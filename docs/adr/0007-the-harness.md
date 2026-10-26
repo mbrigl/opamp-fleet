@@ -25,7 +25,7 @@ What the repository shows:
   Claude Code's under `.claude/`, whose `CLAUDE.md` points to `AGENTS.md` and whose `skills/` holds
   one pointer per skill into `.agents/skills/`.
 - The `Deciders` lines of ADR-0007 to ADR-0034 name Markus Brigl. Those of the template ADRs
-  ADR-0002 to ADR-0006 name only the NUC maintainer.
+  ADR-0001 to ADR-0006 name the NUC maintainer and Markus Brigl, who took them up for the project.
 - [`AGENTS.md` §5](../../AGENTS.md#5-quality-bar--definition-of-done) requires a review in a fresh
   context before a change is handed off, through the `review` skill, and never by the session that
   wrote the change.
