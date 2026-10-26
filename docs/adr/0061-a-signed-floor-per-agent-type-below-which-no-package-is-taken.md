@@ -1,7 +1,7 @@
 # ADR-0061: The operator signs a floor per Agent type, and no Client takes a package below the highest floor it has seen
 
-- **Status:** 🟡 proposed
-- **Date:** 2026-10-25
+- **Status:** 🟢 accepted
+- **Date:** 2026-10-26
 - **Deciders:** Markus Brigl
 - **Applies to:** the floor statement in `crates/fleet-core/src/package.rs`, the `package floor` command of `opamp-fleetctl` in `crates/fleet-tools/`, the floors' store in `crates/fleet-server/src/fs/` and `crates/fleet-server/src/postgres/`, the `/api/v1/package-floors` routes in `crates/fleet-server/src/api.rs`, the `/v1/package-floors` route on the Agent plane in `crates/fleet-server/src/transport.rs` and downstream of a Gateway in `crates/fleet-agent/src/gateway/`, the Client's fetch of the floors, the file `package-floors.json` under its `state_dir`, the Supervisor's check of a package offer in `crates/fleet-agent/src/supervisor/agent/packages.rs`, the self-update's check of an offered version in `crates/fleet-agent/src/update/`, and every document that tells an operator how to keep an old signed build off the fleet
 - **Supersedes:** [ADR-0043](0043-a-package-version-is-semver-and-never-installed-below-the-high-water-mark.md) clause 13; [ADR-0031](0031-opamp-fleetctl-extracts-a-bootstrap-pkcs12-file-into-pem.md) clause 2; [ADR-0050](0050-the-servers-records-may-live-in-postgresql.md) clause 2
