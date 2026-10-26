@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
 # Self-test of the git hooks under .githooks/: pre-commit refuses a commit on main, pre-push
-# refuses a push while the checks are red (AGENTS.md, sections 5 and 6).
+# refuses a push while the checks are red (AGENTS.md, sections 5 and 6) and hands the checks no
+# variable that binds git to the repository being pushed.
 #
 # Each case builds a throwaway repository under a temporary directory with core.hooksPath pointing
 # at this repository's .githooks/, runs a real 'git commit' or 'git push' in it — the push goes to
@@ -92,6 +93,29 @@ d="$(repo green)"
 git -C "$d" switch -q -c feature
 checks "$d" 0
 expect pass "a push while the checks are green" "$d" "" push -q origin feature
+
+# In a linked worktree git hands the hook GIT_DIR, and 'git -c' adds GIT_CONFIG_PARAMETERS. The
+# checks build fixture repositories of their own; with either inherited, those land in the
+# repository being pushed and carry its credentials. This check script does what a self-test
+# does and fails on any variable that binds git to a repository.
+d="$(repo worktree)"
+git -C "${d:?}" worktree add -q "$work/worktree-linked" -b feature
+mkdir -p "$work/worktree-linked/scripts"
+cat > "$work/worktree-linked/scripts/check-all.sh" <<EOF
+#!/usr/bin/env bash
+for v in \$(git rev-parse --local-env-vars); do
+  [[ -v \$v ]] && { echo "leaked \$v"; exit 1; }
+done
+git init -q "$work/worktree-fixture" && git -C "$work/worktree-fixture" config hooktest.leak yes
+EOF
+expect pass "a push from a linked worktree hands the checks no git environment" \
+  "$work/worktree-linked" "" push -q origin feature
+if [[ -n "$(git -C "$d" config hooktest.leak)" ]]; then
+  failed=$((failed + 1))
+  echo "FAIL: a fixture the checks build in a linked worktree wrote into the pushed repository" >&2
+else
+  passed=$((passed + 1))
+fi
 
 d="$(repo detached)"
 git -C "$d" checkout -q --detach
