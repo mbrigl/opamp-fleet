@@ -84,12 +84,15 @@ restates nothing. A rule this file does not state is not a rule of this project.
    the implementation. **Only a human changes the status.** The flip to `accepted`, a header
    line and no text, may land with the implementation.
 5. **Accepted ADRs are binding and immutable.** Never violate or work around one; change it only
-   by superseding it. Outside a normalization, never rewrite or delete one. Two edits are
-   permitted, both by a human. One flips the `Status` line. The other adds the project's decider
-   to the `Deciders` line of an ADR inherited from the template, when the project accepts it as
-   its own. ADR numbers are permanent between normalizations. The template repository corrects
-   its own ADRs in place ([ADR-0005](docs/adr/0005-template-releases.md)). If the specification
-   and an ADR conflict, the specification wins. Raise the conflict; never choose silently.
+   by superseding it. Outside a normalization, never rewrite or delete one. Three edits are
+   permitted. A human flips the `Status` line. A human adds the project's decider to the
+   `Deciders` line of an ADR inherited from the template, when the project accepts it as its
+   own. An ADR that supersedes named clauses of another adds, in the change that proposes it, the
+   suffix naming it to that ADR's `Status` line
+   ([ADR-0007](docs/adr/0007-an-adr-may-supersede-named-clauses-of-another.md)). ADR numbers are
+   permanent between normalizations. The template repository corrects its own ADRs in place
+   ([ADR-0005](docs/adr/0005-template-releases.md)). If the specification and an ADR conflict, the
+   specification wins. Raise the conflict; never choose silently.
 
    **A normalization restates the record, only on a human's instruction.** The specification is
    restated first, under rule 7. The ADRs it invalidates are superseded next. Then the ADRs in
