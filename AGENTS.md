@@ -126,7 +126,8 @@ restates nothing, and a rule this file does not state is not a rule of this proj
   it. The reviewer gets the diff, the task, the doubts, and the standards, never the reasoning,
   and reports on two axes: does it do what was asked; does it meet this bar, simplicity first.
   Findings are fixed before the pull request opens, and every existing test the diff changes or
-  removes needs a reason. Skill: `review`.
+  removes needs a reason. The pull request names the commit the review saw, and a sensor lists
+  what landed after it. Skill: `review`.
 - **A feature spec closes only after a design revision** in a fresh session over the modules its
   tickets touched, the ADRs that bind them, and the criteria they serve, filed as tickets, checks,
   a `proposed` ADR, or a drafted specification change; with no spec open, one runs when the

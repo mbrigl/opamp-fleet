@@ -55,4 +55,7 @@
 <!-- The fresh-context review that ran before this pull request opened, the review skill under
      .agents/skills/ ([§5](../AGENTS.md#5-quality-bar--definition-of-done)): who or what reviewed,
      its findings on the two axes (does it do what was asked, does it meet the bar), and what
-     was fixed. -->
+     was fixed. The commit the review saw, by hash: scripts/sensor-review-binding.sh lists what
+     landed after it. -->
+
+- Reviewed at:

@@ -25,10 +25,13 @@ name: Checks
 # - Sensors: what weakens the test suite and no toolchain's tools notice — test files deleted
 #   and skip markers added since the pull request's base — reported by
 #   scripts/sensor-tests-kept.sh for the reviewer (AGENTS.md, section 5), and the changes since
-#   the last design revision, reported by scripts/sensor-revision-due.sh (ADR-0004), each after
-#   its self-test has passed. The job reports and never fails on what it counts; the reason for
-#   a finding is in the pull request, and a due revision is the human's to schedule. It checks
-#   out the full history because both sensors read it.
+#   the last design revision, reported by scripts/sensor-revision-due.sh (ADR-0004), and on a
+#   pull request only, the commits its review did not see and those mixing ADRs with other paths,
+#   reported by scripts/sensor-review-binding.sh (AGENTS.md, sections 3 and 5), each after its
+#   self-test has passed. The job reports and never fails on what it counts; the reason for a
+#   finding is in the pull request, and a due revision is the human's to schedule. It checks out
+#   the full history because the sensors read it. An edit of a pull request's description runs
+#   none of these jobs: review-binding.yml runs the review binding sensor again on it.
 # - Shell lint: every shell script passes ShellCheck — the scripts are this repository's
 #   enforcement layer, so they are linted themselves. The job first runs the self-test of the
 #   git hooks under .githooks/, which refuse a commit on main and a push while the checks are
@@ -144,6 +147,23 @@ jobs:
         run: bash scripts/test-sensor-revision-due.sh
       - name: Report the changes since the last design revision
         run: bash scripts/sensor-revision-due.sh
+      - name: Self-test the review binding sensor
+        run: bash scripts/test-sensor-review-binding.sh
+      # On a pull request only, against its head: the checkout is a synthetic merge of the two,
+      # and a push to main brings the merge of that pull request, not the hand-offs it carries.
+      # The description is the hand-off of the whole branch; it reaches the sensor through the
+      # environment and a file, never through the script's text.
+      - name: Write the pull request's description, the hand-off of the branch, to a file
+        if: github.event_name == 'pull_request'
+        run: printf '%s\n' "$HAND_OFF" > "$RUNNER_TEMP/hand-off.md"
+        env:
+          HAND_OFF: ${{ github.event.pull_request.body }}
+      - name: Report the commits whose review saw less than the branch, and commits mixing ADRs with other paths
+        if: github.event_name == 'pull_request'
+        run: bash scripts/sensor-review-binding.sh --hand-off "$RUNNER_TEMP/hand-off.md" "$BASE" "$HEAD_SHA"
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
 
   shell:
     runs-on: ubuntu-latest
