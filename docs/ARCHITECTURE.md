@@ -11,7 +11,8 @@
 >
 > **Last design revision:** none yet, due after 20 changes. The revision that ran moves the
 > date; the number is this project's to set; a sensor counts the changes outside `docs/` since
-> the date and says when the next is due ([ADR-0004](adr/0004-feature-layer.md)).
+> the commit that set the date and says when the next is due
+> ([ADR-0004](adr/0004-feature-layer.md)).
 
 ## Context
 

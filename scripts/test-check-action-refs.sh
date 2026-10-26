@@ -17,6 +17,11 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CHECK="$ROOT/scripts/check-action-refs.sh"
 
+# sed_in <file> <sed script> — edit a fixture file in place, the same way on GNU and BSD sed.
+sed_in() {
+  sed "$2" "$1" > "$1.tmp" && mv "$1.tmp" "$1"
+}
+
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
@@ -250,7 +255,7 @@ d="$(repo reusable-workflow)"
   echo "    uses: owner/repo/.github/workflows/w.yml@v1"
 } > "$d/.github/workflows/checks.yml"
 expect fail "a reusable workflow is classified as an action is" "$d" "'owner/repo/.github/workflows/w.yml@v1' is a third-party action"
-sed -i '/call-tagged/,$d' "$d/.github/workflows/checks.yml"
+sed_in "$d/.github/workflows/checks.yml" '/call-tagged/,$d'
 expect pass "a pinned reusable workflow as a job-level key" "$d" "1 third-party on commit SHAs"
 
 d="$(repo offline-does-not-resolve)"

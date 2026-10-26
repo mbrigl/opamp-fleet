@@ -27,18 +27,13 @@
   // container build.
   "initializeCommand": "mkdir \"${localEnv:HOME}${localEnv:USERPROFILE}/.claude\" || exit 0",
 
-  // Runs inside the container once it is created. Git does not version its hooks, so the
-  // repository keeps them under .githooks/ and this points git at them: pre-commit refuses a
-  // commit on main, pre-push runs the checks first (AGENTS.md §5 and §6). Outside the container,
-  // run the same command once per clone (README → "Getting Started"). It is the first command of
-  // `postCreateCommand` below, which also installs the system packages listed there.
-
   // DevContainer Features layered on top of the base image. The container intentionally has NO
   // access to the host Docker daemon (no socket mount) — see ADR-0002. Manage the host's containers
   // from a host-side VS Code extension instead (README → "Host container management").
   "features": {
     // GitHub CLI (`gh`) — used by the coding agent for GitHub operations and as the git
-    // credential helper. Git writes still require explicit human approval (see AGENTS.md §6).
+    // credential helper. A push and every gh action wait for a human instruction
+    // (AGENTS.md, section 6).
     "ghcr.io/devcontainers/features/github-cli:1": {},
     // Rust stable toolchain (rustup + cargo, with rustfmt & clippy) — the project's language
     // toolchain (ADR-0010). The build chain needs no system protoc (ADR-0011 uses the
@@ -48,24 +43,36 @@
 
   // System packages the base image does not carry, installed once when the container is created.
   //
-  // Both are *developer tooling* — nothing shipped depends on them, which is why they
+  // All three are *developer tooling* — nothing shipped depends on them, which is why they
   // need no ADR (AGENTS.md §3.6) — and each earns its place:
   //
+  //   shellcheck  the shell lint, from the base image's signed Debian archive, so the pre-push
+  //             hook runs the lint CI runs; without it the lint skips itself locally.
   //   socat     forwards the host's OpenTelemetry Collector onto this container's loopback, see
   //             `postStartCommand` below.
   //   llvm      `llvm-lib`, without which `cargo xwin` cannot typecheck the Client for Windows.
   //             That check is not optional in practice: `#[cfg(unix)]` code is invisible to an
   //             ordinary local run, so a Windows-only compile error reaches CI instead of the
   //             author. See README → "Build, Test & Run".
-  "postCreateCommand": "git config core.hooksPath .githooks && sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends socat llvm",
+  "postCreateCommand": {
+    "packages": "sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends shellcheck socat llvm"
+  },
 
-  // Runs inside the container on every start. The development observability stack runs on the host,
+  // Runs inside the container on every start, so the settings are set again should a session
+  // have changed them: the repository's git hooks under .githooks/ and the merge settings they
+  // rely on. What each refuses, and the same commands for a clone outside the container, are under
+  // "Git hooks" in the README. The development observability stack runs on the host,
   // apart from this container (observability/compose.yaml); this puts its Collector on the
   // container's loopback, 127.0.0.1:4317 and :4318, because the Client sends own telemetry in
   // plaintext to a loopback IP literal alone (ADR-0016), the stack's rustfs on :9100, the S3
   // store a development Server may use (ADR-0049), and its PostgreSQL on :5432, the database it may
   // keep its records in (ADR-0050). See observability/README.md.
-  "postStartCommand": ".devcontainer/forward-otlp.sh",
+  "postStartCommand": {
+    "hooks": "git config core.hooksPath .githooks",
+    "merge": "git config merge.ff false && git config pull.ff only",
+    "index": "git config merge.adr-index.driver '.githooks/merge-adr-index %O %A %B %S %X %Y'",
+    "otlp": ".devcontainer/forward-otlp.sh"
+  },
 
   "customizations": {
     // VS Code extensions installed inside the container

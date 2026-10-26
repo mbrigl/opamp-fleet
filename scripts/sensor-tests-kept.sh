@@ -8,7 +8,8 @@
 # script cannot read; the reviewer of AGENTS.md, section 5, holds the list against it.
 #
 #   1. Test files: a path with a segment or a basename that contains 'test' or 'spec', in any
-#      case — the convention every toolchain of TEMPLATE-SETUP.md shares, and a heuristic: a
+#      case — the convention every toolchain of the catalogue entry Toolchain shares
+#      (.agents/skills/propose-adr/concepts/toolchain.md), and a heuristic: a
 #      deleted 'manifest.json' is reported too, and the reviewer sees at once that it is none.
 #      A deletion, or a rename to a path that is no longer one, is a finding.
 #   2. Markers: an added line, in any file, that carries a skip or focus marker of one of those
@@ -17,7 +18,9 @@
 #      weakening.
 #
 # Pure bash + git + awk. Usage:
-#     scripts/sensor-tests-kept.sh [base [head]]
+#     scripts/sensor-tests-kept.sh [--root <dir>] [base [head]]
+# It reads the repository it lives in, as the checks do; --root names another, as its self-test
+# does with each fixture.
 # Without a base, the merge base of head with origin/main (else main) is used; CI passes the
 # pull request's base. A base of zeros, which a push event reports for a new branch, counts as
 # none. With nothing to compare — on main without a remote, or base and head the same — it says
@@ -25,19 +28,19 @@
 
 set -uo pipefail
 
+# shellcheck source-path=SCRIPTDIR source=lib/git.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/git.sh"
+
+enter_root "Tests kept sensor" "${BASH_SOURCE[0]}" "$@"
+shift "$ROOT_TAKEN"
+
 MARKERS='@Disabled|@Ignore|enabled *= *false|t\.Skip[a-zA-Z]*\(|pytest\.mark\.skip|pytest\.skip\(|unittest\.skip|#\[ignore\]|(^|[^A-Za-z0-9_.])(it|test|describe|context)\.(skip|only)\(|(^|[^A-Za-z0-9_])(xit|xtest|xdescribe|fit|fdescribe|ftest)\(|Skip *= *"'
 
 base="${1:-}"
 head="${2:-HEAD}"
 
 [[ "$base" =~ ^0+$ ]] && base=""
-if [[ -z "$base" ]]; then
-  for candidate in origin/main main; do
-    if git rev-parse --verify -q "$candidate^{commit}" >/dev/null; then
-      base="$(git merge-base "$candidate" "$head" 2>/dev/null)" && break
-    fi
-  done
-fi
+[[ -n "$base" ]] || base="$(main_merge_base "$head")"
 if [[ -z "$base" ]]; then
   echo "Tests kept sensor: nothing to compare — no base given and no main to compare with."
   exit 0
@@ -67,12 +70,14 @@ while IFS=$'\t' read -r status old new; do
 done < <(git diff --name-status -M --diff-filter=DR "$base" "$head")
 
 # 2. Skip or focus markers on added lines. The regex reaches awk through the environment, so
-# that its backslashes are not escape-processed a second time. This script and its self-test
-# carry the markers as data and are left out.
+# that its backslashes are not escape-processed a second time. This script, its self-test, and the
+# toolchain entry of the catalogue, whose table names the markers, carry them as data
+# and are left out.
 while IFS= read -r hit; do
   findings+=("skip or focus marker added: $hit")
 done < <(git diff -U0 --no-color "$base" "$head" -- . \
            ':(exclude)scripts/sensor-tests-kept.sh' ':(exclude)scripts/test-sensor-tests-kept.sh' \
+           ':(exclude).agents/skills/propose-adr/concepts/toolchain.md' \
          | MARKERS="$MARKERS" awk '
              /^\+\+\+ / { file = substr($0, 7); next }
              /^@@/      { match($0, /\+[0-9]+/); line = substr($0, RSTART + 1, RLENGTH - 1) + 0; next }

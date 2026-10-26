@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+#
+# Git merge driver for the ADR index, docs/adr/README.md: the rows of its tables merge by keeping
+# the lines of both sides, its prose as any other text.
+#
+# Two branches that each add an ADR append a row at the same end of a table, and a conflict there
+# carries no decision. A rule both sides reworded does carry one, and stops the merge with the
+# usual markers, around the rows as well. A row both sides changed comes out twice, and check 1 of
+# scripts/check-docs.sh fails on a file the index lists twice; pre-merge-commit runs it on the
+# merged tree. .gitattributes names the driver for the file; enabled as the README's "Git hooks"
+# says, and a clone without the setting merges the index as text, a conflict on every row.
+# scripts/test-git-hooks.sh exercises this driver.
+#
+# Git calls it with the base, ours, and theirs, the three labels of the markers, and takes the
+# merged file from ours.
+
+set -uo pipefail
+
+base="$1" ours="$2" theirs="$3"
+
+dir="$(mktemp -d)" || exit 2
+trap 'rm -rf "$dir"' EXIT
+
+# The prose of each side: every line but a table row.
+for side in base ours theirs; do
+  sed '/^|/d' "${!side}" > "$dir/$side"
+done
+
+# The union stands when its prose is the prose merged on its own: a rule changed next to a row the
+# other side appended falls into one hunk with it, and the union would keep both versions.
+if git merge-file -q -p "$dir/ours" "$dir/base" "$dir/theirs" > "$dir/prose" \
+  && git merge-file -q -p --union "$ours" "$base" "$theirs" > "$dir/union" \
+  && sed '/^|/d' "$dir/union" | cmp -s - "$dir/prose"; then
+  cat "$dir/union" > "$ours"
+else
+  git merge-file -q -L "${5:-ours}" -L "${4:-base}" -L "${6:-theirs}" "$ours" "$base" "$theirs"
+  exit 1
+fi

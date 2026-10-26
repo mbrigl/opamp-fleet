@@ -1,4 +1,4 @@
-# ADR-NNNN: <short title of the decision>
+# ADR-draft-<slug>: <short title of the decision>
 
 - **Status:** 🟡 proposed
 - **Date:** YYYY-MM-DD
@@ -16,7 +16,7 @@ otherwise the kind of change (every commit, every public interface), in one line
 character: the index mirrors it verbatim, and that is how a reader finds the ADRs that bind a
 change ([mechanics](README.md#mechanics)). `Supersedes` only when this ADR replaces one existing
 ADR or several whose decisions have grown into one, each linked; their status lines flip in the
-same pull request ([mechanics](README.md#mechanics)). An entry followed by `clause N` replaces only
+same change ([mechanics](README.md#mechanics)). An entry followed by `clause N` replaces only
 those clauses; the old ADR then stays active and its status line gains the suffix
 `· clause N superseded by ADR-NNNN` instead of the flip. For a decision recorded only because a
 reader would take it for a mistake, cheap to reverse and constraining nothing
@@ -36,7 +36,9 @@ Interrogate the request with the human before writing this section
 ## Decision
 
 What we decided, in one clear, active sentence ("We will …"). A second "We will …" sentence is a
-sign of two ADRs ([`AGENTS.md` §3](../../AGENTS.md#3-adr-rules)).
+sign of two ADRs ([`AGENTS.md` §3](../../AGENTS.md#3-adr-rules)). Everything that binds stands
+here or under *Enforcement*. A session whose change only follows the ADR reads these two and the
+header ([`AGENTS.md` §2](../../AGENTS.md#2-start-here)).
 
 **Out of scope:** what this decision deliberately leaves open, so a later ADR can take it up
 without contradicting this one. Write "nothing beyond the sentence above" when the decision is

@@ -1,14 +1,10 @@
----
-name: Feature spec
-about: Plan a change larger than one agent session (ADR-0004)
-title: "[Spec] "
-labels: spec
----
+# Spec: <title>
 
-<!-- The destination of a piece of work larger than one agent session, written from the user's
-     side. It is disposable: it closes when its tickets have merged and the design revision has
-     run, and whatever has to last moves into docs/SPECIFICATION.md, an ADR, or
-     docs/ARCHITECTURE.md. No file paths or code; they go stale. How it is written is the
+<!-- Copy to docs/plan/<spec>/spec.md. The destination of a piece of work larger than one agent
+     session, written from the user's side; its tickets lie next to it in the same directory. It
+     is disposable: the design revision deletes it once its tickets have merged, and whatever has
+     to last moves into docs/SPECIFICATION.md, an ADR, docs/ARCHITECTURE.md, docs/GLOSSARY.md, or
+     docs/CONVENTIONS.md first. No file paths or code; they go stale. How it is written is the
      plan-feature skill under .agents/skills/. Decided in docs/adr/0004-feature-layer.md. -->
 
 ## Problem
@@ -23,7 +19,7 @@ labels: spec
 
 <!-- What the system does today that this changes, what must stay as it is, and which tests pin
      it. Where none does, the first ticket writes them (AGENTS.md
-     [§5](../../AGENTS.md#5-quality-bar--definition-of-done)). How existing data and callers get
+     [§5](../../../AGENTS.md#5-quality-bar--definition-of-done)). How existing data and callers get
      from the old behaviour to the new. "Greenfield, nothing exists yet" is an answer. -->
 
 ## Goals served
@@ -44,7 +40,7 @@ labels: spec
 <!-- Modules touched and the interfaces that change, schema and contract changes, clarifications
      from the human, in the project vocabulary, without file paths or code snippets. Any decision
      that is architecture-relevant is an ADR, not a bullet here
-     (AGENTS.md [§3](../../AGENTS.md#3-adr-rules)). -->
+     (AGENTS.md [§3](../../../AGENTS.md#3-adr-rules)). -->
 
 -
 
@@ -63,6 +59,6 @@ labels: spec
 
 ## ADR impact
 
-<!-- Which accepted ADRs bind this work (by number), and whether it needs a new `proposed` ADR
-     before implementation starts (AGENTS.md [§3](../../AGENTS.md#3-adr-rules)). "None" is an
-     answer; write why. -->
+<!-- Which ADRs in force bind this work (by number, from the Binding table of
+     docs/adr/README.md), and whether it needs a new `proposed` ADR before implementation starts
+     (AGENTS.md [§3](../../../AGENTS.md#3-adr-rules)). "None" is an answer; write why. -->

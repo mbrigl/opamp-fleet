@@ -9,7 +9,13 @@
 An entry says in a sentence or two what is done and why; the why tells a convention from a habit.
 A convention a check can decide is the check, not an entry. One that constrains future choices is
 an ADR. What the golden path already shows needs none. Few entries that hold beat many that are
-skimmed. The design revision at the close of a feature spec drops what prevented nothing
+skimmed. The design revision drops what prevented nothing
 ([`AGENTS.md` §5](../AGENTS.md#5-quality-bar--definition-of-done)).
 
+- **A rule changes everywhere it is stated** — a change to a rule, a step, or a name searches
+  the tree for its old wording and for every citation of its anchor, and corrects them in the
+  same change. A link check sees the anchor, never a sentence that restates it.
+- **A self-test asserts what it builds** — it takes its fixtures from the tree it copies or writes
+  them itself, never from the template's own ADRs, scripts, or numbers, so it holds in a derived
+  project and after a normalization.
 - **<Convention>** — what is done, and why.

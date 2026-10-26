@@ -17,6 +17,11 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CHECK="$ROOT/scripts/check-build-hardening.sh"
 
+# sed_in <file> <sed script> — edit a fixture file in place, the same way on GNU and BSD sed.
+sed_in() {
+  sed "$2" "$1" > "$1.tmp" && mv "$1.tmp" "$1"
+}
+
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
@@ -177,36 +182,36 @@ expect fail "an install action without a version" "$d" "the install action takes
 # --- 4. release gate --------------------------------------------------------------------------
 
 d="$(repo no-gate)"
-sed -i '/cargo deny check advisories/d' "$d/.github/workflows/release.yml"
+sed_in "$d/.github/workflows/release.yml" '/cargo deny check advisories/d'
 expect fail "no advisory check" "$d" "runs no 'cargo deny check advisories'"
 
 d="$(repo gate-after-tag)"
-sed -i '/cargo deny check advisories/d' "$d/.github/workflows/release.yml"
+sed_in "$d/.github/workflows/release.yml" '/cargo deny check advisories/d'
 printf '      - run: cargo deny check advisories\n' >> "$d/.github/workflows/release.yml"
 expect fail "the advisory check in a job the tag push does not need" "$d" "pushes the tag without needing"
 
 d="$(repo needs-dropped)"
-sed -i '/needs: advisories/d' "$d/.github/workflows/release.yml"
+sed_in "$d/.github/workflows/release.yml" '/needs: advisories/d'
 expect fail "the tagging job no longer needs the advisory job" "$d" "job 'version' pushes the tag without needing"
 
 d="$(repo needs-other)"
-sed -i 's/needs: advisories/needs: build/' "$d/.github/workflows/release.yml"
+sed_in "$d/.github/workflows/release.yml" 's/needs: advisories/needs: build/'
 expect fail "the tagging job needs another job" "$d" "pushes the tag without needing"
 
 d="$(repo needs-inline-list)"
-sed -i 's/needs: advisories/needs: [lint, advisories]/' "$d/.github/workflows/release.yml"
+sed_in "$d/.github/workflows/release.yml" 's/needs: advisories/needs: [lint, advisories]/'
 expect pass "needs as an inline list" "$d"
 
 d="$(repo needs-block-list)"
-sed -i 's/needs: advisories/needs:\n      - lint\n      - advisories/' "$d/.github/workflows/release.yml"
+sed_in "$d/.github/workflows/release.yml" 's/needs: advisories/needs:\n      - lint\n      - advisories/'
 expect pass "needs as a block list" "$d"
 
 d="$(repo gate-in-same-job)"
-sed -i '/needs: advisories/d; s/^      - name: Tag this commit$/      - run: cargo deny check advisories\n      - name: Tag this commit/' "$d/.github/workflows/release.yml"
+sed_in "$d/.github/workflows/release.yml" '/needs: advisories/d; s/^      - name: Tag this commit$/      - run: cargo deny check advisories\n      - name: Tag this commit/'
 expect pass "the advisory check earlier in the tagging job itself" "$d"
 
 d="$(repo gate-after-push-same-job)"
-sed -i '/needs: advisories/d; s/^          git push origin .*$/&\n      - run: cargo deny check advisories/' "$d/.github/workflows/release.yml"
+sed_in "$d/.github/workflows/release.yml" '/needs: advisories/d; s/^          git push origin .*$/&\n      - run: cargo deny check advisories/'
 expect fail "the advisory check after the push in the same job" "$d" "pushes the tag without needing"
 
 d="$(repo no-release)"
@@ -216,11 +221,11 @@ expect fail "no release workflow" "$d" "release.yml: not found"
 # --- 5. compiler ------------------------------------------------------------------------------
 
 d="$(repo channel-stable)"
-sed -i 's/"1.99.0"/"stable"/' "$d/rust-toolchain.toml"
+sed_in "$d/rust-toolchain.toml" 's/"1.99.0"/"stable"/'
 expect fail "a channel name" "$d" "rust-toolchain.toml: 'channel' is not an exact"
 
 d="$(repo channel-minor)"
-sed -i 's/"1.99.0"/"1.99"/' "$d/rust-toolchain.toml"
+sed_in "$d/rust-toolchain.toml" 's/"1.99.0"/"1.99"/'
 expect fail "a minor version only" "$d" "rust-toolchain.toml: 'channel' is not an exact"
 
 d="$(repo no-toolchain)"

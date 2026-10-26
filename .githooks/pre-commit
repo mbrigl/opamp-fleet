@@ -1,23 +1,43 @@
 #!/usr/bin/env bash
 #
-# Git pre-commit hook: no commit on main.
+# Git pre-commit hook: no commit on main, and on any other branch the commit that concludes a
+# conflicted merge only while the checks pass on it.
 #
 # An agent commits on a branch, never on main, and changes reach main through a pull request
 # (AGENTS.md, section 6). A permission prompt cannot decide this — it asks a human about a command,
 # not about the branch it lands on — so the repository's own hook does, for every agent and every
-# human alike. Enabled through 'git config core.hooksPath .githooks', which the Dev Container sets
-# on creation (.devcontainer/devcontainer.json); outside it, run that command once per clone.
+# human alike. A merge that stops on a conflict is concluded by 'git commit', which runs this hook
+# and not pre-merge-commit. Its resolution is the one part of a merge written by hand, so this hook
+# runs all of scripts/check-all.sh on it, with --changed as before a push, where pre-merge-commit
+# runs only the documentation check on a clean merge. Enabled as the README's "Git hooks" says.
 #
-# Bypassable with 'git commit --no-verify', which is what a maintainer does on purpose and what an
-# agent has no instruction for. scripts/test-git-hooks.sh exercises this hook.
+# Bypassable with 'git commit --no-verify'; AGENTS.md, section 6 says who may.
+# scripts/test-git-hooks.sh exercises this hook.
 
 set -uo pipefail
 
 branch="$(git symbolic-ref --short -q HEAD 2>/dev/null || true)"
 
 if [[ "$branch" == "main" ]]; then
-  echo "pre-commit: refused — the checkout is on 'main', and commits land on a branch that reaches main through a pull request (AGENTS.md, section 6). Create a branch first: git switch -c <name>" >&2
+  echo "pre-commit: refused — the checkout is on 'main', and changes reach main through a pull request (AGENTS.md, section 6). Create a branch first: git switch -c <name>" >&2
   exit 1
+fi
+
+git rev-parse -q --verify MERGE_HEAD >/dev/null || exit 0
+
+root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+
+# The checks build fixture repositories of their own; the variables git hands a hook would bind
+# every git command in a fixture to this repository (see pre-push).
+# shellcheck disable=SC2046 # one variable name per word
+unset $(git rev-parse --local-env-vars)
+
+if [[ -n "$root" && -f "$root/scripts/check-all.sh" ]]; then
+  if ! bash "$root/scripts/check-all.sh" --changed; then
+    echo >&2
+    echo "pre-commit: refused — the checks are red on the resolved merge, and they pass before a branch takes up another (AGENTS.md, section 6). Fix them on the merged branch: git merge --abort, then merge again." >&2
+    exit 1
+  fi
 fi
 
 exit 0
