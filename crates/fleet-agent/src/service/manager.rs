@@ -329,15 +329,27 @@ pub fn install(spec: &InstallSpec) -> Result<(), String> {
     if let Some(agents) = &spec.agents {
         install_agents(spec, agents)?;
     }
+    // On Windows the entry `install_service` creates runs as `LocalSystem` until `configure` sets
+    // its account. A first registration whose configuration fails is taken back, so no
+    // `LocalSystem` entry is left that the next install would keep (ADR-0062 clause 1).
+    #[cfg(windows)]
+    let first = super::windows_config::logon_account(service_name())?.is_none();
     install_service(spec)?;
     // What `service-manager` does not do on Windows, done here (see `windows_config`) — since
     // ADR-0019 that includes the logon account, which its `sc.exe` backend ignores.
-    super::windows_config::configure(
+    let configured = super::windows_config::configure(
         service_name(),
         display_name(),
         WINDOWS_DESCRIPTION,
         spec.run_as.as_deref(),
-    )
+    );
+    #[cfg(windows)]
+    if configured.is_err() && first {
+        if let Ok(manager) = manager(spec.level) {
+            let _ = manager.uninstall(ServiceUninstallCtx { label: label() });
+        }
+    }
+    configured
 }
 
 fn install_service(spec: &InstallSpec) -> Result<(), String> {

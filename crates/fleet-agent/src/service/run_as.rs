@@ -3,9 +3,9 @@
 //!
 //! `service install --run-as <account>` names the account; without the flag a re-registration
 //! keeps the account its registration names, and a first registration runs as root (Linux, macOS)
-//! or the service's own virtual account `NT SERVICE\<service>` (Windows, ADR-0062). The installation's files — the configuration, the state directory,
-//! and the executable layout, across both roots (ADR-0019 clause 8) — belong to that account
-//! afterwards. *What* the service manager is told is [`manager`](super::manager)'s and
+//! or the service's own virtual account `NT SERVICE\<service>` (Windows, ADR-0062). The
+//! installation's files — the configuration, the state directory, and the executable layout,
+//! across both roots (ADR-0019 clause 8) — belong to that account afterwards. *What* the service manager is told is [`manager`](super::manager)'s and
 //! [`windows_config`](super::windows_config)'s business.
 //!
 //! **The decision and the resolution come first** because an install that cannot succeed fails

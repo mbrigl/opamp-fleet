@@ -165,7 +165,7 @@ fn kill(pid: u32) {
 }
 
 /// A Server the installed service can reach. Bound on the loopback interface, so it is reachable
-/// from a service running as `LocalSystem` or `root` — a different account, the same machine.
+/// from a service running under its own account — a different account, the same machine.
 fn spawn_server() -> (
     std::net::SocketAddr,
     Arc<AppState>,

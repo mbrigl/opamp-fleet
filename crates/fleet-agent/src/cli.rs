@@ -368,15 +368,17 @@ pub struct InstallArgs {
     /// Run the service as this account, and hand this installation's files — both roots — over
     /// to it.
     ///
-    /// Without it, a re-registration keeps the account the existing registration names, and a
-    /// first one runs as root (`LocalSystem` on Windows). `--run-as root` chooses root on Linux
-    /// and macOS, and the unit records it.
+    /// Without it, a re-registration keeps the account the existing registration names,
+    /// `LocalSystem` included, and a first one runs as root on Linux and macOS and as the
+    /// service's own virtual account on Windows. `--run-as root` chooses root on Linux and macOS,
+    /// and the unit records it; `--run-as LocalSystem` chooses `LocalSystem` on Windows.
     ///
     /// System scope only: a `--user` service already runs as its user. On Linux and macOS the
     /// account must exist. On Windows only passwordless account forms are accepted — the
-    /// service's own virtual account (`NT SERVICE\<service name>`), a gMSA (`name$`), or
-    /// `NT AUTHORITY\LocalService`/`NetworkService`; a password is never taken here — it would
-    /// stand in the process list and in the installer log (ADR-0019).
+    /// service's own virtual account (`NT SERVICE\<service name>`), a gMSA (`name$`),
+    /// `NT AUTHORITY\LocalService`/`NetworkService`, or `LocalSystem`; a password is never taken
+    /// here — it would stand in the process list and in the installer log (ADR-0019,
+    /// ADR-0062).
     #[arg(long, value_name = "ACCOUNT", conflicts_with = "user")]
     pub run_as: Option<String>,
     // ADR-0059.

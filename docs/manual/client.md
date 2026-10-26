@@ -337,8 +337,8 @@ The Linux packages create the account `opamp-fleet` and name it on a first insta
 [Installing from a native package](#installing-from-a-native-package). A re-registration reads the
 account from the file the Client wrote, `/etc/systemd/system/opamp-fleet.service` or
 `/Library/LaunchDaemons/opamp-fleet.plist`, not from a drop-in. Windows keeps the logon account the
-SCM holds, `LocalSystem` included: a host the MSI installed before this release stays `LocalSystem`
-until an operator moves it. The install prints the account and where it came from:
+SCM holds, `LocalSystem` included: a host registered as `LocalSystem` stays so until an operator
+moves it. The install prints the account and where it came from:
 
 ```console
 # opamp-fleet service install
