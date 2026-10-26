@@ -1777,7 +1777,15 @@ mod tests {
         // What the test makes is the Administrators', as an elevated install's is, whatever owner
         // the shell above it leaves in the token: Git Bash's runtime makes it the account itself,
         // which stands in for the process account here.
-        for path in [&root, &data, &outside, &outside.join("secret"), &elsewhere] {
+        for path in [
+            &root,
+            &data,
+            &data.join("link"),
+            &data.join("symlink"),
+            &outside,
+            &outside.join("secret"),
+            &elsewhere,
+        ] {
             Entry::open(path, Access::Owner, false)
                 .and_then(|entry| entry.set_owner("BA"))
                 .expect("owned by the Administrators");
