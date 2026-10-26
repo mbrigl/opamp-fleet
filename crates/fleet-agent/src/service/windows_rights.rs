@@ -628,6 +628,22 @@ mod tests {
             let outside = dir.path().join("outside");
             std::fs::create_dir(&outside).expect("outside");
             std::fs::write(outside.join("secret"), b"x").expect("secret");
+            // What the test makes is the Administrators', as an elevated install's is, whatever
+            // owner the shell above it leaves in the token: Git Bash's runtime makes it the
+            // account itself, which stands in for the process account here.
+            for path in [
+                &parent,
+                &root,
+                &sub,
+                &sub.join("file"),
+                &sub.join("kept"),
+                &outside,
+                &outside.join("secret"),
+            ] {
+                Entry::open(path, Access::Owner, false)
+                    .and_then(|entry| entry.set_owner("BA"))
+                    .expect("owned by the Administrators");
+            }
             mklink("/J", &root.join("link"), &outside);
             mklink("/H", &root.join("hard"), &outside.join("secret"));
             let owned = root.join("owned");
