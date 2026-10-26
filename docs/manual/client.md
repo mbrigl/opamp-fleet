@@ -308,7 +308,7 @@ $ opamp-fleet service uninstall      # deregisters; never deletes the install la
 | `--data-root <dir>` | `service install`, `service config` | The data root — `supervisor.toml` and `state/` — when it is to differ from the layout root. A packaged install, the MSI included, passes neither flag and takes the platform defaults. |
 | `--interactive` | `service install` | Ask for the settings a fresh host cannot guess, write or edit the configuration file, and enrol a host that holds no certificate yet, before registering the service. See below. |
 | `--endpoint <url>` | `service install` | Write the configuration file with this endpoint instead of asking for it — the same file, from an answer given rather than typed at a prompt. Mutually exclusive with `--interactive`, and it keeps an existing file untouched. `ws://` and `http://` are refused unless the host is `127.0.0.1` or `::1`. It has no siblings for the CA file or the client identity: it takes them from [beside the program](#files-beside-the-program), or they are files the operator names in the file. |
-| `--run-as <account>` | `service install` | Run the service as this account, and hand its files over to it. Without it, a re-registration keeps the account the existing registration names. `--run-as root` chooses root. See [Running it under its own account](#running-it-under-its-own-account). System scope only — a `--user` service already runs as its user. |
+| `--run-as <account>` | `service install` | Run the service as this account, and hand its files over to it. Without it, a re-registration keeps the account the existing registration names. `--run-as root` chooses root, `--run-as LocalSystem` `LocalSystem`. See [Running it under its own account](#running-it-under-its-own-account). System scope only — a `--user` service already runs as its user. |
 | `--process-account <account>` | `service install` | Run every Managed Process under this account, through a second service that runs under it. Without it, a re-registration keeps the account the second service's registration names. See [Managed Processes under a process account](#managed-processes-under-a-process-account). System scope only. |
 | `--no-process-account` | `service install` | Stop and deregister the second service; the Client starts its Managed Processes itself again. Mutually exclusive with `--process-account`. |
 
@@ -328,15 +328,17 @@ Which account it is:
 |---|---|
 | `--run-as <account>` | that account |
 | `--run-as root` (Linux, macOS) | root, written as `User=root` / `UserName` `root`, so the next re-registration keeps root |
-| no flag, the unit or plist names an account | that account, kept |
+| `--run-as LocalSystem` (Windows) | `LocalSystem`, and the install warns at every registration |
+| no flag, the unit, plist or SCM entry names an account | that account, kept — on Windows `LocalSystem` too |
 | no flag, the unit names none, the data root belongs to an account | the data root's owner, and the install says so |
-| no flag, first registration | root (systemd, launchd), `LocalSystem` (Windows) |
+| no flag, first registration | root (systemd, launchd), the service's own virtual account `NT SERVICE\opamp-fleet` (Windows) |
 
 The Linux packages create the account `opamp-fleet` and name it on a first installation — see
 [Installing from a native package](#installing-from-a-native-package). A re-registration reads the
 account from the file the Client wrote, `/etc/systemd/system/opamp-fleet.service` or
 `/Library/LaunchDaemons/opamp-fleet.plist`, not from a drop-in. Windows keeps the logon account the
-SCM holds. The install prints the account and where it came from:
+SCM holds, `LocalSystem` included: a host registered as `LocalSystem` stays so until an operator
+moves it. The install prints the account and where it came from:
 
 ```console
 # opamp-fleet service install
@@ -360,15 +362,38 @@ handle, a symbolic link is re-owned as a link, and a file with a second hard lin
 and named in a warning.
 
 On Windows only **passwordless** account forms are accepted — there is deliberately no password
-flag: a flag stands in the shell history and the process list. The recommended form is the service's
-own virtual account, which Windows provisions and password-manages by itself:
+flag: a flag stands in the shell history and the process list. The recommended form, and the one a
+first registration takes, the MSI's included, is the service's own virtual account, which Windows
+provisions and password-manages by itself. The same line moves a host that runs as `LocalSystem`:
 
 ```console
 > opamp-fleet service install --run-as "NT SERVICE\opamp-fleet"
 ```
 
 A group-managed service account (`DOMAIN\name$`) and the built-ins `NT AUTHORITY\LocalService` /
-`NT AUTHORITY\NetworkService` are accepted as well. The install grants the account Modify on its
+`NT AUTHORITY\NetworkService` are accepted as well, and `LocalSystem` (or `NT AUTHORITY\SYSTEM`) for
+a host whose agents need it. Under `LocalSystem` every Managed Process the Client starts itself runs
+as `LocalSystem` too, and the install says so each time:
+
+```console
+> opamp-fleet service install --run-as LocalSystem
+installed opamp-fleet
+  …
+  runs as:   LocalSystem (named with --run-as)
+warning: the Client runs as LocalSystem, and so does every Managed Process it starts itself. …
+```
+
+The install grants the virtual account no group and no privilege. An agent that reads the Security
+event log or performance counters needs the account in the group that allows it, which the
+operator adds:
+
+```console
+> net localgroup "Event Log Readers" "NT SERVICE\opamp-fleet" /add
+> net localgroup "Performance Monitor Users" "NT SERVICE\opamp-fleet" /add
+```
+
+An agent that needs more than a group gives — a full inventory, a Windows service it installs —
+runs on a host registered with `--run-as LocalSystem`. The install grants the account Modify on its
 directories; it does not touch the *Log on as a service* right — the default security
 policy grants it to `NT SERVICE\ALL SERVICES` (covering the virtual account), the built-ins carry
 it inherently, and a gMSA gets it from its domain's group policy. On a host hardened to remove
@@ -598,8 +623,9 @@ Linux table.
 
 #### On Windows
 
-The Client must run under an account of its own, so name it with `--run-as` on the same install;
-a registration that runs as `LocalSystem`, which is what the MSI's first install makes, is refused.
+The Client must run under an account of its own, which a first registration gives it; a
+registration that runs as `LocalSystem`, named or kept from an earlier install, is refused, and
+`--run-as` on the same install names the Client's account.
 The process account is passwordless, as `--run-as` is: the second service's own virtual account
 `NT SERVICE\opamp-fleet-agents` (recommended), a gMSA (`DOMAIN\name$`), which is looked up in its
 domain, or `NT AUTHORITY\LocalService` / `NetworkService`, which other services share and so

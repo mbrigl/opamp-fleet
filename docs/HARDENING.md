@@ -119,6 +119,14 @@ has:
   lies outside the data root, the layout root and the state directory, is left as it is, with a
   warning, and protecting it is the operator's. A local user acting while the install runs is not
   covered.
+- **On Windows the Client runs under its own virtual account unless an operator names
+  `LocalSystem`** (ADR-0062): a first registration, the MSI's included, registers
+  `NT SERVICE\<PRODUCT_NAME>`, to which the install grants its roots and no group or privilege.
+  Without a process account that account is the bound of what a Server-delivered configuration
+  reaches on the host. A re-registration keeps the account the SCM holds; `--run-as LocalSystem`
+  names `LocalSystem`, and every install under it warns that each Managed Process the Client
+  starts itself runs as `LocalSystem`. Residual: a host registered as `LocalSystem` stays so until
+  an operator moves it, and macOS runs the Client as root unless `--run-as` names an account.
 - **A Managed Process can be kept from the Client's key and program** (ADR-0059): where the
   operator registers a process account, every program a Supervisor starts — the Managed Process,
   its version probe, a package's preflight — runs under it, started by a second service over a Unix

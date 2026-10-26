@@ -347,9 +347,10 @@ fn install(
     };
 
     // The account, decided and resolved with the same before-anything-is-written rule (ADR-0042
-    // clause 2): `--run-as`, else the account the existing unit or plist names, else the owner of
-    // a data root that unit lost its account on, else root. A name that does not exist, or a
-    // Windows form that would need a password, fails here.
+    // clause 2): `--run-as`, else the account the existing unit, plist or SCM entry names, else the
+    // owner of a data root that unit lost its account on, else root — on Windows the service's own
+    // virtual account (ADR-0062). A name that does not exist, or a Windows form that would need a
+    // password, fails here.
     let registered = manager::registration(level)?;
     let registered_agents = manager::agents_registration(level)?;
     let account = run_as::decide(
@@ -759,6 +760,11 @@ fn install(
             run_as.account(),
             account.source.describe()
         );
+        if let Some(warning) =
+            run_as::local_system_warning(run_as.account(), manager::service_name())
+        {
+            println!("warning: {warning}");
+        }
     }
     if let Some(process) = &process {
         println!(

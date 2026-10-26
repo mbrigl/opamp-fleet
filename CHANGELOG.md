@@ -43,6 +43,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   were installed only once the task waiting for them first ran; a stop before that ended the Client
   by the signal itself. The handlers are now in place before the Client starts anything.
 
+### Security
+
+- **On Windows a first install runs the Client under its own virtual account, not `LocalSystem`**
+  ([ADR-0062](docs/adr/0062-on-windows-a-first-registration-runs-the-client-under-its-virtual-account.md)).
+  `service install`, the MSI's included, registers `NT SERVICE\<product>` where no service is
+  registered yet, so a Managed Process the Client starts itself no longer holds `LocalSystem`. A
+  re-registration — every MSI upgrade — keeps the account the SCM holds, `LocalSystem` included.
+  `--run-as LocalSystem` names it for a host whose agents need it, and every install under it
+  warns. The install adds the account to no group: an agent that reads the Security event log or
+  performance counters needs it in *Event Log Readers* or *Performance Monitor Users*, which the
+  manual shows. Upgrade: nothing changes on a running host; `service install --run-as
+  "NT SERVICE\<product>"` moves one off `LocalSystem`.
+
 ## [0.7.0]
 
 ### Added

@@ -232,8 +232,8 @@ pub struct InstallSpec {
     pub state_dir: PathBuf,
     /// The account the service runs as (ADR-0042 clause 2) — already resolved by
     /// [`run_as`](super::run_as), so what arrives here exists and needs no password. On Linux and
-    /// macOS a system registration always names one, `root` included; on Windows `None` leaves the
-    /// logon account the SCM holds, `LocalSystem` on a first registration.
+    /// macOS a system registration always names one, `root` included, and on Windows too, the
+    /// service's virtual account on a first registration (ADR-0062); `None` at user scope.
     pub run_as: Option<String>,
     /// The second service, where a process account is registered (ADR-0059); already decided and
     /// checked by [`run_as`](super::run_as).
@@ -329,15 +329,27 @@ pub fn install(spec: &InstallSpec) -> Result<(), String> {
     if let Some(agents) = &spec.agents {
         install_agents(spec, agents)?;
     }
+    // On Windows the entry `install_service` creates runs as `LocalSystem` until `configure` sets
+    // its account. A first registration whose configuration fails is taken back, so no
+    // `LocalSystem` entry is left that the next install would keep (ADR-0062 clause 1).
+    #[cfg(windows)]
+    let first = super::windows_config::logon_account(service_name())?.is_none();
     install_service(spec)?;
     // What `service-manager` does not do on Windows, done here (see `windows_config`) — since
     // ADR-0019 that includes the logon account, which its `sc.exe` backend ignores.
-    super::windows_config::configure(
+    let configured = super::windows_config::configure(
         service_name(),
         display_name(),
         WINDOWS_DESCRIPTION,
         spec.run_as.as_deref(),
-    )
+    );
+    #[cfg(windows)]
+    if configured.is_err() && first {
+        if let Ok(manager) = manager(spec.level) {
+            let _ = manager.uninstall(ServiceUninstallCtx { label: label() });
+        }
+    }
+    configured
 }
 
 fn install_service(spec: &InstallSpec) -> Result<(), String> {

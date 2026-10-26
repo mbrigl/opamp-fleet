@@ -40,7 +40,7 @@
 //! Everything here is a no-op on Unix.
 
 /// Configure what the Windows backend does not: failure recovery, the display name, the
-/// description — and, when `--run-as` named one, the logon account (ADR-0019).
+/// description — and the logon account a system registration runs as (ADR-0019, ADR-0062).
 ///
 /// # Errors
 /// Returns an error if the service cannot be opened or reconfigured. On Unix this never fails —
@@ -79,6 +79,22 @@ pub fn configure(
             ServiceAccess::CHANGE_CONFIG | ServiceAccess::START,
         )
         .map_err(|e| format!("cannot open the service {service_name}: {e}"))?;
+
+    // The logon account (ADR-0019), on every registration, the default virtual account and a
+    // named `LocalSystem` included (ADR-0062), and first: until it is set the SCM runs a new entry
+    // as `LocalSystem`. `service-manager`'s `sc.exe` backend ignores the ctx's `username`, so the
+    // account is set here — and set *without* a `password=`, which every form `run_as` admits
+    // (the service's virtual account, a gMSA, the built-ins, `LocalSystem`) is defined not to
+    // need. No *Log on as a service* grant follows: the default security policy grants it to
+    // `NT SERVICE\ALL SERVICES` (covering the virtual account), the built-ins carry it
+    // inherently, and a gMSA receives it from its domain's group policy — the manual says so.
+    if let Some(account) = run_as {
+        sc(
+            &["config", service_name, "obj="],
+            account,
+            &format!("logon account of {service_name}"),
+        )?;
+    }
 
     service
         .update_failure_actions(ServiceFailureActions {
@@ -121,19 +137,6 @@ pub fn configure(
         &format!("description of {service_name}"),
     )?;
 
-    // The logon account (ADR-0019). `service-manager`'s `sc.exe` backend ignores the ctx's
-    // `username`, so the account is set here — and set *without* a `password=`, which every form
-    // `run_as` admits (the service's virtual account, a gMSA, the built-ins) is defined not to
-    // need. No *Log on as a service* grant follows: the default security policy grants it to
-    // `NT SERVICE\ALL SERVICES` (covering the virtual account), the built-ins carry it
-    // inherently, and a gMSA receives it from its domain's group policy — the manual says so.
-    if let Some(account) = run_as {
-        sc(
-            &["config", service_name, "obj="],
-            account,
-            &format!("logon account of {service_name}"),
-        )?;
-    }
     Ok(())
 }
 
