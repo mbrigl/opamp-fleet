@@ -3,7 +3,7 @@
 //!
 //! `service install --run-as <account>` names the account; without the flag a re-registration
 //! keeps the account its registration names, and a first registration runs as root (Linux, macOS)
-//! or `LocalSystem` (Windows). The installation's files — the configuration, the state directory,
+//! or the service's own virtual account `NT SERVICE\<service>` (Windows, ADR-0062). The installation's files — the configuration, the state directory,
 //! and the executable layout, across both roots (ADR-0019 clause 8) — belong to that account
 //! afterwards. *What* the service manager is told is [`manager`](super::manager)'s and
 //! [`windows_config`](super::windows_config)'s business.
@@ -41,8 +41,8 @@ pub enum Source {
     Registered(PathBuf),
     /// The owner of the data root, because the registration names no account.
     DataRootOwner(PathBuf),
-    /// No registration names one: root under systemd and launchd, `LocalSystem` or the account the
-    /// SCM already holds on Windows.
+    /// No registration names one: root under systemd and launchd, and on Windows, where no
+    /// service is registered yet, the service's own virtual account (ADR-0062).
     Default,
 }
 
@@ -65,8 +65,7 @@ impl Source {
 /// The account a registration runs under, and where it came from.
 #[derive(Debug)]
 pub struct Decision {
-    /// The resolved account; `None` where nothing is named — the user scope, and Windows without
-    /// `--run-as`, where the SCM keeps the logon account it holds.
+    /// The resolved account; `None` at the user scope, where the service runs as its user.
     pub run_as: Option<RunAs>,
     /// Where the account came from.
     pub source: Source,
@@ -105,41 +104,66 @@ pub fn decide(
     }
     #[cfg(not(unix))]
     {
-        match choose_on_windows(flag, registration) {
-            Some((account, source)) => Ok(Decision {
-                run_as: Some(RunAs::resolve(&account, service, &source, data_root)?),
-                source,
-            }),
-            None => Ok(Decision {
-                run_as: None,
-                source: Source::Default,
-            }),
-        }
+        let (account, source) = choose_on_windows(flag, registration, service);
+        Ok(Decision {
+            run_as: Some(RunAs::resolve(&account, service, &source, data_root)?),
+            source,
+        })
     }
 }
 
-/// The order on Windows: `--run-as`, else the logon account the SCM holds for the service, where
-/// it holds one other than `LocalSystem`, which a registration that names none runs as. A
-/// re-registration — an upgrade of the MSI among them — keeps the account, and with it what the
-/// process account needs of it (ADR-0059 clause 1).
+/// The order on Windows (ADR-0062 clause 1): `--run-as`, else the logon account the SCM holds for
+/// the service, `LocalSystem` included — the SCM names an empty account for it, so a registration
+/// that names none is `LocalSystem` — else, on a first registration, the service's own virtual
+/// account `NT SERVICE\<service>`. A re-registration — an upgrade of the MSI among them — keeps the
+/// account, and with it what the process account needs of it (ADR-0059 clause 1).
 #[cfg(any(not(unix), test))]
 fn choose_on_windows(
     flag: Option<&str>,
     registration: Option<&Registration>,
-) -> Option<(String, Source)> {
+    service: &str,
+) -> (String, Source) {
     if let Some(account) = flag {
-        return Some((account.to_string(), Source::Flag));
+        return (account.to_string(), Source::Flag);
     }
-    let registration = registration?;
-    let account = registration.account.as_ref()?;
-    let system = crate::win32::known_account_sid(account)
-        .is_some_and(|sid| sid.as_str() == crate::win32::LOCAL_SYSTEM);
-    (!system).then(|| {
-        (
-            account.clone(),
+    match registration {
+        Some(registration) => (
+            registration
+                .account
+                .clone()
+                .unwrap_or_else(|| LOCAL_SYSTEM_NAME.to_string()),
             Source::Registered(registration.file.clone()),
-        )
-    })
+        ),
+        None => (format!(r"NT SERVICE\{service}"), Source::Default),
+    }
+}
+
+/// How the install names `LocalSystem` where the SCM names no account.
+#[cfg(any(not(unix), test))]
+const LOCAL_SYSTEM_NAME: &str = "LocalSystem";
+
+/// Whether `account` is `LocalSystem`, in any of the names Windows gives it.
+#[cfg(any(windows, test))]
+fn is_local_system(account: &str) -> bool {
+    crate::win32::known_account_sid(account)
+        .is_some_and(|sid| sid.as_str() == crate::win32::LOCAL_SYSTEM)
+}
+
+/// The warning an install gives where the Client runs as `LocalSystem`, named or kept (ADR-0062
+/// clause 1): every Managed Process it starts itself holds `LocalSystem` too. `None` for any other
+/// account, and on Linux and macOS.
+#[must_use]
+pub fn local_system_warning(account: &str, service: &str) -> Option<String> {
+    #[cfg(any(windows, test))]
+    if is_local_system(account) {
+        return Some(format!(
+            "the Client runs as LocalSystem, and so does every Managed Process it starts itself. \
+             `supervisor service install --run-as \"NT SERVICE\\{service}\"` runs it under the \
+             service's own virtual account"
+        ));
+    }
+    let _ = (account, service);
+    None
 }
 
 /// The order of ADR-0042 clause 2, on what was found. `owner` names the data root's owner when it
@@ -486,6 +510,11 @@ impl RunAs {
     ) -> Result<(), String> {
         use crate::win32::files::{grant_tree, Access, Entry, Passed};
         let sid = &self.sid;
+        // `LocalSystem` is granted nothing: it keeps full control of every root (ADR-0062
+        // clause 1).
+        if sid.as_str() == crate::win32::LOCAL_SYSTEM {
+            return Ok(());
+        }
         let [on_dir, on_file] = handover_aces(sid.as_str(), process.is_some());
         let skip = process.map(ProcessAccount::sid);
         // For as short as the hand-over takes: what a Managed Process protected from the
@@ -814,15 +843,10 @@ pub fn decide_process_account(
     #[cfg(windows)]
     {
         let named = |e: String| refuse_on_windows(&account, kept_from.as_deref(), &e);
-        // No account: `--run-as` named none, and the SCM holds none but LocalSystem — a first
-        // registration runs as LocalSystem — so a process account has nothing to be apart from.
+        // A system service on Windows always names its account (ADR-0062 clause 1); a user
+        // service names none.
         let Some(client) = client else {
-            return Err(named(format!(
-                "the Client runs as LocalSystem unless --run-as names its account, and a process \
-                 account separates the Managed Processes from a Client that runs under an account \
-                 of its own. Name the Client's account with --run-as NT SERVICE\\{}",
-                super::manager::service_name()
-            )));
+            return Err(unsupported());
         };
         let agents = super::manager::agents_service_name();
         let sid = windows_sid(&account).map_err(named)?;
@@ -1553,13 +1577,19 @@ pub fn match_owner(like: &Path, data_root: &Path, paths: &[&Path]) -> Result<Vec
 
 /// The passwordless Windows account forms — the only ones `--run-as` accepts, because a password
 /// parameter must not exist (ADR-0019: it would stand in the process list and the installer log).
+/// `LocalSystem` is one of them, named as an operator's choice (ADR-0062 clause 1).
 ///
 /// Compiled wherever it is used — the Windows install, and the tests of any platform: the rule is
 /// pure string logic, and testing it must not need a Windows host.
 #[cfg(any(windows, test))]
 fn windows_account_form(account: &str, service: &str) -> Result<(), String> {
     const NT_SERVICE: &str = r"NT SERVICE\";
-    const BUILT_IN: [&str; 2] = [r"NT AUTHORITY\LocalService", r"NT AUTHORITY\NetworkService"];
+    const BUILT_IN: [&str; 4] = [
+        r"NT AUTHORITY\LocalService",
+        r"NT AUTHORITY\NetworkService",
+        "LocalSystem",
+        r"NT AUTHORITY\SYSTEM",
+    ];
 
     if BUILT_IN.iter().any(|b| account.eq_ignore_ascii_case(b)) {
         return Ok(());
@@ -1586,7 +1616,7 @@ fn windows_account_form(account: &str, service: &str) -> Result<(), String> {
         "the account {account} would need a password, and a password is never taken on a command \
          line. Passwordless forms: the service's own virtual account \
          (NT SERVICE\\{service}), a group-managed service account (name ending in $), NT \
-         AUTHORITY\\LocalService, or NT AUTHORITY\\NetworkService."
+         AUTHORITY\\LocalService, NT AUTHORITY\\NetworkService, or LocalSystem."
     ))
 }
 
@@ -1623,29 +1653,84 @@ mod tests {
     }
 
     /// On Windows a re-registration keeps the logon account the SCM holds, as a unit's is kept,
-    /// unless `--run-as` names another; `LocalSystem`, the account a registration that names none
-    /// runs as, is no account kept (ADR-0059 clause 1).
-    /// Verifies: ADR-0059
+    /// unless `--run-as` names another — `LocalSystem` included, which the SCM may name as no
+    /// account at all — and a first registration runs as the service's own virtual account
+    /// (ADR-0059 clause 1, ADR-0062 clause 1).
+    /// Verifies: ADR-0059, ADR-0062
     #[test]
     fn on_windows_a_reregistration_keeps_the_scms_logon_account() {
+        let svc = "opamp-fleet";
         let key = PathBuf::from(r"HKLM\SYSTEM\CurrentControlSet\Services\opamp-fleet");
-        let held = |account: &str| Registration {
+        let held = |account: Option<&str>| Registration {
             file: key.clone(),
-            account: Some(account.to_string()),
+            account: account.map(str::to_string),
         };
+        let kept = |account: &str| (account.to_string(), Source::Registered(key.clone()));
         assert_eq!(
-            choose_on_windows(None, Some(&held(r"NT Service\opamp-fleet"))),
-            Some((
-                r"NT Service\opamp-fleet".to_string(),
-                Source::Registered(key.clone())
-            ))
+            choose_on_windows(None, Some(&held(Some(r"NT Service\opamp-fleet"))), svc),
+            kept(r"NT Service\opamp-fleet")
         );
         assert_eq!(
-            choose_on_windows(Some(r"NT AUTHORITY\LocalService"), Some(&held("x"))),
-            Some((r"NT AUTHORITY\LocalService".to_string(), Source::Flag))
+            choose_on_windows(
+                Some(r"NT AUTHORITY\LocalService"),
+                Some(&held(Some("x"))),
+                svc
+            ),
+            (r"NT AUTHORITY\LocalService".to_string(), Source::Flag)
         );
-        assert_eq!(choose_on_windows(None, Some(&held("LocalSystem"))), None);
-        assert_eq!(choose_on_windows(None, None), None);
+        assert_eq!(
+            choose_on_windows(None, Some(&held(Some("LocalSystem"))), svc),
+            kept("LocalSystem"),
+            "a host registered as LocalSystem stays where it is"
+        );
+        assert_eq!(
+            choose_on_windows(None, Some(&held(None)), svc),
+            kept("LocalSystem"),
+            "the SCM names LocalSystem as no account"
+        );
+        assert_eq!(
+            choose_on_windows(Some("LocalSystem"), None, svc),
+            ("LocalSystem".to_string(), Source::Flag)
+        );
+    }
+
+    /// On Windows a first registration — no SCM entry, no `--run-as` — runs as the service's own
+    /// virtual account, not as `LocalSystem` (ADR-0062 clause 1).
+    /// Verifies: ADR-0062
+    #[test]
+    fn on_windows_a_first_registration_runs_as_the_services_virtual_account() {
+        let (account, source) = choose_on_windows(None, None, "opamp-fleet");
+        assert_eq!(account, r"NT SERVICE\opamp-fleet");
+        assert_eq!(source, Source::Default);
+        assert!(windows_account_form(&account, "opamp-fleet").is_ok());
+        assert!(!is_local_system(&account));
+    }
+
+    /// `LocalSystem` is a form an operator names, and the install warns where the Client runs as
+    /// it, named or kept, and names the way to the virtual account; any other account draws no
+    /// warning (ADR-0062 clause 1).
+    /// Verifies: ADR-0062
+    #[test]
+    fn local_system_is_named_and_warned_about() {
+        let svc = "opamp-fleet";
+        for system in ["LocalSystem", "localsystem", r"NT AUTHORITY\SYSTEM"] {
+            assert!(windows_account_form(system, svc).is_ok(), "{system}");
+            assert!(is_local_system(system), "{system}");
+            let warning = local_system_warning(system, svc).expect("a warning");
+            assert!(warning.contains("every Managed Process"), "{warning}");
+            assert!(
+                warning.contains(r#"--run-as "NT SERVICE\opamp-fleet""#),
+                "{warning}"
+            );
+            assert!(!warning.contains("ADR-"), "{warning}");
+        }
+        for other in [
+            r"NT SERVICE\opamp-fleet",
+            r"NT AUTHORITY\LocalService",
+            r"CORP\fleet$",
+        ] {
+            assert_eq!(local_system_warning(other, svc), None, "{other}");
+        }
     }
 
     /// On Windows the hand-over enters no junction or symlink a Managed Process placed in its data

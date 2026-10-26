@@ -216,11 +216,14 @@ fn the_installed_service_starts_comes_back_from_a_crash_and_stays_down_after_a_s
     let root = dir.path().join("install");
     let (addr, state, _server) = spawn_server();
     let config = dir.path().join("supervisor.toml");
+    // The identity lies under the root, which the install hands to the service's account: on
+    // Windows that is the virtual account, which reads nothing else of the runner's (ADR-0062).
+    std::fs::create_dir_all(&root).expect("the root");
     std::fs::write(
         &config,
         format!(
             "endpoint = \"ws://{addr}/v1/opamp\"\nname = \"{AGENT_NAME}\"\nheartbeat_interval_secs = 1\n{}",
-            common::client_identity(dir.path())
+            common::client_identity(&root)
         ),
     )
     .expect("write supervisor.toml");
@@ -231,6 +234,15 @@ fn the_installed_service_starts_comes_back_from_a_crash_and_stays_down_after_a_s
     )
     .expect("install the service");
     let _registered = Registered;
+    // A first registration on Windows runs as the service's own virtual account (ADR-0062), and
+    // the start below proves the Client works under it.
+    #[cfg(windows)]
+    assert!(
+        logon_account_on_windows(service_name())
+            .eq_ignore_ascii_case(&format!(r"NT SERVICE\{}", service_name())),
+        "{}",
+        logon_account_on_windows(service_name())
+    );
 
     // launchd does not auto-start after an install (a known ADR-0019 gap), so every platform is
     // started explicitly — which is also what the README's checklist tells an operator to do.
@@ -1194,6 +1206,111 @@ fn grant_modify(path: &Path, who: &str) {
         .status()
         .expect("run icacls");
     assert!(status.success(), "cannot grant {who} {}", path.display());
+}
+
+/// The logon account the SCM holds for `name`, as `sc.exe qc` prints it.
+#[cfg(windows)]
+fn logon_account_on_windows(name: &str) -> String {
+    let out = Command::new("sc.exe")
+        .args(["qc", name])
+        .output()
+        .expect("run sc qc");
+    let text = String::from_utf8_lossy(&out.stdout);
+    text.lines()
+        .find_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            (key.trim() == "SERVICE_START_NAME").then(|| value.trim().to_string())
+        })
+        .unwrap_or_else(|| panic!("no SERVICE_START_NAME in:\n{text}"))
+}
+
+/// Whether the DACL of `path` names `who`, as `icacls.exe` prints it.
+#[cfg(windows)]
+fn acl_names(path: &Path, who: &str) -> bool {
+    let out = Command::new("icacls.exe")
+        .arg(path)
+        .output()
+        .expect("run icacls");
+    String::from_utf8_lossy(&out.stdout)
+        .to_ascii_lowercase()
+        .contains(&format!("{}:", who.to_ascii_lowercase()))
+}
+
+/// On Windows a first install without `--run-as` registers the service's own virtual account and
+/// grants it the root; a re-install without the flag, as an MSI upgrade makes, keeps it;
+/// `--run-as LocalSystem` registers `LocalSystem` and withdraws what the virtual account was
+/// granted; and a re-install without the flag then keeps `LocalSystem` (ADR-0062 clause 1). The
+/// runner's shell is elevated, as `service install` needs.
+/// Verifies: ADR-0062
+#[cfg(windows)]
+#[test]
+#[ignore = "installs a real system service; run with --ignored in the service-smoke job"]
+fn on_windows_a_first_install_runs_as_the_virtual_account_and_local_system_is_named() {
+    assert_eq!(
+        service().state().expect("query the service"),
+        ServiceState::NotInstalled,
+        "a leftover {} service from an earlier run — remove it before running this",
+        service_name()
+    );
+    let virtual_account = format!(r"NT SERVICE\{}", service_name());
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("install");
+    std::fs::create_dir_all(&root).expect("the root");
+    let config = dir.path().join("supervisor.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "endpoint = \"ws://127.0.0.1:9/v1/opamp\"\nname = \"{AGENT_NAME}\"\n{}",
+            common::client_identity(&root)
+        ),
+    )
+    .expect("write supervisor.toml");
+    let root_arg = root.to_string_lossy().into_owned();
+    let install = |extra: &[&str]| {
+        let mut args = vec!["service", "install", "--root", root_arg.as_str()];
+        args.extend_from_slice(extra);
+        client(&args, &config)
+    };
+
+    let first = install(&[]).expect("a first install");
+    let _registered = Registered;
+    assert!(
+        logon_account_on_windows(service_name()).eq_ignore_ascii_case(&virtual_account),
+        "{first}"
+    );
+    assert!(first.contains("the default"), "{first}");
+    assert!(!first.contains("every Managed Process"), "{first}");
+    assert!(
+        acl_names(&root, &virtual_account),
+        "the root is the virtual account's"
+    );
+
+    let again = install(&[]).expect("a re-install");
+    assert!(
+        logon_account_on_windows(service_name()).eq_ignore_ascii_case(&virtual_account),
+        "{again}"
+    );
+    assert!(again.contains("kept from"), "{again}");
+
+    let system = install(&["--run-as", "LocalSystem"]).expect("an install as LocalSystem");
+    assert!(
+        logon_account_on_windows(service_name()).eq_ignore_ascii_case("LocalSystem"),
+        "{system}"
+    );
+    assert!(system.contains("every Managed Process"), "{system}");
+    assert!(
+        !acl_names(&root, &virtual_account),
+        "what the virtual account was granted is withdrawn"
+    );
+
+    let kept = install(&[]).expect("a re-install of LocalSystem");
+    assert!(
+        logon_account_on_windows(service_name()).eq_ignore_ascii_case("LocalSystem"),
+        "{kept}"
+    );
+    assert!(kept.contains("every Managed Process"), "{kept}");
+
+    client(&["service", "uninstall"], &config).expect("uninstall the service");
 }
 
 /// A Managed Process under a process account on Windows (ADR-0059): installed with `--run-as`

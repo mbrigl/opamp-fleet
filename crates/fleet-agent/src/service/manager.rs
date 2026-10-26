@@ -232,8 +232,8 @@ pub struct InstallSpec {
     pub state_dir: PathBuf,
     /// The account the service runs as (ADR-0042 clause 2) — already resolved by
     /// [`run_as`](super::run_as), so what arrives here exists and needs no password. On Linux and
-    /// macOS a system registration always names one, `root` included; on Windows `None` leaves the
-    /// logon account the SCM holds, `LocalSystem` on a first registration.
+    /// macOS a system registration always names one, `root` included, and on Windows too, the
+    /// service's virtual account on a first registration (ADR-0062); `None` at user scope.
     pub run_as: Option<String>,
     /// The second service, where a process account is registered (ADR-0059); already decided and
     /// checked by [`run_as`](super::run_as).
