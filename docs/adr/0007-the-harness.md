@@ -1,6 +1,6 @@
 # ADR-0007: One maintainer decides, a code owner reviews every pull request and the maintainer may review their own, any agent that reads AGENTS.md implements, a fresh context reviews every change, and nothing is worked unattended
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-10-26
 - **Deciders:** Markus Brigl
 - **Applies to:** every session that works in the repository and every pull request, `AGENTS.md`, `.claude/`, the `review` skill under `.agents/skills/review/`, `.github/CODEOWNERS`, and the rulesets on `main`
