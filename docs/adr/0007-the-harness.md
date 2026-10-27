@@ -1,9 +1,9 @@
-# ADR-0007: One maintainer decides and merges, any agent that reads AGENTS.md implements, a fresh context reviews every change, and nothing is worked unattended
+# ADR-0007: One maintainer decides, a code owner reviews every pull request and the maintainer may review their own, any agent that reads AGENTS.md implements, a fresh context reviews every change, and nothing is worked unattended
 
 - **Status:** 🟡 proposed
 - **Date:** 2026-10-26
 - **Deciders:** Markus Brigl
-- **Applies to:** every session that works in the repository and every pull request, `AGENTS.md`, `.claude/`, the `review` skill under `.agents/skills/review/`, and `.github/CODEOWNERS`
+- **Applies to:** every session that works in the repository and every pull request, `AGENTS.md`, `.claude/`, the `review` skill under `.agents/skills/review/`, `.github/CODEOWNERS`, and the rulesets on `main`
 
 ## Context
 
@@ -19,6 +19,11 @@ reaches and the operator's signing key. But it has one maintainer: the specifica
 rules of [`AGENTS.md`](../../AGENTS.md). The harness has to fit both: room for more than one agent
 and for parallel sessions, and a review and a merge that one human can keep up with.
 
+The agents work under the maintainer's own GitHub account, and GitHub refuses an approval from the
+author of a pull request. A required approval alone would block every pull request the maintainer
+opens, and a second account to open them would be one more identity with write access to keep and
+to protect.
+
 What the repository shows:
 
 - `AGENTS.md` is the rule file, written for no vendor. The only agent configuration in the tree is
@@ -32,34 +37,45 @@ What the repository shows:
 - Changes reach `main` only through a pull request
   ([`AGENTS.md` §6](../../AGENTS.md#6-project-rules)).
   [`.github/CODEOWNERS`](../../.github/CODEOWNERS) names the maintainer for
-  `docs/SPECIFICATION.md` and `docs/adr/`.
+  `docs/SPECIFICATION.md` and `docs/adr/`. The one ruleset on `main` requires the checks, requires
+  no pull request and no approval, and lets the admin role bypass it always, a direct push
+  included.
 - No ticket is dispatched, and `docs/plan/` holds no feature spec or ticket.
 
 ## Decision
 
-We will keep the harness at implementer and reviewer apart: one maintainer decides and merges, any
-agent that reads `AGENTS.md` implements, a fresh context reviews every change, and nothing is
-worked unattended.
+We will keep the harness at implementer and reviewer apart: one maintainer decides, a code owner
+reviews every pull request and the maintainer may review their own, any agent that reads
+`AGENTS.md` implements, a fresh context reviews every change, and nothing is worked unattended.
 
-1. **One maintainer decides.** Markus Brigl decides every ADR and lands every change to the
-   specification. `.github/CODEOWNERS` names him for `docs/SPECIFICATION.md` and `docs/adr/`. The
-   `Deciders` lines of the template ADRs ADR-0002 to ADR-0006 name only the NUC maintainer until
-   he adds himself.
+1. **One maintainer decides.** The maintainer, Markus Brigl, decides every ADR and lands every
+   change to the specification. `.github/CODEOWNERS` names the maintainer for
+   `docs/SPECIFICATION.md` and `docs/adr/`, and may name further reviewers; the maintainer decides
+   who they are.
 2. **Any agent that reads `AGENTS.md` may implement.** `AGENTS.md` is the one rule file, and no
    agent or model is prescribed. An agent's own configuration, such as Claude Code's under
    `.claude/`, points to `AGENTS.md` and the shared skills and states no rule of its own.
 3. **Every change is reviewed in a fresh context before its pull request opens,** through the
    `review` skill, by a session other than the one that wrote it.
-4. **The maintainer reviews and merges every pull request.**
+4. **A code owner reviews every pull request before it merges, and the maintainer may review
+   their own.** Two rulesets on `main` hold it:
+   - the ruleset `main` requires a pull request, the merge method merge commit, the required checks
+     and a branch up to date with `main`, and blocks force pushes and the branch's deletion. Nobody
+     bypasses it, the maintainer included, so nothing reaches `main` but a pull request that passed
+     the checks;
+   - the ruleset `main-review` requires one approval from a code owner. The admin role bypasses it
+     for pull requests only: the maintainer reviews their own pull request, records the review on
+     it, and merges it without an approval. Every other pull request waits for a code owner who did
+     not open it.
 5. **Nothing is worked unattended.** No session works without a human, and no ticket is dispatched
    to one; the cap on open unattended agent work is zero, so every part of the system is kept with
    the human.
 6. **Parallel sessions work in git worktrees of their own.**
 
-**Out of scope:** which model implements or reviews; a second reviewer of a different kind for the
-parts the specification's threats protect; how many attended sessions may be open at once; the
-command that starts a session without a human, and the remote on which a ticket is claimed, which
-matter only once work runs unattended.
+**Out of scope:** which model implements or reviews; who besides the maintainer is a code owner, and
+whether the parts the specification's threats protect need a second reviewer; how many attended
+sessions may be open at once; the command that starts a session without a human, and the remote on
+which a ticket is claimed, which matter only once work runs unattended.
 
 ## Alternatives considered
 
@@ -71,6 +87,12 @@ matter only once work runs unattended.
   worktree of its own and worked through the `work-tickets` skill, with the open agent work capped
   at what the humans can review. Not taken: no work runs unattended here, and no plan is kept under
   `docs/plan/`. Taking it up changes this decision.
+- **A second account for the agents.** A machine user or a GitHub App would open the agents' pull
+  requests, so the maintainer could approve them and the approval could be required of everyone.
+  Not taken: it is one more identity with write access, its token one more secret to keep and to
+  rotate, and the maintainer reviews their own work either way.
+- **No required approval at all.** The checks alone guard `main`, and the review is a habit. Not
+  taken: a pull request of anyone but the maintainer would merge without a code owner's review.
 - **A process-owning framework that brings agents, artifacts and pipeline in one piece.** Declined
   by [ADR-0003](0003-procedures-as-skills.md) and [ADR-0006](0006-feature-layer.md).
 - **A gate in one agent's own configuration as the enforcement of a rule.** A gate one agent
@@ -100,17 +122,21 @@ matter only once work runs unattended.
 - Positive: a session knows who decides, who reviews and that it works with a human; any agent
   that reads `AGENTS.md` can take up the work, and parallel sessions do not share a working tree.
 - Negative / trade-offs: every change waits on one human's review and merge, and so does every
-  proposed ADR. No ticket can run unattended under
+  proposed ADR. The maintainer's own pull requests carry no approval GitHub records, only the
+  review the maintainer records on them; and with the bypass, the maintainer's account can merge a
+  pull request nobody reviewed. No ticket can run unattended under
   [`AGENTS.md` §4](../../AGENTS.md#4-working-style) until this decision changes.
-- Follow-ups: the model that implements and the one that reviews; a second reviewer for the parts
-  the threats protect; a cap on attended parallel sessions; unattended tickets under a cap, once
-  the work outgrows one maintainer's attended sessions.
+- Follow-ups: the model that implements and the one that reviews; further code owners, and a second
+  reviewer for the parts the threats protect; a cap on attended parallel sessions; unattended
+  tickets under a cap, once the work outgrows one maintainer's attended sessions.
 
 ## Enforcement
 
 **Not mechanically decidable:** who reviews, who decides which ADRs, and what runs unattended is
 decided outside the tree. What the harness relies on mechanically is checked elsewhere: the git
-hooks under [`.githooks/`](../../.githooks/), the required checks, and the Code Owners review
-listed under [Repository settings](../../README.md#repository-settings), which
+hooks under [`.githooks/`](../../.githooks/), and the two rulesets of clause 4 with their required
+checks and Code Owners review, listed under
+[Repository settings](../../README.md#repository-settings), which
 [`scripts/sensor-repo-settings.sh`](../../scripts/sensor-repo-settings.sh) compares with the
-repository on a human's instruction.
+repository on a human's instruction. Who may bypass a ruleset the sensor does not read; it stands
+in the repository's settings.

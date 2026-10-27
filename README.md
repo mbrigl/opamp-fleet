@@ -630,12 +630,16 @@ configured once by a maintainer and worth re-checking after a repository move or
   macOS jobs and the S3 and PostgreSQL stores' tests against a real store among them (rulesets
   list checks by their job name); requires a branch up to date with `main` before it merges, so
   that the checks see what the merge produces, such as two ADRs proposed in parallel under one
-  number; and blocks force pushes and branch deletion;
-- enable **require a review from Code Owners** on that ruleset, so the two artifacts only a human
-  decides, [`docs/SPECIFICATION.md`](docs/SPECIFICATION.md) and everything under
-  [`docs/adr/`](docs/adr/) ([`AGENTS.md` §3](AGENTS.md#3-adr-rules)), cannot be merged without the
-  owner named in [`.github/CODEOWNERS`](.github/CODEOWNERS), which has to carry a real handle or
-  team for the requirement to mean anything;
+  number; and blocks force pushes and branch deletion. Nobody bypasses this ruleset, the maintainer
+  included;
+- a second **ruleset `main-review`** on `main` that requires one approval and **a review from Code
+  Owners**, so the two artifacts only a human decides,
+  [`docs/SPECIFICATION.md`](docs/SPECIFICATION.md) and everything under [`docs/adr/`](docs/adr/)
+  ([`AGENTS.md` §3](AGENTS.md#3-adr-rules)), cannot be merged without the owner named in
+  [`.github/CODEOWNERS`](.github/CODEOWNERS); it allows the merge method merge commit only, and
+  the admin role bypasses it for pull requests only, so the maintainer merges their own reviewed
+  pull request without an approval GitHub would refuse them
+  ([ADR-0007](docs/adr/0007-the-harness.md), clause 4);
 - enable **secret scanning with push protection**, the only mechanical backstop behind the secrets
   rule ([`AGENTS.md` §7](AGENTS.md#7-secrets)), which is otherwise carried by review alone;
 - enable **private vulnerability reporting** (see [`SECURITY.md`](SECURITY.md)).
