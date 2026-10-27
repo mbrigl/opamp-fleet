@@ -40,10 +40,10 @@ pub const SELF_AGENT_OFFSET: usize = SELF_AGENT_INDEX + 1;
 
 /// The compiled-in plugin registry (ADR-0017 clause 2). A new process kind is a new module and one
 /// line here — the supervision core stays untouched (goal 8). A wrapped kind is there only when
-/// its feature is, so what a build carries, reports (clause 18) and refuses as unknown all follow
-/// from this one list.
+/// its feature is, so what a build carries, reports (ADR-0017 clause 18) and refuses as unknown all
+/// follow from this one list.
 ///
-/// Every plugin is handed `spawner`, which starts its Managed Processes (ADR-0059 clause 3).
+/// Every plugin is handed `spawner`, which starts its Managed Processes (ADR-0020 clause 18).
 fn registry(spawner: &Spawner) -> Vec<Box<dyn Plugin>> {
     vec![
         Box::new(collector::CollectorPlugin {
@@ -56,7 +56,7 @@ fn registry(spawner: &Spawner) -> Vec<Box<dyn Plugin>> {
 }
 
 /// The [`registry`] of a run: its plugins with the [`Spawner`] the composition root chose from the
-/// Client's command line and handed [`build_engine`] (ADR-0059 clause 3).
+/// Client's command line and handed [`build_engine`] (ADR-0020 clause 18).
 pub struct Registry {
     spawner: Spawner,
 }
@@ -120,7 +120,7 @@ fn kind_attributes(mut attributes: BTreeMap<String, String>) -> BTreeMap<String,
 }
 
 /// Build the Engine from the configuration, starting one adapter task per Supervisor, each of whose
-/// Managed Processes `spawner` starts (ADR-0059 clause 3).
+/// Managed Processes `spawner` starts (ADR-0020 clause 18).
 ///
 /// # Errors
 /// Returns an error when an Agent's state cannot be restored, a `[[supervisor]]` block names an
@@ -146,7 +146,7 @@ pub fn build_engine(
     let storage = Storage::client(config.state_dir.clone(), config.process_account_group)
         .map_err(|e| format!("cannot prepare {}: {e}", config.state_dir.display()))?;
     // A host that keeps its Supervisor set takes none from the Server, and the set stored from
-    // before leaves rather than be reported as applied (ADR-0017 clauses 42 and 44).
+    // before leaves rather than be reported as applied (ADR-0017 clauses 39 and 41).
     let self_state = if config.server_manages_set() {
         AgentState::new(config.name.clone(), storage, crate::host::SystemHost)
     } else {
@@ -194,8 +194,8 @@ pub fn build_engine(
     });
 
     // One set of high-water marks for every Supervisor this Client runs, now and after a
-    // Supervisor-set apply adds one (ADR-0043 clause 8). Read afresh at every start, and seeded
-    // from each Supervisor's installed record as it starts (clause 9).
+    // Supervisor-set apply adds one (ADR-0028 clause 8). Read afresh at every start, and seeded
+    // from each Supervisor's installed record as it starts (ADR-0028 clause 9).
     let marks: Arc<dyn HighWaterMarks> = Arc::new(HighWaterFile::open(&config.state_dir));
     for (block_index, block) in config.supervisors.iter().enumerate() {
         // The event channel is keyed by position in `agents`, and the self-Agent holds 0.
@@ -211,7 +211,7 @@ pub fn build_engine(
 }
 
 /// A directory under the Supervisor root that no `[[supervisor]]` block names is reported, never
-/// reaped (ADR-0059 clause 12): it may be a purge a crash cut short, or an operator's deliberate
+/// reaped (ADR-0020 clause 25): it may be a purge a crash cut short, or an operator's deliberate
 /// hand edit, a temporarily commented-out block whose identity and program are not the Client's
 /// to delete. The log line makes the leftover visible; removing it stays the operator's call. A
 /// tombstone a purge could not delete is named as one, and is reported until it is gone: its name
@@ -277,8 +277,8 @@ pub fn validate_block(config: &ClientConfig, block: &SupervisorBlock) -> Result<
     resolved.plugin.check(&block.name, resolved.settings)
 }
 
-/// What a Server-delivered block may not bring (ADR-0017 clauses 38, 39; for a Supervisor whose
-/// remote configuration is switched off, ADR-0017 clause 54), checked against `running` — the
+/// What a Server-delivered block may not bring (ADR-0017 clauses 35 and 36; for a Supervisor whose
+/// remote configuration is switched off, ADR-0017 clause 51), checked against `running` — the
 /// configuration in force, whose `[supervisors]` section the Server cannot change and whose block
 /// of the same name the delivered one may repeat.
 ///
@@ -339,7 +339,7 @@ pub fn start_supervisor(
 
     let supervisor_dir = config.supervisor_dir(&block.name);
     // The Managed Process passes through the Supervisors' root on its way to its own directory
-    // (ADR-0059 clause 6). Left as it is made where no process account is registered.
+    // (ADR-0020 clause 21). Left as it is made where no process account is registered.
     if config.process_account_group.is_some() {
         let root = config.supervisors_root();
         crate::storage::create_shared_dir(
@@ -355,7 +355,7 @@ pub fn start_supervisor(
     let config_dir = storage.config_dir();
 
     // What a package replaces: one file, or — when the block says where the program sits
-    // inside the package — the whole tree under this Supervisor's `program/` (ADR-0026).
+    // inside the package — the whole tree under this Supervisor's `program/` (ADR-0027).
     let install = match program_path {
         Some(program_path) => crate::supervisor::ports::InstallTarget::Tree {
             root: supervisor_dir.join(crate::config::PROGRAM_DIR),
@@ -365,7 +365,7 @@ pub fn start_supervisor(
     };
 
     // Switched off, the Server's last configuration leaves before the kind starts, and what the
-    // operator placed in `config/` stays (ADR-0017 clause 52).
+    // operator placed in `config/` stays (ADR-0017 clause 49).
     let remote_config = !config.remote_config_disabled(&block.name);
     if !remote_config {
         drop_stored_remote_config(&block.name, &storage)?;
@@ -394,16 +394,16 @@ pub fn start_supervisor(
             .with_high_water(marks.clone()),
     );
     // Every Managed Process is the fleet's (ADR-0017), so every Supervisor takes whichever
-    // top-level package the Server selects for it (ADR-0026). There is no second branch:
+    // top-level package the Server selects for it (ADR-0027). There is no second branch:
     // a block naming a program on the machine does not parse, so the consent is discharged by the
     // type system rather than by a rule. The log line says *where* the program is, which is the
     // thing an operator reading a startup log actually wants.
     //
     // What the target itself needs — for a tree that is its root and nothing below it, since the
-    // live tree arrives by renaming a directory over that name (ADR-0026).
+    // live tree arrives by renaming a directory over that name (ADR-0027).
     install.prepare(config.process_account_group)?;
     // Only a Client holding the operator's verification key takes packages: there is no unsigned
-    // posture (ADR-0026). Without it the program stays as installed, and the startup notice says
+    // posture (ADR-0027). Without it the program stays as installed, and the startup notice says
     // why.
     if config.package_key().is_some() {
         state.accept_packages();
@@ -459,7 +459,7 @@ pub fn start_supervisor(
 }
 
 /// Removes what a remote configuration stored for the Supervisor `name` before its remote
-/// configuration was switched off, and says what it did (ADR-0017 clause 52).
+/// configuration was switched off, and says what it did (ADR-0017 clause 49).
 ///
 /// # Errors
 /// Returns an error when a file that has to go cannot be deleted — the Supervisor must not start
@@ -486,7 +486,7 @@ fn drop_stored_remote_config(name: &str, storage: &Storage) -> Result<(), String
 }
 
 /// Removes the Supervisor set the Client's own Agent stored before the host kept its set, and says
-/// what it did (ADR-0017 clause 44). Nothing runs on those files — the set is already in
+/// what it did (ADR-0017 clause 41). Nothing runs on those files — the set is already in
 /// `supervisor.toml` — so a file that cannot go is a warning, not a reason to stay offline.
 fn drop_stored_supervisor_set(storage: &Storage) {
     match storage.drop_stored_set() {
@@ -523,7 +523,7 @@ fn drop_stored_supervisor_set(storage: &Storage) {
     }
 }
 
-/// The startup notices `[supervisors] remote_config_disabled` earns (ADR-0017 clause 49): a listed
+/// The startup notices `[supervisors] remote_config_disabled` earns (ADR-0017 clause 46): a listed
 /// name no `[[supervisor]]` block carries, since the set may arrive later, and one that is the
 /// Client's own name, whose Agent the switch does not cover.
 #[must_use]
@@ -590,7 +590,7 @@ mod tests {
     }
 
     /// A configuration as `ClientConfig::load` leaves it when `[packages] verification_key` is set:
-    /// the decoded key is what decides whether anything takes packages (ADR-0026).
+    /// the decoded key is what decides whether anything takes packages (ADR-0027).
     fn keyed(mut config: ClientConfig) -> ClientConfig {
         config.package_key = Some(vec![7u8; 32]);
         config
@@ -670,8 +670,7 @@ mod tests {
     }
 
     /// A wrapped kind this build leaves out is an unknown `type` like any other: startup and an
-    /// offered set both refuse the block, naming the kinds the build does carry (ADR-0017 clause
-    /// 2). The default build carries every kind, so this decides something in the
+    /// offered set both refuse the block, naming the kinds the build does carry (ADR-0017 clause 2). The default build carries every kind, so this decides something in the
     /// `--no-default-features` run of CI.
     // Verifies: ADR-0017
     #[test]
@@ -780,11 +779,11 @@ mod tests {
     }
 
     /// Where a process account is registered, the Engine lays out the path to each Managed
-    /// Process for its group (ADR-0059 clause 6): the state directory, the Supervisors' root and
+    /// Process for its group (ADR-0020 clause 21): the state directory, the Supervisors' root and
     /// each Supervisor's directory passed through, `0710`, and `program/` read, `0750`. Without
     /// one, those directories are what they were: `0700`, and `program/` and the root as they are
     /// made.
-    /// Verifies: ADR-0059
+    /// Verifies: ADR-0020
     #[cfg(unix)]
     #[tokio::test]
     async fn the_engine_lays_out_the_path_to_each_managed_process_for_the_process_accounts_group() {
@@ -871,8 +870,8 @@ mod tests {
     }
 
     /// With no mark file and `a`'s record at `0.110.0`, the start seeds the mark: `b`, which has
-    /// no record of its own, refuses `0.109.0` naming the mark (ADR-0043 clause 9).
-    /// Verifies: ADR-0043
+    /// no record of its own, refuses `0.109.0` naming the mark (ADR-0028 clause 9).
+    /// Verifies: ADR-0028
     #[tokio::test]
     async fn the_start_seeds_the_mark_from_the_installed_records() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -894,8 +893,8 @@ mod tests {
     }
 
     /// A mark file that does not parse is never read as empty: every Supervisor offer is refused
-    /// naming the file, and the Client still starts and reports (ADR-0043 clause 11).
-    /// Verifies: ADR-0043
+    /// naming the file, and the Client still starts and reports (ADR-0028 clause 11).
+    /// Verifies: ADR-0028
     #[tokio::test]
     async fn an_unreadable_mark_file_refuses_every_supervisor_package() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -930,8 +929,8 @@ mod tests {
 
     /// Only the host lowers the mark: with the Client stopped, the operator deletes the type's
     /// entry and the type's installed records, and after the start an offer at `0.109.0` is taken
-    /// (ADR-0043 clause 12).
-    /// Verifies: ADR-0043
+    /// (ADR-0028 clause 12).
+    /// Verifies: ADR-0028
     #[tokio::test]
     async fn the_host_lowers_the_mark_by_deleting_the_entry_and_the_records() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -968,7 +967,7 @@ mod tests {
     ///
     /// The `program/` directory is created either way, before the first package: the swap renames
     /// inside it, so it has to exist beforehand rather than after.
-    /// Verifies: ADR-0017, ADR-0026
+    /// Verifies: ADR-0017, ADR-0027
     #[tokio::test]
     async fn every_supervisor_declares_package_acceptance() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1002,8 +1001,8 @@ mod tests {
 
     /// Without the operator's verification key, no Agent of this Client takes packages — neither a
     /// Supervisor nor the Client's own Agent, whose self-update consent stands — so nothing can be
-    /// installed unsigned (ADR-0026, ADR-0018).
-    /// Verifies: ADR-0026, ADR-0018, Q-1
+    /// installed unsigned (ADR-0027, ADR-0018).
+    /// Verifies: ADR-0027, ADR-0018, Q-1
     #[tokio::test]
     async fn without_a_verification_key_no_agent_takes_packages() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1025,7 +1024,7 @@ mod tests {
     }
 
     /// The side-effect-free `installs_packages()` that the startup signature-posture warning reads
-    /// (ADR-0026) agrees with the `AcceptsPackages` capability an Agent actually declares.
+    /// (ADR-0027) agrees with the `AcceptsPackages` capability an Agent actually declares.
     #[tokio::test]
     async fn installs_packages_reflects_declared_package_acceptance() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1064,7 +1063,7 @@ mod tests {
         );
     }
 
-    /// A tree Supervisor owns its `program/` directory and *nothing inside it* (ADR-0026). The
+    /// A tree Supervisor owns its `program/` directory and *nothing inside it* (ADR-0027). The
     /// live tree arrives by renaming a staging directory over `program/tree`, and a rename cannot
     /// replace a directory something else created and filled — so preparing the program's parent,
     /// which is right for a single file, would make every first install of a tree fail.
@@ -1127,7 +1126,7 @@ mod tests {
         assert!(err.contains("needs a `command`"), "{err}");
     }
 
-    /// ADR-0017 point 37: a directory no block names survives startup — reported, never reaped.
+    /// ADR-0020 clause 25: a directory no block names survives startup — reported, never reaped.
     /// Startup cannot tell a purge a crash cut short from an operator's deliberate hand edit, and
     /// the destructive reading of that ambiguity would delete an identity and a program that were
     /// not meant to go.
@@ -1150,8 +1149,8 @@ mod tests {
     }
 
     /// The start removes a tombstone left behind again, beside the start rather than before it,
-    /// and leaves every other orphan in place (ADR-0059 clause 12, ADR-0017 clause 37).
-    /// Verifies: ADR-0059
+    /// and leaves every other orphan in place (ADR-0020 clause 25).
+    /// Verifies: ADR-0020
     #[tokio::test]
     async fn a_start_removes_a_tombstone_left_behind() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1178,8 +1177,8 @@ mod tests {
 
     /// A tombstone a purge could not delete is reported at startup as a removed Supervisor's that
     /// is removed again, apart from the orphans the operator removes; the report itself deletes
-    /// nothing (ADR-0059 clause 12).
-    /// Verifies: ADR-0059
+    /// nothing (ADR-0020 clause 25).
+    /// Verifies: ADR-0020
     #[test]
     fn a_tombstone_left_behind_is_reported_at_startup() {
         #[derive(Clone, Default)]
@@ -1298,7 +1297,7 @@ mod tests {
     }
 
     /// A listed name no block carries starts the Client and earns one notice naming it; one equal
-    /// to the Client's own name says that Agent is not covered (ADR-0017 clause 49).
+    /// to the Client's own name says that Agent is not covered (ADR-0017 clause 46).
     /// Verifies: ADR-0017
     #[tokio::test]
     async fn a_listed_name_without_a_block_is_a_notice_not_a_refusal() {
@@ -1318,7 +1317,7 @@ mod tests {
     /// Switching off takes the Server's last configuration out of force before the kind starts:
     /// the entry files it wrote and `.supplementary` go while their bytes are still the stored
     /// ones, an overwritten entry and an operator's own file stay, and the `.pb` goes (ADR-0017
-    /// clause 32).
+    /// clause 31).
     /// Verifies: ADR-0017
     #[tokio::test]
     async fn a_listed_supervisor_drops_the_stored_remote_config_and_keeps_the_operators_files() {
@@ -1351,7 +1350,7 @@ mod tests {
 
     /// A stored configuration whose files cannot be removed stops the Supervisor before its kind
     /// starts on them, and at startup that fails the whole Client: it fails closed rather than run
-    /// the Server's configuration under a switch that says it does not (ADR-0017 clause 52).
+    /// the Server's configuration under a switch that says it does not (ADR-0017 clause 49).
     /// Verifies: ADR-0017
     #[tokio::test]
     async fn a_stored_remote_config_that_cannot_be_removed_fails_startup() {
@@ -1376,7 +1375,7 @@ mod tests {
     }
 
     /// A stored `.pb` that does not decode is deleted, and `config/` is left exactly as it is,
-    /// since nothing says which of its files the Server wrote (ADR-0017 clause 52).
+    /// since nothing says which of its files the Server wrote (ADR-0017 clause 49).
     /// Verifies: ADR-0017
     #[tokio::test]
     async fn an_undecodable_stored_remote_config_is_deleted_and_config_is_left_alone() {
@@ -1401,7 +1400,7 @@ mod tests {
     }
 
     /// A listed Supervisor restarted over a stored configuration reports no status and no hash,
-    /// and declares neither remote-configuration capability (ADR-0017 clauses 50 and 52).
+    /// and declares neither remote-configuration capability (ADR-0017 clauses 47 and 49).
     /// Verifies: ADR-0017
     #[tokio::test]
     async fn a_listed_supervisor_reports_no_remote_config_status_after_a_restart() {
@@ -1434,7 +1433,7 @@ mod tests {
     }
 
     /// The switch covers Supervisors only: the Client's own name in the list earns a notice, and
-    /// its Agent still declares `AcceptsRemoteConfig` for its Supervisor set (ADR-0017 clause 49
+    /// its Agent still declares `AcceptsRemoteConfig` for its Supervisor set (ADR-0017 clause 46
     /// and out of scope).
     /// Verifies: ADR-0017
     #[tokio::test]
@@ -1474,7 +1473,7 @@ mod tests {
     /// On a host that keeps its set, the set the Client's own Agent stored before is removed at
     /// start — the `.pb` and the unchanged entry copies, not a copy changed since — and is not
     /// reported; the Agent declares neither remote-configuration bit. With the key `true` the same
-    /// stored set is restored as applied (ADR-0017 clauses 42 and 44).
+    /// stored set is restored as applied (ADR-0017 clauses 39 and 41).
     /// Verifies: ADR-0017
     #[tokio::test]
     async fn a_host_that_keeps_its_set_drops_the_stored_set_and_reports_no_status() {
@@ -1519,7 +1518,7 @@ mod tests {
     }
 
     /// A `remote-config.pb` that cannot be read or deleted is a warning, not a refusal: nothing
-    /// runs on it, and it is still not reported (ADR-0017 clause 44).
+    /// runs on it, and it is still not reported (ADR-0017 clause 41).
     /// Verifies: ADR-0017
     #[tokio::test]
     async fn a_stored_set_that_cannot_be_removed_does_not_stop_startup() {
@@ -1535,7 +1534,7 @@ mod tests {
     }
 
     /// `remote-config.pb` goes before the copies, so a copy that cannot be removed leaves no hash
-    /// behind: switched back on, the next start reports none (ADR-0017 clauses 44 and 47).
+    /// behind: switched back on, the next start reports none (ADR-0017 clauses 41 and 44).
     /// Verifies: ADR-0017
     #[tokio::test]
     async fn a_copy_that_cannot_be_removed_still_leaves_no_hash_to_report() {
@@ -1566,7 +1565,7 @@ mod tests {
     }
 
     /// A stored set that does not decode is deleted, and `config/` is left as it is (ADR-0017
-    /// clause 24).
+    /// clause 23).
     /// Verifies: ADR-0017
     #[tokio::test]
     async fn an_undecodable_stored_set_is_deleted_and_config_is_left_alone() {
@@ -1593,7 +1592,7 @@ mod tests {
     }
 
     /// The removal is logged once naming the stored hash, and a set offered to the built Client
-    /// anyway is logged once per hash (ADR-0017 clauses 43 and 44).
+    /// anyway is logged once per hash (ADR-0017 clauses 40 and 41).
     /// Verifies: ADR-0017
     #[tokio::test]
     async fn the_removed_stored_set_is_logged_naming_its_hash() {
@@ -1634,7 +1633,7 @@ mod tests {
         assert!(ignored[1].contains(&hex::encode(b"set-b")), "{log}");
     }
 
-    /// The notice for the Client's own name in `remote_config_disabled` (ADR-0017 clause 49) points
+    /// The notice for the Client's own name in `remote_config_disabled` (ADR-0017 clause 46) points
     /// at `server_manages_set`, and on a host that keeps its set says the set is the host's
     /// already (ADR-0017).
     /// Verifies: ADR-0017

@@ -170,7 +170,7 @@ async fn the_ui_and_the_api_docs_are_guarded_too() {
 
 /// The half that must NOT change: guarding the operator's plane locks nothing out of the fleet's.
 /// An Agent carries no operator credential, and a Client downloading a package carries none either
-/// (ADR-0013, ADR-0021) — so a rollout keeps working.
+/// (ADR-0012, ADR-0021) — so a rollout keeps working.
 /// Verifies: ADR-0021
 #[tokio::test]
 async fn the_agent_plane_is_untouched_by_the_operator_credential() {

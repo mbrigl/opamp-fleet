@@ -86,7 +86,7 @@ const SCOPE: &str = "opamp-fleet-client";
 ///   instance name and identity stays `service.instance.id` (ADR-0016) — that is a statement about
 ///   *identity*, not about what the telemetry is worth carrying. Without it every series at the
 ///   receiving end is a uuid the operator cannot place against the fleet view they searched by.
-/// - `os.type` and `host.arch` are the two halves this project calls a platform (ADR-0026), and
+/// - `os.type` and `host.arch` are the two halves this project calls a platform (ADR-0027), and
 ///   `os.description` is the readable form of the first. They sit on the Resource rather than on
 ///   each sample because they are a property of the *host*: this Client samples its own process and
 ///   the Managed Processes it holds the pids of, so every Agent in one export runs on the machine
@@ -171,7 +171,7 @@ pub use crate::span::{failed, succeeded, STATUS_CODE, STATUS_DESCRIPTION};
 /// when nothing is being traced, which is every run with no destination offered.
 ///
 /// Exists so a caller can persist a trace across something a span cannot survive: the self-update's
-/// restart (ADR-0016 clause 20), where the process that stages a version is not the process that
+/// restart (ADR-0016 clause 21), where the process that stages a version is not the process that
 /// commits or rolls back one. The OpenTelemetry types stay here; what leaves this module is two
 /// strings.
 #[must_use]
@@ -236,7 +236,7 @@ pub use crate::engine::SamplingTarget;
 ///
 /// **Interior mutability, deliberately.** The exporters outlive a connection (ADR-0016), so this is
 /// owned by the runtime loop — but a destination is put in force from *inside* a transport, where
-/// the offer's acknowledgement is composed (ADR-0014). Both the sampler arm of the runtime's
+/// the offer's acknowledgement is composed (ADR-0013). Both the sampler arm of the runtime's
 /// `select!` and the transport future it drives therefore hold this at once, which `&mut self`
 /// cannot express. One `Mutex` gives both a shared borrow and costs nothing else: every method
 /// under the lock is synchronous, so the guard is never held across an `.await` and no deadlock
@@ -538,7 +538,7 @@ fn endpoint_of(settings: Option<&TelemetryConnectionSettings>) -> Option<String>
 /// Client logs, so plaintext is refused anywhere but on the host itself: the loopback literals
 /// `127.0.0.1` and `::1` (ADR-0016). A private address is not a private network, and a name is
 /// not an address. `tls` and `proxy` are refused for the same reasons they are on the OpAMP
-/// settings (ADR-0014 clause 8).
+/// settings (ADR-0013 clause 8).
 fn check(settings: &TelemetryConnectionSettings, field: &str) -> Result<(), String> {
     let endpoint = &settings.destination_endpoint;
     if endpoint.starts_with("http://") && opamp::endpoint::check_url(endpoint).is_err() {
@@ -560,11 +560,12 @@ fn check(settings: &TelemetryConnectionSettings, field: &str) -> Result<(), Stri
     if settings.proxy.is_some() {
         unhonoured.push("proxy");
     }
-    // An offered certificate *is* honoured (ADR-0016 point 32) — but only its `cert`, paired with
+    // An offered certificate *is* honoured (ADR-0016 clause 33) — but only its `cert`, paired with
     // the key this Client already holds. A `private_key` in the offer is a key the Server generated
     // for us, and ADR-0021's rule is that this Client's private key never leaves its host and is
-    // never handed to it: that is the whole point of asking for a certificate through a CSR. Refused
-    // by name rather than quietly ignored, so a Server issuing pairs learns why nothing happened.
+    // never handed to it: that is the whole point of asking for a certificate through a CSR.
+    // Refused by name rather than quietly ignored, so a Server issuing pairs learns why nothing
+    // happened.
     if settings
         .certificate
         .as_ref()
@@ -644,8 +645,8 @@ impl std::fmt::Debug for RuntimeBoundClient {
 /// the fleet identity is for the Server, not for a telemetry destination (ADR-0016) — and it
 /// follows no redirect, so a destination cannot steer the export to another host or to plaintext.
 ///
-/// The certificate machinery is ADR-0021's, reused as-is (ADR-0016 point 32): the offered `cert` is
-/// paired with the key already on disk — the one the CSR was made for — because that key is what
+/// The certificate machinery is ADR-0021's, reused as-is (ADR-0016 clause 33): the offered `cert`
+/// is paired with the key already on disk — the one the CSR was made for — because that key is what
 /// proves the certificate belongs to this host, and it never travels.
 ///
 /// `ca_cert` is deliberately *not* added to the trust store. The Baseline is explicit about it:
@@ -968,7 +969,7 @@ mod tests {
         assert!(!telemetry.reporting());
     }
 
-    /// ADR-0016 point 32: the offered `certificate` is *honoured*, not refused — the ADR-0021
+    /// ADR-0016 clause 33: the offered `certificate` is *honoured*, not refused — the ADR-0021
     /// machinery is reused as-is, which means the offered `cert` is paired with the key this Client
     /// already generated for its CSR. With that key present, an offer naming a certificate builds
     /// an exporter that presents it.
@@ -1110,7 +1111,7 @@ mod tests {
     }
 
     /// The platform travels with the telemetry, because a series that cannot be placed on an
-    /// operating system and an architecture (ADR-0026) cannot be read against a fleet whose Agents
+    /// operating system and an architecture (ADR-0027) cannot be read against a fleet whose Agents
     /// do not all run the same one. It sits on the Resource: every Agent in one export runs on the
     /// host this Resource describes, so per-sample it would be a constant repeated on every point.
     /// Verifies: ADR-0016
@@ -1134,7 +1135,7 @@ mod tests {
     }
 
     /// And nothing else does. The non-identifying attributes are a bag that also holds the host's
-    /// addresses and whatever the operator tagged this Agent with (ADR-0023) — the Resource is what
+    /// addresses and whatever the operator tagged this Agent with (ADR-0025) — the Resource is what
     /// leaves the host for a destination the *Server* named, so what goes in it is a named list,
     /// not the bag. This is the test that fails if that list is ever replaced by a filter.
     /// Verifies: ADR-0016
@@ -1468,7 +1469,7 @@ mod tests {
         );
     }
 
-    /// ADR-0016 clause 20: an operation that outlives the process it started in stays **one** trace.
+    /// ADR-0016 clause 21: an operation that outlives the process it started in stays **one** trace.
     ///
     /// Asserted through the two functions the self-update uses — the ids it writes into its marker,
     /// and the parent it builds from them afterwards — because what the restart breaks is exactly

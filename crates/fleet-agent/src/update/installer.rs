@@ -1,12 +1,12 @@
-//! The Client replacing its own binary on the ADR-0019 version directories (ADR-0018): the
+//! The Client replacing its own binary on the ADR-0020 version directories (ADR-0018): the
 //! [`SelfUpdater`] adapter and the start-up check of the process that comes after it.
 //!
-//! Updating a Managed Process is done by a Supervisor that outlives it (ADR-0026): stop, swap,
+//! Updating a Managed Process is done by a Supervisor that outlives it (ADR-0027): stop, swap,
 //! restart, watch, roll back. Nothing here outlives anything — the process that installs the
 //! package is the process that has to exit for the install to take effect. So the work is split
 //! across the restart, and this module owns both halves:
 //!
-//! **Before.** [`install`] stages the new version *beside* the running one in the ADR-0019 layout,
+//! **Before.** [`install`] stages the new version *beside* the running one in the ADR-0020 layout,
 //! proves it by running it (`client self-check`), records an [`UpdateMarker`], and moves the
 //! `current` pointer. Nothing is overwritten, so the version being replaced is still on disk and
 //! the rollback is a pointer move rather than a download.
@@ -58,7 +58,7 @@ pub struct UpdateMarker {
     /// How many times a process has started and found this marker.
     pub attempts: u32,
     /// The trace the install belongs to, and the span inside it that staged this version
-    /// (ADR-0016 clause 20) — hex, as OpenTelemetry writes them.
+    /// (ADR-0016 clause 21) — hex, as OpenTelemetry writes them.
     ///
     /// **Why a telemetry field is in an operational file.** The install necessarily completes in a
     /// different process than the one that started it, so the span that staged the version is gone
@@ -105,7 +105,7 @@ pub struct UpdateOutcome {
 }
 
 /// The span in which the process that came up after the restart finishes what a previous process
-/// started — a continuation of that install's trace when the marker carries one (ADR-0016 clause 20),
+/// started — a continuation of that install's trace when the marker carries one (ADR-0016 clause 21),
 /// and an ordinary root span when it does not.
 fn continued(marker: &UpdateMarker, span: tracing::Span) -> tracing::Span {
     if let Some(trace) = &marker.trace {
@@ -135,14 +135,14 @@ fn load_marker(state_dir: &Path) -> Option<UpdateMarker> {
 fn store_marker(state_dir: &Path, marker: &UpdateMarker) -> Result<(), String> {
     let json = serde_json::to_vec_pretty(marker).expect("an UpdateMarker serializes");
     // Owner-only, as every file of the Client's in a state directory the process account's group
-    // may pass through (ADR-0059 clause 6).
+    // may pass through (ADR-0020 clause 21).
     crate::storage::write_private(&marker_path(state_dir), &json)
         .map_err(|e| format!("cannot write the update marker: {e}"))
 }
 
 /// The [`SelfUpdater`] on this host (ADR-0018): the state directory the marker lives in, the key
 /// that opens an encrypted archive, the marker this process commits if it is itself a freshly
-/// installed version, and the floors its own Agent type is held to (ADR-0061 clause 8).
+/// installed version, and the floors its own Agent type is held to (ADR-0028 clause 21).
 pub struct Installer {
     state_dir: PathBuf,
     archive_key: Option<zeroize::Zeroizing<String>>,
@@ -166,7 +166,7 @@ impl Installer {
     }
 
     /// Holds every offered version to the floor `floors` keeps for `agent_type`, this Client's own
-    /// Agent type (ADR-0061 clause 8).
+    /// Agent type (ADR-0028 clause 21).
     #[must_use]
     pub fn with_floors(
         mut self,
@@ -207,13 +207,13 @@ impl SelfUpdater for Installer {
 /// Installs a verified artifact as a new version of *this Client* and points `current` at it
 /// (ADR-0018).
 ///
-/// `floor` is what the floors say of this Client's own Agent type (ADR-0061 clause 8): its floor,
+/// `floor` is what the floors say of this Client's own Agent type (ADR-0028 clause 21): its floor,
 /// none, or why the floors cannot be read.
 ///
 /// # Errors
 /// Returns an error — with the previous version still current and still running — when the
 /// offered version is not SemVer, orders below the running build or below `floor`, or `floor` is
-/// unreadable; when this executable is not in an ADR-0019 layout; when the artifact cannot be
+/// unreadable; when this executable is not in an ADR-0020 layout; when the artifact cannot be
 /// staged; or when the staged binary does not answer for itself.
 pub fn install(
     state_dir: &Path,
@@ -223,14 +223,14 @@ pub fn install(
     archive_key: Option<&str>,
     floor: Result<Option<String>, String>,
 ) -> Result<SelfInstall, String> {
-    // The version is Server-controlled and becomes an on-disk directory name below (ADR-0019).
+    // The version is Server-controlled and becomes an on-disk directory name below (ADR-0020).
     // Refuse anything that is not a well-formed version *before* it names a path: a value carrying
     // `..` or a separator would otherwise stage the (hash-verified) binary outside `versions/` and
     // repoint `current` at it — an escape the content hash and signature never cover, because they
-    // sign the bytes, not the destination. The probe's own version check (ADR-0012) is too late; it
+    // sign the bytes, not the destination. The probe's own version check (ADR-0033) is too late; it
     // runs only after the artifact is already staged on disk.
     //
-    // A Package version is SemVer (ADR-0043 clause 2), which is held to the same identifier set.
+    // A Package version is SemVer (ADR-0028 clause 2), which is held to the same identifier set.
     if !fleet_core::version::is_semver(version) {
         return Err(format!(
             "the offered version {version:?} is not a valid version — a package version is a \
@@ -240,7 +240,7 @@ pub fn install(
 
     // Refuse a downgrade. An offer for an older release than the one running — even a genuinely
     // signed one — is how a compromised Server pushes a build with a known vulnerability back onto a
-    // fleet; the Ed25519 signature covers the Agent type, the version and the hash (ADR-0026), which
+    // fleet; the Ed25519 signature covers the Agent type, the version and the hash (ADR-0027), which
     // ties an artifact to its own version but says nothing of how that version orders against the
     // running one, so an old release stays validly signed forever. A rebuild of the same release
     // (Equal) and any newer one still install. Rollback to the *previous* version is a separate
@@ -253,7 +253,7 @@ pub fn install(
         ));
     }
     // The higher of the running build and the floor the operator signed for this Client's own
-    // Agent type is its floor (ADR-0061 clause 8). The running build is held to above; an old
+    // Agent type is its floor (ADR-0028 clause 21). The running build is held to above; an old
     // build numbered above it is held to the signed floor here.
     if let Some(floor) = floor?.filter(|floor| {
         fleet_core::version::precedence(version, floor) == Some(std::cmp::Ordering::Less)
@@ -330,7 +330,7 @@ pub fn install(
     Ok(SelfInstall::Staged)
 }
 
-/// Unpacks the artifact into `dir` as this platform's binary and writes the ADR-0019 manifest.
+/// Unpacks the artifact into `dir` as this platform's binary and writes the ADR-0020 manifest.
 fn stage(
     dir: &Path,
     artifact: &Path,
@@ -339,7 +339,7 @@ fn stage(
 ) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     let binary = dir.join(BINARY_FILENAME);
-    // The artifact is the program or an archive holding it (ADR-0026) — the same shapes a Managed
+    // The artifact is the program or an archive holding it (ADR-0027) — the same shapes a Managed
     // Process's package comes in, which is why the unpacking is shared with the Supervisor's swap.
     install::write_program(artifact, &binary, BINARY_FILENAME, archive_key)?;
 
@@ -402,7 +402,7 @@ fn probe(binary: &Path, expected_version: &str) -> Result<(), String> {
         );
     };
     let reported = reported.trim();
-    // The commit the binary was built from is provenance, not identity (ADR-0012): it is the one
+    // The commit the binary was built from is provenance, not identity (ADR-0033): it is the one
     // part of the string an operator neither knows nor can type when uploading a release, and
     // SemVer itself says metadata is ignored when versions are compared. The pre-release is *not*
     // dropped — a `-dev` build is not the release it heads for, and this is the last gate that can
@@ -515,8 +515,8 @@ fn on_start_as(state_dir: &Path, exe: &Path, running_version: &str) -> Result<St
 /// canonicalising it says where the pointer now leads, not which binary the service manager
 /// actually started. A commit that trusted that would tell the Server a version this host does not
 /// run — and the fleet then holds the package back over a claim the program itself denies, which is
-/// the state ADR-0025 is about. What a binary says about itself is the one thing no stale pointer
-/// can fake, so both must agree; the build metadata does not take part (ADR-0012).
+/// the state ADR-0026 is about. What a binary says about itself is the one thing no stale pointer
+/// can fake, so both must agree; the build metadata does not take part (ADR-0033).
 fn took_over(running_version: &str, running_dir: Option<&Path>, marker: &UpdateMarker) -> bool {
     fleet_core::version::same_release(running_version, &marker.version)
         && running_dir.is_some_and(|dir| {
@@ -593,7 +593,7 @@ mod tests {
 
     /// The update marker and the outcome are the Client's alone, `0600`: the state directory they
     /// lie in is passed through by the process account's group where one is registered.
-    /// Verifies: ADR-0059
+    /// Verifies: ADR-0020
     #[cfg(unix)]
     #[test]
     fn the_marker_and_the_outcome_are_owner_only() {
@@ -629,7 +629,7 @@ mod tests {
         );
     }
 
-    /// The trace the install belongs to rides in the marker (ADR-0016 clause 20) — and a marker
+    /// The trace the install belongs to rides in the marker (ADR-0016 clause 21) — and a marker
     /// written before that field existed still parses.
     ///
     /// The second half is the load-bearing one: an update in flight across a version bump is
@@ -692,7 +692,7 @@ mod tests {
     /// A value that reads as a version but is not SemVer is refused as a Package version is: a
     /// numeric pre-release identifier with a leading zero, `1.0.0-01`, which the version parser
     /// accepts and SemVer 2.0.0 does not.
-    /// Verifies: ADR-0061
+    /// Verifies: ADR-0028
     #[test]
     fn install_refuses_a_version_that_is_not_semver() {
         assert!(fleet_core::version::parse("1.0.0-01").is_some());
@@ -708,7 +708,7 @@ mod tests {
     /// even though it may be validly signed — the refusal happens ahead of the layout check, so it
     /// holds regardless of where this test binary runs from. `0.0.1` is below any release this
     /// project builds.
-    /// Verifies: ADR-0018, ADR-0043
+    /// Verifies: ADR-0018, ADR-0028, Q-6
     #[test]
     fn install_refuses_a_downgrade() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -727,7 +727,7 @@ mod tests {
     /// it orders above the running build; one at the floor passes that check; and floors that
     /// cannot be read refuse every version, naming why. Each refusal comes before the layout
     /// check, so it holds wherever this test binary runs from.
-    /// Verifies: ADR-0061
+    /// Verifies: ADR-0028
     #[test]
     fn the_self_update_refuses_a_version_below_its_types_floor() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -800,10 +800,10 @@ mod tests {
         assert_eq!(on_start(dir.path()).expect("start"), Startup::Ordinary);
     }
 
-    /// ADR-0025: the directory a process runs from says which version was *pointed at*; only the
+    /// ADR-0026: the directory a process runs from says which version was *pointed at*; only the
     /// binary says which one came up. A commit that trusted the pointer would report a version this
     /// host does not run, and the fleet would then hold the package back over a claim the program
-    /// denies — the state ADR-0025 is about, created by the very mechanism meant to end it.
+    /// denies — the state ADR-0026 is about, created by the very mechanism meant to end it.
     /// Verifies: ADR-0018
     #[test]
     fn taking_over_needs_the_binary_to_be_the_version_the_marker_names() {
@@ -817,7 +817,7 @@ mod tests {
         );
         assert!(
             took_over("2.0.0+a1b2c3d", Some(&marker.new_dir), &marker),
-            "the build metadata takes no part in it (ADR-0012)"
+            "the build metadata takes no part in it (ADR-0033)"
         );
         assert!(
             !took_over("1.0.0", Some(&marker.new_dir), &marker),
@@ -963,9 +963,9 @@ mod tests {
         probe(&binary, "1.0.0").expect("the versions agree");
     }
 
-    /// ADR-0012, and the failure that prompted it: a package is uploaded under the release number,
+    /// ADR-0033, and the failure that prompted it: a package is uploaded under the release number,
     /// while the binary in it reports the commit it was built from. Those are the same release.
-    /// Verifies: ADR-0012, ADR-0018
+    /// Verifies: ADR-0033, ADR-0018
     #[cfg(unix)]
     #[test]
     fn the_probe_ignores_the_commit_a_build_came_from() {
@@ -975,12 +975,12 @@ mod tests {
         probe(&binary, "0.1.1").expect("the release number is what an operator uploads");
         probe(&binary, "0.1.1+799e36a").expect("and the full string still works");
         // A rebuild of the same release passes too; which bytes arrived is the content hash's
-        // question (ADR-0026), never this one.
+        // question (ADR-0027), never this one.
         probe(&binary, "0.1.1+deadbee").expect("same release, other build");
     }
 
     /// What is deliberately *not* dropped: a development build is not the release it heads for
-    /// (ADR-0012), and this is the last gate that can refuse one before a fleet installs it.
+    /// (ADR-0033), and this is the last gate that can refuse one before a fleet installs it.
     /// Verifies: ADR-0018
     #[cfg(unix)]
     #[test]
@@ -994,8 +994,8 @@ mod tests {
     }
 
     /// A Server may offer a value that is not a version at all — including the `0.1.1 799e36a` a
-    /// query string makes of an unencoded `+` — and the probe refuses it (ADR-0043 clause 13).
-    /// Verifies: ADR-0018, ADR-0043
+    /// query string makes of an unencoded `+` — and the probe refuses it (ADR-0028 clause 21).
+    /// Verifies: ADR-0018, ADR-0028
     #[cfg(unix)]
     #[test]
     fn the_probe_refuses_an_offer_that_is_not_a_version() {

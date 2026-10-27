@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Self-test of scripts/check-traceability.sh. Verifies: ADR-0003
+# Self-test of scripts/check-traceability.sh. Verifies: ADR-0002
 #
 # Each case builds a throwaway git repository under a temporary directory — a specification with
 # the two criteria sections, a few ADRs, and a file carrying markers — runs the check against it,
@@ -9,34 +9,31 @@
 # The marker text inside fixtures is assembled by 'mark', never written literally, so that the
 # check does not read this script's own fixtures as citations when it runs over the repository.
 #
+# No '# Inputs:' line: while TEMPLATE-SETUP.md exists, a case reads the whole tree, so
+# scripts/check-all.sh runs this self-test in its --changed mode too.
+#
 # Usage:
 #     scripts/test-check-traceability.sh
 # Exit code 0 when every case passes, 1 otherwise.
 
 set -uo pipefail
 
-# The fixtures are repositories of their own: an inherited GIT_DIR, GIT_INDEX_FILE or the like, as
-# a hook exports, would point their git commands at the repository this runs in.
-mapfile -t git_env < <(git rev-parse --local-env-vars)
-unset "${git_env[@]}"
-
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source-path=SCRIPTDIR source=lib/selftest.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/selftest.sh"
 CHECK="$ROOT/scripts/check-traceability.sh"
-
-work="$(mktemp -d)"
-trap 'rm -rf "$work"' EXIT
-
-failed=0
-passed=0
 
 # mark <ids...> — the marker line for the given identifiers.
 mark() { printf 'Verifies: %s\n' "$*"; }
+
+# adr_id <n> — the identifier ADR-000n, assembled so that this file carries no literal one: a
+# normalization rewrites every literal one in the tree.
+adr_id() { printf "ADR-%04d" "$1"; }
 
 # repo <name> — create an empty fixture repository and print its path.
 repo() {
   local dir="$work/$1"
   mkdir -p "$dir/docs/adr" "$dir/tests"
-  git -C "$dir" init -q
+  git -C "${dir:?}" init -q
   echo "$dir"
 }
 
@@ -83,7 +80,7 @@ adr() {
 expect() {
   local want="$1" name="$2" dir="$3" needle="${4:-}"
   local out rc
-  git -C "$dir" add -A
+  git -C "${dir:?}" add -A
   out="$(bash "$CHECK" "$dir" 2>&1)"; rc=$?
   if [[ "$want" == "pass" && $rc -eq 0 && ( -z "$needle" || "$out" == *"$needle"* ) ]] \
      || [[ "$want" == "fail" && $rc -ne 0 && ( -z "$needle" || "$out" == *"$needle"* ) ]]; then
@@ -100,20 +97,20 @@ expect() {
 d="$(repo covered)"
 spec "$d" "**G-1** — it works."
 adr "$d" 0001 "🟢 accepted"
-{ mark ADR-0001; mark G-1; } > "$d/tests/t.txt"
+{ mark "$(adr_id 1)"; mark G-1; } > "$d/tests/t.txt"
 expect pass "accepted ADR and criterion both cited" "$d"
 
 d="$(repo comma-list)"
 spec "$d" "**G-1** — it works." "**G-2** — it also works."
 adr "$d" 0001 "🟢 accepted"
-mark "ADR-0001, G-1 G-2" > "$d/tests/t.txt"
+mark "$(adr_id 1), G-1 G-2" > "$d/tests/t.txt"
 expect pass "several identifiers on one marker line" "$d"
 
 d="$(repo uncited-adr)"
 spec "$d" "**G-1** — it works."
 adr "$d" 0001 "🟢 accepted"
 mark G-1 > "$d/tests/t.txt"
-expect fail "accepted ADR without a citing test" "$d" "ADR-0001 is accepted but no test cites it"
+expect fail "accepted ADR without a citing test" "$d" "$(adr_id 1) is accepted but no test cites it"
 
 d="$(repo proposed-out-of-scope)"
 spec "$d" "**G-1** — it works."
@@ -180,32 +177,50 @@ expect fail "marker citing an ADR that does not exist" "$d" "'$unknown', which d
 
 d="$(repo superseded-adr)"
 spec "$d" "**G-1** — it works."
-adr "$d" 0001 "⚪ superseded by ADR-0002"
+adr "$d" 0001 "⚪ superseded by $(adr_id 2)"
 adr "$d" 0002 "🟢 accepted"
-mark "G-1 ADR-0001 ADR-0002" > "$d/tests/t.txt"
-expect fail "marker citing a superseded ADR" "$d" "'ADR-0001', which is superseded or rejected"
+mark "G-1 $(adr_id 1) $(adr_id 2)" > "$d/tests/t.txt"
+expect fail "marker citing a superseded ADR" "$d" "'$(adr_id 1)', which is superseded or rejected"
+
+# Verifies: ADR-0002
+# A draft is cited by its draft identifier, assembled for the same reason as adr_id.
+draft_id() { printf 'ADR-%s-%s' draft "$1"; }
+
+d="$(repo draft-cited)"
+spec "$d" "**G-1** — it works."
+adr "$d" 0001 "🟢 accepted"
+printf '# %s: next\n\n- **Status:** 🟡 proposed\n' "$(draft_id next)" > "$d/docs/adr/draft-next.md"
+mark "$(adr_id 1) $(draft_id next) G-1" > "$d/tests/t.txt"
+expect pass "a marker citing a draft that exists" "$d"
+
+d="$(repo draft-unknown)"
+spec "$d" "**G-1** — it works."
+adr "$d" 0001 "🟢 accepted"
+mark "$(adr_id 1) $(draft_id gone) G-1" > "$d/tests/t.txt"
+expect fail "a marker citing a draft that does not exist" "$d" "'$(draft_id gone)', which does not exist"
 
 d="$(repo markdown-not-counted)"
 spec "$d" "**G-1** — it works."
 adr "$d" 0001 "🟢 accepted"
-{ mark ADR-0001; mark G-1; } > "$d/tests/notes.md"
-expect fail "markers in Markdown do not count" "$d" "ADR-0001 is accepted but no test cites it"
+{ mark "$(adr_id 1)"; mark G-1; } > "$d/tests/notes.md"
+expect fail "markers in Markdown do not count" "$d" "$(adr_id 1) is accepted but no test cites it"
 
 d="$(repo ignored-not-counted)"
 spec "$d" "**G-1** — it works."
 adr "$d" 0001 "🟢 accepted"
 echo "build/" > "$d/.gitignore"
 mkdir -p "$d/build"
-{ mark ADR-0001; mark G-1; } > "$d/build/t.txt"
-expect fail "markers in gitignored files do not count" "$d" "ADR-0001 is accepted but no test cites it"
+{ mark "$(adr_id 1)"; mark G-1; } > "$d/build/t.txt"
+expect fail "markers in gitignored files do not count" "$d" "$(adr_id 1) is accepted but no test cites it"
 
 # --- the template's own promise ------------------------------------------------------------
 #
 # TEMPLATE-SETUP.md tells the maintainer of a derived project to accept the inherited ADRs. That
-# must not turn CI red, so while this repository is still the template (the setup file exists)
-# its own tree with every ADR that step accepts flipped to accepted has to pass: each inherited
-# ADR ships with a citing test or an exemption. A derived project deletes the setup file, and
-# with it this case: its proposed ADRs may await their tests.
+# must not turn CI red, so while the setup file exists the tree with every inherited ADR accepted,
+# one the template still proposes included, has to pass: each ships with a citing test or an
+# exemption. Inherited means its Deciders name the NUC maintainer. The project's own ADRs, which
+# setup step 4 proposes while the file still exists, are left as they are; they await the tests
+# of the golden path, and a proposed one in the copy shows that they stay proposed.
 
 if [[ -f "$ROOT/TEMPLATE-SETUP.md" ]]; then
   d="$work/template-accepted"
@@ -215,20 +230,30 @@ if [[ -f "$ROOT/TEMPLATE-SETUP.md" ]]; then
     mkdir -p "$d/$(dirname "$rel")"
     cp "$ROOT/$rel" "$d/$rel"
   done < <(git -C "$ROOT" ls-files --cached --others --exclude-standard -z)
-  git -C "$d" init -q
-  # ADR-0006 is the one step 2 leaves to step 7: its test is the derived project's structural
-  # test, so it stays proposed here — as TEMPLATE-SETUP says.
+  git -C "${d:?}" init -q
+  # The number after the highest, assembled, so this file cites no ADR that does not exist here.
+  n="$(find "$d/docs/adr" -maxdepth 1 -name '[0-9][0-9][0-9][0-9]-*.md' -exec basename {} \; \
+    | cut -c1-4 | sort -n | tail -n 1)"
+  n=$((10#$n))
+  cat > "$d/docs/adr/$(printf '%04d' "$((n + 1))")-a-founding-decision.md" <<ADR
+# $(printf 'ADR-%04d' "$((n + 1))"): A founding decision of the project, proposed in setup step 4
+
+- **Status:** 🟡 proposed
+- **Date:** 2026-01-01
+- **Deciders:** Fixture Owner
+- **Applies to:** the code
+
+## Enforcement
+
+The golden path's test will cite this ADR.
+ADR
   for f in "$d"/docs/adr/[0-9]*.md; do
-    [[ "$(basename "$f")" == 0006-* ]] || sed -i 's/🟡 proposed/🟢 accepted/' "$f"
+    grep -q '^- \*\*Deciders:\*\*.*NUC maintainer' "$f" || continue
+    sed 's/🟡 proposed/🟢 accepted/' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
   done
   expect pass "the inherited ADRs, once accepted, pass — TEMPLATE-SETUP step 2 keeps CI green" "$d"
 fi
 
 # --- summary -------------------------------------------------------------------------------
 
-if ((failed)); then
-  echo "Traceability self-test FAILED ($failed of $((passed + failed)) cases)." >&2
-  exit 1
-fi
-echo "Traceability self-test passed ($passed cases)."
-exit 0
+summary "Traceability self-test"

@@ -1,4 +1,4 @@
-//! The REST API v1 as the integration contract (ADR-0023, ADR-0034): Configuration CRUD, the
+//! The REST API v1 as the integration contract (ADR-0025, ADR-0026): Configuration CRUD, the
 //! Deployments that hold and release Configurations, loud rejection of invalid input, and the
 //! OpenAPI document any portal generates a client from.
 
@@ -28,7 +28,7 @@ async fn configurations_crud_round_trips() {
     assert_eq!(list.as_array().expect("array").len(), 0);
 
     // Create; the stored resource comes back, body normalized to a trailing newline — content
-    // only, held by no Deployment yet (ADR-0034).
+    // only, held by no Deployment yet (ADR-0026).
     let put = client
         .put(url(server.rest_addr, "/api/v1/configurations/base"))
         .json(&serde_json::json!({ "body": "receivers: {}", "service_name": AGENT_TYPE }))
@@ -44,7 +44,7 @@ async fn configurations_crud_round_trips() {
     assert_eq!(stored["body"], "receivers: {}\n");
     assert!(
         stored.get("published").is_none() && stored.get("pending_changes").is_none(),
-        "ADR-0025: content has one state — saved; rollout is a fact about Agents: {stored}"
+        "ADR-0026: content has one state — saved; rollout is a fact about Agents: {stored}"
     );
 
     // Read back, singly and as the list.
@@ -88,7 +88,7 @@ async fn configurations_crud_round_trips() {
     assert_eq!(gone.status(), 404);
 }
 
-/// ADR-0023: `role` is optional on the way in and absent on the way out when unset, so every
+/// ADR-0025: `role` is optional on the way in and absent on the way out when unset, so every
 /// stored Configuration and every generated client keeps working unchanged.
 #[tokio::test]
 async fn a_configuration_carries_an_optional_role() {
@@ -154,9 +154,9 @@ async fn a_configuration_carries_an_optional_role() {
     assert_eq!(stored["role"], "some-agents-own-word");
 }
 
-/// A Configuration has no Selector (ADR-0034 clauses 1 and 9): a `PUT` naming one is `400` and says the
+/// A Configuration has no Selector (ADR-0026 clauses 2 and 23): a `PUT` naming one is `400` and says the
 /// Deployment is where to aim, and the Configuration's own rollout route is gone (`404`).
-/// Verifies: ADR-0034
+/// Verifies: ADR-0026
 #[tokio::test]
 async fn a_configuration_takes_no_selector_and_has_no_rollout_of_its_own() {
     let server = spawn().await;
@@ -199,10 +199,10 @@ async fn a_configuration_takes_no_selector_and_has_no_rollout_of_its_own() {
     );
 }
 
-/// ADR-0025 and ADR-0034 over the wire: saving proposes, the Deployment's rollout act
+/// ADR-0026 over the wire: saving proposes, the Deployment's rollout act
 /// distributes — for the channel or per Agent — and a later edit waits as `update` until the next
 /// act pins it.
-/// Verifies: ADR-0034
+/// Verifies: ADR-0026
 #[tokio::test]
 async fn a_configuration_waits_until_it_is_rolled_out() {
     let server = spawn().await;
@@ -340,7 +340,7 @@ async fn a_configuration_waits_until_it_is_rolled_out() {
     assert_eq!(missing.status(), 404);
 }
 
-/// ADR-0025 point 6: an Agent that appears after the rollout act waits — it surfaces as pending
+/// ADR-0026 clause 10: an Agent that appears after the rollout act waits — it surfaces as pending
 /// and receives nothing until an act of its own. The Deployment's act must be repeated (or the
 /// per-Agent one pressed) for latecomers.
 #[tokio::test]
@@ -399,9 +399,9 @@ async fn an_agent_that_appears_later_waits() {
     assert_eq!(view["assigned_configurations"][0], "fleet");
 }
 
-/// ADR-0034 clause 3 over the wire: of the Configurations a Deployment holds, one stating an
+/// ADR-0026 clause 4 over the wire: of the Configurations a Deployment holds, one stating an
 /// Agent type reaches only Agents reporting that `service.name`.
-/// Verifies: ADR-0034
+/// Verifies: ADR-0026
 #[tokio::test]
 async fn a_typed_configuration_reaches_only_agents_of_its_type() {
     let server = spawn().await;
@@ -444,10 +444,10 @@ async fn a_typed_configuration_reaches_only_agents_of_its_type() {
     );
 }
 
-/// Nothing an assignment pins can be deleted (ADR-0034 clause 8): a pinned Configuration and a
+/// Nothing an assignment pins can be deleted (ADR-0026 clause 12): a pinned Configuration and a
 /// pinned Deployment answer `409` saying how many Agents pin them. After a press without the
 /// Configuration it is deleted, and it leaves every Deployment that held it.
-/// Verifies: ADR-0034
+/// Verifies: ADR-0026
 #[tokio::test]
 async fn a_pinned_configuration_or_deployment_is_not_deleted() {
     let server = spawn().await;
@@ -525,8 +525,8 @@ async fn a_pinned_configuration_or_deployment_is_not_deleted() {
     assert_eq!(canary["configurations"], serde_json::json!([]));
 }
 
-/// The per-Agent act on an Agent no Deployment claims, or two claim, is `409` (ADR-0034 clause 6).
-/// Verifies: ADR-0034
+/// The per-Agent act on an Agent no Deployment claims, or two claim, is `409` (ADR-0026 clause 9).
+/// Verifies: ADR-0026
 #[tokio::test]
 async fn the_per_agent_act_without_one_claiming_deployment_is_a_conflict() {
     let server = spawn().await;
@@ -595,9 +595,9 @@ async fn invalid_configurations_are_rejected_loudly() {
     }
 }
 
-/// A Configuration is written for one Agent type (ADR-0034 clause 1): a `PUT` without
+/// A Configuration is written for one Agent type (ADR-0026 clause 2): a `PUT` without
 /// `service_name`, or with an empty one, is `400` naming the field, and nothing is stored.
-/// Verifies: ADR-0034
+/// Verifies: ADR-0026
 #[tokio::test]
 async fn a_configuration_without_an_agent_type_is_refused() {
     let server = spawn().await;
@@ -650,7 +650,7 @@ fn urlencoding(s: &str) -> String {
     s.replace(' ', "%20")
 }
 
-/// Verifies: ADR-0023, ADR-0026, ADR-0033, ADR-0034, ADR-0061, G-5
+/// Verifies: ADR-0025, ADR-0027, ADR-0026, ADR-0028, G-5
 #[tokio::test]
 async fn the_openapi_document_describes_the_contract() {
     let server = spawn().await;
@@ -671,7 +671,7 @@ async fn the_openapi_document_describes_the_contract() {
     let paths = document["paths"].as_object().expect("paths");
     assert!(paths.contains_key("/api/v1/agents"));
     // OpenAPI 3.1 requires a description on every response, and a generator may refuse a
-    // document without one; utoipa writes none for a response that does not state it (ADR-0023).
+    // document without one; utoipa writes none for a response that does not state it (ADR-0025).
     let silent: Vec<String> = paths
         .iter()
         .flat_map(|(path, operations)| {
@@ -695,8 +695,8 @@ async fn the_openapi_document_describes_the_contract() {
         silent.is_empty(),
         "responses without a description: {silent:?}"
     );
-    // Deployments, entry signatures and floors are part of the contract (ADR-0026, ADR-0033,
-    // ADR-0061) — a portal generates against this document, and a route it cannot see is a route
+    // Deployments, entry signatures and floors are part of the contract (ADR-0027,
+    // ADR-0028) — a portal generates against this document, and a route it cannot see is a route
     // it cannot call.
     for route in [
         "/api/v1/deployments",
@@ -709,7 +709,7 @@ async fn the_openapi_document_describes_the_contract() {
     ] {
         assert!(paths.contains_key(route), "{route} is described");
     }
-    // A signature lives on the entry, and every artifact is uploaded (ADR-0033 clause 9): the
+    // A signature lives on the entry, and every artifact is uploaded (ADR-0027 clause 12): the
     // Deployment signature routes and the entry's source route are not in the contract.
     for gone in [
         "/api/v1/deployments/{name}/signatures/{agent_type}/{version}/{os}/{arch}",
@@ -717,7 +717,7 @@ async fn the_openapi_document_describes_the_contract() {
     ] {
         assert!(!paths.contains_key(gone), "{gone} is still described");
     }
-    // And the retired package paths are gone rather than lingering as a promise (ADR-0026).
+    // And the retired package paths are gone rather than lingering as a promise (ADR-0027).
     assert!(
         !paths
             .keys()
@@ -740,17 +740,17 @@ async fn the_openapi_document_describes_the_contract() {
     assert!(paths.contains_key("/api/v1/configurations/{name}"));
     assert!(
         paths.contains_key("/api/v1/deployments/{name}/configurations/{configuration}"),
-        "a Deployment holds Configurations (ADR-0034)"
+        "a Deployment holds Configurations (ADR-0026)"
     );
     assert!(
         !paths.contains_key("/api/v1/configurations/{name}/rollout"),
-        "a Configuration is rolled out only through a Deployment (ADR-0034)"
+        "a Configuration is rolled out only through a Deployment (ADR-0026)"
     );
     assert!(paths.contains_key("/api/v1/deployments/{name}/rollout"));
     assert!(paths.contains_key("/api/v1/agents/{instance_uid}/rollout"));
     assert!(
         !paths.contains_key("/api/v1/configurations/{name}/publication"),
-        "publication left the contract with ADR-0025"
+        "publication left the contract with ADR-0026"
     );
     // The resource schemas ride along, so a client can be generated without the source.
     assert!(document["components"]["schemas"]["ConfigurationView"].is_object());
@@ -759,7 +759,7 @@ async fn the_openapi_document_describes_the_contract() {
         document["components"]["schemas"]["ConfigurationSpec"]["properties"]
             .get("selector")
             .is_none(),
-        "a Configuration takes no Selector (ADR-0034)"
+        "a Configuration takes no Selector (ADR-0026)"
     );
     assert!(document["components"]["schemas"]["AgentView"].is_object());
 }
@@ -1255,7 +1255,7 @@ async fn the_ui_takes_its_look_from_its_own_stylesheet() {
 /// The vendored Shiki bundle is served from the plane's own origin as JavaScript, under the same
 /// policy as every page, and it is the file the pin names: the bundle cannot change without
 /// `scripts/vendor-shiki.lock` changing in the same commit.
-/// Verifies: ADR-0038
+/// Verifies: ADR-0031
 #[tokio::test]
 async fn the_ui_serves_the_pinned_shiki_bundle() {
     use sha2::Digest as _;
@@ -1300,7 +1300,7 @@ async fn the_ui_serves_the_pinned_shiki_bundle() {
     );
     assert!(
         lock.lines().any(|line| line == "shiki 4.5.0"),
-        "the lock pins another Shiki than ADR-0038 names"
+        "the lock pins another Shiki than ADR-0031 names"
     );
     let text = std::str::from_utf8(&body).expect("utf-8");
     assert!(
@@ -1320,7 +1320,7 @@ async fn the_ui_serves_the_pinned_shiki_bundle() {
 /// own Client and Telegraf TOML, Fluent Bit INI, anything else none — and each look defines the
 /// CSS-variables theme's colours in its light and its dark theme. The project's TOML and INI token
 /// rules in the bundle name only those colours, so no look needs a variable of its own for them.
-/// Verifies: ADR-0038
+/// Verifies: ADR-0031
 #[tokio::test]
 async fn the_ui_colours_an_effective_configuration_by_the_agents_type() {
     let server = spawn().await;
@@ -1450,7 +1450,7 @@ async fn a_label_moves_an_agent_into_a_rollout_ring() {
     report(&client, server.addr, &support::full_report(&uid, "host", 1)).await;
 
     // A Deployment aimed at the canary ring, holding a Configuration. Nothing reports `rollout`,
-    // so it proposes itself to nobody — and even a match only proposes (ADR-0025).
+    // so it proposes itself to nobody — and even a match only proposes (ADR-0026).
     save_configuration(server.rest_addr, "canary", "receivers: {}", "").await;
     deploy(
         server.rest_addr,
@@ -1496,7 +1496,7 @@ async fn a_label_moves_an_agent_into_a_rollout_ring() {
         .is_empty());
 }
 
-/// The crux (ADR-0024 point 18): reported attributes decide which artifact fits a machine, so a
+/// The crux (ADR-0024 clause 20): reported attributes decide which artifact fits a machine, so a
 /// label may not restate one. Refused where it is written, naming the key — not quietly ignored.
 // Verifies: ADR-0024
 #[tokio::test]
@@ -1506,7 +1506,7 @@ async fn a_label_may_not_restate_what_the_agent_reports() {
     let uid = opamp::uid::InstanceUid::default();
     report(&client, server.addr, &support::full_report(&uid, "host", 1)).await;
 
-    // `os.type` is reported by this Agent and chooses which artifact it is offered (ADR-0026).
+    // `os.type` is reported by this Agent and chooses which artifact it is offered (ADR-0027).
     let refused = set_labels(
         &client,
         server.rest_addr,
@@ -1641,9 +1641,9 @@ async fn the_view_carries_the_held_configuration_and_a_refusal_with_its_reason()
     );
 }
 
-/// Labels are part of the Agent's record (ADR-0035 clause 6): forgetting an Agent removes them
+/// Labels are part of the Agent's record (ADR-0024 clause 21): forgetting an Agent removes them
 /// with it, and an Agent that comes back starts unlabelled.
-/// Verifies: ADR-0035
+/// Verifies: ADR-0024
 #[tokio::test]
 async fn forgetting_an_agent_removes_its_labels() {
     let server = support::spawn_with_stale_after(std::time::Duration::ZERO).await;
@@ -1683,7 +1683,7 @@ async fn forgetting_an_agent_removes_its_labels() {
 
 /// `fleet.*` is the Server's own: a label in it is refused `400`, naming the key, and nothing is
 /// stored.
-/// Verifies: ADR-0035
+/// Verifies: ADR-0024
 #[tokio::test]
 async fn a_label_in_the_fleet_space_is_refused() {
     let server = spawn().await;
@@ -1751,11 +1751,11 @@ async fn set_labels(
         .expect("put labels")
 }
 
-/// The bundled UI splits along ADR-0034's seam: the Configurations tab edits content with no
+/// The bundled UI splits along ADR-0026's seam: the Configurations tab edits content with no
 /// Selector and no rollout press, the Deployments form holds Configurations in place through the
 /// Deployment's own route, and the fields the page reads are the ones the API serves. A rename on
 /// either side breaks here rather than in an empty column.
-/// Verifies: ADR-0034
+/// Verifies: ADR-0026
 #[tokio::test]
 async fn the_ui_edits_configurations_as_content_and_deployments_hold_them() {
     let server = spawn().await;
@@ -1880,7 +1880,7 @@ async fn the_forms_mark_every_field_required_or_optional() {
 }
 
 /// The bundled UI asks for a bootstrap password of 8 to 128 characters, as the Server takes.
-/// Verifies: ADR-0048
+/// Verifies: ADR-0022
 #[tokio::test]
 async fn the_ui_asks_for_a_bootstrap_password_of_8_to_128_characters() {
     let server = spawn().await;
@@ -1908,7 +1908,7 @@ async fn the_ui_asks_for_a_bootstrap_password_of_8_to_128_characters() {
 /// The bundled UI's Hosts tab reads what `GET /api/v1/hosts` serves and acts on a row through the
 /// Gateway and revocation routes, and the Agents tab marks inherited labels — the fields the page
 /// reads are the ones the API documents.
-/// Verifies: ADR-0035
+/// Verifies: ADR-0024
 #[tokio::test]
 async fn the_ui_lists_hosts_and_marks_inherited_labels() {
     let server = spawn().await;
@@ -1966,11 +1966,11 @@ async fn the_ui_lists_hosts_and_marks_inherited_labels() {
 }
 
 /// The Packages tab shows each entry's SHA-256 and signature state, offers what a signature covers
-/// as a signing file, and imports a signed one through the entry's signature route (ADR-0033) — so
+/// as a signing file, and imports a signed one through the entry's signature route (ADR-0027) — so
 /// the page writes the one format `opamp-fleetctl package sign --signing-info` reads, and the
 /// fields it reads must be the ones the API serves. A rename on either side breaks here rather than
 /// in an empty column or a signing file with a hole in it.
-/// Verifies: ADR-0023, ADR-0027, ADR-0033
+/// Verifies: ADR-0025, ADR-0027
 #[tokio::test]
 async fn the_ui_shows_the_sha256_and_carries_the_signing_file_the_api_serves() {
     let server = spawn().await;
@@ -2029,16 +2029,16 @@ async fn the_ui_shows_the_sha256_and_carries_the_signing_file_the_api_serves() {
     }
 }
 
-/// The bundled UI is a client of the REST API and nothing more (ADR-0023 clause 13), so its
+/// The bundled UI is a client of the REST API and nothing more (ADR-0026 clause 24), so its
 /// Enrolments tab depends on the names the enrolment routes share with it: the routes it calls and
-/// the fields it shows and sends, the requested key's fingerprint above all — what ADR-0021 clause 22 lists
+/// the fields it shows and sends, the requested key's fingerprint above all — what ADR-0022 clause 10 lists
 /// so an operator can match a request to the Client's log. The page asks for them, and the OpenAPI
 /// document describes them; a rename on one side breaks here rather than in an empty column. What
 /// the page does with them is not tested in the repository: it is one embedded page with no
 /// frontend toolchain to run it in. The queue lists the bootstrap certificate's subject values and
 /// not the request's own subject, the issue form sends all six attributes and the password, and
-/// the page never handles a private key: every certificate offers its PKCS#12 file (ADR-0036).
-/// Verifies: ADR-0023, ADR-0028, ADR-0036
+/// the page never handles a private key: every certificate offers its PKCS#12 file (ADR-0022).
+/// Verifies: ADR-0025, ADR-0022
 #[tokio::test]
 async fn the_ui_and_the_enrolment_api_share_their_names() {
     let server = spawn().await;

@@ -15,3 +15,16 @@
 # 'text=auto' detects binary content by inspection, so ordinary binary files need no rule here.
 # Add an explicit '<pattern> binary' line only for a format that detection gets wrong — a file
 # git diffs or normalizes although it must not be touched.
+
+# A Markdown file a tool writes, such as a generated changelog or API reference, is marked
+# 'linguist-generated': check 15 of scripts/check-docs.sh then leaves its line width alone, and
+# GitHub folds it in a diff. For example:
+#     CHANGELOG.md linguist-generated
+
+# The ADR index merges its table rows by keeping the lines of both sides, and its prose as text:
+# two branches that each add an ADR append a row at the same end of a table, and a conflict there
+# carries no decision; a rule both sides reworded does. The driver, .githooks/merge-adr-index,
+# says how, and is enabled as the README's "Git hooks" says; a clone without it merges the index
+# as text. Nothing relies on a merge on GitHub reading this line: a branch takes up main locally
+# before its pull request merges.
+docs/adr/README.md merge=adr-index

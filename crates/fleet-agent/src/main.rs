@@ -1,6 +1,6 @@
 //! Entry point: parse the CLI (ADR-0019) and hand off — `run` to the daemon runtime, the
 //! `service` verbs to the cross-platform lifecycle. The daemon loads `supervisor.toml`, restores the
-//! Agent's identity, and runs the transport the endpoint selects (ADR-0013) until stopped.
+//! Agent's identity, and runs the transport the endpoint selects (ADR-0012) until stopped.
 
 use std::path::{Path, PathBuf};
 
@@ -16,7 +16,7 @@ use fleet_agent::update;
 fn main() {
     // The second service marks itself not dumpable before it does anything else: before its command
     // line is parsed or its log set up, no process of its account may reach into it for longer than
-    // it must (ADR-0059 clause 4). `run_service` does not listen where the mark is not set.
+    // it must (ADR-0020 clause 19). `run_service` does not listen where the mark is not set.
     #[cfg(target_os = "linux")]
     if fleet_agent::supervisor::channel::runs_the_second_service(std::env::args_os().skip(1)) {
         fleet_agent::supervisor::channel::mark_not_dumpable();
@@ -57,7 +57,7 @@ fn main() {
         )
         .init();
 
-    // One TLS provider for the whole process (ADR-0013): ring, never a system library.
+    // One TLS provider for the whole process (ADR-0012): ring, never a system library.
     opamp::tls::install_ring_provider();
 
     let cli::Parsed { cli, config_named } = cli::parse();
@@ -106,7 +106,7 @@ fn main() {
 /// marker set by `service install` routes into the dispatcher shim (ADR-0019). The runtime (or
 /// the shim) owns the tokio runtime; `main` stays synchronous.
 fn run_command(spec: RunSpec, args: cli::RunArgs) -> Result<(), String> {
-    // The second service (ADR-0059): it reads neither the configuration nor the state directory.
+    // The second service (ADR-0020): it reads neither the configuration nor the state directory.
     if let Some((socket, client)) = args.agents_service() {
         return agents_service(&socket, client);
     }
@@ -119,13 +119,13 @@ fn run_command(spec: RunSpec, args: cli::RunArgs) -> Result<(), String> {
 }
 
 /// `run --agents`: the second service, which starts the Managed Processes under the process
-/// account (ADR-0059). Its channel is a Unix socket.
+/// account (ADR-0020). Its channel is a Unix socket.
 #[cfg(unix)]
 fn agents_service(socket: &Path, client_uid: u32) -> Result<(), String> {
     use fleet_agent::supervisor::channel::{run_service, Served};
     if run_service(socket, client_uid)? == Served::Superseded {
         // Non-zero, as the Client's own exit for an update is: the service manager restarts only
-        // a service that failed (ADR-0019 clause 11).
+        // a service that failed (ADR-0019 clause 17).
         std::process::exit(update::EXIT_RESTART_FOR_UPDATE);
     }
     Ok(())
@@ -180,7 +180,7 @@ fn service_command(
 }
 
 /// Completes the withdrawal `pending` recorded in `store` but for the accounts `kept`, naming in a
-/// warning what each walk passed over (ADR-0059 clauses 1 and 6).
+/// warning what each walk passed over (ADR-0020 clauses 16 and 21).
 #[cfg(windows)]
 fn complete_withdrawal(
     store: &dyn fleet_agent::service::withdrawal::Store,
@@ -300,7 +300,7 @@ fn uninstall(level: ServiceLevel) -> Result<(), String> {
 
 /// `service install`: write the configuration if asked to (ADR-0019), validate it, lay out the
 /// versioned install at the chosen root, and register the service against the `current` pointer
-/// (ADR-0019).
+/// (ADR-0019, ADR-0020).
 fn install(
     config_path: &Path,
     config_named: bool,
@@ -319,7 +319,7 @@ fn install(
     #[cfg(windows)]
     let _held = hold_install_lock()?;
 
-    // Two roots and two flags (ADR-0019 clause 8). The executable layout and the data default to
+    // Two roots and two flags (ADR-0019 clause 12). The executable layout and the data default to
     // different places on Linux at system scope — and only there — because systemd may not execute
     // from `/var/lib` under SELinux. `--root` alone keeps ADR-0019's meaning and collapses both
     // halves into the one directory the operator named, whose labeling and permissions are then
@@ -336,9 +336,9 @@ fn install(
             manager::default_root(level)?,
         ),
     };
-    // Where the state directory comes from (ADR-0053 clause 3): `--state-dir`, else the existing
-    // registration — so an upgrade keeps it (clause 2) — and only then the configuration, which the
-    // service's account may rewrite, and from that only beneath these roots.
+    // Where the state directory comes from (ADR-0019 clause 14): `--state-dir`, else the existing
+    // registration — so an upgrade keeps it (ADR-0019 clause 13) — and only then the configuration,
+    // which the service's account may rewrite, and from that only beneath these roots.
     let roots = layout::Roots {
         named: state_dir_named.map(absolute).transpose()?,
         registered: manager::registered_state_dir(level)?,
@@ -346,10 +346,10 @@ fn install(
         layout: layout_root.clone(),
     };
 
-    // The account, decided and resolved with the same before-anything-is-written rule (ADR-0042
-    // clause 2): `--run-as`, else the account the existing unit, plist or SCM entry names, else the
+    // The account, decided and resolved with the same before-anything-is-written rule (ADR-0020
+    // clause 1): `--run-as`, else the account the existing unit, plist or SCM entry names, else the
     // owner of a data root that unit lost its account on, else root — on Windows the service's own
-    // virtual account (ADR-0062). A name that does not exist, or a Windows form that would need a
+    // virtual account (ADR-0020). A name that does not exist, or a Windows form that would need a
     // password, fails here.
     let registered = manager::registration(level)?;
     let registered_agents = manager::agents_registration(level)?;
@@ -361,7 +361,7 @@ fn install(
         manager::service_name(),
     )?;
     let run_as = account.run_as;
-    // The process account, decided and checked by the same rule (ADR-0059 clause 1):
+    // The process account, decided and checked by the same rule (ADR-0020 clause 16):
     // `--process-account`, else the account the second service's unit names, else none — and then
     // no second service, and nothing changes.
     let process = run_as::decide_process_account(
@@ -371,7 +371,7 @@ fn install(
         run_as.as_ref(),
         manager::agents_supported(level),
     )?;
-    // What a former account was granted is withdrawn from it on Windows (ADR-0059 clauses 1 and 6):
+    // What a former account was granted is withdrawn from it on Windows (ADR-0020 clauses 16 and 21):
     // a process account dropped or replaced, and a Client's account replaced. Each is resolved
     // here, before anything changes — one that cannot be found fails the install now, not after
     // the SCM has forgotten it — and a withdrawal an earlier install left undone is read with
@@ -405,7 +405,7 @@ fn install(
         formers
     };
     // The second service's socket lives in a directory of the process account's, which no root
-    // may be (ADR-0059 clause 9).
+    // may be (ADR-0020 clause 7).
     #[cfg(unix)]
     if process.is_some() {
         manager::check_roots_apart(&[&layout_root, &data_root], &manager::agents_socket())?;
@@ -422,7 +422,7 @@ fn install(
     };
 
     // The fleet's files the operator put beside this program, before it is staged anywhere else,
-    // or in the directory `--fleet-files` names (ADR-0029 clause 6).
+    // or in the directory `--fleet-files` names (ADR-0022 clause 14).
     let beside = match &args.fleet_files {
         Some(dir) => config_init::Beside::in_named_dir(&absolute(dir)?)?,
         None => config_init::Beside::the_program(),
@@ -433,7 +433,7 @@ fn install(
         .map(|path| config_init::read_password_file(path, "--bootstrap-password-file"))
         .transpose()?;
     // Not asked, the bootstrap identity found enrols a Client that holds no issued certificate,
-    // over TLS (ADR-0029 clause 10) — decided, and a `bootstrap.p12` opened, before anything is
+    // over TLS (ADR-0022 clause 18) — decided, and a `bootstrap.p12` opened, before anything is
     // written, against the file this install is about to write or keep.
     let unasked = if args.interactive {
         None
@@ -448,7 +448,7 @@ fn install(
         beside.unasked_enrolment(&about_to_run, password.as_deref().map(String::as_str))?
     };
     // Held from the first write to the last, so the account cannot swap the data root for a link
-    // while this privileged run writes into it (ADR-0054).
+    // while this privileged run writes into it (ADR-0020).
     let mut held_root = hold_data_root(&data_root)?;
     let mut written = config_init::Written::default();
     if args.interactive {
@@ -459,10 +459,10 @@ fn install(
             password.as_deref().map(String::as_str),
         )?;
     } else if let Some(endpoint) = &args.endpoint {
-        // The same file, from an answer given rather than asked for (ADR-0019): this is the branch
+        // The same file, from an answer given rather than asked for (ADR-0022): this is the branch
         // the MSI's custom action and a `%post` script take. The self-update consent travels with
         // it — standing unless this install was told to withdraw it (ADR-0018) — and so do the CA
-        // and the verification key beside the program (ADR-0020 clause 3).
+        // and the verification key beside the program (ADR-0022 clause 17).
         let self_update = !args.no_self_update;
         written.copies =
             config_init::run_with_endpoint(&config_path, endpoint, self_update, &beside)?;
@@ -484,7 +484,7 @@ fn install(
     let state_dir = config.service_state_dir(&roots)?;
     let state_dir_source = config.service_state_dir_source(&roots);
     config.state_dir.clone_from(&state_dir);
-    // A registration an earlier install wrote is kept wherever it points (ADR-0053 clause 3), and
+    // A registration an earlier install wrote is kept wherever it points (ADR-0019 clause 14), and
     // that install may have taken it from a file the service's account had rewritten. Said, so an
     // operator who did not choose it sees it on every upgrade.
     if roots.named.is_none()
@@ -504,7 +504,7 @@ fn install(
     let supervisors_root_ours =
         layout::beneath(&supervisors_root, &[&data_root, &layout_root, &state_dir]).is_ok();
     // Nor is it the install's to grant the process account anything in, or to withdraw a former
-    // one's rights from (ADR-0059 clause 6); Windows names it where it plans the restrictions.
+    // one's rights from (ADR-0020 clause 21); Windows names it where it plans the restrictions.
     #[cfg(unix)]
     if let Some(warning) = run_as::supervisors_root_left(
         &supervisors_root,
@@ -538,8 +538,7 @@ fn install(
     // Nothing may run under an account whose rights this install changes or takes away, nor under
     // a registration it rewrites: on Windows every install stops both services here, and waits
     // until their processes have ended — the second service's programs with them — before the
-    // restriction, the take-over, the withdrawal and the switch of the SCM (ADR-0059 clauses 1, 4
-    // and 6). What runs is recorded first, with the withdrawal due, in one write: a stop is never
+    // restriction, the take-over, the withdrawal and the switch of the SCM (ADR-0020 clauses 16, 19 and 21). What runs is recorded first, with the withdrawal due, in one write: a stop is never
     // left unrecorded, and an install that fails after it — or an MSI that rolls back — leaves the
     // next install to start again what ran. A record that cannot be written stops nothing; where
     // the stop fails, what is to run again is set from what the SCM reports then.
@@ -578,7 +577,7 @@ fn install(
     // On Linux and macOS an install that changes an account — the process account named anew or
     // dropped, or another account for the Client — stops the Client and then the second service
     // first, and waits until their processes have ended, so nothing runs under an account whose
-    // files it re-owns (ADR-0059 clause 16). Where one cannot be stopped, what was stopped is
+    // files it re-owns (ADR-0020 clause 26). Where one cannot be stopped, what was stopped is
     // started again and nothing more is changed. Unix keeps no record: what ran is started again
     // once the install has succeeded, and an install that fails leaves it stopped, and says so.
     #[cfg(unix)]
@@ -598,7 +597,7 @@ fn install(
         None
     };
     let finished = (|| -> Result<(PathBuf, bool), String> {
-        // What the process account owns there is its own, and left as it is (ADR-0059 clause 10).
+        // What the process account owns there is its own, and left as it is (ADR-0020 clause 1).
         #[cfg(windows)]
         let process_sid = process.as_ref().map(|p| p.sid().to_string());
         #[cfg(not(windows))]
@@ -609,14 +608,15 @@ fn install(
             println!("enrolling with {}", bootstrap.describe());
             written.bootstrap = Some(bootstrap);
         }
-        // Before anything is staged or registered (ADR-0020 clause 5): an enrolment that is stopped
+        // Before anything is staged or registered (ADR-0019 clause 26): an enrolment that is stopped
         // leaves the answered file and nothing else.
         if let Some(bootstrap) = &written.bootstrap {
             enrol::run(&config, bootstrap)?;
         }
         // And held to what the Client needs at startup. A packaged install registers the service
         // even so — it has an endpoint and no client identity to write — but never starts it, and
-        // the service refuses to run until the file names one (ADR-0019). Said loudly here.
+        // the service refuses to run until the file names one (ADR-0019, ADR-0020). Said loudly
+        // here.
         if let Err(e) = config.check_admission() {
             println!(
                 "warning: {}: {e}. The service is registered, and refuses to start until this is \
@@ -636,13 +636,13 @@ fn install(
             run_as: run_as.as_ref().map(|r| r.account().to_string()),
             agents: agents_spec(process.as_ref(), run_as.as_ref()),
         })?;
-        // Dropped (ADR-0059 clause 1): the Client's unit no longer names the second service, which
+        // Dropped (ADR-0020 clause 16): the Client's unit no longer names the second service, which
         // is stopped and deregistered after it.
         let dropped = args.no_process_account && manager::remove_agents(level)?;
 
         // What a former account was granted on Windows is withdrawn from it now that the SCM names
         // it no more, and what it owns given to the Administrators, as a change of owner withdraws
-        // it on Unix (ADR-0059 clauses 1 and 6); it is struck from the record once all of it is
+        // it on Unix (ADR-0020 clauses 16 and 21); it is struck from the record once all of it is
         // done. Before the hand-over and the share of the layout, which grant what the accounts
         // named now are to hold.
         #[cfg(windows)]
@@ -656,12 +656,12 @@ fn install(
             complete_withdrawal(&withdrawal, &mut pending, &kept)?;
         }
 
-        // The handover (ADR-0042 clause 2), on every registration that runs under an account — a
+        // The handover (ADR-0020 clause 1), on every registration that runs under an account — a
         // kept one and root included: both roots belong to it — config and state because the
         // service reads and rewrites them (ADR-0017), the executable layout because the
         // self-update that stages into it *is* the service (ADR-0018). The state directory is
         // created first: the daemon must not need rights on its parent to begin. Where a process
-        // account is registered, what it keeps there stays its own (ADR-0059 clause 10): every
+        // account is registered, what it keeps there stays its own (ADR-0020 clause 1): every
         // package upgrade re-registers.
         if let Some(run_as) = &run_as {
             std::fs::create_dir_all(&state_dir)
@@ -670,7 +670,7 @@ fn install(
             let mut skipped =
                 run_as.hand_over(&[&layout_root, &data_root, &state_dir, &config_path], kept)?;
             // A Supervisors' root this install created and cut on Windows is the service's to
-            // write too (ADR-0017 clause 21); none is created on Unix.
+            // write too (ADR-0020 clause 24); none is created on Unix.
             skipped.extend(
                 run_as.hand_over(
                     &created_outside
@@ -697,7 +697,7 @@ fn install(
             }
         }
         // The second service runs from the layout, which a root taken over or cut off on Windows
-        // grants the process account nothing of (ADR-0059 clause 2).
+        // grants the process account nothing of (ADR-0020 clause 17).
         #[cfg(windows)]
         if let Some(process) = &process {
             process.share_layout(&layout.versions_dir())?;
@@ -788,7 +788,7 @@ fn install(
     Ok(())
 }
 
-/// The second service a registration names, where a process account was decided (ADR-0059): it
+/// The second service a registration names, where a process account was decided (ADR-0020): it
 /// serves the Client's account, and the Client accepts the process account as its peer.
 #[cfg(unix)]
 fn agents_spec(
@@ -805,7 +805,7 @@ fn agents_spec(
     })
 }
 
-/// The second service a registration names on Windows (ADR-0059): it serves the Client's SID on
+/// The second service a registration names on Windows (ADR-0020): it serves the Client's SID on
 /// its named pipe, and the Client accepts the process account's SID as the pipe's owner.
 #[cfg(windows)]
 fn agents_spec(
@@ -822,7 +822,7 @@ fn agents_spec(
 }
 
 /// `service config`: the questionnaire of `install --interactive` against an installed Client, and
-/// its enrolment when it holds no certificate yet — registering nothing (ADR-0019 clause 15).
+/// its enrolment when it holds no certificate yet — registering nothing (ADR-0019 clause 23).
 fn configure(
     config_path: &Path,
     config_named: bool,
@@ -849,9 +849,9 @@ fn configure(
     } else {
         data_root.join(config_init::FILE_NAME)
     };
-    // Held while this privileged run writes into it, as `install` holds it (ADR-0054).
+    // Held while this privileged run writes into it, as `install` holds it (ADR-0020).
     let _held_root = hold_data_root(&data_root)?;
-    // The installed copy runs from the layout, where no fleet files lie (ADR-0020, out of scope).
+    // The installed copy runs from the layout, where no fleet files lie (ADR-0019, out of scope).
     let written = ask(&config_path, &roots, &config_init::Beside::default(), None)?;
 
     let mut config = ClientConfig::load(&config_path)?;
@@ -861,7 +861,7 @@ fn configure(
         enrol::run(&config, bootstrap)?;
     }
     // What this run created belongs to whoever owns the configuration — the service's account when
-    // it runs as one (ADR-0019 clause 13) — not to the administrator who ran it.
+    // it runs as one (ADR-0020 clause 1) — not to the administrator who ran it.
     let mut created = enrol::written(&state_dir);
     created.extend(written.copies.iter().cloned());
     let skipped = run_as::match_owner(
@@ -890,7 +890,7 @@ fn configure(
 
 /// The questionnaire against the file at `config_path`, offering what it holds and asking for the
 /// bootstrap identity only while the service's state directory holds no issued certificate
-/// (ADR-0019 clauses 16, 17). That directory is decided, and refused, before anything is asked.
+/// (ADR-0019 clause 24 and ADR-0022 clause 16). That directory is decided, and refused, before anything is asked.
 fn ask(
     config_path: &Path,
     roots: &layout::Roots,
@@ -913,7 +913,7 @@ fn ask(
 ///
 /// On Windows the service's account holds Modify, delete included, on the data root itself, so it
 /// could rename the root away and put a junction at its name: a root that is a reparse point is
-/// refused, and the held handle keeps it in place (ADR-0054). On Unix the root's name lies
+/// refused, and the held handle keeps it in place (ADR-0020). On Unix the root's name lies
 /// in a directory only root writes, and holding it costs nothing.
 fn hold_data_root(data_root: &Path) -> Result<Option<fleet_agent::nofollow::HeldDir>, String> {
     match fleet_agent::nofollow::HeldDir::open_root(data_root) {

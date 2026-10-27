@@ -12,7 +12,7 @@ use tracing::debug;
 use crate::supervisor::ports::{parse_settings, Plugin, ProcessCommand, SupervisorContext};
 use crate::supervisor::process::{Preflight, ProcessSpec, Runner, Spawner, VersionProbe};
 
-/// The block's plugin-specific keys, parsed strictly — a typo fails startup, per ADR-0010.
+/// The block's plugin-specific keys, parsed strictly — a typo fails startup, per ADR-0008.
 ///
 /// `command` is not among them: the core takes it out and resolves it (ADR-0017), and what
 /// arrives here is [`SupervisorContext::program`].
@@ -30,7 +30,7 @@ struct CommandSettings {
     /// 2.0.0 version in its output becomes the Agent's `service.version`. A Foreign Agent's
     /// version flag is its own convention — hence opt-in, unlike the Collector's.
     ///
-    /// They are also this kind's **preflight** (ADR-0017 clause 57): a package's staged program is run with
+    /// They are also this kind's **preflight** (ADR-0017 clause 54): a package's staged program is run with
     /// them before the running one is stopped, and a non-zero exit refuses the package with the
     /// program's own message. Same arguments, same contract — a check that is cheap and touches
     /// no state — asked where a refusal costs nothing rather than after the swap.
@@ -54,7 +54,7 @@ const RETIRED: &[(&str, &str)] = &[
     ),
 ];
 
-/// The `command` kind. Its [`Spawner`] is the one the registry hands every plugin (ADR-0059).
+/// The `command` kind. Its [`Spawner`] is the one the registry hands every plugin (ADR-0020).
 #[derive(Default)]
 pub struct CommandPlugin {
     pub spawner: Spawner,
@@ -101,7 +101,7 @@ impl Plugin for CommandPlugin {
             program: command.clone(),
             args,
             // A Foreign Agent's version flag is its own convention, and so is its banner: the
-            // strict SemVer read stays the default here (ADR-0017 clause 58).
+            // strict SemVer read stays the default here (ADR-0017 clause 55).
             parse: None,
         });
         // The same arguments, asked of the *staged* program before the running one is stopped
@@ -140,7 +140,7 @@ impl Plugin for CommandPlugin {
             stop_timeout: ctx.stop_timeout,
             apply_grace: ctx.apply_grace,
             retain_previous: ctx.retain_previous,
-            // A package (ADR-0026) swaps this command's program — one file, or a whole tree.
+            // A package (ADR-0027) swaps this command's program — one file, or a whole tree.
             install: Some(install),
             archive_key: ctx.archive_key,
             version_probe,
@@ -149,7 +149,7 @@ impl Plugin for CommandPlugin {
             // configuration by restarting, which is ADR-0017's generic behaviour.
             reload_signal: None,
             // The Client itself, or the second service where a process account is registered
-            // (ADR-0059 clause 3): the registry says which.
+            // (ADR-0020 clause 18): the registry says which.
             spawner: self.spawner.clone(),
             process_account_group: ctx.process_account_group,
             supervisor_dir: ctx.supervisor_dir.clone(),

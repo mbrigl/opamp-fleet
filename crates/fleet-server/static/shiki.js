@@ -1,5 +1,5 @@
 /*
- * Shiki 4.5.0 (https://shiki.style) for the bundled UI of OpAMP Fleet (ADR-0038):
+ * Shiki 4.5.0 (https://shiki.style) for the bundled UI of OpAMP Fleet (ADR-0031):
  * shiki@4.5.0, @shikijs/core@4.5.0, @shikijs/engine-javascript@4.5.0,
  * @shikijs/langs@4.5.0 (yaml, toml, ini), the CSS-variables theme with this project's TOML and
  * INI token rules, and their dependencies.

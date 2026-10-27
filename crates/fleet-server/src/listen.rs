@@ -1,5 +1,5 @@
-//! How the Server's two planes are served (ADR-0013). The listener, its TLS and its bounds on
-//! connection setup are `opamp`'s (ADR-0010); what is the Server's is that both planes share one
+//! How the Server's two planes are served (ADR-0012). The listener, its TLS and its bounds on
+//! connection setup are `opamp`'s (ADR-0008); what is the Server's is that both planes share one
 //! handle and one idea of shutting down.
 
 use std::net::TcpListener;
@@ -18,7 +18,7 @@ use rustls::ServerConfig;
 pub const SHUTDOWN_DRAIN: Duration = Duration::from_secs(10);
 
 /// A plane on an already-bound listener, over TLS when `tls` is given, holding at most
-/// `max_connections` at once (ADR-0013). `handle` is shared by both planes, so one signal drains
+/// `max_connections` at once (ADR-0012). `handle` is shared by both planes, so one signal drains
 /// both.
 #[must_use]
 pub fn plane(

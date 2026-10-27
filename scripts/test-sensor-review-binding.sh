@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Self-test of scripts/sensor-review-binding.sh. Verifies: ADR-0060
+# Self-test of scripts/sensor-review-binding.sh.
 #
 # Each case builds a throwaway git repository under a temporary directory with a main tagged
 # 'base' and a feat/ branch at it, merges one or more branches into that with --no-ff and a chosen
@@ -12,6 +12,7 @@
 # and code together and apart: the text of an ADR with other paths is listed, its Status, Date,
 # and Deciders lines and the index are not, inside a merged branch too.
 #
+# Verifies: ADR-0002
 # Inputs: scripts/sensor-review-binding.sh scripts/lib/
 #
 # Usage:
@@ -65,7 +66,7 @@ expect() {
   local want="$1" name="$2" dir="$3" needle="$4" base="${5-base}"
   local out rc
   fixture "$dir"
-  out="$(cd "$dir" && bash "$SENSOR" "$base" 2>&1)"; rc=$?
+  out="$(bash "$SENSOR" --root "$dir" "$base" 2>&1)"; rc=$?
   if [[ $rc -eq "$want" && "$out" == *"$needle"* ]]; then
     passed=$((passed + 1))
     return
@@ -80,7 +81,7 @@ expect() {
 reject() {
   local name="$1" dir="$2" needle="$3" base="${4-base}" out
   fixture "$dir"
-  out="$(cd "$dir" && bash "$SENSOR" "$base" 2>&1)"
+  out="$(bash "$SENSOR" --root "$dir" "$base" 2>&1)"
   if [[ "$out" != *"$needle"* ]]; then
     passed=$((passed + 1))
     return
@@ -201,7 +202,7 @@ d="$(repo defaults)"
 g "$d" switch -q -c topic
 change "$d" src/a.py "work"
 merge "$d" topic "$(printf 'Merge topic\n\n- Reviewed at: %s\n' "$(g "$d" rev-parse topic)")"
-out="$(cd "$d" && bash "$SENSOR" 2>&1)"
+out="$(bash "$SENSOR" --root "$d" 2>&1)"
 if [[ "$out" == *"1 merge since $(g "$d" rev-parse --short base)"* ]]; then
   passed=$((passed + 1))
 else
@@ -230,7 +231,7 @@ merge "$d" topic "$(printf 'Merge topic\n\n- Reviewed at: %s\n' "$(g "$d" rev-pa
 pr_head="$(g "$d" rev-parse feat/x)"
 g "$d" switch -q --detach base
 g "$d" merge -q --no-ff -m "Merge $pr_head into base" "$pr_head"
-out="$(cd "$d" && bash "$SENSOR" base "$pr_head" 2>&1)"
+out="$(bash "$SENSOR" --root "$d" base "$pr_head" 2>&1)"
 if [[ "$out" == *"1 reviewed at the tip"* && "$out" != *"Merge $pr_head"* ]]; then
   passed=$((passed + 1))
 else
@@ -245,7 +246,7 @@ hand_off() {
   local want="$1" name="$2" dir="$3" needle="$4" absent="$5" out rc
   fixture "$dir"
   printf '%s\n' "$6" > "$work/hand-off.md"
-  out="$(cd "$dir" && bash "$SENSOR" --hand-off "$work/hand-off.md" base 2>&1)"; rc=$?
+  out="$(bash "$SENSOR" --root "$dir" --hand-off "$work/hand-off.md" base 2>&1)"; rc=$?
   if [[ $rc -eq "$want" && "$out" == *"$needle"* && ( -z "$absent" || "$out" != *"$absent"* ) ]]; then
     passed=$((passed + 1))
     return
@@ -292,7 +293,7 @@ hand_off 0 "a hand-off naming a commit before the branch" "$d" \
 hand_off 0 "a hand-off reviewed at the head of a branch without merges claims to cover none" "$d" \
   "the hand-off was reviewed at the head" "covers" "- Reviewed at: $(g "$d" rev-parse HEAD)"
 
-out="$(cd "$d" && bash "$SENSOR" --hand-off "$work/no-such-file" base 2>&1)"; rc=$?
+out="$(bash "$SENSOR" --root "$d" --hand-off "$work/no-such-file" base 2>&1)"; rc=$?
 if [[ $rc -eq 2 && "$out" == *"is no file"* ]]; then
   passed=$((passed + 1))
 else

@@ -17,7 +17,7 @@
 # working on the Client and the Server, and it runs on the *host*, apart from the Dev Container:
 # start it when you want it, from this directory or with `-f observability/compose.yaml`. The Dev
 # Container reaches the Collector through the host (README.md → "Reaching it from the Dev
-# Container"); it needs no Docker socket for that, so ADR-0002 stands as it is.
+# Container"); it needs no Docker socket for that, so ADR-0004 stands as it is.
 #
 # Every relative path below resolves against this file's directory, the Compose project directory.
 # The bind mounts carry `z`: on an SELinux host (Fedora, RHEL) a file mounted without it is
@@ -35,9 +35,9 @@
 # observability/README.md says which STORES_BIND lets the Dev Container reach them.
 #
 # rustfs is no part of the observability stack: it is the S3-compatible store a development Server
-# keeps its artifacts in when `[blobs] store = "s3"` (ADR-0049 clause 9), here so that a developer
+# keeps its artifacts in when `[blobs] store = "s3"` (ADR-0029 clause 20), here so that a developer
 # starts and forwards one stack rather than two. PostgreSQL is here for the same reason: the database
-# a development Server keeps its records in when `[database] store = "postgres"` (ADR-0050 clause 16).
+# a development Server keeps its records in when `[database] store = "postgres"` (ADR-0029 clause 25).
 #
 # Doris needs fixed addresses: its images register the FE and the BE with each other by IP, never
 # by name (`FE_SERVERS`, `BE_ADDR`). The project network therefore has a
@@ -221,7 +221,7 @@ services:
       grafana-doris-app:
         condition: service_completed_successfully
 
-  # The development S3 store (ADR-0049 clause 9). The Server creates no bucket; README.md →
+  # The development S3 store (ADR-0029 clause 20). The Server creates no bucket; README.md →
   # "The S3 store" creates `fleet` once. The key pair is a development one, like Grafana's admin.
   rustfs:
     image: rustfs/rustfs:1.0.3@sha256:9ca9559533b537d10482fe923288b676ad08f92a7069d9a17327fbae3cab688b
@@ -234,7 +234,7 @@ services:
     ports:
       - "${STORES_BIND:-127.0.0.1}:9100:9000"   # S3 API — not 9000, which ClickHouse holds
 
-  # The development database (ADR-0050 clause 16). The Server creates no database and no role; the
+  # The development database (ADR-0029 clause 25). The Server creates no database and no role; the
   # image makes both, `fleet`, on its first start. The password is a development one, like
   # Grafana's admin. Plaintext: the Server reaches it on the loopback with `tls = false`.
   postgres:

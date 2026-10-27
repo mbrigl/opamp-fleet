@@ -3,9 +3,9 @@
 # Puts the host's OpenTelemetry Collector on this container's loopback: 127.0.0.1:4317 (OTLP/gRPC)
 # and 127.0.0.1:4318 (OTLP/HTTP) inside the container are forwarded to the same ports on the host,
 # where observability/compose.yaml publishes the Collector. 127.0.0.1:9100 goes the same way to the
-# stack's rustfs, the S3 store a development Server may keep its artifacts in (ADR-0049 clause 9):
+# stack's rustfs, the S3 store a development Server may keep its artifacts in (ADR-0029 clause 20):
 # its `[blobs.s3] endpoint` may be plaintext on the loopback alone. 127.0.0.1:5432 goes to the
-# stack's PostgreSQL, the database a development Server may keep its records in (ADR-0050 clause 16),
+# stack's PostgreSQL, the database a development Server may keep its records in (ADR-0029 clause 25),
 # reached with `[database.postgres] tls = false`, which the loopback alone allows.
 #
 # The detour is ADR-0016's: the Client sends own telemetry in plaintext to a loopback IP literal

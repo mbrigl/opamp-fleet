@@ -1,4 +1,6 @@
-<!-- Keep changes small and reviewable. Write everything in English. State what a reviewer can
+<!-- The hand-off of a change: the description of its pull request, or the message of its merge
+     into a feat/ branch (AGENTS.md [§6](../AGENTS.md#6-project-rules)). Keep changes small and
+     reviewable. Write everything in English. State what a reviewer can
      verify against the diff, a test, or an output; a claim nothing shows is one the reviewer has
      to redo. -->
 
@@ -8,8 +10,9 @@
 
 ## Related
 
-- Closes #  <!-- the ticket this lands, or the issue it resolves (ADR-0004) -->
-- Implements / relates to ADR-
+- Ticket:  <!-- the file under docs/plan/ this deletes (ADR-0006), or the request it answers -->
+- Implements:  <!-- the ADR this implements or relates to, as ADR-NNNN or ADR-draft-<slug>,
+     or none -->
 - ADRs reviewed at:  <!-- the commit of ADRs only the human reviewed before the implementation,
      or none (AGENTS.md [§3](../AGENTS.md#3-adr-rules), rule 4) -->
 
@@ -42,10 +45,9 @@
 
 <!-- One statement each, verifiable against the diff. ADR: new, revised, or none, and why none
      (AGENTS.md [§3](../AGENTS.md#3-adr-rules), rule 2); a new or revised `proposed` ADR ships in
-     commits of ADRs only, ahead of its implementation (rules 3 and 4). ARCHITECTURE.md: updated,
-     or unchanged because the structure is
-     ([§5](../AGENTS.md#5-quality-bar--definition-of-done)). Glossary: the terms this change
-     settled, or none. Specification: the accepted ADRs a change to it moves
+     commits of ADRs only (rule 3). ARCHITECTURE.md: updated, or unchanged because the
+     structure is unchanged ([§5](../AGENTS.md#5-quality-bar--definition-of-done)). Glossary: the
+     terms this change settled, or none. Specification: the accepted ADRs a change to it moves
      ([§3](../AGENTS.md#3-adr-rules), rule 7), or untouched. -->
 
 - ADR:
@@ -55,10 +57,11 @@
 
 ## Review
 
-<!-- The fresh-context review that ran before this pull request opened, the review skill under
+<!-- The fresh-context review that ran before this hand-off, the review skill under
      .agents/skills/ ([§5](../AGENTS.md#5-quality-bar--definition-of-done)): who or what reviewed,
      its findings on the two axes (does it do what was asked, does it meet the bar), and what
      was fixed. The commit the review saw, by hash: scripts/sensor-review-binding.sh lists what
-     landed after it. -->
+     landed after it. In the description of a feat/ branch's pull request, the review of the whole
+     branch at its head, which covers the merges it carries. -->
 
 - Reviewed at:

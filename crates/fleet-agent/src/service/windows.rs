@@ -9,7 +9,7 @@
 //! (`StartServiceCtrlDispatcher` fails with error 1063 when the process was *not* SCM-launched,
 //! which is why the path is a marker, not auto-detection).
 //!
-//! The second service (ADR-0059) enters the same shim through `run --agents`, which only its
+//! The second service (ADR-0020) enters the same shim through `run --agents`, which only its
 //! registration writes: it serves the Client on its named pipe until the SCM stops it.
 
 use std::ffi::OsString;
@@ -29,7 +29,7 @@ use super::runtime::{self, RunSpec};
 
 /// The own-process service name handed to the dispatcher. For an `OWN_PROCESS` service the SCM
 /// does not match on this string — the installed service is registered under the product's name
-/// (ADR-0019 clause 3) — so it only needs to be stable.
+/// (ADR-0020 clause 17) — so it only needs to be stable.
 const SERVICE_NAME: &str = "supervisor";
 const SERVICE_TYPE: ServiceType = ServiceType::OWN_PROCESS;
 

@@ -1,7 +1,7 @@
 //! The MSI's custom-action command lines, parsed the way Windows will parse them
-//! (`packaging/windows/supervisor.wxs`, ADR-0019).
+//! (`packaging/windows/supervisor.wxs`, ADR-0019, ADR-0020).
 //!
-//! A guard on the hazard ADR-0019 clause 8 rules out.
+//! A guard on the hazard ADR-0019 clause 12 rules out.
 //!
 //! `[INSTALLFOLDER]` always resolves with a trailing backslash, and the C runtime that builds a
 //! process's argv treats a backslash before a quote as an escaped, literal quote — so
@@ -178,7 +178,7 @@ fn install_args(parsed: cli::Parsed) -> cli::InstallArgs {
     }
 }
 
-/// Verifies: ADR-0019
+/// Verifies: ADR-0019, ADR-0020
 #[test]
 fn register_service_with_endpoint_survives_the_crt() {
     let args = install_args(parse(&exe_commands()["RegisterServiceWithEndpoint"]));
@@ -186,26 +186,26 @@ fn register_service_with_endpoint_survives_the_crt() {
     assert!(!args.interactive);
 }
 
-/// Verifies: ADR-0019
+/// Verifies: ADR-0019, ADR-0020
 #[test]
 fn register_service_survives_the_crt() {
     let args = install_args(parse(&exe_commands()["RegisterService"]));
     assert_eq!(args.endpoint, None);
 }
 
-/// ADR-0019 clause 8: the MSI names neither root, so the install takes the platform defaults —
+/// ADR-0019 clause 12: the MSI names neither root, so the install takes the platform defaults —
 /// `%ProgramData%\opamp-fleet` for both halves — and `Program Files` holds only the payload.
 ///
 /// This is also what keeps error 1722 out. A directory property resolves with a trailing backslash,
 /// and there is no command line for one to reach.
-/// Verifies: ADR-0019
+/// Verifies: ADR-0019, ADR-0020
 #[test]
 fn the_msi_names_no_root_so_no_directory_property_reaches_a_command_line() {
     for (id, command) in exe_commands() {
         assert!(
             !command.contains("[INSTALLFOLDER]"),
             "{id} passes a directory property again — the trailing backslash that resolves into \
-             it is what produced error 1722 (ADR-0019 clause 8)"
+             it is what produced error 1722 (ADR-0019 clause 12)"
         );
         assert!(
             !command.contains("--root") && !command.contains("--data-root"),
@@ -320,7 +320,7 @@ fn the_withdrawal_condition_reads_both_spellings_of_off() {
     );
 }
 
-/// Verifies: ADR-0019
+/// Verifies: ADR-0019, ADR-0020
 #[test]
 fn stop_and_unregister_survive_the_crt() {
     let commands = exe_commands();
@@ -358,7 +358,7 @@ fn scheduled() -> BTreeMap<String, String> {
 /// product with `REMOVE` set to `ALL` too, and sets `UPGRADINGPRODUCTCODE` while it does, so a
 /// condition on `REMOVE` alone would unregister both services in the middle of every upgrade.
 /// The registration runs on every install that removes nothing, an upgrade among them.
-/// Verifies: ADR-0019, ADR-0059
+/// Verifies: ADR-0019, ADR-0020
 #[test]
 fn the_msi_stops_and_unregisters_only_on_a_real_removal() {
     let scheduled = scheduled();
@@ -382,7 +382,7 @@ fn the_msi_stops_and_unregisters_only_on_a_real_removal() {
 /// certificate and its key, as `cert_file` and `key_file`, in the configuration under
 /// `%ProgramData%` — not in the installation folder, which holds only the payload. It mentions no
 /// credential, since the Client reads none.
-/// Verifies: ADR-0019
+/// Verifies: ADR-0019, ADR-0020
 #[test]
 fn the_endpoint_dialog_names_the_identity_and_no_credential() {
     let path =

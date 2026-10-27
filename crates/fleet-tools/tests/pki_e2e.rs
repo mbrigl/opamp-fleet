@@ -1,4 +1,4 @@
-//! The certificates `opamp-fleetctl pki init` makes are all a fleet needs (ADR-0028):
+//! The certificates `opamp-fleetctl pki init` makes are all a fleet needs (ADR-0032):
 //! a Server configured from `server.toml.fragment` issues the bootstrap certificate as a PKCS#12
 //! file, `opamp-fleetctl pki p12-extract` writes its pair where `supervisor.toml.fragment` names
 //! it, and the Server admits the real Client configured from that fragment with it once its
@@ -42,7 +42,7 @@ fn authority(file: &Path, role: &str) -> fleet_server::revocation::Authority {
     }
 }
 
-// Verifies: ADR-0028
+// Verifies: ADR-0032
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_fleet_made_by_pki_init_admits_an_enrolled_host() {
     opamp::tls::install_ring_provider();
@@ -86,8 +86,8 @@ async fn a_fleet_made_by_pki_init_admits_an_enrolled_host() {
     let signer = fleet_server::ca::ClientCa::from_config(&fragment.client_ca)
         .expect("the client CA pki init made loads");
     // The Server issues the host's bootstrap certificate from the bootstrap CA key pki init gave
-    // it, as a PKCS#12 file only (ADR-0036 clause 8), and the operator extracts its pair where
-    // supervisor.toml.fragment names it (ADR-0031).
+    // it, as a PKCS#12 file only (ADR-0022 clause 3), and the operator extracts its pair where
+    // supervisor.toml.fragment names it (ADR-0032).
     let bootstrap_ca =
         fleet_server::ca::BootstrapCa::from_config(&fragment.enrolment, Some(&fragment.client_ca))
             .expect("the bootstrap CA pki init made loads")

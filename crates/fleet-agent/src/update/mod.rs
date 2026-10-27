@@ -5,7 +5,7 @@
 //! [`SelfUpdater`] stages, proves and points at the new version. After it, the next process either
 //! commits that version or rolls back. This module holds the port and the state the Engine keeps
 //! about it: whether self-update is armed, whether the Server has answered this process, and
-//! whether the run has to end. The adapter on the ADR-0019 version directories is
+//! whether the run has to end. The adapter on the ADR-0020 version directories is
 //! [`installer`].
 
 pub mod installer;

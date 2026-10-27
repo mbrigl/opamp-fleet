@@ -71,7 +71,7 @@ const KEEPERS: [(&str, &str); 2] = [("S-1-5-18", "SY"), ("S-1-5-32-544", "BA")];
 #[cfg(any(windows, test))]
 const FULL: u32 = 0x001f_01ff;
 
-/// The Administrators group, by alias: the owner of a system-scope data root (ADR-0019 clause 18).
+/// The Administrators group, by alias: the owner of a system-scope data root (ADR-0019 clause 25).
 #[cfg(any(windows, test))]
 const OWNER: &str = "BA";
 
@@ -110,7 +110,7 @@ fn taken_over(parent: &crate::win32::acl::Dacl, dir: bool) -> crate::win32::acl:
 /// Administrators, the root is cut off ([`cut`]) and every entry keeps only what the root passes
 /// on to it ([`taken_over`]). Each entry is changed through a handle of its own: a link is changed
 /// as itself and never entered, and what the process account `process` owns, with everything
-/// beneath it, is left as it is (ADR-0059 clause 10). An entry that cannot be taken over fails the
+/// beneath it, is left as it is (ADR-0020 clause 1). An entry that cannot be taken over fails the
 /// install instead of staying behind.
 #[cfg(windows)]
 fn take_over(
@@ -243,7 +243,7 @@ pub enum Treatment {
 /// is the platform default, cut when the operator named it — and the state directory and the
 /// Supervisors' root wherever one lies outside every directory already listed. A state directory
 /// outside the data root is always cut: the install has taken it beneath its roots, from the
-/// operator's `--state-dir` or from the registration (ADR-0053 clause 3). A Supervisors' root
+/// operator's `--state-dir` or from the registration (ADR-0019 clause 14). A Supervisors' root
 /// outside both is cut when the install creates it (`exists` says it does not exist yet) and
 /// `ours` says it lies beneath the install's roots, and
 /// left untouched otherwise: `supervisor.toml` is the service account's to rewrite, and a directory
@@ -386,7 +386,7 @@ mod tests {
     /// inherited ones. So the root and every entry is given to the Administrators, the root keeps
     /// nothing but the keepers, and every entry beneath it nothing but what the root passes on —
     /// the result is the same whoever made the directory.
-    /// Verifies: ADR-0019
+    /// Verifies: ADR-0019, ADR-0020
     #[test]
     fn a_data_root_someone_else_made_is_taken_over_before_it_is_cut_off() {
         assert_eq!(OWNER, "BA", "the Administrators own every entry");
@@ -413,7 +413,7 @@ mod tests {
     /// state directory outside it, existing or not, and a Supervisors' root outside both that the
     /// install creates; such a Supervisors' root that already exists is the operator's and is left
     /// alone. A directory inside a listed one inherits its rights.
-    /// Verifies: ADR-0019
+    /// Verifies: ADR-0019, ADR-0020
     #[test]
     fn only_the_default_data_root_is_taken_over_and_only_a_created_directory_is_cut() {
         use Treatment::{Cut, TakeOver, Untouched};
@@ -498,11 +498,11 @@ mod tests {
         );
     }
 
-    /// `supervisor.toml` is the service account's to rewrite (ADR-0042 clause 2). A Supervisors'
+    /// `supervisor.toml` is the service account's to rewrite (ADR-0020 clause 1). A Supervisors'
     /// root it places outside every root of the install is never created, cut or handed over by
     /// the install — not even when it does not exist yet — or the account would choose where an
     /// Administrator makes a directory and grants it Modify.
-    /// Verifies: ADR-0053, ADR-0042
+    /// Verifies: ADR-0019, ADR-0020
     #[test]
     fn a_supervisors_root_outside_the_installs_roots_is_left_untouched() {
         let planned = plan(
@@ -528,7 +528,7 @@ mod tests {
     /// The data root keeps no inherited right — `BUILTIN\Users` read among them — and full control
     /// only for LocalSystem and the Administrators beside its own explicit grants, and what it
     /// holds then inherits that alone, its own explicit grants kept.
-    /// Verifies: ADR-0019, ADR-0053
+    /// Verifies: ADR-0019, ADR-0020
     #[test]
     fn the_data_root_is_cut_off_from_what_every_local_user_inherits() {
         let inherited = Dacl::parse(
@@ -554,7 +554,7 @@ mod tests {
     /// keepers alone, and a junction, the other name of a hard link and what the process account
     /// owns — this test's own account standing in — are not touched; a root that is a link is
     /// refused. The test runs elevated, as an install does.
-    /// Verifies: ADR-0019, ADR-0059
+    /// Verifies: ADR-0019, ADR-0020
     #[cfg(windows)]
     #[test]
     fn on_windows_a_restricted_root_keeps_the_keepers_alone_and_enters_no_link() {
@@ -628,6 +628,22 @@ mod tests {
             let outside = dir.path().join("outside");
             std::fs::create_dir(&outside).expect("outside");
             std::fs::write(outside.join("secret"), b"x").expect("secret");
+            // What the test makes is the Administrators', as an elevated install's is, whatever
+            // owner the shell above it leaves in the token: Git Bash's runtime makes it the
+            // account itself, which stands in for the process account here.
+            for path in [
+                &parent,
+                &root,
+                &sub,
+                &sub.join("file"),
+                &sub.join("kept"),
+                &outside,
+                &outside.join("secret"),
+            ] {
+                Entry::open(path, Access::Owner, false)
+                    .and_then(|entry| entry.set_owner("BA"))
+                    .expect("owned by the Administrators");
+            }
             mklink("/J", &root.join("link"), &outside);
             mklink("/H", &root.join("hard"), &outside.join("secret"));
             let owned = root.join("owned");
@@ -665,7 +681,7 @@ mod tests {
                 "{treatment:?}: inherited"
             );
             // A cut changes nothing explicit beneath the root, as `icacls /inheritance:r` did not;
-            // a take-over resets it away (ADR-0019).
+            // a take-over resets it away (ADR-0019, ADR-0020).
             let kept = sddl(&sub.join("kept"));
             assert_eq!(
                 kept.contains("(A;;0x1200a9;;;BU)"),

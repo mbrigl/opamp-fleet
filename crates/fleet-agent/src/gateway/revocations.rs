@@ -3,7 +3,7 @@
 //!
 //! The Server never sees a downstream certificate — the Gateway terminates that handshake and
 //! presents its own upstream — so the Server hands its Gateways the revoked certificates of the
-//! fleet's client CA instead, chains already resolved (ADR-0021 clause 43). The Gateway fetches the
+//! fleet's client CA instead, chains already resolved (ADR-0021 clause 34). The Gateway fetches the
 //! list over its own upstream origin, with its own certificate, keeps it in memory,
 //! and refuses what it names. While it holds no list young enough to trust, it admits nobody: a
 //! Gateway whose Server is away forwards nothing anyway, and a list kept for ever would admit a
@@ -32,10 +32,11 @@ pub const REVOCATION_MAX_AGE: Duration = Duration::from_secs(300);
 pub const REVOCATION_FIRST_WAIT: Duration = Duration::from_secs(5);
 
 /// The largest list body the Gateway reads. The Server names the revoked certificates of its
-/// register, at most 100 000 (ADR-0021 clause 33), and every entry of its list, at most 100 000
-/// (clause 37), once per subject in its client CA file. An entry is at most 130 bytes of JSON with
-/// a 64-character issuer hash and the 40 hex digits of the longest serial RFC 5280 allows. This is
-/// room for all of them with up to eight client CA subjects: 900 000 entries, 117 MB.
+/// register, at most 100 000 (ADR-0029 clause 9), and every entry of its list, at most 100 000
+/// (ADR-0029 clause 10), once per subject in its client CA file. An entry is at most 130 bytes of
+/// JSON with a 64-character issuer hash and the 40 hex digits of the longest serial RFC 5280
+/// allows. This is room for all of them with up to eight client CA subjects: 900 000 entries,
+/// 117 MB.
 const MAX_LIST_BYTES: usize = 128 << 20;
 
 /// Where the Server serves the list, on its Agent plane.
@@ -109,7 +110,7 @@ impl RevocationList {
     }
 
     /// Whether the list held, however old, names the certificate of `issuer` and `serial`, as the
-    /// Server's register names one (ADR-0058 clause 4).
+    /// Server's register names one (ADR-0015 clause 17).
     #[must_use]
     pub fn lists(&self, issuer: &str, serial: &str) -> bool {
         self.held

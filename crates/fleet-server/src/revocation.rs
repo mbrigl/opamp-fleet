@@ -16,19 +16,19 @@ use tokio::sync::watch;
 
 use crate::fleet::Clock;
 
-/// The revocations one list holds at most (ADR-0021 clause 37).
+/// The revocations one list holds at most (ADR-0029 clause 10).
 pub const MAX_REVOCATIONS: usize = 100_000;
 
-/// The certificates the register holds at most (ADR-0021 clause 33).
+/// The certificates the register holds at most (ADR-0029 clause 9).
 pub const MAX_ISSUED: usize = 100_000;
 
 /// The certificates the register holds at most in one chain — below one root, the first
 /// certificate a chain renews from: enough for a Gateway's downstream Agents, few enough that one
-/// member cannot fill the register (ADR-0021 clause 33).
+/// member cannot fill the register (ADR-0029 clause 9).
 pub const MAX_DESCENDANTS_PER_ROOT: usize = 10_000;
 
 /// The room the register keeps for enrolments: a renewal is refused once fewer are left, so
-/// renewals alone cannot shut out a new host (ADR-0021 clause 33).
+/// renewals alone cannot shut out a new host (ADR-0029 clause 9).
 pub const ENROLMENT_RESERVE: usize = 1_000;
 
 /// A certificate by its issuer and serial: the issuer as the SHA-256 of its DER-encoded name, hex,
@@ -75,7 +75,7 @@ pub fn normalize_serial(serial: &str) -> String {
     }
 }
 
-/// A CA whose certificates can be revoked: the client CA or the bootstrap CA (ADR-0021 clause 34).
+/// A CA whose certificates can be revoked: the client CA or the bootstrap CA (ADR-0021 clause 27).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Authority {
     /// `client` or `bootstrap` — what an operator names.
@@ -97,17 +97,17 @@ pub struct Facts {
     pub key_fingerprint: String,
     /// Milliseconds since the Unix epoch.
     pub not_after_ms: u64,
-    /// The host the certificate was issued to (ADR-0021 clause 7) — the stable identity a host
+    /// The host the certificate was issued to (ADR-0022 clause 11) — the stable identity a host
     /// keeps across renewals and re-keys; `None` for a certificate an operator provisioned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,
-    /// The values of its subject a Host carries (ADR-0035 clause 1); empty when it has none.
+    /// The values of its subject a Host carries (ADR-0024 clause 15); empty when it has none.
     #[serde(default, skip_serializing_if = "SubjectValues::is_empty")]
     pub subject_values: SubjectValues,
 }
 
 /// The values of a client certificate's subject a Host carries into the effective description of
-/// the Agents that arrive over it directly (ADR-0035 clauses 1 and 3). Each holds the first value
+/// the Agents that arrive over it directly (ADR-0024 clauses 15 and 18). Each holds the first value
 /// of its attribute in the subject; empty when the subject has none.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubjectValues {
@@ -137,7 +137,7 @@ impl SubjectValues {
         self.attributes().next().is_none()
     }
 
-    /// The `fleet.host.*` attributes these values are (ADR-0035 clause 3), the empty ones left
+    /// The `fleet.host.*` attributes these values are (ADR-0024 clause 18), the empty ones left
     /// out.
     pub fn attributes(&self) -> impl Iterator<Item = (&'static str, &str)> {
         [
@@ -161,14 +161,14 @@ impl SubjectValues {
 pub struct Presented {
     pub id: CertId,
     pub host: Option<String>,
-    /// Its subject's values, which a Host made at its first report carries (ADR-0035 clause 1).
+    /// Its subject's values, which a Host made at its first report carries (ADR-0024 clause 15).
     pub subject_values: SubjectValues,
-    /// Its `not_after`: every admission moves its Host's valid until forward to it (ADR-0047
-    /// clause 1).
+    /// Its `not_after`: every admission moves its Host's valid until forward to it (ADR-0024
+    /// clause 15).
     pub not_after_ms: u64,
 }
 
-/// A Host: what a client certificate's host id names (ADR-0021 clause 7, ADR-0035 clause 1).
+/// A Host: what a client certificate's host id names (ADR-0022 clause 11, ADR-0024 clause 15).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Host {
     /// A Gateway carries other hosts' Agents, so its certificate binds none of them.
@@ -186,7 +186,7 @@ pub struct Host {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approved_ms: Option<u64>,
     /// The latest `not_after` of a certificate naming it that the Server issued or that it
-    /// presented, in milliseconds since the Unix epoch (ADR-0047 clause 1). Every issuance and
+    /// presented, in milliseconds since the Unix epoch (ADR-0024 clause 15). Every issuance and
     /// every admission moves it forward, never back. Once it has passed, a Host not marked as a
     /// Gateway ends with its bindings. `None` for a Host written before it had one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -204,7 +204,7 @@ impl Host {
     }
 }
 
-/// The Agents a host's certificate speaks for (ADR-0026 clause 37).
+/// The Agents a host's certificate speaks for (ADR-0024 clause 16).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SpeaksFor {
     /// A host marked as a Gateway: it carries other hosts' Agents, and the Server keeps no record
@@ -217,7 +217,7 @@ pub enum SpeaksFor {
 /// A version of the hosts, numbered so no older one is written over a newer.
 type HostsVersion = (u64, BTreeMap<String, Host>);
 
-/// The certificates one host may hold at once (ADR-0021 clause 7): the one in force, its renewal,
+/// The certificates one host may hold at once (ADR-0022 clause 11): the one in force, its renewal,
 /// and one more for a renewal whose answer was lost.
 pub const MAX_PER_HOST: usize = 3;
 
@@ -231,7 +231,7 @@ pub struct Signed {
     pub facts: Facts,
 }
 
-/// One certificate the Server signed (ADR-0021 clause 33).
+/// One certificate the Server signed (ADR-0029 clause 9).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Issued {
     #[serde(flatten)]
@@ -273,7 +273,7 @@ pub struct Ledger {
     pub hosts: BTreeMap<String, Host>,
 }
 
-/// The ledger's port (ADR-0006): where it is kept. A certificate is written on its own, so a
+/// The ledger's port (ADR-0009): where it is kept. A certificate is written on its own, so a
 /// renewal costs one small write however large the register is.
 pub trait LedgerStore: Send + Sync {
     /// The persisted ledger, empty when there is none yet.
@@ -369,7 +369,8 @@ impl State {
             .collect()
     }
 
-    /// Every revoked certificate (clause 35), built once after the list or the register changed.
+    /// Every revoked certificate (ADR-0021 clause 28), built once after the list or the register
+    /// changed.
     fn revoked(&mut self) -> &BTreeSet<CertId> {
         let revoked = match self.revoked.take() {
             Some(revoked) => revoked,
@@ -531,7 +532,7 @@ impl Revocations {
                     state.issued.insert(issued.facts.id.clone(), issued);
                 }
                 // A Host's valid until may pass before any certificate in the register expires
-                // (ADR-0047 clause 1); one written before it had a valid until is pruned at once,
+                // (ADR-0024 clause 15); one written before it had a valid until is pruned at once,
                 // so it takes the register's latest `not_after` for it.
                 for host in state.hosts.values().filter(|host| !host.gateway) {
                     state.earliest_expiry_ms = state
@@ -593,9 +594,9 @@ impl Revocations {
         let forgotten = self.prune(&mut state)?;
         let minted = predecessor.is_none();
         let recorded = self.admit(&mut state, facts.clone(), instance_uid, predecessor);
-        // The approval that mints a host id writes the Host (ADR-0035 clause 1): an issuance that
+        // The approval that mints a host id writes the Host (ADR-0024 clause 15): an issuance that
         // renews nothing and names a host the register does not know yet.
-        // Every issuance moves its Host's valid until forward (ADR-0047 clause 1).
+        // Every issuance moves its Host's valid until forward (ADR-0024 clause 15).
         let hosts = match (&recorded, minted, &facts.host) {
             (Ok(()), true, Some(host)) if !state.hosts.contains_key(host) => {
                 let now = self.clock.now_ms();
@@ -675,7 +676,7 @@ impl Revocations {
     }
 
     /// Whether a connection presenting a certificate of `host` may report for `instance_uid`
-    /// (ADR-0021 clause 7), binding nothing: [`check_report`](Self::check_report) binds it once
+    /// (ADR-0022 clause 11), binding nothing: [`check_report`](Self::check_report) binds it once
     /// the report is admitted.
     ///
     /// # Errors
@@ -686,12 +687,12 @@ impl Revocations {
     }
 
     /// Whether a connection presenting a certificate of `host` may report for `instance_uid`
-    /// (ADR-0021 clause 7). An `instance_uid` first heard from a host is bound to it; one bound to
+    /// (ADR-0022 clause 11). An `instance_uid` first heard from a host is bound to it; one bound to
     /// another host is refused. A Gateway's certificate binds nothing — it carries other hosts'
     /// Agents. A certificate an operator provisioned with a host id makes its Host here, at its
-    /// first report, with `subject` — the values of the certificate it presented (ADR-0035
-    /// clause 1). Every admitted report moves the Host's valid until forward to `not_after_ms`,
-    /// the end of the certificate it presented (ADR-0047 clause 1).
+    /// first report, with `subject` — the values of the certificate it presented (ADR-0024
+    /// clause 15). Every admitted report moves the Host's valid until forward to `not_after_ms`,
+    /// the end of the certificate it presented (ADR-0024 clause 15).
     ///
     /// # Errors
     /// Returns the refusal, or an error when a new binding cannot be written.
@@ -732,7 +733,7 @@ impl Revocations {
     }
 
     /// Releases `instance_uid` from the Host it is bound to, when an operator forgets its Agent
-    /// (ADR-0047 clause 2): the next host that reports it binds it.
+    /// (ADR-0024 clause 10): the next host that reports it binds it.
     ///
     /// # Errors
     /// Returns an error when the release cannot be written; it holds in memory all the same, and
@@ -776,7 +777,7 @@ impl Revocations {
         Ok(true)
     }
 
-    /// The Agents a certificate naming `host` speaks for (ADR-0026 clause 37): the `instance_uid`s
+    /// The Agents a certificate naming `host` speaks for (ADR-0024 clause 16): the `instance_uid`s
     /// bound to it, or any Agent for a host marked as a Gateway. A host the register does not know
     /// speaks for none.
     #[must_use]
@@ -790,7 +791,7 @@ impl Revocations {
     }
 
     /// Moves a binding to the `instance_uid` the Server re-keyed an Agent to — a re-key never
-    /// orphans a host's certificate (ADR-0021 clause 7).
+    /// orphans a host's certificate (ADR-0022 clause 11).
     ///
     /// # Errors
     /// Returns an error when the binding cannot be written.
@@ -824,7 +825,7 @@ impl Revocations {
         }
         let entry = state.hosts.entry(host.to_string()).or_default();
         entry.gateway = gateway;
-        // A Host whose mark is taken away ends with its valid until again (ADR-0047 clause 1).
+        // A Host whose mark is taken away ends with its valid until again (ADR-0024 clause 15).
         let until = entry.valid_until_ms.unwrap_or(0);
         if !gateway {
             state.earliest_expiry_ms = state.earliest_expiry_ms.min(until);
@@ -1012,7 +1013,7 @@ impl Revocations {
 
     /// Every certificate of the CAs of `role` that is revoked, itself or through a certificate it
     /// renewed, with its chain already resolved: what a Gateway refuses
-    /// (ADR-0021 clause 43). A certificate the register never held is on it as revoked.
+    /// (ADR-0021 clause 34). A certificate the register never held is on it as revoked.
     #[must_use]
     pub fn revoked_certificates(&self, role: &str) -> BTreeSet<CertId> {
         let issuers: BTreeSet<&str> = self
@@ -1032,7 +1033,7 @@ impl Revocations {
     }
 
     /// Whether `host` is marked as a Gateway, and its subject values — what places an Agent that
-    /// arrived over it (ADR-0035 clauses 3 and 4). A host the register does not know is neither a
+    /// arrived over it (ADR-0024 clauses 18 and 19). A host the register does not know is neither a
     /// Gateway nor has values.
     #[must_use]
     pub fn placement(&self, host: &str) -> (bool, SubjectValues) {
@@ -1067,7 +1068,7 @@ impl Revocations {
     /// valid renewal stays, so the renewal stays revoked.
     ///
     /// A Host not marked as a Gateway whose valid until has passed is forgotten, and every
-    /// `instance_uid` bound to it released (ADR-0047 clause 1); what is left of the hosts is
+    /// `instance_uid` bound to it released (ADR-0024 clause 15); what is left of the hosts is
     /// answered for the caller to write once the lock is released.
     fn prune(&self, state: &mut State) -> Result<Option<HostsVersion>, String> {
         let now = self.clock.now_ms();
@@ -1097,7 +1098,7 @@ impl Revocations {
             .filter(|id| !needed.contains(*id))
             .cloned()
             .collect();
-        // A Host ends when no certificate naming it is valid (ADR-0047 clause 1): once its valid
+        // A Host ends when no certificate naming it is valid (ADR-0024 clause 15): once its valid
         // until has passed nobody can speak as it again, so its bindings guard nothing. A
         // Gateway's Host stays while it is marked, as its certificate may be one an operator
         // provisioned and never presented. A Host written before it had a valid until takes the
@@ -1327,7 +1328,7 @@ mod tests {
 
     /// A host speaks for the `instance_uid`s that reported with its certificate, a host the
     /// register does not know for none, and a Gateway for any Agent.
-    /// Verifies: ADR-0026
+    /// Verifies: ADR-0027
     #[test]
     fn a_host_speaks_for_the_agents_bound_to_it_and_a_gateway_for_any() {
         let (revocations, _) = open(&Memory::default());
@@ -1372,7 +1373,7 @@ mod tests {
     /// its `instance_uid`s can be bound by another host; a marked Gateway keeps its Host and its
     /// mark, since its certificate may be one the register never held, and one whose mark was
     /// taken away ends like any other.
-    /// Verifies: ADR-0047
+    /// Verifies: ADR-0024
     #[test]
     fn a_host_whose_last_certificate_has_expired_ends_with_its_bindings() {
         let store = Memory::default();
@@ -1429,7 +1430,7 @@ mod tests {
                 .hosts
                 .keys()
                 .collect::<Vec<_>>(),
-            // h2 holds a valid certificate, and its approval wrote it (ADR-0035 clause 1).
+            // h2 holds a valid certificate, and its approval wrote it (ADR-0024 clause 15).
             ["gw", "h2"],
             "the ending is written"
         );
@@ -1445,7 +1446,7 @@ mod tests {
     /// A Host whose certificate an operator provisioned is not in the register, but whose
     /// presented certificate is still valid, keeps its bindings past every register entry's end;
     /// it ends once the presented certificate has.
-    /// Verifies: ADR-0047
+    /// Verifies: ADR-0024
     #[test]
     fn a_host_with_a_valid_presented_certificate_keeps_its_bindings() {
         let store = Memory::default();
@@ -1489,7 +1490,7 @@ mod tests {
     }
 
     /// Every issuance and every admission moves a Host's valid until forward, never back.
-    /// Verifies: ADR-0047
+    /// Verifies: ADR-0024
     #[test]
     fn a_hosts_valid_until_only_moves_forward() {
         let store = Memory::default();
@@ -1526,7 +1527,7 @@ mod tests {
 
     /// A Host written before it had a valid until takes the latest `not_after` the register holds
     /// for it, and stays until its next admission when the register holds none.
-    /// Verifies: ADR-0047
+    /// Verifies: ADR-0024
     #[test]
     fn a_host_written_before_its_valid_until_takes_the_registers() {
         let store = Memory::default();
@@ -1579,7 +1580,7 @@ mod tests {
     }
 
     /// Forgetting an Agent releases its binding.
-    /// Verifies: ADR-0047
+    /// Verifies: ADR-0024
     #[test]
     fn a_released_instance_uid_can_be_bound_by_another_host() {
         let store = Memory::default();
@@ -1602,7 +1603,7 @@ mod tests {
     /// The issuance that mints a host id — an approval — writes the Host before its first report,
     /// with the certificate's subject values and the time; a renewal writes none, and a report
     /// does not overwrite what the approval wrote.
-    /// Verifies: ADR-0035
+    /// Verifies: ADR-0024
     #[test]
     fn an_approval_writes_the_host_before_its_first_report() {
         let store = Memory::default();
@@ -1647,7 +1648,7 @@ mod tests {
 
     /// A certificate an operator provisioned with a host id makes its Host at its first report,
     /// with the values of the certificate it presented.
-    /// Verifies: ADR-0035
+    /// Verifies: ADR-0024
     #[test]
     fn a_provisioned_certificate_makes_its_host_at_its_first_report() {
         let store = Memory::default();
@@ -1717,7 +1718,7 @@ mod tests {
     /// An approval whose Host cannot be written is not refused: the certificate is recorded, the
     /// Host is known with the approval's values, and it reaches the store with the next host
     /// write — here its first report.
-    /// Verifies: ADR-0035
+    /// Verifies: ADR-0024
     #[test]
     fn an_approval_whose_host_cannot_be_written_is_not_refused() {
         let store = FailingHosts::default();
@@ -1767,7 +1768,7 @@ mod tests {
     fn a_failed_write_of_forgotten_hosts_fails_no_issuance_or_start() {
         let memory = Memory::default();
         // Its valid until is its certificate's end: a Host without one and without a register
-        // entry would stay until its next admission (ADR-0047 clause 1).
+        // entry would stay until its next admission (ADR-0024 clause 15).
         memory.0.lock().expect("lock").hosts = BTreeMap::from([(
             "old".to_string(),
             Host {
@@ -1956,8 +1957,8 @@ mod tests {
         ));
     }
 
-    /// What clause 35 answers for `id`, worked out from the list and the register as they are
-    /// listed: named on the list, itself or a predecessor in its register chain.
+    /// What ADR-0021 clause 28 answers for `id`, worked out from the list and the register as they
+    /// are listed: named on the list, itself or a predecessor in its register chain.
     fn expected_revoked(revocations: &Revocations, id: &CertId) -> bool {
         let named: BTreeSet<CertId> = revocations
             .list()

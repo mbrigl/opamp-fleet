@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  The one dialog this installer adds to the stock set (ADR-0019 clause 39): where the Server is, and
+  The one dialog this installer adds to the stock set (ADR-0020 clause 10): where the Server is, and
   whether the fleet may update this Client itself (ADR-0018).
 
   Geometry, control ids and button positions are InstallDirDlg's, so the page it follows and this
@@ -43,10 +43,10 @@
                  Text="This is how the fleet patches the Client itself; without it this host is the one machine you update by hand. The Client only ever takes a package named after itself — anything else is refused and reported." />
 
         <!--
-          The client identity is not asked for (ADR-0019 clause 39): it is a pair of files the
+          The client identity is not asked for (ADR-0020 clause 10): it is a pair of files the
           operator puts on the host. The configuration lives under %ProgramData%, not in
-          INSTALLFOLDER (ADR-0019). No square brackets in the text: a control's Text is a formatted
-          string, and [name] would be replaced by the property of that name.
+          INSTALLFOLDER (ADR-0019, ADR-0020). No square brackets in the text: a control's Text is
+          a formatted string, and [name] would be replaced by the property of that name.
         -->
         <Control Id="IdentityNote" Type="Text" X="20" Y="160" Width="320" Height="44" NoPrefix="yes"
                  Text="The client certificate and its key — a bootstrap certificate to enrol with, or one already issued — are files you put on this host. Name them as cert_file and key_file in the tls section of %ProgramData%\opamp-fleet\supervisor.toml afterwards, or run &quot;supervisor service config&quot; from an elevated prompt to enrol this host." />

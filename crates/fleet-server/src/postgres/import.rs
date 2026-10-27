@@ -1,4 +1,4 @@
-//! `server migrate-to-postgres` (ADR-0050 clause 15): an existing `data_dir` copied into
+//! `server migrate-to-postgres` (ADR-0029 clause 27): an existing `data_dir` copied into
 //! PostgreSQL while the Server is stopped.
 //!
 //! The database is checked first: it must hold none of the Server's tables, and nothing is created
@@ -149,7 +149,7 @@ impl Records {
 }
 
 /// Copies the `data_dir` `from` into the database `config` names and the new, empty `data_dir`
-/// `to` (ADR-0050 clause 15). `filesystem_blobs` copies `blobs/` too, as the filesystem blob store
+/// `to` (ADR-0029 clause 27). `filesystem_blobs` copies `blobs/` too, as the filesystem blob store
 /// keeps the artifacts there.
 ///
 /// # Errors
@@ -173,7 +173,7 @@ pub(crate) fn run_in(
     schema: Option<&str>,
 ) -> Result<Report, String> {
     // Nothing is created or changed before the database has been found without the Server's
-    // tables, and the old data_dir is only ever read (clause 15).
+    // tables, and the old data_dir is only ever read (ADR-0029 clause 27).
     if !from.is_dir() {
         return Err(format!("{} is not a data directory", from.display()));
     }
@@ -595,8 +595,8 @@ mod tests {
     /// The copy over a fixture `data_dir` carries every record into the database and the audit
     /// record and the blobs into the new `data_dir`, keeps the chain verifiable, leaves the old
     /// `data_dir` unchanged, and refuses a database that holds the Server's tables and a
-    /// `--data-dir` that is not empty (ADR-0050 clause 15).
-    /// Verifies: ADR-0050
+    /// `--data-dir` that is not empty (ADR-0029 clause 27).
+    /// Verifies: ADR-0029
     #[test]
     fn migrate_to_postgres_carries_every_record_and_leaves_the_old_data_dir() {
         let Some(test) = TestDatabase::named() else {
@@ -733,8 +733,8 @@ mod tests {
 
     /// The database is checked before anything is touched: one that cannot be reached leaves the
     /// old `data_dir` as it was — no directory created, no mode changed, no leftover removed — and
-    /// creates no new one (ADR-0050 clause 15). Needs no database.
-    /// Verifies: ADR-0050
+    /// creates no new one (ADR-0029 clause 27). Needs no database.
+    /// Verifies: ADR-0029
     #[test]
     fn a_copy_checks_the_database_before_it_touches_anything() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -774,7 +774,7 @@ mod tests {
     /// Server's tables and the new `data_dir` empty. The failure is an object in the way of the
     /// schema's last table — no table, so the copy starts, and the first tables are created before
     /// the statement fails.
-    /// Verifies: ADR-0050
+    /// Verifies: ADR-0029
     #[test]
     fn a_copy_that_fails_leaves_the_database_without_the_servers_tables() {
         let Some(test) = TestDatabase::named() else {

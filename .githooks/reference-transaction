@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+#
+# Git reference-transaction hook: the local main moves only to what the remote's main has.
+#
+# Changes reach main through a pull request, and the local main only takes up the remote's
+# (AGENTS.md, section 6). pre-commit and pre-merge-commit refuse a commit and a merge on main, but
+# a fast-forward to a local branch, a cherry-pick, a reset, or 'git branch -f' moves main without
+# either, and 'git commit --no-verify' skips them. Every one of these updates refs/heads/main in a
+# reference transaction, and git runs this hook on it before the update is made ('prepared'),
+# where a non-zero exit aborts it; --no-verify does not skip it. An update of main is let through
+# when its new commit is one origin/main has, as the same transaction leaves origin/main, so
+# 'git merge --ff-only origin/main', 'git reset --hard origin/main', and
+# 'git fetch origin main:main' pass. So does one that writes main where it already is, as
+# pack-refs and gc do in a clone whose main is ahead of the remote's, and a deletion of the local
+# main. Without origin/main, a repository that has no remote's main yet, nothing is decided.
+# A refused fast-forward has already brought the index and the working tree to its target while
+# main stays: from a clean tree, 'git restore --source=HEAD --staged --worktree .' takes them
+# back. Enabled as the README's "Git hooks" says; it needs git 2.28 or later.
+#
+# Bypassable by running git without the hooks ('git -c core.hooksPath=/dev/null'), or by moving
+# origin/main itself ('git update-ref refs/remotes/origin/main'); AGENTS.md, section 6 says who
+# may. A push that runs the hooks still cannot reach the remote's main.
+# scripts/test-git-hooks.sh exercises this hook.
+
+set -uo pipefail
+
+[[ "${1:-}" == "prepared" ]] || exit 0
+
+# Every update of the transaction, one per line: old object, new object, ref. Read by a loop, which
+# works on bash 3.2, the one macOS ships, not by mapfile, which that bash lacks: without it the
+# hook fails in a way that depends on the bash version. An empty list passes here, since bash
+# before 4.4 takes its expansion for unset.
+updates=()
+while IFS= read -r u || [[ -n "$u" ]]; do
+  updates+=("$u")
+done
+((${#updates[@]})) || exit 0
+
+# The remote's main as this transaction leaves it: a fetch may move it together with main.
+remote="$(git rev-parse -q --verify refs/remotes/origin/main 2>/dev/null)" || remote=""
+for u in "${updates[@]}"; do
+  read -r _ new ref <<< "$u"
+  [[ "$ref" == "refs/remotes/origin/main" && ! "$new" =~ ^0+$ ]] && remote="$new"
+done
+[[ -n "$remote" ]] || exit 0
+
+# Where main is now: a transaction that writes main where it already is, as pack-refs, gc, or
+# 'git reset --hard HEAD' does, moves nothing, and its old column may be zeros.
+current="$(git rev-parse -q --verify refs/heads/main 2>/dev/null)" || current=""
+
+for u in "${updates[@]}"; do
+  read -r _ new ref <<< "$u"
+  [[ "$ref" == "refs/heads/main" && ! "$new" =~ ^0+$ && "$new" != "$current" ]] || continue
+  if ! git merge-base --is-ancestor "$new" "$remote" 2>/dev/null; then
+    hint="Take up the remote's main: git merge --ff-only origin/main"
+    # A main already ahead of the remote's, as in a clone that took up these hooks with unpushed
+    # work, moves no further and takes nothing up; its commits go to a branch first.
+    if [[ -n "$current" ]] && ! git merge-base --is-ancestor "$current" "$remote" 2>/dev/null; then
+      hint="main has commits origin/main lacks; keep them on a branch and take main back: git switch -c feat/<topic> main, then git branch -f main origin/main"
+    fi
+    echo "reference-transaction: refused — main moves only to what origin/main has, and changes reach it through a pull request (AGENTS.md, section 6). $hint" >&2
+    exit 1
+  fi
+done
+
+exit 0

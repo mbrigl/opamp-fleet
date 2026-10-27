@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+#
+# Git pre-merge-commit hook: no merge on main, and a merge into any other branch passes the
+# documentation check before the branch moves.
+#
+# Changes reach main through a pull request, and the local main only takes up the remote's by a
+# fast-forward. Branches integrate first on a feat/ branch by a local merge (AGENTS.md, section 6).
+# Two branches green on their own collide at a merge mostly in the record: the same ADR number,
+# an index row, a link or an anchor the other moved. scripts/check-docs.sh decides those in about
+# a second, so it runs here on the merged tree, which git has written before this hook and before
+# the commit. The rest of scripts/check-all.sh runs before the push (pre-push), where it sees every
+# merge at once; a merge that stops on a conflict, the one carrying edits by hand, runs all of it
+# when concluded (pre-commit). A fast-forward makes no commit and runs no hook; 'merge.ff' false
+# prevents one, and the push still gates what it brought. Enabled as the README's "Git hooks"
+# says.
+#
+# A repository without scripts/check-docs.sh has nothing to run, and the merge proceeds.
+# Bypassable with 'git merge --no-verify'; AGENTS.md, section 6 says who may.
+# scripts/test-git-hooks.sh exercises this hook.
+
+set -uo pipefail
+
+branch="$(git symbolic-ref --short -q HEAD 2>/dev/null || true)"
+
+if [[ "$branch" == "main" ]]; then
+  echo "pre-merge-commit: refused — the checkout is on 'main', and changes reach main through a pull request (AGENTS.md, section 6). git merge --abort, then merge into a feat/ branch, or take up the remote's main: git merge --ff-only origin/main" >&2
+  exit 1
+fi
+
+root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+
+# The variables git hands a hook would bind every git command of the check to this repository's
+# git directory instead of the one it finds from its own path (see pre-push).
+# shellcheck disable=SC2046 # one variable name per word
+unset $(git rev-parse --local-env-vars)
+
+if [[ -n "$root" && -f "$root/scripts/check-docs.sh" ]]; then
+  if ! bash "$root/scripts/check-docs.sh"; then
+    echo >&2
+    echo "pre-merge-commit: refused — the documentation check is red on the merge, and it passes before a branch takes up another (AGENTS.md, section 6). git merge --abort, fix it on the merged branch, then merge again." >&2
+    exit 1
+  fi
+fi
+
+exit 0

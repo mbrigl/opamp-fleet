@@ -83,7 +83,7 @@
           "type": "mysql",
           "uid": "doris"
         },
-        "description": "The host an Agent runs on, as os.type/host.arch — the two halves ADR-0026 selects a package variant by.",
+        "description": "The host an Agent runs on, as os.type/host.arch — the two halves ADR-0027 selects a package variant by.",
         "query": "SELECT DISTINCT CONCAT(CAST(resource_attributes['os.type'] AS STRING), '/', CAST(resource_attributes['host.arch'] AS STRING)) FROM otel.otel_metrics_gauge ORDER BY 1",
         "refresh": 2,
         "includeAll": true,

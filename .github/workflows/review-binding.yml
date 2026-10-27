@@ -1,23 +1,22 @@
 name: Review binding
 
-# Runs scripts/sensor-review-binding.sh again when a pull request's description is edited. The
-# sensors job of checks.yml runs it on every push to the pull request, with the description as
-# the hand-off of the whole branch; the description also changes without a push, as when the
-# 'Reviewed at:' line is filled in after the last one. This workflow re-reads it then, on an edit
-# only, and runs nothing else, so an edit reruns none of the required checks. The sensor reports
-# for the reviewer and fails on nothing it finds; this workflow is no required check.
+# Runs scripts/sensor-review-binding.sh on a pull request, with its description as the hand-off
+# of the whole branch: on every push to it, and again on every edit of the description, which
+# also changes without a push, as when the 'Reviewed at:' line is filled in after the last one.
+# The sensor reports for the reviewer and fails on nothing it finds; its job is no required
+# check. An edit reruns this workflow and nothing else.
 #
 # The job is bounded by a timeout, and the checkout runs with 'persist-credentials: false', as in
 # checks.yml.
 
 on:
   pull_request:
-    types: [edited]
+    types: [opened, synchronize, reopened, edited]
 
 permissions:
   contents: read
 
-# A later edit makes the previous run's report stale.
+# A later push or edit makes the previous run's report stale.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
   cancel-in-progress: true
@@ -32,7 +31,7 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
-      # As in checks.yml: against the pull request's head, the checkout being a synthetic merge of
+      # Against the pull request's head, the checkout being a synthetic merge of
       # the two, and the description passed through the environment and a file, never through
       # the script's text.
       - name: Write the pull request's description, the hand-off of the branch, to a file

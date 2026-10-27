@@ -1,4 +1,4 @@
-//! Server-offered connection settings (ADR-0014): persistence, their precedence over
+//! Server-offered connection settings (ADR-0013): persistence, their precedence over
 //! `supervisor.toml`, and the verify-by-actually-connecting the Baseline requires.
 //!
 //! The persisted file is the Baseline's own `ConnectionSettingsOffers` protobuf — the merged
@@ -23,7 +23,7 @@ pub const SETTINGS_FILE: &str = "connection-settings.pb";
 /// dropped with a warning — `supervisor.toml` then applies, never a half-read override).
 ///
 /// The settings carry no `headers`: a file may hold an `Authorization` header from a credential
-/// rotation, and it is dropped here, so it is never sent (ADR-0014 clause 9). The file is then
+/// rotation, and it is dropped here, so it is never sent (ADR-0013 clause 9). The file is then
 /// rewritten without it, best-effort, so the credential leaves the disk and the warning appears
 /// once; a failed rewrite is warned about and never fails the load.
 pub fn load(state_dir: &Path) -> Option<ConnectionSettingsOffers> {
@@ -58,20 +58,20 @@ pub fn load(state_dir: &Path) -> Option<ConnectionSettingsOffers> {
 
 /// Persists the settings now in force as the Baseline's own protobuf.
 ///
-/// The file outranks `supervisor.toml` (ADR-0014 clause 9) — it decides where this Client connects
+/// The file outranks `supervisor.toml` (ADR-0013 clause 9) — it decides where this Client connects
 /// and which certificate it presents — so it is written no wider than its owner, and the state
 /// directory holding it no wider than `0700`. On Windows the directory ACL under `%ProgramData%`
 /// protects it (ADR-0019); there is no mode to set.
 ///
 /// `group` is the process account's group where a process account is registered: the state
-/// directory stays passed through by it (ADR-0059 clause 6).
+/// directory stays passed through by it (ADR-0020 clause 21).
 pub fn store(
     state_dir: &Path,
     group: Option<crate::storage::ProcessAccountGroup>,
     settings: &ConnectionSettingsOffers,
 ) -> std::io::Result<()> {
     // Never through a link at the directory's name or the file's: an install enrols as root in a
-    // directory that belongs to the service's account (ADR-0054).
+    // directory that belongs to the service's account (ADR-0020).
     crate::storage::create_shared_dir(
         state_dir,
         state_dir,
@@ -89,7 +89,7 @@ pub fn store(
 ///
 /// The **OpAMP** settings carry only what changes — a heartbeat-only offer must not erase a
 /// previously offered endpoint, and vice versa. Offered `headers` are never folded in: this Client
-/// applies none (ADR-0014 clause 8). The **own-telemetry** destinations do not: an offer
+/// applies none (ADR-0013 clause 8). The **own-telemetry** destinations do not: an offer
 /// that names any of them states all three (ADR-0016). The two rules live in one function because
 /// one message carries both, and the difference between them is the whole of what this fold does.
 pub fn merge(
@@ -137,7 +137,7 @@ pub fn merge(
             offer.own_logs.as_ref(),
             stored.and_then(|s| s.own_logs.as_ref()),
         ),
-        // Built only when one of the two sides actually has OpAMP settings (ADR-0014 clause 9).
+        // Built only when one of the two sides actually has OpAMP settings (ADR-0013 clause 9).
         // Emitting a block unconditionally would have a telemetry-only offer persist the claim that
         // the Server offered OpAMP settings it never offered — a lie in the one file an operator is
         // told to inspect and delete, and one that makes the honest assertion untestable.
@@ -159,7 +159,7 @@ pub fn merge(
 }
 
 /// What to report for an offer that has been verified and applied: `Ok` when the Client honoured
-/// all of it, `Err` naming the fields it dropped (ADR-0014 clause 8).
+/// all of it, `Err` naming the fields it dropped (ADR-0013 clause 8).
 ///
 /// The Client applies what it understands and then says so. Reporting `APPLIED` for an offer whose
 /// `tls`, `proxy` or `headers` it discarded tells the Server the settings are in force when they
@@ -168,7 +168,7 @@ pub fn merge(
 ///
 /// None of the three is honoured, on purpose. `TLSConnectionSettings` is mostly a way to weaken
 /// verification — `insecure_skip_verify` would let a Server switch off the check that proves it is
-/// the Server — and trust here is an operator's file (ADR-0013). `ProxyConnectionSettings` has
+/// the Server — and trust here is an operator's file (ADR-0012). `ProxyConnectionSettings` has
 /// nothing on this Client to configure. Offered `headers` have no reader on the Agent plane, which
 /// admits by client certificate alone (ADR-0021): an applied one would be a value the Server plants
 /// on every connection of the fleet. They are named by their keys, never their values — the
@@ -195,10 +195,10 @@ pub fn unhonoured(settings: &OpAmpConnectionSettings) -> Result<(), String> {
     ))
 }
 
-/// Applies persisted settings over the loaded `supervisor.toml` (ADR-0014): the Server's word wins
+/// Applies persisted settings over the loaded `supervisor.toml` (ADR-0013): the Server's word wins
 /// where it spoke — endpoint and heartbeat (on plain HTTP the same value is the polling interval,
 /// the Baseline's MUST) — and the file's word stays everywhere else, except for a plaintext
-/// endpoint the file does not name (ADR-0040 clause 3).
+/// endpoint the file does not name (ADR-0013 clause 9).
 pub fn apply(config: &mut ClientConfig, stored: &ConnectionSettingsOffers) {
     let Some(settings) = &stored.opamp else {
         return;
@@ -206,7 +206,7 @@ pub fn apply(config: &mut ClientConfig, stored: &ConnectionSettingsOffers) {
     let endpoint = &settings.destination_endpoint;
     if opamp::endpoint::is_plaintext(endpoint) && *endpoint != config.endpoint {
         // A move to plaintext persisted before it was refused: `supervisor.toml` decides where this
-        // Client connects, so a host moved there returns at its next start (ADR-0040 clause 3).
+        // Client connects, so a host moved there returns at its next start (ADR-0013 clause 9).
         warn!(
             persisted = %endpoint,
             configured = %config.endpoint,
@@ -225,7 +225,7 @@ pub fn apply(config: &mut ClientConfig, stored: &ConnectionSettingsOffers) {
 /// offered fields, falling back to the current ones. A WebSocket candidate must complete its
 /// handshake; a plain-HTTP candidate must complete a real exchange, fed by `probe_report`. The
 /// current TLS trust override applies to the candidate too. Offered `headers` are never used, and
-/// no `Authorization` is sent (ADR-0014 clauses 5, 8).
+/// no `Authorization` is sent (ADR-0013 clauses 5 and 8).
 pub async fn verify(
     settings: &OpAmpConnectionSettings,
     config: &ClientConfig,
@@ -238,10 +238,10 @@ pub async fn verify(
     };
     // A move to another TLS endpoint is taken only where this Client's own CA file can vouch for
     // it: under the public roots alone, a Server could move the fleet to any host a public CA
-    // ever certified, and keep it there (ADR-0014 clause 5).
+    // ever certified, and keep it there (ADR-0013 clause 5).
     let moves = endpoint != config.endpoint;
     // Nor is a move to plaintext taken, on the loopback neither: no certificate would prove the
-    // Server, and whoever listens on that port would be it (ADR-0040 clause 2).
+    // Server, and whoever listens on that port would be it (ADR-0013 clause 5).
     if moves && opamp::endpoint::is_plaintext(&endpoint) {
         return Err(format!(
             "refusing the offered endpoint {endpoint}: an offer never moves this Client to \
@@ -256,7 +256,7 @@ pub async fn verify(
         ));
     }
     // An offered client certificate is proved the same way the endpoint is: by connecting with it
-    // (ADR-0014 clause 5). Until that succeeds the one in force stays in force, so a
+    // (ADR-0013 clause 5). Until that succeeds the one in force stays in force, so a
     // certificate that cannot authenticate costs nothing.
     let candidate_cert = settings
         .certificate
@@ -332,7 +332,7 @@ mod tests {
     /// Clause 6: what is persisted says only what was offered. A telemetry-only offer against a
     /// fresh state directory must not leave behind an empty `opamp` block claiming the Server
     /// offered settings it never sent.
-    /// Verifies: ADR-0014
+    /// Verifies: ADR-0013
     #[test]
     fn merge_leaves_opamp_absent_when_neither_side_has_one() {
         let merged = merge(None, &telemetry_only(b"t1", "https://x/v1/metrics"));
@@ -371,7 +371,7 @@ mod tests {
 
     /// Rule 2: an offer that names none of the three says nothing about telemetry. An issued
     /// certificate must not take the exporters down with it — that is what keeps the classes of
-    /// ADR-0014 independent, and it is the schema's own "not set means unchanged", held at the
+    /// ADR-0013 independent, and it is the schema's own "not set means unchanged", held at the
     /// level it still holds at.
     /// Verifies: ADR-0016
     #[test]
@@ -412,7 +412,7 @@ mod tests {
 
     /// And the fold still works the other way: a telemetry-only offer arriving over settings
     /// already in force leaves the OpAMP endpoint, heartbeat and certificate exactly where they were.
-    /// Verifies: ADR-0014
+    /// Verifies: ADR-0013
     #[test]
     fn merge_of_a_telemetry_only_offer_carries_the_opamp_settings_in_force_forward() {
         let stored = offer_with(b"h1", "wss://server/v1/opamp", Some("issued"), 20);
@@ -429,7 +429,7 @@ mod tests {
         assert_eq!(merged.hash, b"t2", "the new offer's hash is acknowledged");
     }
 
-    /// Verifies: ADR-0014
+    /// Verifies: ADR-0013
     #[test]
     fn load_store_round_trips() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -446,7 +446,7 @@ mod tests {
 
     /// The persisted file outranks `supervisor.toml` — it decides where this Client connects and
     /// what it presents — so it, and the directory it sits in, are no one else's on the host.
-    /// Verifies: ADR-0014
+    /// Verifies: ADR-0013
     #[cfg(unix)]
     #[test]
     fn stored_settings_and_their_directory_are_owner_only() {
@@ -476,7 +476,7 @@ mod tests {
         assert_eq!(dir_mode & 0o777, 0o700, "the state directory is owner-only");
     }
 
-    /// Verifies: ADR-0014
+    /// Verifies: ADR-0013
     #[test]
     fn merge_keeps_unchanged_fields_from_the_previous_settings() {
         let stored = offer_with(b"h1", "wss://old/v1/opamp", Some("old"), 30);
@@ -496,7 +496,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0014
+    /// Verifies: ADR-0013
     #[test]
     fn apply_overrides_client_toml_where_the_server_spoke() {
         let mut config = ClientConfig {
@@ -513,7 +513,7 @@ mod tests {
         assert_eq!(config.poll_interval_secs, 12);
     }
 
-    /// Verifies: ADR-0014
+    /// Verifies: ADR-0013
     #[test]
     fn apply_leaves_untouched_what_the_offer_omits() {
         let mut config = ClientConfig {
@@ -532,7 +532,7 @@ mod tests {
     /// An offer's `tls` and `proxy` are not taken: what is stored carries neither, so the
     /// connection keeps the operator's trust, and the report names both rather than claiming the
     /// offer was applied whole.
-    /// Verifies: ADR-0014
+    /// Verifies: ADR-0013
     #[test]
     fn offered_tls_and_proxy_are_neither_stored_nor_claimed() {
         use opamp::proto::{ProxyConnectionSettings, TlsConnectionSettings};
@@ -568,7 +568,7 @@ mod tests {
     /// Offered `headers` are dropped like `tls` and `proxy`: the rest of the offer is stored and
     /// applied, nothing of the headers is, and the report names them by their keys, never by a
     /// value.
-    /// Verifies: ADR-0014
+    /// Verifies: ADR-0013
     #[test]
     fn offered_headers_are_neither_stored_nor_claimed() {
         let mut offer = offer_with(b"h1", "wss://server.example/v1/opamp", Some("issued"), 15);
@@ -596,7 +596,7 @@ mod tests {
     /// A persisted file holds the `Authorization` header of a credential rotation. Loading it drops
     /// the header and keeps the rest, so nothing of it is ever sent, and rewrites the file without
     /// it, so the credential leaves the disk.
-    /// Verifies: ADR-0014
+    /// Verifies: ADR-0013
     #[test]
     fn a_persisted_authorization_header_is_dropped_on_load() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -660,7 +660,7 @@ mod tests {
 
     /// The verification connect carries no `Authorization` on either transport — not one an offer
     /// planted in its `headers`, and not one a leftover `[auth]` in the file still names.
-    /// Verifies: ADR-0014, ADR-0021
+    /// Verifies: ADR-0013, ADR-0021
     #[tokio::test]
     async fn verify_sends_no_authorization_even_when_one_is_offered() {
         // The `http` probe builds a reqwest client, which needs a process-wide provider.
@@ -710,7 +710,7 @@ mod tests {
 
     /// A move to another TLS endpoint is refused without the Client's own CA file: the public
     /// roots would let any publicly certified host take the fleet.
-    /// Verifies: ADR-0014
+    /// Verifies: ADR-0013
     #[tokio::test]
     async fn an_offered_move_needs_the_clients_own_ca() {
         let config: ClientConfig =
@@ -727,7 +727,7 @@ mod tests {
 
     /// An offered plaintext endpoint off the loopback is refused before anything is dialled, on
     /// either transport: the probe report a plain-HTTP exchange would send is never built.
-    /// Verifies: ADR-0014
+    /// Verifies: ADR-0013
     #[tokio::test]
     async fn verify_refuses_a_plaintext_endpoint_off_loopback_without_connecting() {
         let config = ClientConfig::default();
@@ -746,7 +746,7 @@ mod tests {
 
     /// A move to plaintext is refused on a loopback IP literal too, without dialling it: whoever
     /// listens there would be this Client's Server, unproven.
-    /// Verifies: ADR-0040
+    /// Verifies: ADR-0013
     #[tokio::test]
     async fn verify_refuses_a_move_to_plaintext_on_the_loopback() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -781,7 +781,7 @@ mod tests {
     /// A persisted plaintext endpoint that `supervisor.toml` does not name is not applied, so a
     /// host moved there returns to its configured endpoint; one the file names, and a persisted
     /// TLS endpoint, still are.
-    /// Verifies: ADR-0040
+    /// Verifies: ADR-0013
     #[test]
     fn apply_ignores_a_persisted_plaintext_endpoint_the_file_does_not_name() {
         let configured = |endpoint: &str| ClientConfig {
@@ -813,7 +813,7 @@ mod tests {
 
     /// A host name never counts as the loopback, not even `localhost`: an offered plaintext
     /// endpoint naming one is refused, and the listener behind it is never dialled.
-    /// Verifies: ADR-0014
+    /// Verifies: ADR-0013
     #[tokio::test]
     async fn verify_refuses_a_plaintext_endpoint_on_a_host_name() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -841,7 +841,7 @@ mod tests {
 
     /// The verification connect presents the client certificate in force: a listener that
     /// requires one admits the probe with it and refuses the same probe without it.
-    /// Verifies: ADR-0014
+    /// Verifies: ADR-0013
     #[tokio::test]
     async fn verify_presents_the_client_certificate_in_force() {
         use opamp::server::listen::{ClientAuth, Handle, Listener, ServerTls};

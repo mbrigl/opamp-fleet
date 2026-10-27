@@ -16,7 +16,8 @@ is one machine, the Clients are all the others — so each half can be read on i
 The two halves interlock in three places, and each is described on both sides: **authentication**
 (the Client presents a client certificate the Server accepts, and a new host is
 enrolled on an operator's approval), **connection settings** (the Server can move
-the fleet to a new endpoint and renews each certificate), and **packages** (the Server decides *which* artifact an
+the fleet to a new endpoint and renews each certificate), and **packages** (the Server decides
+*which* artifact an
 Agent gets, the Client decides *whether* it takes one at all).
 
 ## What this manual is not
@@ -88,7 +89,8 @@ development set of them.
    ([Enrol the Client](setup.md#5-enrol-the-client)).
 
 4. **Open the UI** at <https://127.0.0.1:4321/>. Your browser does not know the development CA, so
-   import `.dev-pki/offline/server-ca.pem` into its trust store first. The Agent is listed as *Connected*, with
+   import `.dev-pki/offline/server-ca.pem` into its trust store first. The Agent is listed as
+   *Connected*, with
    the attributes it reported.
 
 5. **Create a Configuration and roll it out through a Deployment.** In the UI, press
@@ -166,11 +168,13 @@ Agent of another type, and it aims at nobody by itself.
 
 **Selector and Deployment.** A *Selector* is a set of `key=value` pairs that an Agent's effective
 description must equal: the `fleet.host.*` values of the Host it connects over, what it reported,
-its labels, and the labels of its Client's own Agent, in that order. It aims a *Deployment*: a name, the **channel** its Selector
+its labels, and the labels of its Client's own Agent, in that order. It aims a *Deployment*: a name,
+the **channel** its Selector
 names, at most one Package per Agent type, and any number of Configurations. It is the only thing
 that is rolled out — one press releases its Packages and Configurations together — and an
 Agent belongs to **at most one** — two claiming the same Agent is a conflict the Server reports
-rather than resolves. A Selector is equality and cannot say "not", so channels are a partition over an
+rather than resolves. A Selector is equality and cannot say "not", so channels are a partition over
+an
 attribute every Agent carries; there is no fleet-wide default. The Server decides which artifact an
 Agent is offered; the Client decides whether it accepts packages at all. Every artifact is verified
 by its content hash and by its Ed25519 signature, which the operator puts on each entry of the
@@ -200,7 +204,8 @@ its environment alone
 ([Configuration from the environment](server.md#configuration-from-the-environment)). The Client
 reads no setting from its environment. Most keys are optional; the TLS material is not. An unknown
 key is refused at startup rather than ignored. The
-annotated examples in [`config/`](../../config/) are the reference copies: [`config/server.toml`](../../config/server.toml) and
+annotated examples in [`config/`](../../config/) are the reference copies:
+[`config/server.toml`](../../config/server.toml) and
 [`config/supervisor.toml`](../../config/supervisor.toml).
 
 ## Not built yet

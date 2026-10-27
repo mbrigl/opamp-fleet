@@ -1,5 +1,5 @@
 //! What a certificate signing request asks for, read with `x509-parser`: the adapter the proofs a
-//! CSR carries (ADR-0021 clause 27, ADR-0039) are found through, on the Server and on a Gateway
+//! CSR carries (ADR-0015 clauses 18, 20 and 21) are found through, on the Server and on a Gateway
 //! alike.
 //!
 //! A request arrives as PEM and is decoded once, strictly, by [`der`]: every proof, every claim and
@@ -99,7 +99,7 @@ mod tests {
     }
 
     /// A request's SAN URI is found by its prefix, and a request without one has none.
-    /// Verifies: ADR-0039
+    /// Verifies: ADR-0015
     #[test]
     fn a_requested_uri_is_found_by_its_prefix() {
         let csr = der(csr(&format!("{URI_PREFIX}abc")).as_bytes()).expect("one block");
@@ -110,9 +110,9 @@ mod tests {
 
     /// One block with whitespace around it is read; text before or after it or on a boundary's
     /// line, a second block, another label, a header, and content that is no request are refused — what makes every
-    /// reader of a request read the same one (ADR-0021 clause 27, ADR-0039).
+    /// reader of a request read the same one (ADR-0015 clauses 18 and 21).
     /// Verifies: ADR-0021
-    /// Verifies: ADR-0039
+    /// Verifies: ADR-0015
     #[test]
     fn a_request_is_exactly_one_pem_block() {
         let one = csr("urn:example:one");

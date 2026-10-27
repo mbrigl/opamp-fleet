@@ -34,7 +34,7 @@ Repairing Harm* guidelines of the Contributor Covenant 3.0.
 
 ## Attribution
 
-This Code of Conduct is adapted from the [Contributor Covenant](https://www.contributor-covenant.org),
-version 3.0, available at
+This Code of Conduct is adapted from the
+[Contributor Covenant](https://www.contributor-covenant.org), version 3.0, available at
 <https://www.contributor-covenant.org/version/3/0/code_of_conduct/>, and licensed under
 [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/).

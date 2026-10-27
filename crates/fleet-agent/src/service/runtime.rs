@@ -23,7 +23,7 @@ use crate::transport::{self, RunOutcome};
 /// override (`--state-dir`, baked into installed units so they never depend on a relative path).
 #[derive(Debug, Clone)]
 pub struct RunSpec {
-    /// Path to `supervisor.toml` (ADR-0010); defaults apply if the file does not exist.
+    /// Path to `supervisor.toml` (ADR-0030); defaults apply if the file does not exist.
     pub config_path: PathBuf,
     /// Overrides the configuration file's `state_dir` when present.
     pub state_dir: Option<PathBuf>,
@@ -32,14 +32,14 @@ pub struct RunSpec {
     /// and the whole of the condition for writing the log file: it says no terminal is watching.
     pub service: bool,
     /// The second service every Managed Process is started through, where a process account is
-    /// registered (ADR-0059 clause 3): from the hidden `--agents-socket` and `--process-uid` — on
+    /// registered (ADR-0020 clause 18): from the hidden `--agents-socket` and `--process-uid` — on
     /// Windows `--process-sid` — that `service install --process-account` writes into the command
     /// line.
     pub agents: Option<AgentsChannel>,
 }
 
 /// Where the second service listens — its socket, or its named pipe on Windows — and the account
-/// it must answer as: its uid, or its SID (ADR-0059 clause 4).
+/// it must answer as: its uid, or its SID (ADR-0020 clause 19).
 #[derive(Debug, Clone)]
 pub struct AgentsChannel {
     pub socket: PathBuf,
@@ -182,13 +182,13 @@ fn start_log_file(config: &crate::config::ClientConfig) {
 /// What this process is and what it will use, in one line each, before it uses any of it.
 ///
 /// **The version is the point of the first line.** It rides in every report to the Server and names
-/// the directory this binary runs from (ADR-0019), and logged here it lets the file a self-update
+/// the directory this binary runs from (ADR-0020), and logged here it lets the file a self-update
 /// leaves behind (ADR-0018, ADR-0019) be attributed to the version that wrote it, which is the
 /// situation that file exists for. The rest of the line is what an operator otherwise has to
 /// reconstruct from the command line of a service they did not start.
 ///
 /// **The second line is the trust and the identity in force**, resolved through the same two
-/// accessors the transports build their TLS from (ADR-0013, ADR-0021) rather than read off the
+/// accessors the transports build their TLS from (ADR-0012, ADR-0021) rather than read off the
 /// configuration — so it states what *will* be presented, including a Server-issued certificate
 /// that no `supervisor.toml` mentions. Without it, a handshake that fails because the identity is
 /// not the one anybody assumed is diagnosed from the peer's error message, which is written by the
@@ -245,7 +245,7 @@ fn tls_posture(config: &ClientConfig) -> (String, String) {
 ///
 /// Without this, the net catches everything except the one failure a *new* version is most likely
 /// to bring: a file it refuses. A removed configuration key is exactly that
-/// ([ADR-0017](../../../../docs/adr/0017-supervisor-mode-kinds-directories-and-what-the-server-may-change.md)), and for some kinds there
+/// ([ADR-0017](../../../../docs/adr/0017-supervisor-mode-and-its-kinds.md)), and for some kinds there
 /// is no block both versions accept, so the cutover per host cannot be avoided — only caught.
 fn unreadable_config(spec: &RunSpec, error: String) -> Result<Exit, String> {
     let state_dir = recovery_state_dir(spec);
@@ -283,7 +283,7 @@ fn recovery_state_dir(spec: &RunSpec) -> PathBuf {
 }
 
 /// Load the configuration, build the Engine (the configured Supervisors, or the self-Agent when
-/// none are), and run the transport the endpoint selects (ADR-0013) until `shutdown` fires.
+/// none are), and run the transport the endpoint selects (ADR-0012) until `shutdown` fires.
 ///
 /// # Errors
 /// Returns an error if the configuration cannot be loaded or the Agent state cannot be restored.
@@ -298,7 +298,7 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
         Err(error) => return unreadable_config(&spec, error),
     };
     // What the Client shares with the Managed Processes belongs to the process account's group
-    // (ADR-0059 clause 6), from before anything is written.
+    // (ADR-0020 clause 21), from before anything is written.
     if let Some(agents) = &spec.agents {
         config.process_account_group = Some(process_account_group(&agents.process)?);
     }
@@ -334,7 +334,7 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
     };
 
     // A Client the self-update left behind ends as for its own update, through the shutdown that
-    // stops its Supervisors and says goodbye (ADR-0059 clause 2).
+    // stops its Supervisors and says goodbye (ADR-0020 clause 17).
     let left_behind = Arc::new(AtomicBool::new(false));
     let spawner = match &spec.agents {
         Some(agents) => {
@@ -345,7 +345,7 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
         None => supervisor::process::Spawner::Local,
     };
     let mut engine = supervisor::build_engine(&config, &shutdown, spawner)?;
-    // The floor of each Agent type (ADR-0061 clause 4): read from `state_dir` once, fetched from
+    // The floor of each Agent type (ADR-0028 clause 17): read from `state_dir` once, fetched from
     // the endpoint as it falls due, and held to by every Agent of this Client.
     let floors = Arc::new(crate::floors::FloorFile::open(
         &config.state_dir,
@@ -362,7 +362,7 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
             .with_floors(agent_type, floors.clone()),
         );
     }
-    // There is no unsigned posture (ADR-0026, ADR-0018): without `[packages] verification_key` no
+    // There is no unsigned posture (ADR-0027, ADR-0018): without `[packages] verification_key` no
     // Agent of this Client takes packages, its own self-update included. Said once at startup, since
     // the Server only sees an Agent that declares no package capability.
     if config.package_key().is_none() {
@@ -396,7 +396,7 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
     let mut gateway = spawn_gateway(&config, &shutdown);
     if let Some(stored) = connection::load(&config.state_dir) {
         // A restarted Client reports the persisted settings APPLIED, so the Server does not
-        // re-offer what it already runs (ADR-0014).
+        // re-offer what it already runs (ADR-0013).
         engine.adopt_connection_settings(&stored.hash);
         // …and resumes reporting to the destinations it was last told about, before it has spoken
         // to anyone: telemetry from a Client that cannot reach the Server is the useful kind.
@@ -451,13 +451,13 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
                 telemetry.shutdown();
                 return Ok(Exit::RestartForUpdate);
             }
-            // Verified connection settings took effect (ADR-0014): re-resolve the effective
+            // Verified connection settings took effect (ADR-0013): re-resolve the effective
             // configuration — endpoint, certificate, intervals, possibly the other transport —
             // and reconnect. The Engine (and its Managed Processes) carries on.
             RunOutcome::Reconfigured => {
                 config = load_effective_config(&spec)?;
                 // The telemetry destinations of the same offer are already in force: since
-                // ADR-0014 `process_connection_offer` applies them before it asks for the
+                // ADR-0013 `process_connection_offer` applies them before it asks for the
                 // reconnect, and it composes the one acknowledgement that names anything refused.
                 // Re-applying here would be a no-op through `in_force` whose only visible effect
                 // was a `warn!` with no acknowledgement attached — which was the bug.
@@ -507,8 +507,8 @@ async fn sample_beside<T>(
     }
 }
 
-/// The configuration in force: `supervisor.toml` (ADR-0010), the `--state-dir` override, and the
-/// persisted Server-offered connection settings on top (ADR-0014).
+/// The configuration in force: `supervisor.toml` (ADR-0030), the `--state-dir` override, and the
+/// persisted Server-offered connection settings on top (ADR-0013).
 fn load_effective_config(spec: &RunSpec) -> Result<ClientConfig, String> {
     let mut config = ClientConfig::load(&spec.config_path)?;
     if let Some(state_dir) = &spec.state_dir {
@@ -520,7 +520,7 @@ fn load_effective_config(spec: &RunSpec) -> Result<ClientConfig, String> {
     Ok(config)
 }
 
-/// ADR-0019 self-heal: when running from a versioned install layout, make sure `current`
+/// ADR-0020 self-heal: when running from a versioned install layout, make sure `current`
 /// resolves to the directory this binary actually runs from — a crash mid-switch otherwise
 /// leaves the pointer torn. Best-effort: a plain foreground run outside a layout is untouched.
 fn heal_torn_pointer() {
@@ -541,7 +541,7 @@ fn heal_torn_pointer() {
 }
 
 /// The primary group of the process account `uid` names, from the password database: the group
-/// the Client shares what the Managed Processes read with (ADR-0059 clause 6). The registration
+/// the Client shares what the Managed Processes read with (ADR-0020 clause 21). The registration
 /// names the account by its uid alone.
 ///
 /// # Errors
@@ -563,7 +563,7 @@ fn process_account_group(uid: &u32) -> Result<crate::storage::ProcessAccountGrou
 }
 
 /// On Windows the process account itself, by the SID the registration names: what the Client
-/// shares with the Managed Processes is granted to it (ADR-0059 clause 6).
+/// shares with the Managed Processes is granted to it (ADR-0020 clause 21).
 ///
 /// # Errors
 /// Never; the SID was read when the command line was.
@@ -579,7 +579,7 @@ fn process_account_group(
 /// What resolves once the second service tells this Client that a self-update left it behind.
 type LeftBehind = Pin<Box<dyn Future<Output = ()> + Send>>;
 
-/// Every Managed Process of this run is started by the second service (ADR-0059 clause 3). The
+/// Every Managed Process of this run is started by the second service (ADR-0020 clause 18). The
 /// channel connects at the first start; a Client that cannot reach the service reports it per
 /// Supervisor and never starts a program itself. Beside the spawner: what resolves once the
 /// service turns out to be the build `current` names while this Client is not.
@@ -596,7 +596,7 @@ fn through_the_second_service(
     #[allow(clippy::clone_on_copy)]
     let process = agents.process.clone();
     // Each connection is also checked against the process the service manager runs as the second
-    // service (ADR-0059 clause 4).
+    // service (ADR-0020 clause 19).
     watched(Channel::new(
         &agents.socket,
         process,
@@ -618,7 +618,7 @@ fn watched(
 
 /// The run's shutdown where the second service starts its programs: `shutdown`, or `told`
 /// resolving — the self-update left this Client behind, and `left_behind` then says so, which
-/// ends the run for the restart that starts the version `current` names (ADR-0059 clause 2).
+/// ends the run for the restart that starts the version `current` names (ADR-0020 clause 17).
 fn or_left_behind(
     mut shutdown: Shutdown,
     told: LeftBehind,
@@ -690,7 +690,7 @@ mod tests {
 
     /// The shutdown signal's handlers are in place once `shutdown_signal` returns: a `SIGTERM`
     /// raised before its future is first polled is caught, and resolves it, instead of ending
-    /// the process by its default disposition (ADR-0019 clause 12).
+    /// the process by its default disposition (ADR-0019 clause 18).
     /// Verifies: ADR-0019
     #[cfg(unix)]
     #[tokio::test]
@@ -705,10 +705,10 @@ mod tests {
 
     /// A Client whose start meets a second service of another build, while `current` no longer
     /// names its own version, ends its run as for its own update; one the operator stops ends as
-    /// stopped (ADR-0059 clause 2). From the start through the Spawner the run hands its
+    /// stopped (ADR-0020 clause 17). From the start through the Spawner the run hands its
     /// Supervisors to the end of the run's shutdown; what the run returns on it is the one line
     /// after, reached only by a whole run against a Server.
-    /// Verifies: ADR-0059
+    /// Verifies: ADR-0020
     #[cfg(unix)]
     #[tokio::test]
     async fn a_client_left_behind_ends_its_run_for_the_restart() {
