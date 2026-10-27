@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Self-test of scripts/sensor-review-binding.sh. Verifies: ADR-0001
+# Self-test of scripts/sensor-review-binding.sh.
 #
 # Each case builds a throwaway git repository under a temporary directory with a main tagged
 # 'base' and a feat/ branch at it, merges one or more branches into that with --no-ff and a chosen

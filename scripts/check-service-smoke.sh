@@ -4,8 +4,8 @@
 # platform it runs on, with the process account of ADR-0020 and the enrolment of the install
 # (ADR-0022 clause 19); .github/workflows/service-smoke.yml says per platform what that asserts.
 # The 'smoke' job runs it on Windows, Linux, and macOS. It registers services and accounts on the
-# machine, so scripts/check-all.sh names it on an '# On instruction:' line, for a throwaway
-# machine only.
+# machine, so it runs on a throwaway one only: in a CI run (CI=true), or where
+# FLEET_SMOKE_THROWAWAY=1 says the machine is one. Elsewhere it says so and skips.
 #
 # On Linux and macOS the test runs as root through `sudo -E`, the toolchain's PATH kept; on
 # Windows the runner's shell is already elevated. On Linux two tests run as root besides: no link
@@ -21,6 +21,11 @@
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
+
+if [[ "${CI:-}" != "true" && "${FLEET_SMOKE_THROWAWAY:-}" != "1" ]]; then
+  echo "Skipped: it registers services and accounts; set FLEET_SMOKE_THROWAWAY=1 on a throwaway machine."
+  exit 0
+fi
 
 command -v cargo >/dev/null || { echo "cargo is required (rust-toolchain.toml names the toolchain)" >&2; exit 1; }
 

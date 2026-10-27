@@ -255,6 +255,7 @@ d="$(repo reusable-workflow)"
   echo "    uses: owner/repo/.github/workflows/w.yml@v1"
 } > "$d/.github/workflows/checks.yml"
 expect fail "a reusable workflow is classified as an action is" "$d" "'owner/repo/.github/workflows/w.yml@v1' is a third-party action"
+# shellcheck disable=SC2016  # '$d' is sed's last line, not a variable
 sed_in "$d/.github/workflows/checks.yml" '/call-tagged/,$d'
 expect pass "a pinned reusable workflow as a job-level key" "$d" "1 third-party on commit SHAs"
 

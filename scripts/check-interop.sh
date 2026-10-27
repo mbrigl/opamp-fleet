@@ -4,8 +4,8 @@
 # is formatted and vetted first, the test is built next, so that a compile failure does not read
 # as an interop failure, and then run. The 'interop' job of .github/workflows/interop.yml runs it
 # on a schedule; interop/README.md says what it covers and how a red run is triaged.
-# scripts/check-all.sh names it on an '# On instruction:' line: it needs a Go toolchain, which
-# nothing else here needs.
+# Without a Go toolchain, which nothing else here needs, the check says so and skips, except in
+# a CI run (CI=true), where it fails.
 #
 # Needs the Rust toolchain of rust-toolchain.toml and Go as interop/go.mod names it.
 #
@@ -17,7 +17,14 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-command -v go >/dev/null || { echo "go is required (interop/go.mod names the version)" >&2; exit 1; }
+if ! command -v go >/dev/null; then
+  if [[ "${CI:-}" == "true" ]]; then
+    echo "ERROR: go not found in a CI run (interop/go.mod names the version)." >&2
+    exit 1
+  fi
+  echo "Skipped: no Go toolchain (interop/go.mod names the version)."
+  exit 0
+fi
 command -v cargo >/dev/null || { echo "cargo is required (rust-toolchain.toml names the toolchain)" >&2; exit 1; }
 
 unformatted="$(cd interop && gofmt -l .)"

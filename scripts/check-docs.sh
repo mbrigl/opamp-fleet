@@ -36,8 +36,6 @@
 #      another one appears. The headings there must themselves run 1..N in order: a gap or a
 #      repeat is a botched renumbering, and it is the only half of the renumbering hazard a check
 #      can see (AGENTS.md, section 3).
-#      A citation into an external specification (e.g. "RFC 9110 §11") reuses the section sign
-#      for a document that is not in this repository, so it is accepted unverified.
 #   5. ADR-reference integrity: every 'ADR-NNNN' reference (with actual digits) and every
 #      'ADR-draft-<slug>' reference (with an actual slug) names an ADR file that exists in
 #      docs/adr/ — anticipated follow-ups are described by topic, never by a number that does
@@ -65,13 +63,9 @@
 #      check that runs in only one of them is a gate somebody believes in and does not have
 #      (AGENTS.md, section 5). A job that runs no script under scripts/ fails too: its commands
 #      run in CI and never in the local gate. So does a script under scripts/ that neither list
-#      runs, unless check-all.sh names it on an '# On instruction:' line. A script named there may
-#      run in a workflow alone: a gate on another platform or against a real store, which the
-#      local runner cannot run. The README may also name a job of .github/workflows/ci.yml as a
-#      required check; that job has to exist and carry neither a 'name:' nor a matrix, or its
-#      check reports under a rendered name the ruleset never sees.
-#      A workflow check-all.sh names on a '# Not a gate:' line publishes rather than checks, as a
-#      release does; its jobs may run commands of their own.
+#      runs, unless check-all.sh names it on an '# On instruction:' line. A workflow check-all.sh
+#      names on a '# Not a gate:' line publishes rather than checks, as a release does: its jobs
+#      may run commands of their own, and the scripts they run still count.
 #  10. Project Layout integrity: every path listed in the 'Project Layout' block of README.md
 #      exists, a trailing '/' meaning a directory. The block is written by hand and nothing else
 #      tells a reader that one of its lines has gone stale. A path with a '*' matches at least one
@@ -119,20 +113,6 @@
 #      else the branch a push runs on. A draft pull request passes, since it tests a feat/ branch
 #      still under rework, and so does a run outside CI, where nothing names the branch; the
 #      workflow says in PULL_REQUEST_DRAFT whether a pull request is a draft.
-#  17. Protocol Baseline currency: the pinned OpAMP specification version in docs/CONFORMANCE.md
-#      is compared against the latest upstream release. A divergence is a *warning*, never an
-#      error — an upstream release is not a defect in this repository, and failing here would
-#      turn CI red for something outside it. Requires network; without one it prints a note and
-#      skips, so every other check stays usable offline. The check itself is
-#      scripts/check-protocol-baseline.sh, which scripts/test-check-protocol-baseline.sh drives
-#      against fixtures; a helper that is missing or fails without saying why is an error here.
-#      It concerns this repository only, so it does not run against a fixture root passed by
-#      scripts/test-check-docs.sh.
-#  18. The user manual cites no ADR: no file under docs/manual/ names an 'ADR-NNNN' or links into
-#      docs/adr/. The manual is for the people who run the software and says what to do; a
-#      decision record is for those who change it, and a citation sends an operator to a page
-#      that does not answer their question. A repository without docs/manual/ has nothing to
-#      check.
 #
 # Checks 5 and 6 read every text file of the repository, not a list of documentation extensions:
 # docs/adr/README.md states that code may reference an ADR number, so a verifier restricted to
@@ -145,13 +125,12 @@
 #
 # Pure bash + coreutils/grep/sed/awk/find, plus git to enumerate the repository's files — all present
 # in the Dev Container base image, so running it adds no toolchain and no dependency that would
-# require an ADR. Check 17 additionally uses curl when it is available, and degrades to a skip when
-# it is not.
+# require an ADR.
 #
 # Usage:
 #     scripts/check-docs.sh [repository root]        (or: bash scripts/check-docs.sh)
 # The root defaults to this repository; scripts/test-check-docs.sh passes fixture repositories.
-# Exit code 0 when all checks pass, 1 otherwise. Warnings do not affect the exit code.
+# Exit code 0 when all checks pass, 1 otherwise.
 
 set -uo pipefail
 
@@ -163,14 +142,6 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib/check.sh"
 ROOT="$(cd "${1:-$(dirname "${BASH_SOURCE[0]}")/..}" && pwd)"
 ADR_DIR="$ROOT/docs/adr"
 ADR_INDEX="$ADR_DIR/README.md"
-CONFORMANCE="$ROOT/docs/CONFORMANCE.md"
-# Check 17 concerns this repository, not the template mechanics a fixture root exercises.
-OWN_REPOSITORY=$(( $# == 0 ))
-
-# Warnings report drift that is outside this repository's control (see check 17). They are
-# printed but never affect the exit code.
-warnings=()
-add_warning() { warnings+=("$1"); }
 
 
 # The helpers below set a variable rather than print: a check calls them once per ADR or per
@@ -841,9 +812,6 @@ check_section_refs() {
             rest="${rest#*\`}"
           done
           line+="$rest"
-          # A citation into an external spec (e.g. 'RFC 9110 §11') reuses the section sign for a
-          # document outside this repository — accept it unverified, like an external link.
-          while [[ "$line" =~ RFC\ [0-9]+\ §[0-9]+ ]]; do line="${line/"${BASH_REMATCH[0]}"/}"; done
           [[ "$line" == *§* ]] || continue
           # Split the line into its links and what is left once every link is removed, which is a
           # reference nothing verifies. Each match is the leftmost one, so cutting the text up to
@@ -886,12 +854,10 @@ check_section_refs() {
         ;;
       *)
         while IFS=: read -r lineno line; do
-          # A citation into an external spec (e.g. 'RFC 9110 §11') is accepted unverified.
-          [[ "$line" == RFC\ * ]] && continue
           n="${line#§}"
           _contains "$n" "${valid_sections[@]}" \
             || add_error "$rel:$lineno: reference '§$n' matches no numbered section in AGENTS.md"
-        done < <(grep -noE '(RFC [0-9]+ )?§[0-9]+' "$f")
+        done < <(grep -noE '§[0-9]+' "$f")
         ;;
     esac
   done
@@ -975,11 +941,6 @@ check_check_lists() {
   # alone are the required checks.
   local line job="" job_scripts=0 in_jobs=0 file rel is_checks
   local wf_jobs=() wf_scripts=()
-  # The CI workflow's jobs may be required checks too, gates on another platform: its job ids,
-  # and those whose check carries another name — a job with a 'name:' of its own, or a matrix,
-  # which appends its values to the name.
-  local rel_ci=".github/workflows/ci.yml" is_ci
-  local ci_jobs=() ci_renamed=()
   # A workflow that check-all.sh names on a line '# Not a gate: .github/workflows/<file>' publishes
   # rather than checks, as a release does: its jobs may run commands of their own, and the scripts
   # they run still count.
@@ -1000,8 +961,6 @@ check_check_lists() {
     rel="${file#"$ROOT"/}" in_jobs=0 job="" job_scripts=0 is_checks=0 gate=1
     _contains "$rel" "${not_gate[@]}" && gate=0
     [[ "$file" == "$wf" ]] && is_checks=1
-    is_ci=0
-    [[ "$rel" == "$rel_ci" ]] && is_ci=1
     while IFS= read -r line; do
       [[ "$line" == "jobs:"* ]] && { in_jobs=1; continue; }
       ((in_jobs)) || continue
@@ -1010,10 +969,8 @@ check_check_lists() {
         job="${BASH_REMATCH[1]}"
         job_scripts=0
         ((is_checks)) && wf_jobs+=("$job")
-        ((is_ci)) && ci_jobs+=("$job")
         continue
       fi
-      ((is_ci)) && [[ -n "$job" && "$line" =~ ^\ \ \ \ (name|strategy): ]] && ci_renamed+=("$job")
       [[ "$line" =~ run:[[:space:]]+bash[[:space:]]+(scripts/[A-Za-z0-9._-]+\.sh) ]] \
         && { wf_scripts+=("${BASH_REMATCH[1]}"); job_scripts=$((job_scripts + 1)); }
     done < "$file"
@@ -1035,16 +992,9 @@ check_check_lists() {
     return
   fi
 
-  # A script named on a line '# On instruction: scripts/<name>.sh' of the local runner runs on a
-  # human's instruction, as a sensor that reads GitHub (ADR-0002), and may run in a workflow
-  # alone: a gate on another platform or against a real store, which the local runner cannot run.
-  local on_instruction=() name
-  while IFS= read -r name; do on_instruction+=("$name"); done \
-    < <(sed -n 's/^#[[:space:]]*On instruction:[[:space:]]*\(scripts\/[A-Za-z0-9._-]*\.sh\).*/\1/p' "$all")
-
   local s
   for s in "${wf_scripts[@]}"; do
-    _contains "$s" "${all_scripts[@]}" "${on_instruction[@]}" \
+    _contains "$s" "${all_scripts[@]}" \
       || add_error "$rel_all: does not run '$s', which a workflow runs — CI and the local gate disagree"
   done
   for s in "${all_scripts[@]}"; do
@@ -1052,8 +1002,12 @@ check_check_lists() {
       || add_error "$rel_all: runs '$s', which no job of a workflow runs — CI and the local gate disagree"
   done
 
-  # Every script under scripts/ runs in the two lists, unless the local runner names it on an
-  # '# On instruction:' line. A script in neither list is a check nobody runs.
+  # Every script under scripts/ runs in the two lists, unless the local runner names it on a line
+  # '# On instruction: scripts/<name>.sh', as for a sensor that reads GitHub (ADR-0002). A script
+  # in neither list is a check nobody runs.
+  local on_instruction=() name
+  while IFS= read -r name; do on_instruction+=("$name"); done \
+    < <(sed -n 's/^#[[:space:]]*On instruction:[[:space:]]*\(scripts\/[A-Za-z0-9._-]*\.sh\).*/\1/p' "$all")
   while IFS= read -r name; do
     s="scripts/${name##*/}"
     [[ "$s" == "$rel_all" ]] && continue
@@ -1080,13 +1034,8 @@ check_check_lists() {
   fi
 
   for name in "${readme_names[@]}"; do
-    _contains "$name" "${wf_jobs[@]}" && continue
-    if _contains "$name" "${ci_jobs[@]}"; then
-      _contains "$name" "${ci_renamed[@]}" \
-        && add_error "README.md: required check '$name' is a job of $rel_ci with a 'name:' or a matrix — its check reports under another name, and a ruleset would wait for one that never reports"
-      continue
-    fi
-    add_error "README.md: required check '$name' is not a job of $rel_wf or $rel_ci — a ruleset would wait for a check that never reports"
+    _contains "$name" "${wf_jobs[@]}" \
+      || add_error "README.md: required check '$name' is not a job of $rel_wf — a ruleset would wait for a check that never reports"
   done
   for job in "${wf_jobs[@]}"; do
     _contains "$job" "${readme_names[@]}" \
@@ -1317,39 +1266,6 @@ check_template_release() {
     || add_error "README.md: the Template release line names neither a 'vX.Y.Z' tag nor 'unreleased' — a release moves it to the tag it cuts (ADR-0005)"
 }
 
-# Check 17 (see the header).
-check_protocol_baseline() {
-  local helper="$ROOT/scripts/check-protocol-baseline.sh" output rc line said=0
-  if [[ ! -r "$helper" ]]; then
-    add_error "scripts/check-protocol-baseline.sh is missing — the Protocol Baseline check cannot run"
-    return
-  fi
-  output="$(bash "$helper" "$CONFORMANCE" 2>&1)"; rc=$?
-  while IFS= read -r line; do
-    case "$line" in
-      "Error: "*) add_error "${line#Error: }"; said=1 ;;
-      "Warning: "*) add_warning "${line#Warning: }" ;;
-      ?*) echo "$line" ;;
-    esac
-  done <<< "$output"
-  # A failure that names no error is the check not running, which must not read as a pass.
-  if ((rc != 0 && !said)); then
-    add_error "scripts/check-protocol-baseline.sh failed (exit $rc) without naming an error"
-  fi
-}
-
-# Check 18 (see the header). Every line is read, code fences included: a citation in an example is
-# still one an operator follows.
-check_manual_cites_no_adr() {
-  local dir="$ROOT/docs/manual" file hit
-  [[ -d "$dir" ]] || return
-  while IFS= read -r file; do
-    while IFS= read -r hit; do
-      add_error "${file#"$ROOT"/}:${hit%%:*}: cites an ADR — the manual says what to do and why it matters to an operator; the decision record stays in docs/adr/"
-    done < <(grep -nE 'ADR-[0-9]{4}|(^|[(/])\.\./adr/|docs/adr/' "$file")
-  done < <(find "$dir" -type f -name '*.md' | sort)
-}
-
 collect_text_files
 read_adr_headers
 scan_markdown
@@ -1369,15 +1285,6 @@ check_inherited_adrs
 check_template_identity
 check_template_release
 check_prose_width
-check_manual_cites_no_adr
-((OWN_REPOSITORY)) && check_protocol_baseline
-
-if ((${#warnings[@]} > 0)); then
-  echo "Warnings:"
-  echo
-  for w in "${warnings[@]}"; do echo "  - $w"; done
-  echo
-fi
 
 if ((${#errors[@]} > 0)); then
   echo "Documentation checks FAILED:"

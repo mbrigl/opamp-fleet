@@ -9,11 +9,11 @@
 # code and, for a failing case, the message that names the violation. The baseline passes; every
 # other case breaks one thing. The skill pointer check (check 11 of check-docs.sh) is covered in
 # every direction; of the older checks, one case each pins the message a maintainer would meet
-# first — check 9 gets two more for the toolchain job a derived project adds, checks 12 and 13
+# first — check 9 gets two more for the toolchain job a derived project adds and four for a
+# release workflow named as no gate, checks 12 and 13
 # (inherited ADRs decided and the template's identity replaced once the setup file is gone) have
-# a case for each of their conditions, check 14 (the template release named) one for each
-# form the line may take, and check 16 (the user manual cites no ADR) one for each form a
-# citation takes.
+# a case for each of their conditions, and check 14 (the template release named) one for each
+# form the line may take.
 #
 # Section references and ADR numbers inside fixtures are assembled, never written literally, so
 # that check-docs.sh does not read this script's own fixtures as references into this repository.
@@ -595,17 +595,6 @@ d="$(repo consolidation-wrapped-half)"
 consolidation "$d" no wrap
 expect fail "a wrapped Supersedes field, the name on the second line not flipped" "$d" "0002-decision.md: 0003-decision.md supersedes it"
 
-# --- cases: a citation into an external specification (check 4) ---------------------------
-
-d="$(repo rfc-markdown)"
-echo "As [RFC 9110 $(sect 11)](https://www.rfc-editor.org/rfc/rfc9110#section-11) and RFC 5280 $(sect 4) say." >> "$d/README.md"
-expect pass "an RFC section cited in Markdown, linked and plain" "$d"
-
-d="$(repo rfc-shell)"
-printf '#!/usr/bin/env bash\n# Framing follows RFC 6455 %s.\n' "$(sect 5)" > "$d/scripts/frame.sh"
-echo "# On instruction: scripts/frame.sh" >> "$d/scripts/check-all.sh"
-expect pass "an RFC section cited in a shell comment" "$d"
-
 d="$(repo section-ref)"
 echo "Cited in [\`AGENTS.md\` $(sect 9)](AGENTS.md#9-nowhere)." >> "$d/README.md"
 expect fail "a section reference that names no section" "$d" "matches no numbered section"
@@ -696,43 +685,6 @@ d="$(repo build-job-inline)"
 build_job "$d" "make test"
 expect fail "a toolchain job with its commands inline and nothing in the local runner" "$d" "job 'build' runs no script under scripts/"
 
-# ci_job <dir> <job> [matrix] — a job of the CI workflow, listed among the required checks, that
-# runs a gate the local runner cannot, named on an '# On instruction:' line; with 'matrix', the job
-# runs a matrix and its check is named after the values.
-ci_job() {
-  local dir="$1" job="$2" matrix="${3:-}"
-  {
-    echo "jobs:"
-    echo "  $job:"
-    if [[ "$matrix" == "matrix" ]]; then
-      echo "    strategy:"
-      echo "      matrix:"
-      echo "        os: [windows-latest]"
-    fi
-    echo "    runs-on: windows-latest"
-    echo "    steps:"
-    echo "      - run: bash scripts/gate-windows.sh"
-  } > "$dir/.github/workflows/ci.yml"
-  echo "cargo test" > "$dir/scripts/gate-windows.sh"
-  echo "# On instruction: scripts/gate-windows.sh" >> "$dir/scripts/check-all.sh"
-  # shellcheck disable=SC2016  # the backticks are literal Markdown, not a command substitution
-  sed_in "$dir/README.md" "s|^\`docs\`\$|\`docs\`, \`$job\`|"
-}
-
-d="$(repo ci-job)"
-ci_job "$d" client-windows
-expect pass "a required check that is a plain job of the CI workflow, its script run in CI alone" "$d"
-
-d="$(repo ci-job-matrix)"
-ci_job "$d" client-windows matrix
-expect fail "a required check that is a matrix job of the CI workflow" "$d" "its check reports under another name"
-
-d="$(repo ci-job-unnamed-script)"
-ci_job "$d" client-windows
-sed_in "$d/scripts/check-all.sh" '/^# On instruction: scripts\/gate-windows.sh$/d'
-expect fail "a script a workflow runs that the local runner neither runs nor names" "$d" \
-  "does not run 'scripts/gate-windows.sh', which a workflow runs"
-
 # publishing <dir> — a workflow that publishes, its commands inline, as a release's are.
 publishing() {
   printf 'jobs:\n  publish:\n    runs-on: ubuntu-latest\n    steps:\n      - run: cargo build --release\n' \
@@ -748,35 +700,21 @@ d="$(repo not-a-gate-unnamed)"
 publishing "$d"
 expect fail "a publishing workflow nobody names as no gate" "$d" "job 'publish' runs no script under scripts/"
 
+d="$(repo not-a-gate-script-counts)"
+publishing "$d"
+echo "# Not a gate: .github/workflows/release.yml" >> "$d/scripts/check-all.sh"
+echo "echo" > "$d/scripts/pack.sh"
+echo "      - run: bash scripts/pack.sh" >> "$d/.github/workflows/release.yml"
+expect fail "a script a workflow named as no gate runs, which the local runner neither runs nor names" "$d" \
+  "does not run 'scripts/pack.sh', which a workflow runs"
+
 d="$(repo not-a-gate-missing)"
 echo "# Not a gate: .github/workflows/gone.yml" >> "$d/scripts/check-all.sh"
 expect fail "a '# Not a gate:' line naming no workflow" "$d" "names '.github/workflows/gone.yml' on a '# Not a gate:' line"
-
-d="$(repo required-unknown)"
-# shellcheck disable=SC2016  # the backticks are literal Markdown, not a command substitution
-sed_in "$d/README.md" 's|^`docs`$|`docs`, `nowhere`|'
-expect fail "a required check that is a job of no workflow" "$d" "is not a job of"
-
 d="$(repo layout-stale)"
 sed_in "$d/README.md" 's|^docs/adr/ |docs/gone/ |'
 expect fail "a Project Layout entry that no longer exists" "$d" "is not a directory of this repository"
 
-# --- cases: the user manual cites no ADR (check 18) ---------------------------------------
-
-d="$(repo manual-plain)"
-mkdir -p "$d/docs/manual"
-printf '# Manual\n\nStart the Server, then the Client.\n' > "$d/docs/manual/README.md"
-expect pass "a manual that cites no ADR" "$d"
-
-d="$(repo manual-cites-number)"
-mkdir -p "$d/docs/manual"
-printf '# Manual\n\nThe Client verifies every package (%s).\n' "$(adr_id 1)" > "$d/docs/manual/README.md"
-expect fail "a manual that names an ADR" "$d" "docs/manual/README.md:3: cites an ADR"
-
-d="$(repo manual-links-record)"
-mkdir -p "$d/docs/manual"
-printf '# Manual\n\nSee [why](../adr/%s-decision.md).\n' "$(printf '%04d' 1)" > "$d/docs/manual/README.md"
-expect fail "a manual that links into the decision records" "$d" "docs/manual/README.md:3: cites an ADR"
 # Verifies: ADR-0001
 d="$(repo layout-unnamed-top)"
 echo "notes" > "$d/NOTES.md"

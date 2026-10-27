@@ -197,12 +197,13 @@ it (AGENTS.md links here).
 Both binaries read a TOML configuration file
 ([ADR-0030](docs/adr/0030-the-servers-configuration.md));
 every setting has a default except the TLS material, without which neither starts. The annotated
-examples live in [`config/`](config/). [`scripts/check-rust.sh`](scripts/check-rust.sh) runs exactly
-these
-build/test/lint commands, locally through `scripts/check-all.sh` and in CI as the `rust` job of
-[`.github/workflows/checks.yml`](.github/workflows/checks.yml);
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml) additionally checks the Client on Windows and
-macOS and release-builds the Client for Linux, Windows, and macOS and the Server for Linux.
+examples live in [`config/`](config/). [`scripts/check-rust.sh`](scripts/check-rust.sh) runs
+exactly these build/test/lint commands, locally through `scripts/check-all.sh` and in CI as the
+`rust` job of [`.github/workflows/checks.yml`](.github/workflows/checks.yml), whose jobs also check
+the Client on Windows and macOS and the stores against a real S3 and PostgreSQL;
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) release-builds the Client for Linux,
+Windows, and macOS and the Server for Linux, which `scripts/check-all.sh` does for the local
+platform.
 
 **Releases** ([ADR-0034](docs/adr/0034-releases-attestations-and-the-server-image.md),
 [ADR-0033](docs/adr/0033-the-products-version.md)): the version is
@@ -627,10 +628,10 @@ configured once by a maintainer and worth re-checking after a repository move or
   `client-windows`, `client-macos`, `s3-store`, and `postgres-store`
   <!-- required-checks end -->
   jobs as required status checks: every job of the **Checks** workflow, the Client's Windows and
-  macOS jobs of the **CI** workflow, and its jobs that run the S3 and PostgreSQL stores' tests
-  against a real store (rulesets list checks by their job name); requires a branch up to date
-  with `main` before it merges, so that the checks see what the merge produces, such as two ADRs
-  proposed in parallel under one number; and blocks force pushes and branch deletion;
+  macOS jobs and the S3 and PostgreSQL stores' tests against a real store among them (rulesets
+  list checks by their job name); requires a branch up to date with `main` before it merges, so
+  that the checks see what the merge produces, such as two ADRs proposed in parallel under one
+  number; and blocks force pushes and branch deletion;
 - enable **require a review from Code Owners** on that ruleset, so the two artifacts only a human
   decides, [`docs/SPECIFICATION.md`](docs/SPECIFICATION.md) and everything under
   [`docs/adr/`](docs/adr/) ([`AGENTS.md` §3](AGENTS.md#3-adr-rules)), cannot be merged without the

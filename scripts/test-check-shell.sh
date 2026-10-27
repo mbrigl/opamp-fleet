@@ -4,11 +4,11 @@
 #
 # Each case builds a throwaway git repository with one shell script that ShellCheck flags, runs
 # the lint against it, and asserts the exit code: a tracked script and a new one git does not
-# ignore fail, a script under an ignored directory and a git hook in .githooks/ are read as git
-# lists them, and a directory that is no repository fails rather than passing empty. GNU sed's
-# in-place flag fails and names the line, while a temporary file and a comment pass. Where
-# ShellCheck is not on PATH the lint skips ShellCheck, and so does this test with the cases that
-# need it.
+# ignore fail, a script under an ignored directory, a git hook in .githooks/, and a maintainer
+# script under packaging/linux/ are read as git lists them, and a directory that is no repository
+# fails rather than passing empty. GNU sed's in-place flag fails and names the line, while a
+# temporary file and a comment pass. Where ShellCheck is not on PATH the lint skips ShellCheck,
+# and so does this test with the cases that need it.
 #
 # Verifies: ADR-0002
 # Inputs: scripts/check-shell.sh scripts/lib/
@@ -80,6 +80,13 @@ if ((have_shellcheck)); then
   mkdir -p "$d/.githooks"
   printf '%s' "$FLAGGED" > "$d/.githooks/pre-commit"
   expect 1 "a git hook without an extension is linted" "$d"
+
+  d="$(repo maintainer-script)"
+  mkdir -p "$d/packaging/linux"
+  # shellcheck disable=SC2016  # the fixture's $1 is its own
+  printf '#!/bin/sh\necho $1\n' > "$d/packaging/linux/postinst"
+  git -C "${d:?}" add packaging/linux/postinst
+  expect 1 "a Linux package's maintainer script without an extension is linted" "$d"
 fi
 
 # GNU sed's in-place flag, spelled without the literal text so this file passes its own lint.

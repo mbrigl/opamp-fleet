@@ -1,12 +1,12 @@
 name: Checks
 
 # Enforces the repository's rules as CI. Pure bash + coreutils — nothing is installed but the Rust
-# toolchain of the rust job (ShellCheck, used by the shell job, ships preinstalled on the
-# GitHub-hosted runner image).
+# toolchain of the Rust jobs and the stores the two store jobs start (ShellCheck, used by the shell
+# job, ships preinstalled on the GitHub-hosted runner image).
 # scripts/check-all.sh is the local equivalent; check 9 of scripts/check-docs.sh holds its list,
-# the jobs of this workflow, and the required checks named in README.md together. Each job runs
-# a check after its own self-test, and each script's header says what it checks and which ADR it
-# holds.
+# the jobs of this workflow, and the required checks named in README.md together. A job runs each
+# check after its self-test where it has one, and each script's header says what it checks and
+# which ADR it holds, or that the check is the rule.
 #
 # The sensors report for the reviewer and fail on nothing they count, except the action
 # references once a project runs that sensor with --require; their self-tests fail like any
@@ -23,9 +23,12 @@ name: Checks
 #
 # The rust job builds, tests, and lints the Cargo workspace with scripts/check-rust.sh, the commands
 # of README.md → "Build, Test & Run" on the stack of ADR-0008, the same script scripts/check-all.sh
-# runs, so the build and the tests gate a push as they gate a merge. It is the one job of this
-# workflow that installs something: rustup reads rust-toolchain.toml on first use, and the cache
-# keeps the build within its timeout.
+# runs, so the build and the tests gate a push as they gate a merge. rustup reads
+# rust-toolchain.toml on first use, and the cache keeps the build within its timeout. The four
+# jobs after it check the Client on Windows and macOS and the stores against a real S3 and
+# PostgreSQL, with scripts check-all.sh runs too: locally each says so and skips where the machine
+# has no such platform or no store is named. As jobs of this workflow they also run on its
+# schedule, by hand, and when a draft is marked ready.
 #
 # Every job is bounded by a timeout — a hung step would otherwise occupy a runner until the
 # platform's own six-hour limit — and every checkout runs with 'persist-credentials: false': the
@@ -84,6 +87,13 @@ jobs:
         run: bash scripts/check-docs.sh
         env:
           PULL_REQUEST_DRAFT: ${{ github.event.pull_request.draft }}
+      # A newer upstream release is a warning, never a failure (ADR-0011).
+      - name: Check the Protocol Baseline
+        run: bash scripts/check-protocol-baseline.sh
+      - name: Self-test the manual check
+        run: bash scripts/test-check-manual.sh
+      - name: Check that the manual cites no ADR
+        run: bash scripts/check-manual.sh
       # The setup promises a green project once every step is done, and that check-docs.sh names
       # every placeholder left behind; this holds only on the real scaffold, not on a fixture.
       - name: Self-test the template setup against the scaffold
@@ -210,3 +220,138 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Build, test and lint the workspace
         run: bash scripts/check-rust.sh
+
+  # ADR-0019: the client carries platform-specific service paths (the Windows SCM shim, launchd
+  # semantics) that a Linux-only lint never compiles. Keep them honest: clippy and tests on the
+  # real platforms. Actual service registration still needs the manual smoke checklist
+  # (README.md → "Running as an OS service") — CI runners cannot exercise systemd/launchd/SCM.
+  #
+  # Both are required status checks (README.md → "Repository settings"), like every job of this
+  # workflow, so these two are plain jobs without a 'name:' or a matrix: a ruleset names a check
+  # by the job's rendered name, and the job id is what scripts/check-docs.sh compares with the
+  # README.
+  # fleet-tools too: the release packs every Client archive with `opamp-fleetctl`, Windows
+  # included, and publishes it for macOS (ADR-0032).
+  client-windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # Git Bash: the runner's default shell is PowerShell, where 'bash' may name WSL's.
+      - name: Clippy and test
+        shell: bash
+        run: bash scripts/check-client-platform.sh
+
+  client-macos:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Clippy and test
+        run: bash scripts/check-client-platform.sh
+
+  # ADR-0029 clause 20: the S3 store's tests, which a plain `cargo test` skips, run here against a
+  # rustfs service, its image pinned by digest. The key pair is the throwaway one of this job's
+  # own container, not a secret. The tests make a prefix of their own and leave the bucket empty.
+  s3-store:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    services:
+      rustfs:
+        image: rustfs/rustfs:1.0.3@sha256:9ca9559533b537d10482fe923288b676ad08f92a7069d9a17327fbae3cab688b
+        env:
+          RUSTFS_ACCESS_KEY: fleet-ci
+          RUSTFS_SECRET_KEY: fleet-ci-secret
+        ports:
+          - 9000:9000
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Create the bucket
+        # The Server creates none (ADR-0029 clause 16). curl signs the request itself; the service
+        # may still be starting, so the first attempts are allowed to fail.
+        run: |
+          empty="$(printf '' | sha256sum | cut -d' ' -f1)"
+          for _ in $(seq 1 30); do
+            if curl -fsS --aws-sigv4 aws:amz:us-east-1:s3 --user fleet-ci:fleet-ci-secret \
+                -H "x-amz-content-sha256: $empty" -X PUT http://127.0.0.1:9000/fleet; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "rustfs did not create the bucket" >&2
+          exit 1
+      - name: Write the secret key file
+        run: (umask 077 && printf '%s' fleet-ci-secret > "$RUNNER_TEMP/s3-secret")
+      # Skipped is not passed: the store is named, so every S3 test must reach it.
+      - name: Test against rustfs
+        env:
+          FLEET_TEST_S3_ENDPOINT: http://127.0.0.1:9000
+          FLEET_TEST_S3_BUCKET: fleet
+          FLEET_TEST_S3_ACCESS_KEY_ID: fleet-ci
+          FLEET_TEST_S3_SECRET_ACCESS_KEY_FILE: ${{ runner.temp }}/s3-secret
+        run: bash scripts/check-store.sh s3
+
+  postgres-store:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Start PostgreSQL with TLS
+        # The connection the Server makes: TLS 1.3, the database's certificate verified against
+        # the CA made here and its name checked (ADR-0029 clause 24). Started by `docker run`
+        # rather than as a service, so that it starts after its certificate is made.
+        run: |
+          set -euo pipefail
+          certs="$RUNNER_TEMP/postgres-tls"
+          mkdir -p "$certs"
+          cd "$certs"
+          openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 2 \
+            -subj "/CN=fleet CI database CA" -keyout ca.key -out ca.pem
+          openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
+            -subj "/CN=localhost" -keyout server.key -out server.csr
+          printf 'subjectAltName=IP:127.0.0.1,DNS:localhost\nextendedKeyUsage=serverAuth\n' > ext.cnf
+          openssl x509 -req -in server.csr -CA ca.pem -CAkey ca.key -CAcreateserial -days 2 \
+            -extfile ext.cnf -out server.pem
+          # PostgreSQL reads its key only when the server's account owns it, alone.
+          sudo chown 999:999 server.key server.pem
+          sudo chmod 600 server.key
+          docker run -d --name postgres -p 127.0.0.1:5432:5432 \
+            -e POSTGRES_USER=fleet -e POSTGRES_PASSWORD=fleet-ci -e POSTGRES_DB=fleet \
+            -v "$certs/server.pem:/tls/server.pem:ro" -v "$certs/server.key:/tls/server.key:ro" \
+            postgres:18.6@sha256:edb0c08dc33befd0262ab3b5cf1c4f3f8cfd8b09e88c05b45adee29d6761ddb6 \
+            -c ssl=on -c ssl_cert_file=/tls/server.pem -c ssl_key_file=/tls/server.key \
+            -c ssl_min_protocol_version=TLSv1.3
+          for _ in $(seq 1 60); do
+            if docker exec postgres pg_isready --host 127.0.0.1 --username fleet --dbname fleet; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs postgres >&2
+          exit 1
+      - name: Write the password file
+        run: (umask 077 && printf '%s' fleet-ci > "$RUNNER_TEMP/postgres-password")
+      - name: Test against PostgreSQL
+        # Over TLS against the CA above; each test works in a schema of its own
+        # (ADR-0029 clause 25). Skipped is not passed: the database is named, so every PostgreSQL
+        # test must reach it.
+        env:
+          FLEET_TEST_POSTGRES_HOST: 127.0.0.1
+          FLEET_TEST_POSTGRES_PORT: "5432"
+          FLEET_TEST_POSTGRES_DBNAME: fleet
+          FLEET_TEST_POSTGRES_USER: fleet
+          FLEET_TEST_POSTGRES_PASSWORD_FILE: ${{ runner.temp }}/postgres-password
+          FLEET_TEST_POSTGRES_CA_FILE: ${{ runner.temp }}/postgres-tls/ca.pem
+        run: bash scripts/check-store.sh postgres

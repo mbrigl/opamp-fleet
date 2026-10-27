@@ -154,8 +154,10 @@ run() {
 run "Documentation self-test" scripts/test-check-docs.sh
 run "Protocol Baseline self-test" scripts/test-check-protocol-baseline.sh
 run "Documentation consistency" scripts/check-docs.sh
-# Check 17 of check-docs.sh runs the Protocol Baseline check; it reads the network.
-# On instruction: scripts/check-protocol-baseline.sh
+# It reads the network, and says so and skips without one.
+run "Protocol Baseline" scripts/check-protocol-baseline.sh
+run "Manual check self-test" scripts/test-check-manual.sh
+run "Manual cites no ADR" scripts/check-manual.sh
 run "Template setup self-test" scripts/test-template-setup.sh
 run "Normalize map self-test" scripts/test-normalize-remap.sh
 # The numbering script commits and runs on a human's instruction, before the pull request that
@@ -206,16 +208,18 @@ run "Build, test and lint" scripts/check-rust.sh
 # On instruction: scripts/install_tools.sh
 # On instruction: scripts/seed_test_configs.sh
 # On instruction: scripts/vendor-shiki.sh
-# The gates a workflow runs where the local runner cannot: on Windows and macOS, against a real
-# object store and database, as a release build, against the advisory database, under a nightly
-# fuzzer, against opamp-go, and as a real service. Each runs on a human's instruction here.
-# On instruction: scripts/check-client-platform.sh
-# On instruction: scripts/check-store.sh
-# On instruction: scripts/check-release-build.sh
-# On instruction: scripts/check-deny.sh
-# On instruction: scripts/check-fuzz.sh
-# On instruction: scripts/check-interop.sh
-# On instruction: scripts/check-service-smoke.sh
+# The gates the other workflows run: each says so and skips where this machine lacks what it
+# needs — Windows or macOS, a store named in the environment, cargo-deny, cargo-fuzz, Go, a
+# throwaway machine — and fails instead in a CI run, where a skip would read as a pass.
+run "Client on its platform" scripts/check-client-platform.sh
+run "S3 store" scripts/check-store.sh s3
+run "PostgreSQL store" scripts/check-store.sh postgres
+run "Release build of the Client" scripts/check-release-build.sh fleet-agent
+run "Release build of the Server" scripts/check-release-build.sh fleet-server
+run "Supply chain" scripts/check-deny.sh
+run "Fuzzing" scripts/check-fuzz.sh
+run "Interop with opamp-go" scripts/check-interop.sh
+run "Service smoke test" scripts/check-service-smoke.sh
 # The release publishes; it is no gate, and check-build-hardening.sh holds its steps.
 # Not a gate: .github/workflows/release.yml
 

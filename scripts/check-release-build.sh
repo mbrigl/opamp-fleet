@@ -4,8 +4,7 @@
 # .github/workflows/ci.yml runs it for the Client on Linux, Windows, and macOS and for the Server
 # on Linux, the platforms each ships on (docs/SPECIFICATION.md). It shows on every pull request
 # that a release would build; the release itself builds in .github/workflows/release.yml.
-# scripts/check-all.sh names it on an '# On instruction:' line, since a release build is too slow
-# to gate a push.
+# scripts/check-all.sh runs it for both programs on the local platform.
 #
 # Needs the Rust toolchain of rust-toolchain.toml.
 #
