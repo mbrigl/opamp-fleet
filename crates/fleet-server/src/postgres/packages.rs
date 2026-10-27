@@ -236,14 +236,14 @@ mod tests {
         assert_eq!(loaded(&*open()), [shown(&narrowed)]);
     }
 
-    /// Verifies: ADR-0029
+    /// Verifies: G-19, ADR-0029
     #[test]
     fn the_package_port_contract_holds_on_the_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
         contract(&|| Box::new(FsPackageBackend::open(dir.path()).expect("open")));
     }
 
-    /// Verifies: ADR-0029
+    /// Verifies: G-19, ADR-0029
     #[test]
     fn the_package_port_contract_holds_on_postgres() {
         let Some(test) = TestDatabase::named() else {

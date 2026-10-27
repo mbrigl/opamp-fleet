@@ -785,6 +785,56 @@ mod tests {
         assert!(err.contains(&config.bucket), "{err}");
     }
 
+    /// What an upload stored, the download reads back from the store the operator names: the
+    /// same bytes, of the hash and size the entry records, and again after the Server reopens it.
+    /// The Agent fetches from the Server alone, so the store behind it changes nothing it gets.
+    fn the_download_reads_what_the_upload_stored(blobs: &BlobsConfig) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let id = PackageId::new("otelcol", "1.0.0").expect("id");
+        let linux = Platform::new("linux", "amd64").expect("platform");
+        let artifact = b"an artifact the fleet runs".to_vec();
+        let downloaded = |store: &PackageStore| {
+            let (hash, size) = store.artifact(&id, &linux).expect("an entry");
+            let bytes = read_all(store.open_artifact(&hash).expect("artifact"));
+            assert_eq!(
+                hex::encode(&hash),
+                sha256(&bytes),
+                "the bytes the entry names"
+            );
+            assert_eq!(size, bytes.len() as u64);
+            bytes
+        };
+        {
+            let store =
+                PackageStore::open_with(dir.path().to_path_buf(), blobs).expect("open the store");
+            store.create(&id).expect("create");
+            store
+                .put_entry(&id, &linux, artifact.clone())
+                .expect("entry");
+            assert_eq!(downloaded(&store), artifact);
+        }
+        let reopened =
+            PackageStore::open_with(dir.path().to_path_buf(), blobs).expect("open it again");
+        assert_eq!(downloaded(&reopened), artifact);
+    }
+
+    /// Verifies: G-19, ADR-0029
+    #[test]
+    fn the_download_reads_what_the_upload_stored_on_the_filesystem() {
+        the_download_reads_what_the_upload_stored(&BlobsConfig::default());
+    }
+
+    /// Verifies: G-19, ADR-0029
+    #[test]
+    fn the_download_reads_what_the_upload_stored_on_s3() {
+        let Some(config) = named_store() else { return };
+        the_download_reads_what_the_upload_stored(&BlobsConfig {
+            store: "s3".to_string(),
+            s3: Some(again(&config)),
+        });
+        clear(&S3BlobStore::open(&config).expect("open"));
+    }
+
     /// Switching to S3 copies every referenced artifact the bucket lacks, verified against its
     /// name, and leaves the file where it is; the reverse — an entry whose blob neither the bucket
     /// nor the copy can supply — fails startup naming the entry (ADR-0029 clause 19).
