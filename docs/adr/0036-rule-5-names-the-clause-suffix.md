@@ -1,6 +1,6 @@
 # ADR-0036: Rule 5 of `AGENTS.md` names the clause suffix among the edits it permits
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-10-27
 - **Deciders:** Markus Brigl
 - **Applies to:** rule 5 of the ADR rules in `AGENTS.md`
