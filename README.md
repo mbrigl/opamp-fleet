@@ -413,7 +413,6 @@ service that will not start.
 
 ```
 README.md             # overview & setup for humans
-TEMPLATE-SETUP.md     # one-time template setup; delete it when the project is yours
 CHANGELOG.md          # operator-facing changes: what an upgrade needs edited or moved
 AGENTS.md             # single source of truth for coding agents
 CONTRIBUTING.md       # how to contribute, pointing at the rules

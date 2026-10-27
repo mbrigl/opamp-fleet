@@ -158,7 +158,6 @@ run "Documentation consistency" scripts/check-docs.sh
 run "Protocol Baseline" scripts/check-protocol-baseline.sh
 run "Manual check self-test" scripts/test-check-manual.sh
 run "Manual cites no ADR" scripts/check-manual.sh
-run "Template setup self-test" scripts/test-template-setup.sh
 run "Normalize map self-test" scripts/test-normalize-remap.sh
 # The numbering script commits and runs on a human's instruction, before the pull request that
 # brings drafts to main (ADR-0002); its self-test runs here.
