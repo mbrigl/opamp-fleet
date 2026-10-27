@@ -133,7 +133,9 @@ provenance of every asset and of the image, publishing nothing that does not ver
    `<os>-<arch>`, for the mirror-image reason. Inside the `.deb` and `.rpm` the architecture is the
    ecosystem's own (`amd64`/`arm64`, `x86_64`/`aarch64`), derived by the packaging tool; nothing
    resolves a package by its file name. **A published asset is never renamed or rewritten**: a
-   checksum published against a URL stays true.
+   checksum published against a URL stays true. **A release that changes the asset names or
+   containers says so**: the change breaks operators' scripts, and `CHANGELOG.md` and the notes of
+   the release that carries it name the old and the new form.
 
 4. **A file name is read from the right, and an unknown tail fills nothing.** The fleet view's
    upload form reads an artifact's name by matching the platform tokens it knows, including the
@@ -404,6 +406,10 @@ provenance of every asset and of the image, publishing nothing that does not ver
   digest from which commit. Rejected.
 - **Docker Hub instead of `ghcr.io`.** It needs an account and a token outside GitHub; the job's
   own token reaches `ghcr.io`. Rejected.
+- **Change asset names or containers without saying so.** Operators fetch release assets by name
+  from their own scripts, and such a change breaks them on the update that takes it. A release that
+  changes them names the old and the new form in `CHANGELOG.md` and in its notes (clause 3).
+  Rejected.
 
 ## Sources / Prior art
 
@@ -564,4 +570,5 @@ release and leaves the image untagged. The second is held by review of a release
 `cargo tree --target <triple> -e normal -p <package>`. The third is held for `amd64` by the `image`
 job's check and for `arm64` by its `build` row's version check of the same binary; that the
 `arm64` image starts is checked by hand on the first release. The fleet view's reading of a file
-name (clause 4) has no automated test.
+name (clause 4) has no automated test. That a release changing the asset names or containers
+names the change in `CHANGELOG.md` and its notes (clause 3) is held by review.

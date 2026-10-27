@@ -578,7 +578,7 @@ impl Revocations {
             .cloned()
     }
 
-    /// Records a certificate the client CA signed, before it is handed out (clause 2).
+    /// Records a certificate the client CA signed, before it is handed out (ADR-0029 clause 9).
     ///
     /// # Errors
     /// Returns an error when the register is full — for a renewal, [`ENROLMENT_RESERVE`] short of
@@ -905,7 +905,7 @@ impl Revocations {
     }
 
     /// Revokes the certificate with `serial` from the CA of `authority` — `client` or
-    /// `bootstrap` (clause 3).
+    /// `bootstrap` (ADR-0021 clause 27).
     ///
     /// # Errors
     /// Refuses an authority this Server does not have, a serial that is not hex, a full list, and
@@ -972,7 +972,7 @@ impl Revocations {
         Ok(entry)
     }
 
-    /// The list, oldest first (clause 7).
+    /// The list, oldest first (ADR-0021 clause 30).
     #[must_use]
     pub fn list(&self) -> Vec<Revocation> {
         self.state
@@ -982,8 +982,8 @@ impl Revocations {
             .clone()
     }
 
-    /// Lifts one revocation; `Ok(false)` for an unknown id (clause 7). It takes effect at the next
-    /// connection and reopens nothing, so it is not announced.
+    /// Lifts one revocation; `Ok(false)` for an unknown id (ADR-0021 clause 30). It takes effect at
+    /// the next connection and reopens nothing, so it is not announced.
     ///
     /// # Errors
     /// Returns an error when the store cannot write it.
@@ -1001,7 +1001,7 @@ impl Revocations {
         Ok(true)
     }
 
-    /// Whether `certificate`, or a certificate it renewed, is revoked (clause 4).
+    /// Whether `certificate`, or a certificate it renewed, is revoked (ADR-0021 clause 28).
     #[must_use]
     pub fn is_certificate_revoked(&self, certificate: &CertId) -> bool {
         self.state
@@ -1064,8 +1064,8 @@ impl Revocations {
     }
 
     /// Drops the register entries that have expired and from which no valid certificate descends,
-    /// and the revocations of certificates those entries held (clause 6). A revoked ancestor of a
-    /// valid renewal stays, so the renewal stays revoked.
+    /// and the revocations of certificates those entries held (ADR-0029 clause 10). A revoked
+    /// ancestor of a valid renewal stays, so the renewal stays revoked.
     ///
     /// A Host not marked as a Gateway whose valid until has passed is forgotten, and every
     /// `instance_uid` bound to it released (ADR-0024 clause 15); what is left of the hosts is

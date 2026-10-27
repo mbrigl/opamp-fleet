@@ -481,7 +481,9 @@ remote configuration and run only on what the operator placed on the host.
 
 34. **A directory the purge cannot delete fails nothing.** The Supervisor is already stopped and
     the file written, so the set the Server asked for is running; a purge error (a file held open
-    on Windows, permissions) is a warning naming the path, and the directory becomes an orphan.
+    on Windows, permissions) is a warning naming the path. The purge renamed the directory to a
+    tombstone before deleting it, and the next start and the next purge remove the tombstone
+    again ([ADR-0020](0020-the-accounts-the-service-runs-under.md), clause 25).
 
 35. **A delivered block brings no environment and no arguments the operator did not allow.** In
     the apply path, a delivered block's `env` entries, `args` and `version_args` must equal those
@@ -574,9 +576,12 @@ remote configuration and run only on what the operator placed on the host.
     Managed Process, offer connection settings, and configure every Supervisor not named in
     `remote_config_disabled`.
 
-    What the key holds against the Server holds only while every Supervisor whose configuration
-    language can run commands as the Client's account (a Telegraf `inputs.exec`, an Icinga
-    `CheckCommand`, the configuration a `command` kind's program reads) is named in
+    A command a configuration can run (a Telegraf `inputs.exec`, an Icinga `CheckCommand`, the
+    configuration a `command` kind's program reads) runs as the account its Managed Process runs
+    under. Where a process account is registered, that is the process account, which cannot write
+    `supervisor.toml` ([ADR-0020](0020-the-accounts-the-service-runs-under.md)). Where none is,
+    it is the Client's account, and what the key holds against the Server holds only while every
+    Supervisor whose configuration language can run commands is named in
     `remote_config_disabled`. Otherwise the Server can configure such a Supervisor to rewrite
     `supervisor.toml`, and the key flips at the next start. A signed Client build can also still
     replace the Client's own program where `[self_update]` consents
@@ -893,6 +898,14 @@ Supervisor before its first remote configuration); a group stop on Windows throu
   is the normal case, and the refusal would stop the whole Client for it.
 - **Preflight by static inspection of required `GLIBC_` symbols.** A start attempt is the
   definition of "runs here", catches a missing library too, and yields the operator's message.
+- **Leave a directory the purge cannot delete as an orphan.** The orphan stays beneath the
+  Supervisors' root with nothing to remove it. The purge renames the directory to a tombstone first,
+  which the next start and the next purge remove again
+  ([ADR-0020](0020-the-accounts-the-service-runs-under.md), clause 25; clause 34).
+- **Run every command a configuration can run as the Client's account.** Where a process account is
+  registered, that puts a command a Server can deliver above the Managed Process it belongs to. It
+  runs as its Managed Process's account instead
+  ([ADR-0020](0020-the-accounts-the-service-runs-under.md); clause 43).
 
 ## Sources / Prior art
 

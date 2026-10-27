@@ -70,9 +70,9 @@ report, its own labels and its Client Agent's labels, in that order of precedenc
    (`sequence_num`, capabilities, description, health, effective configuration, remote-config,
    connection-settings, and package statuses, available components), the transport of the last
    report, `last_seen_ms`, a queued restart (`restart_pending`), the assignments rollout acts
-   wrote ([ADR-0026](0026-deployments-and-rollouts.md)), a mirror of its labels, and the runtime
-   facts `connected` and the owning connection. `GET /api/v1/agents` returns every record as an
-   `AgentView`.
+   wrote ([ADR-0026](0026-deployments-and-rollouts.md)), its labels and the Host it last arrived
+   over (clauses 16 and 21), and the runtime facts `connected` and the owning connection.
+   `GET /api/v1/agents` returns every record as an `AgentView`.
 
 2. **Records persist behind a port.** The trait `AgentStore: Send + Sync` is the only thing the
    fleet logic knows about persistence, and its surface is the access pattern:
@@ -89,10 +89,9 @@ report, its own labels and its Client Agent's labels, in that order of precedenc
 3. **What a report or an operator decided persists; what a connection knows does not.**
    Persisted: `sequence_num`, `capabilities`, `description`, `health`, `effective_config`,
    `remote_config_status`, `connection_settings_status`, `package_statuses`,
-   `available_components`, `transport` (informational), `last_seen_ms`, `restart_pending`, and
-   the assignments. Not persisted: `connected` and the owning connection. Labels are not
-   duplicated into the record; their own store is the single authority and fills the mirror on
-   restore.
+   `available_components`, `transport` (informational), `last_seen_ms`, `restart_pending`, the
+   assignments, the labels, and the Host the Agent last arrived over. Not persisted: `connected`
+   and the owning connection.
 
 4. **The write discipline lives above the port, so no backend can get it wrong.** The fleet keeps
    a digest of each record's durable content as last written and calls `put` only when it
@@ -188,9 +187,9 @@ report, its own labels and its Client Agent's labels, in that order of precedenc
 16. **What a certificate speaks for, and which Host an Agent belongs to.**
     - The host a member certificate names (`urn:opamp-fleet:host:<id>`) speaks for the
       `instance_uid`s bound to it in the host register.
-    - A Host marked as a Gateway speaks for any Agent: the register binds no `instance_uid` to it
-      and keeps no record of which Agents a Gateway carries. A Gateway's certificate therefore
-      may fetch what is offered to any Agent.
+    - A Host marked as a Gateway speaks for any Agent: the host register binds no `instance_uid`
+      to it and lists none of the Agents a Gateway carries. A Gateway's certificate therefore may
+      fetch what is offered to any Agent.
     - A certificate that names no host speaks for no Agent and fetches nothing.
     - A Client whose Server signs CSRs holds a host certificate after its first connection
       ([ADR-0021](0021-admission-by-client-certificate-and-revocation.md)). An operator who
@@ -368,6 +367,10 @@ provisioned certificates already limit.
   puts a round trip between labelling a host and targeting it.
 - **Key labels by `service.instance.name`.** Not unique across hosts, so labelling one host would
   label its namesakes.
+- **Keep an Agent's labels in a store of their own, mirrored into its record.** Two places hold one
+  fact, while the Server already keeps the labels in the record (clause 21). The record carries the
+  labels and the Host the Agent last arrived over, and no separate label store exists (clauses 1, 3
+  and 21).
 
 ## Sources / Prior art
 

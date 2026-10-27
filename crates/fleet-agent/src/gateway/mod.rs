@@ -356,7 +356,7 @@ pub async fn run_on_timed(
 
 /// Until `shutdown` fires: ends the bindings of hosts whose certificates ended whenever the
 /// revocation list changes and once an hour (ADR-0015 clause 17), and once an hour, while the
-/// bindings' store cannot be read, says so again (clause 2).
+/// bindings' store cannot be read, says so again (clause 16).
 async fn keep_bindings(
     forwarding: Arc<Forwarding>,
     mut changes: tokio::sync::watch::Receiver<u64>,

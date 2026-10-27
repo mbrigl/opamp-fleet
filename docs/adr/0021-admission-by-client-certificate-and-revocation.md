@@ -214,7 +214,8 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
     Agent and the Server through a Gateway there are two mutual-TLS connections, each proving the
     peer at that hop. The Gateway holds its own client identity for the upstream leg, obtained
     through the same CSR flow, and admits a downstream peer by its handshake against the fleet's
-    client CA and the Server's revocation list
+    client CA and the Server's revocation list, or, where it holds the bootstrap CA's certificate,
+    a peer presenting a bootstrap certificate as an enrolling peer
     ([ADR-0015](0015-client-modes-and-the-gateway.md), which also owns the Gateway's downstream
     TLS keys). The Server admits the Gateway, and the Gateway's mark
     ([ADR-0022](0022-bootstrap-certificates-and-enrolment.md)) lets its certificate speak for the
@@ -282,11 +283,14 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
     or a bootstrap certificate on the download route — so the throttle does not stop guessing; it
     bounds what a refused host that keeps retrying costs in handshakes, revocation lookups and
     audit entries ([ADR-0023](0023-an-append-only-audit-record.md)).
-20. **Enrolment happens directly against the Server.** A Gateway's downstream handshake trusts the
-    fleet's client CA and never the bootstrap CA ([ADR-0015](0015-client-modes-and-the-gateway.md)),
-    so a CSR a Gateway forwards comes from a peer that already holds a client certificate and is
-    signed as a renewal. A host behind a Gateway enrols by connecting to the Server once, or is
-    provisioned a client certificate by an operator.
+20. **Enrolment reaches the Server directly or through a Gateway, and the Server decides it.** A
+    host enrols by connecting to the Server, or through a Gateway that holds the bootstrap CA's
+    certificate: the Gateway admits it as an enrolling peer and relays its one CSR, which carries
+    a bootstrap proof, and nothing else it sends
+    ([ADR-0015](0015-client-modes-and-the-gateway.md), clause 24). The Server decides a relayed
+    enrolment as any other ([ADR-0022](0022-bootstrap-certificates-and-enrolment.md)). A CSR a
+    Gateway forwards from a peer that holds a client certificate is signed as a renewal. A host
+    can also be provisioned a client certificate by an operator.
 21. **No credential in `server.toml` authenticates on its own.** An entry of `[rest.auth]
     basic_users` is an Argon2id PHC string with at least `m=19456`, `t=2` and `p=1`, a 32-byte
     output and a 16-byte salt. Any other value is refused at startup with a message naming the
@@ -495,6 +499,12 @@ bundled UI; an audit record of revocations.
 - **Refusing to start while a credential entry is on the persisted list.** Rejected: the entry
   names nothing the Server still accepts, so it guards nothing, and a Server that will not start
   after an upgrade would shut out the whole fleet for no gain in security.
+- **A Gateway that trusts the fleet's client CA alone, and enrolment only directly against the
+  Server.** A host that only a Gateway reaches could then join only with a client certificate an
+  operator provisions, while G-15 asks that it enrol through the Gateway. A Gateway that holds the
+  bootstrap CA's certificate admits an enrolling peer and relays its one CSR, and the Server decides
+  that enrolment as any other ([ADR-0015](0015-client-modes-and-the-gateway.md), clause 24; clauses
+  11 and 20).
 
 ## Sources / Prior art
 
@@ -795,5 +805,5 @@ Where a test below also covers a clause another ADR carries, that ADR is named b
   [ADR-0022](0022-bootstrap-certificates-and-enrolment.md)).
 
 **Not mechanically decidable:** clause 12 decides what is *not* built beyond the host — no test
-can show the absence of a per-Agent authorization the design rejects; and clause 20 rests on a
-Gateway's client CA, which the Server cannot see. Review holds them.
+can show the absence of a per-Agent authorization the design rejects; and clause 20 rests on the
+CAs a Gateway trusts, which the Server cannot see. Review holds them.
