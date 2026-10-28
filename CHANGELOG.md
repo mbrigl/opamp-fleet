@@ -73,6 +73,19 @@ once its tag exists.
   send more through a Gateway than the defaults allow needs the section raised on each Gateway it
   reports through.
 
+- **On Windows a Managed Process can no longer reach into the second service**
+  ([ADR-0036](docs/adr/0036-on-windows-the-second-service-closes-its-process-and-threads-to-the-process-account.md)).
+  The second service's process kept the default security its account gives it, so a Managed
+  Process under the same process account could open it to read its memory — what the Client sends
+  it, the Supervisor Endpoint's token among it — run code in it, or duplicate its pipe handle and
+  answer the Client in its place. As the first thing its program does, the second service now gives
+  its process and every one of its threads a protected DACL that leaves the process account, and
+  for the process the Client's account, only the right to ask about it and wait for it, and it does
+  not listen while its process or a thread reads back otherwise. The Client holds the pipe server's
+  process open while it asks the SCM, so a process id passed on in between no longer passes its
+  check. **What to do:** nothing on upgrade. An administrator's tool that opens the second
+  service's process, a debugger or a process explorer, has to run elevated.
+
 ## [0.7.0]
 
 ### Added

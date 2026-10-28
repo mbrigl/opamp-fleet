@@ -143,8 +143,8 @@ has:
   without a process account runs every Managed Process as the Client; all Managed Processes share
   the one account, so they read one another's `config/`.
 - **A Managed Process cannot take the second service's place by its socket or pipe, nor, on
-  Linux, reach into it once it has marked itself** (ADR-0020 clause 19): before the Client writes
-  anything
+  Linux and Windows, reach into it once it has closed itself** (ADR-0020 clause 19, ADR-0036):
+  before the Client writes anything
   on a new connection it reads the process at the other end — `SO_PEERPIDFD` on Linux,
   `LOCAL_PEERPID` on macOS, `GetNamedPipeServerProcessId` on Windows — and accepts it only where
   systemd, launchd or the SCM runs that process as the second service. A Managed Process that
@@ -154,12 +154,23 @@ has:
   dumpable before it parses its command line or sets up its log, so from then on no process of
   the process account without `CAP_SYS_PTRACE` attaches to it, reads or writes its memory or takes
   its descriptors, whatever `kernel.yama.ptrace_scope` says, and it does not listen while it is
-  traced. Residual: on Windows a Managed Process can open the second service's process with the
-  rights its account holds on it, duplicate its pipe handle or run code in it; on Linux where Yama
+  traced. On Windows the second service's program gives its process and every one of its threads a
+  protected DACL before it parses its command line or sets up its log: the process account, and
+  for the process the Client's account, may only ask about it and wait for it, its owner only read
+  that DACL, and only `LocalSystem` and the Administrators hold more. So a Managed Process, which
+  holds no `SeDebugPrivilege`, can neither read nor write its memory, start or steer a thread in
+  it, duplicate its handles, suspend it nor end it, and the second service does not listen while
+  its process or a thread reads back otherwise; a thread the system starts for it later is closed
+  within a second. The Client holds the pipe server's process open from before it asks the SCM
+  until it has decided, so a process that ended in between is refused. Residual: on Windows the
+  second service's process is open from its creation until its program's first act, and a thread
+  its runtime or the system starts from its creation until it is closed, the runtime's for an
+  instant and the system's for up to a second; on Linux where Yama
   is absent or `ptrace_scope` is 0, a Managed Process can kill the second service and attach to
   the one its service manager starts again between its `execve` and the mark, and as its tracer
-  make it read a `TracerPid` of 0; on Linux before 6.5, on macOS and on Windows a process that
-  listened and ended can leave its id to the second service, which the Client does not tell apart;
+  make it read a `TracerPid` of 0; on Linux before 6.5 and on macOS a process that listened and
+  ended can leave its id to the second service, and on Windows one that ended before the Client
+  opens the process the pipe names, which the Client does not tell apart;
   a Managed Process can remove or replace the socket, and the Client then finds the second service
   away; where the service manager cannot be asked — no system bus, a `launchctl print` that fails —
   no Managed Process starts until it answers again.

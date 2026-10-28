@@ -85,7 +85,18 @@ fn client(args: &[&str], config: &Path) -> Result<String, String> {
     }
 }
 
-fn wait_for<T>(what: &str, timeout: Duration, mut probe: impl FnMut() -> Option<T>) -> T {
+fn wait_for<T>(what: &str, timeout: Duration, probe: impl FnMut() -> Option<T>) -> T {
+    wait_telling(what, timeout, probe, String::new)
+}
+
+/// [`wait_for`], and on a timeout what `tell` says of the host besides: the services' logs and
+/// state, so that a run in CI shows why.
+fn wait_telling<T>(
+    what: &str,
+    timeout: Duration,
+    mut probe: impl FnMut() -> Option<T>,
+    tell: impl FnOnce() -> String,
+) -> T {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
         if let Some(value) = probe() {
@@ -93,7 +104,7 @@ fn wait_for<T>(what: &str, timeout: Duration, mut probe: impl FnMut() -> Option<
         }
         std::thread::sleep(Duration::from_millis(250));
     }
-    panic!("timed out after {timeout:?} waiting for {what}");
+    panic!("timed out after {timeout:?} waiting for {what}{}", tell());
 }
 
 fn agent(state: &AppState) -> Option<AgentView> {
@@ -1129,61 +1140,102 @@ fn a_managed_process_in_the_second_services_place_is_refused() {
     client(&["service", "uninstall"], &config).expect("uninstall the service");
 }
 
-/// `service <verb>` on Windows, and on a failure what the SCM holds of both services, what the
-/// layout grants and what the SCM last logged, so that a failed start or stop says why.
+/// `service <verb>` on Windows, and on a failure what the host says of both services
+/// ([`windows_host`]), so that a failed start or stop says why.
 #[cfg(windows)]
 fn service_on_windows(verb: &str, config: &Path, root: &Path) {
     if let Err(e) = client(&["service", verb], config) {
-        let mut said = String::new();
-        let mut run = |program: &str, args: &[&std::ffi::OsStr]| {
-            let out = Command::new(program).args(args).output();
-            said.push_str(&format!("\n--- {program} {args:?} ---\n"));
-            match out {
-                Ok(out) => {
-                    said.push_str(&String::from_utf8_lossy(&out.stdout));
-                    said.push_str(&String::from_utf8_lossy(&out.stderr));
-                }
-                Err(e) => said.push_str(&e.to_string()),
-            }
-        };
-        for name in [
-            service_name().to_string(),
-            fleet_agent::service::manager::agents_service_name(),
-        ] {
-            for verb in ["qc", "qprivs", "sdshow", "queryex"] {
-                run(
-                    "sc",
-                    &[std::ffi::OsStr::new(verb), std::ffi::OsStr::new(&name)],
-                );
-            }
-        }
-        for path in [
-            root.to_path_buf(),
-            root.join("versions"),
-            root.join("current"),
-        ] {
-            run("icacls", &[path.as_os_str()]);
-        }
-        run(
-            "wevtutil",
-            &[
-                std::ffi::OsStr::new("qe"),
-                std::ffi::OsStr::new("System"),
-                std::ffi::OsStr::new("/c:10"),
-                std::ffi::OsStr::new("/rd:true"),
-                std::ffi::OsStr::new("/f:text"),
-                std::ffi::OsStr::new("/q:*[System[Provider[@Name='Service Control Manager']]]"),
-            ],
-        );
-        panic!("{verb} the service: {e}{said}");
+        panic!("{verb} the service: {e}{}", windows_host(root));
     }
 }
 
-/// What the Managed Process below found out about itself on Windows, once it has written it.
+/// What the host says of both services installed under `root`: what the SCM holds of them, what
+/// the layout grants, the smoke's scheduled tasks, what the SCM and the applications last logged,
+/// and the Client's log. The second service writes no log file of its own: why it ended is in its
+/// exit code (`sc queryex`) and the System log.
 #[cfg(windows)]
-fn reported_on_windows(result: &Path) -> std::collections::BTreeMap<String, String> {
-    wait_for(
-        "the Managed Process to report",
+fn windows_host(root: &Path) -> String {
+    let mut said = String::new();
+    let mut run = |program: &str, args: &[&str]| {
+        let out = Command::new(program).args(args).output();
+        said.push_str(&format!("\n--- {program} {args:?} ---\n"));
+        match out {
+            Ok(out) => {
+                said.push_str(&String::from_utf8_lossy(&out.stdout));
+                said.push_str(&String::from_utf8_lossy(&out.stderr));
+            }
+            Err(e) => said.push_str(&e.to_string()),
+        }
+    };
+    for name in [
+        service_name().to_string(),
+        fleet_agent::service::manager::agents_service_name(),
+    ] {
+        for verb in ["qc", "qprivs", "sdshow", "queryex"] {
+            run("sc", &[verb, &name]);
+        }
+    }
+    for path in [
+        root.to_path_buf(),
+        root.join("versions"),
+        root.join("current"),
+    ] {
+        run("icacls", &[&path.display().to_string()]);
+    }
+    run(
+        "powershell.exe",
+        &[
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "Get-ScheduledTask -TaskName 'opamp-fleet-smoke-*' -ErrorAction SilentlyContinue | \
+             ForEach-Object { $_.TaskName; $_ | Get-ScheduledTaskInfo | Format-List | Out-String }",
+        ],
+    );
+    for (log, query) in [
+        (
+            "System",
+            "/q:*[System[Provider[@Name='Service Control Manager']]]",
+        ),
+        (
+            "Application",
+            "/q:*[System[(Level=1 or Level=2 or Level=3)]]",
+        ),
+    ] {
+        run(
+            "wevtutil",
+            &["qe", log, "/c:15", "/rd:true", "/f:text", query],
+        );
+    }
+    let log = client_log(&root.join("state"));
+    let lines: Vec<&str> = log.lines().collect();
+    said.push_str("\n--- the Client's log, its last 200 lines ---\n");
+    for line in &lines[lines.len().saturating_sub(200)..] {
+        said.push_str(line);
+        said.push('\n');
+    }
+    said
+}
+
+/// What the Managed Process below found out about itself on Windows, once it has written it; on a
+/// timeout, what the host says of the services installed under `root` ([`windows_host`]).
+#[cfg(windows)]
+fn reported_on_windows(result: &Path, root: &Path) -> std::collections::BTreeMap<String, String> {
+    report_on_windows("the Managed Process to report", result, || {
+        windows_host(root)
+    })
+}
+
+/// The `key=value` lines `result` holds once it holds `done`, waited for as `what`; on a timeout,
+/// what `tell` says besides.
+#[cfg(windows)]
+fn report_on_windows(
+    what: &str,
+    result: &Path,
+    tell: impl FnOnce() -> String,
+) -> std::collections::BTreeMap<String, String> {
+    wait_telling(
+        what,
         Duration::from_secs(90),
         || {
             let text = std::fs::read_to_string(result).ok()?;
@@ -1194,6 +1246,7 @@ fn reported_on_windows(result: &Path) -> std::collections::BTreeMap<String, Stri
                 .collect();
             report.contains_key("done").then_some(report)
         },
+        tell,
     )
 }
 
@@ -1441,13 +1494,14 @@ fn on_windows_a_managed_process_runs_under_the_process_account_and_reaches_only_
         assert_eq!(privileges, ["SeChangeNotifyPrivilege"]);
     }
     service_on_windows("start", &config, &root);
-    wait_for(
+    wait_telling(
         "the Agent to appear in the fleet",
         Duration::from_secs(60),
         || agent(&state_view).filter(|a| a.connected).map(|_| ()),
+        || windows_host(&root),
     );
 
-    let first = reported_on_windows(&result);
+    let first = reported_on_windows(&result, &root);
     assert!(
         first["user"].eq_ignore_ascii_case(&process_account),
         "{first:?}"
@@ -1470,7 +1524,7 @@ fn on_windows_a_managed_process_runs_under_the_process_account_and_reaches_only_
     let pid = parse_after(&String::from_utf8_lossy(&queried.stdout), "PID")
         .expect("the second service's process id");
     kill(pid);
-    let again = reported_on_windows(&result);
+    let again = reported_on_windows(&result, &root);
     assert!(
         again["user"].eq_ignore_ascii_case(&process_account),
         "{again:?}"
@@ -1487,7 +1541,7 @@ fn on_windows_a_managed_process_runs_under_the_process_account_and_reaches_only_
         "{reinstalled}"
     );
     service_on_windows("start", &config, &root);
-    let upgraded = reported_on_windows(&result);
+    let upgraded = reported_on_windows(&result, &root);
     assert!(
         upgraded["user"].eq_ignore_ascii_case(&process_account),
         "{upgraded:?}"
@@ -1539,7 +1593,7 @@ fn on_windows_a_managed_process_runs_under_the_process_account_and_reaches_only_
             },
         );
     }
-    let resumed = reported_on_windows(&result);
+    let resumed = reported_on_windows(&result, &root);
     assert!(
         resumed["user"].eq_ignore_ascii_case(&process_account),
         "{resumed:?}"
@@ -1595,7 +1649,7 @@ fn on_windows_a_managed_process_runs_under_the_process_account_and_reaches_only_
         "a completed withdrawal leaves no record: {}",
         String::from_utf8_lossy(&recorded.stdout)
     );
-    let dropped = reported_on_windows(&result);
+    let dropped = reported_on_windows(&result, &root);
     assert!(
         dropped["user"].eq_ignore_ascii_case(&client_account),
         "{dropped:?}"
@@ -1655,16 +1709,43 @@ struct ScheduledTask(&'static str);
 impl ScheduledTask {
     /// Registers `script` as a task under `NT AUTHORITY\LocalService` and starts it.
     fn start(name: &'static str, script: &Path) -> Self {
+        Self::run(
+            name,
+            "powershell.exe",
+            &format!(
+                "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{}\"",
+                script.display()
+            ),
+        )
+    }
+
+    /// Registers `script` as a task under `NT AUTHORITY\LocalService` and starts it, everything
+    /// PowerShell writes — a script it cannot parse or read among it — going to `log`.
+    fn start_logged(name: &'static str, script: &Path, log: &Path) -> Self {
+        Self::run(
+            name,
+            "cmd.exe",
+            &format!(
+                "/c powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \
+                 \"{}\" > \"{}\" 2>&1",
+                script.display(),
+                log.display()
+            ),
+        )
+    }
+
+    /// Registers `execute` with `argument` as a task under `NT AUTHORITY\LocalService` and starts
+    /// it.
+    fn run(name: &'static str, execute: &str, argument: &str) -> Self {
         let task = Self(name);
         powershell(&format!(
-            "$action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument \
-             '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{script}\"'; \
+            "$action = New-ScheduledTaskAction -Execute '{execute}' -Argument '{argument}'; \
              $principal = New-ScheduledTaskPrincipal -UserId 'NT AUTHORITY\\LOCALSERVICE' \
              -LogonType ServiceAccount; \
              Register-ScheduledTask -TaskName '{name}' -Action $action -Principal $principal \
              -Force | Out-Null; \
              Start-ScheduledTask -TaskName '{name}'",
-            script = script.display(),
+            argument = argument.replace('\'', "''"),
         ));
         task
     }
@@ -1814,15 +1895,17 @@ while ($true) {
     .expect("install the service with LocalService as the process account");
     let _registered = Registered;
     service_on_windows("start", &config, &root);
-    wait_for(
+    wait_telling(
         "the Agent to appear in the fleet",
         Duration::from_secs(60),
         || agent(&state_view).filter(|a| a.connected).map(|_| ()),
+        || windows_host(&root),
     );
-    wait_for(
+    wait_telling(
         "the Managed Process to start",
         Duration::from_secs(90),
         || (started() == 1).then_some(()),
+        || windows_host(&root),
     );
 
     // The second service stops, and its program with it; the SCM then names no process for it,
@@ -1846,7 +1929,10 @@ while ($true) {
     scm_to("stop", service_name(), "STOPPED");
     scm_to("start", service_name(), "RUNNING");
     let pipe_text = pipe.display().to_string();
-    wait_for(
+    // The impostor's process carries the default security of its account, which grants the
+    // Client nothing: the Client cannot open it to hold it (ADR-0036) and refuses it as a process
+    // it cannot read, before the SCM's answer; were it opened, the SCM would name no process.
+    wait_telling(
         "the restarted Client to refuse the impostor",
         Duration::from_secs(60),
         || {
@@ -1854,12 +1940,14 @@ while ($true) {
                 .lines()
                 .any(|line| {
                     line.contains("ERROR")
-                        && line.contains("runs no process as the second service")
+                        && (line.contains("cannot be read")
+                            || line.contains("runs no process as the second service"))
                         && line.contains(&format!("peer_pid={impostor_pid}"))
                         && line.contains(&pipe_text)
                 })
                 .then_some(())
         },
+        || windows_host(&root),
     );
     std::thread::sleep(Duration::from_secs(u64::from(RESTART_DELAY_SECS) * 3));
     let impostor_heard = std::fs::read_to_string(&heard).expect("what the impostor heard");
@@ -1891,10 +1979,252 @@ while ($true) {
         (!String::from_utf8_lossy(&out.stdout).contains(&impostor_pid.to_string())).then_some(())
     });
     scm_to("start", &agents, "RUNNING");
-    wait_for(
+    wait_telling(
         "the Managed Process to start through the second service again",
         Duration::from_secs(90),
         || (started() == 2).then_some(()),
+        || windows_host(&root),
+    );
+
+    service_on_windows("stop", &config, &root);
+    client(&["service", "uninstall"], &config).expect("uninstall the service");
+}
+
+/// On Windows the second service's process and threads are closed to its own account (ADR-0036):
+/// with `NT AUTHORITY\LocalService` as the process account, a task scheduled under that account —
+/// as a Managed Process would be — is refused `ERROR_ACCESS_DENIED` when it opens the second
+/// service's process with `PROCESS_VM_READ`, `PROCESS_DUP_HANDLE` or `PROCESS_CREATE_THREAD`, and
+/// any of its threads with `THREAD_SET_CONTEXT`, while it may still open the process to ask about
+/// it (`PROCESS_QUERY_LIMITED_INFORMATION`), and the Managed Process the second service started
+/// still runs.
+/// Verifies: ADR-0036
+#[cfg(windows)]
+#[test]
+#[ignore = "installs a real system service; run with --ignored in the service-smoke job"]
+fn on_windows_the_second_services_process_and_threads_are_closed_to_the_process_account() {
+    use fleet_agent::service::manager::agents_service_name;
+    assert_eq!(
+        service().state().expect("query the service"),
+        ServiceState::NotInstalled,
+        "a leftover {} service from an earlier run — remove it before running this",
+        service_name()
+    );
+    let client_account = format!(r"NT SERVICE\{}", service_name());
+    let process_account = r"NT AUTHORITY\LocalService";
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("install");
+    let state = root.join("state");
+    let program = state.join("supervisors").join("probe").join("program");
+    std::fs::create_dir_all(&program).expect("program/");
+    // Where the Managed Process and the task say what they did: writable by everyone.
+    let out = dir.path().join("out");
+    std::fs::create_dir(&out).expect("out/");
+    grant_modify(&out, "*S-1-1-0");
+    let starts = out.join("starts");
+    let started = || {
+        std::fs::read_to_string(&starts)
+            .map(|text| text.lines().filter(|line| line.trim() == "started").count())
+            .unwrap_or(0)
+    };
+
+    common::client_identity(dir.path());
+    let key = state.join("client-key.pem");
+    let cert = state.join("client.pem");
+    std::fs::rename(dir.path().join("test-client-key.pem"), &key).expect("place the key");
+    std::fs::rename(dir.path().join("test-client.pem"), &cert).expect("place the certificate");
+    std::fs::write(
+        program.join("probe.cmd"),
+        format!(
+            "@echo off\r\n\
+             echo started>> \"{starts}\"\r\n\
+             ping -n 3600 127.0.0.1 >nul\r\n",
+            starts = starts.display(),
+        ),
+    )
+    .expect("write the program");
+
+    let (addr, state_view, _server) = spawn_server();
+    let config = dir.path().join("supervisor.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "endpoint = \"ws://{addr}/v1/opamp\"\nname = \"{AGENT_NAME}\"\nheartbeat_interval_secs = 1\n\
+             [tls]\ncert_file = {cert:?}\nkey_file = {key:?}\n\n\
+             [[supervisor]]\ntype = \"command\"\nname = \"probe\"\ncommand = \"probe.cmd\"\n",
+            cert = cert.display().to_string(),
+            key = key.display().to_string(),
+        ),
+    )
+    .expect("write supervisor.toml");
+
+    let root_arg = root.to_string_lossy().into_owned();
+    client(
+        &[
+            "service",
+            "install",
+            "--root",
+            &root_arg,
+            "--run-as",
+            &client_account,
+            "--process-account",
+            process_account,
+        ],
+        &config,
+    )
+    .expect("install the service with LocalService as the process account");
+    let _registered = Registered;
+    service_on_windows("start", &config, &root);
+    wait_telling(
+        "the Agent to appear in the fleet",
+        Duration::from_secs(60),
+        || agent(&state_view).filter(|a| a.connected).map(|_| ()),
+        || windows_host(&root),
+    );
+    wait_telling(
+        "the Managed Process to start",
+        Duration::from_secs(90),
+        || (started() == 1).then_some(()),
+        || windows_host(&root),
+    );
+    let agents = agents_service_name();
+    let agents_pid = || {
+        let queried = Command::new("sc")
+            .args(["queryex", &agents])
+            .output()
+            .expect("run sc queryex");
+        parse_after(&String::from_utf8_lossy(&queried.stdout), "PID")
+            .expect("the second service's process id")
+    };
+    let pid = agents_pid();
+
+    // The task opens the second service's process and each of its threads for what a Managed
+    // Process would read, steer or take it by, and notes the error of each.
+    let result = out.join("opened");
+    let probe = out.join("open.ps1");
+    std::fs::write(
+        &probe,
+        r#"$ErrorActionPreference = 'Stop'
+$out = '@OUT@'
+$target = [uint32]@PID@
+$lines = @()
+try {
+$lines += "user=" + [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public static class Opener {
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern IntPtr OpenProcess(uint access, bool inherit, uint id);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern IntPtr OpenThread(uint access, bool inherit, uint id);
+    [DllImport("kernel32.dll")]
+    static extern bool CloseHandle(IntPtr handle);
+    public static string TryProcess(uint access, uint id) {
+        IntPtr handle = OpenProcess(access, false, id);
+        if (handle == IntPtr.Zero) { return Marshal.GetLastWin32Error().ToString(); }
+        CloseHandle(handle);
+        return "0";
+    }
+    public static string TryThread(uint access, uint id) {
+        IntPtr handle = OpenThread(access, false, id);
+        if (handle == IntPtr.Zero) { return Marshal.GetLastWin32Error().ToString(); }
+        CloseHandle(handle);
+        return "0";
+    }
+}
+"@
+$lines += "vm_read=$([Opener]::TryProcess([uint32]0x0010, [uint32]$target))"
+$lines += "dup_handle=$([Opener]::TryProcess([uint32]0x0040, [uint32]$target))"
+$lines += "create_thread=$([Opener]::TryProcess([uint32]0x0002, [uint32]$target))"
+$lines += "query_limited=$([Opener]::TryProcess([uint32]0x1000, [uint32]$target))"
+$threads = @(Get-CimInstance Win32_Thread -Filter "ProcessHandle='$target'" | ForEach-Object { [uint32]$_.Handle })
+foreach ($thread in $threads) {
+    $lines += "set_context_$($thread)=$([Opener]::TryThread([uint32]0x0010, [uint32]$thread))"
+}
+} catch {
+    $lines += "error=" + (($_ | Out-String) -replace "[`r`n]+", ' ')
+}
+$lines += "done=yes"
+# Written in place, `done` last: the test reads the file only once it holds `done`, and a rename
+# over it is a right LocalService is not granted.
+Set-Content -Path $out -Value $lines
+"#
+        .replace("@OUT@", &result.display().to_string())
+        .replace("@PID@", &pid.to_string()),
+    )
+    .expect("write the task's script");
+    // LocalService reads the script and writes beside it by its own grant too, not only as
+    // Everyone; what PowerShell itself says, a script it cannot read or parse among it, goes to
+    // the log.
+    grant_modify(&out, "*S-1-5-19");
+    let opener_log = out.join("opener.log");
+    let _task = ScheduledTask::start_logged("opamp-fleet-smoke-opener", &probe, &opener_log);
+    let opened = report_on_windows(
+        "the task under LocalService to write what it could open",
+        &result,
+        || {
+            let granted = Command::new("icacls.exe")
+                .arg(&probe)
+                .output()
+                .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
+                .unwrap_or_else(|e| e.to_string());
+            format!(
+                "\n--- what PowerShell wrote under LocalService ---\n{}\n--- icacls {} ---\n{granted}{}",
+                std::fs::read_to_string(&opener_log).unwrap_or_else(|e| e.to_string()),
+                probe.display(),
+                windows_host(&root)
+            )
+        },
+    );
+    assert!(
+        !opened.contains_key("error"),
+        "the task could not try: {opened:?}"
+    );
+    assert_eq!(
+        opened["user"], "S-1-5-19",
+        "run as LocalService: {opened:?}"
+    );
+    for right in ["vm_read", "dup_handle", "create_thread"] {
+        assert_eq!(opened[right], "5", "{right} is not refused: {opened:?}");
+    }
+    assert_eq!(
+        opened["query_limited"], "0",
+        "the process account may ask about the second service: {opened:?}"
+    );
+    let threads: Vec<(&String, &String)> = opened
+        .iter()
+        .filter(|(key, _)| key.starts_with("set_context_"))
+        .collect();
+    assert!(!threads.is_empty(), "no thread was opened: {opened:?}");
+    for (thread, error) in threads {
+        assert_eq!(error, "5", "{thread} is not refused: {opened:?}");
+    }
+
+    // The Managed Process still runs, under the second service it was started by.
+    assert_eq!(scm_state(&agents), "RUNNING");
+    assert_eq!(agents_pid(), pid, "the second service was restarted");
+    assert_eq!(started(), 1, "the Managed Process was started again");
+    let children = Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &format!(
+                "@(Get-CimInstance Win32_Process -Filter 'ParentProcessId={pid}' | \
+                 Where-Object {{ $_.Name -eq 'cmd.exe' }}).Count"
+            ),
+        ])
+        .output()
+        .expect("run powershell");
+    let children = String::from_utf8_lossy(&children.stdout);
+    assert!(
+        children.trim().parse::<u32>().is_ok_and(|count| count >= 1),
+        "the Managed Process no longer runs under the second service: {children}"
+    );
+    assert!(
+        agent(&state_view).is_some_and(|a| a.connected),
+        "the Agent is no longer connected"
     );
 
     service_on_windows("stop", &config, &root);
