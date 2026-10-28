@@ -320,7 +320,7 @@ proves the certificate it rests on, which the Server decides as any enrolment.
       many lines as it holds live bindings and hosts, as a new file synced and renamed over the
       old. A store is at most 512 MiB. It is written as the Client writes into its state
       directory, without following a link
-      ([ADR-0020](0020-the-accounts-the-service-runs-under.md)), readable and writable by the
+      ([ADR-0037](0037-the-accounts-the-service-runs-under.md)), readable and writable by the
       Client's account alone: `0600` on Unix, under the restricted ACL the install gives the state
       directory on Windows.
     - **An unreadable store refuses every downstream Agent.** At start the Gateway reads the store

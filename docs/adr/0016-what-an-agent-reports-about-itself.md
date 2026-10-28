@@ -467,7 +467,7 @@ telemetry — the specification keeps this project out of the telemetry-backend 
 on the Agent that drops the three capability bits. Also out of scope: the Supervisor Endpoint's
 token and which processes are handed it ([ADR-0015](0015-client-modes-and-the-gateway.md)); what a
 Managed Process can read on its host, which includes the Client's `state_dir` and key while both
-run under one account ([ADR-0020](0020-the-accounts-the-service-runs-under.md)); `service.version`,
+run under one account ([ADR-0037](0037-the-accounts-the-service-runs-under.md)); `service.version`,
 which stays the process's word; what a compromised Client reports, since its code builds the whole
 description and no rule on the Client binds it; and the Server's precedence of the effective
 description ([ADR-0024](0024-the-fleet-record-of-agents-and-hosts.md)).

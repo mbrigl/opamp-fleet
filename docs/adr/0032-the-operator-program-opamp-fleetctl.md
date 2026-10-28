@@ -357,7 +357,7 @@ fleet through the Operator plane beyond the upload `package fetch` makes; writin
 key encrypted, extracting files other than the bootstrap form, and making a PKCS#12 file with the
 tool; the file modes the repack keeps, including group- and world-writable bits a tree may carry,
 which the repack leaves as upstream set them and the Client applies as
-[ADR-0020](0020-the-accounts-the-service-runs-under.md) clause 23 states; a kind's own removal,
+[ADR-0037](0037-the-accounts-the-service-runs-under.md) clause 23 states; a kind's own removal,
 before packing, of links it
 knows upstream leaves behind (as the GLPI repack removes `.DirIcon`), which each kind states where
 it is decided; hard links, which are files of the tree; and the trust in the extracted tree's

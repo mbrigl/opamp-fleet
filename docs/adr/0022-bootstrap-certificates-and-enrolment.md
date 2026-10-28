@@ -313,7 +313,7 @@ find the bootstrap identity beside its program and enrol with it.
     **The answered CA is copied beside the written file**, as `server-ca.pem`, owner-only on Unix,
     and the file names the copy. A copy left by an earlier answer is replaced. The copy is handed
     over to the service account with the file, as the install hands over the configuration
-    ([ADR-0020](0020-the-accounts-the-service-runs-under.md)). The questionnaire asks nothing about
+    ([ADR-0037](0037-the-accounts-the-service-runs-under.md)). The questionnaire asks nothing about
     the self-update: the file carries `[packages] self_update = true`, and the verification key
     decides whether that takes effect
     ([ADR-0018](0018-the-client-updates-itself-from-a-signed-package.md)). Everything else
@@ -358,9 +358,9 @@ find the bootstrap identity beside its program and enrol with it.
 
 19. **A packaged host enrols in a step after the package.** The post-install of the `.deb` and the
     `.rpm` runs `service install` from the payload path as the Linux packages' install states
-    ([ADR-0020](0020-the-accounts-the-service-runs-under.md)): it finds no fleet files and enrols
+    ([ADR-0037](0037-the-accounts-the-service-runs-under.md)): it finds no fleet files and enrols
     nothing, so `apt` and `dnf` never wait for an approval. The host is enrolled by the step the
-    post-install prints ([ADR-0020](0020-the-accounts-the-service-runs-under.md)), interactively,
+    post-install prints ([ADR-0037](0037-the-accounts-the-service-runs-under.md)), interactively,
     or by a script that puts the fleet's files in a directory, names it with `--fleet-files`, and
     runs the non-interactive install of clause 18:
 
@@ -520,7 +520,7 @@ find the bootstrap identity beside its program and enrol with it.
   plane, revocation), [ADR-0015](0015-client-modes-and-the-gateway.md) (approval through a proved
   bootstrap certificate, renewal, enrolment through a Gateway),
   [ADR-0019](0019-the-installed-service-and-its-state.md) and
-  [ADR-0020](0020-the-accounts-the-service-runs-under.md) (the installed service and the Linux
+  [ADR-0037](0037-the-accounts-the-service-runs-under.md) (the installed service and the Linux
   packages), [ADR-0029](0029-the-servers-state-and-its-stores.md) (the record of issued bootstrap
   certificates), [ADR-0032](0032-the-operator-program-opamp-fleetctl.md) (certificate names,
   `pki p12-extract`), [ADR-0023](0023-an-append-only-audit-record.md) (the audit record).

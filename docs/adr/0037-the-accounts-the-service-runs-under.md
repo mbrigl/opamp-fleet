@@ -1325,7 +1325,7 @@ either account placed.
 
 ## Enforcement
 
-Tests that carry `Verifies: ADR-0020`; the Windows process and thread DACLs of clause 19 are
+Tests that carry `Verifies: ADR-0037`; the Windows process and thread DACLs of clause 19 are
 verified by the tests
 [ADR-0036](0036-on-windows-the-second-service-closes-its-process-and-threads-to-the-process-account.md)
 names:

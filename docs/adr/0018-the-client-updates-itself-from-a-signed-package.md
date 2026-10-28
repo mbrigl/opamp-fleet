@@ -16,7 +16,7 @@ restart and roll back on failure (G-11).
 The machinery around a self-update is decided elsewhere: the versioned side-by-side layout with
 its `current` pointer, per-version `manifest.toml` and restart-on-failure registration
 ([ADR-0019](0019-the-installed-service-and-its-state.md),
-[ADR-0020](0020-the-accounts-the-service-runs-under.md)), the verified download and the archive
+[ADR-0037](0037-the-accounts-the-service-runs-under.md)), the verified download and the archive
 handling of package delivery
 ([ADR-0027](0027-packages-signatures-and-delivery.md)), and the per-Agent offer
 ([ADR-0026](0026-deployments-and-rollouts.md)). Four problems are specific to replacing the

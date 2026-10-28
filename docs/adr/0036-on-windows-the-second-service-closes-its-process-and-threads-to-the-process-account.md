@@ -8,7 +8,7 @@
 ## Context
 
 Where a process account is registered, every Managed Process runs under it, and so does the second
-service that starts them ([ADR-0020](0020-the-accounts-the-service-runs-under.md)).
+service that starts them ([ADR-0037](0037-the-accounts-the-service-runs-under.md)).
 Clause 19 of ADR-0020 has the Client speak only to the process its service manager runs as the
 second service, and closes that process to the Managed Processes where the platform allows: on
 Linux it marks itself not dumpable, and on macOS `task_for_pid` refuses a caller of the same user.
@@ -21,7 +21,7 @@ its place. ADR-0020 names this under *Out of scope*, together with a process id 
 and names closing the Windows process and pinning the peer's process as follow-ups.
 
 Windows checks every `OpenProcess` and `OpenThread` against the object's DACL. A caller without
-`SeDebugPrivilege`, which the process account does not hold (ADR-0020 clause 7), gets only what the
+`SeDebugPrivilege`, which the process account does not hold (ADR-0037 clause 7), gets only what the
 DACL grants. A process's owner keeps `READ_CONTROL` and `WRITE_DAC` implicitly unless an
 `OWNER RIGHTS` entry says otherwise. A thread is an object of its own, with a DACL of its own, and
 `THREAD_SET_CONTEXT` on one is enough to run code in its process. A new process or thread whose
@@ -43,7 +43,7 @@ the peer's process by a handle while it checks it.
 **Out of scope:** the process itself from its creation until its program's first act; a thread the
 runtime creates, in the instant between its creation and its own first act; a thread the system
 starts in the process, until the next snapshot, at most a second later; a broker outside the job, a
-WMI process creation or a scheduled task, through which a Managed Process outlives the job (ADR-0020
+WMI process creation or a scheduled task, through which a Managed Process outlives the job (ADR-0037
 clause 19); a process id reused on macOS, or on Windows before the Client opens the process the pipe
 names; what the Managed Processes can do to one another under the one account.
 
@@ -53,7 +53,7 @@ names; what the Managed Processes can do to one another under the one account.
   from its creation, but every Managed Process would inherit the DACL and be closed to its own
   account too, which may break an agent that inspects its own processes. Starting each program
   under a token of its own instead brings back the token handling of `CreateProcessAsUserW` that
-  ADR-0020 kept out of the second service. Rejected.
+  ADR-0037 kept out of the second service. Rejected.
 - **Leave `PROCESS_TERMINATE` to the process account.** A Managed Process could end the second
   service, which the service manager restarts; that is a denial and no takeover, and the shared
   account allows other denials anyway. Not taken: the rule is the narrowest grant that still lets
@@ -77,7 +77,7 @@ names; what the Managed Processes can do to one another under the one account.
   decides both on a real host.
 - Microsoft Learn, `SetSecurityInfo`, `GetNamedPipeServerProcessId`, `OpenProcess`,
   `CreateToolhelp32Snapshot`.
-- This repository: [ADR-0020](0020-the-accounts-the-service-runs-under.md) clauses 17, 19 and 21;
+- This repository: [ADR-0037](0037-the-accounts-the-service-runs-under.md) clauses 17, 19 and 21;
   `crates/fleet-agent/src/supervisor/channel/windows.rs`; `docs/HARDENING.md`.
 
 ## Consequences

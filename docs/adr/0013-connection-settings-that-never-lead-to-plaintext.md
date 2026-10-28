@@ -24,7 +24,7 @@ unproven: a `ws://` or `http://` endpoint has no TLS to verify. Whoever listens 
 Client's host then speaks to the Client as its Server. Any local account can open such a port. It
 can send Supervisor sets and configurations whose language runs commands, such as a Telegraf
 `inputs.exec`, and these run with the rights of the account the Client's service runs under
-([ADR-0020](0020-the-accounts-the-service-runs-under.md)). A Server needs to send only one such
+([ADR-0037](0037-the-accounts-the-service-runs-under.md)). A Server needs to send only one such
 offer, whether it is compromised or misconfigured. The real Server cannot undo the move, because
 the Client never connects to it again, and the persisted endpoint outranks `supervisor.toml`.
 Plaintext on the loopback exists for development and tests, where an operator writes the endpoint
