@@ -63,7 +63,7 @@ const HOST_URI_PREFIX: &str = "urn:opamp-fleet:host:";
 const CONCURRENT_FETCHES: usize = 4;
 
 /// The most `instance_uid`s bound at once, over all hosts (ADR-0015 clause 15).
-const MAX_BINDINGS: usize = 1_000_000;
+pub(crate) const MAX_BINDINGS: usize = 1_000_000;
 
 /// How many lines per host and minute are logged one by one (ADR-0027 clause 44).
 const LINES_PER_MINUTE: u32 = 5;
@@ -1418,6 +1418,8 @@ pub struct Downloads {
     pub revocations: RevocationList,
     /// Tells an enrolling peer, which is served no download, from a member (ADR-0015 clause 24).
     pub members: crate::gateway::Members,
+    /// The downstream hosts' buckets, which every download request takes a token from (ADR-0035).
+    pub rate: Arc<crate::gateway::rate::HostRate>,
 }
 
 /// The download route on the downstream listener (ADR-0015 clause 15).
@@ -1453,6 +1455,20 @@ fn store_unreadable() -> Response {
     (StatusCode::SERVICE_UNAVAILABLE, STORE_UNREADABLE).into_response()
 }
 
+/// The answer to a download past the host's rate limit, as the Server gives it (ADR-0012
+/// clause 26, ADR-0035 clause 4).
+fn over_rate() -> Response {
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        [(
+            header::RETRY_AFTER,
+            HeaderValue::from(crate::gateway::rate::RETRY_AFTER.as_secs()),
+        )],
+        crate::gateway::rate::THROTTLED,
+    )
+        .into_response()
+}
+
 async fn serve(
     axum::extract::State(downloads): axum::extract::State<Arc<Downloads>>,
     request: Request,
@@ -1482,15 +1498,29 @@ async fn serve(
                 .into_response()
         }
     }
+    // The host's token, once the certificate is admitted and before anything of the package cache
+    // is looked up: past the limit the artifact is not read (ADR-0035 clauses 2 and 4).
+    let enrolling = downloads.members.enrolling(&certificate);
+    let peer = request
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|info| info.0);
+    // A certificate the revocation list could judge can be read, so this refuses nothing the
+    // handshake and the list admitted, as on `/v1/opamp`.
+    let Some(speaker) = speaker_of(&certificate) else {
+        return (StatusCode::UNAUTHORIZED, "this certificate cannot be read").into_response();
+    };
+    let bucket = crate::gateway::rate::Key::of(enrolling, &speaker, peer);
+    if !downloads.rate.admit(&bucket) {
+        return over_rate();
+    }
     let path = request
         .uri()
         .path_and_query()
         .map_or("", |path| path.as_str());
     // An enrolling peer is offered nothing, so it is served nothing (ADR-0015 clause 24), whatever
     // host its certificate names.
-    let host = (!downloads.members.enrolling(&certificate))
-        .then(|| host_of(&certificate))
-        .flatten();
+    let host = (!enrolling).then(|| host_of(&certificate)).flatten();
     let Some(artifact) = host
         .as_deref()
         .and_then(|host| downloads.cache.offered_to(host, path))
@@ -1790,6 +1820,73 @@ mod tests {
             bytes
         );
         assert_eq!(fetches(&count, "1"), 1);
+    }
+
+    /// A certificate that names `host`, as one the Server issues does.
+    fn certificate_naming(host: &str) -> Vec<u8> {
+        let key = rcgen::KeyPair::generate().expect("key");
+        let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).expect("params");
+        params.subject_alt_names.push(rcgen::SanType::URI(
+            format!("{HOST_URI_PREFIX}{host}").try_into().expect("uri"),
+        ));
+        params.self_signed(&key).expect("cert").der().to_vec()
+    }
+
+    /// A download past the host's limit is answered `429` with `Retry-After: 30`, and the
+    /// artifact is not read; within its limit the host is served.
+    /// Verifies: ADR-0035
+    #[tokio::test]
+    async fn a_download_past_the_hosts_limit_is_answered_429_and_reads_no_artifact() {
+        let bytes = b"the-binary".to_vec();
+        let gate = Arc::new(tokio::sync::Semaphore::new(8));
+        let (server, _count) = upstream(vec![(path("1"), bytes.clone())], gate).await;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache = open_cache(config(server, dir.path(), 1 << 20)).await;
+        let one = artifact("1", &bytes);
+        offer_to_new_agent(&cache, &[&one]).await;
+        until(&cache, "held", |inner| inner.held.contains_key(&one.hash)).await;
+        let revocations = RevocationList::new(Duration::from_secs(300));
+        revocations.replace(HashSet::new(), None);
+        let downloads = |burst| {
+            Arc::new(Downloads {
+                cache: cache.clone(),
+                revocations: revocations.clone(),
+                members: crate::gateway::Members::default(),
+                rate: Arc::new(crate::gateway::rate::HostRate::frozen(
+                    crate::config::GatewayRateLimitConfig {
+                        messages_per_sec: 1,
+                        burst,
+                    },
+                )),
+            })
+        };
+        let h1 = certificate_naming("h1");
+        let get = |version: &str| {
+            let mut request = Request::new(Body::empty());
+            *request.uri_mut() = path(version).parse().expect("uri");
+            request.extensions_mut().insert(PeerCertificate(Some(
+                rustls::pki_types::CertificateDer::from(h1.clone()),
+            )));
+            request
+        };
+        let used = || cache.inner().held.get(&one.hash).map(|held| held.used);
+
+        let limited = downloads(1);
+        // The one token, spent on a path not offered.
+        let response = serve(axum::extract::State(limited.clone()), get("9")).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let before = used();
+        let response = serve(axum::extract::State(limited), get("1")).await;
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            response.headers().get(header::RETRY_AFTER),
+            Some(&HeaderValue::from_static("30"))
+        );
+        assert_eq!(used(), before, "the artifact was read");
+
+        let response = serve(axum::extract::State(downloads(1)), get("1")).await;
+        assert_eq!(response.status(), StatusCode::OK, "within the limit");
+        assert_ne!(used(), before);
     }
 
     /// What an earlier run left in the cache directory is gone once the Gateway opens it, the
@@ -2390,6 +2487,7 @@ mod tests {
             cache,
             revocations,
             members: crate::gateway::Members::default(),
+            rate: Arc::new(crate::gateway::rate::HostRate::new(Default::default())),
         });
         let mut request = Request::new(Body::empty());
         *request.uri_mut() = path("1").parse().expect("uri");

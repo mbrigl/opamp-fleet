@@ -81,8 +81,9 @@ Five crates in one workspace ([ADR-0008](adr/0008-five-crates-on-tokio-and-axum.
   ([ADR-0028](adr/0028-package-versions-high-water-mark-and-floor.md)), the
   renewal proof and
   the bootstrap proof a CSR carries — read from a CSR by the adapter `csr` — the host a
-  certificate that names none is taken for, when a certificate counts as ending, and what a
-  certificate is called — and the
+  certificate that names none is taken for, when a certificate counts as ending, what a
+  certificate is called, the token buckets the Server and a Gateway count a sender in (`rate`) —
+  and the
   bootstrap certificate's PKCS#12 file, whose rule is core and whose reading and writing with
   `p12-keystore` is the adapter `pkcs12::file` (ADR-0022).
 - **`fleet-server`** — the Server: the fleet and its Hosts, its Configurations, labels, packages
@@ -162,7 +163,8 @@ core module names an adapter or a technology, and when a module has no role.
   `LedgerStore` port ([ADR-0021](adr/0021-admission-by-client-certificate-and-revocation.md),
   [ADR-0024](adr/0024-the-fleet-record-of-agents-and-hosts.md)).
   `agent_rate` holds the token buckets that bound how often an admitted host, an Agent behind a
-  marked Gateway, and the Gateway as a whole are heard; `transport` takes a token for each
+  marked Gateway, and the Gateway as a whole are heard, in the bounded tables of
+  `fleet_core::rate`; `transport` takes a token for each
   message before the handler does anything else and for each download in the guard
   ([ADR-0012](adr/0012-tls-1-3-two-planes-and-bounded-input.md)).
 - **Audit record** — `audit` is the port every security decision is recorded through;
@@ -251,6 +253,10 @@ core module names an adapter or a technology, and when a module has no role.
   With a bootstrap CA the Gateway tells an
   enrolling peer from a member and relays its one plain-HTTP enrolment request without a binding
   ([ADR-0015](adr/0015-client-modes-and-the-gateway.md)).
+  `gateway::rate` holds a token bucket per downstream host, or per enrolling peer's address, in a
+  table of `fleet_core::rate`; the downstream endpoint and the download route take a token before
+  they do anything else
+  ([ADR-0035](adr/0035-a-gateway-rate-limits-each-downstream-host-as-the-server-limits-a-host.md)).
 - **Client engine** — `engine` routes the Server's replies to the Agents over one connection
   ([ADR-0015](adr/0015-client-modes-and-the-gateway.md)). The transports, the Gateway, telemetry
   and the service runtime are adapters around it.
