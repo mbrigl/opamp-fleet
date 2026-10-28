@@ -1700,7 +1700,7 @@ mod tests {
 
     /// The release also carries the operator tool's archives, named like the Client's
     /// (ADR-0032 clause 3); they are selected by stem, never by version and platform alone, so none
-    /// of them becomes the `supervisor` Package's entry for its platform (clause 5).
+    /// of them becomes the `supervisor` Package's entry for its platform (ADR-0034 clause 5).
     // Verifies: ADR-0032
     #[test]
     fn the_supervisor_passes_over_the_operator_tools_archives() {

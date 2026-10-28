@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  The Windows installer (ADR-0019, ADR-0020).
+  The Windows installer (ADR-0019, ADR-0037).
 
   The package delivers one file into `Program Files` and then calls the Client's own
-  `service install` (ADR-0020), which builds the layout and the state directory under
+  `service install` (ADR-0037), which builds the layout and the state directory under
   `%ProgramData%\opamp-fleet`. That division is ADR-0019 clause 12: `Program Files` is
   `TrustedInstaller`-owned and read-only once installation finishes, and the layout is rewritten at
   runtime by the daemon — the self-update stages a new version directory and swings `current`. It
@@ -12,7 +12,7 @@
   host installed from the archive and one installed by this package identical.
 
   It registers no service of its own. An MSI `ServiceInstall` element would write a registration
-  knowing nothing of ADR-0020's service name and display name, nor of ADR-0019's SCM recovery
+  knowing nothing of ADR-0037's service name and display name, nor of ADR-0019's SCM recovery
   actions, both of which `service install` sets through calls the `service-manager` backend cannot
   make. There is one install path on four operating systems and this is not a second one.
 
@@ -121,7 +121,7 @@
     <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" Secure="yes" />
 
     <!--
-      One directory the operator configures (ADR-0020 clause 10), holding the payload this package
+      One directory the operator configures (ADR-0037 clause 10), holding the payload this package
       delivers: `supervisor.exe` and nothing else. The layout and the state directory are not here
       — `service install` puts them under `%ProgramData%\opamp-fleet`, for ADR-0019 clause 12's
       reason. The operator still configures one path; it simply is not the install root.
@@ -228,10 +228,10 @@
         so it has to exist first.
 
         The service is registered and left stopped, exactly as the `.deb` and `.rpm` post-install
-        does and for the same reason (ADR-0020 clause 9): a Client with no configuration
+        does and for the same reason (ADR-0037 clause 9): a Client with no configuration
         dials the development default and manages nothing, and an installer must not manufacture
         that state on every host it touches. An install that was given an ENDPOINT still does not
-        start — the client identity is not in yet (ADR-0020).
+        start — the client identity is not in yet (ADR-0037).
       -->
       <Custom Action="RegisterServiceWithEndpoint" After="InstallFiles"
               Condition="NOT REMOVE AND ENDPOINT&lt;&gt;&quot;&quot;" />
@@ -239,7 +239,7 @@
               Condition="NOT REMOVE AND ENDPOINT=&quot;&quot;" />
 
       <!--
-        Only a real removal, as the pre-removal of every package (ADR-0020 clause 4): on an upgrade
+        Only a real removal, as the pre-removal of every package (ADR-0037 clause 4): on an upgrade
         it falls straight through, because the successor re-runs `service install`. A major upgrade
         removes the old product with REMOVE set to ALL as well (RemoveExistingProducts), and sets
         UPGRADINGPRODUCTCODE while it does, which a removal from Add or Remove Programs does not;

@@ -108,7 +108,7 @@ pub struct ClientConfig {
     /// certificate; set by the install, never by the file.
     #[serde(skip)]
     pub bootstrap_identity: Option<BootstrapIdentity>,
-    /// The process account's primary group, where a process account is registered (ADR-0020
+    /// The process account's primary group, where a process account is registered (ADR-0037
     /// clause 21): what the Client shares with the Managed Processes belongs to it. Set by the run
     /// from the `--process-uid` its registration names, never by the file.
     #[serde(skip)]
@@ -254,7 +254,7 @@ pub struct Program {
     pub path: PathBuf,
 }
 
-/// Resolves the program path of a `[[supervisor]]` block (ADR-0020 clause 24, as amended by
+/// Resolves the program path of a `[[supervisor]]` block (ADR-0037 clause 24, as amended by
 /// ADR-0017).
 ///
 /// `key` is the block's own name for it (`binary`, `command`) so the error names what the operator
@@ -761,10 +761,51 @@ pub struct GatewayConfig {
     /// refused at load.
     #[serde(default = "default_package_cache_bytes")]
     pub package_cache_bytes: u64,
+    /// The bucket each downstream host is counted in (ADR-0035).
+    #[serde(default)]
+    pub rate_limit: GatewayRateLimitConfig,
     /// TLS for the downstream hop, required (ADR-0015). Mutual TLS is per hop: what this verifies
     /// is the Agents connecting *here*, and the identity presented *upstream* is the Client's own.
     /// An `Option` only so its absence can be named at load.
     pub tls: Option<GatewayTlsConfig>,
+}
+
+/// The `[gateway.rate_limit]` section (ADR-0035 clause 3): the bucket of each downstream host,
+/// sized as the Server sizes a host's (ADR-0012 clause 22). Both keys have a default, and neither
+/// is `0`: no value switches the limit off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct GatewayRateLimitConfig {
+    /// Tokens a downstream host's bucket gains per second, continuously.
+    pub messages_per_sec: u32,
+    /// That bucket's capacity; a new bucket starts full.
+    pub burst: u32,
+}
+
+impl Default for GatewayRateLimitConfig {
+    fn default() -> Self {
+        GatewayRateLimitConfig {
+            messages_per_sec: 10,
+            burst: 300,
+        }
+    }
+}
+
+impl GatewayRateLimitConfig {
+    fn check(&self) -> Result<(), String> {
+        for (key, value) in [
+            ("messages_per_sec", self.messages_per_sec),
+            ("burst", self.burst),
+        ] {
+            if value == 0 {
+                return Err(format!(
+                    "[gateway.rate_limit] {key} must be greater than zero — the limit is never \
+                     switched off; raise it instead"
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// The downstream hop's TLS material (ADR-0015). Separate from the top-level `[tls]`, which is
@@ -807,6 +848,7 @@ impl GatewayConfig {
                     .to_string(),
             );
         }
+        self.rate_limit.check()?;
         if !endpoint.starts_with("ws://") && !endpoint.starts_with("wss://") {
             return Err(format!(
                 "[gateway] needs a WebSocket endpoint upstream, and this Client's is {endpoint} — \
@@ -1561,6 +1603,56 @@ mod tests {
         assert!(err.contains("package_cache_bytes"), "{err}");
     }
 
+    /// Each downstream host's bucket gains ten tokens a second and holds 300 by default; `0` for
+    /// either key fails startup naming it, as does any other key of the section.
+    /// Verifies: ADR-0035
+    #[test]
+    fn the_gateway_rate_limit_defaults_and_refuses_zero_and_unknown_keys() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("supervisor.toml");
+        let gateway = "endpoint = \"wss://s/v1/opamp\"\n[gateway]\nlisten = \"127.0.0.1:9\"\n\
+                       [gateway.tls]\ncert_file = \"g.pem\"\nkey_file = \"g-key.pem\"\n\
+                       client_ca_file = \"ca.pem\"\n";
+        std::fs::write(&path, gateway).expect("write");
+        let config = ClientConfig::load(&path).expect("loads with the defaults");
+        assert_eq!(
+            config.gateway.expect("gateway").rate_limit,
+            GatewayRateLimitConfig {
+                messages_per_sec: 10,
+                burst: 300,
+            }
+        );
+
+        for key in ["messages_per_sec", "burst"] {
+            std::fs::write(&path, format!("{gateway}[gateway.rate_limit]\n{key} = 0\n"))
+                .expect("write");
+            let err = ClientConfig::load(&path).expect_err("zero must fail startup");
+            assert!(
+                err.contains(&format!("[gateway.rate_limit] {key}")),
+                "{err}"
+            );
+        }
+        std::fs::write(
+            &path,
+            format!("{gateway}[gateway.rate_limit]\nmessages_per_second = 5\n"),
+        )
+        .expect("write");
+        let err = ClientConfig::load(&path).expect_err("an unknown key");
+        assert!(err.contains("messages_per_second"), "{err}");
+
+        std::fs::write(
+            &path,
+            format!("{gateway}[gateway.rate_limit]\nburst = 50\n"),
+        )
+        .expect("write");
+        let limits = ClientConfig::load(&path)
+            .expect("loads")
+            .gateway
+            .expect("gateway")
+            .rate_limit;
+        assert_eq!((limits.messages_per_sec, limits.burst), (10, 50));
+    }
+
     /// A Gateway admits Agents, so it never serves without TLS, nor without a client CA to verify
     /// them against — on the loopback neither (ADR-0015).
     /// Verifies: ADR-0015, Q-1
@@ -2178,8 +2270,8 @@ mod tests {
     /// Where `supervisor_dir` is the state directory, no Supervisor takes the name of an entry the
     /// Client keeps there, and the refusal names the Supervisor and the entry; under the default
     /// root the same names are Supervisors like any other. A Supervisor's directory is never the
-    /// state directory or one that holds it (ADR-0020 clauses 21 and 24).
-    /// Verifies: ADR-0020
+    /// state directory or one that holds it (ADR-0037 clauses 21 and 24).
+    /// Verifies: ADR-0037
     #[test]
     fn a_supervisor_never_takes_a_directory_of_the_clients() {
         let state = Path::new("/var/lib/opamp-fleet/state");
@@ -2259,8 +2351,8 @@ mod tests {
     }
 
     /// Only the nonce a tombstone name is made with marks one: a directory an operator named
-    /// alike is no tombstone, so neither a start nor a purge removes it (ADR-0020 clause 25).
-    /// Verifies: ADR-0020
+    /// alike is no tombstone, so neither a start nor a purge removes it (ADR-0037 clause 25).
+    /// Verifies: ADR-0037
     #[test]
     fn a_directory_named_alike_is_no_tombstone() {
         for name in [

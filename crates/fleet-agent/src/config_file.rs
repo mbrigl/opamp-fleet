@@ -48,7 +48,7 @@ impl ClientConfig {
     /// `--state-dir`, else the one the service's registration carries, else the absolute one the
     /// file names, else `<data root>/state`.
     ///
-    /// The file is the service account's to rewrite (ADR-0020 clause 1), and the install that reads
+    /// The file is the service account's to rewrite (ADR-0037 clause 1), and the install that reads
     /// it runs as root or an Administrator and hands the state directory over to that account. So
     /// a directory the file names is taken only beneath the data root or the layout root, and one
     /// from any source that lies beneath them is reached through directories only, as
@@ -216,7 +216,7 @@ fn legacy_name_beside(path: &Path) -> Result<(), String> {
 ///
 /// Lexical rather than `canonicalize`: that needs the file to exist, and these directories are
 /// named before they are created. It also follows symbolic links, which would be wrong here — the
-/// versioned install layout (ADR-0020) points at its current version *with* a link, and resolving
+/// versioned install layout (ADR-0037) points at its current version *with* a link, and resolving
 /// it would freeze a path that stops being true at the next update.
 pub(crate) fn absolute(path: &Path) -> PathBuf {
     if path.is_absolute() {
@@ -493,13 +493,13 @@ mod tests {
         }
     }
 
-    /// `supervisor.toml` is the service account's to rewrite (ADR-0020 clause 1), and the install
+    /// `supervisor.toml` is the service account's to rewrite (ADR-0037 clause 1), and the install
     /// that reads it runs as root or an Administrator and hands the state directory over to that
     /// account. With nothing registered and no `--state-dir`, a state directory the file names
     /// outside the data root and the layout root, or one that leaves them by `..`, is refused, so
     /// the account cannot have another tree handed over to itself. The operator's `--state-dir`
     /// names one anywhere.
-    /// Verifies: ADR-0019, ADR-0020
+    /// Verifies: ADR-0019, ADR-0037
     #[test]
     fn a_state_directory_the_file_names_outside_the_installs_roots_is_refused() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -572,7 +572,7 @@ mod tests {
     /// A link the service's account planted beneath the data root would carry the state directory
     /// out of it, so a component that is a link is refused — the default `<data root>/state` and a
     /// registered directory beneath the root included.
-    /// Verifies: ADR-0019, ADR-0020
+    /// Verifies: ADR-0019, ADR-0037
     #[cfg(unix)]
     #[test]
     fn a_state_directory_reached_through_a_link_beneath_the_root_is_refused() {

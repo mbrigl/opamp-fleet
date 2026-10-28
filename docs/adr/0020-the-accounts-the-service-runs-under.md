@@ -1,7 +1,7 @@
 # ADR-0020: The accounts the service runs under
 
-- **Status:** 🟢 accepted
-- **Date:** 2026-10-26
+- **Status:** ⚪ superseded by [ADR-0037](0037-the-accounts-the-service-runs-under.md)
+- **Date:** 2026-10-27
 - **Deciders:** Markus Brigl
 - **Applies to:** the account a `service install` chooses, accepts, sets and hands the roots to, `--run-as`, `--process-account` and `--no-process-account`, and the second service in `crates/fleet-agent/src/main.rs`, `crates/fleet-agent/src/service/run_as.rs`, `crates/fleet-agent/src/service/manager.rs`, `crates/fleet-agent/src/service/layout.rs`, `crates/fleet-agent/src/service/windows_config.rs`, `crates/fleet-agent/src/service/windows_rights.rs` and `crates/fleet-agent/src/service/withdrawal.rs`, the systemd units, launchd plists and SCM entries the install registers, `service start`, `service stop` and `service uninstall` on Windows, the install lock, the pipe, the job objects and the handle-based walks in `crates/fleet-agent/src/win32.rs` and `crates/fleet-agent/src/win32/`, the no-follow adapter `crates/fleet-agent/src/nofollow.rs` and the state the Client keeps through it in `crates/fleet-agent/src/storage.rs`, `crates/fleet-agent/src/csr.rs`, `crates/fleet-agent/src/connection.rs` and `crates/fleet-agent/src/tls.rs`, every place a Supervisor starts a program in `crates/fleet-agent/src/supervisor/process.rs`, the channel in `crates/fleet-agent/src/supervisor/channel.rs` and `crates/fleet-agent/src/supervisor/channel/windows.rs`, `supervisor_dir` and the Supervisors' directories with their modes, owners and ACLs, the modes a package archive gives a program, `packaging/linux/postinst` and `packaging/linux/postrm`, the `[package.metadata.deb]` and `[package.metadata.generate-rpm]` tables of `crates/fleet-agent/Cargo.toml`, `packaging/windows/supervisor.wxs`, and every document that tells an operator which account the Client or a Managed Process runs as
 

@@ -111,9 +111,11 @@ Configuration, Package or Deployment that an assignment pins.
    - `PUT|DELETE …/packages/{agent_type}/{version}` holds or drops a Package.
      `PUT|DELETE …/configurations/{configuration}` holds or drops a Configuration; one the Server
      does not hold is `404`.
-   - A Deployment is persisted owner-only, one JSON file per Deployment, in the store
-     [ADR-0029](0029-the-servers-state-and-its-stores.md) names. A file that does not parse, or
-     whose name disagrees with its content, fails startup naming it. Saving distributes nothing.
+   - A Deployment is persisted through the store
+     [ADR-0029](0029-the-servers-state-and-its-stores.md) names: owner-only, one JSON file per
+     Deployment in the filesystem adapter, one row in the PostgreSQL adapter. A stored Deployment
+     that does not parse, or whose name disagrees with its content, fails startup naming it.
+     Saving distributes nothing.
 
 6. **The assignment is per Agent, persisted, and pins one release.**
    - Each Agent's record ([ADR-0024](0024-the-fleet-record-of-agents-and-hosts.md)) stores what
@@ -358,6 +360,10 @@ the test holds back; a Server-driven downgrade.
 - **A per-Package "allow downgrade" flag**, or an operator override on the act. A standing second
   mode on the resource where the rule was asked for; an override is unavailable to the bulk act
   and the count. A downgrade, if wanted, is its own act.
+- **Persist a Deployment as JSON files of its own, outside the port
+  [ADR-0029](0029-the-servers-state-and-its-stores.md) puts every record behind.** A PostgreSQL
+  deployment would then keep its Deployments on the host while every other record lives in the
+  database. A Deployment is persisted through that store's port (clause 5).
 
 ## Sources / Prior art
 

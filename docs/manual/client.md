@@ -477,8 +477,9 @@ What the separation gives and what it does not:
   and environment.
 - None of them can take the second service's place through its socket or pipe, as far as the
   platform tells processes apart: a process id that comes round again is told apart on Linux 6.5
-  and later alone, and on Windows a Managed Process can still open the second service's process
-  with the rights its account holds on it. A Managed Process can replace the socket in the
+  and later, and on Windows once the Client holds the process the pipe names. On Windows a Managed
+  Process can open the second service's process and threads only to ask about them and wait for
+  them ([On Windows](#on-windows) below). A Managed Process can replace the socket in the
   directory the process account owns, or on Windows create an instance of the pipe, but before
   the Client writes anything on a connection it reads the process at the other end and asks the
   service manager which process it runs as the second service — systemd's `MainPID`, launchd's
@@ -650,7 +651,17 @@ What the install registers and sets:
 - The named pipe `\\.\pipe\opamp-fleet-agents`, owned by the process account. Only the Client's
   account may read and write data on it, and nobody may create an instance of it but the process
   account; it rejects remote clients, and a pipe of that name made by anyone first fails the second
-  service's start. Each end checks the other's account.
+  service's start. Each end checks the other's account. The Client also checks that the process
+  serving the pipe is the one the SCM runs as the second service, and holds that process open
+  while it asks, so a process that ends in between is refused.
+- A protected DACL on the second service's process and on every one of its threads, set before
+  its program parses its command line: the process account, and for the process the Client's
+  account, may only ask about it and wait for it (`SYNCHRONIZE` and the limited query right), and
+  only `LocalSystem` and the Administrators may do more. A Managed Process can therefore neither
+  read the second service's memory, run code in it or take its handles, nor suspend or end it. The
+  second service does not start to listen while its process or a thread reads back otherwise; it
+  exits with an error naming which, and the SCM starts it again. A debugger or a process explorer
+  that opens the second service has to run elevated.
 - A job object per program. Every program, and everything it starts, ends with its job when the
   Client's connection closes; a program that has a broker start a process for it — a WMI process
   creation, a scheduled task — outlives that. Windows has no signals: a kind that reloads by a
@@ -1698,6 +1709,40 @@ The offers the cache serves are kept in memory. After the Gateway restarts, an A
 is still under way re-draws its offer when it reconnects. One that already reported a failed
 install and retries is answered `404` until the Server offers it another version; rolling out the
 same version again does not re-send the offer.
+
+### How often a host behind it may be heard
+
+The Server counts everything a Gateway forwards in one aggregate for all the hosts behind it. So
+that one host cannot drain it for the others, the Gateway counts what each host sends in a bucket
+of its own, sized as the Server sizes a host's:
+
+```toml
+[gateway.rate_limit]
+messages_per_sec = 10  # tokens a host's bucket gains per second; 0 fails startup
+burst = 300            # the bucket's capacity, a new one starts full; 0 fails startup
+```
+
+- **What is counted.** Every report on the downstream `/v1/opamp`, over a WebSocket and over plain
+  HTTP, one it cannot decode, every download request and an enrolling peer's request take one
+  token, as the Server counts them, before the Gateway
+  reads a signing request, binds an `instance_uid`, looks at its package cache or forwards
+  anything. The Gateway's own Supervisors and its upstream connection are not counted.
+- **Whose bucket.** The host the downstream certificate names, or for a certificate that names
+  none, the host the Server derives from its issuer and serial. Every connection, every
+  `instance_uid` and a renewed certificate of one host take from the same bucket. An enrolling
+  peer is counted by its address, an IPv6 one by its /64, since a bootstrap certificate may be one
+  for the whole fleet.
+- **Past the limit.** A report or an enrolment request is not forwarded and binds nothing. It is
+  answered `Unavailable`, for the `instance_uid` it names, with a retry after 30 seconds, as the
+  Server answers it; a WebSocket stays open. A download is answered `429` with `Retry-After: 30`,
+  and the artifact is not read. The log says it once per host and minute, with the host and how
+  many were refused.
+- **How much memory.** The buckets live in memory, at most 1 000 000 of them; when the table is
+  full a new host takes the place of the one heard from least recently.
+
+The section is optional, and no value turns the limit off; any other key in it fails startup. A
+host whose Agents legitimately send more needs it raised at each Gateway it reports through, and a
+host that reports through two Gateways has a bucket at each.
 
 ### What a Gateway keeps on disk
 

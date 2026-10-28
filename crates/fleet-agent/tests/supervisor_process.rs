@@ -58,7 +58,7 @@ fn spec(program: &Path) -> ProcessSpec {
     }
 }
 
-/// Who starts the Managed Process under test (ADR-0020): the Client itself, or the second service
+/// Who starts the Managed Process under test (ADR-0037): the Client itself, or the second service
 /// through its channel. The supervision is the same either way, so every case that runs a process
 /// runs against both — [`both!`] makes the pair.
 #[derive(Debug, Clone, Copy)]
@@ -71,7 +71,7 @@ enum Via {
 /// Runs the case `$name(via)` once per [`Via`], as `$name::local` and `$name::channel`. The channel
 /// case runs the second service in this process on a socket in a temporary directory, under this
 /// test's own uid, which is the uid it admits.
-/// Verifies: ADR-0020
+/// Verifies: ADR-0037
 macro_rules! both {
     ($(#[$attr:meta])* $name:ident) => {
         $(#[$attr])*
@@ -103,7 +103,7 @@ impl Drop for AgentsService {
 }
 
 /// The process this test runs as, named as the second service's: the in-process services run in
-/// it (ADR-0020 clause 19).
+/// it (ADR-0037 clause 19).
 #[cfg(unix)]
 fn this_process() -> fleet_agent::supervisor::channel::ServiceProcess {
     fleet_agent::supervisor::channel::ServiceProcess::named(|| Ok(Some(std::process::id())))
@@ -549,13 +549,13 @@ async fn a_swapped_binary_is_probed_again_for_its_version(via: Via) {
 }
 both!(a_swapped_binary_is_probed_again_for_its_version);
 
-// ── The second service (ADR-0020) ────────────────────────────────────────────
+// ── The second service (ADR-0037) ────────────────────────────────────────────
 
 /// The shipped program is the second service under `run --agents`. It will not serve its own
-/// account as the Client's (ADR-0020 clause 16); serving another, it refuses this test at the socket
+/// account as the Client's (ADR-0037 clause 16); serving another, it refuses this test at the socket
 /// and ends cleanly on `SIGTERM`. A program started through it needs a second account to connect
 /// from; the cases above run the same service in-process, under this test's own uid.
-/// Verifies: ADR-0020
+/// Verifies: ADR-0037
 #[cfg(unix)]
 #[tokio::test]
 async fn the_shipped_program_serves_as_the_second_service() {
@@ -664,11 +664,11 @@ fn holds_cap_sys_ptrace() -> bool {
     effective & (1 << 19) != 0
 }
 
-/// The shipped second service closes its process to its own account (ADR-0020 clause 19): once
+/// The shipped second service closes its process to its own account (ADR-0037 clause 19): once
 /// listening it reports itself not dumpable, and this test — its parent, of its account and without
 /// `CAP_SYS_PTRACE`, which Yama's `ptrace_scope` 1 would let attach to a descendant — is refused
 /// `PTRACE_ATTACH`, its `/proc/<pid>/mem` and `pidfd_getfd`.
-/// Verifies: ADR-0020
+/// Verifies: ADR-0037
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn the_second_service_closes_its_process_to_its_own_account() {
@@ -790,8 +790,8 @@ async fn the_second_service_closes_its_process_to_its_own_account() {
 
 /// The shipped second service does not listen while it is traced: a tracer attached before it
 /// marks itself not dumpable stays attached, so it ends with an error, and the service manager
-/// starts it again (ADR-0020 clause 19).
-/// Verifies: ADR-0020
+/// starts it again (ADR-0037 clause 19).
+/// Verifies: ADR-0037
 #[cfg(target_os = "linux")]
 #[test]
 fn the_second_service_does_not_listen_while_it_is_traced() {
@@ -2018,7 +2018,7 @@ async fn the_phases_of_an_install_hang_off_the_span_that_came_with_it() {
     let _ = harness.task.await;
 }
 
-// ── An apply while the second service is away (ADR-0020 clause 17) ───────────
+// ── An apply while the second service is away (ADR-0037 clause 17) ───────────
 
 /// An apply that does not reach the second service, or whose program goes with the service during
 /// the apply grace, is neither applied nor failed: nothing is reported, a package is neither
@@ -2308,7 +2308,7 @@ mod an_apply_while_the_second_service_is_away {
     /// what ran stays in place, and nothing is reported. Once the service is back it is swapped in
     /// and gated as its own start would have been — here it fails the grace, and is rolled back
     /// to the program that ran and reported `InstallFailed`.
-    /// Verifies: ADR-0020
+    /// Verifies: ADR-0037
     #[tokio::test]
     async fn a_package_waits_staged_while_the_service_is_away_and_is_swapped_in_once_it_is_back() {
         let (mut away, service) = running(&stub_agent(), Duration::from_millis(500)).await;
@@ -2348,7 +2348,7 @@ mod an_apply_while_the_second_service_is_away {
     /// package that is a tree (ADR-0027 clause 56): staged beside what runs and kept, the whole
     /// previous tree in place while the service is away, and swapped in whole once it is back —
     /// here it survives its grace and is `Installed`.
-    /// Verifies: ADR-0020
+    /// Verifies: ADR-0037
     #[tokio::test]
     async fn a_tree_package_waits_staged_while_the_service_is_away_and_is_swapped_in_once_it_is_back(
     ) {
@@ -2436,7 +2436,7 @@ mod an_apply_while_the_second_service_is_away {
     /// A retry that does not reach the second service never swaps the package that waits in, not
     /// even for the time it waits for the service: what ran is live throughout, so a Client that
     /// ends meanwhile, however it ends, leaves the program the record names.
-    /// Verifies: ADR-0020
+    /// Verifies: ADR-0037
     #[tokio::test]
     async fn a_retry_without_the_service_never_puts_the_waiting_package_live() {
         let (mut away, service) = running(&stub_agent(), Duration::from_millis(500)).await;
@@ -2453,7 +2453,7 @@ mod an_apply_while_the_second_service_is_away {
     /// The predecessor a successful update retained (ADR-0027 clause 61) outlasts the retries a
     /// package that waits for the second service makes: one that does not reach the service sets
     /// nothing aside. The swap once the service is back replaces it, as any next update does.
-    /// Verifies: ADR-0027, ADR-0020
+    /// Verifies: ADR-0027, ADR-0037
     #[tokio::test]
     async fn a_retained_predecessor_outlasts_the_retries_while_a_package_waits() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2499,7 +2499,7 @@ mod an_apply_while_the_second_service_is_away {
 
     /// A configuration applied while the second service is away is reported `APPLIED` once the
     /// program has run on it, after the service is back, and not `FAILED` before.
-    /// Verifies: ADR-0020
+    /// Verifies: ADR-0037
     #[tokio::test]
     async fn a_configuration_applied_while_the_service_is_away_is_gated_once_it_is_back() {
         let (mut away, service) = running(&stub_agent(), Duration::from_millis(500)).await;
@@ -2518,7 +2518,7 @@ mod an_apply_while_the_second_service_is_away {
     /// A configuration whose retry reaches the second service but whose program does not start —
     /// it is not there — is `FAILED`, as the apply itself would have been, and is not started
     /// again: a respawn is for a program that ran and exited within the grace (ADR-0027 clause 60), and a start that did not happen has nothing to respawn.
-    /// Verifies: ADR-0020
+    /// Verifies: ADR-0037
     #[tokio::test]
     async fn a_retry_whose_program_does_not_start_fails_the_configuration_and_respawns_nothing() {
         let (mut away, service) = running(&stub_agent(), Duration::from_millis(500)).await;
@@ -2547,7 +2547,7 @@ mod an_apply_while_the_second_service_is_away {
     /// program rejected nothing, so the package is neither installed nor refused; it is taken back
     /// out to wait, what ran before is put back, and the swap once the service is back decides —
     /// here it survives, and is `Installed`.
-    /// Verifies: ADR-0020
+    /// Verifies: ADR-0037
     #[tokio::test]
     async fn a_package_whose_service_goes_in_the_grace_is_gated_once_it_is_back() {
         let (mut away, service) = running(&stub_agent(), Duration::from_secs(3)).await;
@@ -2594,7 +2594,7 @@ mod an_apply_while_the_second_service_is_away {
 
     /// The second service goes during a configuration's apply grace: no `FAILED` for a program
     /// that went with the service; `APPLIED` once it has run on the configuration after.
-    /// Verifies: ADR-0020
+    /// Verifies: ADR-0037
     #[tokio::test]
     async fn a_configuration_whose_service_goes_in_the_grace_is_gated_once_it_is_back() {
         let (mut away, service) = running(&stub_agent(), Duration::from_secs(3)).await;
@@ -2619,7 +2619,7 @@ mod an_apply_while_the_second_service_is_away {
     /// on the current files and does no more (ADR-0017 clause 8): its start, though it reaches the
     /// service, acknowledges nothing and swaps nothing in. The retry it makes due at once does
     /// both, with a start of its own that is gated.
-    /// Verifies: ADR-0017, ADR-0020
+    /// Verifies: ADR-0017, ADR-0037
     #[tokio::test]
     async fn a_restart_while_something_waits_only_respawns_and_the_retry_decides() {
         let (mut away, service) = running(&stub_agent(), Duration::from_millis(500)).await;
@@ -2662,7 +2662,7 @@ mod an_apply_while_the_second_service_is_away {
     /// The second service goes during a package's apply grace, and the predecessor the package
     /// would be taken back out for cannot be put back — it is gone. The package stays live and is
     /// reported `InstallFailed`: `program/` is never left empty (ADR-0027 clause 59).
-    /// Verifies: ADR-0027, ADR-0020
+    /// Verifies: ADR-0027, ADR-0037
     #[tokio::test]
     async fn a_package_whose_predecessor_cannot_be_put_back_stays_live() {
         let (mut away, service) = running(&stub_agent(), Duration::from_secs(3)).await;
@@ -2691,7 +2691,7 @@ mod an_apply_while_the_second_service_is_away {
     /// A first install whose start finds the service away is taken back out, and a second package
     /// offered meanwhile replaces it: once the service is back only the second is swapped in and
     /// gated, and the first, which never ran, is nobody's predecessor.
-    /// Verifies: ADR-0020
+    /// Verifies: ADR-0037
     #[tokio::test]
     async fn a_newer_package_replaces_the_waiting_one_and_nothing_unrun_is_kept_to_go_back_to() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2731,7 +2731,7 @@ mod an_apply_while_the_second_service_is_away {
     /// A Client that stops while a package waits leaves the program the record names, and nothing
     /// staged; offered again after the restart, the package installs over that program, which is
     /// then its predecessor.
-    /// Verifies: ADR-0020
+    /// Verifies: ADR-0037
     #[tokio::test]
     async fn a_client_that_stops_while_a_package_waits_leaves_what_the_record_names() {
         let (mut away, service) = running(&stub_agent(), Duration::from_millis(500)).await;
@@ -2777,7 +2777,7 @@ mod an_apply_while_the_second_service_is_away {
     /// A configuration owed its acknowledgement is decided by the start that reaches the service:
     /// where the waiting package that start swaps in fails its grace, by the start of the
     /// predecessor it is rolled back to, which survives — `APPLIED`, though the package failed.
-    /// Verifies: ADR-0020
+    /// Verifies: ADR-0037
     #[tokio::test]
     async fn a_failed_package_does_not_fail_the_configuration_its_predecessor_runs() {
         let (mut away, service) = running(&stub_agent(), Duration::from_millis(500)).await;
@@ -2803,7 +2803,7 @@ mod an_apply_while_the_second_service_is_away {
 
     /// A swap that fails before anything starts decides no configuration: the program that stays
     /// in place is started, and its start acknowledges the configuration.
-    /// Verifies: ADR-0020
+    /// Verifies: ADR-0037
     #[tokio::test]
     async fn a_swap_that_fails_before_a_start_does_not_fail_the_configuration() {
         let (mut away, service) = running(&stub_agent(), Duration::from_millis(500)).await;
@@ -2841,7 +2841,7 @@ mod an_apply_while_the_second_service_is_away {
     /// A second service that is reached and refused — here its socket is served by another
     /// account than the process account — is what the Supervisor's health names while a
     /// configuration and a package wait for it, and so what the Agent names as their reason.
-    /// Verifies: ADR-0020
+    /// Verifies: ADR-0037
     #[tokio::test]
     async fn what_waits_for_a_refused_service_names_the_refusal() {
         const REFUSED: &str =
@@ -2911,10 +2911,10 @@ mod an_apply_while_the_second_service_is_away {
             .expect("cleanly");
     }
 
-    /// The preflight runs through the second service (ADR-0020 clause 18): a package offered while
+    /// The preflight runs through the second service (ADR-0037 clause 18): a package offered while
     /// the service is away is staged unchecked and waits, and once the service is back the
     /// preflight runs before the swap — here it passes, and the package is installed.
-    /// Verifies: ADR-0020
+    /// Verifies: ADR-0037
     #[tokio::test]
     async fn a_package_whose_preflight_found_the_service_away_is_checked_once_it_is_back() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2946,8 +2946,8 @@ mod an_apply_while_the_second_service_is_away {
 
     /// A package that waited for the second service without its preflight is refused by the
     /// preflight that runs once the service is back, before anything is stopped: it is reported
-    /// failed, and what ran stays in place (ADR-0020 clause 18, ADR-0017 clause 54).
-    /// Verifies: ADR-0020
+    /// failed, and what ran stays in place (ADR-0037 clause 18, ADR-0017 clause 54).
+    /// Verifies: ADR-0037
     #[tokio::test]
     async fn a_package_whose_preflight_found_the_service_away_is_refused_once_it_is_back() {
         let dir = tempfile::tempdir().expect("tempdir");

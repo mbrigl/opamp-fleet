@@ -18,12 +18,12 @@ use tokio::sync::mpsc;
 
 use crate::shutdown::Shutdown;
 
-/// The health status a Supervisor reports while the second service cannot be reached (ADR-0020
+/// The health status a Supervisor reports while the second service cannot be reached (ADR-0037
 /// clause 17).
 pub const UNREACHABLE: &str = "the second service cannot be reached";
 
 /// What a Supervisor reports while the second service is reached and refused: another account
-/// serves its socket, it is another build, or it refuses the Client (ADR-0020 clauses 19 and 20).
+/// serves its socket, it is another build, or it refuses the Client (ADR-0037 clauses 19 and 20).
 /// Not an outage that ends by itself, so it is told apart from [`UNREACHABLE`].
 pub const REFUSED: &str =
     "the second service is refused: another account, another build, or it refuses this Client";
@@ -31,7 +31,7 @@ pub const REFUSED: &str =
 /// Why `health` says that the second service is not reached — [`UNREACHABLE`] or [`REFUSED`] —
 /// or `None` where it says nothing of the kind. While it says so, a configuration that is
 /// `APPLYING` and a package that is `Installing` wait for the service, and the Agent names it as the
-/// reason (ADR-0020 clause 17).
+/// reason (ADR-0037 clause 17).
 #[must_use]
 pub fn waiting_reason(health: &ComponentHealth) -> Option<&str> {
     let waits = !health.healthy && (health.status == UNREACHABLE || health.status == REFUSED);
@@ -45,7 +45,7 @@ pub enum ProcessCommand {
     /// to the adapter's [`config_dir`](SupervisorContext::config_dir). Apply it, which for a
     /// process means restarting on the new files, and answer with
     /// [`ProcessEvent::ConfigApplied`] — where the start does not reach the second service, once
-    /// a start does (ADR-0020 clause 17).
+    /// a start does (ADR-0037 clause 17).
     ApplyConfig {
         config: AgentRemoteConfig,
         /// The span of the apply this command is one half of (ADR-0016). The core opens it when the
@@ -61,7 +61,7 @@ pub enum ProcessCommand {
     /// hash the status refers to; `version` is what the Agent then reports it has. While the
     /// second service cannot be reached, the package is staged and kept, never swapped in, and
     /// the answer follows its swap once a start reaches the service; a newer package replaces it
-    /// unanswered (ADR-0020 clause 17).
+    /// unanswered (ADR-0037 clause 17).
     ApplyPackage {
         staged: PathBuf,
         version: String,
@@ -164,19 +164,19 @@ pub enum InstallTarget {
     },
 }
 
-/// The process account's primary group, where a process account is registered (ADR-0020 clause 21).
+/// The process account's primary group, where a process account is registered (ADR-0037 clause 21).
 /// What the Client shares with the Managed Processes belongs to this group, and nothing else does.
 ///
 /// Resolved from the `--process-uid` of the Client's command line when it starts, never from the
 /// configuration file: the registration that names the process account is the only place it is
-/// stated (ADR-0020 clause 6).
+/// stated (ADR-0037 clause 6).
 #[cfg(unix)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProcessAccountGroup(pub u32);
 
 /// On Windows the process account itself, by its SID, from the `--process-sid` of the Client's
 /// command line: what the Client shares with the Managed Processes is granted to it by ACL, where
-/// Unix gives it to the account's group (ADR-0020 clause 21). Made once per run.
+/// Unix gives it to the account's group (ADR-0037 clause 21). Made once per run.
 #[cfg(windows)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProcessAccountGroup(pub &'static str);
@@ -337,7 +337,7 @@ pub struct SupervisorContext {
     /// configured. Client-wide, like the package verification key.
     pub archive_key: Option<zeroize::Zeroizing<String>>,
     /// The process account's primary group, where a process account is registered: what the
-    /// Supervisor shares with its Managed Process belongs to it (ADR-0020 clause 21).
+    /// Supervisor shares with its Managed Process belongs to it (ADR-0037 clause 21).
     pub process_account_group: Option<ProcessAccountGroup>,
     /// The plugin-specific keys of the block, for the strict second-stage parse.
     pub settings: toml::Table,
@@ -440,7 +440,7 @@ pub type Purged<'a> =
     std::pin::Pin<Box<dyn std::future::Future<Output = Vec<Result<(), String>>> + Send + 'a>>;
 
 /// The plugins a run starts its Supervisors with (ADR-0017 clause 2), as the composition root
-/// made them: every one starts its Managed Process the way the run does (ADR-0020 clause 18). The
+/// made them: every one starts its Managed Process the way the run does (ADR-0037 clause 18). The
 /// Engine keeps it, so a Supervisor that a Supervisor-set apply starts later is started the same
 /// way as those started with the Client.
 pub trait PluginRegistry: Send + Sync {
@@ -449,7 +449,7 @@ pub trait PluginRegistry: Send + Sync {
 
     /// Removes what the Managed Processes wrote in each of `removed` — a Supervisor's name and its
     /// directory — that the Client cannot remove itself, before the purge deletes the rest
-    /// (ADR-0028 clause 13, ADR-0020 clause 20), all of them within one wait (ADR-0020 clause 17).
+    /// (ADR-0028 clause 13, ADR-0037 clause 20), all of them within one wait (ADR-0037 clause 17).
     /// Nothing where the Client starts its programs itself.
     ///
     /// # Errors

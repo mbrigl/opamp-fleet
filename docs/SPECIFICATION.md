@@ -7,17 +7,19 @@
 
 ## Problem
 
-Operators of a telemetry fleet run agents on many machines, each configured by a file next to
-it. To change what a hundred agents do, they reach a hundred machines, by hand or through a
-configuration-management tool, and nobody can say with certainty what each agent runs right
-now. Configuration drifts, rollouts are ad hoc, and a bad configuration shows as missing
-telemetry rather than as a report.
+Operators of a telemetry fleet run agents on many machines, each configured by a file next to it. To
+change what a hundred agents do, they reach a hundred machines, by hand or through a
+configuration-management tool, and nobody can say with certainty what each agent runs right now, in
+configuration or in software. Configuration drifts, rollouts are ad hoc, and a bad configuration
+shows as missing telemetry rather than as a report.
 
 [OpAMP](https://opentelemetry.io/docs/specs/opamp/), the Open Agent Management Protocol, closes
 this loop: an agent accepts configuration over the protocol and reports back what it applied and
 how it is doing. Three gaps keep it from managing a real fleet:
 
-- **No Server in Rust.** The protocol needs a Server on the other end.
+- **No Server to run.** The protocol needs a Server on the other end. The reference
+  implementations provide libraries and examples to build one, not a Server an operator
+  deploys to manage a fleet.
 - **Heterogeneous fleets.** Beside OpenTelemetry Collectors, a fleet runs agents that do not
   speak OpAMP. A tool that sees only OpAMP-native agents manages a slice of the fleet, never all
   of it.
@@ -39,32 +41,32 @@ allows and demonstrably in step with its upstream specification.
 
 ## Vision
 
-An operator changes a configuration in one place and knows, within seconds, which agents took
-it and which did not, and why — across OpAMP-native Collectors and foreign, non-OpAMP agents
-alike. A change can address the whole fleet or a chosen subset of it, so a configuration can be
-rolled out to part of the fleet before all of it. And what the Server distributes is not only
-configuration but the agents' software itself: it can update an agent's binary in place, verified
-before it is applied and rolled back on failure. Agents that were never built for OpAMP are brought
-into the same control loop by purpose-built supervisor plugins, so the whole fleet's real state
-is observable rather than assumed, and a rejected configuration or a failed update is a reported
-event, not a silent outage.
+An operator changes a configuration in one place and knows, within seconds, which agents took it and
+which did not, and why — across OpAMP-native Collectors and foreign, non-OpAMP agents alike. A
+change can address the whole fleet or a chosen subset of it, so a configuration can be rolled out to
+part of the fleet before all of it. And what the Server distributes is not only configuration but
+the agents' software itself: it can update an agent's binary in place, verified before it is applied
+and rolled back on failure. Agents that were never built for OpAMP are brought into the same control
+loop by purpose-built Custom Supervisor Plugins, so the whole fleet's real state is observable
+rather than assumed, and a rejected configuration or a failed update is a reported event, not a
+silent outage.
 
-One Client binary covers the shapes a real deployment needs. It **supervises** local processes —
-and because every supervisor also listens on loopback for OpAMP, a Collector carrying its own OpAMP
-client reports *to its own supervisor* rather than being watched from the outside. Independently
-of that, the same binary can stand at a network boundary as a **gateway**, folding many clients'
+One Client binary covers the shapes a real deployment needs. It **supervises** local processes — and
+because every Supervisor also listens on loopback for OpAMP, a Collector carrying its own OpAMP
+client reports *to its own Supervisor* rather than being watched from the outside. Independently of
+that, the same binary can stand at a network boundary as a **gateway**, folding many clients'
 connections onto a small pool of upstream ones; a machine may do both at once. Whichever shape it
 takes, the Server sees only Agents distinguished by their identity, never by the connection that
 carried them — so a fleet can grow past the point where one connection per agent is affordable.
 
 The Server exposes a stable, OpenAPI-described REST API and carries only a rudimentary user
-interface of its own, so any external portal can integrate it easily and render the fleet however
-it likes. The Client is one process that can supervise many managed processes at once, installs
-as a native operating-system service that updates itself in place, and runs on Linux, macOS, and
-Windows; growing to a new kind of managed process means writing a new plugin, not changing the
-core. Both ends carry a written record of which parts of the protocol they implement, kept in step
-with the upstream specification rather than drifting quietly behind it. The project grows from the
-smallest thing that closes the loop and widens only as the protocol and its agents actually allow.
+interface of its own, so any external portal can integrate it easily and render the fleet however it
+likes. The Client is one process that can supervise many Managed Processes at once, installs as a
+native operating-system service that updates itself in place, and runs on Linux, macOS, and Windows;
+growing to a new kind of Managed Process means writing a new Plugin, not changing the core. Both
+ends carry a written record of which parts of the protocol they implement, kept in step with the
+upstream specification rather than drifting quietly behind it. The project grows from the smallest
+thing that closes the loop and widens only as the protocol and its agents actually allow.
 
 ## Strategy
 
@@ -109,7 +111,7 @@ smallest thing that closes the loop and widens only as the protocol and its agen
 - **Security before convenience.** A fleet manager puts configuration and software onto
   every host it reaches, so a flaw in it is a flaw on all of them at once. Where security and
   convenience conflict, security wins, and the operator meets a refusal that says what to fix,
-  not a warning.  Every connection that leaves the host is TLS 1.3; plaintext is accepted on the
+  not a warning. Every connection that leaves the host is TLS 1.3; plaintext is accepted on the
   loopback alone. An Agent proves fleet membership with a client certificate in the TLS handshake,
   issued to its host, and it obtains that certificate in a separate enrolment that is time-limited
   and approved. This is done with the protocol's own means — client certificates, the CSR flow,

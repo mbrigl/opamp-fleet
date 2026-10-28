@@ -325,10 +325,12 @@ Agent plane with token buckets.
     `H2_KEEP_ALIVE_TIMEOUT` (20 s) is dropped. They are named constants, not keys, as clause 18
     states for the HTTP/1 bound.
 
-21. **The Server's outbound HTTP is TLS 1.3 and `https://`.** The probe that asks a package source
-    whether it holds an artifact speaks `https://` over the provider of clause 5. An `http://`
-    source is probed only on LOOPBACK; off LOOPBACK it is refused with a message naming the URL.
-    The probe keeps its refusal of internal addresses and redirects.
+21. **The Server dials its stores alone, over TLS 1.3.** Its outbound connections are those to
+    the S3 store and the PostgreSQL store, each over the provider of clause 5, and plaintext only
+    to a loopback endpoint the configuration names
+    ([ADR-0029](0029-the-servers-state-and-its-stores.md), clauses 17 and 24). The Server sends no
+    request for a package anywhere ([ADR-0027](0027-packages-signatures-and-delivery.md),
+    clause 4).
 
 22. **`[agent_rate_limit]` in `server.toml`.** The rate limit covers an admitted peer's
     `AgentToServer` messages on `/v1/opamp` over both transports and its requests on the package
@@ -594,6 +596,10 @@ Agent plane with token buckets.
   plain HTTP an exchange always has a reply.
 - **`0` to switch the limit off.** A limit that one line disables is not a default an operator can
   rely on (Q-1). A fleet that needs more raises the numbers.
+- **Probe a package source over `https://`, with `http://` on the loopback alone.** It sets rules
+  for an outbound request the Server does not make: the Server sends no request for a package
+  anywhere ([ADR-0027](0027-packages-signatures-and-delivery.md), clause 4), and its outbound
+  connections are those to its stores (clause 21).
 
 ## Sources / Prior art
 
@@ -854,8 +860,8 @@ These tests carry `Verifies: ADR-0012`:
   `the_agent_plane_defaults_to_the_loopback`, `a_server_without_tls_is_refused_at_startup`
   (clauses 7, 9), `the_operator_plane_requires_authentication_off_the_loopback` (clause 8),
   `max_connections_defaults_per_plane_and_zero_is_refused` (clause 19).
-- [`crates/fleet-server/tests/packages.rs`](../../crates/fleet-server/tests/packages.rs):
-  `a_plaintext_source_off_the_loopback_is_refused` (clause 21).
+- The store connections of clause 21 are verified under
+  [ADR-0029](0029-the-servers-state-and-its-stores.md), clauses 17 and 24.
 
 The Operator plane's own certificate (clauses 9 to 13), each test marked as verifying this ADR:
 

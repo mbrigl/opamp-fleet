@@ -27,7 +27,7 @@ clap.workspace = true
 # The Client is an Agent upstream and a server for the Gateway and the Supervisor Endpoint.
 opamp = { workspace = true, features = ["client", "server"] }
 fleet-core.workspace = true
-# ADR-0019, ADR-0020: service lifecycle and the content hash in the install layout's manifest.
+# ADR-0019, ADR-0037: service lifecycle and the content hash in the install layout's manifest.
 service-manager.workspace = true
 # ADR-0019: the questionnaire `service install --interactive` and `service config` run.
 dialoguer.workspace = true
@@ -96,8 +96,8 @@ windows-service.workspace = true
 # bytes in a `.deb` are the bytes in its sibling `.7z`.
 #
 # Neither ships a systemd unit — deliberately. `cargo-deb`'s `systemd-units` integration would write
-# a second registration knowing nothing of ADR-0020's service name or ADR-0019's restart policy; the
-# maintainer scripts call `service install` instead, which is the one install path (ADR-0020).
+# a second registration knowing nothing of ADR-0037's service name or ADR-0019's restart policy; the
+# maintainer scripts call `service install` instead, which is the one install path (ADR-0037).
 # The package carries the **product's** name (ADR-0019 clause 9), not the program's: a second
 # instance is a second build, and two variants that shared a package name could not be installed
 # side by side. `cargo-deb`'s `[package.metadata.deb.variants.<name>]` is the seam a variant build
@@ -117,12 +117,12 @@ packages the Server offers.
 The package delivers the binary only. `supervisor service install`, which the post-install \
 runs, lays out the versioned install root and registers the systemd service."""
 # Derived from what the binary actually links, rather than a floor somebody typed — and `passwd`,
-# which ships the `useradd` the post-install creates the account with (ADR-0020 clause 3).
+# which ships the `useradd` the post-install creates the account with (ADR-0037 clause 3).
 depends = "$auto, passwd"
 # Always spelled `target/release/`, whatever the real target directory is: cargo-deb rewrites the
 # prefix itself for a cross build, and a hand-adjusted path defeats that.
 #
-# `usr/libexec`, not `usr/bin` (ADR-0020): what an operator invokes on PATH is the symlink the
+# `usr/libexec`, not `usr/bin` (ADR-0037): what an operator invokes on PATH is the symlink the
 # maintainer scripts lay through the layout's `current` pointer, so the CLI always answers for the
 # binary the service runs. The payload itself stays off PATH.
 #
@@ -142,7 +142,7 @@ assets = [
 # taken as the scriptlet body itself — so the release job asserts with `rpm -qp --scripts` that what
 # landed in the package is the script and not its file name.
 #
-# `%posttrans` re-lays the `/usr/bin` symlink (ADR-0020): on an upgrade, rpm erases the *old*
+# `%posttrans` re-lays the `/usr/bin` symlink (ADR-0037): on an upgrade, rpm erases the *old*
 # package's files after the new `%post` has run, which deletes the link `%post` just created — the
 # transaction scriptlet runs after that erasure, so its link is the one that survives.
 post_install_script = "../../packaging/linux/postinst"
@@ -150,7 +150,7 @@ pre_uninstall_script = "../../packaging/linux/prerm"
 post_uninstall_script = "../../packaging/linux/postrm"
 post_trans_script = "../../packaging/linux/posttrans"
 
-# The post-install creates the account `opamp-fleet` with `useradd` (ADR-0020 clause 3). A file
+# The post-install creates the account `opamp-fleet` with `useradd` (ADR-0037 clause 3). A file
 # dependency, because the package that ships it is `shadow-utils` on Fedora and RHEL and `shadow`
 # on SUSE. cargo-generate-rpm writes a plain `Requires:`; it has no `Requires(post):` form.
 [package.metadata.generate-rpm.requires]
@@ -160,7 +160,7 @@ post_trans_script = "../../packaging/linux/posttrans"
 # Virtual time, so a bound measured in minutes is tested in milliseconds.
 tokio = { workspace = true, features = ["test-util"] }
 tempfile = "3"
-# ADR-0020: a test reads the process account back from a plist as `service-manager` writes it,
+# ADR-0037: a test reads the process account back from a plist as `service-manager` writes it,
 # through the crate it writes with.
 plist = "1"
 # A test holds a TLS connection open mid-headers on the Gateway (H18), below what a client library

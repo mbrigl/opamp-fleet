@@ -46,22 +46,9 @@ struct Entry {
     in_flight: u32,
 }
 
-/// The address a peer is counted under: an IPv6 address by its /64, the block one host holds, so
-/// a peer cannot step past its back-off by changing the low bits; an IPv4-mapped one as IPv4.
-#[must_use]
-pub fn peer_key(peer: IpAddr) -> IpAddr {
-    match peer {
-        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
-            Some(v4) => IpAddr::V4(v4),
-            None => {
-                let mut segments = v6.segments();
-                segments[4..].fill(0);
-                IpAddr::V6(std::net::Ipv6Addr::from(segments))
-            }
-        },
-        v4 => v4,
-    }
-}
+/// The address a peer is counted under: an IPv6 address by its /64, an IPv4-mapped one as IPv4
+/// — as the Agent plane's rate limit and a Gateway count it too.
+pub use fleet_core::rate::peer_key;
 
 /// One attempt being verified; dropping it ends it.
 pub struct Attempt {

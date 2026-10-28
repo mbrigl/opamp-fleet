@@ -10,10 +10,10 @@
 //! from that certificate's bucket (ADR-0015 clause 26). Both tables are bounded, and a full one
 //! forgets the bucket used least recently, which can only grant tokens.
 
-use std::collections::{BTreeMap, HashMap};
-use std::hash::Hash;
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
+
+use fleet_core::rate::{Table, TOKEN};
 
 use crate::fleet::Clock;
 use crate::revocation::CertId;
@@ -104,70 +104,6 @@ enum Key {
     UncheckedEnrolments(String),
 }
 
-/// A bucket's tokens, in thousandths so that a refill of a few milliseconds is not lost.
-#[derive(Clone, Copy)]
-struct Level {
-    milli: u64,
-    at_ms: u64,
-    used: u64,
-}
-
-const TOKEN: u64 = 1000;
-
-/// One bounded table of buckets, forgetting the one used least recently when full.
-struct Table<K> {
-    capacity: usize,
-    buckets: HashMap<K, Level>,
-    /// The order of use: the tick each bucket was last used at.
-    order: BTreeMap<u64, K>,
-}
-
-impl<K: Clone + Eq + Hash> Table<K> {
-    fn new(capacity: usize) -> Self {
-        Table {
-            capacity: capacity.max(1),
-            buckets: HashMap::new(),
-            order: BTreeMap::new(),
-        }
-    }
-
-    /// The tokens in `key`'s bucket now, in thousandths; a new bucket starts full.
-    fn level(&mut self, key: &K, rate: u32, burst: u32, now: u64, tick: u64) -> u64 {
-        let full = u64::from(burst) * TOKEN;
-        if !self.buckets.contains_key(key) && self.buckets.len() >= self.capacity {
-            if let Some((_, oldest)) = self.order.pop_first() {
-                self.buckets.remove(&oldest);
-            }
-        }
-        let level = self.buckets.entry(key.clone()).or_insert(Level {
-            milli: full,
-            at_ms: now,
-            used: tick,
-        });
-        // Thousandths a millisecond is tokens a second.
-        let gained = now
-            .saturating_sub(level.at_ms)
-            .saturating_mul(u64::from(rate));
-        level.milli = level.milli.saturating_add(gained).min(full);
-        level.at_ms = level.at_ms.max(now);
-        self.order.remove(&level.used);
-        level.used = tick;
-        self.order.insert(tick, key.clone());
-        level.milli
-    }
-
-    fn spend(&mut self, key: &K) {
-        if let Some(level) = self.buckets.get_mut(key) {
-            level.milli = level.milli.saturating_sub(TOKEN);
-        }
-    }
-
-    #[cfg(test)]
-    fn len(&self) -> usize {
-        self.buckets.len()
-    }
-}
-
 /// What a message through a Gateway is counted for besides an aggregate: the Agent it names, or —
 /// for an enrolment request — the bootstrap certificate the request proves (ADR-0015 clause 26).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -177,7 +113,6 @@ enum Named {
 }
 
 struct Tables {
-    tick: u64,
     own: Table<Key>,
     agents: Table<(String, Named)>,
 }
@@ -208,7 +143,6 @@ impl AgentRate {
             limits,
             clock,
             tables: Mutex::new(Tables {
-                tick: 0,
                 own: Table::new(subjects),
                 agents: Table::new(agents),
             }),
@@ -257,21 +191,12 @@ impl AgentRate {
         let now = self.clock.now_ms();
         let limits = self.limits;
         let mut tables = self.tables.lock().expect("agent rate lock");
-        let Tables { tick, own, agents } = &mut *tables;
-        *tick += 1;
+        let Tables { own, agents } = &mut *tables;
         let Some(bootstrap) = bootstrap else {
             let unchecked = Key::UncheckedEnrolments(host.clone());
-            if own.level(
-                &unchecked,
-                limits.messages_per_sec,
-                limits.burst,
-                now,
-                *tick,
-            ) < TOKEN
-            {
+            if !own.take(&unchecked, limits.messages_per_sec, limits.burst, now) {
                 return Err(Bucket::UncheckedEnrolment);
             }
-            own.spend(&unchecked);
             return Ok(());
         };
         let aggregate = Key::Enrolments(host.clone());
@@ -281,14 +206,12 @@ impl AgentRate {
             limits.gateway_messages_per_sec,
             limits.gateway_burst,
             now,
-            *tick,
         ) < TOKEN
         {
             return Err(Bucket::Enrolment);
         }
         let key = (host.clone(), Named::Enrolment(bootstrap.clone()));
-        *tick += 1;
-        if agents.level(&key, limits.messages_per_sec, limits.burst, now, *tick) < TOKEN {
+        if agents.level(&key, limits.messages_per_sec, limits.burst, now) < TOKEN {
             return Err(Bucket::Bootstrap);
         }
         agents.spend(&key);
@@ -300,16 +223,14 @@ impl AgentRate {
         let now = self.clock.now_ms();
         let limits = self.limits;
         let mut tables = self.tables.lock().expect("agent rate lock");
-        let Tables { tick, own, agents } = &mut *tables;
-        *tick += 1;
+        let Tables { own, agents } = &mut *tables;
         let host = match (subject, gateway) {
             (Subject::Host(host), true) => host,
             _ => {
                 let key = Key::Own(subject.clone());
-                if own.level(&key, limits.messages_per_sec, limits.burst, now, *tick) < TOKEN {
+                if !own.take(&key, limits.messages_per_sec, limits.burst, now) {
                     return Err(Bucket::Host);
                 }
-                own.spend(&key);
                 return Ok(());
             }
         };
@@ -319,7 +240,6 @@ impl AgentRate {
             limits.gateway_messages_per_sec,
             limits.gateway_burst,
             now,
-            *tick,
         );
         // Checked first, so a peer cycling uids against an empty aggregate fills no table.
         if level < TOKEN {
@@ -327,8 +247,7 @@ impl AgentRate {
         }
         if let Some(named) = named {
             let key = (host.clone(), named);
-            *tick += 1;
-            if agents.level(&key, limits.messages_per_sec, limits.burst, now, *tick) < TOKEN {
+            if agents.level(&key, limits.messages_per_sec, limits.burst, now) < TOKEN {
                 return Err(Bucket::Agent);
             }
             agents.spend(&key);

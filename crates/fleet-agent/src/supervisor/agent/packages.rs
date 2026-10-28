@@ -136,7 +136,7 @@ impl AgentState {
     }
 
     /// A package `Installing` names `reason` as what it waits for, the second service, or nothing
-    /// once `reason` is empty (ADR-0020 clause 17); the outcome replaces it. A package still
+    /// once `reason` is empty (ADR-0037 clause 17); the outcome replaces it. A package still
     /// downloading, and a status other than `Installing`, stay as they are.
     pub(super) fn package_waits(&mut self, reason: &str) {
         let local = &mut self.local;

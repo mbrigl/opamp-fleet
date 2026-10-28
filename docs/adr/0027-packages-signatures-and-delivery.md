@@ -197,9 +197,9 @@ swapped in by rename, health-gated and rolled back only to a real predecessor.
 
 8. **The store opens loudly or not at all.** At startup every Package's metadata is read and every
    uploaded artifact is re-hashed by streaming. Metadata that cannot be read or parsed, an invalid
-   type, version or Platform, a content hash that is not hex, a directory whose name disagrees with
-   the identity its metadata states, or an artifact that no longer matches its recorded hash fails
-   startup naming the file. A corrupt distribution artifact must never ship, and a store that
+   type, version or Platform, a content hash that is not hex, a stored Package whose name disagrees
+   with the identity its metadata states, or an artifact that no longer matches its recorded hash
+   fails startup naming the file. A corrupt distribution artifact must never ship, and a store that
    silently drops a Package looks like one that was never given it.
 
 9. **Two names are derived, and they answer different questions.** The **wire name** is the Agent
@@ -403,8 +403,9 @@ swapped in by rename, health-gated and rolled back only to a real predecessor.
 
 32. **An absent assignment means nothing was rolled out.** An Agent record carrying no assignment
     fields loads as assigned nothing; the Server never invents a rollout at startup. Records are
-    written as envelope version 2, and an envelope of another version stops the Server with a
-    message saying to clear the agents directory.
+    written in the envelope [ADR-0029](0029-the-servers-state-and-its-stores.md) holds, and an
+    envelope of another version stops the Server with a message saying that `server migrate`
+    moves a data directory an older Server wrote.
 
 ### The download route
 
@@ -1037,6 +1038,13 @@ mode for `opamp-fleetctl package pack`.
 - **Retention on the downloaded artifact instead of the installed predecessor.** A rollback
   restores the installed program, not the download; tying retention to the staged file would
   delete what a fallback needs.
+- **A directory per Package.** It is not the layout the store keeps: the filesystem adapter of
+  [ADR-0029](0029-the-servers-state-and-its-stores.md) holds one stored file per Package and the
+  PostgreSQL adapter one row, so startup checks a stored Package, not a directory (clause 8).
+- **An envelope of its own for an Agent record, with a cleared agents directory as the way past a
+  version change.** Clearing the directory drops the fleet record an operator relies on. The
+  record's envelope is [ADR-0029](0029-the-servers-state-and-its-stores.md)'s, and `server migrate`
+  moves a data directory an older Server wrote (clause 32).
 
 ## Sources / Prior art
 

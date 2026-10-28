@@ -91,7 +91,7 @@ fn prepare(dir: &Path, private: bool) -> std::io::Result<()> {
 }
 
 /// Creates the log directory owner-only, `0700`, and narrows one that exists, with the Client's
-/// log files already in it, to the Client alone: `0700` and `0600` (ADR-0020 clause 21). For a log
+/// log files already in it, to the Client alone: `0700` and `0600` (ADR-0037 clause 21). For a log
 /// directory beneath a state directory that the process account's group passes through, which
 /// [`is_private`] decides: the log is never among what that group reads. The appender creates each
 /// day's file at the umask; the directory is what keeps it.
@@ -135,7 +135,7 @@ fn keep_private(dir: &Path) -> std::io::Result<()> {
 /// Where a process account is registered, refuses a `dir` that narrowing would take from the
 /// process account's group, or that would put the log where that group reads or writes: one
 /// named with `..`, the state directory itself, the Supervisors' root `supervisors_root` or one
-/// it lies beneath, and the directory of one of `supervisors` or one beneath it (ADR-0020 clause 21). Another directory beneath the Supervisors' root is not refused: `<state_dir>/logs`, the
+/// it lies beneath, and the directory of one of `supervisors` or one beneath it (ADR-0037 clause 21). Another directory beneath the Supervisors' root is not refused: `<state_dir>/logs`, the
 /// default, lies there where the Supervisors' root is the state directory itself.
 pub fn is_private(
     dir: &Path,
@@ -254,11 +254,11 @@ mod tests {
         );
     }
 
-    /// The log is the Client's alone (ADR-0020 clause 21) where a process account passes through
+    /// The log is the Client's alone (ADR-0037 clause 21) where a process account passes through
     /// the state directory it lies in: its directory is made `0700`, and one that exists — made at
     /// the umask by an earlier version — is narrowed to `0700` with the Client's log files in it
     /// `0600`. A file there that the appender did not name is left as it is.
-    /// Verifies: ADR-0020
+    /// Verifies: ADR-0037
     #[cfg(unix)]
     #[test]
     fn the_log_directory_and_its_files_are_the_clients_alone() {
@@ -289,8 +289,8 @@ mod tests {
     /// is refused: the state directory itself, the Supervisors' root or a directory above it, a
     /// Supervisor's directory or one beneath it, and a path that reaches any of them through `..`.
     /// A real subdirectory of the state directory is narrowed, and so is one beside a Supervisors'
-    /// root the operator moved out of it (ADR-0020 clause 21).
-    /// Verifies: ADR-0020
+    /// root the operator moved out of it (ADR-0037 clause 21).
+    /// Verifies: ADR-0037
     #[test]
     fn a_log_directory_the_process_accounts_group_passes_through_is_refused() {
         let state = Path::new("/var/lib/opamp-fleet/state");
@@ -333,8 +333,8 @@ mod tests {
 
     /// Where the Supervisors' root is the state directory itself, the default log directory
     /// `<state_dir>/logs` is the Client's and narrowed, unless a Supervisor is named `logs`; a
-    /// Supervisor's directory there is refused as anywhere (ADR-0020 clause 21).
-    /// Verifies: ADR-0020
+    /// Supervisor's directory there is refused as anywhere (ADR-0037 clause 21).
+    /// Verifies: ADR-0037
     #[test]
     fn the_default_log_directory_is_kept_where_the_supervisors_root_is_the_state_directory() {
         let state = Path::new("/var/lib/opamp-fleet/state");
@@ -348,8 +348,8 @@ mod tests {
 
     /// A log directory is kept private only beneath the state directory and only where a process
     /// account is registered; otherwise — and in a directory the operator chose elsewhere, such
-    /// as `/var/log` — the directory and what it holds stay as they are (ADR-0020 clause 21).
-    /// Verifies: ADR-0020
+    /// as `/var/log` — the directory and what it holds stay as they are (ADR-0037 clause 21).
+    /// Verifies: ADR-0037
     #[cfg(unix)]
     #[test]
     fn a_log_directory_elsewhere_or_without_a_process_account_is_left_as_it_is() {

@@ -463,13 +463,38 @@ impl Drop for OurClient {
 }
 
 fn our_client(dir: &Path, endpoint: &str) -> (OurClient, PathBuf) {
-    our_client_with(dir, endpoint, &common::client_identity(dir))
+    let tls = common::client_identity(dir);
+    let member = (dir.join("test-client.pem"), dir.join("test-client-key.pem"));
+    our_client_with(dir, endpoint, &tls, (&member.0, &member.1))
 }
 
 /// Our Client with the `[tls]` table given, which names its certificate and, for a TLS endpoint,
-/// the CA it trusts.
-fn our_client_with(dir: &Path, endpoint: &str, tls: &str) -> (OurClient, PathBuf) {
+/// the CA it trusts, and a member of its fleet: `member`, its certificate and key, stand in its
+/// state directory as the pair a Server issued. opamp-go signs no CSR, and a Client holding only a
+/// configured certificate enrols first over plain HTTP, sending its request and nothing else
+/// until a Server answers it (ADR-0015 clause 24), so the reports these tests read come from a
+/// Client that has enrolled.
+fn our_client_with(
+    dir: &Path,
+    endpoint: &str,
+    tls: &str,
+    member: (&Path, &Path),
+) -> (OurClient, PathBuf) {
     let state_dir = dir.join("client-state");
+    std::fs::create_dir_all(&state_dir).expect("create the state directory");
+    for (from, name) in [
+        (member.0, fleet_agent::tls::ISSUED_CERT_FILE),
+        (member.1, fleet_agent::tls::ISSUED_KEY_FILE),
+    ] {
+        let to = state_dir.join(name);
+        std::fs::copy(from, &to).expect("store the issued pair");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&to, std::fs::Permissions::from_mode(0o600))
+                .expect("owner-only, as the Client writes it");
+        }
+    }
     let config = format!(
         concat!(
             "endpoint = {endpoint:?}\n",
@@ -853,7 +878,12 @@ fn our_client_against_go_tls_server(scheme: &str) {
 
     let dir = tempfile::tempdir().expect("tempdir");
     let member = pki.issue("our-agent");
-    let (client, _) = our_client_with(dir.path(), &endpoint, &member.tls_table());
+    let (client, _) = our_client_with(
+        dir.path(),
+        &endpoint,
+        &member.tls_table(),
+        (&member.cert, &member.key),
+    );
     let first = go.wait_for("our Client's first report over TLS", "agent_message", |e| {
         e["has_description"] == true
     });
@@ -880,7 +910,12 @@ fn our_client_against_go_tls_server(scheme: &str) {
         go.events("client_hello").len(),
         go.events("agent_message").len(),
     );
-    let (mut refused, _) = our_client_with(other.path(), &endpoint, &stranger.tls_table());
+    let (mut refused, _) = our_client_with(
+        other.path(),
+        &endpoint,
+        &stranger.tls_table(),
+        (&stranger.cert, &stranger.key),
+    );
     // It tries: handshakes arrive while the Client keeps running.
     let deadline = Instant::now() + TIMEOUT;
     while go.events("client_hello").len() < hellos + 2 {

@@ -78,8 +78,8 @@ pub struct Handled {
 ///
 /// It is also the shipped program's name and its configuration file's (ADR-0019) — see
 /// [`layout::COMPONENT`](crate::service::layout::COMPONENT), which holds the same string as a
-/// **separate** constant. It is *not* the service's name: ADR-0020 clause 17 gives the service the
-/// product's name, and ADR-0020 clause 6 keeps this one off
+/// **separate** constant. It is *not* the service's name: ADR-0037 clause 17 gives the service the
+/// product's name, and ADR-0037 clause 6 keeps this one off
 /// [`PRODUCT_NAME`](crate::product::PRODUCT_NAME) deliberately — the archive member a self-update
 /// extracts is the same in every variant build, which is what lets one published package Set
 /// serve them all. Derive this from the product and the fleet carries N products where it has one.
@@ -187,7 +187,7 @@ struct Local {
     /// installing or after a failure).
     server_offered: Option<(String, Vec<u8>)>,
     /// The last install failure for this Agent's package, reported alongside the status — or,
-    /// while it is `Installing`, why it waits for the second service (ADR-0020 clause 17).
+    /// while it is `Installing`, why it waits for the second service (ADR-0037 clause 17).
     package_error: String,
     /// A failure in processing the *offer itself* rather than one package — the Baseline's
     /// `PackageStatuses.error_message`, "set if the Agent encountered an error when processing the
@@ -387,7 +387,7 @@ impl AgentState {
         self.name_the_wait();
     }
 
-    /// What waits for the second service says so (ADR-0020 clause 17): while the Supervisor's
+    /// What waits for the second service says so (ADR-0037 clause 17): while the Supervisor's
     /// health says that the service is not reached, a configuration that is `APPLYING` and a
     /// package that is `Installing` name that as the reason, and nothing once it is reached.
     fn name_the_wait(&mut self) {
@@ -2447,7 +2447,7 @@ mod tests {
     /// A configuration that waits for the second service stays `APPLYING` and names why, as the
     /// Supervisor's health says it — down or refused; once a start reaches the service the reason
     /// goes, and the acknowledgement closes it. A health that comes after it changes nothing.
-    /// Verifies: ADR-0020
+    /// Verifies: ADR-0037
     #[test]
     fn a_configuration_that_waits_for_the_second_service_stays_applying_and_says_why() {
         use crate::supervisor::ports::{REFUSED, UNREACHABLE};
@@ -2497,7 +2497,7 @@ mod tests {
     /// A package that waits for the second service stays `Installing` and names why, as the
     /// Supervisor's health says it; a package still downloading does not, and the outcome
     /// replaces the reason.
-    /// Verifies: ADR-0020
+    /// Verifies: ADR-0037
     #[test]
     fn a_package_that_waits_for_the_second_service_stays_installing_and_says_why() {
         use crate::supervisor::ports::UNREACHABLE;

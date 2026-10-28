@@ -30,7 +30,7 @@ The reference `opampsupervisor` runs a local OpAMP server on
 timeout, and watchdog-restarts it with exponential backoff. It configures its agent generically,
 an absolute `agent.executable` plus `args`, because it supervises a binary somebody else
 installed. This Client is in the opposite position: it installs every program it supervises into a
-directory it owns ([ADR-0020](0020-the-accounts-the-service-runs-under.md) lays the directory
+directory it owns ([ADR-0037](0037-the-accounts-the-service-runs-under.md) lays the directory
 out), from an artifact this project packs (clause 23). It is the one end that can know an agent's
 layout, and `opamp-fleetctl package fetch` already carries per-agent knowledge (service name,
 release source, default Configuration names). Writing that knowledge into every host's TOML by
@@ -82,7 +82,7 @@ package, prevents that. It is not enough on its own: a block's `env` and `args` 
 program unchecked, with placeholders expanded in both (clause 25). A Server that delivers a shared
 object as a configuration entry and then a block with `LD_PRELOAD` pointing at it has the loader
 run that object as the account the Managed Process runs under
-([ADR-0020](0020-the-accounts-the-service-runs-under.md)), and any signed program that loads a
+([ADR-0037](0037-the-accounts-the-service-runs-under.md)), and any signed program that loads a
 plugin or a script named in its arguments reaches as far. A kind setting that names a file the
 Supervisor reads reaches as far as the host's files: a kind that reads such a file and sends its
 content to a peer the block names sends whatever file a delivered block points it at, to whatever
@@ -481,7 +481,9 @@ remote configuration and run only on what the operator placed on the host.
 
 34. **A directory the purge cannot delete fails nothing.** The Supervisor is already stopped and
     the file written, so the set the Server asked for is running; a purge error (a file held open
-    on Windows, permissions) is a warning naming the path, and the directory becomes an orphan.
+    on Windows, permissions) is a warning naming the path. The purge renamed the directory to a
+    tombstone before deleting it, and the next start and the next purge remove the tombstone
+    again ([ADR-0037](0037-the-accounts-the-service-runs-under.md), clause 25).
 
 35. **A delivered block brings no environment and no arguments the operator did not allow.** In
     the apply path, a delivered block's `env` entries, `args` and `version_args` must equal those
@@ -519,7 +521,7 @@ remote configuration and run only on what the operator placed on the host.
 38. **The key `server_manages_set`.** `[supervisors] server_manages_set` is a boolean and defaults
     to `true`, the behaviour clauses 26 to 37 describe, with the purge of a removed Supervisor
     ([ADR-0028](0028-package-versions-high-water-mark-and-floor.md)) and the orphaned directories
-    of [ADR-0020](0020-the-accounts-the-service-runs-under.md). It is read when the configuration
+    of [ADR-0037](0037-the-accounts-the-service-runs-under.md). It is read when the configuration
     is loaded, like every key of the file, and is never taken from the Server, since the
     Supervisor-set apply replaces only the `[[supervisor]]` array (clauses 26 and 30). A change
     takes effect at the next start of the Client.
@@ -574,9 +576,12 @@ remote configuration and run only on what the operator placed on the host.
     Managed Process, offer connection settings, and configure every Supervisor not named in
     `remote_config_disabled`.
 
-    What the key holds against the Server holds only while every Supervisor whose configuration
-    language can run commands as the Client's account (a Telegraf `inputs.exec`, an Icinga
-    `CheckCommand`, the configuration a `command` kind's program reads) is named in
+    A command a configuration can run (a Telegraf `inputs.exec`, an Icinga `CheckCommand`, the
+    configuration a `command` kind's program reads) runs as the account its Managed Process runs
+    under. Where a process account is registered, that is the process account, which cannot write
+    `supervisor.toml` ([ADR-0037](0037-the-accounts-the-service-runs-under.md)). Where none is,
+    it is the Client's account, and what the key holds against the Server holds only while every
+    Supervisor whose configuration language can run commands is named in
     `remote_config_disabled`. Otherwise the Server can configure such a Supervisor to rewrite
     `supervisor.toml`, and the key flips at the next start. A signed Client build can also still
     replace the Client's own program where `[self_update]` consents
@@ -794,7 +799,7 @@ Supervisor before its first remote configuration); a group stop on Windows throu
   for a capability the fleet path does not need. Warning and applying anyway is not a control.
 - **A separate `bin_dir`, or a `supervisor_dir` per block.** Two knobs for a separation nobody has
   asked for; one root per Client, laid out by
-  [ADR-0020](0020-the-accounts-the-service-runs-under.md), matches how the Client's own root is
+  [ADR-0037](0037-the-accounts-the-service-runs-under.md), matches how the Client's own root is
   treated.
 - **Keeping a bare name as a `$PATH` lookup and requiring `./` for the owned meaning.** A fourth
   case, noise in TOML, to keep behaviour fragile under a service manager's minimal `PATH`.
@@ -826,7 +831,7 @@ Supervisor before its first remote configuration); a group stop on Windows throu
 - **Reaping orphaned directories at startup.** Startup cannot tell a leftover from a deliberate
   hand edit, and the destructive reading deletes an identity that was not meant to go; the
   orphaned directories are reported as
-  [ADR-0020](0020-the-accounts-the-service-runs-under.md) decides.
+  [ADR-0037](0037-the-accounts-the-service-runs-under.md) decides.
 - **Default `false` for `server_manages_set`.** Every existing Client would stop following the
   Server's set at upgrade, including hosts that took one, and G-1's loop would no longer close for
   Supervisor sets until each host's file says so. The switch is an operator's narrowing of what
@@ -893,6 +898,14 @@ Supervisor before its first remote configuration); a group stop on Windows throu
   is the normal case, and the refusal would stop the whole Client for it.
 - **Preflight by static inspection of required `GLIBC_` symbols.** A start attempt is the
   definition of "runs here", catches a missing library too, and yields the operator's message.
+- **Leave a directory the purge cannot delete as an orphan.** The orphan stays beneath the
+  Supervisors' root with nothing to remove it. The purge renames the directory to a tombstone first,
+  which the next start and the next purge remove again
+  ([ADR-0037](0037-the-accounts-the-service-runs-under.md), clause 25; clause 34).
+- **Run every command a configuration can run as the Client's account.** Where a process account is
+  registered, that puts a command a Server can deliver above the Managed Process it belongs to. It
+  runs as its Managed Process's account instead
+  ([ADR-0037](0037-the-accounts-the-service-runs-under.md); clause 43).
 
 ## Sources / Prior art
 
@@ -1135,7 +1148,7 @@ Supervisor before its first remote configuration); a group stop on Windows throu
 - Directory and program, in `crates/fleet-agent/src/config.rs`:
   `the_supervisor_root_defaults_under_the_state_dir_and_is_relocatable` and
   `a_relative_state_dir_yields_absolute_directories` (the root of
-  [ADR-0020](0020-the-accounts-the-service-runs-under.md) clause 24),
+  [ADR-0037](0037-the-accounts-the-service-runs-under.md) clause 24),
   `a_bare_name_resolves_and_everything_else_is_refused`,
   `an_absolute_program_path_is_refused_and_names_the_way_across`,
   `the_retired_package_keys_are_refused`, `a_program_path_must_stay_inside_the_package`.
@@ -1144,7 +1157,7 @@ Supervisor before its first remote configuration); a group stop on Windows throu
   `installs_packages_reflects_declared_package_acceptance`,
   `a_tree_supervisor_prepares_its_root_and_leaves_the_tree_to_the_package`,
   `a_program_path_that_is_neither_fails_the_build`, `a_block_without_a_program_fails_the_build`,
-  `an_orphaned_supervisor_directory_is_not_reaped_at_startup` (ADR-0020 clause 25).
+  `an_orphaned_supervisor_directory_is_not_reaped_at_startup` (ADR-0037 clause 25).
 - Placeholders: `the_placeholders_name_this_supervisors_own_directories` and
   `an_unknown_placeholder_is_passed_through_untouched`
   (`crates/fleet-agent/src/supervisor/ports.rs`),

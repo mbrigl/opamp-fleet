@@ -9,7 +9,7 @@
 //! (`StartServiceCtrlDispatcher` fails with error 1063 when the process was *not* SCM-launched,
 //! which is why the path is a marker, not auto-detection).
 //!
-//! The second service (ADR-0020) enters the same shim through `run --agents`, which only its
+//! The second service (ADR-0037) enters the same shim through `run --agents`, which only its
 //! registration writes: it serves the Client on its named pipe until the SCM stops it.
 
 use std::ffi::OsString;
@@ -29,7 +29,7 @@ use super::runtime::{self, RunSpec};
 
 /// The own-process service name handed to the dispatcher. For an `OWN_PROCESS` service the SCM
 /// does not match on this string — the installed service is registered under the product's name
-/// (ADR-0020 clause 17) — so it only needs to be stable.
+/// (ADR-0037 clause 17) — so it only needs to be stable.
 const SERVICE_NAME: &str = "supervisor";
 const SERVICE_TYPE: ServiceType = ServiceType::OWN_PROCESS;
 
@@ -57,12 +57,15 @@ pub fn run_agents_as_service(pipe: &Path, client: crate::win32::Sid) -> Result<(
 
 /// The second service's SCM entry point.
 fn agents_main(_arguments: Vec<OsString>) {
+    // The thread the SCM starts for the service closes itself to the process account first, as
+    // every thread of its runtime does (ADR-0036).
+    crate::supervisor::channel::windows::close_this_thread();
     let served = under_the_scm(|mut shutdown| {
         let (pipe, client) = AGENTS
             .get()
             .cloned()
             .ok_or_else(|| "the second service's pipe was not initialised".to_string())?;
-        let tokio_runtime = runtime::daemon_runtime()?;
+        let tokio_runtime = runtime::agents_runtime()?;
         let served = tokio_runtime.block_on(crate::supervisor::channel::windows::run(
             &pipe,
             client,

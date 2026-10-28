@@ -57,6 +57,35 @@ once its tag exists.
   manual shows. Upgrade: nothing changes on a running host; `service install --run-as
   "NT SERVICE\<product>"` moves one off `LocalSystem`.
 
+- **A Gateway rate-limits each host behind it as the Server limits a host**
+  ([ADR-0035](docs/adr/0035-a-gateway-rate-limits-each-downstream-host-as-the-server-limits-a-host.md)).
+  The Server counts what a Gateway forwards in one aggregate for all the hosts behind it, so a
+  single host speaking for many `instance_uid`s, or looping downloads or enrolment requests, could
+  drain it and leave every other host behind that Gateway answered `Unavailable`. A Gateway now
+  counts every downstream report, enrolment request and package download in a bucket of the host
+  that sent it, an enrolling peer by its address and an IPv6 one by its /64, before it does
+  anything else with it. Past the limit a report or an enrolment request is not forwarded and is
+  answered `Unavailable` with a retry after 30 seconds, over a WebSocket that stays open, and a
+  download is answered `429` with `Retry-After: 30`; the Gateway logs it once per host and minute
+  with the count. The new `[gateway.rate_limit]` section of `supervisor.toml` sets
+  `messages_per_sec` (default `10`) and `burst` (default `300`), the values the Server gives a
+  host; `0` fails startup. **What to do:** nothing on upgrade. A host whose Agents legitimately
+  send more through a Gateway than the defaults allow needs the section raised on each Gateway it
+  reports through.
+
+- **On Windows a Managed Process can no longer reach into the second service**
+  ([ADR-0036](docs/adr/0036-on-windows-the-second-service-closes-its-process-and-threads-to-the-process-account.md)).
+  The second service's process kept the default security its account gives it, so a Managed
+  Process under the same process account could open it to read its memory — what the Client sends
+  it, the Supervisor Endpoint's token among it — run code in it, or duplicate its pipe handle and
+  answer the Client in its place. As the first thing its program does, the second service now gives
+  its process and every one of its threads a protected DACL that leaves the process account, and
+  for the process the Client's account, only the right to ask about it and wait for it, and it does
+  not listen while its process or a thread reads back otherwise. The Client holds the pipe server's
+  process open while it asks the SCM, so a process id passed on in between no longer passes its
+  check. **What to do:** nothing on upgrade. An administrator's tool that opens the second
+  service's process, a debugger or a process explorer, has to run elevated.
+
 ## [0.7.0]
 
 ### Added

@@ -1,7 +1,8 @@
-//! The channel on Windows (ADR-0020 clause 19): a named pipe whose security descriptor grants the
+//! The channel on Windows (ADR-0037 clause 19): a named pipe whose security descriptor grants the
 //! Client's account and nobody else ([`crate::win32::pipe_sddl`]), a client identified by its
-//! token and a server by the pipe's owner, and a job object for every program the second service
-//! starts.
+//! token and a server by the pipe's owner and its process, held open while the Client checks it,
+//! a job object for every program the second service starts, and the DACLs that close the second
+//! service's process and threads to the process account (ADR-0036).
 //!
 //! Windows has no signals: a stop ends a program's job, and a signal is refused. A kind that would
 //! reload its agent by a signal reloads it by a restart there, as it does without a process account
@@ -45,7 +46,7 @@ const CREATE_SUSPENDED: u32 = 0x0000_0004;
 const ENDED: u32 = 1;
 
 /// Creates the pipe `pipe`, owned by the account this service runs as and granting the Client's
-/// account `client` alone (ADR-0020 clause 19). Its first instance must be the first of that
+/// account `client` alone (ADR-0037 clause 19). Its first instance must be the first of that
 /// name: a pipe someone else made under the name first is not taken over, and the bind fails.
 /// Remote clients are refused by the pipe itself.
 ///
@@ -99,7 +100,7 @@ impl Listener {
     }
 }
 
-/// Whether the client of `stream` is the Client's account `client` (ADR-0020 clause 19), read from
+/// Whether the client of `stream` is the Client's account `client` (ADR-0037 clause 19), read from
 /// its token once it has written.
 ///
 /// # Errors
@@ -122,7 +123,7 @@ pub fn admit_sid(peer: &Sid, client: &Sid) -> Result<(), String> {
     }
 }
 
-/// Whether the service, running as `own`, may serve `client` as the Client's account (ADR-0020
+/// Whether the service, running as `own`, may serve `client` as the Client's account (ADR-0037
 /// clause 16): the service never runs as `LocalSystem`, the Client's account never is
 /// `LocalSystem`, and never the account the service runs as.
 ///
@@ -180,7 +181,7 @@ pub(super) fn connect(pipe: &Path) -> io::Result<NamedPipeClient> {
 }
 
 /// The account that made the pipe `stream` is connected to: its owner, which only that account
-/// — or an administrator — can have set (ADR-0020 clause 19).
+/// — or an administrator — can have set (ADR-0037 clause 19).
 ///
 /// # Errors
 /// Returns why the owner could not be read.
@@ -188,11 +189,41 @@ pub(super) fn server_of(stream: &NamedPipeClient) -> io::Result<Sid> {
     win32::pipe_owner(stream.as_raw_handle())
 }
 
-/// The process that serves the pipe instance `stream` is connected to (ADR-0020 clause 19): the
+/// The process that serves the pipe instance `stream` is connected to (ADR-0037 clause 19): the
 /// second service's, or that of whoever else of the process account made an instance of the pipe.
+/// It is held open ([`peer_process`]) until the Client has decided.
 pub(super) fn server_process(stream: &NamedPipeClient) -> io::Result<super::PeerProcess> {
-    win32::pipe_server_process(stream.as_raw_handle()).map(|pid| super::PeerProcess { pid })
+    peer_process(win32::pipe_server_process(stream.as_raw_handle())?)
 }
+
+/// The process `pid`, opened to ask about it and wait for it before the SCM is asked which process
+/// is the second service (ADR-0036): while the handle is open the id cannot pass to another
+/// process, and whether it has ended is read from it once the SCM has answered. A process that
+/// cannot be opened is one that cannot be read.
+///
+/// # Errors
+/// Returns why it could not be opened, naming it.
+pub(super) fn peer_process(pid: u32) -> io::Result<super::PeerProcess> {
+    let handle = win32::process_to_check(pid)
+        .map_err(|error| io::Error::new(error.kind(), Unopened { pid, error }))?;
+    Ok(super::PeerProcess { pid, handle })
+}
+
+/// The process the pipe names as its server, which could not be opened: by its id, so that the
+/// refusal names it in the log as it names a process that differs.
+#[derive(Debug)]
+pub(super) struct Unopened {
+    pub(super) pid: u32,
+    error: io::Error,
+}
+
+impl std::fmt::Display for Unopened {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "process {} cannot be opened: {}", self.pid, self.error)
+    }
+}
+
+impl std::error::Error for Unopened {}
 
 /// A program's job: every process it starts is in it too, and ends with it.
 pub(super) struct Tree(Job);
@@ -213,7 +244,7 @@ impl Tree {
 /// Starts a program in a job of its own, suspended until it is in the job, so it starts nothing
 /// outside it. Its environment is the second service's own — the process account's, as the SCM
 /// starts the service under it — with the request's environment laid over it: the block's `env`,
-/// then the Supervisor Endpoint's token (ADR-0020 clause 22).
+/// then the Supervisor Endpoint's token (ADR-0037 clause 22).
 pub(super) fn start(launch: &Launch) -> io::Result<(Child, Tree)> {
     let job = Job::new()?;
     let mut command = Command::new(&launch.program);
@@ -279,11 +310,14 @@ pub(super) fn exit_status(raw: i32) -> ExitStatus {
 }
 
 /// `supervisor run --agents <pipe> --client-sid <SID>` under the SCM: the second service
-/// (ADR-0020), until `shutdown` resolves or a self-update leaves it behind.
+/// (ADR-0037), until `shutdown` resolves or a self-update leaves it behind. It listens only once
+/// its process and every thread it has read back closed to the process account (ADR-0036), and
+/// closes every [`SWEEP`] what threads the system starts for it after that.
 ///
 /// # Errors
 /// Returns an error when the service runs as `LocalSystem`, `client` is `LocalSystem` or the
-/// service's own account, or the pipe cannot be made.
+/// service's own account, its process or one of its threads is not closed, or the pipe cannot be
+/// made.
 pub async fn run(
     pipe: &Path,
     client: Sid,
@@ -291,10 +325,24 @@ pub async fn run(
 ) -> Result<Served, String> {
     let own = win32::own_sid().map_err(|e| format!("cannot read this service's account: {e}"))?;
     check_client(&client, &own)?;
+    let thread = CLOSED
+        .get()
+        .cloned()
+        .unwrap_or_else(|| Err("its program did not close it at its start".to_string()))
+        .map_err(|e| format!("the second service's process is not closed: {e}"))?;
+    // A thread the system started for the process since the program's start is closed too; one
+    // that cannot be is found by the read-back.
+    close_threads(&thread)?;
+    check_closed(
+        &win32::process_sddl(&own, &client),
+        &win32::thread_sddl(&own),
+    )?;
     let listener =
         bind(pipe, &client).map_err(|e| format!("cannot listen on {}: {e}", pipe.display()))?;
     info!(pipe = %pipe.display(), client = %client, "second service listening");
+    let sweeping = tokio::spawn(sweep(thread));
     let served = super::serve(listener, client, super::superseded, shutdown).await;
+    sweeping.abort();
     if served == Served::Superseded {
         info!(
             "the Client is another build and current names another version; exiting so the \
@@ -302,6 +350,118 @@ pub async fn run(
         );
     }
     Ok(served)
+}
+
+/// The thread DACL this program closed its process and its threads with at its start
+/// ([`close_this_process`]), or why it could not: set once, before anything else runs.
+static CLOSED: std::sync::OnceLock<Result<String, String>> = std::sync::OnceLock::new();
+
+/// How often the second service looks for a thread the system started for it since and closes it:
+/// the thread pool the runtime waits for its programs' processes on is one of them.
+const SWEEP: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Closes the second service's process and its threads to the process account (ADR-0036): the
+/// process's DACL ([`win32::process_sddl`]) grants the process account and the Client's account
+/// `client`, as `--client-sid` names it, only to ask about it and wait for it, and each thread's
+/// ([`win32::thread_sddl`]) the process account the same. The first thing its program does, before
+/// it parses its command line or sets up its log: it sets the process's DACL, its own thread's and,
+/// from a snapshot, those of the threads that exist by then. Nothing can be logged yet, so what
+/// fails is kept, and [`run`] does not listen with it. The token's default DACL is left as it is,
+/// so the programs the service starts carry the security of their own account.
+pub fn close_this_process(client: Option<&str>) {
+    let _ = CLOSED.set(closing(client));
+}
+
+fn closing(client: Option<&str>) -> Result<String, String> {
+    let client = Sid::parse(client.ok_or("its command line names no --client-sid")?)?;
+    let own = win32::own_sid().map_err(|e| format!("cannot read this service's account: {e}"))?;
+    let thread = win32::thread_sddl(&own);
+    win32::set_this_process_dacl(&win32::process_sddl(&own, &client))
+        .map_err(|e| format!("cannot set the process's DACL: {e}"))?;
+    win32::set_this_thread_dacl(&thread)
+        .map_err(|e| format!("cannot set the main thread's DACL: {e}"))?;
+    close_threads(&thread)?;
+    Ok(thread)
+}
+
+/// Closes the calling thread as [`close_this_process`] closed the process: the first act of the
+/// thread the SCM starts for the service and of every thread of its runtime. Nothing where the
+/// process was not closed, which [`run`] refuses to listen with anyway.
+pub fn close_this_thread() {
+    if let Some(Ok(thread)) = CLOSED.get() {
+        if let Err(e) = win32::set_this_thread_dacl(thread) {
+            tracing::error!(error = %e, "cannot close a thread of the second service");
+        }
+    }
+}
+
+/// Gives every thread of this process that carries a DACL other than `sddl` that one, and answers
+/// how many it gave it. A thread it cannot close is left to the read-back ([`check_closed`]) and
+/// named in a warning.
+///
+/// # Errors
+/// Returns why the threads could not be listed.
+fn close_threads(sddl: &str) -> Result<usize, String> {
+    let threads = win32::threads_of_this_process()
+        .map_err(|e| format!("cannot list the process's threads: {e}"))?;
+    let mut closed = 0;
+    for thread in threads {
+        match win32::thread_dacl(thread) {
+            // Ended since the snapshot.
+            Ok(None) => continue,
+            Ok(Some(held)) if win32::same_dacl(&held, sddl).unwrap_or(false) => continue,
+            _ => {}
+        }
+        match win32::set_thread_dacl(thread, sddl) {
+            Ok(true) => closed += 1,
+            Ok(false) => {}
+            Err(e) => warn!(thread, error = %e, "cannot close a thread of the second service"),
+        }
+    }
+    Ok(closed)
+}
+
+/// Whether this process carries the DACL `process` and every one of its threads the DACL
+/// `thread`, read back from each and compared by what they say ([`win32::same_dacl`], as ADR-0037
+/// clause 21 compares an ACL): the second service does not listen while one differs (ADR-0036).
+///
+/// # Errors
+/// Returns which differs, or cannot be read.
+pub(super) fn check_closed(process: &str, thread: &str) -> Result<(), String> {
+    let differs = |what: String, held: &str, set: &str| match win32::same_dacl(held, set) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(format!("{what} carries {held}, not {set}")),
+        Err(e) => Err(format!(
+            "{what} carries {held}, which cannot be compared: {e}"
+        )),
+    };
+    let held = win32::this_process_dacl()
+        .map_err(|e| format!("cannot read the DACL of the second service's process: {e}"))?;
+    differs("the second service's process".to_string(), &held, process)?;
+    let threads = win32::threads_of_this_process()
+        .map_err(|e| format!("cannot list the process's threads: {e}"))?;
+    for id in threads {
+        match win32::thread_dacl(id) {
+            Ok(None) => {}
+            Ok(Some(held)) => differs(format!("thread {id} of the second service"), &held, thread)?,
+            Err(e) => return Err(format!("cannot read the DACL of thread {id}: {e}")),
+        }
+    }
+    Ok(())
+}
+
+/// Closes, every [`SWEEP`], the threads the system has started for the process since: the
+/// runtime's own close themselves as their first act, but those of the system's thread pool, on
+/// which the runtime waits for a program's process, do not.
+async fn sweep(thread: String) {
+    loop {
+        tokio::time::sleep(SWEEP).await;
+        match close_threads(&thread) {
+            Ok(0) => {}
+            Ok(closed) => tracing::debug!(closed, "closed threads the system started"),
+            Err(e) => warn!(error = %e, "cannot close the threads the system started"),
+        }
+    }
 }
 
 /// `FILE_FLAG_BACKUP_SEMANTICS`, which opens a directory, and `FILE_FLAG_OPEN_REPARSE_POINT`, which
@@ -315,12 +475,12 @@ const READ_CONTROL: u32 = 0x0002_0000;
 const REPARSE_POINT: u32 = 0x400;
 
 /// Removes what the process account wrote under `dir`, the tombstone of the Supervisor named
-/// `supervisor` (ADR-0020 clause 20), as [`super::purge`] does on Unix: every entry this service's
+/// `supervisor` (ADR-0037 clause 20), as [`super::purge`] does on Unix: every entry this service's
 /// account owns in each of the directories `shared` names relative to `dir`, and in the
 /// directories beneath them, with everything beneath it. `dir` is absolute and the tombstone of
 /// that Supervisor, each of `shared` is a path beneath it of plain names alone, and no link or
 /// junction is followed on the way or beneath. The service acts with its own rights, which the
-/// Client's directories grant it only where its Managed Processes write (ADR-0020 clause 21).
+/// Client's directories grant it only where its Managed Processes write (ADR-0037 clause 21).
 ///
 /// # Errors
 /// Returns why the request is refused, or the first entry that cannot be reached or removed.
@@ -486,14 +646,14 @@ mod tests {
     }
 
     /// The process this test runs as, named as the second service's: it serves the in-process
-    /// services (ADR-0020 clause 19).
+    /// services (ADR-0037 clause 19).
     fn this_process() -> ServiceProcess {
         ServiceProcess::named(|| Ok(Some(std::process::id())))
     }
 
     /// Only the Client's account is served, and the service runs as neither `LocalSystem` nor the
-    /// Client's account, nor serves `LocalSystem` (ADR-0020 clauses 16 and 19).
-    /// Verifies: ADR-0020
+    /// Client's account, nor serves `LocalSystem` (ADR-0037 clauses 16 and 19).
+    /// Verifies: ADR-0037
     #[test]
     fn only_the_clients_account_is_admitted_and_never_local_system() {
         let client = sid("S-1-5-80-1-2-3-4-5");
@@ -508,7 +668,7 @@ mod tests {
     }
 
     /// A purge takes only the tombstone of the Supervisor it names, by an absolute path.
-    /// Verifies: ADR-0020
+    /// Verifies: ADR-0037
     #[test]
     fn a_purge_takes_only_the_tombstone_of_the_supervisor_it_names() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -529,7 +689,7 @@ mod tests {
     /// everything beneath it, and nothing else. The second service runs under its own account,
     /// which owns what it creates; a test run elevated creates what the Administrators own, so the
     /// test makes this account the owner of what stands for the service's own.
-    /// Verifies: ADR-0020
+    /// Verifies: ADR-0037
     #[test]
     fn the_second_service_removes_what_it_wrote_under_a_tombstone() {
         use crate::win32::files::{Access, Entry};
@@ -601,7 +761,7 @@ mod tests {
 
     /// A program the second service starts on the Client's request runs, reports its output and
     /// its exit code, through the pipe.
-    /// Verifies: ADR-0020
+    /// Verifies: ADR-0037
     #[tokio::test]
     async fn a_started_program_reports_its_output_and_exit() {
         let (channel, _stop, _pipe) = served().await;
@@ -617,7 +777,7 @@ mod tests {
     }
 
     /// A signal is refused on Windows, which has none.
-    /// Verifies: ADR-0020
+    /// Verifies: ADR-0037
     #[tokio::test]
     async fn a_signal_is_refused() {
         let (channel, _stop, _pipe) = served().await;
@@ -630,7 +790,7 @@ mod tests {
     }
 
     /// The pipe's owner is the account that made it, and the Client takes it for no other.
-    /// Verifies: ADR-0020
+    /// Verifies: ADR-0037
     #[tokio::test]
     async fn the_client_talks_only_to_the_process_account() {
         let (channel, _stop, pipe) = served().await;
@@ -650,8 +810,8 @@ mod tests {
     }
 
     /// The pipe's server is the process the Client reads, and the Client takes no instance served
-    /// by a process other than the one the SCM names as the second service's (ADR-0020 clause 19).
-    /// Verifies: ADR-0020
+    /// by a process other than the one the SCM names as the second service's (ADR-0037 clause 19).
+    /// Verifies: ADR-0037
     #[tokio::test]
     async fn the_client_talks_only_to_the_process_the_scm_names() {
         let (channel, _stop, pipe) = served().await;
@@ -695,7 +855,7 @@ mod tests {
     }
 
     /// A pipe of that name made by someone first is not taken over.
-    /// Verifies: ADR-0020
+    /// Verifies: ADR-0037
     #[tokio::test]
     async fn a_pipe_made_first_by_another_is_not_taken_over() {
         let pipe = unique_pipe();
@@ -706,7 +866,7 @@ mod tests {
 
     /// A client of another account is refused once it has written, and the service goes on
     /// serving the Client's.
-    /// Verifies: ADR-0020
+    /// Verifies: ADR-0037
     #[tokio::test]
     async fn a_peer_of_another_account_is_refused() {
         let pipe = unique_pipe();
@@ -734,8 +894,8 @@ mod tests {
     }
 
     /// Closing the Client's connection ends every program it started, and what that program
-    /// started and left running: the job holds them all (ADR-0020 clause 19).
-    /// Verifies: ADR-0020
+    /// started and left running: the job holds them all (ADR-0037 clause 19).
+    /// Verifies: ADR-0037
     #[tokio::test]
     async fn closing_the_connection_ends_the_whole_job() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -776,9 +936,9 @@ mod tests {
         assert_eq!(size(), after, "and ends with the connection");
     }
 
-    /// The Supervisor Endpoint's token is laid over the program's environment last (ADR-0020
+    /// The Supervisor Endpoint's token is laid over the program's environment last (ADR-0037
     /// clause 22).
-    /// Verifies: ADR-0020
+    /// Verifies: ADR-0037
     #[tokio::test]
     async fn a_program_has_the_token_last() {
         let (channel, _stop, _pipe) = served().await;
@@ -794,5 +954,215 @@ mod tests {
             stdout.contains("the token") && !stdout.contains("from the block"),
             "{output:?}"
         );
+    }
+
+    /// What [`a_second_service_listens_only_once_closed_to_the_process_account`] runs its helper
+    /// with: the pipe it may listen on.
+    const CLOSING_PIPE: &str = "FLEET_CLOSING_PIPE";
+    const CLOSING_HELPER: &str =
+        "supervisor::channel::windows::tests::close_and_listen_as_the_second_service_would";
+    /// The Client's account the helper closes its process to: one that is not its own.
+    const CLIENT: &str = "S-1-5-80-1-2-3-4-5";
+
+    /// Runs `body` on the runtime the second service runs on, whose threads close themselves.
+    fn on_the_agents_runtime<T>(body: impl Future<Output = T>) -> T {
+        crate::service::runtime::agents_runtime()
+            .expect("the runtime")
+            .block_on(body)
+    }
+
+    /// A thread that runs until it is told to end, and is joined then.
+    fn parked_thread() -> (
+        u32,
+        std::sync::mpsc::Sender<()>,
+        std::thread::JoinHandle<()>,
+    ) {
+        let (id_tx, id_rx) = std::sync::mpsc::channel();
+        let (end, ended) = std::sync::mpsc::channel::<()>();
+        let joined = std::thread::spawn(move || {
+            id_tx.send(win32::this_thread_id()).expect("send");
+            let _ = ended.recv();
+        });
+        (id_rx.recv().expect("its id"), end, joined)
+    }
+
+    /// Not a test of its own: what [`a_second_service_listens_only_once_closed_to_the_process_account`]
+    /// runs in a process of its own, as the second service's program would, since closing a
+    /// process cannot be undone for the rest of it.
+    #[test]
+    #[ignore = "run in a process of its own by a_second_service_listens_only_once_closed_to_the_process_account"]
+    fn close_and_listen_as_the_second_service_would() {
+        let Ok(pipe) = std::env::var(CLOSING_PIPE) else {
+            return;
+        };
+        let pipe = PathBuf::from(pipe);
+        let me = win32::own_sid().expect("own sid");
+        let client = sid(CLIENT);
+        let process = win32::process_sddl(&me, &client);
+        let thread = win32::thread_sddl(&me);
+        let gone =
+            |pipe: &Path| matches!(connect(pipe), Err(e) if e.kind() == io::ErrorKind::NotFound);
+
+        // Not yet closed: it does not listen.
+        let refused = on_the_agents_runtime(run(&pipe, client.clone(), async {}))
+            .expect_err("it listened before it closed its process");
+        assert!(refused.contains("not closed"), "{refused}");
+        assert!(gone(&pipe));
+
+        // Closed as the program does first: the process and every thread read back as set.
+        close_this_process(Some(CLIENT));
+        assert_eq!(CLOSED.get(), Some(&Ok(thread.clone())));
+        check_closed(&process, &thread).expect("closed");
+        assert!(
+            win32::same_dacl(&win32::this_process_dacl().expect("dacl"), &process)
+                .expect("compared")
+        );
+
+        // The runtime's threads close themselves, the blocking ones among them.
+        on_the_agents_runtime(async {
+            tokio::task::spawn_blocking(|| ()).await.expect("blocking");
+            // A worker closes itself once it has started running: that is waited for, briefly.
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while let Err(e) = check_closed(&process, &thread) {
+                assert!(
+                    std::time::Instant::now() < until,
+                    "the runtime's threads did not close themselves: {e}"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        });
+
+        // A thread that did not close itself differs, and is closed before the service listens.
+        let (open, end, joined) = parked_thread();
+        let differs = check_closed(&process, &thread).expect_err("an open thread passed");
+        assert!(differs.contains(&format!("thread {open}")), "{differs}");
+        let served = on_the_agents_runtime(run(&pipe, client.clone(), async {}))
+            .expect("closed, it listens");
+        assert_eq!(served, Served::Stopped);
+        let held = win32::thread_dacl(open).expect("read").expect("runs");
+        assert!(
+            win32::same_dacl(&held, &thread).expect("compared"),
+            "{held}"
+        );
+        end.send(()).expect("end");
+        joined.join().expect("joined");
+
+        // A thread that carries another DACL, which this account may not change: no listening.
+        let (other, end, joined) = parked_thread();
+        assert!(win32::set_thread_dacl(other, "D:P(A;;RC;;;OW)").expect("set"));
+        let refused = on_the_agents_runtime(run(&pipe, client.clone(), async {}))
+            .expect_err("it listened with a thread of another DACL");
+        assert!(refused.contains(&format!("thread {other}")), "{refused}");
+        assert!(gone(&pipe));
+        end.send(()).expect("end");
+        joined.join().expect("joined");
+
+        // A process that carries another DACL: no listening.
+        win32::set_this_process_dacl(&win32::process_sddl(&me, &sid("S-1-5-80-6-7-8-9-10")))
+            .expect("another process DACL");
+        let refused = on_the_agents_runtime(run(&pipe, client, async {}))
+            .expect_err("it listened with a process of another DACL");
+        assert!(
+            refused.contains("the second service's process carries"),
+            "{refused}"
+        );
+        assert!(gone(&pipe));
+        println!("closed and read back");
+    }
+
+    /// The second service's process and every one of its threads carry the DACLs of ADR-0036 and
+    /// read back as such; one whose process or a thread carries another does not listen, a thread
+    /// of its runtime closes itself, and one the system started is closed before it listens. In a
+    /// process of its own, the test binary's helper above.
+    /// Verifies: ADR-0036
+    #[test]
+    fn a_second_service_listens_only_once_closed_to_the_process_account() {
+        let exe = std::env::current_exe().expect("the test binary");
+        let out = std::process::Command::new(exe)
+            .args([CLOSING_HELPER, "--exact", "--ignored", "--nocapture"])
+            .env(CLOSING_PIPE, unique_pipe())
+            .output()
+            .expect("run the helper");
+        let said = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(out.status.success(), "{said}");
+        assert!(said.contains("closed and read back"), "{said}");
+    }
+
+    /// A program that runs until it is ended.
+    fn a_process() -> std::process::Child {
+        std::process::Command::new(r"C:\Windows\System32\cmd.exe")
+            .args(["/c", "ping -n 60 127.0.0.1 >nul"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .spawn()
+            .expect("spawn")
+    }
+
+    /// A peer whose process the Client cannot open is refused as one that cannot be read, before
+    /// the SCM's answer counts (ADR-0036). The process is one that does not exist: a DACL closed
+    /// to everyone does not stop a caller holding `SeDebugPrivilege`, as CI's elevated runner may.
+    /// Verifies: ADR-0036
+    #[tokio::test]
+    async fn the_client_refuses_a_peer_whose_process_it_cannot_open() {
+        // Process ids are multiples of four; this one is never handed out.
+        let pid = u32::MAX - 3;
+        let peer = peer_process(pid);
+        let refused = super::super::check_process(
+            peer,
+            &ServiceProcess::named(move || Ok(Some(pid))),
+            Path::new(r"\\.\pipe\opamp-fleet-test"),
+        )
+        .await
+        .expect_err("a process it cannot open passed");
+        assert_eq!(refused.kind(), io::ErrorKind::PermissionDenied, "{refused}");
+        assert_eq!(
+            super::super::other_process(&refused),
+            Some(Some(pid)),
+            "logged by its id: {refused}"
+        );
+        assert!(refused.to_string().contains("cannot be read"), "{refused}");
+        assert!(
+            refused
+                .to_string()
+                .contains(&format!("process {pid} cannot be opened")),
+            "{refused}"
+        );
+    }
+
+    /// The Client holds the peer's process while the SCM is asked: one that has ended once the SCM
+    /// has answered is refused although the SCM names its id, and one that still runs is accepted
+    /// (ADR-0036).
+    /// Verifies: ADR-0036
+    #[tokio::test]
+    async fn the_client_refuses_a_peer_whose_process_ended_once_the_scm_answered() {
+        let socket = Path::new(r"\\.\pipe\opamp-fleet-test");
+        let child = std::sync::Arc::new(std::sync::Mutex::new(a_process()));
+        let pid = child.lock().expect("child").id();
+        super::super::check_process(
+            peer_process(pid),
+            &ServiceProcess::named(move || Ok(Some(pid))),
+            socket,
+        )
+        .await
+        .expect("a peer that still runs is accepted");
+
+        let ending = {
+            let child = std::sync::Arc::clone(&child);
+            ServiceProcess::named(move || {
+                let mut child = child.lock().expect("child");
+                let _ = child.kill();
+                let _ = child.wait();
+                Ok(Some(pid))
+            })
+        };
+        let refused = super::super::check_process(peer_process(pid), &ending, socket)
+            .await
+            .expect_err("a process that ended passed");
+        assert_eq!(refused.kind(), io::ErrorKind::PermissionDenied, "{refused}");
+        assert!(refused.to_string().contains("has ended"), "{refused}");
     }
 }

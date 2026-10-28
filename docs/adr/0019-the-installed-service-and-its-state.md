@@ -29,7 +29,7 @@ Forces:
 - **What the service points at decides how an update works.** Registering the binary's own path
   would force a re-registration on every update, and Windows locks a running `.exe`. A stable
   pointer into side-by-side version directories makes an update a pointer switch; the layout itself
-  is [ADR-0020](0020-the-accounts-the-service-runs-under.md)'s.
+  is [ADR-0037](0037-the-accounts-the-service-runs-under.md)'s.
 - **The layout is rewritten at runtime by the daemon itself**, so it must stand where the platform
   lets the service execute it *and* where the service's own account may write it. On Fedora, RHEL
   and openSUSE Leap 16 / SLES 16 the SELinux targeted policy is enforcing by default, and systemd
@@ -150,7 +150,7 @@ and is delivered by `.deb`, `.rpm` and `.msi` packages that run its own `service
    CLI's own name. The configuration file is **`supervisor.toml`**, and the `--config` default with
    it. What names an *installation* (the install path, the service, the dpkg/rpm package, the
    `PATH` symlink) is the product's name, not the program's (clauses 2 and 3, and the service name
-   of [ADR-0020](0020-the-accounts-the-service-runs-under.md)). The program's name is not derived
+   of [ADR-0037](0037-the-accounts-the-service-runs-under.md)). The program's name is not derived
    from the product's, so one published Package serves every variant build: the member a
    self-update extracts is the same in all of them. Two names deliberately stay where they are: the
    Cargo package `fleet-agent`, a build-time identifier that never leaves the repository, and the
@@ -217,11 +217,11 @@ and is delivered by `.deb`, `.rpm` and `.msi` packages that run its own `service
       and then runs the same `service install` the command line would, which builds the layout and
       the data under `%ProgramData%\<PRODUCT_NAME>`. The layout is not put in `Program Files`: the
       service's own account must be able to write it
-      ([ADR-0020](0020-the-accounts-the-service-runs-under.md)), and granting a low-privileged
+      ([ADR-0037](0037-the-accounts-the-service-runs-under.md)), and granting a low-privileged
       account modify rights on a `TrustedInstaller`-owned tree it executes from is a
       privilege-escalation surface. The line is the one the Linux packages draw between the
       package-owned `/usr/libexec/<PRODUCT_NAME>/` payload and the program-owned `/opt` layout
-      ([ADR-0020](0020-the-accounts-the-service-runs-under.md)). The MSI passes no root flag, so no
+      ([ADR-0037](0037-the-accounts-the-service-runs-under.md)). The MSI passes no root flag, so no
       directory property reaches a command line, and an MSI host and an archive host put the same
       things in the same places.
     - **Two flags.** `--root` names the layout root; given **alone** it collapses layout and data
@@ -239,8 +239,8 @@ and is delivered by `.deb`, `.rpm` and `.msi` packages that run its own `service
       registration has it (clause 14).
     - A re-registration rewrites the program path (`ExecStart`) and the rest of the unit or plist
       from the version that runs it, the systemd unit's directives included
-      ([ADR-0020](0020-the-accounts-the-service-runs-under.md)). The account stays the one the
-      registration names ([ADR-0020](0020-the-accounts-the-service-runs-under.md)).
+      ([ADR-0037](0037-the-accounts-the-service-runs-under.md)). The account stays the one the
+      registration names ([ADR-0037](0037-the-accounts-the-service-runs-under.md)).
     - The instance's configuration, identity and state never move.
     - A change that would move the data root or the state directory of an installed host must bring
       its own migration and carries the full weight of this rule. An administrator who names
@@ -257,7 +257,7 @@ and is delivered by `.deb`, `.rpm` and `.msi` packages that run its own `service
        - Under the SCM it is the service's binary path name, read with `QueryServiceConfig`.
        - The install reads what the Client wrote, never a drop-in and never the manager's loaded
          state, as the account a registration names is read
-         ([ADR-0020](0020-the-accounts-the-service-runs-under.md)).
+         ([ADR-0037](0037-the-accounts-the-service-runs-under.md)).
        - A registration that names no `--state-dir`, and every user-scope one, offers none. A user
          scope has no administrator between the file and the service.
     3. **The file's**: the absolute `state_dir` that `supervisor.toml` names, and only beneath the
@@ -283,7 +283,7 @@ and is delivered by `.deb`, `.rpm` and `.msi` packages that run its own `service
 
 16. **A Supervisors' root outside the roots is the operator's.** A `supervisor_dir` outside the
     data root, the layout root and the state directory stays as relocatable as the Supervisors'
-    directories are made ([ADR-0020](0020-the-accounts-the-service-runs-under.md)). A system-scope
+    directories are made ([ADR-0037](0037-the-accounts-the-service-runs-under.md)). A system-scope
     install on Windows never creates, restricts or hands over such a root. It leaves it as it is
     and names it in a warning. On Linux and macOS an install never touches a Supervisors' root.
 
@@ -434,12 +434,12 @@ and is delivered by `.deb`, `.rpm` and `.msi` packages that run its own `service
 
 **Out of scope:** the versioned layout and its `current` pointer, the service's name, the account
 it runs under, what the Linux packages deliver and remove, and the MSI's dialogs and actions
-([ADR-0020](0020-the-accounts-the-service-runs-under.md)); staging, verifying, rolling back and
+([ADR-0037](0037-the-accounts-the-service-runs-under.md)); staging, verifying, rolling back and
 pruning versions, and the self-update consent
 ([ADR-0018](0018-the-client-updates-itself-from-a-signed-package.md)); the questions of the first
 configuration, `service install --endpoint` and what lies beside the program
 ([ADR-0022](0022-bootstrap-certificates-and-enrolment.md)); that no installer starts the service
-it registers ([ADR-0020](0020-the-accounts-the-service-runs-under.md)); whether
+it registers ([ADR-0037](0037-the-accounts-the-service-runs-under.md)); whether
 variant builds are ever published, and where their `UpgradeCode`s are recorded; how an operator
 discovers what is installed on a host; a confined SELinux policy module; configuration reload on
 `SIGHUP`; `Type=notify` integration; the startup rules themselves and the Server's enrolment window
@@ -447,7 +447,7 @@ and approval, which the installer only applies and names
 ([ADR-0021](0021-admission-by-client-certificate-and-revocation.md)); hosting apt and yum
 repositories; preseeding the endpoint on Linux; a macOS `.pkg`, which needs a Developer ID and
 notarization; the files an enrolment writes as root into the state directory, which no
-privileged step writes through a link ([ADR-0020](0020-the-accounts-the-service-runs-under.md)
+privileged step writes through a link ([ADR-0037](0037-the-accounts-the-service-runs-under.md)
 clause 11); the `[tls]` files an enrolment reads as root; `[logging] dir`, which only the
 service's own run uses; the releases and the Server's image
 ([ADR-0034](0034-releases-attestations-and-the-server-image.md)).
@@ -777,11 +777,11 @@ service's own run uses; the releases and the Server's image
   `restaging_replaces_a_staged_binary_with_different_bytes`,
   `a_torn_pointer_is_healed_a_correct_one_left_alone`,
   `the_layout_is_found_from_the_pointer_the_service_was_registered_against` (clause 6, and the
-  layout of [ADR-0020](0020-the-accounts-the-service-runs-under.md)).
+  layout of [ADR-0037](0037-the-accounts-the-service-runs-under.md)).
 - `crates/fleet-agent/src/service/run_as.rs`: `windows_forms_are_the_passwordless_ones`,
   `a_missing_account_is_refused_with_the_way_out`,
   `the_handover_walks_the_tree_and_skips_what_is_missing` (the account of
-  [ADR-0020](0020-the-accounts-the-service-runs-under.md)).
+  [ADR-0037](0037-the-accounts-the-service-runs-under.md)).
 - `crates/fleet-agent/src/config_init.rs`: `an_existing_file_is_never_overwritten`,
   `an_endpoint_given_never_overwrites_an_existing_file`,
   `an_edit_changes_the_asked_keys_and_keeps_the_rest`, `the_defaults_are_what_the_file_holds`,
@@ -800,7 +800,7 @@ service's own run uses; the releases and the Server's image
 - The tests of the first configuration's questions, `--endpoint`, the post-install's printed steps
   and the MSI's dialogs and actions, which hold what
   [ADR-0022](0022-bootstrap-certificates-and-enrolment.md) and
-  [ADR-0020](0020-the-accounts-the-service-runs-under.md) carry:
+  [ADR-0037](0037-the-accounts-the-service-runs-under.md) carry:
   `the_bootstrap_pair_is_asked_only_before_enrolment`,
   `a_private_ca_is_only_asked_about_where_tls_applies`,
   `the_suggested_endpoint_is_tls_on_the_loopback`,

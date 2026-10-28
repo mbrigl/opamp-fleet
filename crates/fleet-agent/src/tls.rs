@@ -206,7 +206,7 @@ fn read(path: &Path) -> Result<Vec<u8>, String> {
 }
 
 /// A file of the state directory, never read through a link: an install reads it as root, and the
-/// directory belongs to the service's account (ADR-0020).
+/// directory belongs to the service's account (ADR-0037).
 fn state_file(path: &Path) -> Result<Vec<u8>, String> {
     crate::nofollow::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))
 }

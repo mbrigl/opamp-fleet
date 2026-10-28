@@ -2197,7 +2197,7 @@ async fn an_enrolment_csr_claiming_another_instance_uid_never_reaches_the_queue(
 
 /// The issuer is named by its role, so a CA whose subject has several parts — and a comma inside
 /// one — is revoked as simply as any other; a role the Server does not have is refused (ADR-0021
-/// clause 3).
+/// clause 27).
 /// Verifies: ADR-0021
 #[tokio::test]
 async fn a_revocation_names_its_issuer_by_role_whatever_the_issuer_is_called() {

@@ -53,7 +53,7 @@ than anywhere else, and none beats one that has stopped being true.
 - **The service manager** starts the Client and restarts it after a self-update
   ([ADR-0018](adr/0018-the-client-updates-itself-from-a-signed-package.md)). Where a process
   account is registered, it also runs the second service, which starts the Managed Processes
-  under that account (ADR-0020).
+  under that account (ADR-0037).
 - **Upstream**, the opamp-spec release named as the Protocol Baseline in
   [`CONFORMANCE.md`](CONFORMANCE.md) fixes the wire format.
 
@@ -81,8 +81,9 @@ Five crates in one workspace ([ADR-0008](adr/0008-five-crates-on-tokio-and-axum.
   ([ADR-0028](adr/0028-package-versions-high-water-mark-and-floor.md)), the
   renewal proof and
   the bootstrap proof a CSR carries — read from a CSR by the adapter `csr` — the host a
-  certificate that names none is taken for, when a certificate counts as ending, and what a
-  certificate is called — and the
+  certificate that names none is taken for, when a certificate counts as ending, what a
+  certificate is called, the token buckets the Server and a Gateway count a sender in (`rate`) —
+  and the
   bootstrap certificate's PKCS#12 file, whose rule is core and whose reading and writing with
   `p12-keystore` is the adapter `pkcs12::file` (ADR-0022).
 - **`fleet-server`** — the Server: the fleet and its Hosts, its Configurations, labels, packages
@@ -162,7 +163,8 @@ core module names an adapter or a technology, and when a module has no role.
   `LedgerStore` port ([ADR-0021](adr/0021-admission-by-client-certificate-and-revocation.md),
   [ADR-0024](adr/0024-the-fleet-record-of-agents-and-hosts.md)).
   `agent_rate` holds the token buckets that bound how often an admitted host, an Agent behind a
-  marked Gateway, and the Gateway as a whole are heard; `transport` takes a token for each
+  marked Gateway, and the Gateway as a whole are heard, in the bounded tables of
+  `fleet_core::rate`; `transport` takes a token for each
   message before the handler does anything else and for each download in the guard
   ([ADR-0012](adr/0012-tls-1-3-two-planes-and-bounded-input.md)).
 - **Audit record** — `audit` is the port every security decision is recorded through;
@@ -189,7 +191,7 @@ core module names an adapter or a technology, and when a module has no role.
   Supervisors' root as an absolute path too. When a failed process is started again or held is
   `supervisor::restart`'s decision; the runner reads the clock and starts it. Who starts the
   program is the runner's `Spawner`: the Client itself, or the second service of
-  [ADR-0020](adr/0020-the-accounts-the-service-runs-under.md),
+  [ADR-0037](adr/0037-the-accounts-the-service-runs-under.md),
   `supervisor run --agents`, through `supervisor::channel`, which holds the private protocol, the
   service and the Client's end of its socket — on Windows of its named pipe, in
   `supervisor::channel::windows`, which runs each program in a job object. The Windows system
@@ -224,7 +226,7 @@ core module names an adapter or a technology, and when a module has no role.
   a directory held open without following a link at its name, read from and written to by name,
   each file written whole and renamed into place, because a privileged install works in
   directories the service's account owns
-  ([ADR-0020](adr/0020-the-accounts-the-service-runs-under.md)).
+  ([ADR-0037](adr/0037-the-accounts-the-service-runs-under.md)).
 - **Client configuration** — `config` is what `supervisor.toml` may say and the rules it must meet
   ([ADR-0008](adr/0008-five-crates-on-tokio-and-axum.md)); `config_file` reads it from disk, makes
   its
@@ -251,13 +253,17 @@ core module names an adapter or a technology, and when a module has no role.
   With a bootstrap CA the Gateway tells an
   enrolling peer from a member and relays its one plain-HTTP enrolment request without a binding
   ([ADR-0015](adr/0015-client-modes-and-the-gateway.md)).
+  `gateway::rate` holds a token bucket per downstream host, or per enrolling peer's address, in a
+  table of `fleet_core::rate`; the downstream endpoint and the download route take a token before
+  they do anything else
+  ([ADR-0035](adr/0035-a-gateway-rate-limits-each-downstream-host-as-the-server-limits-a-host.md)).
 - **Client engine** — `engine` routes the Server's replies to the Agents over one connection
   ([ADR-0015](adr/0015-client-modes-and-the-gateway.md)). The transports, the Gateway, telemetry
   and the service runtime are adapters around it.
 - **Client service** — `service::manager` registers, starts, stops and deregisters the Client's
   service and, where a process account is named, the second service `<PRODUCT_NAME>-agents` beside
   it, and writes both systemd units itself
-  ([ADR-0020](adr/0020-the-accounts-the-service-runs-under.md)). `service::run_as`
+  ([ADR-0037](adr/0037-the-accounts-the-service-runs-under.md)). `service::run_as`
   decides and checks the Client's account and the process account, and hands the roots over,
   leaving what the process account owns. On Windows `service::windows_config` sets the SCM's
   accounts, recovery actions and required privileges, `service::windows_rights` restricts the data
@@ -354,12 +360,12 @@ alone by the peer's credentials or the pipe client's token, and stops every prog
 process group on Unix, by job object on Windows — when that connection closes. Before it writes
 anything, the Client accepts the connection only from the process the service manager runs as the
 second service, which `service::manager::agents_process` asks of systemd, launchd or the SCM
-([ADR-0020](adr/0020-the-accounts-the-service-runs-under.md) clause 19).
+([ADR-0037](adr/0037-the-accounts-the-service-runs-under.md) clause 19).
 Both ends refuse a peer of another build, and the one that `current` no longer names exits so its
 service manager starts it from the new version. While the second service is away, a delivered
 package is staged and
 waits, and the Supervisor retries with backoff
-([ADR-0020](adr/0020-the-accounts-the-service-runs-under.md)).
+([ADR-0037](adr/0037-the-accounts-the-service-runs-under.md)).
 
 **Where state lives.** The Server keeps all of its state under one `data_dir`, one directory per
 domain and owner-only: `configurations/`, `deployments/`, `packages/` (metadata) and `blobs/` (the
@@ -378,4 +384,4 @@ state
 under `state_dir`: the issued certificate and key, the connection settings the Server offered,
 and per Supervisor a directory with `config/` and `program/`. An installed Client runs from
 `versions/<version>/` through the `current` pointer
-([ADR-0020](adr/0020-the-accounts-the-service-runs-under.md)).
+([ADR-0037](adr/0037-the-accounts-the-service-runs-under.md)).
