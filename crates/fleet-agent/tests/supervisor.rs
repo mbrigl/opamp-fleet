@@ -369,11 +369,11 @@ fn sigterm_stops_the_managed_process_and_the_client_cleanly() {
 
 /// Where the Client's command line names the second service — as the unit `service install
 /// --process-account` writes does — the shipped Client starts its Managed Process through it, not
-/// itself (ADR-0020 clause 18): the stub's parent is the second service. Run without a second
+/// itself (ADR-0037 clause 18): the stub's parent is the second service. Run without a second
 /// account: the service runs in this test, under this test's uid, which the Client is told is the
 /// process account's, and as this test's process, which a `systemctl` on the Client's `PATH`
-/// names as the one systemd runs as the second service (ADR-0020 clause 19).
-/// Verifies: ADR-0020
+/// names as the one systemd runs as the second service (ADR-0037 clause 19).
+/// Verifies: ADR-0037
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_client_told_of_the_second_service_starts_its_program_through_it() {

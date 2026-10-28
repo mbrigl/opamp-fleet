@@ -33,7 +33,7 @@ impl AgentState {
     }
 
     /// A configuration still `APPLYING` names `reason` as what it waits for, the second service,
-    /// or nothing once `reason` is empty (ADR-0020 clause 17). Any other status stays as it is.
+    /// or nothing once `reason` is empty (ADR-0037 clause 17). Any other status stays as it is.
     pub(super) fn config_waits(&mut self, reason: &str) {
         let Some(status) = self.protocol.remote_config_status() else {
             return;

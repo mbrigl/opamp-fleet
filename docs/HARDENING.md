@@ -112,7 +112,7 @@ has:
 - **Key material and configuration readable by their owner alone** (ADR-0021 clause 7, ADR-0019
   clause 25): on Unix the private key, the stored connection settings and `supervisor.toml` are
   written `0600` in `0700` directories, a state directory `0710` that the process account's group
-  only passes through where one is registered (ADR-0020). On Windows a system-scope install gives
+  only passes through where one is registered (ADR-0037). On Windows a system-scope install gives
   the default data
   root under `%ProgramData%` to the Administrators, whoever created it, drops every right in it
   that the install does not grant, cuts it off from the read right every local user inherits
@@ -124,14 +124,14 @@ has:
   warning, and protecting it is the operator's. A local user acting while the install runs is not
   covered.
 - **On Windows the Client runs under its own virtual account unless an operator names
-  `LocalSystem`** (ADR-0020): a first registration, the MSI's included, registers
+  `LocalSystem`** (ADR-0037): a first registration, the MSI's included, registers
   `NT SERVICE\<PRODUCT_NAME>`, to which the install grants its roots and no group or privilege.
   Without a process account that account is the bound of what a Server-delivered configuration
   reaches on the host. A re-registration keeps the account the SCM holds; `--run-as LocalSystem`
   names `LocalSystem`, and every install under it warns that each Managed Process the Client
   starts itself runs as `LocalSystem`. Residual: a host registered as `LocalSystem` stays so until
   an operator moves it, and macOS runs the Client as root unless `--run-as` names an account.
-- **A Managed Process can be kept from the Client's key and program** (ADR-0020): where the
+- **A Managed Process can be kept from the Client's key and program** (ADR-0037): where the
   operator registers a process account, every program a Supervisor starts — the Managed Process,
   its version probe, a package's preflight — runs under it, started by a second service over a Unix
   socket or named pipe that admits the Client's account alone. It reads its own `program/` and
@@ -143,7 +143,7 @@ has:
   without a process account runs every Managed Process as the Client; all Managed Processes share
   the one account, so they read one another's `config/`.
 - **A Managed Process cannot take the second service's place by its socket or pipe, nor, on
-  Linux and Windows, reach into it once it has closed itself** (ADR-0020 clause 19, ADR-0036):
+  Linux and Windows, reach into it once it has closed itself** (ADR-0037 clause 19, ADR-0036):
   before the Client writes anything
   on a new connection it reads the process at the other end — `SO_PEERPIDFD` on Linux,
   `LOCAL_PEERPID` on macOS, `GetNamedPipeServerProcessId` on Windows — and accepts it only where
@@ -175,7 +175,7 @@ has:
   away; where the service manager cannot be asked — no system bus, a `launchctl print` that fails —
   no Managed Process starts until it answers again.
 - **An install acts only on directories an administrator named or its roots hold** (ADR-0019,
-  ADR-0020 clause 1): `supervisor.toml` belongs to the service's account, and `service install`
+  ADR-0037 clause 1): `supervisor.toml` belongs to the service's account, and `service install`
   and `service config` run as root or an Administrator. The state directory comes from
   `--state-dir`, else from the registration an earlier install wrote, and only then from the file,
   and from that only beneath the data root or the layout root. Beneath a root it is reached with no
@@ -189,7 +189,7 @@ has:
   Client refuses the names and placeholders the clause lists, and further loader variables
   (`PATHEXT`, `COMSPEC`, `NODE_PATH`, `PYTHONHOME`, `PERLLIB`, `PERL5DB`, `RUBYLIB`) and new values
   that start with a path under the Supervisors' root.
-- **A privileged install follows no link the service's account placed** (ADR-0020):
+- **A privileged install follows no link the service's account placed** (ADR-0037):
   `service install` and `service config` run as root or an Administrator and write into the state
   directory and the layout root, which belong to the account. Each file there is read without
   following a link and written whole to a new name, then renamed over its own, so a link at the
@@ -336,7 +336,7 @@ account — a Telegraf `inputs.exec`, an Icinga `CheckCommand`, the configuratio
 kind's program reads — is in `remote_config_disabled`; otherwise the Server can configure such a
 Supervisor to rewrite `supervisor.toml`, and the keys change at the next start. Where a process
 account
-is registered (ADR-0020), such a command runs under it, and it cannot write `supervisor.toml`. A
+is registered (ADR-0037), such a command runs under it, and it cannot write `supervisor.toml`. A
 signed Client
 build can still replace the program that reads them where `[packages] self_update` consents
 (ADR-0018).

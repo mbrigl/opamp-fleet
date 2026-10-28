@@ -1,5 +1,5 @@
 //! File operations in a directory the Client's service account can write, which never follow a
-//! link that account could have planted (ADR-0020).
+//! link that account could have planted (ADR-0037).
 //!
 //! `service install` and `service config` run as root or as an Administrator, and they write into
 //! the state directory and the executable layout, which belong to the service's account. A plain

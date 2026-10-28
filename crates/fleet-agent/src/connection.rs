@@ -64,14 +64,14 @@ pub fn load(state_dir: &Path) -> Option<ConnectionSettingsOffers> {
 /// protects it (ADR-0019); there is no mode to set.
 ///
 /// `group` is the process account's group where a process account is registered: the state
-/// directory stays passed through by it (ADR-0020 clause 21).
+/// directory stays passed through by it (ADR-0037 clause 21).
 pub fn store(
     state_dir: &Path,
     group: Option<crate::storage::ProcessAccountGroup>,
     settings: &ConnectionSettingsOffers,
 ) -> std::io::Result<()> {
     // Never through a link at the directory's name or the file's: an install enrols as root in a
-    // directory that belongs to the service's account (ADR-0020).
+    // directory that belongs to the service's account (ADR-0037).
     crate::storage::create_shared_dir(
         state_dir,
         state_dir,

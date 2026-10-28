@@ -225,7 +225,7 @@ to, not after the product inside them
 inside them and its configuration file are called `supervisor` too. The dpkg/rpm/MSI package and
 the service carry the **product's** name, `opamp-fleet`
 ([ADR-0019](docs/adr/0019-the-installed-service-and-its-state.md),
-[ADR-0020](docs/adr/0020-the-accounts-the-service-runs-under.md)): that is the name that
+[ADR-0037](docs/adr/0037-the-accounts-the-service-runs-under.md)): that is the name that
 identifies an *installation*, and a second one is a second build rather than a flag. The fields are
 separated by `_` because a name and a version both
 contain `-` ([ADR-0034](docs/adr/0034-releases-attestations-and-the-server-image.md)),
@@ -402,7 +402,7 @@ answering `Enforcing`): the `.rpm` install must start — a service dying with `
 an AVC denial in `ausearch -m avc` is the failure ADR-0019 clause 12 exists to prevent. Each wrapped
 kind — Telegraf, Icinga 2 with its plugins, GLPI Agent with its tasks — under the packaged account
 `opamp-fleet` and under `--run-as root`: it starts, reports, and its `sudo` or setuid helpers still
-work ([ADR-0020](docs/adr/0020-the-accounts-the-service-runs-under.md)). Known platform gaps
+work ([ADR-0037](docs/adr/0037-the-accounts-the-service-runs-under.md)). Known platform gaps
 (tracked in the ADR):
 launchd `status` is advisory and `install` does not auto-start there. The SCM still discards a
 Windows service's stderr, but the service now writes its own rotating log under

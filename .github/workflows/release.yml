@@ -47,7 +47,7 @@ env:
   #
   # The names that are *not* this are the ones that identify an installation rather than a program:
   # the dpkg/rpm/MSI package, the service, and the `PATH` symlink all carry the **product's** name,
-  # `opamp-fleet` (ADR-0019, ADR-0020). Keeping the program's name off the product's is what lets
+  # `opamp-fleet` (ADR-0019, ADR-0037). Keeping the program's name off the product's is what lets
   # one published Set serve every variant build. They live in crates/fleet-agent/Cargo.toml and
   # packaging/windows/supervisor.wxs, not here.
   ARTIFACT: supervisor
@@ -422,10 +422,10 @@ jobs:
           echo "$scripts"
           grep -q 'service install' <<<"$scripts"
           grep -q 'service uninstall' <<<"$scripts"
-          # ADR-0020: the PATH symlink (%post and %posttrans) and the removal cleanup (%postun)
+          # ADR-0037: the PATH symlink (%post and %posttrans) and the removal cleanup (%postun)
           # ride the same silently-degrading path mechanism, so they are asserted the same way.
           grep -q 'ln -sfn' <<<"$scripts"
-          # The two halves of ADR-0020's remove/purge distinction, drawn across the two roots by
+          # The two halves of ADR-0037's remove/purge distinction, drawn across the two roots by
           # ADR-0019 clause 12: a removal takes the executable layout under /opt, and only a purge
           # takes the data root with the identity and the credential in it. Asserting both is what
           # makes a scriptlet that silently became its own file name fail here.
@@ -435,7 +435,7 @@ jobs:
           # `-F`: these are literals, and a mid-pattern `$` is what regex dialects disagree on.
           grep -qF 'rm -rf "$layout_root"' <<<"$scripts"
           grep -qF 'rm -rf "$data_root"' <<<"$scripts"
-          # ADR-0020 clause 3: the account is created, a first registration names it, and the
+          # ADR-0037 clause 3: the account is created, a first registration names it, and the
           # package requires what creates it.
           grep -q 'useradd --system' <<<"$scripts"
           grep -q -- '--run-as opamp-fleet' <<<"$scripts"
@@ -824,8 +824,8 @@ jobs:
           themselves — the same install every platform gets, not a second one. \`supervisor\` is the
           **program**; what lands on your \`PATH\` is \`opamp-fleet\`, the **product**, as a symlink
           through the layout's \`current\` pointer, so the command always answers for the version the
-          service runs (ADR-0020). **They register the service and leave it stopped**: a Client with no configuration would dial the development
-          default and manage nothing (ADR-0020), so starting it is the last step and it is yours.
+          service runs (ADR-0037). **They register the service and leave it stopped**: a Client with no configuration would dial the development
+          default and manage nothing (ADR-0037), so starting it is the last step and it is yours.
 
           \`\`\`console
           # Debian, Ubuntu

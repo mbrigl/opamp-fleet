@@ -341,7 +341,7 @@ pub fn run(
 /// The configuration then depends on nothing outside its own directory for its trust: the copy
 /// survives the removal of wherever the operator brought the CA from, and it lives where the file
 /// and the state do — in the data root, which the install hands over and an uninstall keeps
-/// (ADR-0019, ADR-0020). It is written owner-only to a temporary name and renamed into place, so
+/// (ADR-0019, ADR-0037). It is written owner-only to a temporary name and renamed into place, so
 /// a later answer replaces a copy left by an earlier one, and an answer that already names the
 /// copy — the default an edit offers — is read before anything is written there.
 ///
@@ -411,7 +411,7 @@ fn write_owner_only(to: &Path, bytes: &[u8], owner: Option<(u32, u32)>) -> Resul
 /// Through a temporary name and a rename, so a Client starting meanwhile reads the old file or the
 /// new one, never half of either. The new file is owner-only like the one it replaces (ADR-0019
 /// clause 25), and on Unix it is given back to the old file's owner: the file of a service that
-/// runs as its own account belongs to that account (ADR-0020 clause 1), and the administrator
+/// runs as its own account belongs to that account (ADR-0037 clause 1), and the administrator
 /// editing it must not take it away.
 fn replace(path: &Path, contents: &str) -> Result<(), String> {
     let meta = std::fs::symlink_metadata(path)

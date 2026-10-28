@@ -495,7 +495,7 @@ fn extract_tree_tar_gz_within(
         // A tar carries its own modes, and a tree needs them: the program is made executable by
         // its caller either way, but a helper beside it is only executable if the archive said so.
         // Never with write for group or others, on every host, so no account but the Client's can
-        // rewrite what a Supervisor runs (ADR-0020 clause 23).
+        // rewrite what a Supervisor runs (ADR-0037 clause 23).
         #[cfg(unix)]
         if let (Some(out_path), Ok(mode)) = (written, entry.header().mode()) {
             use std::os::unix::fs::PermissionsExt;
@@ -1611,7 +1611,7 @@ mod tests {
 
     /// A tar carries modes, and a tree needs them: a helper beside the program is executable only
     /// if the archive said so.
-    /// Verifies: ADR-0027, ADR-0020
+    /// Verifies: ADR-0027, ADR-0037
     #[cfg(unix)]
     #[test]
     fn a_tree_keeps_the_modes_the_archive_carried() {
@@ -1657,7 +1657,7 @@ mod tests {
 
     /// A member's mode lands without the group's and others' write bits, whatever the archive
     /// said: `0777` lands `0755`, `0666` lands `0644`, `0775` lands `0755`.
-    /// Verifies: ADR-0020
+    /// Verifies: ADR-0037
     #[cfg(unix)]
     #[test]
     fn a_tree_member_never_lands_writable_by_group_or_others() {

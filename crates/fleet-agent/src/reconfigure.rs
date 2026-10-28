@@ -148,7 +148,7 @@ async fn apply_inner(
         let purge = tracing::info_span!("purge", removed = removed.len());
         // Moved aside first, so nothing that goes on removing from them reaches a Supervisor added
         // again under the same name. What the process account wrote and the Client cannot remove
-        // goes next, through the second service (ADR-0020 clause 20); the Client then deletes the
+        // goes next, through the second service (ADR-0037 clause 20); the Client then deletes the
         // rest.
         let tombs = purge.in_scope(|| entomb(config, &removed));
         release_removed(engine.plugins().as_deref(), &tombs)
@@ -257,7 +257,7 @@ enum Aside {
 /// the same name, which gets a fresh directory (ADR-0028 clause 13). A link where a directory
 /// should be is removed, never followed (ADR-0017 clause 33). What cannot be moved is a warning,
 /// and stays an orphan (ADR-0017 clause 34). The tombstones earlier purges could not delete go with
-/// them: their names record that the Client meant to remove them (ADR-0020 clause 25), and no other
+/// them: their names record that the Client meant to remove them (ADR-0037 clause 25), and no other
 /// orphan is taken.
 fn entomb(config: &ClientConfig, removed: &[String]) -> Vec<Tomb> {
     if removed.is_empty() {
@@ -303,12 +303,12 @@ fn tombstones(root: &Path) -> Vec<Tomb> {
 }
 
 /// Removes again the tombstones beneath `root` that earlier purges could not delete, the way a
-/// purge removes its own (ADR-0020 clause 25): what the process account wrote through `plugins` —
+/// purge removes its own (ADR-0037 clause 25): what the process account wrote through `plugins` —
 /// the second service, within the purge's deadline, reaching it included — and the rest by the
-/// Client. It runs beside the start and never holds it up (ADR-0020 clause 17): the work is
+/// Client. It runs beside the start and never holds it up (ADR-0037 clause 17): the work is
 /// spawned, and tried once. A tombstone that is still not gone — the second service was not
 /// reached, or a file will not delete — is a warning, and the next start or purge tries it once
-/// more. No other orphan is touched (ADR-0020 clause 25).
+/// more. No other orphan is touched (ADR-0037 clause 25).
 pub(crate) fn reap_tombstones(
     root: &Path,
     plugins: std::sync::Arc<dyn crate::supervisor::ports::PluginRegistry>,
@@ -412,7 +412,7 @@ fn move_aside(root: &Path, name: &str) -> std::io::Result<Aside> {
 }
 
 /// Asks `plugins` — the second service, where a process account is registered — to remove what
-/// the Managed Processes wrote in each tomb and the Client cannot remove itself (ADR-0020 clause 20). What is left is a warning, and the purge leaves it an orphan (ADR-0017 clause 34).
+/// the Managed Processes wrote in each tomb and the Client cannot remove itself (ADR-0037 clause 20). What is left is a warning, and the purge leaves it an orphan (ADR-0017 clause 34).
 async fn release_removed(
     plugins: Option<&dyn crate::supervisor::ports::PluginRegistry>,
     tombs: &[Tomb],
@@ -443,7 +443,7 @@ async fn release_removed(
 /// set from the old file, which needs the data intact. A directory that will not delete is a
 /// warning, never a `FAILED` apply — the set the Server asked for is running; the tombstone left
 /// is reported and removed again at the next start and with the next purge (ADR-0017 clause 34,
-/// ADR-0020 clause 25).
+/// ADR-0037 clause 25).
 fn bury(tombs: &[Tomb]) {
     for tomb in tombs {
         match remove_tomb(&tomb.path) {
@@ -510,7 +510,7 @@ fn start(
 ) -> Result<(), String> {
     let index = engine.next_index();
     // The plugins the startup started its Supervisors with, so this one starts its Managed
-    // Process the same way (ADR-0020 clause 18). An Engine without them is not told who starts a
+    // Process the same way (ADR-0037 clause 18). An Engine without them is not told who starts a
     // program, and guessing the Client itself would start one outside the process account.
     let plugins = engine.plugins().ok_or_else(|| {
         format!(
@@ -1200,8 +1200,8 @@ mod tests {
 
     /// A Supervisor a set apply adds starts its Managed Process through the Spawner the Engine was
     /// built with — here the second service's channel — as every Supervisor of the startup does
-    /// (ADR-0020 clause 18).
-    /// Verifies: ADR-0020
+    /// (ADR-0037 clause 18).
+    /// Verifies: ADR-0037
     #[cfg(unix)]
     #[tokio::test]
     async fn a_supervisor_a_set_apply_adds_starts_through_the_engines_spawner() {
@@ -1265,9 +1265,9 @@ mod tests {
     }
 
     /// An Engine that was not told who starts its programs starts no Supervisor at all, rather
-    /// than the Client starting the program itself outside the process account (ADR-0020
+    /// than the Client starting the program itself outside the process account (ADR-0037
     /// clause 18).
-    /// Verifies: ADR-0020
+    /// Verifies: ADR-0037
     #[tokio::test]
     async fn an_engine_without_its_plugins_starts_no_supervisor() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1362,8 +1362,8 @@ mod tests {
     /// keeps there fails startup, and an offered set carrying one is refused whole, naming the
     /// Supervisor and the entry, before anything stops or the file changes: a Supervisor `logs`
     /// would share the Client's log directory with the process account's group, and its purge
-    /// would delete it (ADR-0020 clause 21, ADR-0017 clause 27).
-    /// Verifies: ADR-0020
+    /// would delete it (ADR-0037 clause 21, ADR-0017 clause 27).
+    /// Verifies: ADR-0037
     #[tokio::test]
     async fn a_supervisor_named_after_an_entry_of_the_clients_is_refused() {
         use opamp::proto::RemoteConfigStatuses;
@@ -1793,9 +1793,9 @@ mod tests {
     /// Where a process account is registered, the purge first has the second service remove what
     /// the removed Supervisor's Managed Processes wrote — a directory an agent made `0755`, as Go's
     /// `MkdirAll` does, a read-only one inside it — and then deletes the rest: nothing is left
-    /// (ADR-0020 clause 20, ADR-0028 clause 13). The in-process service runs as this test's uid, so
+    /// (ADR-0037 clause 20, ADR-0028 clause 13). The in-process service runs as this test's uid, so
     /// the read-only directory is what the Client could not remove without it.
-    /// Verifies: ADR-0020
+    /// Verifies: ADR-0037
     #[cfg(unix)]
     #[tokio::test]
     async fn the_purge_has_the_second_service_remove_what_the_processes_wrote() {
@@ -1813,7 +1813,7 @@ mod tests {
         let cache = made.join("cache");
         std::fs::create_dir_all(&cache).expect("mkdir");
         std::fs::set_permissions(&made, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-        // A data directory the Client shares for writing (ADR-0020 clause 21).
+        // A data directory the Client shares for writing (ADR-0037 clause 21).
         std::fs::set_permissions(gone.join("data"), std::fs::Permissions::from_mode(0o2770))
             .expect("chmod");
         std::fs::write(cache.join("module"), b"x").expect("write");
@@ -1855,8 +1855,8 @@ mod tests {
 
     /// One apply waits for the second service once, however many Supervisors it removes: two
     /// removed Supervisors and a service that never answers hold it [`PURGE_ANSWER`], not twice
-    /// that (ADR-0020 clause 17).
-    /// Verifies: ADR-0020
+    /// that (ADR-0037 clause 17).
+    /// Verifies: ADR-0037
     #[cfg(unix)]
     #[tokio::test]
     async fn an_apply_waits_for_a_service_that_does_not_answer_once() {
@@ -1878,8 +1878,8 @@ mod tests {
 
     /// A second service that cannot be reached holds one apply [`PURGE_ANSWER`] for all its
     /// removed Supervisors, and the next apply in the same outage tries once rather than waiting
-    /// again: the wait the deadline cut short counts as given up on (ADR-0020 clause 17).
-    /// Verifies: ADR-0020
+    /// again: the wait the deadline cut short counts as given up on (ADR-0037 clause 17).
+    /// Verifies: ADR-0037
     #[cfg(unix)]
     #[tokio::test]
     async fn an_apply_waits_for_a_service_that_cannot_be_reached_once_per_outage() {
@@ -1910,8 +1910,8 @@ mod tests {
     /// What goes on being removed after the purge gave up never reaches a Supervisor added again
     /// under the same name: the second service answers past the purge's deadline and only then
     /// removes what the process account wrote, while `gone` has been purged and added again in
-    /// between; the new `gone` keeps its data (ADR-0028 clause 13, ADR-0020 clause 17).
-    /// Verifies: ADR-0020
+    /// between; the new `gone` keeps its data (ADR-0028 clause 13, ADR-0037 clause 17).
+    /// Verifies: ADR-0037
     #[cfg(unix)]
     #[tokio::test]
     async fn what_a_purge_removes_after_its_deadline_misses_a_supervisor_added_again() {
@@ -1956,8 +1956,8 @@ mod tests {
 
     /// A tombstone an earlier purge could not delete goes with the next purge, its name recording
     /// that the Client meant to remove it; every other orphan stays — a directory no block names,
-    /// and one that only looks like a tombstone (ADR-0020 clause 25).
-    /// Verifies: ADR-0020
+    /// and one that only looks like a tombstone (ADR-0037 clause 25).
+    /// Verifies: ADR-0037
     #[test]
     fn the_next_purge_removes_a_tombstone_left_behind() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2009,8 +2009,8 @@ mod tests {
 
     /// What a start removes again: the tombstones alone, each named to the second service by its
     /// Supervisor and asked once, the Client's part only after the service answered — beside the
-    /// start, which does not wait for the answer (ADR-0020 clauses 17, 20 and 25).
-    /// Verifies: ADR-0020
+    /// start, which does not wait for the answer (ADR-0037 clauses 17, 20 and 25).
+    /// Verifies: ADR-0037
     #[tokio::test]
     async fn a_start_removes_the_tombstones_again_beside_it() {
         use crate::supervisor::ports::{Plugin, PluginRegistry, Purged};
@@ -2073,7 +2073,7 @@ mod tests {
     /// A Supervisors' root reached through a link of the Client's own account — one beneath a data
     /// root the hand-over gave the Client, or `~/.local` → `/data` for `--user` — is purged
     /// through it: the link is the Client's, in a directory only the Client writes (ADR-0028
-    /// clause 13, ADR-0020 clause 21).
+    /// clause 13, ADR-0037 clause 21).
     /// Verifies: ADR-0017
     #[cfg(unix)]
     #[test]

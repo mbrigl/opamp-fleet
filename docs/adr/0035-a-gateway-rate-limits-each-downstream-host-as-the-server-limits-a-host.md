@@ -1,7 +1,7 @@
 # ADR-0035: A Gateway rate-limits each downstream host as the Server limits a host
 
-- **Status:** 🟡 proposed
-- **Date:** 2026-10-25
+- **Status:** 🟢 accepted
+- **Date:** 2026-10-27
 - **Deciders:** Markus Brigl
 - **Applies to:** the downstream reports, enrolment requests and package downloads a Gateway serves in `crates/fleet-agent/src/gateway/mod.rs`, the buckets that count them in `crates/fleet-agent/src/gateway/`, the `[gateway.rate_limit]` section of `supervisor.toml` and its parsing in `crates/fleet-agent/src/config.rs`, and every document that tells an operator how a Gateway bounds what a host behind it sends
 

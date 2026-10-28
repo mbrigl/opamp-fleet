@@ -1,9 +1,9 @@
-//! The Client updating itself, end to end (ADR-0018, ADR-0019, ADR-0020) — the one path in this
+//! The Client updating itself, end to end (ADR-0018, ADR-0019, ADR-0037) — the one path in this
 //! project whose failure takes a host out of the fleet's reach for good, and the only major
 //! feature that had no test across the process boundary.
 //!
 //! Everything real except the service manager: the real Server armed with a package store, the
-//! real Client binary running from a real ADR-0020 install layout, installing a real artifact over
+//! real Client binary running from a real ADR-0037 install layout, installing a real artifact over
 //! itself. The restart the Client asks for by exiting is performed *here* — that is precisely the
 //! step no CI can delegate to systemd, launchd, or the SCM, and standing in for it is what makes
 //! the rest observable.
@@ -12,7 +12,7 @@
 //! takes, the Server must end up being told the new version is `Installed`. Asserting the step
 //! count instead would freeze an implementation detail that ADR-0018 deliberately leaves open.
 //!
-//! Runs on all three platforms, because the pointer is the part of ADR-0020 that differs between
+//! Runs on all three platforms, because the pointer is the part of ADR-0037 that differs between
 //! them — a symlink on Unix, a junction on Windows — and it is precisely what a self-update moves
 //! while the Client is running through it. A test that only ever moved the symlink would leave the
 //! platform whose mechanism is the unusual one entirely unasserted.

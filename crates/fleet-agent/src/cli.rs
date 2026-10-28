@@ -136,7 +136,7 @@ pub struct RunArgs {
     /// watching, which is what turns on the log file (ADR-0019).
     #[arg(long, hide = true)]
     pub service: bool,
-    /// Run as the second service instead of the Client (ADR-0020): listen on this socket and
+    /// Run as the second service instead of the Client (ADR-0037): listen on this socket and
     /// start, signal and stop programs for the Client alone. Hidden, because the registration
     /// writes it and no operator types it.
     /// It reads neither the configuration nor the state directory and is no Client, so the flags
@@ -163,8 +163,8 @@ pub struct RunArgs {
         )
     )]
     pub agents: Option<PathBuf>,
-    /// The uid of the Client's account, the one peer the second service serves (ADR-0020
-    /// clause 19). Never root's (ADR-0020 clause 16); the service refuses its own as well.
+    /// The uid of the Client's account, the one peer the second service serves (ADR-0037
+    /// clause 19). Never root's (ADR-0037 clause 16); the service refuses its own as well.
     #[cfg(unix)]
     #[arg(
         long,
@@ -175,7 +175,7 @@ pub struct RunArgs {
     )]
     pub client_uid: Option<u32>,
     /// The SID of the Client's account, the one client the second service serves on Windows
-    /// (ADR-0020 clause 19). The service refuses `LocalSystem` and its own.
+    /// (ADR-0037 clause 19). The service refuses `LocalSystem` and its own.
     #[cfg(windows)]
     #[arg(
         long,
@@ -186,7 +186,7 @@ pub struct RunArgs {
     )]
     pub client_sid: Option<crate::win32::Sid>,
     /// The second service's socket, through which the Client starts every Managed Process
-    /// (ADR-0020 clause 18). Hidden: `service install --process-account` writes it into the
+    /// (ADR-0037 clause 18). Hidden: `service install --process-account` writes it into the
     /// Client's unit, and it is how the running Client learns that a process account is
     /// registered. On Windows it is the second service's named pipe.
     #[cfg_attr(
@@ -210,7 +210,7 @@ pub struct RunArgs {
         )
     )]
     pub agents_socket: Option<PathBuf>,
-    /// The uid of the process account, the one the Client accepts as the socket's peer (ADR-0020
+    /// The uid of the process account, the one the Client accepts as the socket's peer (ADR-0037
     /// clause 19). Never root's.
     #[cfg(unix)]
     #[arg(
@@ -222,7 +222,7 @@ pub struct RunArgs {
     )]
     pub process_uid: Option<u32>,
     /// The SID of the process account, the one the Client accepts as the owner of the second
-    /// service's pipe on Windows (ADR-0020 clause 19).
+    /// service's pipe on Windows (ADR-0037 clause 19).
     #[cfg(windows)]
     #[arg(
         long,
@@ -266,7 +266,7 @@ fn parse_sid(text: &str) -> Result<crate::win32::Sid, String> {
 /// Service-lifecycle actions (`service install|config|uninstall|start|stop|status`).
 #[derive(Debug, Subcommand)]
 pub enum ServiceAction {
-    // ADR-0019 and ADR-0020 decide the layout this lays out.
+    // ADR-0019 and ADR-0037 decide the layout this lays out.
     /// Register this instance as a system (or `--user`) service and lay out the versioned
     /// install.
     Install(InstallArgs),
@@ -364,7 +364,7 @@ pub struct InstallArgs {
     /// is no way to give it on the command line or in the environment.
     #[arg(long, value_name = "PATH")]
     pub bootstrap_password_file: Option<PathBuf>,
-    // ADR-0019, ADR-0020.
+    // ADR-0019, ADR-0037.
     /// Run the service as this account, and hand this installation's files — both roots — over
     /// to it.
     ///
@@ -378,10 +378,10 @@ pub struct InstallArgs {
     /// service's own virtual account (`NT SERVICE\<service name>`), a gMSA (`name$`),
     /// `NT AUTHORITY\LocalService`/`NetworkService`, or `LocalSystem`; a password is never taken
     /// here — it would stand in the process list and in the installer log (ADR-0019,
-    /// ADR-0020).
+    /// ADR-0037).
     #[arg(long, value_name = "ACCOUNT", conflicts_with = "user")]
     pub run_as: Option<String>,
-    // ADR-0020.
+    // ADR-0037.
     /// Run every Managed Process under this account, through a second service,
     /// `<PRODUCT_NAME>-agents`, that runs under it and starts them on the Client's request.
     ///
@@ -394,7 +394,7 @@ pub struct InstallArgs {
     /// the account the second service's registration names.
     #[arg(long, value_name = "ACCOUNT", conflicts_with = "user")]
     pub process_account: Option<String>,
-    // ADR-0020.
+    // ADR-0037.
     /// Drop the process account: stop and deregister the second service, and let the Client
     /// start its Managed Processes itself again.
     #[arg(long, conflicts_with = "process_account")]
@@ -533,9 +533,9 @@ mod tests {
         );
     }
 
-    /// The second service is `run` with a flag, not a subcommand of its own (ADR-0020 clause 17),
+    /// The second service is `run` with a flag, not a subcommand of its own (ADR-0037 clause 17),
     /// and names the one uid it serves; neither half parses without the other.
-    /// Verifies: ADR-0020
+    /// Verifies: ADR-0037
     #[cfg(unix)]
     #[test]
     fn the_agents_service_is_run_with_its_socket_and_the_clients_uid() {
@@ -561,8 +561,8 @@ mod tests {
 
     /// The second service is no Client: a flag that only means something to the Client is
     /// refused next to `--agents`, not silently ignored, and root is never the Client's account
-    /// it serves (ADR-0020 clause 16).
-    /// Verifies: ADR-0020
+    /// it serves (ADR-0037 clause 16).
+    /// Verifies: ADR-0037
     #[cfg(unix)]
     #[test]
     fn the_agents_service_refuses_the_clients_flags_and_root() {
@@ -600,10 +600,10 @@ mod tests {
     }
 
     /// The Client's unit names the second service's socket and the process account's uid; the
-    /// Client learns from them that a process account is registered (ADR-0020 clause 18). Neither
+    /// Client learns from them that a process account is registered (ADR-0037 clause 18). Neither
     /// half parses without the other, root is never the process account, and the Client is not
     /// the second service.
-    /// Verifies: ADR-0020
+    /// Verifies: ADR-0037
     #[cfg(unix)]
     #[test]
     fn the_client_is_told_the_second_services_socket_and_uid() {
@@ -655,8 +655,8 @@ mod tests {
 
     /// On Windows the second service is the pipe and the Client's SID, and the Client is told the
     /// pipe and the process account's SID; each half needs the other, a SID is read as the system
-    /// writes it, and the two ends are never one run (ADR-0020 clauses 17 to 19).
-    /// Verifies: ADR-0020
+    /// writes it, and the two ends are never one run (ADR-0037 clauses 17 to 19).
+    /// Verifies: ADR-0037
     #[cfg(windows)]
     #[test]
     fn on_windows_the_two_ends_are_told_the_pipe_and_a_sid() {
@@ -724,7 +724,7 @@ mod tests {
 
     /// A SID on either end's command line is read as the system writes it, and anything else is
     /// refused before the run begins.
-    /// Verifies: ADR-0020
+    /// Verifies: ADR-0037
     #[test]
     fn a_sid_on_the_command_line_is_read_canonically() {
         assert_eq!(
@@ -735,8 +735,8 @@ mod tests {
         assert!(parse_sid("998").is_err());
     }
 
-    /// `--process-account` names the account at system scope only (ADR-0020 clause 16).
-    /// Verifies: ADR-0020
+    /// `--process-account` names the account at system scope only (ADR-0037 clause 16).
+    /// Verifies: ADR-0037
     #[test]
     fn the_process_account_conflicts_with_user() {
         let cli = parse(&[
@@ -766,9 +766,9 @@ mod tests {
         .is_err());
     }
 
-    /// `--no-process-account` drops the process account, and conflicts with naming one (ADR-0020
+    /// `--no-process-account` drops the process account, and conflicts with naming one (ADR-0037
     /// clause 16).
-    /// Verifies: ADR-0020
+    /// Verifies: ADR-0037
     #[test]
     fn no_process_account_conflicts_with_naming_one() {
         let cli = parse(&["client", "service", "install", "--no-process-account"]);
@@ -791,8 +791,8 @@ mod tests {
     }
 
     /// The process account's flags are in the help: the Managed Processes' files are split from
-    /// the Client's (ADR-0020 clause 21), so the separation they name holds.
-    /// Verifies: ADR-0020
+    /// the Client's (ADR-0037 clause 21), so the separation they name holds.
+    /// Verifies: ADR-0037
     #[test]
     fn the_process_account_flags_are_shown() {
         let mut command = <Cli as clap::CommandFactory>::command();
@@ -999,7 +999,7 @@ mod tests {
         assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
-    /// ADR-0020: the account is named at install time and nowhere else. No password parameter
+    /// ADR-0037: the account is named at install time and nowhere else. No password parameter
     /// exists beside it — the accepted Windows forms are all passwordless.
     #[test]
     fn install_takes_a_run_as_account() {
@@ -1021,11 +1021,11 @@ mod tests {
         };
         assert_eq!(
             args.run_as, None,
-            "an absent flag names nothing: the install keeps the registration's account (ADR-0020)"
+            "an absent flag names nothing: the install keeps the registration's account (ADR-0037)"
         );
     }
 
-    /// ADR-0020: `--run-as` is system scope only — a `--user` service already runs as its user,
+    /// ADR-0037: `--run-as` is system scope only — a `--user` service already runs as its user,
     /// so naming an account beside it could only contradict it.
     #[test]
     fn run_as_and_user_scope_are_refused_together() {

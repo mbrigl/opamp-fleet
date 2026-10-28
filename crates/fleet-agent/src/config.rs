@@ -108,7 +108,7 @@ pub struct ClientConfig {
     /// certificate; set by the install, never by the file.
     #[serde(skip)]
     pub bootstrap_identity: Option<BootstrapIdentity>,
-    /// The process account's primary group, where a process account is registered (ADR-0020
+    /// The process account's primary group, where a process account is registered (ADR-0037
     /// clause 21): what the Client shares with the Managed Processes belongs to it. Set by the run
     /// from the `--process-uid` its registration names, never by the file.
     #[serde(skip)]
@@ -254,7 +254,7 @@ pub struct Program {
     pub path: PathBuf,
 }
 
-/// Resolves the program path of a `[[supervisor]]` block (ADR-0020 clause 24, as amended by
+/// Resolves the program path of a `[[supervisor]]` block (ADR-0037 clause 24, as amended by
 /// ADR-0017).
 ///
 /// `key` is the block's own name for it (`binary`, `command`) so the error names what the operator
@@ -2270,8 +2270,8 @@ mod tests {
     /// Where `supervisor_dir` is the state directory, no Supervisor takes the name of an entry the
     /// Client keeps there, and the refusal names the Supervisor and the entry; under the default
     /// root the same names are Supervisors like any other. A Supervisor's directory is never the
-    /// state directory or one that holds it (ADR-0020 clauses 21 and 24).
-    /// Verifies: ADR-0020
+    /// state directory or one that holds it (ADR-0037 clauses 21 and 24).
+    /// Verifies: ADR-0037
     #[test]
     fn a_supervisor_never_takes_a_directory_of_the_clients() {
         let state = Path::new("/var/lib/opamp-fleet/state");
@@ -2351,8 +2351,8 @@ mod tests {
     }
 
     /// Only the nonce a tombstone name is made with marks one: a directory an operator named
-    /// alike is no tombstone, so neither a start nor a purge removes it (ADR-0020 clause 25).
-    /// Verifies: ADR-0020
+    /// alike is no tombstone, so neither a start nor a purge removes it (ADR-0037 clause 25).
+    /// Verifies: ADR-0037
     #[test]
     fn a_directory_named_alike_is_no_tombstone() {
         for name in [

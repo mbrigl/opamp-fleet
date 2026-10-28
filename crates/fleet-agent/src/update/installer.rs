@@ -1,4 +1,4 @@
-//! The Client replacing its own binary on the ADR-0020 version directories (ADR-0018): the
+//! The Client replacing its own binary on the ADR-0037 version directories (ADR-0018): the
 //! [`SelfUpdater`] adapter and the start-up check of the process that comes after it.
 //!
 //! Updating a Managed Process is done by a Supervisor that outlives it (ADR-0027): stop, swap,
@@ -6,7 +6,7 @@
 //! package is the process that has to exit for the install to take effect. So the work is split
 //! across the restart, and this module owns both halves:
 //!
-//! **Before.** [`install`] stages the new version *beside* the running one in the ADR-0020 layout,
+//! **Before.** [`install`] stages the new version *beside* the running one in the ADR-0037 layout,
 //! proves it by running it (`client self-check`), records an [`UpdateMarker`], and moves the
 //! `current` pointer. Nothing is overwritten, so the version being replaced is still on disk and
 //! the rollback is a pointer move rather than a download.
@@ -135,7 +135,7 @@ fn load_marker(state_dir: &Path) -> Option<UpdateMarker> {
 fn store_marker(state_dir: &Path, marker: &UpdateMarker) -> Result<(), String> {
     let json = serde_json::to_vec_pretty(marker).expect("an UpdateMarker serializes");
     // Owner-only, as every file of the Client's in a state directory the process account's group
-    // may pass through (ADR-0020 clause 21).
+    // may pass through (ADR-0037 clause 21).
     crate::storage::write_private(&marker_path(state_dir), &json)
         .map_err(|e| format!("cannot write the update marker: {e}"))
 }
@@ -213,7 +213,7 @@ impl SelfUpdater for Installer {
 /// # Errors
 /// Returns an error — with the previous version still current and still running — when the
 /// offered version is not SemVer, orders below the running build or below `floor`, or `floor` is
-/// unreadable; when this executable is not in an ADR-0020 layout; when the artifact cannot be
+/// unreadable; when this executable is not in an ADR-0037 layout; when the artifact cannot be
 /// staged; or when the staged binary does not answer for itself.
 pub fn install(
     state_dir: &Path,
@@ -223,7 +223,7 @@ pub fn install(
     archive_key: Option<&str>,
     floor: Result<Option<String>, String>,
 ) -> Result<SelfInstall, String> {
-    // The version is Server-controlled and becomes an on-disk directory name below (ADR-0020).
+    // The version is Server-controlled and becomes an on-disk directory name below (ADR-0037).
     // Refuse anything that is not a well-formed version *before* it names a path: a value carrying
     // `..` or a separator would otherwise stage the (hash-verified) binary outside `versions/` and
     // repoint `current` at it — an escape the content hash and signature never cover, because they
@@ -330,7 +330,7 @@ pub fn install(
     Ok(SelfInstall::Staged)
 }
 
-/// Unpacks the artifact into `dir` as this platform's binary and writes the ADR-0020 manifest.
+/// Unpacks the artifact into `dir` as this platform's binary and writes the ADR-0037 manifest.
 fn stage(
     dir: &Path,
     artifact: &Path,
@@ -593,7 +593,7 @@ mod tests {
 
     /// The update marker and the outcome are the Client's alone, `0600`: the state directory they
     /// lie in is passed through by the process account's group where one is registered.
-    /// Verifies: ADR-0020
+    /// Verifies: ADR-0037
     #[cfg(unix)]
     #[test]
     fn the_marker_and_the_outcome_are_owner_only() {

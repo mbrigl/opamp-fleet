@@ -54,7 +54,7 @@ const RETIRED: &[(&str, &str)] = &[
     ),
 ];
 
-/// The `command` kind. Its [`Spawner`] is the one the registry hands every plugin (ADR-0020).
+/// The `command` kind. Its [`Spawner`] is the one the registry hands every plugin (ADR-0037).
 #[derive(Default)]
 pub struct CommandPlugin {
     pub spawner: Spawner,
@@ -149,7 +149,7 @@ impl Plugin for CommandPlugin {
             // configuration by restarting, which is ADR-0017's generic behaviour.
             reload_signal: None,
             // The Client itself, or the second service where a process account is registered
-            // (ADR-0020 clause 18): the registry says which.
+            // (ADR-0037 clause 18): the registry says which.
             spawner: self.spawner.clone(),
             process_account_group: ctx.process_account_group,
             supervisor_dir: ctx.supervisor_dir.clone(),

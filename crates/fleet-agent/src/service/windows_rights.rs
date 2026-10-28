@@ -110,7 +110,7 @@ fn taken_over(parent: &crate::win32::acl::Dacl, dir: bool) -> crate::win32::acl:
 /// Administrators, the root is cut off ([`cut`]) and every entry keeps only what the root passes
 /// on to it ([`taken_over`]). Each entry is changed through a handle of its own: a link is changed
 /// as itself and never entered, and what the process account `process` owns, with everything
-/// beneath it, is left as it is (ADR-0020 clause 1). An entry that cannot be taken over fails the
+/// beneath it, is left as it is (ADR-0037 clause 1). An entry that cannot be taken over fails the
 /// install instead of staying behind.
 #[cfg(windows)]
 fn take_over(
@@ -386,7 +386,7 @@ mod tests {
     /// inherited ones. So the root and every entry is given to the Administrators, the root keeps
     /// nothing but the keepers, and every entry beneath it nothing but what the root passes on —
     /// the result is the same whoever made the directory.
-    /// Verifies: ADR-0019, ADR-0020
+    /// Verifies: ADR-0019, ADR-0037
     #[test]
     fn a_data_root_someone_else_made_is_taken_over_before_it_is_cut_off() {
         assert_eq!(OWNER, "BA", "the Administrators own every entry");
@@ -413,7 +413,7 @@ mod tests {
     /// state directory outside it, existing or not, and a Supervisors' root outside both that the
     /// install creates; such a Supervisors' root that already exists is the operator's and is left
     /// alone. A directory inside a listed one inherits its rights.
-    /// Verifies: ADR-0019, ADR-0020
+    /// Verifies: ADR-0019, ADR-0037
     #[test]
     fn only_the_default_data_root_is_taken_over_and_only_a_created_directory_is_cut() {
         use Treatment::{Cut, TakeOver, Untouched};
@@ -498,11 +498,11 @@ mod tests {
         );
     }
 
-    /// `supervisor.toml` is the service account's to rewrite (ADR-0020 clause 1). A Supervisors'
+    /// `supervisor.toml` is the service account's to rewrite (ADR-0037 clause 1). A Supervisors'
     /// root it places outside every root of the install is never created, cut or handed over by
     /// the install — not even when it does not exist yet — or the account would choose where an
     /// Administrator makes a directory and grants it Modify.
-    /// Verifies: ADR-0019, ADR-0020
+    /// Verifies: ADR-0019, ADR-0037
     #[test]
     fn a_supervisors_root_outside_the_installs_roots_is_left_untouched() {
         let planned = plan(
@@ -528,7 +528,7 @@ mod tests {
     /// The data root keeps no inherited right — `BUILTIN\Users` read among them — and full control
     /// only for LocalSystem and the Administrators beside its own explicit grants, and what it
     /// holds then inherits that alone, its own explicit grants kept.
-    /// Verifies: ADR-0019, ADR-0020
+    /// Verifies: ADR-0019, ADR-0037
     #[test]
     fn the_data_root_is_cut_off_from_what_every_local_user_inherits() {
         let inherited = Dacl::parse(
@@ -554,7 +554,7 @@ mod tests {
     /// keepers alone, and a junction, the other name of a hard link and what the process account
     /// owns — this test's own account standing in — are not touched; a root that is a link is
     /// refused. The test runs elevated, as an install does.
-    /// Verifies: ADR-0019, ADR-0020
+    /// Verifies: ADR-0019, ADR-0037
     #[cfg(windows)]
     #[test]
     fn on_windows_a_restricted_root_keeps_the_keepers_alone_and_enters_no_link() {
@@ -681,7 +681,7 @@ mod tests {
                 "{treatment:?}: inherited"
             );
             // A cut changes nothing explicit beneath the root, as `icacls /inheritance:r` did not;
-            // a take-over resets it away (ADR-0019, ADR-0020).
+            // a take-over resets it away (ADR-0019, ADR-0037).
             let kept = sddl(&sub.join("kept"));
             assert_eq!(
                 kept.contains("(A;;0x1200a9;;;BU)"),

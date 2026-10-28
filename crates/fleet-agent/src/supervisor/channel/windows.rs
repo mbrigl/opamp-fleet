@@ -1,4 +1,4 @@
-//! The channel on Windows (ADR-0020 clause 19): a named pipe whose security descriptor grants the
+//! The channel on Windows (ADR-0037 clause 19): a named pipe whose security descriptor grants the
 //! Client's account and nobody else ([`crate::win32::pipe_sddl`]), a client identified by its
 //! token and a server by the pipe's owner and its process, held open while the Client checks it,
 //! a job object for every program the second service starts, and the DACLs that close the second
@@ -46,7 +46,7 @@ const CREATE_SUSPENDED: u32 = 0x0000_0004;
 const ENDED: u32 = 1;
 
 /// Creates the pipe `pipe`, owned by the account this service runs as and granting the Client's
-/// account `client` alone (ADR-0020 clause 19). Its first instance must be the first of that
+/// account `client` alone (ADR-0037 clause 19). Its first instance must be the first of that
 /// name: a pipe someone else made under the name first is not taken over, and the bind fails.
 /// Remote clients are refused by the pipe itself.
 ///
@@ -100,7 +100,7 @@ impl Listener {
     }
 }
 
-/// Whether the client of `stream` is the Client's account `client` (ADR-0020 clause 19), read from
+/// Whether the client of `stream` is the Client's account `client` (ADR-0037 clause 19), read from
 /// its token once it has written.
 ///
 /// # Errors
@@ -123,7 +123,7 @@ pub fn admit_sid(peer: &Sid, client: &Sid) -> Result<(), String> {
     }
 }
 
-/// Whether the service, running as `own`, may serve `client` as the Client's account (ADR-0020
+/// Whether the service, running as `own`, may serve `client` as the Client's account (ADR-0037
 /// clause 16): the service never runs as `LocalSystem`, the Client's account never is
 /// `LocalSystem`, and never the account the service runs as.
 ///
@@ -181,7 +181,7 @@ pub(super) fn connect(pipe: &Path) -> io::Result<NamedPipeClient> {
 }
 
 /// The account that made the pipe `stream` is connected to: its owner, which only that account
-/// — or an administrator — can have set (ADR-0020 clause 19).
+/// — or an administrator — can have set (ADR-0037 clause 19).
 ///
 /// # Errors
 /// Returns why the owner could not be read.
@@ -189,7 +189,7 @@ pub(super) fn server_of(stream: &NamedPipeClient) -> io::Result<Sid> {
     win32::pipe_owner(stream.as_raw_handle())
 }
 
-/// The process that serves the pipe instance `stream` is connected to (ADR-0020 clause 19): the
+/// The process that serves the pipe instance `stream` is connected to (ADR-0037 clause 19): the
 /// second service's, or that of whoever else of the process account made an instance of the pipe.
 /// It is held open ([`peer_process`]) until the Client has decided.
 pub(super) fn server_process(stream: &NamedPipeClient) -> io::Result<super::PeerProcess> {
@@ -244,7 +244,7 @@ impl Tree {
 /// Starts a program in a job of its own, suspended until it is in the job, so it starts nothing
 /// outside it. Its environment is the second service's own — the process account's, as the SCM
 /// starts the service under it — with the request's environment laid over it: the block's `env`,
-/// then the Supervisor Endpoint's token (ADR-0020 clause 22).
+/// then the Supervisor Endpoint's token (ADR-0037 clause 22).
 pub(super) fn start(launch: &Launch) -> io::Result<(Child, Tree)> {
     let job = Job::new()?;
     let mut command = Command::new(&launch.program);
@@ -310,7 +310,7 @@ pub(super) fn exit_status(raw: i32) -> ExitStatus {
 }
 
 /// `supervisor run --agents <pipe> --client-sid <SID>` under the SCM: the second service
-/// (ADR-0020), until `shutdown` resolves or a self-update leaves it behind. It listens only once
+/// (ADR-0037), until `shutdown` resolves or a self-update leaves it behind. It listens only once
 /// its process and every thread it has read back closed to the process account (ADR-0036), and
 /// closes every [`SWEEP`] what threads the system starts for it after that.
 ///
@@ -422,7 +422,7 @@ fn close_threads(sddl: &str) -> Result<usize, String> {
 }
 
 /// Whether this process carries the DACL `process` and every one of its threads the DACL
-/// `thread`, read back from each and compared by what they say ([`win32::same_dacl`], as ADR-0020
+/// `thread`, read back from each and compared by what they say ([`win32::same_dacl`], as ADR-0037
 /// clause 21 compares an ACL): the second service does not listen while one differs (ADR-0036).
 ///
 /// # Errors
@@ -475,12 +475,12 @@ const READ_CONTROL: u32 = 0x0002_0000;
 const REPARSE_POINT: u32 = 0x400;
 
 /// Removes what the process account wrote under `dir`, the tombstone of the Supervisor named
-/// `supervisor` (ADR-0020 clause 20), as [`super::purge`] does on Unix: every entry this service's
+/// `supervisor` (ADR-0037 clause 20), as [`super::purge`] does on Unix: every entry this service's
 /// account owns in each of the directories `shared` names relative to `dir`, and in the
 /// directories beneath them, with everything beneath it. `dir` is absolute and the tombstone of
 /// that Supervisor, each of `shared` is a path beneath it of plain names alone, and no link or
 /// junction is followed on the way or beneath. The service acts with its own rights, which the
-/// Client's directories grant it only where its Managed Processes write (ADR-0020 clause 21).
+/// Client's directories grant it only where its Managed Processes write (ADR-0037 clause 21).
 ///
 /// # Errors
 /// Returns why the request is refused, or the first entry that cannot be reached or removed.
@@ -646,14 +646,14 @@ mod tests {
     }
 
     /// The process this test runs as, named as the second service's: it serves the in-process
-    /// services (ADR-0020 clause 19).
+    /// services (ADR-0037 clause 19).
     fn this_process() -> ServiceProcess {
         ServiceProcess::named(|| Ok(Some(std::process::id())))
     }
 
     /// Only the Client's account is served, and the service runs as neither `LocalSystem` nor the
-    /// Client's account, nor serves `LocalSystem` (ADR-0020 clauses 16 and 19).
-    /// Verifies: ADR-0020
+    /// Client's account, nor serves `LocalSystem` (ADR-0037 clauses 16 and 19).
+    /// Verifies: ADR-0037
     #[test]
     fn only_the_clients_account_is_admitted_and_never_local_system() {
         let client = sid("S-1-5-80-1-2-3-4-5");
@@ -668,7 +668,7 @@ mod tests {
     }
 
     /// A purge takes only the tombstone of the Supervisor it names, by an absolute path.
-    /// Verifies: ADR-0020
+    /// Verifies: ADR-0037
     #[test]
     fn a_purge_takes_only_the_tombstone_of_the_supervisor_it_names() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -689,7 +689,7 @@ mod tests {
     /// everything beneath it, and nothing else. The second service runs under its own account,
     /// which owns what it creates; a test run elevated creates what the Administrators own, so the
     /// test makes this account the owner of what stands for the service's own.
-    /// Verifies: ADR-0020
+    /// Verifies: ADR-0037
     #[test]
     fn the_second_service_removes_what_it_wrote_under_a_tombstone() {
         use crate::win32::files::{Access, Entry};
@@ -761,7 +761,7 @@ mod tests {
 
     /// A program the second service starts on the Client's request runs, reports its output and
     /// its exit code, through the pipe.
-    /// Verifies: ADR-0020
+    /// Verifies: ADR-0037
     #[tokio::test]
     async fn a_started_program_reports_its_output_and_exit() {
         let (channel, _stop, _pipe) = served().await;
@@ -777,7 +777,7 @@ mod tests {
     }
 
     /// A signal is refused on Windows, which has none.
-    /// Verifies: ADR-0020
+    /// Verifies: ADR-0037
     #[tokio::test]
     async fn a_signal_is_refused() {
         let (channel, _stop, _pipe) = served().await;
@@ -790,7 +790,7 @@ mod tests {
     }
 
     /// The pipe's owner is the account that made it, and the Client takes it for no other.
-    /// Verifies: ADR-0020
+    /// Verifies: ADR-0037
     #[tokio::test]
     async fn the_client_talks_only_to_the_process_account() {
         let (channel, _stop, pipe) = served().await;
@@ -810,8 +810,8 @@ mod tests {
     }
 
     /// The pipe's server is the process the Client reads, and the Client takes no instance served
-    /// by a process other than the one the SCM names as the second service's (ADR-0020 clause 19).
-    /// Verifies: ADR-0020
+    /// by a process other than the one the SCM names as the second service's (ADR-0037 clause 19).
+    /// Verifies: ADR-0037
     #[tokio::test]
     async fn the_client_talks_only_to_the_process_the_scm_names() {
         let (channel, _stop, pipe) = served().await;
@@ -855,7 +855,7 @@ mod tests {
     }
 
     /// A pipe of that name made by someone first is not taken over.
-    /// Verifies: ADR-0020
+    /// Verifies: ADR-0037
     #[tokio::test]
     async fn a_pipe_made_first_by_another_is_not_taken_over() {
         let pipe = unique_pipe();
@@ -866,7 +866,7 @@ mod tests {
 
     /// A client of another account is refused once it has written, and the service goes on
     /// serving the Client's.
-    /// Verifies: ADR-0020
+    /// Verifies: ADR-0037
     #[tokio::test]
     async fn a_peer_of_another_account_is_refused() {
         let pipe = unique_pipe();
@@ -894,8 +894,8 @@ mod tests {
     }
 
     /// Closing the Client's connection ends every program it started, and what that program
-    /// started and left running: the job holds them all (ADR-0020 clause 19).
-    /// Verifies: ADR-0020
+    /// started and left running: the job holds them all (ADR-0037 clause 19).
+    /// Verifies: ADR-0037
     #[tokio::test]
     async fn closing_the_connection_ends_the_whole_job() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -936,9 +936,9 @@ mod tests {
         assert_eq!(size(), after, "and ends with the connection");
     }
 
-    /// The Supervisor Endpoint's token is laid over the program's environment last (ADR-0020
+    /// The Supervisor Endpoint's token is laid over the program's environment last (ADR-0037
     /// clause 22).
-    /// Verifies: ADR-0020
+    /// Verifies: ADR-0037
     #[tokio::test]
     async fn a_program_has_the_token_last() {
         let (channel, _stop, _pipe) = served().await;

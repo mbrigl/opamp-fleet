@@ -1,7 +1,7 @@
 # ADR-0036: On Windows the second service closes its process and its threads to the process account, and the Client holds the peer's process while it checks it
 
-- **Status:** 🟡 proposed
-- **Date:** 2026-10-25
+- **Status:** 🟢 accepted
+- **Date:** 2026-10-27
 - **Deciders:** Markus Brigl
 - **Applies to:** the security of the second service's process and threads on Windows in `crates/fleet-agent/src/supervisor/channel/windows.rs`, `crates/fleet-agent/src/win32.rs` and the service's entry in `crates/fleet-agent/src/main.rs` and `crates/fleet-agent/src/service/`, the Client's check of the pipe's server process in `crates/fleet-agent/src/supervisor/channel/windows.rs`, the Windows service smoke in `crates/fleet-agent/tests/service_smoke.rs`, and every document that says what the separation by a process account holds against a Managed Process on Windows
 

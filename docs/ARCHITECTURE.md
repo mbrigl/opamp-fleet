@@ -53,7 +53,7 @@ than anywhere else, and none beats one that has stopped being true.
 - **The service manager** starts the Client and restarts it after a self-update
   ([ADR-0018](adr/0018-the-client-updates-itself-from-a-signed-package.md)). Where a process
   account is registered, it also runs the second service, which starts the Managed Processes
-  under that account (ADR-0020).
+  under that account (ADR-0037).
 - **Upstream**, the opamp-spec release named as the Protocol Baseline in
   [`CONFORMANCE.md`](CONFORMANCE.md) fixes the wire format.
 
@@ -191,7 +191,7 @@ core module names an adapter or a technology, and when a module has no role.
   Supervisors' root as an absolute path too. When a failed process is started again or held is
   `supervisor::restart`'s decision; the runner reads the clock and starts it. Who starts the
   program is the runner's `Spawner`: the Client itself, or the second service of
-  [ADR-0020](adr/0020-the-accounts-the-service-runs-under.md),
+  [ADR-0037](adr/0037-the-accounts-the-service-runs-under.md),
   `supervisor run --agents`, through `supervisor::channel`, which holds the private protocol, the
   service and the Client's end of its socket — on Windows of its named pipe, in
   `supervisor::channel::windows`, which runs each program in a job object. The Windows system
@@ -226,7 +226,7 @@ core module names an adapter or a technology, and when a module has no role.
   a directory held open without following a link at its name, read from and written to by name,
   each file written whole and renamed into place, because a privileged install works in
   directories the service's account owns
-  ([ADR-0020](adr/0020-the-accounts-the-service-runs-under.md)).
+  ([ADR-0037](adr/0037-the-accounts-the-service-runs-under.md)).
 - **Client configuration** — `config` is what `supervisor.toml` may say and the rules it must meet
   ([ADR-0008](adr/0008-five-crates-on-tokio-and-axum.md)); `config_file` reads it from disk, makes
   its
@@ -263,7 +263,7 @@ core module names an adapter or a technology, and when a module has no role.
 - **Client service** — `service::manager` registers, starts, stops and deregisters the Client's
   service and, where a process account is named, the second service `<PRODUCT_NAME>-agents` beside
   it, and writes both systemd units itself
-  ([ADR-0020](adr/0020-the-accounts-the-service-runs-under.md)). `service::run_as`
+  ([ADR-0037](adr/0037-the-accounts-the-service-runs-under.md)). `service::run_as`
   decides and checks the Client's account and the process account, and hands the roots over,
   leaving what the process account owns. On Windows `service::windows_config` sets the SCM's
   accounts, recovery actions and required privileges, `service::windows_rights` restricts the data
@@ -360,12 +360,12 @@ alone by the peer's credentials or the pipe client's token, and stops every prog
 process group on Unix, by job object on Windows — when that connection closes. Before it writes
 anything, the Client accepts the connection only from the process the service manager runs as the
 second service, which `service::manager::agents_process` asks of systemd, launchd or the SCM
-([ADR-0020](adr/0020-the-accounts-the-service-runs-under.md) clause 19).
+([ADR-0037](adr/0037-the-accounts-the-service-runs-under.md) clause 19).
 Both ends refuse a peer of another build, and the one that `current` no longer names exits so its
 service manager starts it from the new version. While the second service is away, a delivered
 package is staged and
 waits, and the Supervisor retries with backoff
-([ADR-0020](adr/0020-the-accounts-the-service-runs-under.md)).
+([ADR-0037](adr/0037-the-accounts-the-service-runs-under.md)).
 
 **Where state lives.** The Server keeps all of its state under one `data_dir`, one directory per
 domain and owner-only: `configurations/`, `deployments/`, `packages/` (metadata) and `blobs/` (the
@@ -384,4 +384,4 @@ state
 under `state_dir`: the issued certificate and key, the connection settings the Server offered,
 and per Supervisor a directory with `config/` and `program/`. An installed Client runs from
 `versions/<version>/` through the `current` pointer
-([ADR-0020](adr/0020-the-accounts-the-service-runs-under.md)).
+([ADR-0037](adr/0037-the-accounts-the-service-runs-under.md)).

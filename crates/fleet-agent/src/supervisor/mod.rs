@@ -43,7 +43,7 @@ pub const SELF_AGENT_OFFSET: usize = SELF_AGENT_INDEX + 1;
 /// its feature is, so what a build carries, reports (ADR-0017 clause 18) and refuses as unknown all
 /// follow from this one list.
 ///
-/// Every plugin is handed `spawner`, which starts its Managed Processes (ADR-0020 clause 18).
+/// Every plugin is handed `spawner`, which starts its Managed Processes (ADR-0037 clause 18).
 fn registry(spawner: &Spawner) -> Vec<Box<dyn Plugin>> {
     vec![
         Box::new(collector::CollectorPlugin {
@@ -56,7 +56,7 @@ fn registry(spawner: &Spawner) -> Vec<Box<dyn Plugin>> {
 }
 
 /// The [`registry`] of a run: its plugins with the [`Spawner`] the composition root chose from the
-/// Client's command line and handed [`build_engine`] (ADR-0020 clause 18).
+/// Client's command line and handed [`build_engine`] (ADR-0037 clause 18).
 pub struct Registry {
     spawner: Spawner,
 }
@@ -120,7 +120,7 @@ fn kind_attributes(mut attributes: BTreeMap<String, String>) -> BTreeMap<String,
 }
 
 /// Build the Engine from the configuration, starting one adapter task per Supervisor, each of whose
-/// Managed Processes `spawner` starts (ADR-0020 clause 18).
+/// Managed Processes `spawner` starts (ADR-0037 clause 18).
 ///
 /// # Errors
 /// Returns an error when an Agent's state cannot be restored, a `[[supervisor]]` block names an
@@ -211,7 +211,7 @@ pub fn build_engine(
 }
 
 /// A directory under the Supervisor root that no `[[supervisor]]` block names is reported, never
-/// reaped (ADR-0020 clause 25): it may be a purge a crash cut short, or an operator's deliberate
+/// reaped (ADR-0037 clause 25): it may be a purge a crash cut short, or an operator's deliberate
 /// hand edit, a temporarily commented-out block whose identity and program are not the Client's
 /// to delete. The log line makes the leftover visible; removing it stays the operator's call. A
 /// tombstone a purge could not delete is named as one, and is reported until it is gone: its name
@@ -339,7 +339,7 @@ pub fn start_supervisor(
 
     let supervisor_dir = config.supervisor_dir(&block.name);
     // The Managed Process passes through the Supervisors' root on its way to its own directory
-    // (ADR-0020 clause 21). Left as it is made where no process account is registered.
+    // (ADR-0037 clause 21). Left as it is made where no process account is registered.
     if config.process_account_group.is_some() {
         let root = config.supervisors_root();
         crate::storage::create_shared_dir(
@@ -779,11 +779,11 @@ mod tests {
     }
 
     /// Where a process account is registered, the Engine lays out the path to each Managed
-    /// Process for its group (ADR-0020 clause 21): the state directory, the Supervisors' root and
+    /// Process for its group (ADR-0037 clause 21): the state directory, the Supervisors' root and
     /// each Supervisor's directory passed through, `0710`, and `program/` read, `0750`. Without
     /// one, those directories are what they were: `0700`, and `program/` and the root as they are
     /// made.
-    /// Verifies: ADR-0020
+    /// Verifies: ADR-0037
     #[cfg(unix)]
     #[tokio::test]
     async fn the_engine_lays_out_the_path_to_each_managed_process_for_the_process_accounts_group() {
@@ -1126,7 +1126,7 @@ mod tests {
         assert!(err.contains("needs a `command`"), "{err}");
     }
 
-    /// ADR-0020 clause 25: a directory no block names survives startup — reported, never reaped.
+    /// ADR-0037 clause 25: a directory no block names survives startup — reported, never reaped.
     /// Startup cannot tell a purge a crash cut short from an operator's deliberate hand edit, and
     /// the destructive reading of that ambiguity would delete an identity and a program that were
     /// not meant to go.
@@ -1149,8 +1149,8 @@ mod tests {
     }
 
     /// The start removes a tombstone left behind again, beside the start rather than before it,
-    /// and leaves every other orphan in place (ADR-0020 clause 25).
-    /// Verifies: ADR-0020
+    /// and leaves every other orphan in place (ADR-0037 clause 25).
+    /// Verifies: ADR-0037
     #[tokio::test]
     async fn a_start_removes_a_tombstone_left_behind() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1177,8 +1177,8 @@ mod tests {
 
     /// A tombstone a purge could not delete is reported at startup as a removed Supervisor's that
     /// is removed again, apart from the orphans the operator removes; the report itself deletes
-    /// nothing (ADR-0020 clause 25).
-    /// Verifies: ADR-0020
+    /// nothing (ADR-0037 clause 25).
+    /// Verifies: ADR-0037
     #[test]
     fn a_tombstone_left_behind_is_reported_at_startup() {
         #[derive(Clone, Default)]

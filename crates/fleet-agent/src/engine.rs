@@ -128,7 +128,7 @@ pub struct Engine {
     /// a set apply adds at runtime is held to them too.
     floors: Option<Arc<dyn PackageFloors>>,
     /// The plugins this Client's Supervisors were started with, kept so a Supervisor a set apply
-    /// adds at runtime starts its Managed Process the same way (ADR-0020 clause 18).
+    /// adds at runtime starts its Managed Process the same way (ADR-0037 clause 18).
     plugins: Option<Arc<dyn PluginRegistry>>,
 }
 
@@ -227,7 +227,7 @@ impl Engine {
         }
     }
 
-    /// Gives the Engine the plugins its Supervisors were started with (ADR-0020 clause 18).
+    /// Gives the Engine the plugins its Supervisors were started with (ADR-0037 clause 18).
     pub fn set_plugins(&mut self, plugins: Arc<dyn PluginRegistry>) {
         self.plugins = Some(plugins);
     }

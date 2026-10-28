@@ -25,7 +25,7 @@
 /// The version this build reports, e.g. `1.2.3+a1b2c3d` or `1.2.3-dev+b4e5f6a`.
 ///
 /// The one place either binary states its version (ADR-0033): the OpAMP `service.version`
-/// attribute, both CLIs' `--version` output, and the install layout of ADR-0020 all call this.
+/// attribute, both CLIs' `--version` output, and the install layout of ADR-0037 all call this.
 ///
 /// It is resolved at compile time by this crate's `build.rs` — the base from `Cargo.toml`
 /// (ADR-0033), the `-dev` marker and the commit short-hash from git — so a binary carries the
@@ -67,7 +67,7 @@ impl<'a> Version<'a> {
 ///
 /// The pre-release and build metadata are held to the SemVer character set — dot-separated,
 /// non-empty identifiers of `[0-9A-Za-z-]`. That is not pedantry: this string becomes a directory
-/// name in the self-update layout (ADR-0020), so a value carrying `/`, `\`, or a bare `..` is both
+/// name in the self-update layout (ADR-0037), so a value carrying `/`, `\`, or a bare `..` is both
 /// not a version *and* a path-traversal waiting to happen. Refusing it here is the single gate the
 /// rest of the project trusts.
 #[must_use]
@@ -348,7 +348,7 @@ mod tests {
         assert!(!same_release("latest", "latest"));
     }
 
-    /// The self-update turns this string into a directory name (ADR-0020), so a pre-release or
+    /// The self-update turns this string into a directory name (ADR-0037), so a pre-release or
     /// build metadata that smuggles a path separator or `..` is not a version. Parsing it away is
     /// the gate that stops a crafted Server offer from escaping `versions/`.
     #[test]

@@ -19,5 +19,5 @@ skimmed. The design revision drops what prevented nothing
   them itself, never from the template's own ADRs, scripts, or numbers, so it holds in a derived
   project and after a normalization.
 - **Code cites a clause, never a place in a document** — a comment that relies on a decision
-  names the ADR and its clause (`ADR-0020 clause 25`), never "point N", a paragraph, or a line.
+  names the ADR and its clause (`ADR-0037 clause 25`), never "point N", a paragraph, or a line.
   A normalization remaps clauses by their map; a place in a document it cannot follow.

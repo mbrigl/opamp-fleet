@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  WixUI_InstallDir with one page inserted (ADR-0020 clause 10):
+  WixUI_InstallDir with one page inserted (ADR-0037 clause 10):
 
       WelcomeDlg → InstallDirDlg → EndpointDlg → VerifyReadyDlg
 
