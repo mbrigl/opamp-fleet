@@ -358,6 +358,31 @@ async fn the_full_map_is_demanded_once_per_hash() {
     assert!(demands(&reply));
 }
 
+/// An Agent that never counts its `sequence_num` shows a gap on every message; answering the
+/// demand without the map still draws it only once.
+#[tokio::test]
+async fn an_agent_that_never_counts_is_asked_for_the_map_once() {
+    let server = spawn().await;
+    let url = format!("http://{}/v1/opamp", server.addr);
+    let client = reqwest::Client::new();
+    let uid = InstanceUid::default();
+
+    let mut report = full_report(&uid, "uncounted", 0);
+    report.capabilities |= opamp::proto::AgentCapabilities::ReportsAvailableComponents as u64;
+    report.available_components = Some(opamp::proto::AvailableComponents {
+        components: Default::default(),
+        hash: b"h".to_vec(),
+    });
+    let mut demanded = 0;
+    for _ in 0..5 {
+        let reply = exchange(&client, &url, &report).await;
+        if reply.flags & ServerToAgentFlags::ReportAvailableComponents as u64 != 0 {
+            demanded += 1;
+        }
+    }
+    assert_eq!(demanded, 1);
+}
+
 #[tokio::test]
 async fn no_component_demand_without_the_declared_capability() {
     let server = spawn().await;

@@ -1977,6 +1977,9 @@ impl AppState {
         // means state was lost somewhere; the Baseline's recovery is to demand a full report.
         let compressed = msg.agent_description.is_none();
         let gap = known && msg.sequence_num != record.sequence_num.wrapping_add(1);
+        // Counting from the start again is an Agent that restarted. A gap alone is not: an Agent
+        // that never counts shows one on every message.
+        let restarted = known && msg.sequence_num < record.sequence_num;
         if compressed && (!known || gap) {
             reply_flags |= ServerToAgentFlags::ReportFullState as u64;
         }
@@ -1993,9 +1996,9 @@ impl AppState {
         record.sequence_num = msg.sequence_num;
         record.transport = transport;
         // A demand for the component map may have been lost with the previous connection, or with
-        // an Agent that restarted (a gap in `sequence_num`, which plain HTTP has instead of a
-        // connection), so either may be asked again.
-        if !record.connected || record.owner != conn || gap {
+        // an Agent that restarted, which plain HTTP shows instead of a connection, so either may be
+        // asked again.
+        if !record.connected || record.owner != conn || restarted {
             record.components_demanded = None;
         }
         record.connected = true;
