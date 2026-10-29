@@ -13,7 +13,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use opamp::proto::{AgentToServer, ServerCapabilities, ServerToAgent};
+use opamp::proto::{AgentToServer, ServerCapabilities, ServerToAgent, ServerToAgentFlags};
 use opamp::server::listen::{Handle, Listener, HEADER_READ_TIMEOUT};
 use opamp::server::{Handler, Outbound, Rejection, Reply, RequestInfo, Settings, Transports};
 use tracing::{debug, info, warn};
@@ -130,6 +130,10 @@ impl Endpoint {
 
 /// The endpoint's handler: every `AgentToServer` is folded into the owning Agent and answered with
 /// this endpoint's capability set, so the client keeps reporting what we accept.
+///
+/// A process that reports its available components as a hash alone is asked for the map, once
+/// per hash on a connection: the hash alone gives the owning Agent nothing to report, and a
+/// process that keeps answering without the map is not asked again.
 struct Folding {
     name: String,
     events: EventSender,
@@ -188,13 +192,14 @@ impl Outbound for UntilShutdown {
 }
 
 impl Handler for Folding {
-    type Connection = ();
+    /// The component hash this connection's process was last asked to send the map of.
+    type Connection = Option<Vec<u8>>;
     type Outbound = UntilShutdown;
 
     fn on_connecting(
         &self,
         request: &RequestInfo<'_>,
-    ) -> Result<((), Option<UntilShutdown>), Rejection> {
+    ) -> Result<(Option<Vec<u8>>, Option<UntilShutdown>), Rejection> {
         if let Some(expected) = &self.expected {
             let presented = request
                 .headers
@@ -214,20 +219,32 @@ impl Handler for Folding {
             }
         }
         debug!(supervisor = %self.name, "endpoint connection");
-        Ok(((), Some(UntilShutdown(self.shutdown.clone()))))
+        Ok((None, Some(UntilShutdown(self.shutdown.clone()))))
     }
 
-    async fn on_message(&self, _: &mut (), report: AgentToServer) -> Reply {
-        let reply = ServerToAgent {
+    async fn on_message(&self, asked: &mut Option<Vec<u8>>, report: AgentToServer) -> Reply {
+        let mut reply = ServerToAgent {
             instance_uid: report.instance_uid.clone(),
             capabilities: ENDPOINT_CAPABILITIES,
             ..Default::default()
         };
+        if let Some(components) = &report.available_components {
+            if components.components.is_empty()
+                && asked.as_deref() != Some(components.hash.as_slice())
+            {
+                reply.flags |= ServerToAgentFlags::ReportAvailableComponents as u64;
+                *asked = Some(components.hash.clone());
+            }
+        }
         self.fold(report).await;
         Reply::Send(reply)
     }
 
-    fn on_outbound(&self, _: &mut (), item: std::convert::Infallible) -> Vec<ServerToAgent> {
+    fn on_outbound(
+        &self,
+        _: &mut Option<Vec<u8>>,
+        item: std::convert::Infallible,
+    ) -> Vec<ServerToAgent> {
         match item {}
     }
 }
@@ -366,6 +383,81 @@ mod tests {
             frame::decode(&data, opamp::frame::DEFAULT_MAX_MESSAGE_SIZE).expect("decodable");
         assert_eq!(decoded.instance_uid, report.instance_uid);
         assert_eq!(decoded.capabilities, ENDPOINT_CAPABILITIES);
+        assert_eq!(
+            decoded.flags,
+            ServerToAgentFlags::ReportAvailableComponents as u64,
+            "a hash without the map is asked for the map"
+        );
+    }
+
+    /// One report from the fake extension and the endpoint's reply to it.
+    async fn exchange<S>(socket: &mut S, report: &AgentToServer) -> ServerToAgent
+    where
+        S: SinkExt<Message>
+            + StreamExt<Item = tokio_tungstenite::tungstenite::Result<Message>>
+            + Unpin,
+        <S as futures_util::Sink<Message>>::Error: std::fmt::Debug,
+    {
+        let framed = frame::encode_within(report, frame::DEFAULT_MAX_MESSAGE_SIZE).expect("frame");
+        socket
+            .send(Message::Binary(framed.into()))
+            .await
+            .expect("send");
+        let reply = tokio::time::timeout(Duration::from_secs(10), socket.next())
+            .await
+            .expect("a reply in time")
+            .expect("an open socket")
+            .expect("a frame");
+        let Message::Binary(data) = reply else {
+            panic!("expected a binary reply");
+        };
+        frame::decode(&data, frame::DEFAULT_MAX_MESSAGE_SIZE).expect("decodable")
+    }
+
+    /// A process that reports its components as a hash alone is asked for the map once per hash:
+    /// not again when it answers without the map, again when the hash changes, and not when the
+    /// map arrives.
+    /// Verifies: ADR-0017
+    #[tokio::test]
+    async fn a_hash_without_the_map_is_asked_for_the_map_once() {
+        let (event_tx, _events) = mpsc::channel(16);
+        let (_shutdown_tx, shutdown) = shutdown_channel();
+        let addr = start(
+            "test".to_string(),
+            0,
+            EventSender::new(0, event_tx),
+            shutdown,
+            frame::DEFAULT_MAX_MESSAGE_SIZE,
+            Zeroizing::default(),
+        )
+        .expect("endpoint starts");
+        let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/v1/opamp"))
+            .await
+            .expect("the fake extension connects");
+
+        let reporting = |hash: &[u8], map: bool| AgentToServer {
+            instance_uid: opamp::uid::InstanceUid::default().as_bytes().to_vec(),
+            available_components: Some(opamp::proto::AvailableComponents {
+                components: if map {
+                    std::collections::HashMap::from([(
+                        "receiver/otlp".to_string(),
+                        opamp::proto::ComponentDetails::default(),
+                    )])
+                } else {
+                    Default::default()
+                },
+                hash: hash.to_vec(),
+            }),
+            ..Default::default()
+        };
+        let asks = |reply: &ServerToAgent| {
+            reply.flags & ServerToAgentFlags::ReportAvailableComponents as u64 != 0
+        };
+
+        assert!(asks(&exchange(&mut socket, &reporting(b"a", false)).await));
+        assert!(!asks(&exchange(&mut socket, &reporting(b"a", false)).await));
+        assert!(asks(&exchange(&mut socket, &reporting(b"b", false)).await));
+        assert!(!asks(&exchange(&mut socket, &reporting(b"b", true)).await));
     }
 
     /// Verifies: ADR-0015

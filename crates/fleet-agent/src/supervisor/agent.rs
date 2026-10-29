@@ -412,7 +412,14 @@ impl AgentState {
     /// The Managed Process reported its available components. Only now does the Agent declare
     /// `ReportsAvailableComponents` — a capability without components would be a false promise —
     /// and the next full report carries the hash (the Server flags for the full map on demand).
+    ///
+    /// A hash without the map is not taken: the Supervisor Endpoint asks the process for the map
+    /// instead. Held, it would be all the Agent could answer the Server's demand with, and the
+    /// Server would demand again on every answer.
     pub fn set_available_components(&mut self, components: AvailableComponents) {
+        if components.components.is_empty() {
+            return;
+        }
         self.local.available_components = Some(components);
         self.declare_capability(AgentCapabilities::ReportsAvailableComponents);
         self.protocol.force_full();
@@ -2711,6 +2718,35 @@ mod tests {
         assert!(handled.send_report);
         let demanded = agent.next_report().available_components.expect("the map");
         assert!(demanded.components.contains_key("receiver/otlp"));
+        assert!(agent.next_report().available_components.is_none());
+    }
+
+    /// A process that reports its components as a hash alone gives the Agent nothing to answer a
+    /// demand with: the Agent declares nothing and answers no demand, so the exchange with the
+    /// Server settles instead of repeating the demand on every answer.
+    #[test]
+    fn a_hash_without_the_map_is_neither_declared_nor_answered() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut agent = make_agent(dir.path());
+        let _ = agent.next_report();
+
+        agent.set_available_components(AvailableComponents {
+            components: HashMap::new(),
+            hash: b"components-hash".to_vec(),
+        });
+        agent.force_full();
+        let report = agent.next_report();
+        assert_eq!(
+            report.capabilities & AgentCapabilities::ReportsAvailableComponents as u64,
+            0
+        );
+        assert!(report.available_components.is_none());
+
+        let handled = agent.handle(&ServerToAgent {
+            flags: ServerToAgentFlags::ReportAvailableComponents as u64,
+            ..Default::default()
+        });
+        assert!(!handled.send_report);
         assert!(agent.next_report().available_components.is_none());
     }
 

@@ -102,6 +102,10 @@ pub struct AgentRecord {
     pub restart_pending: bool,
     /// The Agent's available components — hash-only until the full map was demanded and arrived.
     pub available_components: Option<AvailableComponents>,
+    /// The component hash the full map was last demanded for on the Agent's current connection —
+    /// runtime-only. An Agent that answers the demand without the map is not asked again for the
+    /// same hash, or every answer would draw the next demand.
+    pub components_demanded: Option<Vec<u8>>,
     /// The outcome of the last connection-settings offer this Agent reported (ADR-0013); its
     /// hash is what gates re-offering.
     pub connection_settings_status: Option<ConnectionSettingsStatus>,
@@ -264,6 +268,7 @@ impl AgentRecord {
             last_seen_ms: persisted.last_seen_ms,
             restart_pending: persisted.restart_pending,
             available_components: persisted.available_components,
+            components_demanded: None,
             connection_settings_status: persisted.connection_settings_status,
             package_statuses: persisted.package_statuses,
             owner: None,
@@ -1957,6 +1962,7 @@ impl AppState {
                 last_seen_ms: self.clock.now_ms(),
                 restart_pending: false,
                 available_components: None,
+                components_demanded: None,
                 connection_settings_status: None,
                 package_statuses: None,
                 owner: conn,
@@ -1986,6 +1992,11 @@ impl AppState {
 
         record.sequence_num = msg.sequence_num;
         record.transport = transport;
+        // A demand for the component map may have been lost with the previous connection, so a
+        // new one may be asked again.
+        if !record.connected || record.owner != conn {
+            record.components_demanded = None;
+        }
         record.connected = true;
         record.owner = conn;
         record.last_seen_ms = self.clock.now_ms();
@@ -2165,17 +2176,23 @@ impl AppState {
         }
 
         // A hash without the map is an offer to fetch: demand the full component list from an
-        // Agent that declared it can report one (the flag is meaningless toward any other).
+        // Agent that declared it can report one (the flag is meaningless toward any other), once
+        // per hash on a connection.
         if !disconnected
             && record.capabilities
                 & opamp::proto::AgentCapabilities::ReportsAvailableComponents as u64
                 != 0
-            && record
+        {
+            if let Some(stored) = record
                 .available_components
                 .as_ref()
-                .is_some_and(|ac| ac.components.is_empty())
-        {
-            reply_flags |= ServerToAgentFlags::ReportAvailableComponents as u64;
+                .filter(|ac| ac.components.is_empty())
+            {
+                if record.components_demanded.as_ref() != Some(&stored.hash) {
+                    record.components_demanded = Some(stored.hash.clone());
+                    reply_flags |= ServerToAgentFlags::ReportAvailableComponents as u64;
+                }
+            }
         }
 
         // A queued restart goes out as the Baseline's command-only message: nothing but
@@ -3764,6 +3781,7 @@ mod tests {
             last_seen_ms: now_ms(),
             restart_pending: false,
             available_components: None,
+            components_demanded: None,
             connection_settings_status: None,
             package_statuses: None,
             owner: None,
