@@ -192,6 +192,7 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             ("supervisor::command", Adapter),
             ("supervisor::endpoint", Adapter),
             ("supervisor::process", Adapter),
+            ("supervisor::telegraf", Adapter),
             ("telemetry", Adapter),
             // Test-only: the log capture the unit tests share, bound to `tracing_subscriber`.
             ("test_support", Adapter),

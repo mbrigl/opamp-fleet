@@ -604,7 +604,7 @@
       const esc = (s) => (s ?? "").toString().replace(/[&<>"'`]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;", "`": "&#96;" }[c]));
       // The grammar an Agent's effective configuration is coloured with, chosen by the type the
       // Agent reports (ADR-0031 clause 3); any other type is shown plain.
-      const CONFIG_GRAMMARS = new Map([["supervisor", "toml"], ["fluent-bit", "ini"]]);
+      const CONFIG_GRAMMARS = new Map([["supervisor", "toml"], ["telegraf", "toml"], ["fluent-bit", "ini"]]);
       const configGrammar = (type) => ((type || "").startsWith("otelcol") ? "yaml" : CONFIG_GRAMMARS.get(type) || null);
       // Coloured configurations by grammar and text: the refresh every two seconds draws an
       // unchanged one from here instead of colouring it again. A text whose colouring failed is

@@ -4,7 +4,7 @@
 //! Getting a real agent into the fleet is a research task before it is a command: which repository
 //! publishes the binaries, what the assets are called this month, which checksum file goes with
 //! them, and whether the container is one a Client can open at all. This tool holds that knowledge
-//! for the agent types the manual documents — `otelcol`, `otelcol-contrib`,
+//! for the agent types the manual documents — `otelcol`, `otelcol-contrib`, `telegraf`,
 //! and `supervisor`, this fleet's own Client (ADR-0019) — and asks the
 //! operator only what it cannot know: which one, which version, which platforms, and where to send
 //! the result.
@@ -88,6 +88,9 @@ enum AgentKind {
     /// The OpenTelemetry Collector, Contrib distribution — the one carrying `opampextension`.
     #[value(name = "otelcol-contrib")]
     OtelcolContrib,
+    /// Telegraf.
+    #[value(name = "telegraf")]
+    Telegraf,
     /// This fleet's own Client — the package a Client updates *itself* from (ADR-0018, ADR-0019).
     #[value(name = "supervisor")]
     Supervisor,
@@ -98,7 +101,8 @@ struct Source {
     /// The Agent type a Supervisor reports and a package Set is built for (ADR-0027) — also this
     /// tool's default package name.
     service_name: &'static str,
-    /// The GitHub repository whose tags name the versions.
+    /// The GitHub repository whose tags name the versions. Telegraf's binaries do not live there,
+    /// but its versions do.
     repo: &'static str,
 }
 
@@ -113,6 +117,10 @@ impl AgentKind {
                 service_name: "otelcol-contrib",
                 repo: "open-telemetry/opentelemetry-collector-releases",
             },
+            AgentKind::Telegraf => Source {
+                service_name: "telegraf",
+                repo: "influxdata/telegraf",
+            },
             // This repository's own releases. The Client is an Agent like any other (ADR-0018), so
             // the artifact that updates it is fetched the way every other agent's is — and by
             // ADR-0034 it is named and packed like one too, which is what makes that possible.
@@ -125,9 +133,9 @@ impl AgentKind {
 
     /// The version a tag names, or `None` when the tag is not a release of *this* agent.
     ///
-    /// Each project spells its tags its own way, and one of them carries tags that are not releases
+    /// Each project spells its tags its own way, and two of them carry tags that are not releases
     /// at all: the Collector repository tags its builder and supervisor alongside
-    /// (`cmd/builder/v0.158.0`). A pattern
+    /// (`cmd/builder/v0.158.0`), and Telegraf keeps release candidates (`v1.21.0-rc1`). A pattern
     /// per source is what keeps those out of the list an operator picks from.
     fn version_of_tag(self, tag: &str) -> Option<String> {
         let numeric = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit());
@@ -142,7 +150,7 @@ impl AgentKind {
     /// project's release workflow creates them under (ADR-0033).
     fn tag_prefix(self) -> &'static str {
         match self {
-            AgentKind::Otelcol | AgentKind::OtelcolContrib => "v",
+            AgentKind::Otelcol | AgentKind::OtelcolContrib | AgentKind::Telegraf => "v",
             AgentKind::Supervisor => "version/",
         }
     }
@@ -168,7 +176,10 @@ impl AgentKind {
     /// (ADR-draft-the-operator-program-opamp-fleetctl clause 28).
     fn repacked(self) -> bool {
         match self {
-            AgentKind::Otelcol | AgentKind::OtelcolContrib | AgentKind::Supervisor => false,
+            AgentKind::Otelcol
+            | AgentKind::OtelcolContrib
+            | AgentKind::Supervisor
+            | AgentKind::Telegraf => false,
         }
     }
 
@@ -187,6 +198,11 @@ impl AgentKind {
             AgentKind::Otelcol | AgentKind::OtelcolContrib => {
                 "linux, darwin, windows — as the release publishes".to_string()
             }
+            AgentKind::Telegraf => group_platforms(
+                TELEGRAF_PLATFORMS
+                    .iter()
+                    .map(|(os, arch, _, _)| (*os, *arch)),
+            ),
             // Named rather than left to the release, unlike the Collectors': this is *this*
             // project's own build matrix (`.github/workflows/release.yml`), so it moves only when
             // this repository decides it should — and the column's question, "does it run on the
@@ -201,6 +217,10 @@ impl AgentKind {
     fn needs_assets(self) -> bool {
         match self {
             AgentKind::Otelcol | AgentKind::OtelcolContrib | AgentKind::Supervisor => true,
+            // Telegraf's GitHub releases carry no assets at all — its binaries are on a CDN, at a
+            // URL built from the version. What its plan reads from its release instead is the
+            // notes ([`release_notes`]).
+            AgentKind::Telegraf => false,
         }
     }
 
@@ -232,6 +252,11 @@ impl AgentKind {
                 name: "otelcol-contrib-conf",
                 service_name: "otelcol-contrib",
                 body: include_str!("../../../config/examples/otelcol-contrib-conf.yaml"),
+            }],
+            AgentKind::Telegraf => &[DefaultConfiguration {
+                name: "telegraf-conf",
+                service_name: "telegraf",
+                body: include_str!("../../../config/examples/telegraf-conf.toml"),
             }],
             // None. A Client is configured by `supervisor.toml` on its host — the one file the fleet
             // deliberately does not own (ADR-0017 admits only `[[supervisor]]` blocks), and none
@@ -321,10 +346,23 @@ struct DefaultConfiguration {
     body: &'static str,
 }
 
-/// One file to fetch, and where the SHA-256 it must match comes from.
+/// One file to fetch, where the SHA-256 it must match comes from, and whose signature it must
+/// carry where its upstream signs it.
 struct Download {
     url: String,
     checksum: ChecksumSource,
+    /// `None` for an upstream whose artifacts this tool holds to a digest alone.
+    signature: Option<DetachedSignature>,
+}
+
+/// An OpenPGP signature published beside an artifact, checked with `gpgv` against a key the tool
+/// carries — Telegraf's `.asc` (ADR-draft-telegraf clause 3).
+struct DetachedSignature {
+    /// The `.asc` beside the artifact.
+    url: String,
+    /// Whether a `404` refuses the artifact (`true`) or is the signature's absence, which leaves
+    /// the digests to decide (`false`).
+    required: bool,
 }
 
 /// One platform's artifact, planned before anything is downloaded.
@@ -363,6 +401,21 @@ enum ChecksumSource {
     /// A file holding one bare hex digest and nothing else — the Collector's per-asset sidecar
     /// from 0.158.0 on.
     BareDigest { url: String },
+    /// A digest the release notes publish on another origin than the artifact's, which a
+    /// `sha256sum`-style file beside the artifact must agree with where it exists — Telegraf's
+    /// (ADR-draft-telegraf clause 3): notes on GitHub, artifact and `.DIGESTS` on InfluxData's CDN.
+    ReleaseNotes {
+        /// What the notes publish for this artifact; `None` when they name it nowhere, which
+        /// refuses the artifact.
+        digest: Option<String>,
+        /// The release page the notes are on, for the refusal.
+        release: String,
+        /// The file beside the artifact; answered `404`, it is not published for this release.
+        sidecar: String,
+        /// Whether the release publishes the file beside every asset, so that a `404` refuses the
+        /// artifact instead of leaving the notes to decide alone.
+        sidecar_required: bool,
+    },
 }
 
 /// What happens between the download and the artifact.
@@ -765,7 +818,34 @@ async fn plans(agent: AgentKind, release: &Release<'_>) -> Result<Vec<Plan>, Str
             Ok(collector_plans(agent, release.version, release.assets))
         }
         AgentKind::Supervisor => Ok(supervisor_plans(release.version, release.assets)),
+        AgentKind::Telegraf => {
+            let source = agent.source();
+            let notes = release_notes(&source, release.tag).await?;
+            Ok(telegraf_plans(
+                release.version,
+                &format!(
+                    "https://github.com/{}/releases/tag/{}",
+                    source.repo, release.tag
+                ),
+                &notes,
+            ))
+        }
     }
+}
+
+/// The notes of one release — its body, as the release page shows it. Telegraf publishes each
+/// asset's SHA-256 there (ADR-draft-telegraf clause 3).
+async fn release_notes(source: &Source, tag: &str) -> Result<String, String> {
+    let body = get_json(&format!(
+        "https://api.github.com/repos/{}/releases/tags/{tag}",
+        source.repo
+    ))
+    .await?;
+    Ok(body
+        .get("body")
+        .and_then(|b| b.as_str())
+        .unwrap_or_default()
+        .to_string())
 }
 
 /// The Collector publishes `<dist>_<version>_<os>_<arch>.tar.gz` for every platform it supports,
@@ -791,6 +871,7 @@ fn collector_plans(agent: AgentKind, version: &str, assets: &[(String, String)])
             sources: vec![Download {
                 url: url.clone(),
                 checksum: collector_checksum(name, dist, assets),
+                signature: None,
             }],
             action: Action::AsPublished,
             out_name: name.clone(),
@@ -851,6 +932,7 @@ fn supervisor_plans(version: &str, assets: &[(String, String)]) -> Vec<Plan> {
             sources: vec![Download {
                 url: url.clone(),
                 checksum: ChecksumSource::Sums { urls: sums.clone() },
+                signature: None,
             }],
             action: Action::AsPublished,
             out_name: name.clone(),
@@ -886,6 +968,121 @@ fn collector_checksum(asset: &str, dist: &str, assets: &[(String, String)]) -> C
         .collect();
     urls.sort_by_key(|url| std::cmp::Reverse(url.len()));
     ChecksumSource::Sums { urls }
+}
+
+/// Telegraf's platforms, which cannot be read from anywhere: its GitHub releases carry no assets,
+/// and the CDN that holds the binaries serves no directory listing. The list is therefore this
+/// tool's own — kept to the platforms this fleet has a name for — and a URL that has gone away is
+/// reported as the 404 it is rather than hidden.
+///
+/// Each entry is (fleet os, fleet arch, upstream os, upstream arch). It sits at file scope because
+/// the agent menu names these same platforms ([`AgentKind::platforms`]), and a second copy of the
+/// list is a second thing to keep current.
+const TELEGRAF_PLATFORMS: [(&str, &str, &str, &str); 7] = [
+    ("linux", "amd64", "linux", "amd64"),
+    ("linux", "arm64", "linux", "arm64"),
+    ("linux", "386", "linux", "i386"),
+    ("darwin", "amd64", "darwin", "amd64"),
+    ("darwin", "arm64", "darwin", "arm64"),
+    ("windows", "amd64", "windows", "amd64"),
+    ("windows", "arm64", "windows", "arm64"),
+];
+
+/// What Telegraf offers, built from that list — the release is asked only for its notes, where
+/// each asset's SHA-256 is published (`notes`, read from the release page at `release`).
+///
+/// The SHA-256 comes from GitHub and the artifact from InfluxData's CDN, so neither origin alone
+/// can swap the artifact unnoticed. The `.DIGESTS` file beside each asset is the CDN's own
+/// statement of the same digest; where it is published it must agree, and from
+/// [`TELEGRAF_DIGESTS_FROM`] on it must be published. The `.asc` beside each asset is
+/// InfluxData's signature, required from [`TELEGRAF_SIGNED_FROM`] on and checked wherever it is
+/// published. A platform whose notes name
+/// no SHA-256 is still planned and is refused when it is fetched, so the operator is told why
+/// rather than shown a shorter list.
+fn telegraf_plans(version: &str, release: &str, notes: &str) -> Vec<Plan> {
+    let signed = version_key(version) >= version_key(TELEGRAF_SIGNED_FROM);
+    let digested = version_key(version) >= version_key(TELEGRAF_DIGESTS_FROM);
+    TELEGRAF_PLATFORMS
+        .iter()
+        .map(|(os, arch, up_os, up_arch)| {
+            let ext = if *os == "windows" { "zip" } else { "tar.gz" };
+            let name = format!("telegraf-{version}_{up_os}_{up_arch}.{ext}");
+            let url = format!("https://dl.influxdata.com/telegraf/releases/{name}");
+            // The archive wraps everything in a version-named directory, and the program sits at
+            // `usr/bin/telegraf` on Unix but at the root on Windows. The Client's kind knows both
+            // places and takes the program from there, so the upstream archive installs as it is.
+            Plan {
+                os: (*os).to_string(),
+                arch: (*arch).to_string(),
+                sources: vec![Download {
+                    checksum: ChecksumSource::ReleaseNotes {
+                        digest: parse_release_notes(notes, &name),
+                        release: release.to_string(),
+                        sidecar: format!("{url}.DIGESTS"),
+                        sidecar_required: digested,
+                    },
+                    signature: Some(DetachedSignature {
+                        url: format!("{url}.asc"),
+                        required: signed,
+                    }),
+                    url,
+                }],
+                action: Action::AsPublished,
+                out_name: name,
+                block_hint: "type = \"telegraf\"  (docs/artifacts/telegraf.md)".to_string(),
+            }
+        })
+        .collect()
+}
+
+/// The first Telegraf release from which InfluxData publishes an `.asc` beside every asset; from
+/// it on, every release does (ADR-draft-telegraf clause 3). Before it a few releases carry one
+/// for some assets, and none for most.
+const TELEGRAF_SIGNED_FROM: &str = "1.34.4";
+
+/// The first Telegraf release from which InfluxData publishes a `.DIGESTS` beside every asset;
+/// from it on, every release does (ADR-draft-telegraf clause 3). Between 1.36.4 and 1.38.4 a few
+/// assets carry one and most do not.
+const TELEGRAF_DIGESTS_FROM: &str = "1.39.0";
+
+/// InfluxData's package-signing key, carried in the tool (ADR-draft-telegraf clause 3):
+/// `InfluxData Package Signing Key <support@influxdata.com>`, primary key
+/// [`INFLUXDATA_PRIMARY_KEY`], with its signing subkeys `9D53 9D90 … D8FF 8E1F 7DF8 B07E`
+/// (2023-01-18, expired 2026-01-17) and `AC10 D744 … DA61 C26A 0585 BD3B` (2025-07-10, expires
+/// 2029-01-17). Dearmored from `https://repos.influxdata.com/influxdata-archive.key`, because a
+/// binary keyring is what `gpgv` reads.
+const INFLUXDATA_ARCHIVE_KEY: &[u8] = include_bytes!("../trust/influxdata-archive.gpg");
+
+/// The primary key a Telegraf signature has to chain to, whichever of its subkeys made it.
+const INFLUXDATA_PRIMARY_KEY: &str = "24C975CBA61A024EE1B631787C3D57159FC2F927";
+
+/// Holds a downloaded artifact to the signature published beside it: fetched, and checked against
+/// InfluxData's key. A `404` refuses the artifact where the signature is required, and is its
+/// absence otherwise.
+async fn verify_published_signature(
+    signature: &DetachedSignature,
+    artifact: &Path,
+) -> Result<(), String> {
+    let Some(asc) = get_optional_bytes(&signature.url).await? else {
+        if signature.required {
+            return Err(format!(
+                "{} answered 404 — this release publishes a signature beside every artifact, \
+                 so one without it is refused",
+                signature.url
+            ));
+        }
+        eprintln!("  no signature published beside it — the SHA-256 decides");
+        return Ok(());
+    };
+    crate::gpgv::verify_detached(
+        &asc,
+        artifact,
+        INFLUXDATA_ARCHIVE_KEY,
+        &[INFLUXDATA_PRIMARY_KEY],
+    )
+    .map_err(|e| format!("{}: {e}", signature.url))?;
+    eprintln!("  verified InfluxData's signature");
+    Ok(())
 }
 
 /// Upstream's platform words in this fleet's vocabulary (ADR-0027), or `None` for one this fleet
@@ -938,6 +1135,9 @@ async fn produce(plan: &Plan, out_dir: &Path) -> Result<PathBuf, String> {
             ));
         }
         eprintln!("  verified against upstream's SHA-256");
+        if let Some(signature) = &source.signature {
+            verify_published_signature(signature, &downloaded).await?;
+        }
         fetched.push(downloaded);
     }
     // Every plan has exactly one; the ones that act on "the download" mean this.
@@ -981,6 +1181,33 @@ async fn published_sha256(source: &ChecksumSource, artifact: &Path) -> Result<St
                 .to_string());
         }
         ChecksumSource::Sums { urls } => urls,
+        ChecksumSource::ReleaseNotes {
+            digest,
+            release,
+            sidecar,
+            sidecar_required,
+        } => {
+            let beside = get_optional_bytes(sidecar).await?;
+            if beside.is_none() && *sidecar_required {
+                return Err(format!(
+                    "{sidecar} is not published, though this release publishes one beside every \
+                     asset — the artifact is not fetched"
+                ));
+            }
+            let beside = beside
+                .map(|bytes| {
+                    String::from_utf8(bytes)
+                        .map_err(|_| format!("{sidecar} is not a checksum file"))
+                })
+                .transpose()?;
+            return corroborate(
+                digest.as_deref(),
+                beside.as_deref(),
+                artifact,
+                release,
+                sidecar,
+            );
+        }
     };
     if urls.is_empty() {
         return Err("upstream published no checksum for this artifact".to_string());
@@ -997,6 +1224,69 @@ async fn published_sha256(source: &ChecksumSource, artifact: &Path) -> Result<St
         artifact.file_name().unwrap_or_default().to_string_lossy(),
         urls.join(", ")
     ))
+}
+
+/// The digest the release notes state for `asset`, read from their table of
+/// `| <arch> | <os> | [<asset>](<url>) | <sha256> |` rows, where the name and the digest may be
+/// wrapped in backticks. `None` when no row names the asset, when its last cell is not a SHA-256,
+/// or when two rows name it with different digests.
+fn parse_release_notes(notes: &str, asset: &str) -> Option<String> {
+    let mut found: Option<String> = None;
+    for line in notes.lines() {
+        let cells: Vec<&str> = line
+            .split('|')
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+            .collect();
+        let names_it = cells.iter().any(|cell| {
+            cell.strip_prefix('[')
+                .and_then(|rest| rest.split_once("]("))
+                .is_some_and(|(text, _)| text.trim_matches('`') == asset)
+        });
+        if !names_it {
+            continue;
+        }
+        let digest = cells.last()?.trim_matches('`');
+        if digest.len() != 64 || !digest.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        let digest = digest.to_ascii_lowercase();
+        match &found {
+            Some(earlier) if *earlier != digest => return None,
+            _ => found = Some(digest),
+        }
+    }
+    found
+}
+
+/// The SHA-256 an artifact is held to when its release notes and a file beside it may both state
+/// one (ADR-draft-telegraf clause 3): the notes' digest, which must exist, and which the file
+/// beside the artifact must agree with when it is published at all.
+fn corroborate(
+    notes: Option<&str>,
+    beside: Option<&str>,
+    artifact: &Path,
+    release: &str,
+    sidecar: &str,
+) -> Result<String, String> {
+    let name = artifact.file_name().unwrap_or_default().to_string_lossy();
+    let Some(notes) = notes else {
+        return Err(format!(
+            "the release notes at {release} publish no SHA-256 for {name} — an artifact only its \
+             download host vouches for is not fetched"
+        ));
+    };
+    let Some(beside) = beside else {
+        return Ok(notes.to_string());
+    };
+    match parse_sums(beside, artifact) {
+        Some(digest) if digest.eq_ignore_ascii_case(notes) => Ok(notes.to_string()),
+        Some(digest) => Err(format!(
+            "the two published SHA-256 of {name} disagree\n  release notes ({release}): \
+             {notes}\n  {sidecar}: {digest}"
+        )),
+        None => Err(format!("{sidecar} has no line for {name}")),
+    }
 }
 
 /// The artifact's digest out of a `sha256sum`-style file: `<hash>  <name>` lines, where the name
@@ -1633,6 +1923,29 @@ async fn get_bytes(url: &str) -> Result<Vec<u8>, String> {
         .to_vec())
 }
 
+/// As [`get_bytes`], with a `404` answered as `None`: a file a release may or may not publish.
+async fn get_optional_bytes(url: &str) -> Result<Option<Vec<u8>>, String> {
+    let response = http()?
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("cannot reach {url}: {}", because(&e)))?;
+    let status = response.status();
+    if status == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    if !status.is_success() {
+        return Err(format!("{url} answered {status}"));
+    }
+    Ok(Some(
+        response
+            .bytes()
+            .await
+            .map_err(|e| format!("cannot read {url}: {e}"))?
+            .to_vec(),
+    ))
+}
+
 async fn get_json(url: &str) -> Result<serde_json::Value, String> {
     let bytes = get_bytes(url).await.map_err(|e| {
         // The one failure an operator hits without doing anything wrong, and it says nothing about
@@ -1650,7 +1963,9 @@ async fn get_json(url: &str) -> Result<serde_json::Value, String> {
 mod tests {
     /// The agent menu names the systems each agent can be fetched for, which is not something to
     /// discover three questions later. Every variant answers —
-    /// adding one without a line here is the omission this catches.
+    /// adding one without a line here is the omission this catches — and Telegraf's answer is the
+    /// table `telegraf_plans` builds from, so the menu cannot claim a platform the tool then fails
+    /// to fetch.
     #[test]
     fn the_agent_menu_states_the_systems_each_agent_is_published_for() {
         for agent in super::AgentKind::value_variants() {
@@ -1660,6 +1975,27 @@ mod tests {
                 "{agent:?} names no system: {platforms:?}"
             );
         }
+
+        // Read back what the grouping wrote: every platform `telegraf_plans` fetches is named,
+        // and none that it does not.
+        let telegraf = super::AgentKind::Telegraf.platforms();
+        let named: Vec<(String, String)> = telegraf
+            .split(' ')
+            .flat_map(|group| {
+                let (os, arches) = group.split_once('/').expect("os/arch group");
+                arches
+                    .split('+')
+                    .map(move |arch| (os.to_string(), arch.to_string()))
+            })
+            .collect();
+        let fetched: Vec<(String, String)> = super::TELEGRAF_PLATFORMS
+            .iter()
+            .map(|(os, arch, _, _)| (os.to_string(), arch.to_string()))
+            .collect();
+        assert_eq!(
+            named, fetched,
+            "the menu and the fetch disagree: {telegraf:?}"
+        );
     }
 
     /// `group_platforms` states that a menu line wrapping at eighty columns is one `dialoguer`
@@ -1692,7 +2028,7 @@ mod tests {
             .iter()
             .map(|agent| agent.source().service_name)
             .collect();
-        for expected in ["otelcol", "otelcol-contrib"] {
+        for expected in ["otelcol", "otelcol-contrib", "telegraf"] {
             assert!(offered.contains(&expected), "{expected} is not offered");
         }
     }
@@ -1756,7 +2092,8 @@ mod tests {
     }
 
     /// The tag patterns are what keep a version list from offering things that are not releases of
-    /// the agent being fetched — the Collector repository tags its builder alongside.
+    /// the agent being fetched — the Collector repository tags its builder alongside, and Telegraf
+    /// keeps its release candidates.
     #[test]
     fn a_tag_is_a_version_only_when_it_is_this_agents_release() {
         assert_eq!(
@@ -1770,6 +2107,11 @@ mod tests {
         ] {
             assert_eq!(AgentKind::Otelcol.version_of_tag(other), None, "{other}");
         }
+        assert_eq!(
+            AgentKind::Telegraf.version_of_tag("v1.39.3"),
+            Some("1.39.3".to_string())
+        );
+        assert_eq!(AgentKind::Telegraf.version_of_tag("v1.21.0-rc1"), None);
 
         // This project's own tags carry the prefix its release workflow creates them under, and
         // the round trip is what `--version` relies on: an operator types what the release page
@@ -2008,6 +2350,399 @@ mod tests {
             collector_checksum("otelcol_0.157.0_linux_amd64.tar.gz", "otelcol", &older),
             ChecksumSource::Sums { .. }
         ));
+    }
+
+    /// Telegraf's Windows archive is a zip and its Unix ones are tarballs, and upstream spells
+    /// 32-bit `i386` where this fleet says `386`. Its release tags name a SemVer Package version
+    /// as they are.
+    ///
+    /// The packing half of `docs/artifacts/telegraf.md`; its client half is in
+    /// `crates/fleet-agent/src/supervisor/telegraf.rs`.
+    /// Verifies: ADR-draft-telegraf
+    #[test]
+    fn telegraf_urls_carry_upstreams_spelling_and_the_platform_this_fleet_names() {
+        let plans = telegraf_plans("1.39.3", RELEASE, TELEGRAF_NOTES);
+        let find = |os: &str, arch: &str| {
+            plans
+                .iter()
+                .find(|p| p.os == os && p.arch == arch)
+                .unwrap_or_else(|| panic!("no {os}/{arch}"))
+        };
+        let url = |os: &str, arch: &str| find(os, arch).sources[0].url.clone();
+        assert!(url("linux", "amd64").ends_with("telegraf-1.39.3_linux_amd64.tar.gz"));
+        assert!(url("windows", "amd64").ends_with("_windows_amd64.zip"));
+        assert!(url("linux", "386").ends_with("_linux_i386.tar.gz"));
+        // The SHA-256 is the release notes' on GitHub, and the `.DIGESTS` beside the asset on the
+        // CDN is what must agree with it (ADR-draft-telegraf clause 3).
+        match &find("linux", "amd64").sources[0].checksum {
+            ChecksumSource::ReleaseNotes {
+                digest,
+                release,
+                sidecar,
+                sidecar_required,
+            } => {
+                assert_eq!(digest.as_deref(), Some(LINUX_AMD64));
+                assert!(
+                    sidecar_required,
+                    "1.39.3 publishes a .DIGESTS beside every asset"
+                );
+                assert_eq!(release, RELEASE);
+                assert_eq!(
+                    sidecar,
+                    "https://dl.influxdata.com/telegraf/releases/\
+                     telegraf-1.39.3_linux_amd64.tar.gz.DIGESTS"
+                );
+            }
+            _ => panic!("Telegraf's checksum is not its release notes'"),
+        }
+        // A platform the notes name nowhere is still planned, and refused when it is fetched.
+        assert!(matches!(
+            &find("linux", "386").sources[0].checksum,
+            ChecksumSource::ReleaseNotes { digest: None, .. }
+        ));
+        // The block is the kind and nothing else (ADR-draft-telegraf): the program's name per
+        // platform is the Client's to know, and `docs/artifacts/telegraf.md` is where the two sides
+        // meet.
+        assert_eq!(
+            find("windows", "amd64").block_hint,
+            "type = \"telegraf\"  (docs/artifacts/telegraf.md)"
+        );
+        // Every release tag Telegraf's list admits is three numbers, so it is fetched under
+        // `v<version>` and named as a Package by the same three numbers (ADR-0028 clause 6).
+        let version = AgentKind::Telegraf
+            .version_of_tag("v1.39.3")
+            .expect("a release tag");
+        assert_eq!(
+            AgentKind::Telegraf.release_names(&version),
+            Ok(("v1.39.3".to_string(), "1.39.3".to_string()))
+        );
+    }
+
+    /// The release page Telegraf's test notes stand for.
+    const RELEASE: &str = "https://github.com/influxdata/telegraf/releases/tag/v1.39.3";
+
+    const LINUX_AMD64: &str = "2ddd297f3b0cea5c91f2fed36671a24a9e26c374fcdedf16113fb4bda8a9c012";
+    const WINDOWS_AMD64: &str = "94178e3104a16d77c39ffd1149d2868e9d635aa38b8d5d95948f8aaf0b2f6d07";
+
+    /// Release notes in the two shapes Telegraf has published its table in — bare (1.28 on) and
+    /// with backticks (before) — with the `static` build beside the one this fleet fetches, whose
+    /// name starts the same way. No row for `linux_i386`.
+    const TELEGRAF_NOTES: &str = "\
+## v1.39.3 [2026-10-01]
+
+### Bugfixes
+
+- a fix that mentions telegraf-1.39.3_linux_amd64.tar.gz in passing
+
+Arch | Platform | Package | SHA256
+---| --- | --- | ---
+amd64 | Linux | [telegraf-1.39.3_linux_amd64.tar.gz](https://dl.influxdata.com/telegraf/releases/telegraf-1.39.3_linux_amd64.tar.gz) | 2ddd297f3b0cea5c91f2fed36671a24a9e26c374fcdedf16113fb4bda8a9c012
+amd64 | Linux | [`telegraf-1.39.3_static_linux_amd64.tar.gz`](https://dl.influxdata.com/telegraf/releases/telegraf-1.39.3_static_linux_amd64.tar.gz) | `f51aeb581c1ef576afc478fc930568558380d38f8000c3b354ecd5e9312cab37`
+amd64 | Windows | [`telegraf-1.39.3_windows_amd64.zip`](https://dl.influxdata.com/telegraf/releases/telegraf-1.39.3_windows_amd64.zip) | `94178E3104A16D77C39FFD1149D2868E9D635AA38B8D5D95948F8AAF0B2F6D07`
+";
+
+    /// The notes' digest is found by the asset's exact name in its link, in either shape, and
+    /// is nothing else: not the `static` build's, not a mention in the prose, not a cell that is
+    /// no SHA-256, not one of two rows that disagree.
+    /// Verifies: ADR-draft-telegraf
+    #[test]
+    fn the_release_notes_digest_is_read_by_the_assets_name() {
+        assert_eq!(
+            parse_release_notes(TELEGRAF_NOTES, "telegraf-1.39.3_linux_amd64.tar.gz").as_deref(),
+            Some(LINUX_AMD64)
+        );
+        assert_eq!(
+            parse_release_notes(TELEGRAF_NOTES, "telegraf-1.39.3_windows_amd64.zip").as_deref(),
+            Some(WINDOWS_AMD64),
+            "backticks are dropped and the digest is compared in lower case"
+        );
+        assert_eq!(
+            parse_release_notes(TELEGRAF_NOTES, "telegraf-1.39.3_linux_i386.tar.gz"),
+            None
+        );
+        let short = "amd64 | Linux | [a.tar.gz](https://x/a.tar.gz) | 2ddd297f";
+        assert_eq!(parse_release_notes(short, "a.tar.gz"), None);
+        let twice = format!(
+            "amd64 | Linux | [a.tar.gz](https://x/a.tar.gz) | {LINUX_AMD64}\n\
+             amd64 | Linux | [a.tar.gz](https://x/a.tar.gz) | {WINDOWS_AMD64}\n"
+        );
+        assert_eq!(parse_release_notes(&twice, "a.tar.gz"), None);
+    }
+
+    /// The release notes' digest is required, and the file beside the artifact agrees with it or
+    /// fails the fetch — and where no such file is published, as for most assets before 1.39.0,
+    /// the notes alone decide (ADR-draft-telegraf clause 3).
+    /// Verifies: ADR-draft-telegraf
+    #[test]
+    fn an_artifact_is_held_to_its_release_notes_and_to_the_digests_beside_it() {
+        let artifact = Path::new("telegraf-1.39.3_linux_amd64.tar.gz");
+        let sidecar = "https://dl.influxdata.com/x.DIGESTS";
+        let digests = format!("{LINUX_AMD64}  telegraf-1.39.3_linux_amd64.tar.gz\n");
+        let held = |notes: Option<&str>, beside: Option<&str>| {
+            corroborate(notes, beside, artifact, RELEASE, sidecar)
+        };
+
+        assert_eq!(held(Some(LINUX_AMD64), None), Ok(LINUX_AMD64.to_string()));
+        assert_eq!(
+            held(Some(LINUX_AMD64), Some(&digests)),
+            Ok(LINUX_AMD64.to_string())
+        );
+
+        let other = format!("{WINDOWS_AMD64}  telegraf-1.39.3_linux_amd64.tar.gz\n");
+        let disagree = held(Some(LINUX_AMD64), Some(&other)).expect_err("two digests");
+        assert!(disagree.contains("disagree"), "{disagree}");
+        assert!(
+            disagree.contains(LINUX_AMD64) && disagree.contains(WINDOWS_AMD64),
+            "{disagree}"
+        );
+
+        let unvouched = held(None, Some(&digests)).expect_err("the CDN's word alone");
+        assert!(unvouched.contains(RELEASE), "{unvouched}");
+        assert!(held(None, None).is_err(), "nothing published at all");
+
+        let elsewhere = held(Some(LINUX_AMD64), Some("aaaa  other.tar.gz\n"))
+            .expect_err("a file beside it that does not name it");
+        assert!(elsewhere.contains("has no line"), "{elsewhere}");
+    }
+
+    /// The file beside the artifact is fetched, and a `404` is its absence rather than a failure
+    /// before 1.39.0, from which every asset has one; from then on the `404` refuses it. A
+    /// stand-in host serves the `.DIGESTS` of one artifact and answers `404` for another.
+    /// Verifies: ADR-draft-telegraf
+    #[tokio::test]
+    async fn digests_that_are_not_published_leave_the_release_notes_to_decide() {
+        let required = |version: &str| {
+            telegraf_plans(version, RELEASE, TELEGRAF_NOTES)
+                .iter()
+                .map(|plan| match &plan.sources[0].checksum {
+                    ChecksumSource::ReleaseNotes {
+                        sidecar_required, ..
+                    } => *sidecar_required,
+                    _ => panic!("Telegraf's checksum is not its release notes'"),
+                })
+                .collect::<Vec<_>>()
+        };
+        assert!(required("1.38.4").iter().all(|r| !r));
+        assert!(required("1.39.0").iter().all(|r| *r));
+
+        use std::io::Write;
+
+        opamp::tls::install_ring_provider();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let host = format!("http://{}", listener.local_addr().expect("addr"));
+        let digests = format!("{LINUX_AMD64}  telegraf-1.39.3_linux_amd64.tar.gz\n");
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let mut head = Vec::new();
+                let mut byte = [0u8; 1];
+                while !head.ends_with(b"\r\n\r\n") {
+                    match stream.read(&mut byte) {
+                        Ok(1) => head.push(byte[0]),
+                        _ => break,
+                    }
+                }
+                let line = String::from_utf8_lossy(&head)
+                    .lines()
+                    .next()
+                    .map(str::to_string);
+                let answer = match line {
+                    Some(line) if line.contains("/published.DIGESTS ") => format!(
+                        "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{digests}",
+                        digests.len()
+                    ),
+                    _ => "HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                        .to_string(),
+                };
+                let _ = stream.write_all(answer.as_bytes());
+            }
+        });
+
+        let artifact = Path::new("telegraf-1.39.3_linux_amd64.tar.gz");
+        let source = |sidecar: &str, digest: &str, required: bool| ChecksumSource::ReleaseNotes {
+            digest: Some(digest.to_string()),
+            release: RELEASE.to_string(),
+            sidecar: format!("{host}/{sidecar}"),
+            sidecar_required: required,
+        };
+        assert_eq!(
+            published_sha256(&source("absent.DIGESTS", LINUX_AMD64, false), artifact).await,
+            Ok(LINUX_AMD64.to_string()),
+            "no file beside it: the notes decide"
+        );
+        let refused = published_sha256(&source("absent.DIGESTS", LINUX_AMD64, true), artifact)
+            .await
+            .expect_err("a release that publishes one beside every asset");
+        assert!(refused.contains("is not published"), "{refused}");
+        assert_eq!(
+            published_sha256(&source("published.DIGESTS", LINUX_AMD64, false), artifact).await,
+            Ok(LINUX_AMD64.to_string())
+        );
+        let refused =
+            published_sha256(&source("published.DIGESTS", WINDOWS_AMD64, false), artifact)
+                .await
+                .expect_err("the file beside it disagrees");
+        assert!(refused.contains("disagree"), "{refused}");
+    }
+
+    /// The key the tool carries is InfluxData's: it verifies InfluxData's own signature of the
+    /// `.DIGESTS` beside `telegraf-1.40.2_linux_amd64.tar.gz`, as the CDN served both, made by the
+    /// signing subkey of the pinned primary key (ADR-draft-telegraf clause 3).
+    /// Verifies: ADR-draft-telegraf
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_carried_key_verifies_influxdatas_own_signature() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let digests = dir
+            .path()
+            .join("telegraf-1.40.2_linux_amd64.tar.gz.DIGESTS");
+        std::fs::write(
+            &digests,
+            include_bytes!(
+                "../testdata/telegraf-signature/telegraf-1.40.2_linux_amd64.tar.gz.DIGESTS"
+            ),
+        )
+        .expect("digests");
+        let asc = include_bytes!(
+            "../testdata/telegraf-signature/telegraf-1.40.2_linux_amd64.tar.gz.DIGESTS.asc"
+        );
+        crate::gpgv::verify_detached(
+            asc,
+            &digests,
+            INFLUXDATA_ARCHIVE_KEY,
+            &[INFLUXDATA_PRIMARY_KEY],
+        )
+        .expect("signed by InfluxData");
+        // The subkey that made it is not the key pinned.
+        crate::gpgv::verify_detached(
+            asc,
+            &digests,
+            INFLUXDATA_ARCHIVE_KEY,
+            &["AC10D7449F343ADCEFDDC2B6DA61C26A0585BD3B"],
+        )
+        .expect_err("a subkey is not its primary");
+    }
+
+    /// From 1.34.4 on every Telegraf asset is planned with its `.asc` required; before, the
+    /// `.asc` is checked where it is published. A stand-in host answers `404` for every
+    /// signature: that refuses a required one and leaves the SHA-256 to decide otherwise, without
+    /// `gpgv` being asked (ADR-draft-telegraf clause 3).
+    /// Verifies: ADR-draft-telegraf
+    #[tokio::test]
+    async fn a_missing_signature_refuses_only_a_release_that_signs_every_asset() {
+        use std::io::Write;
+
+        let required = |version: &str| {
+            telegraf_plans(version, RELEASE, TELEGRAF_NOTES)
+                .iter()
+                .map(|plan| {
+                    let signature = plan.sources[0].signature.as_ref().expect("a signature");
+                    assert_eq!(signature.url, format!("{}.asc", plan.sources[0].url));
+                    signature.required
+                })
+                .collect::<Vec<_>>()
+        };
+        assert!(required("1.34.3").iter().all(|r| !r));
+        assert!(required("1.34.4").iter().all(|r| *r));
+        assert!(required("1.40.2").iter().all(|r| *r));
+
+        opamp::tls::install_ring_provider();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let host = format!("http://{}", listener.local_addr().expect("addr"));
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let mut head = Vec::new();
+                let mut byte = [0u8; 1];
+                while !head.ends_with(b"\r\n\r\n") {
+                    match stream.read(&mut byte) {
+                        Ok(1) => head.push(byte[0]),
+                        _ => break,
+                    }
+                }
+                let _ = stream.write_all(
+                    b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                );
+            }
+        });
+
+        let artifact = Path::new("telegraf-1.34.3_linux_amd64.tar.gz");
+        let signature = |required: bool| DetachedSignature {
+            url: format!("{host}/{}.asc", artifact.display()),
+            required,
+        };
+        verify_published_signature(&signature(false), artifact)
+            .await
+            .expect("not published: the SHA-256 decides");
+        let refused = verify_published_signature(&signature(true), artifact)
+            .await
+            .expect_err("required and not published");
+        assert!(refused.contains("404"), "{refused}");
+    }
+
+    /// A published `.asc` must verify at any version: one that does not refuses the artifact
+    /// before 1.34.4 too, where a missing one would not. A stand-in host serves InfluxData's own
+    /// signature of a `.DIGESTS` file, which holds for those bytes and for no others
+    /// (ADR-draft-telegraf clause 3).
+    /// Verifies: ADR-draft-telegraf
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_published_signature_that_does_not_verify_refuses_the_artifact_at_any_version() {
+        use std::io::Write;
+
+        let asc: &[u8] = include_bytes!(
+            "../testdata/telegraf-signature/telegraf-1.40.2_linux_amd64.tar.gz.DIGESTS.asc"
+        );
+        opamp::tls::install_ring_provider();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let host = format!("http://{}", listener.local_addr().expect("addr"));
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let mut head = Vec::new();
+                let mut byte = [0u8; 1];
+                while !head.ends_with(b"\r\n\r\n") {
+                    match stream.read(&mut byte) {
+                        Ok(1) => head.push(byte[0]),
+                        _ => break,
+                    }
+                }
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    asc.len()
+                );
+                let _ = stream.write_all(head.as_bytes());
+                let _ = stream.write_all(asc);
+            }
+        });
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let signed = dir
+            .path()
+            .join("telegraf-1.40.2_linux_amd64.tar.gz.DIGESTS");
+        std::fs::write(
+            &signed,
+            include_bytes!(
+                "../testdata/telegraf-signature/telegraf-1.40.2_linux_amd64.tar.gz.DIGESTS"
+            ),
+        )
+        .expect("digests");
+        let other = dir.path().join("telegraf-1.34.3_linux_amd64.tar.gz");
+        std::fs::write(&other, b"not the bytes InfluxData signed").expect("artifact");
+        let signature = |required: bool| DetachedSignature {
+            url: format!("{host}/telegraf-1.34.3_linux_amd64.tar.gz.asc"),
+            required,
+        };
+
+        verify_published_signature(&signature(false), &signed)
+            .await
+            .expect("the signature holds for the bytes it signs");
+        for required in [false, true] {
+            let refused = verify_published_signature(&signature(required), &other)
+                .await
+                .expect_err("a published signature over other bytes");
+            assert!(refused.contains(&signature(required).url), "{refused}");
+        }
     }
 
     /// A directory reached through a link is packed **under the linked name too**, with its
@@ -2650,6 +3385,7 @@ mod tests {
             sources: vec![Download {
                 url: String::new(),
                 checksum: ChecksumSource::BareDigest { url: String::new() },
+                signature: None,
             }],
             action: Action::AsPublished,
             out_name: "otelcol_0.0.1_linux_amd64.tar.gz".into(),

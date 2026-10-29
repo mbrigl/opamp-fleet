@@ -2147,6 +2147,31 @@ Here `fluent-bit-conf` is the *name of the Configuration on the Server* — that
 file
 is called.
 
+### `type = "telegraf"`
+
+For Telegraf. Also two lines:
+
+```toml
+[[supervisor]]
+type = "telegraf"
+name = "telegraf"
+```
+
+The kind knows the program's name per platform, points `--config` at the Configuration named
+`telegraf-conf`, asks `--version`, and applies a configuration with **`SIGHUP`** where signals exist
+and a restart where they do not. That last part is why the kind exists: as a block key the signal
+was refused on Windows at parse time, so one Supervisor set could not serve a mixed fleet. Listed
+in `remote_config_disabled`, it runs on the `telegraf-conf` you place in its `config/` directory,
+and without one Telegraf exits and is reported.
+
+Telegraf runs under the Client's account. Under the account a Linux package creates, an input that
+needs root (`smart`, `ipmi_sensor`) works only with `use_sudo = true` and a `sudoers` rule for that
+account; running the Client as root is your choice per host, with
+`opamp-fleet service install --run-as root`
+([Running it under its own account](#running-it-under-its-own-account)).
+
+The artifact is [`docs/artifacts/telegraf.md`](../artifacts/telegraf.md).
+
 ## How a block names its program
 
 `binary` and `command` take a **bare file name** — `otelcol-contrib`, not a path. It names a file in
