@@ -347,6 +347,15 @@ async fn the_full_map_is_demanded_once_per_hash() {
     }
     let reply = exchange(&client, &url, &reporting(compressed_report(&uid, 5), b"h2")).await;
     assert!(demands(&reply));
+
+    // An Agent that restarted without a goodbye is asked again: the demand may have been lost.
+    let reply = exchange(
+        &client,
+        &url,
+        &reporting(full_report(&uid, "hashonly", 1), b"h2"),
+    )
+    .await;
+    assert!(demands(&reply));
 }
 
 #[tokio::test]

@@ -1992,9 +1992,10 @@ impl AppState {
 
         record.sequence_num = msg.sequence_num;
         record.transport = transport;
-        // A demand for the component map may have been lost with the previous connection, so a
-        // new one may be asked again.
-        if !record.connected || record.owner != conn {
+        // A demand for the component map may have been lost with the previous connection, or with
+        // an Agent that restarted (a gap in `sequence_num`, which plain HTTP has instead of a
+        // connection), so either may be asked again.
+        if !record.connected || record.owner != conn || gap {
             record.components_demanded = None;
         }
         record.connected = true;
