@@ -203,6 +203,19 @@ thing that closes the loop and widens only as the protocol and its agents actual
     records under its data directory or in PostgreSQL, as the operator names. An Agent receives
     the same verified bytes either way, through the Server, and the fleet never reaches a store
     itself.
+20. **G-20** — **A fleet of up to about 100 000 Agents is served on when a Server instance is
+    lost.** Two or more Server instances shall serve one fleet of up to about 100 000 Agents from
+    one PostgreSQL database and one S3-compatible object store. When one instance stops without
+    warning, every Agent it carried shall be connected to another instance within its lease time and
+    two heartbeat intervals (90 seconds at the defaults), served from what the shared stores hold. A
+    revocation committed on any instance shall end the sessions it concerns on every instance within
+    one lease renewal interval (10 seconds at the defaults). A test shows both for a simulated fleet
+    of 10 000 Agents across three instances. A second test shows that the database carries the
+    presence writes and the notifications of 100 000 simulated Agents at the default heartbeat of 30
+    seconds, about 3 300 reports a second, across three instances, with no presence batch written
+    later than its interval after it was due and no notification left unread. The database and the
+    object store are what the instances share, and making them redundant is the operator's: G-20
+    holds while they are.
 
 ## Quality Goals
 
