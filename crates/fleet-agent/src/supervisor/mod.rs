@@ -12,6 +12,8 @@ pub mod collector;
 pub mod command;
 pub mod delivered;
 pub mod endpoint;
+#[cfg(feature = "glpi")]
+pub mod glpi;
 pub mod ports;
 pub mod process;
 pub mod restart;
@@ -50,6 +52,10 @@ fn registry(spawner: &Spawner) -> Vec<Box<dyn Plugin>> {
             spawner: spawner.clone(),
         }),
         Box::new(command::CommandPlugin {
+            spawner: spawner.clone(),
+        }),
+        #[cfg(feature = "glpi")]
+        Box::new(glpi::GlpiPlugin {
             spawner: spawner.clone(),
         }),
     ]
@@ -664,7 +670,7 @@ mod tests {
     }
 
     /// The wrapped kinds, each with whether this build's features carry it (ADR-0017 clause 2).
-    const WRAPPED: &[(&str, bool)] = &[];
+    const WRAPPED: &[(&str, bool)] = &[("glpi", cfg!(feature = "glpi"))];
 
     /// A build's kinds are the core's two and the wrapped ones its features name — no more, so a
     /// Selector aimed at `supervisor.kind.<type>` never reaches a build without it, and no fewer

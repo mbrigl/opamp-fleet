@@ -4,7 +4,7 @@
 //! Getting a real agent into the fleet is a research task before it is a command: which repository
 //! publishes the binaries, what the assets are called this month, which checksum file goes with
 //! them, and whether the container is one a Client can open at all. This tool holds that knowledge
-//! for the agent types the manual documents — `otelcol`, `otelcol-contrib`,
+//! for the agent types the manual documents — `otelcol`, `otelcol-contrib`, `glpi-agent`,
 //! and `supervisor`, this fleet's own Client (ADR-0019) — and asks the
 //! operator only what it cannot know: which one, which version, which platforms, and where to send
 //! the result.
@@ -16,8 +16,9 @@
 //!   host stays unbroken. Every artifact is verified against the checksum *upstream* published
 //!   before anything else happens to it.
 //! - **Repacked only where it must be.** An agent whose upstream publishes no archive a Client can
-//!   install is repacked deterministically, from its own tree alone (ADR-0032). That is the one
-//!   place the bytes change, and the tool says so.
+//!   install is repacked deterministically, from its own tree alone (ADR-0032): the GLPI Agent,
+//!   whose `.tar.gz` is source, has its AppImage's file system extracted, never run, and repacked
+//!   (ADR-draft-glpi-agent clause 6). That is the one place the bytes change, and the tool says so.
 //!
 //! Interactive by default; every prompt has a flag, so the same tool serves a pipeline:
 //!   opamp-fleetctl package fetch                          # asks for everything
@@ -88,6 +89,9 @@ enum AgentKind {
     /// The OpenTelemetry Collector, Contrib distribution — the one carrying `opampextension`.
     #[value(name = "otelcol-contrib")]
     OtelcolContrib,
+    /// The GLPI inventory agent.
+    #[value(name = "glpi-agent")]
+    GlpiAgent,
     /// This fleet's own Client — the package a Client updates *itself* from (ADR-0018, ADR-0019).
     #[value(name = "supervisor")]
     Supervisor,
@@ -113,6 +117,10 @@ impl AgentKind {
                 service_name: "otelcol-contrib",
                 repo: "open-telemetry/opentelemetry-collector-releases",
             },
+            AgentKind::GlpiAgent => Source {
+                service_name: "glpi-agent",
+                repo: "glpi-project/glpi-agent",
+            },
             // This repository's own releases. The Client is an Agent like any other (ADR-0018), so
             // the artifact that updates it is fetched the way every other agent's is — and by
             // ADR-0034 it is named and packed like one too, which is what makes that possible.
@@ -133,17 +141,23 @@ impl AgentKind {
         let numeric = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit());
         let rest = tag.strip_prefix(self.tag_prefix())?;
         let parts = rest.split('.').count();
-        // `v0.158.0`, `version/1.2.3` — three numeric parts behind the prefix, and nothing else.
-        let shaped = parts == 3;
+        let shaped = match self {
+            // `1.19`, `1.7.1` — two or three parts. `1.0-beta1` fails on the last part.
+            AgentKind::GlpiAgent => (2..=3).contains(&parts),
+            // `v0.158.0`, `version/1.2.3` — three numeric parts behind the prefix, and nothing
+            // else.
+            _ => parts == 3,
+        };
         (shaped && rest.split('.').all(numeric)).then(|| rest.to_string())
     }
 
     /// What each project puts in front of the version in its tags: `v`, the `version/` this
-    /// project's release workflow creates them under (ADR-0033).
+    /// project's release workflow creates them under (ADR-0033), and nothing at all for GLPI.
     fn tag_prefix(self) -> &'static str {
         match self {
             AgentKind::Otelcol | AgentKind::OtelcolContrib => "v",
             AgentKind::Supervisor => "version/",
+            AgentKind::GlpiAgent => "",
         }
     }
 
@@ -168,6 +182,8 @@ impl AgentKind {
     /// (ADR-draft-the-operator-program-opamp-fleetctl clause 28).
     fn repacked(self) -> bool {
         match self {
+            // The Linux artifact is the AppImage's tree, repacked (ADR-draft-glpi-agent clause 7).
+            AgentKind::GlpiAgent => true,
             AgentKind::Otelcol | AgentKind::OtelcolContrib | AgentKind::Supervisor => false,
         }
     }
@@ -187,6 +203,9 @@ impl AgentKind {
             AgentKind::Otelcol | AgentKind::OtelcolContrib => {
                 "linux, darwin, windows — as the release publishes".to_string()
             }
+            AgentKind::GlpiAgent => {
+                group_platforms([("linux", "amd64"), ("windows", "amd64")].into_iter())
+            }
             // Named rather than left to the release, unlike the Collectors': this is *this*
             // project's own build matrix (`.github/workflows/release.yml`), so it moves only when
             // this repository decides it should — and the column's question, "does it run on the
@@ -201,6 +220,7 @@ impl AgentKind {
     fn needs_assets(self) -> bool {
         match self {
             AgentKind::Otelcol | AgentKind::OtelcolContrib | AgentKind::Supervisor => true,
+            AgentKind::GlpiAgent => true,
         }
     }
 
@@ -232,6 +252,11 @@ impl AgentKind {
                 name: "otelcol-contrib-conf",
                 service_name: "otelcol-contrib",
                 body: include_str!("../../../config/examples/otelcol-contrib-conf.yaml"),
+            }],
+            AgentKind::GlpiAgent => &[DefaultConfiguration {
+                name: "glpi-agent-conf",
+                service_name: "glpi-agent",
+                body: include_str!("../../../config/examples/glpi-agent-conf.cfg"),
             }],
             // None. A Client is configured by `supervisor.toml` on its host — the one file the fleet
             // deliberately does not own (ADR-0017 admits only `[[supervisor]]` blocks), and none
@@ -354,7 +379,7 @@ struct Plan {
 /// the same way, and the Collector changed its mind at 0.158.0.
 enum ChecksumSource {
     /// Files holding `<hash>  <name>` lines, `sha256sum` style — the artifact's line is looked up
-    /// by name. The Collector's pre-0.158 files.
+    /// by name. GLPI's combined file, the Collector's pre-0.158 files.
     ///
     /// Several, because a release may split them: 0.157.0 keeps its Windows assets in a file of
     /// their own. Which file holds a given artifact is answered by looking, not by a rule about
@@ -370,6 +395,9 @@ enum Action {
     /// Nothing. The artifact is uploaded exactly as upstream published it, so the hash the fleet
     /// verifies is the hash on the release page (ADR-0027).
     AsPublished,
+    /// Extract the AppImage and repack the tree deterministically (ADR-draft-glpi-agent clause 6):
+    /// upstream publishes no archive a Client can install for Linux.
+    RepackAppImage { wrapper: String },
 }
 
 impl Action {
@@ -764,6 +792,11 @@ async fn plans(agent: AgentKind, release: &Release<'_>) -> Result<Vec<Plan>, Str
         AgentKind::Otelcol | AgentKind::OtelcolContrib => {
             Ok(collector_plans(agent, release.version, release.assets))
         }
+        AgentKind::GlpiAgent => Ok(glpi_plans(
+            release.version,
+            release.package_version,
+            release.assets,
+        )),
         AgentKind::Supervisor => Ok(supervisor_plans(release.version, release.assets)),
     }
 }
@@ -888,6 +921,65 @@ fn collector_checksum(asset: &str, dist: &str, assets: &[(String, String)]) -> C
     ChecksumSource::Sums { urls }
 }
 
+/// GLPI publishes two self-contained builds: a portable zip for Windows, which travels as
+/// published, and an AppImage for Linux, which is repacked (ADR-draft-glpi-agent clauses 5 and 6).
+/// Everything else in the release is an installer for a machine to run, not an artifact a fleet
+/// installs.
+///
+/// The assets are named by upstream's `tag`. The repacked Linux artifact is this tool's own, so it
+/// is named by the Package version it is uploaded as (ADR-0028 clause 6), which is also what the
+/// Packages tab reads out of a file name.
+fn glpi_plans(tag: &str, package_version: &str, assets: &[(String, String)]) -> Vec<Plan> {
+    let sums: Option<String> = assets
+        .iter()
+        .find(|(name, _)| *name == format!("glpi-agent-{tag}.sha256"))
+        .map(|(_, url)| url.clone());
+    let mut plans = Vec::new();
+
+    // The zip's name changed case at 1.9 (`glpi-agent-1.8-x64.zip` → `GLPI-Agent-1.9-x64.zip`),
+    // so it is matched case-insensitively rather than by a name that is right for some releases.
+    if let Some((name, url)) = assets.iter().find(|(name, _)| {
+        let lower = name.to_ascii_lowercase();
+        lower == format!("glpi-agent-{tag}-x64.zip")
+    }) {
+        plans.push(Plan {
+            os: "windows".to_string(),
+            arch: "amd64".to_string(),
+            sources: vec![Download {
+                url: url.clone(),
+                checksum: ChecksumSource::Sums {
+                    urls: sums.clone().into_iter().collect(),
+                },
+            }],
+            action: Action::AsPublished,
+            out_name: name.clone(),
+            block_hint: "type = \"glpi\"  (docs/artifacts/glpi-agent.md)".to_string(),
+        });
+    }
+
+    if let Some((_, url)) = assets
+        .iter()
+        .find(|(name, _)| *name == format!("glpi-agent-{tag}-x86_64.AppImage"))
+    {
+        plans.push(Plan {
+            os: "linux".to_string(),
+            arch: "amd64".to_string(),
+            sources: vec![Download {
+                url: url.clone(),
+                checksum: ChecksumSource::Sums {
+                    urls: sums.into_iter().collect(),
+                },
+            }],
+            action: Action::RepackAppImage {
+                wrapper: format!("glpi-agent-{package_version}"),
+            },
+            out_name: format!("glpi-agent_{package_version}_linux_amd64.tar.gz"),
+            block_hint: "type = \"glpi\"  (docs/artifacts/glpi-agent.md)".to_string(),
+        });
+    }
+    plans
+}
+
 /// Upstream's platform words in this fleet's vocabulary (ADR-0027), or `None` for one this fleet
 /// has no name for — an Agent reports `os.type` and `host.arch`, and a package entry no Agent can
 /// match is one nobody would ever be offered.
@@ -950,6 +1042,9 @@ async fn produce(plan: &Plan, out_dir: &Path) -> Result<PathBuf, String> {
     let artifact = out_dir.join(&plan.out_name);
     let repacked: Option<Result<(), String>> = match &plan.action {
         Action::AsPublished => None,
+        Action::RepackAppImage { wrapper } => {
+            Some(repack_appimage(&downloaded, wrapper, &artifact))
+        }
     };
     let Some(repacked) = repacked else {
         eprintln!("  as published — the fleet verifies upstream's own hash");
@@ -1012,6 +1107,227 @@ fn parse_sums(text: &str, artifact: &Path) -> Option<String> {
                 .is_some_and(|n| n.to_string_lossy() == wanted)
         })
         .map(|(hash, _)| hash.trim().to_string())
+}
+
+/// The program that extracts the AppImage's file system: `unsquashfs`, of squashfs-tools.
+const UNSQUASHFS: &str = "unsquashfs";
+
+/// The oldest `unsquashfs` the repack runs (ADR-draft-glpi-agent clause 6). Older squashfs-tools
+/// write outside the destination for a crafted file system: CVE-2021-40153, fixed in 4.5, and
+/// CVE-2021-41072, the incomplete fix of it, fixed in 4.5.1.
+const UNSQUASHFS_MINIMUM: (u32, u32, u32) = (4, 5, 1);
+
+/// Extracts the AppImage's file system and packs the tree it holds (ADR-draft-glpi-agent
+/// clause 6).
+///
+/// The AppImage is upstream's only self-contained Linux build, and extracting it here is what
+/// spares every fleet host the FUSE dependency — or the re-extraction on every start that avoiding
+/// FUSE otherwise costs. **The AppImage is never run**: it is an ELF program with a squashfs file
+/// system appended, and running it — `--appimage-extract` included — would execute code from a
+/// download on the operator's host. The file system starts where the ELF ends, which its header
+/// says, and `unsquashfs` reads it from there as data.
+fn repack_appimage(appimage: &Path, wrapper: &str, out: &Path) -> Result<(), String> {
+    repack_appimage_with(UNSQUASHFS, appimage, wrapper, out)
+}
+
+/// [`repack_appimage`] with the extracting program named, so a test can name a stand-in.
+///
+/// The staging directory holds the whole extracted tree, about 259 MB for GLPI, so it is removed
+/// whether the repack succeeds or not.
+fn repack_appimage_with(
+    program: &str,
+    appimage: &Path,
+    wrapper: &str,
+    out: &Path,
+) -> Result<(), String> {
+    let offset = squashfs_offset(appimage)?;
+    require_unsquashfs(program)?;
+    let staging = out.with_extension("staging");
+    let _ = std::fs::remove_dir_all(&staging);
+    std::fs::create_dir_all(&staging)
+        .map_err(|e| format!("cannot create {}: {e}", staging.display()))?;
+    let tree = staging.join("squashfs-root");
+    eprintln!("  extracting the AppImage's file system …");
+    let packed = extract_squashfs(program, appimage, offset, &tree)
+        .and_then(|()| pack_extracted(&tree, wrapper, out));
+    let _ = std::fs::remove_dir_all(&staging);
+    packed
+}
+
+/// Packs the tree extracted from the AppImage as upstream built it, without its desktop icon, and
+/// refuses one without the entry point the kind runs (ADR-draft-glpi-agent clause 6). The one
+/// absolute link the tree keeps is the host loader's of upstream's default runtime, which the kind
+/// names ([`LINUX_TREE_LINKS`](fleet_agent::supervisor::glpi::LINUX_TREE_LINKS)); every other link
+/// leading out fails the pack.
+///
+/// The download is upstream's, checked only against a checksum from the same release, so nothing
+/// here follows a link it holds: the tree's root, `.DirIcon` and `AppRun` are each asked what they
+/// are themselves, and `.DirIcon` is removed only as a link or a file, which removes no target.
+fn pack_extracted(tree: &Path, wrapper: &str, out: &Path) -> Result<(), String> {
+    let what = |path: &Path| std::fs::symlink_metadata(path).map(|meta| meta.file_type());
+    if !what(tree).is_ok_and(|kind| kind.is_dir()) {
+        return Err(format!(
+            "the extracted tree {} is no directory",
+            tree.display()
+        ));
+    }
+    // The desktop icon is a link to the icon by another name, which no agent reads; the core's
+    // repack would carry it as a second copy of the icon.
+    let icon = tree.join(".DirIcon");
+    if what(&icon).is_ok_and(|kind| kind.is_symlink() || kind.is_file()) {
+        std::fs::remove_file(&icon)
+            .map_err(|e| format!("cannot remove {}: {e}", icon.display()))?;
+    }
+    if !what(&tree.join("AppRun")).is_ok_and(|kind| kind.is_file()) {
+        return Err("the extracted tree has no AppRun, as a file of its own".to_string());
+    }
+    eprintln!("  packing the tree …");
+    pack_tree(
+        tree,
+        wrapper,
+        fleet_agent::supervisor::glpi::LINUX_TREE_LINKS,
+        out,
+    )
+}
+
+/// The version `unsquashfs -version` names on its first line, `unsquashfs version 4.5.1
+/// (2022/03/17)`: two or three numeric parts, a missing third read as 0. Anything else, a
+/// `4.5-git` among it, names none.
+fn unsquashfs_version(banner: &str) -> Option<(u32, u32, u32)> {
+    let mut words = banner.trim_start().lines().next()?.split_whitespace();
+    if words.next()? != "unsquashfs" || words.next()? != "version" {
+        return None;
+    }
+    let parts: Vec<&str> = words.next()?.split('.').collect();
+    let numeric = |part: &&str| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());
+    if !(2..=3).contains(&parts.len()) || !parts.iter().all(numeric) {
+        return None;
+    }
+    let part = |at: usize| parts.get(at).map_or(Some(0), |p| p.parse().ok());
+    Some((part(0)?, part(1)?, part(2)?))
+}
+
+/// Whether the banner `program -version` printed names [`UNSQUASHFS_MINIMUM`] or later, and if
+/// not, what the operator is told.
+fn unsquashfs_admitted(program: &str, banner: &str) -> Result<(), String> {
+    let (major, minor, patch) = UNSQUASHFS_MINIMUM;
+    let needed = format!(
+        "the repack needs squashfs-tools {major}.{minor}.{patch} or later, which fixes \
+         CVE-2021-40153 and CVE-2021-41072 — install it, or fetch the Linux artifact on a host \
+         that has it"
+    );
+    match unsquashfs_version(banner) {
+        Some(found) if found >= UNSQUASHFS_MINIMUM => Ok(()),
+        Some((a, b, c)) => Err(format!("`{program}` is version {a}.{b}.{c}; {needed}")),
+        None => {
+            // Quoted and cut short: the line comes from a program on PATH, not from this tool.
+            let first: String = banner
+                .trim_start()
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .chars()
+                .take(80)
+                .collect();
+            Err(format!(
+                "`{program} -version` names no version this tool can read ({first:?}); {needed}"
+            ))
+        }
+    }
+}
+
+/// Asks `program` for its version and refuses one below [`UNSQUASHFS_MINIMUM`], before it is
+/// handed anything to extract.
+fn require_unsquashfs(program: &str) -> Result<(), String> {
+    let output = std::process::Command::new(program)
+        .arg("-version")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| cannot_run(program, &e))?;
+    unsquashfs_admitted(program, &String::from_utf8_lossy(&output.stdout))
+}
+
+/// What the operator is told when `program` does not start: a host without it is told which
+/// program the repack needs, rather than meeting a bare "No such file or directory".
+fn cannot_run(program: &str, e: &std::io::Error) -> String {
+    match e.kind() {
+        std::io::ErrorKind::NotFound => format!(
+            "this repack needs `{program}` (squashfs-tools) on PATH, which extracts the \
+             AppImage's file system without running it — install it, or fetch the Linux \
+             artifact on a host that has it"
+        ),
+        _ => format!("cannot run `{program}`: {e}"),
+    }
+}
+
+/// Where the squashfs file system of the type-2 AppImage at `appimage` begins: the end of the ELF
+/// program in front of it, which is where its section header table ends — `e_shoff`, plus
+/// `e_shnum` entries of `e_shentsize` bytes — read from a 64-bit little-endian ELF header. The
+/// AppImage runtime finds its own file system the same way.
+///
+/// Refused unless the file is such an ELF carrying the AppImage type-2 mark (`AI\x02` at byte 8)
+/// and a squashfs superblock (`hsqs`) starts at that offset, so nothing else is handed to
+/// `unsquashfs` as an AppImage.
+fn squashfs_offset(appimage: &Path) -> Result<u64, String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let cannot = |e: std::io::Error| format!("cannot read {}: {e}", appimage.display());
+    let not_one = |why: &str| format!("{} is not a type-2 AppImage: {why}", appimage.display());
+    let mut file = std::fs::File::open(appimage).map_err(cannot)?;
+    let mut header = [0u8; 64];
+    file.read_exact(&mut header)
+        .map_err(|_| not_one("it is shorter than an ELF header"))?;
+    if &header[0..4] != b"\x7fELF" {
+        return Err(not_one("it is no ELF file"));
+    }
+    if header[4] != 2 || header[5] != 1 {
+        return Err(not_one("it is no 64-bit little-endian ELF file"));
+    }
+    if &header[8..11] != b"AI\x02" {
+        return Err(not_one("it carries no AppImage type-2 mark"));
+    }
+    let u16_at = |at: usize| u64::from(u16::from_le_bytes([header[at], header[at + 1]]));
+    let mut shoff = [0u8; 8];
+    shoff.copy_from_slice(&header[0x28..0x30]);
+    let offset = u16_at(0x3A)
+        .checked_mul(u16_at(0x3C))
+        .and_then(|table| table.checked_add(u64::from_le_bytes(shoff)))
+        .ok_or_else(|| not_one("its section header table ends beyond any file"))?;
+    let mut magic = [0u8; 4];
+    file.seek(SeekFrom::Start(offset))
+        .and_then(|_| file.read_exact(&mut magic))
+        .map_err(|_| not_one("nothing follows its ELF program"))?;
+    if &magic != b"hsqs" {
+        return Err(not_one("no squashfs file system follows its ELF program"));
+    }
+    Ok(offset)
+}
+
+/// Extracts the squashfs file system that starts `offset` bytes into `image` to `dest`, which
+/// must not exist yet, with `unsquashfs` — the program named `program`, a parameter so a test can
+/// name one that is missing or a stand-in.
+fn extract_squashfs(program: &str, image: &Path, offset: u64, dest: &Path) -> Result<(), String> {
+    let output = std::process::Command::new(program)
+        .args(["-no-progress", "-quiet", "-no-xattrs", "-offset"])
+        .arg(offset.to_string())
+        .arg("-dest")
+        .arg(dest)
+        .arg(image)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| cannot_run(program, &e))?;
+    if !output.status.success() {
+        let said = String::from_utf8_lossy(&output.stderr);
+        let reason = said
+            .lines()
+            .rev()
+            .find(|line| !line.trim().is_empty())
+            .map_or("no output", str::trim);
+        return Err(format!(
+            "`{program}` could not extract {}: {reason}",
+            image.display()
+        ));
+    }
+    Ok(())
 }
 
 /// Packs a directory as a `.tar.gz` a Client can install as a tree — deterministically, with every
@@ -1692,7 +2008,7 @@ mod tests {
             .iter()
             .map(|agent| agent.source().service_name)
             .collect();
-        for expected in ["otelcol", "otelcol-contrib"] {
+        for expected in ["otelcol", "otelcol-contrib", "glpi-agent"] {
             assert!(offered.contains(&expected), "{expected} is not offered");
         }
     }
@@ -1755,8 +2071,27 @@ mod tests {
         }
     }
 
+    /// A later repack of one GLPI version is numbered as the core numbers any repack, from the
+    /// Package version upstream's tag is written as: the second of `1.19` is `1.19.1-0.r.2`
+    /// (ADR-draft-glpi-agent clause 7).
+    /// Verifies: ADR-draft-glpi-agent
+    #[test]
+    fn a_later_glpi_repack_is_numbered_as_the_core_numbers_one() {
+        assert!(AgentKind::GlpiAgent.repacked());
+        let (_, version) = AgentKind::GlpiAgent.release_names("1.19").expect("1.19");
+        assert_eq!(
+            repack_version(AgentKind::GlpiAgent, &version, 1).as_deref(),
+            Ok("1.19.0")
+        );
+        assert_eq!(
+            repack_version(AgentKind::GlpiAgent, &version, 2).as_deref(),
+            Ok("1.19.1-0.r.2")
+        );
+    }
+
     /// The tag patterns are what keep a version list from offering things that are not releases of
     /// the agent being fetched — the Collector repository tags its builder alongside.
+    /// Verifies: ADR-draft-glpi-agent
     #[test]
     fn a_tag_is_a_version_only_when_it_is_this_agents_release() {
         assert_eq!(
@@ -1770,6 +2105,26 @@ mod tests {
         ] {
             assert_eq!(AgentKind::Otelcol.version_of_tag(other), None, "{other}");
         }
+
+        // GLPI numbers releases with two parts and sometimes three, and never a leading `v`.
+        assert_eq!(
+            AgentKind::GlpiAgent.version_of_tag("1.19"),
+            Some("1.19".to_string())
+        );
+        assert_eq!(
+            AgentKind::GlpiAgent.version_of_tag("1.7.1"),
+            Some("1.7.1".to_string())
+        );
+        assert_eq!(AgentKind::GlpiAgent.version_of_tag("1.0-beta1"), None);
+        // Fetched under upstream's own tag, and uploaded as the SemVer Package version.
+        assert_eq!(
+            AgentKind::GlpiAgent.release_names("1.19"),
+            Ok(("1.19".to_string(), "1.19.0".to_string()))
+        );
+        assert_eq!(
+            AgentKind::GlpiAgent.release_names("1.7.1"),
+            Ok(("1.7.1".to_string(), "1.7.1".to_string()))
+        );
 
         // This project's own tags carry the prefix its release workflow creates them under, and
         // the round trip is what `--version` relies on: an operator types what the release page
@@ -2008,6 +2363,47 @@ mod tests {
             collector_checksum("otelcol_0.157.0_linux_amd64.tar.gz", "otelcol", &older),
             ChecksumSource::Sums { .. }
         ));
+    }
+
+    /// GLPI renamed its zip's case at 1.9, so both spellings have to be found — and the Linux
+    /// artifact is the one that gets repacked.
+    ///
+    /// The packing half of `docs/artifacts/glpi-agent.md`; its client half is in
+    /// `crates/fleet-agent/src/supervisor/glpi.rs`. An upstream that renames an asset or its
+    /// checksum file should turn this red rather than produce a run that quietly packs one
+    /// platform.
+    /// Verifies: ADR-draft-glpi-agent
+    #[test]
+    fn glpi_finds_both_zip_spellings_and_repacks_only_linux() {
+        for zip in ["GLPI-Agent-1.19-x64.zip", "glpi-agent-1.19-x64.zip"] {
+            let assets = vec![
+                asset(zip),
+                asset("glpi-agent-1.19-x86_64.AppImage"),
+                asset("glpi-agent-1.19.sha256"),
+            ];
+            let plans = glpi_plans("1.19", "1.19.0", &assets);
+            assert_eq!(plans.len(), 2, "{zip}");
+            assert!(matches!(plans[0].action, Action::AsPublished), "{zip}");
+            assert_eq!(plans[0].out_name, zip, "the zip travels under its own name");
+            assert!(matches!(plans[1].action, Action::RepackAppImage { .. }));
+            assert_eq!(plans[1].out_name, "glpi-agent_1.19.0_linux_amd64.tar.gz");
+            assert!(
+                matches!(
+                    &plans[1].action,
+                    Action::RepackAppImage { wrapper } if wrapper == "glpi-agent-1.19.0"
+                ),
+                "the repack is named by the Package version"
+            );
+            // Both are verified against the release's one combined file, looked up by its name.
+            let sums = vec![asset("glpi-agent-1.19.sha256").1];
+            for plan in &plans {
+                assert_eq!(plan.sources.len(), 1, "{zip}");
+                let ChecksumSource::Sums { urls } = &plan.sources[0].checksum else {
+                    panic!("{zip}: {}/{} reads no sums file", plan.os, plan.arch);
+                };
+                assert_eq!(urls, &sums, "{zip}: {}/{}", plan.os, plan.arch);
+            }
+        }
     }
 
     /// A directory reached through a link is packed **under the linked name too**, with its
@@ -2717,6 +3113,525 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A type-2 AppImage as its runtime is laid out: a 64-bit little-endian ELF header carrying
+    /// the `AI\x02` mark, whose section header table — `shnum` entries of `shentsize` bytes from
+    /// `shoff` — ends where `tail` begins.
+    fn appimage(shoff: u64, shentsize: u16, shnum: u16, tail: &[u8]) -> Vec<u8> {
+        let mut image = vec![0u8; 64];
+        image[0..4].copy_from_slice(b"\x7fELF");
+        image[4] = 2;
+        image[5] = 1;
+        image[8..11].copy_from_slice(b"AI\x02");
+        image[0x28..0x30].copy_from_slice(&shoff.to_le_bytes());
+        image[0x3A..0x3C].copy_from_slice(&shentsize.to_le_bytes());
+        image[0x3C..0x3E].copy_from_slice(&shnum.to_le_bytes());
+        let end =
+            usize::try_from(shoff).expect("small") + usize::from(shentsize) * usize::from(shnum);
+        image.resize(end, 0);
+        image.extend_from_slice(tail);
+        image
+    }
+
+    /// The AppImage's file system is found where its ELF program ends, as its header says, and
+    /// only a file that is a type-2 AppImage with a squashfs file system there is taken for one.
+    /// Verifies: ADR-draft-glpi-agent
+    #[test]
+    fn an_appimages_file_system_is_found_where_its_program_ends() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let at = |bytes: Vec<u8>| {
+            let path = dir.path().join("glpi-agent.AppImage");
+            std::fs::write(&path, bytes).expect("write");
+            squashfs_offset(&path)
+        };
+        assert_eq!(
+            at(appimage(4096, 64, 30, b"hsqs and the rest")),
+            Ok(4096 + 64 * 30)
+        );
+
+        let mut not_elf = appimage(4096, 64, 30, b"hsqs");
+        not_elf[0] = b'#';
+        let mut no_mark = appimage(4096, 64, 30, b"hsqs");
+        no_mark[8] = 0;
+        let mut elf32 = appimage(4096, 64, 30, b"hsqs");
+        elf32[4] = 1;
+        for (bytes, why) in [
+            (not_elf, "no ELF file"),
+            (no_mark, "no AppImage type-2 mark"),
+            (elf32, "no 64-bit little-endian ELF file"),
+            (
+                appimage(4096, 64, 30, b"PK\x03\x04"),
+                "no squashfs file system",
+            ),
+            (appimage(4096, 64, 30, b""), "nothing follows"),
+            (b"\x7fELF".to_vec(), "shorter than an ELF header"),
+        ] {
+            let err = at(bytes).expect_err(why);
+            assert!(err.contains("is not a type-2 AppImage"), "{err}");
+            assert!(err.contains(why), "{err}");
+        }
+    }
+
+    /// The repack never runs what it downloaded: a file that is a program but no AppImage is
+    /// refused before anything executes it — under `--appimage-extract`, this one would have left
+    /// its mark.
+    /// Verifies: ADR-draft-glpi-agent
+    #[cfg(unix)]
+    #[test]
+    fn the_repack_runs_nothing_it_downloaded() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ran = dir.path().join("ran");
+        let downloaded = dir.path().join("glpi-agent-1.19-x86_64.AppImage");
+        std::fs::write(
+            &downloaded,
+            format!(
+                "#!/bin/sh\ntouch '{}'\nmkdir squashfs-root\n",
+                ran.display()
+            ),
+        )
+        .expect("write");
+        std::fs::set_permissions(&downloaded, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod");
+        let out = dir.path().join("glpi-agent_1.19.0_linux_amd64.tar.gz");
+        let err = repack_appimage(&downloaded, "glpi-agent-1.19.0", &out).expect_err("refused");
+        assert!(err.contains("is not a type-2 AppImage"), "{err}");
+        assert!(!ran.exists(), "the download was run");
+        assert!(!out.exists());
+    }
+
+    /// A host without `unsquashfs` is told which program the repack needs, rather than meeting a
+    /// bare "No such file or directory".
+    /// Verifies: ADR-draft-glpi-agent
+    #[test]
+    fn a_repack_without_unsquashfs_names_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let image = dir.path().join("glpi-agent.AppImage");
+        std::fs::write(&image, appimage(4096, 64, 30, b"hsqs")).expect("write");
+        let program = "unsquashfs-that-is-not-installed";
+        let err = extract_squashfs(program, &image, 4096 + 64 * 30, &dir.path().join("root"))
+            .expect_err("refused");
+        assert!(err.contains(program), "{err}");
+        assert!(err.contains("squashfs-tools"), "{err}");
+        assert!(err.contains("without running it"), "{err}");
+    }
+
+    /// A stand-in for `unsquashfs` that answers `-version` with `banner` and otherwise extracts a
+    /// GLPI-shaped tree to its `-dest`: `AppRun`, the agent's script, and `.DirIcon` linking the
+    /// icon. Each call's arguments are appended to `calls`.
+    #[cfg(unix)]
+    fn unsquashfs_stand_in(dir: &Path, banner: &str, calls: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let program = dir.join("unsquashfs");
+        std::fs::write(
+            &program,
+            format!(
+                "#!/bin/sh\n\
+                 echo \"$*\" >> '{calls}'\n\
+                 if [ \"$1\" = -version ]; then echo '{banner}'; echo 'copyright'; exit 0; fi\n\
+                 while [ $# -gt 1 ]; do [ \"$1\" = -dest ] && dest=$2; shift; done\n\
+                 mkdir -p \"$dest/usr/bin\"\n\
+                 printf entry > \"$dest/AppRun\"\n\
+                 chmod 755 \"$dest/AppRun\"\n\
+                 printf agent > \"$dest/usr/bin/glpi-agent\"\n\
+                 printf icon > \"$dest/glpi-agent.png\"\n\
+                 ln -s glpi-agent.png \"$dest/.DirIcon\"\n\
+                 printf 'APPDIR=$ORIGIN\\nAPPDIR_LIBC_VERSION=2.27\\n' > \"$dest/AppRun.env\"\n\
+                 mkdir -p \"$dest/runtime/compat/lib64\" \"$dest/runtime/default/lib64\"\n\
+                 printf loader > \"$dest/runtime/compat/lib64/ld-linux-x86-64.so.2\"\n\
+                 ln -s /lib64/ld-linux-x86-64.so.2 \
+                   \"$dest/runtime/default/lib64/ld-linux-x86-64.so.2\"\n",
+                calls = calls.display(),
+            ),
+        )
+        .expect("write");
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        program
+    }
+
+    /// The members of the `.tar.gz` at `artifact`, without a trailing `/`.
+    #[cfg(unix)]
+    fn members(artifact: &Path) -> Vec<String> {
+        let file = std::fs::File::open(artifact).expect("open");
+        let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(file));
+        archive
+            .entries()
+            .expect("entries")
+            .map(|entry| {
+                let entry = entry.expect("entry");
+                let path = entry.path().expect("path").to_string_lossy().into_owned();
+                path.trim_end_matches('/').to_string()
+            })
+            .collect()
+    }
+
+    /// The whole repack past the download: the version check, the extraction from where the ELF
+    /// program ends, and the pack of what was extracted, with `.DirIcon` dropped, under the
+    /// wrapper directory — and no staging left behind.
+    /// Verifies: ADR-draft-glpi-agent
+    #[cfg(unix)]
+    #[test]
+    fn a_repack_extracts_with_unsquashfs_and_packs_the_tree() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let calls = dir.path().join("calls");
+        let program =
+            unsquashfs_stand_in(dir.path(), "unsquashfs version 4.5.1 (2022/03/17)", &calls);
+        let image = dir.path().join("glpi-agent-1.19-x86_64.AppImage");
+        std::fs::write(&image, appimage(4096, 64, 30, b"hsqs")).expect("write");
+        let out = dir.path().join("glpi-agent_1.19.0_linux_amd64.tar.gz");
+
+        repack_appimage_with(
+            &program.to_string_lossy(),
+            &image,
+            "glpi-agent-1.19.0",
+            &out,
+        )
+        .expect("repacked");
+
+        let calls = std::fs::read_to_string(&calls).expect("calls");
+        let calls: Vec<&str> = calls.lines().collect();
+        assert_eq!(calls.first(), Some(&"-version"), "{calls:?}");
+        assert_eq!(calls.len(), 2, "{calls:?}");
+        assert!(
+            calls[1].contains(&format!("-offset {}", 4096 + 64 * 30)),
+            "{calls:?}"
+        );
+        assert!(calls[1].ends_with(&*image.to_string_lossy()), "{calls:?}");
+
+        let members = members(&out);
+        for member in [
+            "glpi-agent-1.19.0/AppRun",
+            "glpi-agent-1.19.0/usr/bin/glpi-agent",
+            "glpi-agent-1.19.0/glpi-agent.png",
+        ] {
+            assert!(
+                members.contains(&member.to_string()),
+                "{member}: {members:?}"
+            );
+        }
+        assert!(
+            !members.iter().any(|m| m.ends_with(".DirIcon")),
+            "{members:?}"
+        );
+        assert!(
+            members.contains(
+                &"glpi-agent-1.19.0/runtime/default/lib64/ld-linux-x86-64.so.2".to_string()
+            ),
+            "the host loader's link is kept: {members:?}"
+        );
+        assert!(
+            !out.with_extension("staging").exists(),
+            "the staging is left behind"
+        );
+    }
+
+    /// An `unsquashfs` older than 4.5.1 is refused before it is handed the download, and so is
+    /// one whose version cannot be read.
+    /// Verifies: ADR-draft-glpi-agent
+    #[cfg(unix)]
+    #[test]
+    fn unsquashfs_older_than_4_5_1_is_refused() {
+        for banner in [
+            "unsquashfs version 4.5 (2021/07/22)",
+            "unsquashfs version 4.4 (2019/08/29)",
+            "unsquashfs version 4.5-git (2021/09/01)",
+            "Usage: unsquashfs [options] filesystem",
+        ] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let calls = dir.path().join("calls");
+            let program = unsquashfs_stand_in(dir.path(), banner, &calls);
+            let image = dir.path().join("glpi-agent-1.19-x86_64.AppImage");
+            std::fs::write(&image, appimage(4096, 64, 30, b"hsqs")).expect("write");
+            let out = dir.path().join("glpi-agent_1.19.0_linux_amd64.tar.gz");
+
+            let err = repack_appimage_with(&program.to_string_lossy(), &image, "w", &out)
+                .expect_err(banner);
+            assert!(err.contains("4.5.1 or later"), "{banner}: {err}");
+            assert!(err.contains("CVE-2021-41072"), "{banner}: {err}");
+            assert_eq!(
+                std::fs::read_to_string(&calls).expect("calls"),
+                "-version\n",
+                "{banner}: asked for nothing but its version"
+            );
+            assert!(!out.exists(), "{banner}");
+            assert!(!out.with_extension("staging").exists(), "{banner}");
+        }
+    }
+
+    /// The version is read from the first line `unsquashfs -version` prints, and only from a
+    /// number of two or three numeric parts; the minimum is 4.5.1.
+    /// Verifies: ADR-draft-glpi-agent
+    #[test]
+    fn the_unsquashfs_version_is_read_from_its_banner() {
+        for (banner, version) in [
+            (
+                "unsquashfs version 4.5.1 (2022/03/17)\ncopyright",
+                Some((4, 5, 1)),
+            ),
+            ("unsquashfs version 4.6.1 (2023/03/25)", Some((4, 6, 1))),
+            ("unsquashfs version 4.6 (2023/03/18)", Some((4, 6, 0))),
+            ("  unsquashfs version 4.4 (2019/08/29)", Some((4, 4, 0))),
+            ("unsquashfs version 4.5-git (2021/09/01)", None),
+            ("unsquashfs version 4.5.1.2", None),
+            ("mksquashfs version 4.5.1 (2022/03/17)", None),
+            ("copyright\nunsquashfs version 4.5.1", None),
+            ("", None),
+        ] {
+            assert_eq!(unsquashfs_version(banner), version, "{banner}");
+        }
+        assert_eq!(
+            unsquashfs_admitted("unsquashfs", "unsquashfs version 4.5.1 (2022/03/17)"),
+            Ok(())
+        );
+        assert_eq!(
+            unsquashfs_admitted("unsquashfs", "unsquashfs version 4.7 (2025/06/01)"),
+            Ok(())
+        );
+        let err = unsquashfs_admitted("unsquashfs", "unsquashfs version 4.5 (2021/07/22)")
+            .expect_err("4.5");
+        assert!(err.contains("is version 4.5.0"), "{err}");
+        let err = unsquashfs_admitted("unsquashfs", "\u{1b}[2Jnot a version").expect_err("none");
+        assert!(
+            err.contains("\\u{1b}"),
+            "the line is quoted, not printed: {err}"
+        );
+    }
+
+    /// The extracted tree is packed without its desktop icon, which no agent reads.
+    /// Verifies: ADR-draft-glpi-agent
+    #[cfg(unix)]
+    #[test]
+    fn an_extracted_tree_is_packed_without_its_desktop_icon() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let tree = dir.path().join("squashfs-root");
+        extracted_tree(&tree);
+        std::fs::write(tree.join("glpi-agent.png"), b"icon").expect("write");
+        std::os::unix::fs::symlink("glpi-agent.png", tree.join(".DirIcon")).expect("link");
+        let out = dir.path().join("packed.tar.gz");
+
+        pack_extracted(&tree, "glpi-agent-1.19.0", &out).expect("packed");
+
+        let members = members(&out);
+        assert!(
+            members.contains(&"glpi-agent-1.19.0/AppRun".to_string()),
+            "{members:?}"
+        );
+        assert!(
+            members.contains(&"glpi-agent-1.19.0/glpi-agent.png".to_string()),
+            "{members:?}"
+        );
+        assert!(
+            !members.iter().any(|m| m.ends_with(".DirIcon")),
+            "{members:?}"
+        );
+    }
+
+    /// An extracted AppImage tree as upstream builds it: `AppRun`, its `AppRun.env`, and both
+    /// runtimes, the default one's loader an absolute link to the host's, the compat one's
+    /// `libcrypt.so.1` a link naming a file that runtime does not hold.
+    #[cfg(unix)]
+    fn extracted_tree(tree: &Path) {
+        std::fs::create_dir_all(tree.join("usr/bin")).expect("create");
+        std::fs::create_dir_all(tree.join("runtime/compat/lib/x86_64-linux-gnu")).expect("create");
+        std::fs::create_dir_all(tree.join("runtime/compat/lib64")).expect("create");
+        std::fs::create_dir_all(tree.join("runtime/default/lib64")).expect("create");
+        std::fs::write(tree.join("AppRun"), b"entry").expect("write");
+        std::fs::write(
+            tree.join("AppRun.env"),
+            "APPDIR=$ORIGIN\n\
+             APPDIR_LIBC_LIBRARY_PATH=$APPDIR/runtime/compat/lib64\n\
+             APPDIR_LIBC_VERSION=2.27\n\
+             LANG=C\n",
+        )
+        .expect("write");
+        std::fs::write(
+            tree.join("runtime/compat/lib/x86_64-linux-gnu/ld-2.27.so"),
+            b"the-bundled-loader",
+        )
+        .expect("write");
+        std::os::unix::fs::symlink(
+            "../lib/x86_64-linux-gnu/ld-2.27.so",
+            tree.join("runtime/compat/lib64/ld-linux-x86-64.so.2"),
+        )
+        .expect("link the bundled loader");
+        std::os::unix::fs::symlink(
+            "/lib64/ld-linux-x86-64.so.2",
+            tree.join("runtime/default/lib64/ld-linux-x86-64.so.2"),
+        )
+        .expect("link the host loader");
+        // Upstream's one dangling library link: the file it names sits in the tree's `lib/`.
+        std::fs::create_dir_all(tree.join("lib/x86_64-linux-gnu")).expect("create");
+        std::fs::write(
+            tree.join("lib/x86_64-linux-gnu/libcrypt-2.27.so"),
+            b"the-bundled-libcrypt",
+        )
+        .expect("write");
+        std::os::unix::fs::symlink(
+            "libcrypt-2.27.so",
+            tree.join("runtime/compat/lib/x86_64-linux-gnu/libcrypt.so.1"),
+        )
+        .expect("link the bundled libcrypt where upstream links it");
+    }
+
+    /// The repack keeps upstream's runtimes as `AppRun` chooses between them: the default runtime
+    /// with its one absolute link, to the host's program loader, which the kind names and the
+    /// Client creates, the compat runtime as built, and `AppRun.env` byte for byte. A link that
+    /// names nothing in the tree, the compat runtime's `libcrypt.so.1` among them, is dropped.
+    /// Verifies: ADR-draft-glpi-agent
+    #[cfg(unix)]
+    #[test]
+    fn an_extracted_tree_keeps_upstreams_runtimes_as_built() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let tree = dir.path().join("squashfs-root");
+        extracted_tree(&tree);
+        let env = std::fs::read(tree.join("AppRun.env")).expect("AppRun.env");
+        let out = dir.path().join("packed.tar.gz");
+
+        pack_extracted(&tree, "glpi-agent-1.19.0", &out).expect("packed");
+
+        let dest = dir.path().join("unpacked");
+        std::fs::create_dir_all(&dest).expect("create");
+        fleet_agent::archive::extract_tree_tar_gz(
+            &out,
+            Path::new("AppRun"),
+            fleet_agent::supervisor::glpi::LINUX_TREE_LINKS,
+            &dest,
+        )
+        .expect("the packed tree is one a Client installs");
+        assert_eq!(
+            std::fs::read_link(dest.join("runtime/default/lib64/ld-linux-x86-64.so.2"))
+                .expect("the host loader's link"),
+            Path::new("/lib64/ld-linux-x86-64.so.2")
+        );
+        assert_eq!(
+            std::fs::read(dest.join("runtime/compat/lib64/ld-linux-x86-64.so.2")).expect("loader"),
+            b"the-bundled-loader"
+        );
+        assert_eq!(
+            std::fs::read(dest.join("AppRun.env")).expect("AppRun.env"),
+            env,
+            "AppRun.env is upstream's"
+        );
+        assert!(
+            std::fs::symlink_metadata(
+                dest.join("runtime/compat/lib/x86_64-linux-gnu/libcrypt.so.1")
+            )
+            .is_err(),
+            "a link that names nothing in the tree is dropped"
+        );
+    }
+
+    /// Nothing before the pack follows a link of the download: a `.DirIcon` linking out of the
+    /// tree is removed as the link, its target untouched; an `AppRun` that is a link, and a tree
+    /// root that is one, are refused with nothing packed; and an absolute link the kind does not
+    /// name, beside the one it keeps, still fails the pack.
+    /// Verifies: ADR-draft-glpi-agent
+    #[cfg(unix)]
+    #[test]
+    fn the_repack_follows_no_link_of_the_download() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let outside = dir.path().join("operator");
+        std::fs::create_dir_all(outside.join("keep")).expect("create");
+        std::fs::write(outside.join("file"), b"the-operators-file").expect("write");
+        std::fs::write(outside.join("keep/inner"), b"inner").expect("write");
+
+        for (n, target) in [outside.join("file"), outside.join("keep")]
+            .iter()
+            .enumerate()
+        {
+            let tree = dir.path().join(format!("icon-{n}"));
+            extracted_tree(&tree);
+            std::os::unix::fs::symlink(target, tree.join(".DirIcon")).expect("link out");
+            let out = dir.path().join(format!("icon-{n}.tar.gz"));
+            pack_extracted(&tree, "glpi-agent-1.19.0", &out).expect("packed");
+            assert!(std::fs::symlink_metadata(tree.join(".DirIcon")).is_err());
+            assert!(!members(&out).iter().any(|m| m.ends_with(".DirIcon")));
+        }
+        assert_eq!(
+            std::fs::read(outside.join("file")).expect("untouched"),
+            b"the-operators-file"
+        );
+        assert_eq!(
+            std::fs::read(outside.join("keep/inner")).expect("untouched"),
+            b"inner"
+        );
+
+        let linked_apprun = dir.path().join("apprun");
+        extracted_tree(&linked_apprun);
+        std::fs::remove_file(linked_apprun.join("AppRun")).expect("remove");
+        std::os::unix::fs::symlink(outside.join("file"), linked_apprun.join("AppRun"))
+            .expect("link out");
+        let out = dir.path().join("apprun.tar.gz");
+        let err = pack_extracted(&linked_apprun, "glpi-agent-1.19.0", &out).expect_err("AppRun");
+        assert!(err.contains("no AppRun"), "{err}");
+        assert!(!out.exists());
+
+        let real = dir.path().join("real-root");
+        extracted_tree(&real);
+        let linked_root = dir.path().join("linked-root");
+        std::os::unix::fs::symlink(&real, &linked_root).expect("link the root");
+        let out = dir.path().join("root.tar.gz");
+        let err = pack_extracted(&linked_root, "glpi-agent-1.19.0", &out).expect_err("the root");
+        assert!(err.contains("is no directory"), "{err}");
+        assert!(!out.exists());
+
+        let unnamed = dir.path().join("unnamed");
+        extracted_tree(&unnamed);
+        std::os::unix::fs::symlink(
+            "/lib/x86_64-linux-gnu/libc.so.6",
+            unnamed.join("runtime/default/lib64/libc.so.6"),
+        )
+        .expect("link out");
+        let out = dir.path().join("unnamed.tar.gz");
+        let err = pack_extracted(&unnamed, "glpi-agent-1.19.0", &out).expect_err("unnamed");
+        assert!(
+            err.contains(
+                r#""runtime/default/lib64/libc.so.6" -> "/lib/x86_64-linux-gnu/libc.so.6""#
+            ),
+            "{err}"
+        );
+        assert!(!err.contains("ld-linux-x86-64.so.2\" ->"), "{err}");
+        assert!(!out.exists());
+    }
+
+    /// A tree without `AppRun` has nothing the kind could start, so it is refused before anything
+    /// is packed.
+    /// Verifies: ADR-draft-glpi-agent
+    #[test]
+    fn an_extracted_tree_without_apprun_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let tree = dir.path().join("squashfs-root");
+        std::fs::create_dir_all(tree.join("usr/bin")).expect("create");
+        std::fs::write(tree.join("usr/bin/glpi-agent"), b"agent").expect("write");
+        let out = dir.path().join("packed.tar.gz");
+
+        let err = pack_extracted(&tree, "glpi-agent-1.19.0", &out).expect_err("refused");
+        assert!(err.contains("no AppRun"), "{err}");
+        assert!(!out.exists());
+    }
+
+    /// The Configuration uploaded beside the GLPI package is the file the `glpi` kind points its
+    /// agent's `--conf-file` at, for the Agent type the kind presents: the packing half of the
+    /// name contract, whose client half is
+    /// `the_agent_reads_the_configuration_by_its_contracted_name`. Renamed on one side only, the
+    /// agent would start against a file that does not exist.
+    /// Verifies: ADR-draft-glpi-agent
+    #[test]
+    fn the_glpi_configuration_is_the_file_the_kind_points_its_agent_at() {
+        use fleet_agent::supervisor::ports::Plugin as _;
+        let configurations = AgentKind::GlpiAgent.default_configurations();
+        assert_eq!(configurations.len(), 1);
+        assert_eq!(
+            configurations[0].name,
+            fleet_agent::supervisor::glpi::CONFIG_ENTRY
+        );
+        let kind = fleet_agent::supervisor::glpi::GlpiPlugin::default().defaults();
+        assert_eq!(Some(configurations[0].service_name), kind.service_name);
+        assert_eq!(
+            AgentKind::GlpiAgent.source().service_name,
+            configurations[0].service_name
+        );
     }
 
     /// The upload asks before it writes: a Configuration the Server already holds is left exactly

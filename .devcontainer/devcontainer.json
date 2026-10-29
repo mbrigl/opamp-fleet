@@ -43,8 +43,10 @@
 
   // System packages the base image does not carry, installed once when the container is created.
   //
-  // All three are *developer tooling* — nothing shipped depends on them, which is why they
-  // need no ADR (AGENTS.md §3.6) — and each earns its place:
+  // The first three are *developer tooling* — nothing shipped depends on them, which is why they
+  // need no ADR (AGENTS.md §3.6). The fourth is a runtime helper of `opamp-fleetctl`, installed
+  // so this container can run the GLPI repack; ADR-draft-glpi-agent clause 6 decides that
+  // dependency and its minimum version. Each earns its place:
   //
   //   shellcheck  the shell lint, from the base image's signed Debian archive, so the pre-push
   //             hook runs the lint CI runs; without it the lint skips itself locally.
@@ -54,8 +56,12 @@
   //             That check is not optional in practice: `#[cfg(unix)]` code is invisible to an
   //             ordinary local run, so a Windows-only compile error reaches CI instead of the
   //             author. See README → "Build, Test & Run".
+  //   squashfs-tools
+  //             `unsquashfs`, with which `opamp-fleetctl package fetch` extracts the GLPI
+  //             AppImage's file system without running it. The tool refuses one older than
+  //             4.5.1; the base image's Debian ships 4.5.1.
   "postCreateCommand": {
-    "packages": "sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends shellcheck socat llvm"
+    "packages": "sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends shellcheck socat llvm squashfs-tools"
   },
 
   // Runs inside the container on every start, so the settings are set again should a session

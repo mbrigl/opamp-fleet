@@ -2147,6 +2147,29 @@ Here `fluent-bit-conf` is the *name of the Configuration on the Server* — that
 file
 is called.
 
+### `type = "glpi"`
+
+For the GLPI inventory agent. The block is two lines on **both** platforms, which is the whole
+point: its Linux and Windows invocations differ in the program's name and place in the tree, in
+four Perl `-I` paths, and in whether the script is named by `--script` or by path — and not one of
+those differences is a decision anybody makes.
+
+```toml
+[[supervisor]]
+type = "glpi"
+name = "glpi"
+```
+
+The kind also holds `--daemon --no-fork`, which are supervision requirements rather than
+preferences: without the first the agent runs its tasks once and exits into a restart loop, without
+the second it detaches and leaves the Supervisor holding a pid that ends immediately. Its state
+goes beside the tree rather than inside `program/`, which a package swap replaces whole. Listed in
+`remote_config_disabled`, it runs on the `glpi-agent-conf` you place in its `config/` directory.
+
+The [GLPI Agent recipe](glpi-agent.md) is a third party's release repacked and delivered, run as
+a foreground daemon, and configured from the Server; the artifact is
+[`docs/artifacts/glpi-agent.md`](../artifacts/glpi-agent.md).
+
 ## How a block names its program
 
 `binary` and `command` take a **bare file name** — `otelcol-contrib`, not a path. It names a file in
@@ -2157,7 +2180,8 @@ Server replace what is in it. Every Agent therefore consents to package updates,
 Anything with a path separator in it — `/usr/local/bin/otelcol`, `./x`, `bin/x` — is a startup error
 naming the rule, rather than a guess. A program the machine's package manager installed is not
 something this Client supervises; to bring one under management, repack it as a package and deliver
-it from the Server.
+it from the Server. The [GLPI Agent](glpi-agent.md) recipe shows what that
+looks like for a real agent.
 
 One thing to know about a bare name: it is **not** searched for in `$PATH`. It names a file in that
 one directory, and the first copy arrives by package like every later one.
@@ -2371,7 +2395,8 @@ the count is logged rather than passed over in silence.
 Two more things worth knowing. **A `.tar.gz` carries file modes and is the right format for a
 tree** on Unix; a `.7z` and a `.zip` are opened too, but both store Windows attributes rather than
 Unix modes, so only the program is made executable and a helper binary beside it would not be —
-which costs nothing for a tree that runs on Windows.
+which costs nothing for a tree that runs on Windows, and is why the GLPI Agent's portable Windows
+build ships as the `.zip` upstream published (see the [GLPI Agent recipe](glpi-agent.md)).
 
 ## Updating the Client itself
 

@@ -8,6 +8,8 @@
 #                            (selector service.name = otelcol-contrib; opampextension, self-reporting)
 #   otelcol-conf          →  type otelcol, deployment otelcol
 #                            (selector service.name = otelcol; core otelcol, observed externally)
+#   glpi-agent-conf       →  type glpi-agent, deployment glpi-agent
+#                            (selector service.name = glpi-agent; glpi Supervisor, restart on apply)
 #
 # A Configuration's name is the file name its entry gets in the Supervisor's config directory,
 # so a block that reads one must read exactly that path. Names carry no extension: they follow the
@@ -154,6 +156,8 @@ seed() {
 seed otelcol-contrib-conf "$examples/otelcol-contrib-conf.yaml" otelcol-contrib otelcol-contrib \
     '{"service.name": "otelcol-contrib"}'
 seed otelcol-conf "$examples/otelcol-conf.yaml" otelcol otelcol '{"service.name": "otelcol"}'
+seed glpi-agent-conf "$examples/glpi-agent-conf.cfg" glpi-agent glpi-agent \
+    '{"service.name": "glpi-agent"}'
 
 if [ "$mode" = stage ]; then
     echo "Done — the Server holds these Configurations from its next start; put each into a Deployment and roll that out to assign them."

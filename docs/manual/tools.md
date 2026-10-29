@@ -66,6 +66,7 @@ checksum file goes with them:
 |---|---|---|
 | `otelcol` | `open-telemetry/opentelemetry-collector-releases` | the core Collector's `.tar.gz`, as published |
 | `otelcol-contrib` | the same repository | the Contrib Collector's `.tar.gz`, as published |
+| `glpi-agent` | `glpi-project/glpi-agent` | Windows: the portable `.zip`, as published · Linux: a `.tar.gz` repacked from the AppImage |
 | `supervisor` | `mbrigl/opamp-fleet` — this project's own releases | the `.tar.gz` this fleet's Client is released as, one per platform, as published. It is the package a Client updates *itself* from; the `.deb`, `.rpm` and `.msi` beside it are for installing a Client by hand and are passed over |
 
 Four things it does on every run:
@@ -91,6 +92,7 @@ $ opamp-fleetctl package fetch
 Which agent:
   otelcol          linux, darwin, windows — as the release publishes
 > otelcol-contrib  linux, darwin, windows — as the release publishes
+  glpi-agent       linux/amd64 windows/amd64
   supervisor       linux/amd64+arm64 darwin/arm64+amd64 windows/amd64
 Reading the last releases of open-telemetry/opentelemetry-collector-releases …
 Which version› 0.158.0
@@ -112,8 +114,9 @@ question below shows what *that release* actually has. Some need a word:
 The version list is the **three most recent release series**, newest first — a series being a
 `major.minor` line, of which only its newest patch is offered. That is the difference between a
 list you can go back through and one you cannot. An
-older patch of a series already on the list is not a choice anyone makes, so it is not offered.
-Release candidates and the tags a repository keeps for other things
+older patch of a series already on the list is not a choice anyone makes, so it is not offered;
+where an agent versions in two parts and has no patch to collapse (GLPI's `1.15`), the list is
+simply the last three versions. Release candidates and the tags a repository keeps for other things
 (the Collector repository tags its builder alongside) are filtered out.
 
 The platform list is what *that release actually publishes*, read from its assets rather than
@@ -134,7 +137,7 @@ $ opamp-fleetctl package fetch --agent otelcol-contrib --version 0.158.0 \
 
 | Option | Meaning |
 |---|---|
-| `--agent <name>` | `otelcol`, `otelcol-contrib`, or `supervisor` (this fleet's own Client). |
+| `--agent <name>` | `otelcol`, `otelcol-contrib`, `glpi-agent`, or `supervisor` (this fleet's own Client). |
 | `--version <v>` | The version **as upstream numbers it** — `0.158.0`, `1.19` — never the tag (`v0.158.0`). Omitted, the last five are offered. |
 | `--platform <os/arch>` | Repeatable. `linux/amd64`, `windows/amd64`, `darwin/arm64`, … A platform the release does not publish is refused with the list of those it does. |
 | `--out-dir <path>` | Where artifacts are written. Created if missing. Defaults to the working directory. |
@@ -190,6 +193,7 @@ released binary:
 |---|---|---|
 | `otelcol` | `otelcol-conf` | `service_name = otelcol` |
 | `otelcol-contrib` | `otelcol-contrib-conf` | `service_name = otelcol-contrib` |
+| `glpi-agent` | `glpi-agent-conf` | `service_name = glpi-agent` |
 | `supervisor` | none | — a Client is configured by `supervisor.toml` on its own host, and the fleet owns only its `[[supervisor]]` blocks |
 
 Two rules keep this from surprising anyone:
@@ -255,6 +259,13 @@ underlying cause (DNS, refused connection, TLS) rather than only the request tha
 - **GitHub rate-limits unauthenticated requests to 60 per hour** per address. A run costs two
   requests (one to list versions, one to read a release), so this is only reached by scripting.
   The error says so rather than leaving you guessing.
+- **The GLPI Linux repack needs `unsquashfs` 4.5.1 or later** (squashfs-tools) on `PATH`. Older
+  versions can write outside the directory they extract to (CVE-2021-40153, CVE-2021-41072), so
+  the tool asks `unsquashfs -version` first and refuses an older one, or one whose version it
+  cannot read, before it extracts anything. A distribution that backports the fixes into an older
+  version is refused too. The tool reads the AppImage's file system as data and never runs the
+  AppImage, so the host's own architecture does not matter. Every other agent, platform, and step
+  needs nothing beyond the tool. The Dev Container installs squashfs-tools 4.5.1.
 - **Only amd64 and arm64 (and 386 where published)** are named, matching what Agents report as
   `os.type` and `host.arch`.
 
