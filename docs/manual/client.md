@@ -159,7 +159,9 @@ running block of the same name already has them, or as you allow below; never a 
 steers which code a program loads (`PATH`, `PATHEXT`, `COMSPEC`, `LD_*`, `DYLD_*`,
 `JAVA_TOOL_OPTIONS`, `PYTHONPATH`, `PERL5LIB`, `RUBYLIB`, `NODE_PATH` and the like) and never a
 value pointing into the Supervisors' own directories, whether by `${config_dir}`,
-`${supervisor_dir}` or a path under the Supervisors' root.
+`${supervisor_dir}` or a path under the Supervisors' root; and a file it names, such as Icinga's
+`ticket_file`, only inside its own `config/` directory, with the Icinga parent pinned by
+`trusted_cert_file`.
 
 ```toml
 [supervisors]
@@ -185,7 +187,7 @@ uninstall, start, stop, update, reload, and apply-configuration. A plugin select
 
 The vocabulary being closed is the point. A new kind of agent adds an implementation, not a new
 concept — so package delivery, health gating and rollback work for it without anyone extending them.
-Kinds exist for OpenTelemetry Collectors and a generic one that runs a command; the
+Kinds exist for OpenTelemetry Collectors, for Icinga 2, and a generic one that runs a command; the
 generic one covers most things without a plugin at all.
 
 Each supervised process gets one directory holding everything about it: its identity, its
@@ -406,10 +408,12 @@ Two consequences to weigh before using it:
   the packaged `/usr/bin/opamp-fleet` symlink resolves through that layout's `current`
   pointer — an administrator invoking the CLI executes account-owned code.
 - **The account's limits are the fleet's.** Under an account other than root, an inventory
-  agent's full inventory and its deploy task, an input without a `sudo` rule, a listener on a port
-  below 1024, and a log receiver reading `root:adm` files fail — that trade-off is the point. Grant
-  what is missing (a `sudoers` entry, `usermod -aG adm opamp-fleet`, or a drop-in, below), or
-  choose root with `opamp-fleet service install --run-as root`.
+  agent's full inventory and its deploy task, an input without a `sudo` rule, an Icinga 2
+  `check_icmp` from the delivered tree
+  ([Icinga 2](icinga2.md#limits-worth-knowing-before-you-start)), a listener on a port below 1024,
+  and a log receiver reading `root:adm` files fail — that trade-off is the point. Grant what is
+  missing (a `sudoers` entry, `usermod -aG adm opamp-fleet`, or a drop-in, below), or choose root
+  with `opamp-fleet service install --run-as root`.
 
 Re-running `install` with a different `--run-as` re-registers and re-owns the same directories.
 Without the flag it keeps the account; a plain re-install does not return a host to root.
@@ -1981,7 +1985,8 @@ false` as well to close that. A change to the list takes effect when the Client 
 
 `collector` and `command` know nothing about the agent they run, so their blocks say everything.
 Every other kind is a **wrapper**: it knows its agent's program, its layout and
-its invocation, so its block says which host runs it and little else — two lines.
+its invocation, so its block says which host runs it and little else — two lines, and up to six
+for an [Icinga 2](#type--icinga2) node that enrols.
 
 A key a wrapper supplies is **refused by name** rather than silently overridden, and the message
 says what supplies the value now. The same check runs on a Supervisor set the Server offers, so a
@@ -2020,8 +2025,9 @@ apply_grace_secs = 3     # how long a restart must hold before an apply is ackno
 retain_previous_secs = 86400
 ```
 
-A **wrapped kind corrects them** where its agent's own behaviour demands it.
-Only a block of an **unwrapped** kind may state its own, because there no kind
+A **wrapped kind corrects them** where its agent's own behaviour demands it — Icinga 2 needs sixty
+seconds to drain its checks and close its cluster connections, which is a property of Icinga and
+not of any host. Only a block of an **unwrapped** kind may state its own, because there no kind
 exists to hold the value.
 
 #### Keys that were removed
@@ -2147,6 +2153,43 @@ Here `fluent-bit-conf` is the *name of the Configuration on the Server* — that
 file
 is called.
 
+### `type = "icinga2"`
+
+For Icinga 2 in the Agent role, which needs more than a program and arguments: it must be told where
+its state, its template library and its account are on **every** invocation, it creates none of
+those directories itself, and it obtains a certificate from an Icinga master before it can do
+anything.
+
+It is the one wrapper that keeps any keys, and it keeps exactly the four that describe the
+**installation this host is joining**. Nothing here can compute them: the ticket was minted on the
+parent for one common name, and a node that differs from it does not enrol.
+
+| Key | Meaning |
+|---|---|
+| `parent_host` | The Icinga master or satellite, as `host` or `host:port` — the port defaults to Icinga's 5665. Absent means a standalone node: no enrolment, no certificate, only local checks. |
+| `node_name` | This node's `NodeName`, its certificate's common name and its Endpoint name — Icinga requires the three to be the same string. Defaults to this **host's FQDN**, which is what an operator following Icinga's own instructions feeds `pki ticket --cn`; where no qualified name can be resolved, this Supervisor's name stands in. |
+| `ticket_file` | The file holding this host's enrolment ticket, delivered as a `supplementary` Configuration in a Deployment aimed at this one Agent. Absent means the signing request waits for `icinga2 ca sign` on the parent. |
+| `trusted_cert_file` | The parent's **own** certificate — not the CA that signed it — which the request compares against what the parent presents. Not named at all falls back to trust on first sight, which is logged as such; a named file that is not there makes enrolment wait for it, never fall back. |
+
+Everything else is the kind's, because it is a property of the artifact or of Icinga: the daemon's
+name and place in the tree, the Agent type it presents, its state, log, cache, spool and run
+directories beside the tree, the template library and check plugins inside it, the
+`LD_LIBRARY_PATH` that makes the tree's own libraries win, the account it runs under, the console
+severity, the certificate renewal thirty days before expiry, and the sixty-second stop Icinga needs
+to drain its checks. A block stating one of them is refused by name.
+
+**Which delivered Configuration is Icinga's root** is stated by the fleet rather than by this file:
+the root Configuration carries `role = "main"`, and where the fleet marks none, the conventional
+name `icinga2-conf` stands in. Two entries marked `main` are a reason not to start, naming both.
+Listed in `remote_config_disabled`, it runs on the `role = "main"` entry or `icinga2-conf` you place
+in its `config/` directory and waits without one, saying so; a delivered block that adds it names
+nothing beyond `type` and `name`, since its other keys name the parent it enrols with and the
+certificate it pins.
+
+The recipe with everything around it — building the artifact, the ticket, the configuration, and
+what the fleet view shows — is [Rolling out and managing Icinga 2](icinga2.md); the artifact itself
+is [`docs/artifacts/icinga2.md`](../artifacts/icinga2.md).
+
 ## How a block names its program
 
 `binary` and `command` take a **bare file name** — `otelcol-contrib`, not a path. It names a file in
@@ -2157,7 +2200,8 @@ Server replace what is in it. Every Agent therefore consents to package updates,
 Anything with a path separator in it — `/usr/local/bin/otelcol`, `./x`, `bin/x` — is a startup error
 naming the rule, rather than a guess. A program the machine's package manager installed is not
 something this Client supervises; to bring one under management, repack it as a package and deliver
-it from the Server.
+it from the Server. The [Icinga 2](icinga2.md) recipe shows what that
+looks like for a real agent.
 
 One thing to know about a bare name: it is **not** searched for in `$PATH`. It names a file in that
 one directory, and the first copy arrives by package like every later one.
@@ -2171,7 +2215,7 @@ path written there drifts the moment `supervisor_dir` moves or the Supervisor is
 silently, because the process then starts happily on a file nobody writes to. Two placeholders
 close that, in a Supervisor's operator-written strings — a `command`'s `args` and
 `[supervisor.env]`, and a `collector`'s `args` and `[supervisor.env]`. A wrapped kind builds its own
-paths and needs no placeholder:
+paths and needs no placeholder, except in the four Icinga keys, which take them too:
 
 | Placeholder | Expands to |
 |---|---|

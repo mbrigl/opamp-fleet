@@ -11,6 +11,7 @@ is one machine, the Clients are all the others — so each half can be read on i
 | **[Server](server.md)** | run the control plane: the two listeners, Configurations, packages and the deployments that aim them, the REST API, authentication, enrolment, TLS |
 | **[Client](client.md)** | run a managed host, end to end: how it is built, the OS service and the process account its Managed Processes may run under, the on-disk layout, Supervisors for Collectors and Foreign Agents, package updates, self-update, and Gateway Mode |
 | **[Rollout walkthrough](rollout.md)** | both ends at once, end to end: build an artifact, sign it, upload it, aim it, and watch a Foreign Agent be installed and configured entirely from the Server |
+| **[Icinga 2 recipe](icinga2.md)** | roll out a monitoring agent the fleet owns end to end: the program, its directories, its certificate from the Icinga master, and its configuration |
 | **[Command-line tools](tools.md)** | get software into the fleet: fetch a known agent's release and hand it to the Server, or build, hash, and sign an artifact out of any program |
 | **[Upgrading from 0.5](upgrade.md)** | take a fleet on a 0.5 release to this one, in order: the Clients' files, the Server and its records, then the Clients' own update |
 | **[Artifact documents](../artifacts/README.md)** | for maintainers: what each wrapped agent's artifact *is* — source, assets, integrity, repack, the delivered tree, and what the Client derives from it. One per wrapped agent |

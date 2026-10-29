@@ -46,6 +46,65 @@ once its tag exists.
   `r.10` orders above `r.9`. `--repack 1`, the default, is the version itself.
   **What to do:** nothing.
 
+- **Icinga 2 is managed by the fleet, end to end** — a new Supervisor kind `icinga2`, compiled into
+  the Client by default as the `icinga2` feature ([ADR-draft-icinga-2](docs/adr/draft-icinga-2.md)).
+  The fleet ships the program, creates its directories, enrols it with an Icinga master, distributes
+  its configuration, and updates and rolls it back — with nothing installed through `apt`, `dnf` or
+  an MSI — and the artifact carries the check plugins, so a rolled-out Agent can actually check
+  something. The daemon is stopped as a process group with Icinga's own 60 seconds, and every
+  configuration is validated before it is applied. The recipe is
+  [docs/manual/icinga2.md](docs/manual/icinga2.md). The kind 0.5.3 removed is back in this shape.
+  **What to do:** nothing, unless you run Icinga; to bring an Icinga host back under a Supervisor,
+  write the block below into its `supervisor.toml` or the Supervisor set again.
+  - **A block holds only the enrolment:** `type = "icinga2"`, `name`, and at most `parent_host`,
+    `node_name`, `ticket_file` and `trusted_cert_file`. `node_name` defaults to the host's FQDN,
+    taken only when the resolved name contains a dot. Icinga's root file is the Configuration
+    marked `role = "main"` on the Server; where nothing is marked, `icinga2-conf` stands in. The
+    per-host ticket travels as a `supplementary` Configuration in a Deployment that claims that one
+    Agent.
+  - **A named parent certificate is waited for, never trusted on sight.** Once `trusted_cert_file`
+    names a file, enrolment waits until it arrives and the Agent stays unhealthy, naming the path.
+    Only a block that names no `trusted_cert_file` trusts the parent on first contact, once per
+    parent, and logs that it did. A named `ticket_file` is waited for the same way; a request
+    without a ticket waits in the master's queue and is asked again with the same key until it is
+    signed. A block the Server delivers reads `ticket_file` and `trusted_cert_file` only from
+    `${config_dir}/`, and one that names a `parent_host` must name `trusted_cert_file` too
+    ([ADR-0017](docs/adr/0017-supervisor-mode-and-its-kinds.md)).
+  - **`opamp-fleetctl package fetch --agent icinga2`** repacks the vendor's Debian packages into one
+    tree for **Linux amd64**, with the check plugins and every shared library the programs link
+    taken as packages from Debian's archive of the same release — nothing from the host the tool
+    runs on, so any host repacks any of `bullseye`, `bookworm` and `trixie` (`--distro`, by default
+    the host's own). Repacked from the oldest release you serve, it reaches Debian, Ubuntu and Red
+    Hat hosts alike, and the tool prints that reach, the highest glibc floor the packages state:
+    2.36 for bookworm. A file `deb.debian.org` answers `404` for, as it does for packages of the
+    ended bullseye, is read from `archive.debian.org` at the same path and verified alike. The
+    upload also stores `icinga2-conf` and `icinga2-zones` from
+    `config/examples/`, left untouched where the Server already holds them; the per-host ticket and
+    parent certificate are not among them. Every index is read only once its signed `InRelease`
+    verifies with `gpgv` against the keys the tool carries — Icinga's, and Debian's for Debian 11,
+    12 and 13, its security keys alone for a `-security` suite — by a pinned primary key, names
+    the suite it was fetched for and is within its `Valid-Until`, so `gpgv`, `xz` and
+    `dpkg-deb` must be installed. A later repack of the same version is named with `--repack <n>`
+    and uploaded as a pre-release of the next patch: the second repack of `2.14.3` is Package
+    `2.14.4-0.r.2`, offered to the hosts on `2.14.3`, whose Supervisor reports the Package
+    version rather than the daemon's, and replaced by `2.14.4`. **Linux only:** no
+    Windows artifact is built until a repacked tree has run on a Windows host, and the kind
+    refuses to start there — keep Windows hosts on their MSI installation and outside the
+    fleet. The Package is named by Icinga's release number,
+    which is SemVer already: `--version 2.16.5` uploads Package `2.16.5`.
+  - **Under the packaged service account**, the delivered check plugins run unprivileged:
+    `check_icmp` and its setuid relatives fail from the tree, while a setuid helper the host
+    installed still works, since the unit sets no `NoNewPrivileges=`. Where the delivered plugins
+    must run privileged, choose root with `service install --run-as root`
+    ([ADR-0037](docs/adr/0037-the-accounts-the-service-runs-under.md)).
+  - **Not on a host with a process account.** There an `icinga2` block is refused when it is
+    checked and when it starts, naming `service install --no-process-account`
+    ([ADR-0037](docs/adr/0037-the-accounts-the-service-runs-under.md)):
+    Icinga drops to an account of its own, which a program under the process account cannot do.
+  - **A repack follows no link out of the unpacked packages**
+    ([ADR-0032](docs/adr/0032-the-operator-program-opamp-fleetctl.md)): one that leads out
+    fails it, naming the link.
+
 - **An artifact document per wrapped agent**, under [`docs/artifacts/`](docs/artifacts/README.md):
   what the artifact is, per platform — source, assets, integrity, repack, the delivered tree, and
   what the Client derives from it. Each is pinned by two tests, one on the packing side and one in

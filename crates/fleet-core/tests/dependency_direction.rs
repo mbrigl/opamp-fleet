@@ -136,6 +136,7 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             ("main", Root),
             ("bin::stub_agent", Root),
             ("bin::stub_crasher", Root),
+            ("bin::stub_icinga2", Root),
             ("supervisor", Root),
             ("service::enrol", Root),
             ("service::runtime", Root),
@@ -191,6 +192,7 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             ("supervisor::collector", Adapter),
             ("supervisor::command", Adapter),
             ("supervisor::endpoint", Adapter),
+            ("supervisor::icinga2", Adapter),
             ("supervisor::process", Adapter),
             ("telemetry", Adapter),
             // Test-only: the log capture the unit tests share, bound to `tracing_subscriber`.

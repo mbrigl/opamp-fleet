@@ -4,7 +4,7 @@
 //! Getting a real agent into the fleet is a research task before it is a command: which repository
 //! publishes the binaries, what the assets are called this month, which checksum file goes with
 //! them, and whether the container is one a Client can open at all. This tool holds that knowledge
-//! for the agent types the manual documents — `otelcol`, `otelcol-contrib`,
+//! for the agent types the manual documents — `otelcol`, `otelcol-contrib`, `icinga2`,
 //! and `supervisor`, this fleet's own Client (ADR-0019) — and asks the
 //! operator only what it cannot know: which one, which version, which platforms, and where to send
 //! the result.
@@ -27,6 +27,7 @@ use crate::package::sha256_file;
 use clap::ValueEnum;
 use dialoguer::{Confirm, Input, MultiSelect, Select};
 use fleet_core::tree::KeptLink;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 /// How many release series the operator is offered. Enough to reach the release before last when
@@ -76,6 +77,12 @@ pub struct Args {
     /// release (ADR-draft-the-operator-program-opamp-fleetctl clause 28).
     #[arg(long, value_name = "N", default_value_t = 1)]
     repack: u32,
+    /// Which Debian build to repack, by codename (`bullseye`, `bookworm`, `trixie`). Icinga 2 only.
+    /// Every file of the tree comes from that suite's signed archives, so any host builds any of
+    /// them; omitted, it is this host's own. It is the artifact's reach: repack the oldest suite
+    /// you serve, since glibc cannot travel and is backward compatible (ADR-draft-icinga-2).
+    #[arg(long, value_name = "CODENAME")]
+    distro: Option<String>,
 }
 
 /// The agents this tool knows how to fetch. Adding one is this enum, its [`Source`], and nothing
@@ -88,6 +95,9 @@ enum AgentKind {
     /// The OpenTelemetry Collector, Contrib distribution — the one carrying `opampextension`.
     #[value(name = "otelcol-contrib")]
     OtelcolContrib,
+    /// Icinga 2, repacked from the vendor's distribution packages (ADR-draft-icinga-2).
+    #[value(name = "icinga2")]
+    Icinga2,
     /// This fleet's own Client — the package a Client updates *itself* from (ADR-0018, ADR-0019).
     #[value(name = "supervisor")]
     Supervisor,
@@ -112,6 +122,10 @@ impl AgentKind {
             AgentKind::OtelcolContrib => Source {
                 service_name: "otelcol-contrib",
                 repo: "open-telemetry/opentelemetry-collector-releases",
+            },
+            AgentKind::Icinga2 => Source {
+                service_name: "icinga2",
+                repo: "Icinga/icinga2",
             },
             // This repository's own releases. The Client is an Agent like any other (ADR-0018), so
             // the artifact that updates it is fetched the way every other agent's is — and by
@@ -142,7 +156,7 @@ impl AgentKind {
     /// project's release workflow creates them under (ADR-0033).
     fn tag_prefix(self) -> &'static str {
         match self {
-            AgentKind::Otelcol | AgentKind::OtelcolContrib => "v",
+            AgentKind::Otelcol | AgentKind::OtelcolContrib | AgentKind::Icinga2 => "v",
             AgentKind::Supervisor => "version/",
         }
     }
@@ -168,25 +182,36 @@ impl AgentKind {
     /// (ADR-draft-the-operator-program-opamp-fleetctl clause 28).
     fn repacked(self) -> bool {
         match self {
+            // The Linux artifact is a tree built from Icinga's and Debian's packages
+            // (ADR-draft-icinga-2).
+            AgentKind::Icinga2 => true,
             AgentKind::Otelcol | AgentKind::OtelcolContrib | AgentKind::Supervisor => false,
         }
     }
 
     /// The systems this agent can be fetched for, as the agent menu states them.
     ///
-    /// A hint, not the plan: what is actually offered comes from the release itself a step later.
-    /// It is here because the menu asks for an agent before any of that is known, and picking one
-    /// only to be told that it publishes nothing for the systems an operator runs is a round trip
-    /// the operator should not have to make.
+    /// A hint, not the plan: what is actually offered comes from the release itself a step later,
+    /// and for Icinga 2 also from the suite it is repacked from, by default the host's own. It is
+    /// here because the menu asks for an agent before any of that is known, and picking one only to
+    /// be told that this host builds nothing for it is a round trip the operator should not have
+    /// to make.
     ///
     /// The Collectors publish per platform and add new ones between releases, so naming their
     /// architectures here would be a table going stale — the operating systems are the honest
     /// answer, and the platform question that follows shows the release's own list.
-    fn platforms(self) -> String {
+    ///
+    /// `host` is this machine's distribution codename where it has one, because Icinga 2's answer
+    /// depends on it and no other agent's does.
+    fn platforms(self, host: Option<&str>) -> String {
         match self {
             AgentKind::Otelcol | AgentKind::OtelcolContrib => {
                 "linux, darwin, windows — as the release publishes".to_string()
             }
+            // This column answers one question for every agent alike — does it run on the hosts I
+            // have — so Icinga 2 states its *reach*: that of the Debian suite this run repacks
+            // unless `--distro` names another, which is this host's own (ADR-draft-icinga-2).
+            AgentKind::Icinga2 => icinga2_reach(host),
             // Named rather than left to the release, unlike the Collectors': this is *this*
             // project's own build matrix (`.github/workflows/release.yml`), so it moves only when
             // this repository decides it should — and the column's question, "does it run on the
@@ -201,6 +226,9 @@ impl AgentKind {
     fn needs_assets(self) -> bool {
         match self {
             AgentKind::Otelcol | AgentKind::OtelcolContrib | AgentKind::Supervisor => true,
+            // Icinga 2's GitHub releases carry none of what is repacked — its packages come from
+            // the vendor's own repositories (ADR-draft-icinga-2).
+            AgentKind::Icinga2 => false,
         }
     }
 
@@ -219,8 +247,12 @@ impl AgentKind {
     /// The Configurations this agent needs before it can do anything, typed the way
     /// `scripts/seed_test_configs.sh` types them — which is where these bodies come from, and why
     /// they agree with the `[[supervisor]]` blocks in `config/supervisor.toml` down to the file names.
+    ///
+    /// Icinga 2 gets two, because it reads one root file and includes the rest by name
+    /// (ADR-draft-icinga-2). Its ticket and its parent's certificate are *not* here: both are per
+    /// host, one is a secret, and neither has a sensible default — see `docs/manual/icinga2.md`.
     fn default_configurations(self) -> &'static [DefaultConfiguration] {
-        // Each is stated for the `service.name` its Collector reports, so a Deployment holding it
+        // Each is stated for the `service.name` its agent reports, so a Deployment holding it
         // fits it to that Agent type alone (ADR-0026); the Deployment's Selector does the aiming.
         match self {
             AgentKind::Otelcol => &[DefaultConfiguration {
@@ -237,6 +269,18 @@ impl AgentKind {
             // deliberately does not own (ADR-0017 admits only `[[supervisor]]` blocks), and none
             // of it has a default this tool could put on a Server.
             AgentKind::Supervisor => &[],
+            AgentKind::Icinga2 => &[
+                DefaultConfiguration {
+                    name: "icinga2-conf",
+                    service_name: "icinga2",
+                    body: include_str!("../../../config/examples/icinga2-conf.conf"),
+                },
+                DefaultConfiguration {
+                    name: "icinga2-zones",
+                    service_name: "icinga2",
+                    body: include_str!("../../../config/examples/icinga2-zones.conf"),
+                },
+            ],
         }
     }
 }
@@ -332,7 +376,9 @@ struct Plan {
     /// The platform as *this fleet* names it (ADR-0027), which is what the upload path carries.
     os: String,
     arch: String,
-    /// What has to be fetched. Every one of them is verified before any of them is used.
+    /// What has to be fetched. Usually one file; a repacked Icinga 2 tree needs the vendor's binary
+    /// package *and* the one holding the ITL, so this is a list (ADR-draft-icinga-2). Every one of
+    /// them is verified before any of them is used.
     sources: Vec<Download>,
     /// What has to happen to the downloaded bytes before they are a package artifact.
     action: Action,
@@ -363,6 +409,11 @@ enum ChecksumSource {
     /// A file holding one bare hex digest and nothing else — the Collector's per-asset sidecar
     /// from 0.158.0 on.
     BareDigest { url: String },
+    /// The digest is already known — read out of a repository index rather than a sidecar. Icinga
+    /// signs its repositories with GPG instead of publishing per-file checksums, so the `SHA256:`
+    /// field of the `Packages` index is where its hash comes from — an index read only after its
+    /// signed `InRelease` verified and vouched for it (ADR-draft-icinga-2).
+    Known { sha256: String },
 }
 
 /// What happens between the download and the artifact.
@@ -370,6 +421,17 @@ enum Action {
     /// Nothing. The artifact is uploaded exactly as upstream published it, so the hash the fleet
     /// verifies is the hash on the release page (ADR-0027).
     AsPublished,
+    /// Unpack the vendor's Debian packages into one normalised, link-free tree and pack that
+    /// (ADR-draft-icinga-2): Icinga 2 publishes distribution packages and an MSI, and no portable
+    /// tree.
+    ///
+    /// The first `tree_packages` sources make the tree; the rest are the library packages of
+    /// Debian's archive the tree's shared libraries are taken from (ADR-draft-icinga-2 clause 18).
+    /// Nothing the tree carries comes from the host that repacks it.
+    RepackDebs {
+        wrapper: String,
+        tree_packages: usize,
+    },
 }
 
 impl Action {
@@ -529,6 +591,47 @@ pub async fn run(args: Args) -> Result<(), String> {
 
 // ── The questions ───────────────────────────────────────────────────────────
 
+/// What a Linux artifact repacked from one Debian suite reaches, by that suite's codename.
+///
+/// Each row is the highest `libc6 (>= …)` floor the packages of that build state — the vendor's
+/// and every library's the tree carries — read back as the systems it covers: glibc is backward
+/// compatible, so a floor is the whole of it and the distribution family is none of it
+/// (ADR-draft-icinga-2). The floors are what this tool prints for real once the repository indexes
+/// have been read (`icinga2_plans`); the ones below were read for Icinga 2 2.16.5.
+///
+/// The table is small because the source of truth is not it: it translates a floor into the names
+/// an operator recognises, one row per distribution Icinga publishes for. `--distro` accepts the
+/// same three, and the test below holds the two lists together.
+const ICINGA2_REACH: &[(&str, &str)] = &[
+    // libc6 >= 2.30 — Debian 11 is 2.31, Ubuntu 20.04 is 2.31, RHEL 9 is 2.34. RHEL 8 (2.28) is
+    // the one this misses, and no build of Icinga's reaches it.
+    ("bullseye", "Debian 11+/Ubuntu 20.04+/RHEL 9+"),
+    // libc6 >= 2.36 — `icinga2-bin` states 2.34, but the `libstdc++6` it links states 2.36.
+    // Ubuntu 22.04 is 2.35 and RHEL 9 is 2.34, so both drop out here; Ubuntu 24.04 and RHEL 10 are
+    // 2.39.
+    ("bookworm", "Debian 12+/Ubuntu 24.04+/RHEL 10+"),
+    // libc6 >= 2.39 — Ubuntu 24.04 is 2.39, RHEL 10 is 2.39.
+    ("trixie", "Debian 13+/Ubuntu 24.04+/RHEL 10+"),
+];
+
+/// Icinga 2's line in the agent menu, for the host this tool is running on.
+///
+/// The build defaults to the host's own suite (`chosen_distro`), so the line states that suite's
+/// reach. A host that is none of the three builds a Linux artifact only when `--distro` names one,
+/// so the line says so rather than naming a reach this run would not deliver unasked. That is the
+/// one case where a codename belongs in this column: it is then the flag the operator has to give.
+fn icinga2_reach(host: Option<&str>) -> String {
+    match host.and_then(|codename| {
+        ICINGA2_REACH
+            .iter()
+            .find(|(name, _)| *name == codename)
+            .map(|(_, reach)| *reach)
+    }) {
+        Some(reach) => format!("linux/amd64 ({reach})"),
+        None => "linux/amd64 with --distro bullseye/bookworm/trixie".to_string(),
+    }
+}
+
 /// Platform pairs as one menu line: `linux/amd64+arm64 windows/amd64`.
 ///
 /// Grouped by operating system, and tightly, because the menu is one line per agent and a line
@@ -552,7 +655,7 @@ fn group_platforms<'p>(pairs: impl Iterator<Item = (&'p str, &'p str)>) -> Strin
 ///
 /// Its own function so the width rule below is testable against the very lines the menu shows,
 /// rather than against a copy of them that drifts.
-fn agent_menu_labels() -> Vec<String> {
+fn agent_menu_labels(host: Option<&str>) -> Vec<String> {
     // Asked of clap rather than written out again. A second list of the same agents is how an
     // agent goes missing from this prompt while `--agent` accepts it: adding a variant is one
     // place, and the menu follows it whether or not anyone remembers this function.
@@ -571,7 +674,7 @@ fn agent_menu_labels() -> Vec<String> {
             format!(
                 "{name:<width$}  {platforms}",
                 name = a.source().service_name,
-                platforms = a.platforms()
+                platforms = a.platforms(host)
             )
         })
         .collect()
@@ -579,7 +682,10 @@ fn agent_menu_labels() -> Vec<String> {
 
 fn choose_agent() -> Result<AgentKind, String> {
     let agents = AgentKind::value_variants();
-    let labels = agent_menu_labels();
+    // Not an error when it fails: a host without a `VERSION_CODENAME` still fetches every other
+    // agent, and Icinga 2's line then says so instead of the menu refusing to appear.
+    let host = host_codename().ok();
+    let labels = agent_menu_labels(host.as_deref());
     let picked = Select::new()
         .with_prompt("Which agent")
         .items(&labels)
@@ -765,7 +871,690 @@ async fn plans(agent: AgentKind, release: &Release<'_>) -> Result<Vec<Plan>, Str
             Ok(collector_plans(agent, release.version, release.assets))
         }
         AgentKind::Supervisor => Ok(supervisor_plans(release.version, release.assets)),
+        AgentKind::Icinga2 => {
+            let distro = chosen_distro(release.args.distro.as_deref(), host_codename())?;
+            icinga2_plans(release.version, &distro).await
+        }
     }
+}
+
+/// Which Debian suite's build is repacked: the one `--distro` names, else this host's own when it
+/// is one Icinga publishes for. A host that is none of them is refused, naming the flag: the
+/// Linux artifact is the only one this tool builds for Icinga 2 (ADR-draft-icinga-2 clause 23).
+///
+/// The suite is the artifact's reach (ADR-draft-icinga-2 clause 19), and nothing else about the
+/// host is: every file of the tree comes from the vendor's and Debian's signed archives, so any
+/// host builds any of the three. The host's codename is only the default, stated as it is taken.
+fn chosen_distro(flag: Option<&str>, host: Result<String, String>) -> Result<String, String> {
+    let known = |codename: &str| ICINGA2_REACH.iter().any(|(name, _)| *name == codename);
+    let names = || {
+        ICINGA2_REACH
+            .iter()
+            .map(|(name, _)| *name)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    if let Some(distro) = flag {
+        if !known(distro) {
+            return Err(format!(
+                "Icinga publishes no Debian build for {distro:?}; --distro takes one of {}",
+                names()
+            ));
+        }
+        return Ok(distro.to_string());
+    }
+    match host {
+        Ok(here) if known(&here) => {
+            eprintln!("  building the {here} artifact, this host's own; --distro names another");
+            Ok(here)
+        }
+        Ok(here) => Err(format!(
+            "this host is {here:?}, which Icinga publishes no Debian build for, so name the one \
+             to repack with --distro ({})",
+            names()
+        )),
+        Err(e) => Err(format!(
+            "{e}, so name the Debian build to repack with --distro ({})",
+            names()
+        )),
+    }
+}
+
+/// What distribution this host is, by the codename its own `/etc/os-release` states.
+fn host_codename() -> Result<String, String> {
+    let os_release = std::fs::read_to_string("/etc/os-release")
+        .map_err(|e| format!("cannot read /etc/os-release: {e}"))?;
+    os_release
+        .lines()
+        .find_map(|line| line.strip_prefix("VERSION_CODENAME="))
+        .map(|name| name.trim_matches('"').to_string())
+        .filter(|codename| !codename.is_empty())
+        .ok_or_else(|| {
+            "this host's /etc/os-release names no VERSION_CODENAME, so which vendor build to \
+             repack cannot be derived — name it with `--distro <codename>`"
+                .to_string()
+        })
+}
+
+/// Where Icinga publishes what this tool repacks.
+const ICINGA_REPO: &str = "https://packages.icinga.com/debian";
+
+/// The key Icinga signs its Debian repositories with, carried in the tool (ADR-draft-icinga-2
+/// clause 18): `Icinga GmbH (Build server) <info@icinga.com>`, fingerprint
+/// `DD3A F619 8ED0 00B4 C0B7 3956 CC11 6F55 AA7F 2382`. A binary keyring, because that is what
+/// `gpgv` reads. A repository index signed by any other key is refused.
+const ICINGA_ARCHIVE_KEY: &[u8] = include_bytes!("../trust/icinga-archive.gpg");
+
+/// The primary key a signature over Icinga's index must be made by, or by a subkey of.
+const ICINGA_PRIMARY_KEYS: &[&str] = &["DD3AF6198ED000B4C0B73956CC116F55AA7F2382"];
+
+/// The keys Debian signs its archives with, carried in the tool like Icinga's (ADR-draft-icinga-2
+/// clause 18) rather than read from the host, so what the tree carries depends on no file of the
+/// host that repacks it. A binary keyring of the six automatic signing keys of Debian 11, 12 and
+/// 13, as `ftp-master.debian.org/keys.html` lists them and the `debian-archive-keyring` package
+/// carries them:
+///
+/// - `1F89 983E 0081 FDE0 18F3  CC96 73A4 F27B 8DD4 7936` archive, 11/bullseye
+/// - `AC53 0D52 0F2F 3269 F5E9  8313 A484 4904 4AAD 5C5D` security archive, 11/bullseye
+/// - `B8B8 0B5B 623E AB6A D877  5C45 B7C5 D7D6 3509 47F8` archive, 12/bookworm
+/// - `05AB 9034 0C0C 5E79 7F44  A8C8 254C F3B5 AEC0 A8F0` security archive, 12/bookworm
+/// - `04B5 4C3C DCA7 9751 B16B  C6B5 2256 29DF 75B1 88BD` archive, 13/trixie
+/// - `5E04 A1E3 223A 19A2 0706  E20F 9904 613D 4CCE 68C6` security archive, 13/trixie
+///
+/// Every suite this tool reads is signed by at least one of them; the per-release stable keys sign
+/// beside them and are not needed.
+const DEBIAN_ARCHIVE_KEY: &[u8] = include_bytes!("../trust/debian-archive.gpg");
+
+/// The archive primaries of [`DEBIAN_ARCHIVE_KEY`], one of which, or a subkey of it, must have
+/// made a signature over the index of a Debian suite or its `-updates`. Debian signs with subkeys,
+/// so the key is told by the primary fingerprint `gpgv` states last on its `VALIDSIG` line.
+const DEBIAN_ARCHIVE_PRIMARY_KEYS: &[&str] = &[
+    "1F89983E0081FDE018F3CC9673A4F27B8DD47936",
+    "B8B80B5B623EAB6AD8775C45B7C5D7D6350947F8",
+    "04B54C3CDCA79751B16BC6B5225629DF75B188BD",
+];
+
+/// The security archive primaries of [`DEBIAN_ARCHIVE_KEY`], one of which, or a subkey of it,
+/// must have made a signature over the index of a Debian `-security` suite.
+const DEBIAN_SECURITY_PRIMARY_KEYS: &[&str] = &[
+    "AC530D520F2F3269F5E98313A48449044AAD5C5D",
+    "05AB90340C0C5E797F44A8C8254CF3B5AEC0A8F0",
+    "5E04A1E3223A19A20706E20F9904613D4CCE68C6",
+];
+
+/// The largest uncompressed `Packages` index this tool reads. Debian's own is about 50 MB; the
+/// signed index states the exact size, and this bounds what that statement may ask for.
+const MAX_INDEX_BYTES: u64 = 512 * 1024 * 1024;
+
+/// Where the *check plugins* come from. They are not Icinga's to publish — `monitoring-plugins` is
+/// its own project, packaged by the distribution — but an Icinga Agent without `check_disk` and its
+/// siblings can barely check anything, so the artifact carries them
+/// (ADR-draft-icinga-2's "(+ plugins)").
+const DEBIAN_REPO: &str = "https://deb.debian.org/debian";
+
+/// Where Debian publishes its security updates, a suite `<codename>-security` of its own. The
+/// shared libraries the tree carries — OpenSSL above all — are taken at the newest version any of
+/// the suite, its `-updates` and its `-security` states, as an `apt` with Debian's default sources
+/// would install them.
+const DEBIAN_SECURITY_REPO: &str = "https://deb.debian.org/debian-security";
+
+/// What Icinga 2 offers for one distribution build, read out of that repository's own index.
+///
+/// Two packages make one tree: `icinga2-bin` carries the daemon, `icinga2-common` the ITL. Their
+/// SHA-256 comes from the `Packages` index — Icinga signs repositories with GPG rather than
+/// publishing per-file checksums, and the index is where the digests live, read only once the
+/// repository's signature over it verified ([`signed_index`], ADR-draft-icinga-2). The check
+/// plugins and every shared library the tree needs come from Debian's archive the same way.
+///
+/// Only `linux/amd64` for now, and deliberately: an artifact's reach is decided by the suite it
+/// was built from, so each build is its own act rather than a loop over architectures. No Windows
+/// artifact is offered until a repacked tree has run on a Windows host (ADR-draft-icinga-2 clause
+/// 23).
+async fn icinga2_plans(version: &str, distro: &str) -> Result<Vec<Plan>, String> {
+    let packages = signed_index(ICINGA_REPO, &format!("icinga-{distro}"), &ICINGA_ARCHIVE).await?;
+    let mut tree: Vec<&DebEntry> = Vec::new();
+    // The highest packaging revision of this release, and the other package at exactly that one:
+    // a rebuild of the same Icinga version replaces the earlier one in the vendor's own order.
+    let revision = newest(packages.iter().filter(|entry| {
+        entry.package == "icinga2-bin" && entry.version.starts_with(&format!("{version}-"))
+    }))
+    .map(|entry| entry.version.clone())
+    .ok_or_else(|| {
+        format!(
+            "{distro} publishes no icinga2-bin {version} — check the version and the distribution"
+        )
+    })?;
+    for package in ["icinga2-bin", "icinga2-common"] {
+        let entry = packages
+            .iter()
+            .find(|entry| entry.package == package && entry.version == revision)
+            .ok_or_else(|| format!("{distro} publishes no {package} {revision}"))?;
+        tree.push(entry);
+    }
+
+    // The check plugins, from the distribution rather than from Icinga: `-basic` is check_disk,
+    // check_load, check_procs and the rest, `-common` the helpers several of them source at run
+    // time. Whatever version that distribution ships — they are not versioned with Icinga.
+    let debian = debian_index(distro).await?;
+    for package in ["monitoring-plugins-basic", "monitoring-plugins-common"] {
+        let entry = newest(debian.iter().filter(|entry| entry.package == package))
+            .ok_or_else(|| format!("{distro} publishes no {package}"))?;
+        tree.push(entry);
+    }
+    // The shared libraries, as Debian's packages of the same suite: what the four packages declare
+    // they need, followed through the library packages, glibc left out (ADR-draft-icinga-2
+    // clause 18). Which of their files the tree carries is decided after unpacking, by what the
+    // programs link against.
+    let libraries = library_packages(&tree, &debian);
+    eprintln!(
+        "  {} library packages from Debian {distro}: {}",
+        libraries.len(),
+        libraries
+            .iter()
+            .map(|entry| entry.package.as_str())
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    // How old a libc may be, as the packages themselves state it. It is the artifact's reach, and
+    // it belongs in front of an operator before the rollout rather than after it
+    // (ADR-draft-icinga-2).
+    if let Some(floor) = glibc_floor(tree.iter().chain(&libraries).copied()) {
+        eprintln!("  this build needs glibc >= {floor} on every host it is rolled out to");
+    }
+    let tree_packages = tree.len();
+    let sources = tree
+        .into_iter()
+        .chain(libraries)
+        .map(|entry| Download {
+            url: format!("{}/{}", entry.repo, entry.filename),
+            checksum: ChecksumSource::Known {
+                sha256: entry.sha256.clone(),
+            },
+        })
+        .collect();
+    Ok(vec![linux_plan(version, sources, tree_packages)])
+}
+
+/// Icinga 2's Linux artifact for `version`: the `sources`, of which the first `tree_packages` make
+/// the tree, repacked under the wrapper `icinga2-<version>` (ADR-draft-icinga-2 clause 17).
+fn linux_plan(version: &str, sources: Vec<Download>, tree_packages: usize) -> Plan {
+    Plan {
+        os: "linux".to_string(),
+        arch: "amd64".to_string(),
+        sources,
+        action: Action::RepackDebs {
+            wrapper: format!("icinga2-{version}"),
+            tree_packages,
+        },
+        out_name: format!("icinga2_{version}_linux_amd64.tar.gz"),
+        block_hint: "type = \"icinga2\"  (docs/artifacts/icinga2.md)".to_string(),
+    }
+}
+
+/// Debian's packages for `distro`: the suite, its `-updates` and its `-security`, each verified
+/// against the carried keys, in one list — [`newest`] then picks across them.
+async fn debian_index(distro: &str) -> Result<Vec<DebEntry>, String> {
+    let mut entries = signed_index(DEBIAN_REPO, distro, &DEBIAN_ARCHIVE).await?;
+    entries.extend(signed_index(DEBIAN_REPO, &format!("{distro}-updates"), &DEBIAN_ARCHIVE).await?);
+    entries.extend(
+        signed_index(
+            DEBIAN_SECURITY_REPO,
+            &format!("{distro}-security"),
+            &DEBIAN_SECURITY_ARCHIVE,
+        )
+        .await?,
+    );
+    Ok(entries)
+}
+
+/// One stanza of a Debian `Packages` index — the fields this tool needs and no others.
+#[derive(Debug)]
+struct DebEntry {
+    /// The repository the index was read from, which `filename` is relative to.
+    repo: String,
+    package: String,
+    version: String,
+    filename: String,
+    sha256: String,
+    depends: String,
+    pre_depends: String,
+    provides: String,
+    section: String,
+}
+
+/// Whose signature an index needs: the keyring the tool carries for that archive, and the primary
+/// keys in it a signature must be made by.
+struct Archive {
+    key: &'static [u8],
+    primaries: &'static [&'static str],
+}
+
+/// Icinga's repositories.
+const ICINGA_ARCHIVE: Archive = Archive {
+    key: ICINGA_ARCHIVE_KEY,
+    primaries: ICINGA_PRIMARY_KEYS,
+};
+
+/// Debian's archive, for a suite and its `-updates`.
+const DEBIAN_ARCHIVE: Archive = Archive {
+    key: DEBIAN_ARCHIVE_KEY,
+    primaries: DEBIAN_ARCHIVE_PRIMARY_KEYS,
+};
+
+/// Debian's security archive, for a `-security` suite.
+const DEBIAN_SECURITY_ARCHIVE: Archive = Archive {
+    key: DEBIAN_ARCHIVE_KEY,
+    primaries: DEBIAN_SECURITY_PRIMARY_KEYS,
+};
+
+/// Reads a suite's `Packages` index the way `apt` trusts it (ADR-draft-icinga-2 clause 18): the
+/// suite's `InRelease` is verified with `gpgv` against the archive's carried key, is refused
+/// unless it names the suite it was fetched for and once the `Valid-Until` it states has passed,
+/// and the index is checked against the SHA-256 and the size that signed text states for it,
+/// compressed and uncompressed, before a line of it is read. TLS alone would put the digests —
+/// and so every package — in the hands of whoever serves or mirrors the repository.
+async fn signed_index(repo: &str, suite: &str, archive: &Archive) -> Result<Vec<DebEntry>, String> {
+    let release_url = format!("{repo}/dists/{suite}/InRelease");
+    eprintln!("  reading {release_url} …");
+    let inrelease = get_bytes(&release_url).await?;
+    let release = crate::gpgv::verify_clearsigned(&inrelease, archive.key, archive.primaries)
+        .and_then(|release| release_names(&release, suite).map(|()| release))
+        .and_then(|release| {
+            release_current(&release, time::OffsetDateTime::now_utc()).map(|()| release)
+        });
+    let release = release.map_err(|e| format!("{release_url}: {e}"))?;
+    eprintln!("  verified the repository's signature");
+    let compression = index_compression(&release).ok_or_else(|| {
+        format!("{release_url}: the signed index names no {INDEX_PATH} this tool reads")
+    })?;
+    let index_url = format!("{repo}/dists/{suite}/{INDEX_PATH}.{compression}");
+    eprintln!("  reading {index_url} …");
+    let compressed = get_bytes(&index_url).await?;
+    let text = verified_index(&release, compression, &compressed)
+        .map_err(|e| format!("{index_url}: {e}"))?;
+    let mut entries = parse_deb_index(&text);
+    for entry in &mut entries {
+        entry.repo = repo.to_string();
+    }
+    Ok(entries)
+}
+
+/// The compressed forms of the `Packages` index this tool reads, the preferred first: Debian's
+/// `-updates` and `-security` suites publish only `.xz`, Icinga's repositories only `.gz`.
+const INDEX_COMPRESSIONS: [&str; 2] = ["xz", "gz"];
+
+/// The first form of [`INDEX_COMPRESSIONS`] the signed `Release` text states a digest for.
+fn index_compression(release: &str) -> Option<&'static str> {
+    INDEX_COMPRESSIONS
+        .into_iter()
+        .find(|ext| release_digest(release, &format!("{INDEX_PATH}.{ext}")).is_some())
+}
+
+/// The index this tool reads, as the signed `InRelease` names it.
+const INDEX_PATH: &str = "main/binary-amd64/Packages";
+
+/// Refuses a signed `Release` text that names neither as its `Codename` nor as its `Suite` the
+/// suite it was fetched for, as `apt` refuses a conflicting distribution. A signature covers the
+/// text and not the path it was served under, so without it whoever serves the repository could
+/// answer for one suite with another's genuine index: an archived `-security` index, which states
+/// no `Valid-Until`, in place of the live one, or another distribution's build of Icinga.
+fn release_names(release: &str, suite: &str) -> Result<(), String> {
+    let field = |name: &str| {
+        release
+            .lines()
+            .find_map(|line| line.strip_prefix(name)?.strip_prefix(':'))
+            .map(str::trim)
+    };
+    let (codename, stated) = (field("Codename"), field("Suite"));
+    if codename == Some(suite) || stated == Some(suite) {
+        return Ok(());
+    }
+    Err(format!(
+        "is signed for {}, not for {suite:?} it was fetched as — refusing it",
+        codename
+            .or(stated)
+            .map_or_else(|| "no suite".to_string(), |named| format!("{named:?}"))
+    ))
+}
+
+/// Refuses a signed `Release` text whose `Valid-Until` lies before `now`, as `apt` does: a
+/// signature never expires, so without it an old index — with the libraries it named before a
+/// security fix — could be served again and would still verify. A text that states no
+/// `Valid-Until`, as Icinga's and Debian's main suites do, is not bounded by one.
+fn release_current(release: &str, now: time::OffsetDateTime) -> Result<(), String> {
+    let format = time::macros::format_description!(
+        "[weekday repr:short], [day] [month repr:short] [year] [hour]:[minute]:[second] UTC"
+    );
+    let Some(stated) = release
+        .lines()
+        .find_map(|line| line.strip_prefix("Valid-Until:"))
+        .map(str::trim)
+    else {
+        return Ok(());
+    };
+    let until = time::PrimitiveDateTime::parse(stated, format)
+        .map_err(|_| format!("states a Valid-Until this tool cannot read: {stated:?}"))?
+        .assume_utc();
+    if until < now {
+        return Err(format!(
+            "was valid until {stated}, so it may be an old index served again — refusing it"
+        ));
+    }
+    Ok(())
+}
+
+/// The SHA-256 and size the signed `Release` text states for `path`.
+fn release_digest<'r>(release: &'r str, path: &str) -> Option<(&'r str, u64)> {
+    release
+        .lines()
+        .skip_while(|line| line.trim_end() != "SHA256:")
+        .skip(1)
+        .take_while(|line| line.starts_with(' '))
+        .find_map(|line| {
+            let mut fields = line.split_whitespace();
+            let (hash, size, name) = (fields.next()?, fields.next()?, fields.next()?);
+            (name == path).then_some(())?;
+            Some((hash, size.parse().ok()?))
+        })
+}
+
+/// The `Packages` index out of its compressed bytes — `compression` one of
+/// [`INDEX_COMPRESSIONS`] — accepted only as the signed `Release` text states it: the compressed
+/// bytes match their digest and size, and the decompressed text matches its own — read no further
+/// than the size stated, so a stream that inflates past it is refused rather than followed.
+fn verified_index(release: &str, compression: &str, compressed: &[u8]) -> Result<String, String> {
+    use sha2::Digest as _;
+    let (packed_hash, packed_size) =
+        release_digest(release, &format!("{INDEX_PATH}.{compression}"))
+            .ok_or_else(|| format!("the signed index names no {INDEX_PATH}.{compression}"))?;
+    if compressed.len() as u64 != packed_size
+        || hex::encode(sha2::Sha256::digest(compressed)) != packed_hash
+    {
+        return Err(
+            "does not match the SHA-256 and size the signed InRelease states for it".to_string(),
+        );
+    }
+    let (hash, size) = release_digest(release, INDEX_PATH)
+        .ok_or_else(|| format!("the signed index names no {INDEX_PATH}"))?;
+    if size > MAX_INDEX_BYTES {
+        return Err(format!(
+            "the signed index states {size} bytes for {INDEX_PATH}, more than this tool reads"
+        ));
+    }
+    let text = match compression {
+        "gz" => {
+            let mut text = Vec::new();
+            flate2::read::GzDecoder::new(compressed)
+                .take(size + 1)
+                .read_to_end(&mut text)
+                .map_err(|e| format!("cannot decompress: {e}"))?;
+            text
+        }
+        "xz" => unxz(compressed, size + 1)?,
+        other => return Err(format!("this tool reads no .{other} index")),
+    };
+    if text.len() as u64 != size || hex::encode(sha2::Sha256::digest(&text)) != hash {
+        return Err(format!(
+            "decompresses to something other than the {INDEX_PATH} the signed InRelease states"
+        ));
+    }
+    String::from_utf8(text).map_err(|_| format!("{INDEX_PATH} is not text"))
+}
+
+/// At most `limit` bytes of what `xz` decompresses `compressed` to. Shelled out to like `gpgv`
+/// and `dpkg-deb` (ADR-draft-icinga-2 clause 21): the bytes it is handed already matched the
+/// digest the signed `Release` states, and what it answers is checked against that text's own.
+fn unxz(compressed: &[u8], limit: u64) -> Result<Vec<u8>, String> {
+    use std::io::Write as _;
+    let mut child = std::process::Command::new("xz")
+        .args(["--decompress", "--stdout", "--quiet"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| {
+            format!(
+                "cannot run xz, which decompresses Debian's signed index (install xz-utils): {e}"
+            )
+        })?;
+    let mut stdin = child.stdin.take();
+    let stdout = child.stdout.take();
+    let mut text = Vec::new();
+    let read = std::thread::scope(|scope| {
+        // Written from a thread of its own, since `xz` writes while it reads; a write cut short
+        // because the read below stopped at the limit is no error of its own.
+        scope.spawn(move || stdin.take().map(|mut input| input.write_all(compressed)));
+        let read = stdout
+            .map(|out| out.take(limit).read_to_end(&mut text))
+            .transpose();
+        if text.len() as u64 >= limit {
+            let _ = child.kill();
+        }
+        read
+    });
+    let status = child.wait().map_err(|e| format!("cannot run xz: {e}"))?;
+    read.map_err(|e| format!("cannot decompress: {e}"))?;
+    if !status.success() && (text.len() as u64) < limit {
+        return Err("xz could not decompress it".to_string());
+    }
+    Ok(text)
+}
+
+/// The entry with the highest version among `entries`, in Debian's own order.
+fn newest<'e>(entries: impl Iterator<Item = &'e DebEntry>) -> Option<&'e DebEntry> {
+    entries.max_by(|a, b| deb_version_cmp(&a.version, &b.version))
+}
+
+/// Debian's version order (`dpkg --compare-versions`): the epoch numerically, then the upstream
+/// version, then the revision, each by `verrevcmp` — `~` before everything, the end, letters,
+/// then other characters; digit runs by their value.
+fn deb_version_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    fn split(version: &str) -> (u64, &str, &str) {
+        let (epoch, rest) = match version.split_once(':') {
+            Some((epoch, rest)) if epoch.bytes().all(|b| b.is_ascii_digit()) => {
+                (epoch.parse().unwrap_or(0), rest)
+            }
+            _ => (0, version),
+        };
+        let (upstream, revision) = rest.rsplit_once('-').unwrap_or((rest, ""));
+        (epoch, upstream, revision)
+    }
+    let (a, b) = (split(a), split(b));
+    a.0.cmp(&b.0)
+        .then_with(|| verrevcmp(a.1, b.1))
+        .then_with(|| verrevcmp(a.2, b.2))
+}
+
+/// dpkg's `verrevcmp`, over bytes.
+fn verrevcmp(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    fn order(c: Option<u8>) -> i32 {
+        match c {
+            None => 0,
+            Some(b'~') => -1,
+            Some(c) if c.is_ascii_digit() => 0,
+            Some(c) if c.is_ascii_alphabetic() => i32::from(c),
+            Some(c) => i32::from(c) + 256,
+        }
+    }
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    let digit = |s: &[u8], i: usize| s.get(i).is_some_and(u8::is_ascii_digit);
+    let (mut i, mut j) = (0, 0);
+    while i < a.len() || j < b.len() {
+        while (i < a.len() && !digit(a, i)) || (j < b.len() && !digit(b, j)) {
+            let (x, y) = (order(a.get(i).copied()), order(b.get(j).copied()));
+            if x != y {
+                return x.cmp(&y);
+            }
+            i += 1;
+            j += 1;
+        }
+        while a.get(i) == Some(&b'0') {
+            i += 1;
+        }
+        while b.get(j) == Some(&b'0') {
+            j += 1;
+        }
+        let mut first_diff = Ordering::Equal;
+        while digit(a, i) && digit(b, j) {
+            if first_diff == Ordering::Equal {
+                first_diff = a[i].cmp(&b[j]);
+            }
+            i += 1;
+            j += 1;
+        }
+        if digit(a, i) {
+            return Ordering::Greater;
+        }
+        if digit(b, j) {
+            return Ordering::Less;
+        }
+        if first_diff != Ordering::Equal {
+            return first_diff;
+        }
+    }
+    Ordering::Equal
+}
+
+/// The parse of a `Packages` index [`signed_index`] verified, separated from the fetch so it can be
+/// tested against a stanza rather than against the network. RFC 822-ish stanzas separated by
+/// blank lines; only the single-line fields matter here, so continuation lines are simply not
+/// fields.
+fn parse_deb_index(text: &str) -> Vec<DebEntry> {
+    let mut entries = Vec::new();
+    for stanza in text.split("\n\n") {
+        let field = |name: &str| {
+            stanza
+                .lines()
+                .find_map(|line| line.strip_prefix(&format!("{name}: ")))
+                .unwrap_or_default()
+                .to_string()
+        };
+        let package = field("Package");
+        if package.is_empty() {
+            continue;
+        }
+        entries.push(DebEntry {
+            repo: String::new(),
+            package,
+            version: field("Version"),
+            filename: field("Filename"),
+            sha256: field("SHA256"),
+            depends: field("Depends"),
+            pre_depends: field("Pre-Depends"),
+            provides: field("Provides"),
+            section: field("Section"),
+        });
+    }
+    entries
+}
+
+/// The package names of a relationship field such as `Depends`, one list of alternatives per
+/// entry, without version constraints or architecture qualifiers.
+fn relationships(field: &str) -> Vec<Vec<&str>> {
+    field
+        .split(',')
+        .map(|entry| {
+            entry
+                .split('|')
+                .filter_map(|alternative| alternative.split_whitespace().next())
+                .map(|name| name.split(':').next().unwrap_or(name))
+                .filter(|name| !name.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .filter(|alternatives| !alternatives.is_empty())
+        .collect()
+}
+
+/// The packages the host provides and the tree never carries: glibc and its loader
+/// (ADR-draft-icinga-2 clause 18), which are one package in Debian.
+const GLIBC_PACKAGES: [&str; 1] = ["libc6"];
+
+/// The package an index answers a relationship's name with: the real package of that name at its
+/// newest version, else — a virtual name such as `libboost-regex1.74.0-icu72` — the first package
+/// by name that `Provides` it, at its newest. Both orders are the index's own, so the same index
+/// gives the same answer.
+fn resolve_package<'e>(name: &str, index: &'e [DebEntry]) -> Option<&'e DebEntry> {
+    newest(index.iter().filter(|entry| entry.package == name)).or_else(|| {
+        let provides = |entry: &&DebEntry| {
+            relationships(&entry.provides)
+                .iter()
+                .flatten()
+                .any(|provided| *provided == name)
+        };
+        let first = index
+            .iter()
+            .filter(provides)
+            .map(|entry| entry.package.as_str())
+            .min()?;
+        newest(
+            index
+                .iter()
+                .filter(provides)
+                .filter(|entry| entry.package == first),
+        )
+    })
+}
+
+/// The library packages the tree's own packages need, out of a verified index: their `Depends` and
+/// `Pre-Depends`, followed through every package of Debian's `libs` section, each relationship
+/// answered by the first alternative the index holds ([`resolve_package`]). glibc is left out,
+/// since the host provides it, and so is everything outside `libs` — `adduser`, `procps`, `ucf` are
+/// what an installation runs, not what a program links. Sorted by name, so the plan is the same
+/// whichever order the index came in.
+///
+/// The closure only decides what is downloaded. Which of its files the tree carries is decided by
+/// what the programs link against once unpacked ([`bundle_libraries`]), and a library none of
+/// these packages holds fails the repack there.
+fn library_packages<'e>(roots: &[&DebEntry], index: &'e [DebEntry]) -> Vec<&'e DebEntry> {
+    let is_library = |entry: &DebEntry| entry.section == "libs" || entry.section.ends_with("/libs");
+    let needs = |entry: &DebEntry| {
+        let mut names: Vec<String> = Vec::new();
+        for field in [&entry.pre_depends, &entry.depends] {
+            for alternatives in relationships(field) {
+                if let Some(found) = alternatives
+                    .iter()
+                    .find_map(|name| resolve_package(name, index))
+                {
+                    names.push(found.package.clone());
+                }
+            }
+        }
+        names
+    };
+    let mut seen: std::collections::BTreeMap<String, &'e DebEntry> = Default::default();
+    let mut pending: Vec<String> = roots.iter().flat_map(|entry| needs(entry)).collect();
+    while let Some(name) = pending.pop() {
+        if seen.contains_key(&name) || GLIBC_PACKAGES.contains(&name.as_str()) {
+            continue;
+        }
+        let Some(entry) = resolve_package(&name, index).filter(|entry| is_library(entry)) else {
+            continue;
+        };
+        seen.insert(name, entry);
+        pending.extend(needs(entry));
+    }
+    seen.into_values().collect()
+}
+
+/// The oldest glibc every one of `entries` runs on: the highest `libc6 (>= …)` their `Depends` and
+/// `Pre-Depends` state. A bundled library may need a newer glibc than the program that links it —
+/// bookworm's `libstdc++6` states 2.36 where `icinga2-bin` states 2.34 — so the tree's floor is
+/// the highest of all of them, not the vendor package's alone.
+fn glibc_floor<'e>(entries: impl Iterator<Item = &'e DebEntry>) -> Option<String> {
+    entries
+        .flat_map(|entry| [libc_floor(&entry.pre_depends), libc_floor(&entry.depends)])
+        .flatten()
+        .max_by(|a, b| deb_version_cmp(a, b))
+}
+
+/// The `libc6 (>= 2.34)` out of a `Depends` field — the oldest glibc that package runs on.
+fn libc_floor(depends: &str) -> Option<String> {
+    depends.split(',').find_map(|dep| {
+        let dep = dep.trim();
+        let rest = dep.strip_prefix("libc6 (>= ")?;
+        rest.strip_suffix(')').map(str::to_string)
+    })
 }
 
 /// The Collector publishes `<dist>_<version>_<os>_<arch>.tar.gz` for every platform it supports,
@@ -940,7 +1729,7 @@ async fn produce(plan: &Plan, out_dir: &Path) -> Result<PathBuf, String> {
         eprintln!("  verified against upstream's SHA-256");
         fetched.push(downloaded);
     }
-    // Every plan has exactly one; the ones that act on "the download" mean this.
+    // Every plan but Icinga's has exactly one; the ones that act on "the download" mean this.
     let downloaded = fetched
         .first()
         .cloned()
@@ -950,6 +1739,10 @@ async fn produce(plan: &Plan, out_dir: &Path) -> Result<PathBuf, String> {
     let artifact = out_dir.join(&plan.out_name);
     let repacked: Option<Result<(), String>> = match &plan.action {
         Action::AsPublished => None,
+        Action::RepackDebs {
+            wrapper,
+            tree_packages,
+        } => Some(repack_debs(&fetched, *tree_packages, wrapper, &artifact)),
     };
     let Some(repacked) = repacked else {
         eprintln!("  as published — the fleet verifies upstream's own hash");
@@ -971,6 +1764,8 @@ async fn produce(plan: &Plan, out_dir: &Path) -> Result<PathBuf, String> {
 /// The SHA-256 upstream published for this artifact, from whichever form the source uses.
 async fn published_sha256(source: &ChecksumSource, artifact: &Path) -> Result<String, String> {
     let urls = match source {
+        // Already read out of a repository index (ADR-draft-icinga-2) — there is nothing to fetch.
+        ChecksumSource::Known { sha256 } => return Ok(sha256.clone()),
         ChecksumSource::BareDigest { url } => {
             let text = String::from_utf8(get_bytes(url).await?)
                 .map_err(|_| format!("{url} is not a checksum file"))?;
@@ -1012,6 +1807,594 @@ fn parse_sums(text: &str, artifact: &Path) -> Option<String> {
                 .is_some_and(|n| n.to_string_lossy() == wanted)
         })
         .map(|(hash, _)| hash.trim().to_string())
+}
+
+/// Every regular file of that name below `root`, sorted, found without following a link.
+fn files_below(root: &Path, name: &str) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(parent) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&parent) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            let path = entry.path();
+            if kind.is_dir() {
+                stack.push(path);
+            } else if kind.is_file() && path.file_name().is_some_and(|n| n == name) {
+                found.push(path);
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+/// Turns the vendor's Debian packages into one normalised, link-free tree (ADR-draft-icinga-2).
+///
+/// The layout is normalised rather than kept, so that **one** `program_path` serves every
+/// distribution: Debian puts the binary under `/usr/lib/<triplet>/icinga2/sbin` and RHEL under
+/// `/usr/lib64/icinga2/sbin`, and a block should not have to know which. What comes along is the
+/// daemon, the ITL, the check plugin the package ships, the copyright files — repacking is
+/// redistribution — and the shared libraries the daemon and the plugins link against, out of the
+/// library packages that follow the first `tree_packages` of `debs`.
+///
+/// Left out on purpose: `/etc/icinga2` (the fleet delivers configuration), the systemd unit and
+/// init script, and the `prepare-dirs`/`safe-reload` helpers, which need a `nagios` account that a
+/// fleet-managed host does not have — the Supervisor does that work instead (ADR-draft-icinga-2).
+fn repack_debs(
+    debs: &[PathBuf],
+    tree_packages: usize,
+    wrapper: &str,
+    out: &Path,
+) -> Result<(), String> {
+    if !cfg!(target_os = "linux") {
+        return Err("repacking Debian packages needs dpkg-deb, so it runs on Linux".to_string());
+    }
+    let staging = out.with_extension("staging");
+    let _ = std::fs::remove_dir_all(&staging);
+    let extracted = staging.join("extracted");
+    // The library packages apart from the tree's own: only the shared objects the programs link
+    // against are taken out of them, and nothing of theirs is looked for by name. Each group is
+    // unpacked into one directory, and a link is resolved inside its group's directory
+    // (ADR-draft-icinga-2 clause 18).
+    let libraries = staging.join("libraries");
+    let tree = staging.join("tree");
+    for dir in [&extracted, &libraries] {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    }
+
+    for (n, deb) in debs.iter().enumerate() {
+        let into = if n < tree_packages {
+            &extracted
+        } else {
+            &libraries
+        };
+        // Unpacked, not installed: `dpkg-deb -x` writes the payload and runs none of the
+        // package's scripts.
+        let status = std::process::Command::new("dpkg-deb")
+            .arg("-x")
+            .arg(deb)
+            .arg(into)
+            .status()
+            .map_err(|e| format!("cannot run dpkg-deb (is it installed?): {e}"))?;
+        if !status.success() {
+            return Err(format!("dpkg-deb could not unpack {}", deb.display()));
+        }
+        if n < tree_packages {
+            apply_alternatives(deb, &staging, &extracted)?;
+        }
+    }
+
+    for dir in ["sbin", "lib", "share/icinga2", "plugins", "doc"] {
+        std::fs::create_dir_all(tree.join(dir))
+            .map_err(|e| format!("cannot create {}: {e}", tree.join(dir).display()))?;
+    }
+    // The real binary, not `/usr/sbin/icinga2` — that is a shell wrapper, and what the Supervisor
+    // spawns has to be the process it then watches.
+    let binary = find_file(&extracted.join("usr/lib"), "icinga2")?;
+    copy_from_tree(&extracted, &binary, &tree.join("sbin/icinga2"))?;
+    copy_from_tree(
+        &extracted,
+        &extracted.join("usr/share/icinga2/include"),
+        &tree.join("share/icinga2/include"),
+    )?;
+    let plugins = extracted.join("usr/lib/nagios/plugins");
+    if plugins.is_dir() {
+        copy_from_tree(&extracted, &plugins, &tree.join("plugins"))?;
+    }
+    // Some plugins source these at run time (`utils.sh`, `utils.pm`); without them a check fails
+    // with a message about a missing file rather than about what it was checking.
+    for helper in ["usr/share/monitoring-plugins", "usr/lib/monitoring-plugins"] {
+        let dir = extracted.join(helper);
+        if dir.is_dir() {
+            copy_from_tree(&extracted, &dir, &tree.join("plugins"))?;
+        }
+    }
+    // Repacking is redistribution, so the copyright file of every package downloaded travels:
+    // which library packages the tree carries files of is known only once the libraries are
+    // gathered, and one too many errs toward attribution. The changelogs stay behind, weight
+    // nobody unpacks on a monitored host (ADR-draft-icinga-2 clause 17). A pool file is
+    // `<package>_<version>_<arch>.deb`.
+    for (n, deb) in debs.iter().enumerate() {
+        let root = if n < tree_packages {
+            &extracted
+        } else {
+            &libraries
+        };
+        let Some(package) = deb
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.split('_').next())
+        else {
+            continue;
+        };
+        let copyright = root.join("usr/share/doc").join(package).join("copyright");
+        copy_from_tree(
+            root,
+            &copyright,
+            &tree.join("doc").join(format!("{package}.copyright")),
+        )?;
+    }
+    // The daemon *and* every plugin: a plugin is a program of its own, and one whose libraries the
+    // host does not have fails as a check that never runs rather than as a Supervisor that does not
+    // start — the harder failure to trace of the two.
+    let mut programs = vec![tree.join("sbin/icinga2")];
+    if let Ok(entries) = std::fs::read_dir(tree.join("plugins")) {
+        programs.extend(
+            entries
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| path.is_file()),
+        );
+    }
+    programs.sort();
+    bundle_libraries(&programs, &tree.join("lib"), &[&libraries, &extracted])?;
+
+    pack_tree(&tree, wrapper, &[], out)?;
+    let _ = std::fs::remove_dir_all(&staging);
+    Ok(())
+}
+
+/// Materialises the alternatives a package's own installation would have created.
+///
+/// A `.deb` payload is not what an installed package looks like: `dh_installalternatives` puts
+/// `update-alternatives --install …` into the maintainer script, and the link it creates exists
+/// only after installation. For the check plugins that gap is load-bearing — Debian ships
+/// `check_http.deprecated` and `check_curl` and registers **both** under the name `check_http`, so
+/// a payload-only repack has no `check_http` at all, and the ITL's `http` CheckCommand calls
+/// exactly that name.
+///
+/// So the rule the package states is applied here: among the alternatives registered for one name,
+/// the highest priority wins — which is what `update-alternatives` does in automatic mode — and the
+/// winner is copied to the link's path. A package with no alternatives is untouched.
+fn apply_alternatives(deb: &Path, staging: &Path, extracted: &Path) -> Result<(), String> {
+    let control = staging.join("control");
+    let _ = std::fs::remove_dir_all(&control);
+    std::fs::create_dir_all(&control)
+        .map_err(|e| format!("cannot create {}: {e}", control.display()))?;
+    let status = std::process::Command::new("dpkg-deb")
+        .arg("-e")
+        .arg(deb)
+        .arg(&control)
+        .status()
+        .map_err(|e| format!("cannot run dpkg-deb: {e}"))?;
+    if !status.success() {
+        return Ok(()); // no control scripts is not a failure, it is a package without any
+    }
+    let script = match std::fs::read_to_string(control.join("postinst")) {
+        Ok(script) => script,
+        Err(_) => return Ok(()),
+    };
+    for (link, target) in winning_alternatives(&script) {
+        // The paths are the installed system's; here they name places inside the payload, and
+        // only places inside it: a script naming `..` would otherwise write beside the staging.
+        let (from, to) = (
+            inside_payload(extracted, &target)?,
+            inside_payload(extracted, &link)?,
+        );
+        if from.is_file() && unoccupied(extracted, &to)? {
+            copy_from_tree(extracted, &from, &to)?;
+            eprintln!(
+                "  provided {} as the package's own installation would",
+                link
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Whether `to`, a path inside the unpacked payload `extracted`, is free for an alternative:
+/// nothing is there, not even a link. A directory on the way that is a link fails the repack naming
+/// it, since a copy to `to` would write wherever that link leads, the host's file system included
+/// (ADR-0032).
+fn unoccupied(extracted: &Path, to: &Path) -> Result<bool, String> {
+    let inside = to
+        .strip_prefix(extracted)
+        .map_err(|_| format!("{} is not inside {}", to.display(), extracted.display()))?;
+    let mut at = extracted.to_path_buf();
+    for component in inside.components() {
+        at.push(component);
+        match std::fs::symlink_metadata(&at) {
+            Err(_) => return Ok(true),
+            Ok(_) if at == to => return Ok(false),
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(format!(
+                    "an alternative names {}, below the link {}, and a repack follows no link to \
+                     write (ADR-0032)",
+                    to.display(),
+                    at.display()
+                ));
+            }
+            Ok(_) => {}
+        }
+    }
+    Ok(false)
+}
+
+/// Where an absolute path of the installed system lies inside an unpacked payload, refused when it
+/// is not absolute or names anything but plain components — `..` above all (ADR-0032).
+fn inside_payload(extracted: &Path, installed: &str) -> Result<PathBuf, String> {
+    use std::path::Component;
+    let path = Path::new(installed);
+    let mut components = path.components();
+    let plain = components.next() == Some(Component::RootDir)
+        && components.clone().next().is_some()
+        && components.all(|c| matches!(c, Component::Normal(_)));
+    if !plain {
+        return Err(format!(
+            "a maintainer script names the alternative {installed:?}, which is not a plain path \
+             of the installed system — refusing to follow it out of the package"
+        ));
+    }
+    Ok(extracted.join(path.components().skip(1).collect::<PathBuf>()))
+}
+
+/// The `(link, target)` pairs a maintainer script's `update-alternatives --install` lines describe,
+/// one per name, keeping the highest priority — automatic mode's own rule.
+fn winning_alternatives(script: &str) -> Vec<(String, String)> {
+    let mut best: std::collections::BTreeMap<String, (i64, String, String)> = Default::default();
+    for line in script.lines() {
+        let mut words = line.split_whitespace();
+        if words.next() != Some("update-alternatives") || words.next() != Some("--install") {
+            continue;
+        }
+        let (Some(link), Some(name), Some(target), Some(priority)) =
+            (words.next(), words.next(), words.next(), words.next())
+        else {
+            continue;
+        };
+        let Ok(priority) = priority.parse::<i64>() else {
+            continue;
+        };
+        // The first of equal priorities stays; only a strictly higher one replaces it.
+        if best.get(name).is_none_or(|(held, ..)| priority > *held) {
+            best.insert(
+                name.to_string(),
+                (priority, link.to_string(), target.to_string()),
+            );
+        }
+    }
+    best.into_values()
+        .map(|(_, link, target)| (link, target))
+        .collect()
+}
+
+/// The sonames glibc provides on the host, together with its loader: what the tree never carries
+/// (ADR-draft-icinga-2 clause 18). They are the shared objects Debian's `libc6` ships for amd64,
+/// and glibc has kept every one of these names since long before the oldest build this tool
+/// repacks.
+const GLIBC_SONAMES: [&str; 18] = [
+    "ld-linux-x86-64.so.2",
+    "libBrokenLocale.so.1",
+    "libanl.so.1",
+    "libc.so.6",
+    "libc_malloc_debug.so.0",
+    "libdl.so.2",
+    "libm.so.6",
+    "libmvec.so.1",
+    "libnsl.so.1",
+    "libnss_compat.so.2",
+    "libnss_dns.so.2",
+    "libnss_files.so.2",
+    "libnss_hesiod.so.2",
+    "libpthread.so.0",
+    "libresolv.so.2",
+    "librt.so.1",
+    "libthread_db.so.1",
+    "libutil.so.1",
+];
+
+/// Where a Debian package keeps the shared objects a program finds by soname, searched in this
+/// order inside each unpacked package tree.
+const LIBRARY_DIRS: [&str; 4] = [
+    "usr/lib/x86_64-linux-gnu",
+    "lib/x86_64-linux-gnu",
+    "usr/lib",
+    "lib",
+];
+
+/// Gathers the shared libraries the programs link against into `lib_dir` — **except glibc and its
+/// loader** — out of the unpacked packages under `roots`, and nothing from anywhere else.
+///
+/// Those two cannot travel: a libc without its matching loader does not work, and with it the
+/// program would have to *be* the loader, which a Supervisor's program path cannot express. What
+/// follows is the artifact's reach — it runs where the glibc is at least the floor its suite
+/// states (ADR-draft-icinga-2) — and the Supervisor points `LD_LIBRARY_PATH` at what lands here,
+/// which wins over the binary's own RUNPATH.
+///
+/// What a program needs is read out of its `DT_NEEDED` entries ([`elf_needed`]), then out of each
+/// library gathered for it, until nothing new is needed. Nothing is executed: `ldd` would run the
+/// host's dynamic loader on the program and answer with the host's files. A soname the packages do
+/// not hold fails the repack naming it and who needs it, since a tree missing one would ship and
+/// die on its first start; one is copied as the file its link resolves to inside the directory
+/// its package was unpacked into, with the packages unpacked beside it (ADR-0032).
+fn bundle_libraries(programs: &[PathBuf], lib_dir: &Path, roots: &[&Path]) -> Result<(), String> {
+    std::fs::create_dir_all(lib_dir)
+        .map_err(|e| format!("cannot create {}: {e}", lib_dir.display()))?;
+    let mut pending: Vec<PathBuf> = programs.iter().rev().cloned().collect();
+    let mut missing: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
+        Default::default();
+    let mut bundled = 0usize;
+    while let Some(file) = pending.pop() {
+        let bytes =
+            std::fs::read(&file).map_err(|e| format!("cannot read {}: {e}", file.display()))?;
+        // A shell or Perl script among the plugins is not an ELF file: a plugin that needs no
+        // libraries of its own.
+        let Some(needed) = elf_needed(&bytes).map_err(|e| format!("{}: {e}", file.display()))?
+        else {
+            continue;
+        };
+        let needer = file
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        for soname in needed {
+            if GLIBC_SONAMES.contains(&soname.as_str()) {
+                continue;
+            }
+            if soname.is_empty() || soname.contains('/') || soname.starts_with('.') {
+                return Err(format!(
+                    "{needer} needs {soname:?}, which is not a library name a repack can carry"
+                ));
+            }
+            let target = lib_dir.join(&soname);
+            if target.exists() {
+                continue;
+            }
+            let found = roots.iter().find_map(|root| {
+                LIBRARY_DIRS
+                    .iter()
+                    .map(|dir| root.join(dir).join(&soname))
+                    .find(|candidate| std::fs::symlink_metadata(candidate).is_ok())
+                    .map(|candidate| (root, candidate))
+            });
+            if let Some((root, candidate)) = found {
+                copy_from_tree(root, &candidate, &target)?;
+            }
+            if target.is_file() {
+                bundled += 1;
+                pending.push(target);
+            } else {
+                missing.entry(soname).or_default().insert(needer.clone());
+            }
+        }
+    }
+    if !missing.is_empty() {
+        return Err(format!(
+            "the packages the tree is made of hold no {} the programs link against: {}\n  the \
+             tree would fail on its first start, so nothing is packed; the library packages are \
+             what the vendor packages declare in Debian's index (ADR-draft-icinga-2)",
+            if missing.len() == 1 {
+                "library"
+            } else {
+                "libraries"
+            },
+            missing
+                .iter()
+                .map(|(soname, needers)| format!(
+                    "{soname} (needed by {})",
+                    needers.iter().cloned().collect::<Vec<_>>().join(", ")
+                ))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    eprintln!("  bundled {bundled} shared libraries");
+    Ok(())
+}
+
+/// The `DT_NEEDED` names of an ELF file — the sonames its dynamic loader would look for — read
+/// from its bytes alone. `None` for a file that is not ELF at all, such as a script. Only the
+/// 64-bit little-endian form is read, the one of the amd64 build this tool makes; another, or a
+/// file whose headers point outside it, is an error rather than a guess.
+fn elf_needed(bytes: &[u8]) -> Result<Option<Vec<String>>, String> {
+    const PT_LOAD: u32 = 1;
+    const PT_DYNAMIC: u32 = 2;
+    const DT_NEEDED: u64 = 1;
+    const DT_STRTAB: u64 = 5;
+    const DT_STRSZ: u64 = 10;
+    if bytes.get(..4) != Some(b"\x7fELF".as_slice()) {
+        return Ok(None);
+    }
+    if bytes.get(4..6) != Some([2u8, 1].as_slice()) {
+        return Err("is not a 64-bit little-endian ELF file".to_string());
+    }
+    let malformed = || "is a malformed ELF file".to_string();
+    let u16_at = |at: usize| {
+        bytes
+            .get(at..at.checked_add(2)?)
+            .and_then(|b| b.try_into().ok())
+            .map(u16::from_le_bytes)
+    };
+    let u32_at = |at: usize| {
+        bytes
+            .get(at..at.checked_add(4)?)
+            .and_then(|b| b.try_into().ok())
+            .map(u32::from_le_bytes)
+    };
+    let u64_at = |at: usize| {
+        bytes
+            .get(at..at.checked_add(8)?)
+            .and_then(|b| b.try_into().ok())
+            .map(u64::from_le_bytes)
+    };
+    let offset = |value: u64| usize::try_from(value).ok();
+
+    let phoff = u64_at(0x20).and_then(offset).ok_or_else(malformed)?;
+    let phentsize = usize::from(u16_at(0x36).ok_or_else(malformed)?);
+    let phnum = usize::from(u16_at(0x38).ok_or_else(malformed)?);
+    // (virtual address, file offset, size in the file) of each loaded segment, and the dynamic one.
+    let mut loads: Vec<(u64, u64, u64)> = Vec::new();
+    let mut dynamic = None;
+    for n in 0..phnum {
+        let at = n
+            .checked_mul(phentsize)
+            .and_then(|o| o.checked_add(phoff))
+            .ok_or_else(malformed)?;
+        let kind = u32_at(at).ok_or_else(malformed)?;
+        let file_offset = u64_at(at + 8).ok_or_else(malformed)?;
+        let vaddr = u64_at(at + 16).ok_or_else(malformed)?;
+        let filesz = u64_at(at + 32).ok_or_else(malformed)?;
+        match kind {
+            PT_LOAD => loads.push((vaddr, file_offset, filesz)),
+            PT_DYNAMIC => dynamic = Some((file_offset, filesz)),
+            _ => {}
+        }
+    }
+    // Statically linked: nothing to load.
+    let Some((dyn_offset, dyn_size)) = dynamic else {
+        return Ok(Some(Vec::new()));
+    };
+    let mut needed = Vec::new();
+    let (mut strtab, mut strsz) = (None, None);
+    let entries = dyn_size / 16;
+    for n in 0..entries {
+        let at = n
+            .checked_mul(16)
+            .and_then(|o| o.checked_add(dyn_offset))
+            .and_then(offset)
+            .ok_or_else(malformed)?;
+        let tag = u64_at(at).ok_or_else(malformed)?;
+        let value = u64_at(at + 8).ok_or_else(malformed)?;
+        match tag {
+            0 => break,
+            DT_NEEDED => needed.push(value),
+            DT_STRTAB => strtab = Some(value),
+            DT_STRSZ => strsz = Some(value),
+            _ => {}
+        }
+    }
+    if needed.is_empty() {
+        return Ok(Some(Vec::new()));
+    }
+    let (strtab, strsz) = (strtab.ok_or_else(malformed)?, strsz.ok_or_else(malformed)?);
+    // The string table is named by its address once loaded; where that lies in the file is the
+    // loaded segment's to say.
+    let table = loads
+        .iter()
+        .find(|(vaddr, _, filesz)| strtab >= *vaddr && strtab - *vaddr < *filesz)
+        .and_then(|(vaddr, file_offset, _)| file_offset.checked_add(strtab - vaddr))
+        .and_then(offset)
+        .ok_or_else(malformed)?;
+    let table = bytes
+        .get(
+            table
+                ..table
+                    .checked_add(offset(strsz).ok_or_else(malformed)?)
+                    .ok_or_else(malformed)?,
+        )
+        .ok_or_else(malformed)?;
+    needed
+        .into_iter()
+        .map(|at| {
+            let rest = offset(at)
+                .and_then(|at| table.get(at..))
+                .ok_or_else(malformed)?;
+            let end = rest.iter().position(|b| *b == 0).ok_or_else(malformed)?;
+            String::from_utf8(rest[..end].to_vec()).map_err(|_| malformed())
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(Some)
+}
+
+/// The one file of that name below `root`, wherever the distribution decided to put it.
+/// The one regular file of that name below `root`: none, or more than one, fails the repack
+/// naming what it found, since which of two the tree carried would depend on the order a
+/// directory is read in.
+fn find_file(root: &Path, name: &str) -> Result<PathBuf, String> {
+    let mut found = files_below(root, name);
+    match found.len() {
+        0 => Err(format!(
+            "the vendor packages hold no {name} below {}",
+            root.display()
+        )),
+        1 => Ok(found.remove(0)),
+        _ => Err(format!(
+            "the vendor packages hold more than one {name} below {}: {}",
+            root.display(),
+            found
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
+fn copy_file(from: &Path, to: &Path) -> Result<(), String> {
+    if let Some(parent) = to.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
+    }
+    std::fs::copy(from, to)
+        .map(|_| ())
+        .map_err(|e| format!("cannot copy {} to {}: {e}", from.display(), to.display()))
+}
+
+/// Copies `from`, a file or directory of the tree `root` was unpacked into, to `to`, resolving
+/// every link inside that tree alone (ADR-0032): a link that leads out of it fails the repack
+/// naming it, one that names nothing inside it is left out, and the copy carries no link
+/// (ADR-0027).
+fn copy_from_tree(root: &Path, from: &Path, to: &Path) -> Result<(), String> {
+    let inside = from
+        .strip_prefix(root)
+        .map_err(|_| format!("{} is not inside {}", from.display(), root.display()))?;
+    match resolve_inside(root, Path::new(""), inside)? {
+        Resolution::Inside {
+            real,
+            is_dir: false,
+        } => copy_file(&root.join(real), to),
+        Resolution::Inside { real, is_dir: true } => {
+            let dir = root.join(real);
+            std::fs::create_dir_all(to)
+                .map_err(|e| format!("cannot create {}: {e}", to.display()))?;
+            let mut names: Vec<_> = std::fs::read_dir(&dir)
+                .map_err(|e| format!("cannot read {}: {e}", dir.display()))?
+                .flatten()
+                .map(|entry| entry.file_name())
+                .collect();
+            names.sort();
+            for name in names {
+                copy_from_tree(root, &dir.join(&name), &to.join(&name))?;
+            }
+            Ok(())
+        }
+        Resolution::Nothing => Ok(()),
+        Resolution::LeadsOut => Err(format!(
+            "{} leads out of the tree it was unpacked into, and a repack follows no link out of \
+             its tree (ADR-0032)",
+            from.display()
+        )),
+        Resolution::Special => Err(format!(
+            "{} is neither a file nor a directory",
+            from.display()
+        )),
+    }
 }
 
 /// Packs a directory as a `.tar.gz` a Client can install as a tree — deterministically, with every
@@ -1588,16 +2971,62 @@ fn client_builder() -> reqwest::ClientBuilder {
 }
 
 async fn get(url: &str) -> Result<reqwest::Response, String> {
-    let response = http()?
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| format!("cannot reach {url}: {}", because(&e)))?;
+    get_moved(url, DEBIAN_MOVES).await
+}
+
+/// Where Debian keeps what `deb.debian.org` no longer serves: an ended release's suites and pool
+/// files move to `archive.debian.org`, under the same paths (ADR-draft-icinga-2 clause 18).
+const DEBIAN_MOVES: &[(&str, &str)] = &[
+    (DEBIAN_REPO, "https://archive.debian.org/debian"),
+    (
+        DEBIAN_SECURITY_REPO,
+        "https://archive.debian.org/debian-security",
+    ),
+];
+
+/// `url` answered, or — where it answers `404` and lies below the first of a pair of `moves` —
+/// the same path below the second. Only a `404` moves: any other failure is the answer, so a
+/// network fault never sends a fetch elsewhere. What the archive answers is verified exactly as
+/// the original would have been, since the digests that decide come from the signed index.
+async fn get_moved(url: &str, moves: &[(&str, &str)]) -> Result<reqwest::Response, String> {
+    let response = send(url).await?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        if let Some(moved) = moved_url(url, moves) {
+            eprintln!("  {url} answered 404 — reading it from Debian's archive instead");
+            eprintln!("  reading {moved} …");
+            let response = send(&moved).await?;
+            let status = response.status();
+            if !status.is_success() {
+                return Err(format!(
+                    "{url} answered 404 Not Found, and {moved} answered {status}"
+                ));
+            }
+            return Ok(response);
+        }
+    }
     let status = response.status();
     if !status.is_success() {
         return Err(format!("{url} answered {status}"));
     }
     Ok(response)
+}
+
+/// `url` below the second of the first pair of `moves` whose first it lies below, by whole path
+/// segments.
+fn moved_url(url: &str, moves: &[(&str, &str)]) -> Option<String> {
+    moves.iter().find_map(|(from, to)| {
+        url.strip_prefix(from)
+            .filter(|rest| rest.starts_with('/'))
+            .map(|rest| format!("{to}{rest}"))
+    })
+}
+
+async fn send(url: &str) -> Result<reqwest::Response, String> {
+    http()?
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("cannot reach {url}: {}", because(&e)))
 }
 
 /// Streams an artifact to disk. An agent release is hundreds of megabytes, and a tool that read
@@ -1648,18 +3077,106 @@ async fn get_json(url: &str) -> Result<serde_json::Value, String> {
 
 #[cfg(test)]
 mod tests {
-    /// The agent menu names the systems each agent can be fetched for, which is not something to
-    /// discover three questions later. Every variant answers —
+    /// The agent menu names the systems each agent can be fetched for, and the one that needs it
+    /// most is Icinga 2: its Linux artifact reaches what the suite it is repacked from reaches,
+    /// which is not something to discover three questions later. Every variant answers —
     /// adding one without a line here is the omission this catches.
     #[test]
     fn the_agent_menu_states_the_systems_each_agent_is_published_for() {
         for agent in super::AgentKind::value_variants() {
-            let platforms = agent.platforms();
+            let platforms = agent.platforms(Some("bookworm"));
             assert!(
                 platforms.contains('/') || platforms.contains("linux"),
                 "{agent:?} names no system: {platforms:?}"
             );
         }
+    }
+
+    /// Icinga 2's line is the reach of the artifact this host builds by default, its own suite's,
+    /// so it is asserted per host rather than once. Three properties hold for every row: the
+    /// systems are named with versions — "Debian" alone still leaves a RHEL 8 or Ubuntu 18.04
+    /// operator guessing — Linux is the one platform offered (ADR-draft-icinga-2 clause 23), and no
+    /// build-host codename appears. That last one is the defect this test exists for: a line that
+    /// named the container was read as the reach, and left every Red Hat host looking unserved
+    /// (ADR-draft-icinga-2).
+    /// Verifies: ADR-draft-icinga-2
+    #[test]
+    fn icinga_2s_line_is_the_reach_of_the_host_it_is_read_on() {
+        for (codename, _) in super::ICINGA2_REACH {
+            let line = super::icinga2_reach(Some(codename));
+            assert!(
+                line.contains("linux/amd64") && !line.contains("windows"),
+                "{codename} offers another platform than Linux: {line:?}"
+            );
+            for family in ["Debian", "Ubuntu", "RHEL"] {
+                assert!(
+                    line.contains(family),
+                    "{codename} names no {family} version: {line:?}"
+                );
+            }
+            for other in super::ICINGA2_REACH {
+                assert!(
+                    !line.contains(other.0),
+                    "{:?} is a build host, not a reach: {line:?}",
+                    other.0
+                );
+            }
+        }
+
+        // A host Icinga publishes no packages for builds nothing unless `--distro` names a suite,
+        // and the line says which — the one place a codename is the honest answer, because there
+        // it *is* the flag the operator has to give.
+        for stranger in [None, Some("noble"), Some("sid")] {
+            let line = super::icinga2_reach(stranger);
+            assert!(
+                line.contains("--distro bullseye/bookworm/trixie") && !line.contains("Debian"),
+                "{stranger:?} names a reach it does not build by default: {line:?}"
+            );
+            assert!(!line.contains("windows"), "{stranger:?}: {line:?}");
+        }
+    }
+
+    /// The suite repacked is the one `--distro` names, any of the three on any host; omitted, the
+    /// host's own when it is one of them. A host that is none of them, and a codename Icinga
+    /// publishes no build for, are refused naming the three (ADR-draft-icinga-2 clauses 19 and 23):
+    /// with no Windows artifact, there is nothing else to build.
+    /// Verifies: ADR-draft-icinga-2
+    #[test]
+    fn any_host_repacks_any_suite_and_defaults_to_its_own() {
+        let host = |name: &str| Ok::<_, String>(name.to_string());
+        assert_eq!(
+            super::chosen_distro(Some("bullseye"), host("trixie")),
+            Ok("bullseye".to_string())
+        );
+        assert_eq!(
+            super::chosen_distro(Some("trixie"), Err("no os-release".to_string())),
+            Ok("trixie".to_string())
+        );
+        assert_eq!(
+            super::chosen_distro(None, host("bookworm")),
+            Ok("bookworm".to_string())
+        );
+        for refused in [
+            super::chosen_distro(Some("noble"), host("bookworm")),
+            super::chosen_distro(None, host("noble")),
+            super::chosen_distro(None, Err("no os-release".to_string())),
+        ] {
+            let refused = refused.expect_err("nothing to build");
+            assert!(refused.contains("bullseye, bookworm, trixie"), "{refused}");
+        }
+    }
+
+    /// The reach table and the `--distro` flag describe the same three builds, so a codename added
+    /// to one and not the other is a menu that promises what the build refuses, or a build nobody
+    /// is told about. `docs/manual/tools.md` and `docs/manual/icinga2.md` name them too.
+    #[test]
+    fn every_distro_the_tool_builds_for_has_a_stated_reach() {
+        let documented: Vec<&str> = super::ICINGA2_REACH.iter().map(|(name, _)| *name).collect();
+        assert_eq!(
+            documented,
+            vec!["bullseye", "bookworm", "trixie"],
+            "the reach table and the distributions Icinga publishes for have drifted apart"
+        );
     }
 
     /// `group_platforms` states that a menu line wrapping at eighty columns is one `dialoguer`
@@ -1671,7 +3188,11 @@ mod tests {
     #[test]
     fn no_agent_menu_line_wraps() {
         const SELECTION_PREFIX: usize = 2;
-        for label in super::agent_menu_labels() {
+        let hosts = super::ICINGA2_REACH
+            .iter()
+            .map(|(codename, _)| Some(*codename))
+            .chain([None]);
+        for label in hosts.flat_map(super::agent_menu_labels) {
             let columns = SELECTION_PREFIX + label.chars().count();
             assert!(
                 columns <= 80,
@@ -1683,8 +3204,8 @@ mod tests {
     /// Every agent the `--agent` flag accepts is also offered when the flag is omitted.
     ///
     /// The two come apart as soon as the prompt keeps its own list — an agent reachable by flag
-    /// and absent from the prompt — so what is asserted here is that the menu is built
-    /// from the same variants clap validates against.
+    /// and absent from the prompt — so what is asserted here is that the menu is built from the
+    /// same variants clap validates against, and that the newest one is among them.
     #[test]
     fn the_prompt_offers_every_agent_the_flag_accepts() {
         use clap::ValueEnum as _;
@@ -1692,13 +3213,1028 @@ mod tests {
             .iter()
             .map(|agent| agent.source().service_name)
             .collect();
-        for expected in ["otelcol", "otelcol-contrib"] {
+        for expected in ["otelcol", "otelcol-contrib", "icinga2"] {
             assert!(offered.contains(&expected), "{expected} is not offered");
         }
     }
 
+    /// The rule `update-alternatives` follows in automatic mode, applied to a payload that has not
+    /// been installed: highest priority wins. Taken verbatim from Debian's own
+    /// `monitoring-plugins-basic`, which registers two implementations under one name — and whose
+    /// lower-priority one is the modern `check_curl`, so guessing "the newest" would pick the
+    /// opposite of what installing the package produces.
+    #[test]
+    fn the_highest_priority_alternative_is_the_one_a_package_would_install() {
+        let postinst = "\
+set -e
+if [ \"$1\" = \"configure\" ]; then
+        update-alternatives --install /usr/lib/nagios/plugins/check_http check_http /usr/lib/nagios/plugins/check_http.deprecated 50
+fi
+if [ \"$1\" = \"configure\" ]; then
+        update-alternatives --install /usr/lib/nagios/plugins/check_http check_http /usr/lib/nagios/plugins/check_curl -100
+fi
+        update-alternatives --install /usr/lib/nagios/plugins/check_ping check_ping /usr/lib/nagios/plugins/check_icmp 10
+echo done
+";
+        let mut won = super::winning_alternatives(postinst);
+        won.sort();
+        assert_eq!(
+            won,
+            vec![
+                (
+                    "/usr/lib/nagios/plugins/check_http".to_string(),
+                    "/usr/lib/nagios/plugins/check_http.deprecated".to_string()
+                ),
+                (
+                    "/usr/lib/nagios/plugins/check_ping".to_string(),
+                    "/usr/lib/nagios/plugins/check_icmp".to_string()
+                ),
+            ]
+        );
+        assert!(super::winning_alternatives("echo nothing to do").is_empty());
+    }
+
+    /// What a maintainer script names is a path of the installed system, and inside the payload it
+    /// stays: a `..` or a relative path is refused rather than joined (ADR-0032).
+    /// Verifies: ADR-draft-icinga-2
+    #[test]
+    fn an_alternative_names_only_a_place_inside_the_payload() {
+        let root = Path::new("/staging/extracted");
+        assert_eq!(
+            super::inside_payload(root, "/usr/lib/nagios/plugins/check_http"),
+            Ok(root.join("usr/lib/nagios/plugins/check_http"))
+        );
+        assert_eq!(
+            super::inside_payload(root, "/usr/./lib/x"),
+            Ok(root.join("usr/lib/x")),
+            "a `.` names no other place, and is dropped"
+        );
+        for escaping in [
+            "/usr/lib/nagios/plugins/../../../../etc/cron.d/x",
+            "usr/lib/x",
+            "/",
+            "",
+        ] {
+            let refused = super::inside_payload(root, escaping).expect_err(escaping);
+            assert!(refused.contains("not a plain path"), "{refused}");
+        }
+    }
+
+    /// An alternative is written only where nothing is, and never through a link: a name the
+    /// payload already holds — as a file or as a link, dangling or not — is left as it is, and a
+    /// directory link on the way fails the repack naming it rather than being written through
+    /// (ADR-0032).
+    /// Verifies: ADR-draft-icinga-2
+    #[cfg(unix)]
+    #[test]
+    fn an_alternative_is_written_only_where_nothing_is_and_through_no_link() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let payload = dir.path().join("extracted");
+        let outside = dir.path().join("outside");
+        let plugins = payload.join("usr/lib/nagios/plugins");
+        std::fs::create_dir_all(&plugins).expect("plugins");
+        std::fs::create_dir_all(&outside).expect("outside");
+        std::fs::write(plugins.join("check_curl"), b"curl").expect("write");
+        symlink(outside.join("check_x"), plugins.join("check_dangling")).expect("link");
+        symlink(&outside, payload.join("usr/lib/escape")).expect("link");
+
+        let free = |path: &str| super::unoccupied(&payload, &payload.join(path));
+        assert_eq!(free("usr/lib/nagios/plugins/check_http"), Ok(true));
+        assert_eq!(free("usr/lib/new/dir/check_http"), Ok(true));
+        assert_eq!(free("usr/lib/nagios/plugins/check_curl"), Ok(false));
+        assert_eq!(
+            free("usr/lib/nagios/plugins/check_dangling"),
+            Ok(false),
+            "a dangling link is not written through"
+        );
+        let refused = free("usr/lib/escape/check_http").expect_err("through a link");
+        assert!(refused.contains("usr/lib/escape"), "{refused}");
+        assert!(
+            std::fs::read_dir(&outside)
+                .expect("outside")
+                .next()
+                .is_none(),
+            "nothing was written outside the payload"
+        );
+    }
+
+    /// ADR-draft-icinga-2: the digests come out of the repository's own index, because Icinga signs
+    /// repositories with GPG instead of publishing per-file checksums. The parse has to find both
+    /// packages of one version among the many versions a pool index carries.
+    #[test]
+    fn the_repository_index_yields_a_packages_filename_digest_and_libc_floor() {
+        let index = "\
+Package: icinga2-bin
+Architecture: amd64
+Version: 2.16.4-1+debian13
+Depends: libc6 (>= 2.38), libssl3t64 (>= 3.0.0)
+Filename: pool/main/i/icinga2/icinga2-bin_2.16.4-1+debian13_amd64.deb
+SHA256: aaaa
+
+Package: icinga2-bin
+Architecture: amd64
+Version: 2.16.3-1+debian13
+Filename: pool/main/i/icinga2/icinga2-bin_2.16.3-1+debian13_amd64.deb
+SHA256: bbbb
+
+Package: icinga2-common
+Architecture: all
+Version: 2.16.4-1+debian13
+Filename: pool/main/i/icinga2/icinga2-common_2.16.4-1+debian13_all.deb
+SHA256: cccc
+";
+        let entries = super::parse_deb_index(index);
+        let find = |package: &str, version: &str| {
+            entries
+                .iter()
+                .find(|e| e.package == package && e.version.starts_with(version))
+                .unwrap_or_else(|| panic!("{package} {version}"))
+        };
+        assert_eq!(find("icinga2-bin", "2.16.4-").sha256, "aaaa");
+        assert_eq!(find("icinga2-common", "2.16.4-").sha256, "cccc");
+        assert!(
+            find("icinga2-bin", "2.16.4-")
+                .filename
+                .ends_with("icinga2-bin_2.16.4-1+debian13_amd64.deb"),
+            "the index names where the file is, so no URL has to be guessed"
+        );
+        // The older version is still in the index and must not be picked by accident.
+        assert_eq!(find("icinga2-bin", "2.16.3-").sha256, "bbbb");
+
+        // The vendor's own statement of how old a libc may be: the artifact's reach
+        // (ADR-draft-icinga-2).
+        assert_eq!(
+            super::libc_floor(&find("icinga2-bin", "2.16.4-").depends).as_deref(),
+            Some("2.38")
+        );
+        assert_eq!(super::libc_floor("libssl3 (>= 3.0.0)"), None);
+    }
+
+    /// Icinga's own `InRelease`, as the repository served it, verifies against the key the tool
+    /// carries — and nothing else does: an altered byte inside the signed text, or a keyring
+    /// without that key, is refused before any digest in it is believed
+    /// (ADR-draft-icinga-2 clause 18).
+    /// Verifies: ADR-draft-icinga-2
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_carried_key_verifies_icingas_own_signed_index() {
+        let inrelease = include_str!("../testdata/icinga-bookworm-InRelease");
+        let verify = |text: &str, key: &[u8]| {
+            crate::gpgv::verify_clearsigned(text.as_bytes(), key, super::ICINGA_PRIMARY_KEYS)
+        };
+
+        let release = verify(inrelease, super::ICINGA_ARCHIVE_KEY).expect("signed by Icinga");
+        assert!(release.contains("Codename: icinga-bookworm"), "{release}");
+        assert!(
+            !release.contains("BEGIN PGP"),
+            "only the signed text is returned"
+        );
+        assert_eq!(
+            super::release_digest(&release, "main/binary-amd64/Packages.gz"),
+            Some((
+                "f93c784e3e78c39da3feedaa033203c6bfee13b49809372b6b694285b48d708c",
+                127_321
+            ))
+        );
+
+        let altered = inrelease.replacen(
+            "f93c784e3e78c39da3feedaa033203c6bfee13b49809372b6b694285b48d708c",
+            "093c784e3e78c39da3feedaa033203c6bfee13b49809372b6b694285b48d708c",
+            1,
+        );
+        let refused = verify(&altered, super::ICINGA_ARCHIVE_KEY).expect_err("altered");
+        assert!(refused.contains("does not match"), "{refused}");
+
+        let refused = verify(inrelease, super::DEBIAN_ARCHIVE_KEY).expect_err("not Debian's");
+        assert!(refused.contains("nobody vouched for"), "{refused}");
+    }
+
+    /// An ended Debian release lives on at `archive.debian.org` under the same paths: a URL below
+    /// `deb.debian.org`'s two repositories moves to the same path below the archive's, by whole
+    /// path segments, and no other URL moves — Icinga's repository among them
+    /// (ADR-draft-icinga-2 clause 18).
+    /// Verifies: ADR-draft-icinga-2
+    #[test]
+    fn only_debians_own_repositories_move_to_its_archive() {
+        let moved = |url: &str| super::moved_url(url, super::DEBIAN_MOVES);
+        assert_eq!(
+            moved("https://deb.debian.org/debian/dists/bullseye/InRelease").as_deref(),
+            Some("https://archive.debian.org/debian/dists/bullseye/InRelease")
+        );
+        assert_eq!(
+            moved(
+                "https://deb.debian.org/debian-security/pool/updates/main/i/icu/\
+                 libicu67_67.1-7+deb11u1_amd64.deb"
+            )
+            .as_deref(),
+            Some(
+                "https://archive.debian.org/debian-security/pool/updates/main/i/icu/\
+                 libicu67_67.1-7+deb11u1_amd64.deb"
+            )
+        );
+        for stays in [
+            "https://packages.icinga.com/debian/dists/icinga-bullseye/InRelease",
+            "https://deb.debian.org/debian-ports/dists/sid/InRelease",
+            "https://deb.debian.org/debianx/dists/bullseye/InRelease",
+            "https://archive.debian.org/debian/dists/bullseye/InRelease",
+        ] {
+            assert_eq!(moved(stays), None, "{stays}");
+        }
+    }
+
+    /// A file that answers `404` is read from where it moved, and only a `404` moves: another
+    /// failure is the answer, a URL with no move keeps its `404`, and a moved file the archive
+    /// does not hold either fails naming both places. A stand-in host serves both trees
+    /// (ADR-draft-icinga-2 clause 18).
+    /// Verifies: ADR-draft-icinga-2
+    #[tokio::test]
+    async fn a_file_debian_no_longer_serves_is_read_from_its_archive_and_only_then() {
+        use std::io::Write;
+
+        opamp::tls::install_ring_provider();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let host = format!("http://{}", listener.local_addr().expect("addr"));
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let mut head = Vec::new();
+                let mut byte = [0u8; 1];
+                while !head.ends_with(b"\r\n\r\n") {
+                    match stream.read(&mut byte) {
+                        Ok(1) => head.push(byte[0]),
+                        _ => break,
+                    }
+                }
+                let head = String::from_utf8_lossy(&head).into_owned();
+                let path = head
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap_or_default()
+                    .to_string();
+                let answer = if path == "/archive/pool/moved.deb" {
+                    "HTTP/1.1 200 OK\r\ncontent-length: 8\r\nconnection: close\r\n\r\narchived"
+                } else if path == "/current/pool/failing.deb" {
+                    "HTTP/1.1 500 Internal Server Error\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                } else {
+                    "HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                };
+                let _ = stream.write_all(answer.as_bytes());
+            }
+        });
+        let current = format!("{host}/current");
+        let archive = format!("{host}/archive");
+        let moves = [(current.as_str(), archive.as_str())];
+
+        let moved = super::get_moved(&format!("{current}/pool/moved.deb"), &moves)
+            .await
+            .expect("read from the archive");
+        assert_eq!(moved.bytes().await.expect("body").as_ref(), b"archived");
+
+        let refused = super::get_moved(&format!("{current}/pool/failing.deb"), &moves)
+            .await
+            .expect_err("a 500 is the answer");
+        assert!(refused.contains("500"), "{refused}");
+        let refused = super::get_moved(&format!("{current}/pool/gone.deb"), &moves)
+            .await
+            .expect_err("in neither place");
+        assert!(
+            refused.contains("/current/pool/gone.deb")
+                && refused.contains("/archive/pool/gone.deb"),
+            "{refused}"
+        );
+        let refused = super::get_moved(&format!("{host}/elsewhere/moved.deb"), &moves)
+            .await
+            .expect_err("no move");
+        assert!(refused.contains("404"), "{refused}");
+    }
+
+    /// An archived suite verifies as a served one does: bullseye-security's last `InRelease`, as
+    /// `archive.debian.org` serves it, verifies against the carried keys by a pinned primary, and
+    /// states no `Valid-Until`, so it is not refused as expired — the one security index that
+    /// states none is the last one (ADR-draft-icinga-2 clause 18).
+    /// Verifies: ADR-draft-icinga-2
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_archived_suite_verifies_by_the_same_keys_and_states_no_valid_until() {
+        let inrelease = include_str!("../testdata/debian-bullseye-security-InRelease");
+        let release = crate::gpgv::verify_clearsigned(
+            inrelease.as_bytes(),
+            super::DEBIAN_ARCHIVE_KEY,
+            super::DEBIAN_SECURITY_PRIMARY_KEYS,
+        )
+        .expect("signed by Debian");
+        super::release_names(&release, "bullseye-security").expect("fetched as itself");
+        assert!(!release.contains("Valid-Until:"), "{release}");
+        super::release_current(&release, time::OffsetDateTime::now_utc())
+            .expect("no Valid-Until bounds it");
+        assert_eq!(super::index_compression(&release), Some("xz"));
+        crate::gpgv::verify_clearsigned(
+            inrelease.as_bytes(),
+            super::ICINGA_ARCHIVE_KEY,
+            super::DEBIAN_SECURITY_PRIMARY_KEYS,
+        )
+        .expect_err("not Icinga's");
+    }
+
+    /// A signed index stands only for the suite it names: bullseye-security's last `InRelease`,
+    /// genuinely signed by Debian's security keys and stating no `Valid-Until`, is refused when it
+    /// is served as `bookworm-security`, and Icinga's bookworm index as another distribution's —
+    /// while each is read as itself, by its `Codename` or, as `apt` allows, its `Suite`
+    /// (ADR-draft-icinga-2 clause 18).
+    /// Verifies: ADR-draft-icinga-2
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_signed_index_served_for_another_suite_is_refused() {
+        let verified = |text: &str, key: &[u8], primaries: &[&str]| {
+            crate::gpgv::verify_clearsigned(text.as_bytes(), key, primaries).expect("signed")
+        };
+        let archived = verified(
+            include_str!("../testdata/debian-bullseye-security-InRelease"),
+            super::DEBIAN_ARCHIVE_KEY,
+            super::DEBIAN_SECURITY_PRIMARY_KEYS,
+        );
+        let refused =
+            super::release_names(&archived, "bookworm-security").expect_err("another suite's");
+        assert!(
+            refused.contains("\"bullseye-security\"") && refused.contains("bookworm-security"),
+            "{refused}"
+        );
+        super::release_names(&archived, "bullseye-security").expect("its Codename");
+        super::release_names(&archived, "oldoldstable-security").expect("its Suite");
+
+        let icinga = verified(
+            include_str!("../testdata/icinga-bookworm-InRelease"),
+            super::ICINGA_ARCHIVE_KEY,
+            super::ICINGA_PRIMARY_KEYS,
+        );
+        super::release_names(&icinga, "icinga-bookworm").expect("its own");
+        for other in ["icinga-bullseye", "icinga-trixie", "bookworm"] {
+            let refused = super::release_names(&icinga, other).expect_err(other);
+            assert!(refused.contains("not for"), "{refused}");
+        }
+        let refused = super::release_names("Origin: Debian\n", "bookworm").expect_err("unnamed");
+        assert!(refused.contains("no suite"), "{refused}");
+    }
+
+    /// A signed text past its `Valid-Until` is refused, so an old index served again — one that
+    /// predates a security fix — is not read; a text that states none is not bounded by one
+    /// (ADR-draft-icinga-2 clause 18).
+    /// Verifies: ADR-draft-icinga-2
+    #[test]
+    fn an_index_past_its_valid_until_is_refused() {
+        let at = |text: &str| {
+            time::PrimitiveDateTime::parse(
+                text,
+                time::macros::format_description!("[year]-[month]-[day] [hour]:[minute]"),
+            )
+            .expect("instant")
+            .assume_utc()
+        };
+        let release = "Codename: bookworm-security\nDate: Wed, 28 Oct 2026 06:47:35 UTC\n\
+                       Valid-Until: Wed, 04 Nov 2026 06:47:35 UTC\n";
+        super::release_current(release, at("2026-10-28 12:00")).expect("within");
+        let refused = super::release_current(release, at("2026-11-04 06:48")).expect_err("past it");
+        assert!(refused.contains("old index served again"), "{refused}");
+        super::release_current("Codename: icinga-bookworm\n", at("2099-01-01 00:00"))
+            .expect("no Valid-Until");
+        super::release_current("Valid-Until: next week\n", at("2026-10-28 12:00"))
+            .expect_err("unreadable");
+    }
+
+    /// The index is read only as the signed text states it: the compressed bytes match their
+    /// digest and size, the decompressed text matches its own, and a stream that inflates past
+    /// the stated size is refused rather than followed (ADR-draft-icinga-2 clause 18) — in both
+    /// forms it is read in, Icinga's `.gz` and Debian's `.xz`.
+    /// Verifies: ADR-draft-icinga-2
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_index_is_read_only_as_its_signed_release_states_it() {
+        use sha2::Digest as _;
+        use std::io::Write as _;
+        let gzip = |text: &[u8]| {
+            let mut encoder =
+                flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            encoder.write_all(text).expect("gzip");
+            encoder.finish().expect("gzip")
+        };
+        let xz = |text: &[u8]| {
+            let mut child = std::process::Command::new("xz")
+                .args(["--compress", "--stdout"])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .expect("xz");
+            let mut stdin = child.stdin.take().expect("stdin");
+            let text = text.to_vec();
+            let writer = std::thread::spawn(move || stdin.write_all(&text));
+            let out = child.wait_with_output().expect("xz");
+            writer.join().expect("writer").expect("written");
+            out.stdout
+        };
+        let release_for = |ext: &str, packed: &[u8], text: &[u8]| {
+            format!(
+                "Origin: test\nSHA256:\n {} {} main/binary-amd64/Packages\n {} {} \
+                 main/binary-amd64/Packages.{ext}\nSHA512:\n",
+                hex::encode(sha2::Sha256::digest(text)),
+                text.len(),
+                hex::encode(sha2::Sha256::digest(packed)),
+                packed.len()
+            )
+        };
+        let text = b"Package: icinga2-bin\nVersion: 2.14.6-1+debian12\n";
+        for (ext, pack) in [("gz", &gzip as &dyn Fn(&[u8]) -> Vec<u8>), ("xz", &xz)] {
+            let packed = pack(text);
+            let release = release_for(ext, &packed, text);
+            assert_eq!(super::index_compression(&release), Some(ext));
+            assert_eq!(
+                super::verified_index(&release, ext, &packed)
+                    .expect("as stated")
+                    .as_bytes(),
+                text,
+                "{ext}"
+            );
+
+            let mut altered = packed.clone();
+            let last = altered.len() - 1;
+            altered[last] ^= 1;
+            let refused = super::verified_index(&release, ext, &altered).expect_err("altered");
+            assert!(refused.contains("signed InRelease"), "{ext}: {refused}");
+
+            // Signed for less text than the stream holds: the read stops at the stated size.
+            let bomb = pack(&vec![b'x'; 1 << 20]);
+            let release = release_for(ext, &bomb, text);
+            let refused =
+                super::verified_index(&release, ext, &bomb).expect_err("inflates past it");
+            assert!(
+                refused.contains("decompresses to something other"),
+                "{ext}: {refused}"
+            );
+
+            let refused = super::verified_index("Origin: test\nSHA256:\n", ext, &packed)
+                .expect_err("unnamed");
+            assert!(refused.contains("names no"), "{ext}: {refused}");
+        }
+        // Debian states both forms for its main suites; the `.xz` is the one read.
+        let both =
+            "SHA256:\n 00 1 main/binary-amd64/Packages.gz\n 00 1 main/binary-amd64/Packages.xz\n";
+        assert_eq!(super::index_compression(both), Some("xz"));
+        assert_eq!(super::index_compression("Origin: test\nSHA256:\n"), None);
+    }
+
+    /// The newest packaging revision of a release is the one repacked, in Debian's own order —
+    /// `-10` after `-9`, a `~` pre-release before the release, an epoch above everything.
+    /// Verifies: ADR-draft-icinga-2
+    #[test]
+    fn the_newest_revision_is_taken_in_debians_order() {
+        use std::cmp::Ordering::{Greater, Less};
+        for (lower, higher) in [
+            ("2.14.6-1+debian12", "2.14.6-2+debian12"),
+            ("2.14.6-9", "2.14.6-10"),
+            ("1.0~rc1-1", "1.0-1"),
+            ("2.14.6-1", "2.14.6-1+b1"),
+            ("9.9-1", "1:1.0-1"),
+            ("2.36-9", "2.36-9+deb12u1"),
+        ] {
+            assert_eq!(
+                super::deb_version_cmp(lower, higher),
+                Less,
+                "{lower} < {higher}"
+            );
+            assert_eq!(
+                super::deb_version_cmp(higher, lower),
+                Greater,
+                "{higher} > {lower}"
+            );
+        }
+        let entries = super::parse_deb_index(
+            "Package: icinga2-bin\nVersion: 2.14.6-9+debian12\n\n\
+             Package: icinga2-bin\nVersion: 2.14.6-10+debian12\n\n\
+             Package: icinga2-bin\nVersion: 2.14.6-2+debian12\n",
+        );
+        assert_eq!(
+            super::newest(entries.iter()).map(|entry| entry.version.as_str()),
+            Some("2.14.6-10+debian12")
+        );
+    }
+
+    /// Debian's archive keys are carried, not read from the host (ADR-draft-icinga-2 clause 18):
+    /// the keyring holds exactly the six automatic signing keys `ftp-master.debian.org/keys.html`
+    /// lists for Debian 11, 12 and 13, by the fingerprints of their primary keys — computed here
+    /// from the keyring's own packets, so a key added, dropped or swapped is a red test.
+    /// Verifies: ADR-draft-icinga-2
+    #[test]
+    fn the_carried_debian_keys_are_the_archives_own() {
+        assert_eq!(
+            primary_fingerprints(super::DEBIAN_ARCHIVE_KEY),
+            [
+                "1F89983E0081FDE018F3CC9673A4F27B8DD47936", // archive, 11/bullseye
+                "AC530D520F2F3269F5E98313A48449044AAD5C5D", // security, 11/bullseye
+                "B8B80B5B623EAB6AD8775C45B7C5D7D6350947F8", // archive, 12/bookworm
+                "05AB90340C0C5E797F44A8C8254CF3B5AEC0A8F0", // security, 12/bookworm
+                "04B54C3CDCA79751B16BC6B5225629DF75B188BD", // archive, 13/trixie
+                "5E04A1E3223A19A20706E20F9904613D4CCE68C6", // security, 13/trixie
+            ]
+        );
+        assert_eq!(
+            primary_fingerprints(super::ICINGA_ARCHIVE_KEY),
+            ["DD3AF6198ED000B4C0B73956CC116F55AA7F2382"]
+        );
+        // The pins a signature is held to are the keyrings' own primaries, all of them: Debian's
+        // archive keys for a suite and its `-updates`, its security keys for `-security`.
+        let mut pinned = [
+            super::DEBIAN_ARCHIVE_PRIMARY_KEYS,
+            super::DEBIAN_SECURITY_PRIMARY_KEYS,
+        ]
+        .concat();
+        pinned.sort_unstable();
+        let mut carried = primary_fingerprints(super::DEBIAN_ARCHIVE_KEY);
+        carried.sort_unstable();
+        assert_eq!(carried, pinned);
+        assert_eq!(
+            super::DEBIAN_ARCHIVE_PRIMARY_KEYS,
+            [
+                "1F89983E0081FDE018F3CC9673A4F27B8DD47936",
+                "B8B80B5B623EAB6AD8775C45B7C5D7D6350947F8",
+                "04B54C3CDCA79751B16BC6B5225629DF75B188BD",
+            ],
+            "the archive keys, as keys.html names them"
+        );
+        assert_eq!(
+            primary_fingerprints(super::ICINGA_ARCHIVE_KEY),
+            super::ICINGA_PRIMARY_KEYS
+        );
+    }
+
+    /// The v4 fingerprints of the primary keys of a binary OpenPGP keyring: the SHA-1 of `0x99`,
+    /// the two-byte length and the body of each public-key packet (RFC 4880 §12.2).
+    fn primary_fingerprints(keyring: &[u8]) -> Vec<String> {
+        let mut fingerprints = Vec::new();
+        let mut at = 0;
+        while at < keyring.len() {
+            let header = keyring[at];
+            assert!(header & 0x80 != 0, "not an OpenPGP packet at {at}");
+            let (tag, body, len) = if header & 0x40 != 0 {
+                let first = usize::from(keyring[at + 1]);
+                let (len, skip) = match first {
+                    0..=191 => (first, 2),
+                    192..=223 => (((first - 192) << 8) + usize::from(keyring[at + 2]) + 192, 3),
+                    255 => (
+                        u32::from_be_bytes(keyring[at + 2..at + 6].try_into().expect("len"))
+                            as usize,
+                        6,
+                    ),
+                    _ => panic!("partial length in a keyring"),
+                };
+                (header & 0x3f, at + skip, len)
+            } else {
+                let (len, skip) = match header & 3 {
+                    0 => (usize::from(keyring[at + 1]), 2),
+                    1 => (
+                        usize::from(u16::from_be_bytes([keyring[at + 1], keyring[at + 2]])),
+                        3,
+                    ),
+                    2 => (
+                        u32::from_be_bytes(keyring[at + 1..at + 5].try_into().expect("len"))
+                            as usize,
+                        5,
+                    ),
+                    _ => panic!("indeterminate length in a keyring"),
+                };
+                ((header >> 2) & 0x0f, at + skip, len)
+            };
+            if tag == 6 {
+                let packet = &keyring[body..body + len];
+                let mut hashed = vec![0x99];
+                hashed.extend_from_slice(&u16::try_from(len).expect("short").to_be_bytes());
+                hashed.extend_from_slice(packet);
+                let digest = ring::digest::digest(&ring::digest::SHA1_FOR_LEGACY_USE_ONLY, &hashed);
+                fingerprints.push(hex::encode_upper(digest.as_ref()));
+            }
+            at = body + len;
+        }
+        fingerprints
+    }
+
+    /// Debian's own `InRelease` of `bookworm-security`, as the archive served it, verifies against
+    /// the carried keys — Debian signs with several keys at once, and one of them is enough — by
+    /// its security keys, and not by the archive keys a suite and its `-updates` are signed with.
+    /// Verifies: ADR-draft-icinga-2
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_carried_keys_verify_debians_own_signed_index() {
+        let inrelease = include_str!("../testdata/debian-bookworm-security-InRelease");
+        let verify = |key: &[u8], primaries: &[&str]| {
+            crate::gpgv::verify_clearsigned(inrelease.as_bytes(), key, primaries)
+        };
+        let release = verify(
+            super::DEBIAN_ARCHIVE_KEY,
+            super::DEBIAN_SECURITY_PRIMARY_KEYS,
+        )
+        .expect("signed by Debian");
+        assert!(release.contains("Codename: bookworm-security"), "{release}");
+        assert_eq!(super::index_compression(&release), Some("xz"));
+
+        // A security index does not stand in for a suite or its `-updates`.
+        let refused = verify(
+            super::DEBIAN_ARCHIVE_KEY,
+            super::DEBIAN_ARCHIVE_PRIMARY_KEYS,
+        )
+        .expect_err("not an archive key's");
+        assert!(refused.contains("nobody vouched for"), "{refused}");
+        // Icinga's key alone vouches for nothing of Debian's.
+        let refused = verify(
+            super::ICINGA_ARCHIVE_KEY,
+            super::DEBIAN_SECURITY_PRIMARY_KEYS,
+        )
+        .expect_err("not Icinga's");
+        assert!(refused.contains("nobody vouched for"), "{refused}");
+        // Nor does Debian's keyring, with Debian's keys pinned for another archive.
+        let refused =
+            verify(super::DEBIAN_ARCHIVE_KEY, super::ICINGA_PRIMARY_KEYS).expect_err("not pinned");
+        assert!(refused.contains("nobody vouched for"), "{refused}");
+    }
+
+    /// A slice of bookworm's real index, with the relationships that make the closure hard: a
+    /// virtual name only a `Provides` answers, a library at a newer version in `-security` than in
+    /// the suite, `Pre-Depends`, an alternative whose first name is not in the index, and the
+    /// packages an installation runs rather than a program links.
+    const BOOKWORM_SLICE: &str = "\
+Package: icinga2-bin
+Version: 2.16.5-1+debian12
+Depends: icinga2-common (= 2.16.5-1+debian12), libboost-regex1.74.0-icu72, libc6 (>= 2.34), libssl3 (>= 3.0.0), libstdc++6 (>= 12), adduser
+Section: admin
+
+Package: monitoring-plugins-basic
+Version: 2.3.3-5+deb12u2
+Depends: iputils-ping, monitoring-plugins-common, procps, ucf, libc6 (>= 2.34), libssl3 (>= 3.0.0)
+Section: net
+
+Package: libboost-regex1.74.0
+Version: 1.74.0+ds1-21
+Provides: libboost-regex1.74.0-icu72
+Depends: libc6 (>= 2.14), libgcc-s1 (>= 3.0), libicu72 (>= 72.1~rc-1~), libstdc++6 (>= 11)
+Section: libs
+
+Package: libicu72
+Version: 72.1-3+deb12u1
+Depends: libc6 (>= 2.34), libgcc-s1 (>= 3.0), libstdc++6 (>= 12)
+Section: libs
+
+Package: libssl3
+Version: 3.0.17-1~deb12u2
+Depends: libc6 (>= 2.34)
+Section: libs
+
+Package: libssl3
+Version: 3.0.22-1~deb12u2
+Depends: libc6 (>= 2.34)
+Section: libs
+
+Package: libstdc++6
+Version: 12.2.0-14+deb12u1
+Depends: gcc-12-base (= 12.2.0-14+deb12u1), libc6 (>= 2.36), libgcc-s1 (>= 4.3)
+Section: libs
+
+Package: libgcc-s1
+Version: 12.2.0-14+deb12u1
+Depends: gcc-12-base (= 12.2.0-14+deb12u1), libc6 (>= 2.35)
+Section: libs
+
+Package: gcc-12-base
+Version: 12.2.0-14+deb12u1
+Section: libs
+
+Package: libsystemd0
+Version: 252.39-1~deb12u2
+Pre-Depends: libcap2 (>= 1:2.10), libzstd1 (>= 1.5.4)
+Section: libs
+
+Package: libcap2
+Version: 1:2.66-4+deb12u3+b1
+Depends: libc6 (>= 2.34)
+Section: libs
+
+Package: libzstd1
+Version: 1.5.4+dfsg2-5
+Depends: libc6 (>= 2.34)
+Section: libs
+
+Package: libedit2
+Version: 3.1-20221030-2
+Depends: libbsd0 (>= 0.1.3), libc6 (>= 2.34), libtinfo6 (>= 6)
+Section: libs
+
+Package: libbsd0
+Version: 0.11.7-2
+Depends: libc6 (>= 2.34), libmd0 (>= 1.0.3-2)
+Section: libs
+
+Package: libmd0
+Version: 1.0.4-2
+Depends: libc6 (>= 2.33)
+Section: libs
+
+Package: libtinfo6
+Version: 6.4-4
+Depends: libc6 (>= 2.34)
+Section: libs
+
+Package: libc6
+Version: 2.36-9+deb12u13
+Depends: libgcc-s1
+Section: libs
+
+Package: adduser
+Version: 3.134
+Depends: passwd
+Section: admin
+
+Package: passwd
+Version: 1:4.13+dfsg1-1+b1
+Depends: libpam0g, libc6
+Section: admin
+
+Package: libpam0g
+Version: 1.5.2-6+deb12u1
+Section: libs
+
+Package: procps
+Version: 2:4.0.2-3
+Depends: libproc2-0
+Section: admin
+
+Package: libproc2-0
+Version: 2:4.0.2-3
+Section: libs
+";
+
+    /// The library packages are the `Depends` and `Pre-Depends` closure of the tree's own packages
+    /// in the verified index, through Debian's `libs` section alone and without glibc — newest
+    /// version each, a virtual name answered by its provider, and the same answer whatever order
+    /// the index came in (ADR-draft-icinga-2 clause 18).
+    /// Verifies: ADR-draft-icinga-2
+    #[test]
+    fn the_library_packages_are_the_depends_closure_in_the_signed_index() {
+        let closure = |text: &str, extra: &str| {
+            let index = super::parse_deb_index(text);
+            let mut roots: Vec<&super::DebEntry> = index
+                .iter()
+                .filter(|e| {
+                    ["icinga2-bin", "monitoring-plugins-basic"].contains(&e.package.as_str())
+                })
+                .collect();
+            let wanted = super::parse_deb_index(extra);
+            roots.extend(wanted.iter());
+            super::library_packages(&roots, &index)
+                .iter()
+                .map(|e| format!("{} {}", e.package, e.version))
+                .collect::<Vec<_>>()
+        };
+        let expected = [
+            "gcc-12-base 12.2.0-14+deb12u1",
+            "libboost-regex1.74.0 1.74.0+ds1-21",
+            "libbsd0 0.11.7-2",
+            "libcap2 1:2.66-4+deb12u3+b1",
+            "libedit2 3.1-20221030-2",
+            "libgcc-s1 12.2.0-14+deb12u1",
+            "libicu72 72.1-3+deb12u1",
+            "libmd0 1.0.4-2",
+            "libssl3 3.0.22-1~deb12u2",
+            "libstdc++6 12.2.0-14+deb12u1",
+            "libsystemd0 252.39-1~deb12u2",
+            "libtinfo6 6.4-4",
+            "libzstd1 1.5.4+dfsg2-5",
+        ];
+        // A root that reaches `libsystemd0` by an alternative whose first name the index lacks,
+        // and `libedit2` directly.
+        let extra = "Package: extra\nDepends: libsystemd-absent | libsystemd0, libedit2\n";
+        assert_eq!(closure(BOOKWORM_SLICE, extra), expected);
+
+        // The floor is the highest any of them states: `libstdc++6`'s 2.36, not the vendor's 2.34.
+        let index = super::parse_deb_index(BOOKWORM_SLICE);
+        let bin = index
+            .iter()
+            .find(|e| e.package == "icinga2-bin")
+            .expect("bin");
+        let libraries = super::library_packages(&[bin], &index);
+        assert_eq!(
+            super::glibc_floor([bin].into_iter()).as_deref(),
+            Some("2.34")
+        );
+        assert_eq!(
+            super::glibc_floor(std::iter::once(bin).chain(libraries)).as_deref(),
+            Some("2.36")
+        );
+
+        let mut stanzas: Vec<&str> = BOOKWORM_SLICE.split("\n\n").collect();
+        stanzas.reverse();
+        assert_eq!(
+            closure(&stanzas.join("\n\n"), extra),
+            expected,
+            "the order of the index decides nothing"
+        );
+    }
+
+    /// The `DT_NEEDED` of an ELF file are read out of its bytes: this very test binary links
+    /// glibc, a script is no ELF file and needs nothing, and a file whose headers point outside
+    /// it is refused rather than guessed at.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn the_libraries_a_program_needs_are_read_without_running_it() {
+        let own = std::fs::read("/proc/self/exe").expect("own binary");
+        let needed = super::elf_needed(&own).expect("ELF").expect("is ELF");
+        assert!(needed.iter().any(|n| n == "libc.so.6"), "{needed:?}");
+
+        assert_eq!(super::elf_needed(b"#!/bin/sh\necho ok\n"), Ok(None));
+        let made = tiny_elf(&["libfoo.so.1", "libc.so.6"]);
+        assert_eq!(
+            super::elf_needed(&made),
+            Ok(Some(vec![
+                "libfoo.so.1".to_string(),
+                "libc.so.6".to_string()
+            ]))
+        );
+        super::elf_needed(&made[..made.len() - 20]).expect_err("cut short");
+        super::elf_needed(&own[..64]).expect_err("headers only");
+        let mut big_endian = made.clone();
+        big_endian[5] = 2;
+        super::elf_needed(&big_endian).expect_err("big-endian");
+    }
+
+    /// A minimal 64-bit little-endian ELF file whose dynamic section names `needed`: the header,
+    /// one loaded segment covering the whole file at address 0, one dynamic segment, and the
+    /// string table.
+    #[cfg(unix)]
+    fn tiny_elf(needed: &[&str]) -> Vec<u8> {
+        let mut strtab = vec![0u8];
+        let mut offsets = Vec::new();
+        for name in needed {
+            offsets.push(strtab.len() as u64);
+            strtab.extend_from_slice(name.as_bytes());
+            strtab.push(0);
+        }
+        let (phoff, phnum) = (64u64, 2u64);
+        let dyn_off = phoff + 56 * phnum;
+        let dyn_entries = needed.len() as u64 + 3;
+        let str_off = dyn_off + 16 * dyn_entries;
+        let total = str_off + strtab.len() as u64;
+        let mut out = vec![0u8; 64];
+        out[..6].copy_from_slice(b"\x7fELF\x02\x01");
+        out[0x20..0x28].copy_from_slice(&phoff.to_le_bytes());
+        out[0x36..0x38].copy_from_slice(&56u16.to_le_bytes());
+        out[0x38..0x3a].copy_from_slice(&(phnum as u16).to_le_bytes());
+        let mut header = |kind: u32, offset: u64, size: u64| {
+            let mut ph = vec![0u8; 56];
+            ph[..4].copy_from_slice(&kind.to_le_bytes());
+            ph[8..16].copy_from_slice(&offset.to_le_bytes());
+            ph[16..24].copy_from_slice(&offset.to_le_bytes());
+            ph[32..40].copy_from_slice(&size.to_le_bytes());
+            out.extend_from_slice(&ph);
+        };
+        header(1, 0, total);
+        header(2, dyn_off, 16 * dyn_entries);
+        let mut entry = |tag: u64, value: u64| {
+            out.extend_from_slice(&tag.to_le_bytes());
+            out.extend_from_slice(&value.to_le_bytes());
+        };
+        for offset in offsets {
+            entry(1, offset);
+        }
+        entry(5, str_off);
+        entry(10, strtab.len() as u64);
+        entry(0, 0);
+        out.extend_from_slice(&strtab);
+        out
+    }
+
+    /// The tree's libraries come out of the unpacked archive packages and from nowhere else: what
+    /// the programs need is followed through the libraries gathered for them, a link resolves to
+    /// its file inside its package's tree, glibc stays behind — and a library the packages do not
+    /// hold fails the repack naming it and who needs it, even where the host has it, as does a
+    /// link that would reach into the host for it (ADR-draft-icinga-2 clause 18, ADR-0032).
+    /// Verifies: ADR-draft-icinga-2
+    #[cfg(unix)]
+    #[test]
+    fn the_tree_takes_its_libraries_from_the_archives_packages_and_nothing_from_the_host() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let packages = dir.path().join("libraries");
+        let usr_lib = packages.join("usr/lib/x86_64-linux-gnu");
+        let lib = packages.join("lib/x86_64-linux-gnu");
+        std::fs::create_dir_all(&usr_lib).expect("dirs");
+        std::fs::create_dir_all(&lib).expect("dirs");
+        let foo = tiny_elf(&["libbar.so.0", "libc.so.6"]);
+        let bar = tiny_elf(&["libm.so.6"]);
+        std::fs::write(usr_lib.join("libfoo.so.1.2.3"), &foo).expect("foo");
+        symlink("libfoo.so.1.2.3", usr_lib.join("libfoo.so.1")).expect("link");
+        std::fs::write(lib.join("libbar.so.0"), &bar).expect("bar");
+        std::fs::write(usr_lib.join("libunused.so.9"), tiny_elf(&[])).expect("unused");
+
+        let programs = dir.path().join("programs");
+        std::fs::create_dir_all(&programs).expect("programs");
+        let daemon = programs.join("icinga2");
+        std::fs::write(
+            &daemon,
+            tiny_elf(&["libfoo.so.1", "libc.so.6", "ld-linux-x86-64.so.2"]),
+        )
+        .expect("daemon");
+        let script = programs.join("check_script");
+        std::fs::write(&script, b"#!/bin/sh\n").expect("script");
+
+        let lib_dir = dir.path().join("tree/lib");
+        super::bundle_libraries(&[daemon.clone(), script], &lib_dir, &[&packages])
+            .expect("bundled");
+        let mut carried: Vec<String> = std::fs::read_dir(&lib_dir)
+            .expect("lib")
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        carried.sort();
+        assert_eq!(carried, ["libbar.so.0", "libfoo.so.1"]);
+        assert_eq!(
+            std::fs::read(lib_dir.join("libfoo.so.1")).expect("foo"),
+            foo
+        );
+        assert!(!std::fs::symlink_metadata(lib_dir.join("libfoo.so.1"))
+            .expect("meta")
+            .file_type()
+            .is_symlink());
+
+        // `libgcc_s.so.1` is on every host this test runs on — the test binary links it — and it
+        // is still not taken from there.
+        let wants_more = programs.join("check_more");
+        std::fs::write(&wants_more, tiny_elf(&["libgcc_s.so.1"])).expect("plugin");
+        let lib_dir = dir.path().join("again/lib");
+        let refused =
+            super::bundle_libraries(std::slice::from_ref(&wants_more), &lib_dir, &[&packages])
+                .expect_err("not in the packages");
+        assert!(
+            refused.contains("libgcc_s.so.1 (needed by check_more)"),
+            "{refused}"
+        );
+        assert!(!lib_dir.join("libgcc_s.so.1").exists());
+
+        // A package link into the host's own library directory is followed no further.
+        symlink(
+            "/lib/x86_64-linux-gnu/libgcc_s.so.1",
+            lib.join("libgcc_s.so.1"),
+        )
+        .expect("link");
+        let refused =
+            super::bundle_libraries(&[wants_more], &dir.path().join("third/lib"), &[&packages])
+                .expect_err("a link into the host");
+        assert!(refused.contains("ADR-0032"), "{refused}");
+    }
+
     use super::*;
-    use std::io::Read as _;
+
+    /// What the Icinga 2 repack copies out of an unpacked vendor package is resolved inside that
+    /// tree alone (ADR-0032): a link to a file of the tree is copied as that file, a link into the
+    /// host's file system fails the repack naming it, and a link to nothing is left out.
+    /// Verifies: ADR-0032
+    #[cfg(unix)]
+    #[test]
+    fn a_copy_out_of_an_unpacked_package_follows_no_link_out_of_it() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let unpacked = dir.path().join("unpacked");
+        let plugins = unpacked.join("usr/lib/nagios/plugins");
+        std::fs::create_dir_all(&plugins).expect("plugins");
+        std::fs::write(plugins.join("check_ping"), b"ping").expect("write");
+        symlink("check_ping", plugins.join("check_alias")).expect("link");
+        symlink("missing", plugins.join("check_gone")).expect("link");
+
+        let copied = dir.path().join("copied");
+        copy_from_tree(&unpacked, &plugins, &copied).expect("copied");
+        assert_eq!(
+            std::fs::read(copied.join("check_alias")).expect("read"),
+            b"ping"
+        );
+        assert!(!std::fs::symlink_metadata(copied.join("check_alias"))
+            .expect("meta")
+            .file_type()
+            .is_symlink());
+        assert!(
+            !copied.join("check_gone").exists(),
+            "a link to nothing is left out"
+        );
+
+        let host = dir.path().join("host-secret");
+        std::fs::write(&host, b"secret").expect("write");
+        symlink(&host, plugins.join("check_host")).expect("link");
+        let err = copy_from_tree(&unpacked, &plugins, &dir.path().join("again"))
+            .expect_err("a link into the host");
+        assert!(
+            err.contains("check_host") && err.contains("ADR-0032"),
+            "{err}"
+        );
+        std::fs::remove_file(plugins.join("check_host")).expect("remove");
+        symlink("../../../../../host-secret", plugins.join("check_climb")).expect("link");
+        let err = copy_from_tree(&unpacked, &plugins, &dir.path().join("third"))
+            .expect_err("a link that climbs out");
+        assert!(err.contains("check_climb"), "{err}");
+    }
 
     /// A later repack of one version is numbered as a pre-release of the next patch, so it orders
     /// above the first repack and below upstream's next release, its repack number compared as a
@@ -1787,6 +4323,18 @@ mod tests {
         );
     }
 
+    /// A later repack of one Icinga version is numbered as the core numbers any repack: the second
+    /// of 2.14.3 is `2.14.4-0.r.2`, the first keeps the version (ADR-draft-icinga-2 clause 27).
+    /// Verifies: ADR-draft-icinga-2
+    #[test]
+    fn a_later_icinga_repack_is_numbered_as_the_core_numbers_one() {
+        assert!(AgentKind::Icinga2.repacked());
+        let icinga = |n| repack_version(AgentKind::Icinga2, "2.14.3", n);
+        assert_eq!(icinga(1).as_deref(), Ok("2.14.3"));
+        assert_eq!(icinga(2).as_deref(), Ok("2.14.4-0.r.2"));
+        assert_eq!(icinga(10).as_deref(), Ok("2.14.4-0.r.10"));
+    }
+
     /// Upstream `1.19` is fetched under its own tag and named Package `1.19.0`, and a number that
     /// cannot be written as SemVer is refused, naming it (ADR-0028 clause 6). How a number is
     /// written is tested with `fleet_core::version::written_as_semver`.
@@ -1810,6 +4358,23 @@ mod tests {
                 "{refusal}"
             );
         }
+    }
+
+    /// Icinga 2's release numbers are SemVer already, so its Package is named by the release number
+    /// itself — the number the kind reads out of the daemon's banner, which is what a rollout's
+    /// version test compares — and the tag is upstream's own (ADR-draft-icinga-2 clause 17).
+    /// Verifies: ADR-draft-icinga-2
+    #[test]
+    fn icinga_2s_package_is_named_by_its_release_number() {
+        assert_eq!(
+            AgentKind::Icinga2.release_names("2.16.5"),
+            Ok(("v2.16.5".to_string(), "2.16.5".to_string()))
+        );
+        assert_eq!(
+            AgentKind::Icinga2.version_of_tag("v2.14.6").as_deref(),
+            Some("2.14.6")
+        );
+        assert!(fleet_core::version::is_semver("2.14.6"));
     }
 
     /// Versions sort by their numbers: `0.9.0` is older than `0.10.0`, which as text it is not.
@@ -2008,6 +4573,39 @@ mod tests {
             collector_checksum("otelcol_0.157.0_linux_amd64.tar.gz", "otelcol", &older),
             ChecksumSource::Sums { .. }
         ));
+    }
+
+    /// Icinga 2's Linux artifact is the Debian packages repacked under the wrapper
+    /// `icinga2-<version>`, named by the Package version, and the block is the kind alone
+    /// (ADR-draft-icinga-2 clauses 17 and 24). The packing half of `docs/artifacts/icinga2.md`;
+    /// its client half is in `crates/fleet-agent/src/supervisor/icinga2.rs`.
+    /// Verifies: ADR-draft-icinga-2
+    #[test]
+    fn icinga_2s_linux_artifact_is_the_debian_tree_under_its_wrapper() {
+        let source = |name: &str| Download {
+            url: format!("https://deb.debian.org/debian/pool/main/{name}.deb"),
+            checksum: ChecksumSource::Known {
+                sha256: "00".repeat(32),
+            },
+        };
+        let plan = linux_plan("2.16.5", vec![source("icinga2-bin"), source("libssl3")], 1);
+        assert_eq!((plan.os.as_str(), plan.arch.as_str()), ("linux", "amd64"));
+        assert_eq!(plan.sources.len(), 2);
+        match &plan.action {
+            Action::RepackDebs {
+                wrapper,
+                tree_packages,
+            } => {
+                assert_eq!(wrapper, "icinga2-2.16.5");
+                assert_eq!(*tree_packages, 1);
+            }
+            Action::AsPublished => panic!("the Debian packages are repacked into one tree"),
+        }
+        assert_eq!(plan.out_name, "icinga2_2.16.5_linux_amd64.tar.gz");
+        assert_eq!(
+            plan.block_hint,
+            "type = \"icinga2\"  (docs/artifacts/icinga2.md)"
+        );
     }
 
     /// A directory reached through a link is packed **under the linked name too**, with its
@@ -2717,14 +5315,21 @@ mod tests {
                 );
             }
         }
+        let icinga = AgentKind::Icinga2.default_configurations();
+        let names: Vec<&str> = icinga.iter().map(|c| c.name).collect();
+        assert_eq!(
+            names,
+            vec!["icinga2-conf", "icinga2-zones"],
+            "Icinga 2 reads a root file that includes the other by name (ADR-draft-icinga-2), so both travel"
+        );
     }
 
     /// The upload asks before it writes: a Configuration the Server already holds is left exactly
     /// as it is — operator edits included — and only the missing one is stored.
     ///
-    /// The stand-in Server answers `200` for `otelcol-conf` and `404` for `otelcol-contrib-conf`,
-    /// and records every request, so what the test asserts is the *absence* of a PUT over the top
-    /// of the existing one.
+    /// The stand-in Server answers `200` for `otelcol-conf` and `icinga2-conf` and `404` for
+    /// `otelcol-contrib-conf` and `icinga2-zones`, and records every request, so what the test
+    /// asserts is the *absence* of a PUT over the top of an existing one.
     #[tokio::test]
     async fn a_default_configuration_the_server_already_holds_is_not_written_over() {
         use std::io::Write;
@@ -2762,7 +5367,8 @@ mod tests {
                     .unwrap_or(0);
                 let mut body = vec![0u8; length];
                 let _ = stream.read_exact(&mut body);
-                let answer = if line.starts_with("GET") && line.contains("/otelcol-conf ") {
+                let held = ["/otelcol-conf ", "/icinga2-conf "];
+                let answer = if line.starts_with("GET") && held.iter().any(|n| line.contains(n)) {
                     "HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}"
                 } else if line.starts_with("GET") {
                     "HTTP/1.1 404 Not Found\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}"
@@ -2773,24 +5379,28 @@ mod tests {
             }
         });
 
-        for agent in [AgentKind::Otelcol, AgentKind::OtelcolContrib] {
+        for agent in [
+            AgentKind::Otelcol,
+            AgentKind::OtelcolContrib,
+            AgentKind::Icinga2,
+        ] {
             upload_default_configurations(&http().expect("client"), &server, agent)
                 .await
                 .expect("the Server accepted the one it was missing");
         }
 
         let seen = seen.lock().expect("lock").clone();
-        assert!(
-            seen.iter().any(|r| r.starts_with("PUT")
-                && r.contains("/api/v1/configurations/otelcol-contrib-conf")),
-            "the missing configuration is stored: {seen:?}"
-        );
-        assert!(
-            !seen
-                .iter()
-                .any(|r| r.starts_with("PUT") && r.contains("/api/v1/configurations/otelcol-conf")),
-            "the one the Server already holds is left alone: {seen:?}"
-        );
+        let put = |name: &str| {
+            let path = format!("/api/v1/configurations/{name} ");
+            seen.iter()
+                .any(|r| r.starts_with("PUT") && r.contains(&path))
+        };
+        for missing in ["otelcol-contrib-conf", "icinga2-zones"] {
+            assert!(put(missing), "{missing}, missing, is stored: {seen:?}");
+        }
+        for held in ["otelcol-conf", "icinga2-conf"] {
+            assert!(!put(held), "{held}, already held, is left alone: {seen:?}");
+        }
     }
 
     /// `--cacert` is what lets the tool upload to a fleet whose Server certificate a self-made CA

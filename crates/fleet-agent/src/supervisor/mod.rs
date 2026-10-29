@@ -12,6 +12,8 @@ pub mod collector;
 pub mod command;
 pub mod delivered;
 pub mod endpoint;
+#[cfg(feature = "icinga2")]
+pub mod icinga2;
 pub mod ports;
 pub mod process;
 pub mod restart;
@@ -50,6 +52,10 @@ fn registry(spawner: &Spawner) -> Vec<Box<dyn Plugin>> {
             spawner: spawner.clone(),
         }),
         Box::new(command::CommandPlugin {
+            spawner: spawner.clone(),
+        }),
+        #[cfg(feature = "icinga2")]
+        Box::new(icinga2::Icinga2Plugin {
             spawner: spawner.clone(),
         }),
     ]
@@ -619,10 +625,85 @@ mod tests {
         config
     }
 
+    /// A block of a wrapped kind, as ADR-0017 means one to be written.
+    #[cfg(feature = "icinga2")]
+    fn wrapped(root: &std::path::Path, extra: &str) -> ClientConfig {
+        toml::from_str(&format!(
+            "endpoint = \"ws://127.0.0.1:1/v1/opamp\"\nstate_dir = {state:?}\n\
+             [[supervisor]]\ntype = \"icinga2\"\nname = \"icinga2\"\n{extra}",
+            state = root.join("state").to_string_lossy(),
+        ))
+        .expect("parse")
+    }
+
+    /// The point of ADR-0017, at the seam: a wrapped block names its agent and nothing about how
+    /// that agent is built. What the kind supplies has to reach the program path and the Agent
+    /// type without the block saying either.
+    #[cfg(feature = "icinga2")]
+    #[test]
+    fn a_wrapped_block_needs_neither_a_program_nor_a_type() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = wrapped(dir.path(), "");
+        let block = &config.supervisors[0];
+        let plugins = registry(&Spawner::Local);
+        let plugin = find_plugin(&plugins, block).expect("the kind is known");
+
+        let (_, program, _) =
+            take_program(&config, block, plugin).expect("the kind names its program");
+        let expected = config
+            .supervisor_dir("icinga2")
+            .join(crate::config::PROGRAM_DIR)
+            .join(crate::config::TREE_DIR)
+            .join(if cfg!(windows) {
+                "sbin/icinga2.exe"
+            } else {
+                "sbin/icinga2"
+            });
+        assert_eq!(
+            program.path, expected,
+            "the tree's own layout, per platform"
+        );
+        assert_eq!(
+            effective_service_name(block, plugin, &program.path).expect("a type"),
+            "icinga2"
+        );
+    }
+
+    /// And a block that states one anyway is refused, naming what supplies it now — the pattern
+    /// `package` and `accepts_packages` already run (ADR-0017 clause 13). Silently preferring one
+    /// of the two is how a host quietly differs from what the fleet believes.
+    // Verifies: ADR-0017
+    #[cfg(feature = "icinga2")]
+    #[test]
+    fn a_wrapped_block_that_restates_a_derived_value_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for (line, expected) in [
+            (
+                "binary = \"icinga2\"\n",
+                "installs and names its own program",
+            ),
+            (
+                "program_path = \"sbin/icinga2\"\n",
+                "where its program sits",
+            ),
+            ("service_name = \"icinga2\"\n", "the Agent type it presents"),
+            ("endpoint_port = 4321\n", "says nothing for type"),
+            ("stop_timeout_secs = 60\n", "how long an agent needs"),
+            ("apply_grace_secs = 30\n", "how long an agent needs"),
+            ("retain_previous_secs = 60\n", "how long an agent needs"),
+        ] {
+            let config = wrapped(dir.path(), line);
+            let error = validate_block(&config, &config.supervisors[0])
+                .expect_err(&format!("{line:?} is refused"));
+            assert!(error.contains(expected), "{line:?} -> {error}");
+        }
+    }
+
     /// The claim of ADR-0017 in one assertion: every wrapped kind's block is `type` and `name`, and
     /// it validates whole — the program resolves inside this Supervisor's own directory, the Agent
     /// type is stated, the timing comes from the fleet, and the kind's own strict parse accepts an
-    /// empty table.
+    /// empty table. Icinga adds only its enrolment, and stands here without it as a standalone
+    /// node.
     // Verifies: ADR-0017
     #[test]
     fn every_wrapped_kinds_block_is_two_lines() {
@@ -664,7 +745,7 @@ mod tests {
     }
 
     /// The wrapped kinds, each with whether this build's features carry it (ADR-0017 clause 2).
-    const WRAPPED: &[(&str, bool)] = &[];
+    const WRAPPED: &[(&str, bool)] = &[("icinga2", cfg!(feature = "icinga2"))];
 
     /// A build's kinds are the core's two and the wrapped ones its features name — no more, so a
     /// Selector aimed at `supervisor.kind.<type>` never reaches a build without it, and no fewer
@@ -719,6 +800,31 @@ mod tests {
             let compiled: Vec<&str> = kinds().iter().map(|plugin| plugin.kind()).collect();
             assert_eq!(known, compiled.join(", "), "{kind} is not among them");
         }
+    }
+
+    /// Timing is the fleet's, then the kind's correction of it, and nothing below that
+    /// (ADR-0017 clause 17). Icinga is the correction that exists: its shutdown drains checks and
+    /// closes cluster connections, so the fleet's ten seconds would kill it mid-drain — a property
+    /// of Icinga, which is why the kind holds it rather than every host repeating it.
+    #[cfg(feature = "icinga2")]
+    #[test]
+    fn a_wrapped_kind_corrects_the_fleets_timing_and_the_block_says_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut config = wrapped(dir.path(), "");
+        config.supervisor_defaults.stop_timeout_secs = 10;
+        config.supervisor_defaults.apply_grace_secs = 3;
+        config.updates.retain_previous_secs = 1234;
+        let plugins = registry(&Spawner::Local);
+        let block = &config.supervisors[0];
+        let timing = effective_timing(&config, block, find_plugin(&plugins, block).expect("kind"))
+            .expect("resolved");
+        assert_eq!(timing.stop_timeout, Duration::from_secs(60), "Icinga's own");
+        assert_eq!(timing.apply_grace, Duration::from_secs(30), "Icinga's own");
+        assert_eq!(
+            timing.retain_previous,
+            Duration::from_secs(1234),
+            "nothing to correct here, so the fleet's number stands"
+        );
     }
 
     /// And where a kind states no correction, the fleet's policy reaches the Supervisor unchanged

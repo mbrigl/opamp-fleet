@@ -1,7 +1,9 @@
 {
   "name": "OpAMP Fleet DevContainer",
 
-  // Pinned to a Debian *release*, not the floating `:debian` tag.
+  // Pinned to a Debian *release*, not the floating `:debian` tag: it is also the Debian release an
+  // Icinga 2 repack in this container takes when `--distro` names none (ADR-draft-icinga-2), and a
+  // tag that moves would move that default with it.
   "image": "mcr.microsoft.com/devcontainers/base:debian12",
   "workspaceFolder": "/workspace",
   "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind",
@@ -54,6 +56,10 @@
   //             That check is not optional in practice: `#[cfg(unix)]` code is invisible to an
   //             ordinary local run, so a Windows-only compile error reaches CI instead of the
   //             author. See README → "Build, Test & Run".
+  //
+  // The Linux repack takes none of its libraries from this container: they come as verified
+  // packages from Debian's archive (ADR-draft-icinga-2), and `dpkg-deb`, `xz` and `gpgv` are in the
+  // base image.
   "postCreateCommand": {
     "packages": "sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends shellcheck socat llvm"
   },
