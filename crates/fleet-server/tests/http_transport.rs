@@ -304,6 +304,85 @@ async fn a_components_hash_is_answered_with_a_demand_for_the_full_map() {
     assert_eq!(view.available_components, ["receiver/otlp"]);
 }
 
+/// An Agent that answers the demand with the hash alone is not asked again for the same hash, so
+/// the exchange settles instead of repeating at the speed of the replies; a new hash is asked for.
+#[tokio::test]
+async fn the_full_map_is_demanded_once_per_hash() {
+    let server = spawn().await;
+    let url = format!("http://{}/v1/opamp", server.addr);
+    let client = reqwest::Client::new();
+    let uid = InstanceUid::default();
+
+    let reporting = |report: AgentToServer, hash: &[u8]| AgentToServer {
+        capabilities: report.capabilities
+            | opamp::proto::AgentCapabilities::ReportsAvailableComponents as u64,
+        available_components: Some(opamp::proto::AvailableComponents {
+            components: Default::default(),
+            hash: hash.to_vec(),
+        }),
+        ..report
+    };
+    let demands = |reply: &opamp::proto::ServerToAgent| {
+        reply.flags & ServerToAgentFlags::ReportAvailableComponents as u64 != 0
+    };
+
+    let reply = exchange(
+        &client,
+        &url,
+        &reporting(full_report(&uid, "hashonly", 1), b"h1"),
+    )
+    .await;
+    assert!(demands(&reply));
+    for seq in 2..5 {
+        let reply = exchange(
+            &client,
+            &url,
+            &reporting(compressed_report(&uid, seq), b"h1"),
+        )
+        .await;
+        assert!(
+            !demands(&reply),
+            "demanded again for the same hash at {seq}"
+        );
+    }
+    let reply = exchange(&client, &url, &reporting(compressed_report(&uid, 5), b"h2")).await;
+    assert!(demands(&reply));
+
+    // An Agent that restarted without a goodbye is asked again: the demand may have been lost.
+    let reply = exchange(
+        &client,
+        &url,
+        &reporting(full_report(&uid, "hashonly", 1), b"h2"),
+    )
+    .await;
+    assert!(demands(&reply));
+}
+
+/// An Agent that never counts its `sequence_num` shows a gap on every message; answering the
+/// demand without the map still draws it only once.
+#[tokio::test]
+async fn an_agent_that_never_counts_is_asked_for_the_map_once() {
+    let server = spawn().await;
+    let url = format!("http://{}/v1/opamp", server.addr);
+    let client = reqwest::Client::new();
+    let uid = InstanceUid::default();
+
+    let mut report = full_report(&uid, "uncounted", 0);
+    report.capabilities |= opamp::proto::AgentCapabilities::ReportsAvailableComponents as u64;
+    report.available_components = Some(opamp::proto::AvailableComponents {
+        components: Default::default(),
+        hash: b"h".to_vec(),
+    });
+    let mut demanded = 0;
+    for _ in 0..5 {
+        let reply = exchange(&client, &url, &report).await;
+        if reply.flags & ServerToAgentFlags::ReportAvailableComponents as u64 != 0 {
+            demanded += 1;
+        }
+    }
+    assert_eq!(demanded, 1);
+}
+
 #[tokio::test]
 async fn no_component_demand_without_the_declared_capability() {
     let server = spawn().await;
