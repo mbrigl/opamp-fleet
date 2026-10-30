@@ -12,6 +12,7 @@ is one machine, the Clients are all the others — so each half can be read on i
 | **[Client](client.md)** | run a managed host, end to end: how it is built, the OS service and the process account its Managed Processes may run under, the on-disk layout, Supervisors for Collectors and Foreign Agents, package updates, self-update, and Gateway Mode |
 | **[Rollout walkthrough](rollout.md)** | both ends at once, end to end: build an artifact, sign it, upload it, aim it, and watch a Foreign Agent be installed and configured entirely from the Server |
 | **[Command-line tools](tools.md)** | get software into the fleet: fetch a known agent's release and hand it to the Server, or build, hash, and sign an artifact out of any program |
+| **[Upgrading from 0.5](upgrade.md)** | take a fleet on a 0.5 release to this one, in order: the Clients' files, the Server and its records, then the Clients' own update |
 
 The two halves interlock in three places, and each is described on both sides: **authentication**
 (the Client presents a client certificate the Server accepts, and a new host is
@@ -28,7 +29,7 @@ Agent gets, the Client decides *whether* it takes one at all).
 - **[`docs/CONFORMANCE.md`](../CONFORMANCE.md)** — how much of the OpAMP protocol each end
   implements, capability by capability, including what is deliberately missing.
 - **[`CHANGELOG.md`](../../CHANGELOG.md)** — what an upgrade needs edited or moved before it will
-  start.
+  start. For a fleet on 0.5, [Upgrading from 0.5](upgrade.md) puts those steps in order.
 
 ## Before you start
 

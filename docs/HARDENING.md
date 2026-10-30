@@ -301,13 +301,46 @@ one listener and not on its neighbour is the failure mode worth seeing at a glan
     serves the next one afterwards
     ([`endpoint.rs`](../crates/fleet-agent/src/supervisor/endpoint.rs))
 
-What follows is therefore not "make it secure" but two narrower things: **close the windows during
-which a revoked certificate still works**, and **shrink the surface that sits beside the protocol**.
+What follows is therefore not "make it secure" but three narrower things: **close the windows during
+which a revoked certificate still works**, **shrink the surface that sits beside the protocol**, and
+**keep the link's cryptography ahead of a quantum computer**.
 
 **Status of each measure below:** 🔴 not taken · 🟡 partly in force · 🟢 in force. Nothing is 🟢 here by
 construction: a measure that reaches it moves up into [What already holds](#what-already-holds), the
 way the connection-setup bound did when ADR-0012 took it. The ✅/⚠️/❌ marks in that section are the
 same three states seen per *surface* rather than per measure.
+
+## Post-quantum cryptography
+
+🔴 **H20 — Move the link's cryptography to post-quantum algorithms, in hybrid steps.**
+Every asymmetric algorithm on the link is classical: the TLS key exchange (X25519, P-256, P-384),
+the certificates and CSRs (ECDSA P-256 and P-384, Ed25519, and RSA where an operator's CA or a
+Server certificate uses it) and the package and floor signatures (Ed25519). A large quantum
+computer breaks all of them. The key exchange matters first, because traffic recorded today can be
+decrypted later; a signature can only be forged once such a computer exists. The symmetric suites
+and hashes (AES-GCM, ChaCha20-Poly1305, SHA-256/384) are not affected in the same way. OpAMP
+prescribes no algorithm — the CSR and certificates are PEM, the content hash is opaque and the
+signature is Agent specific — so no step breaks the specification; what limits each step is what
+the peers support. It could go in three steps, each hybrid so a classical peer still connects: the
+key exchange as X25519MLKEM768 with X25519 beside it; the package and floor signatures as Ed25519
+together with ML-DSA; the certificates as ML-DSA chains beside the classical ones, once peers
+verify them.
+**Cost:** a TLS provider other than ring, which brings a C library built from source into the
+build and the supply chain; a larger ClientHello on every connection; and ML-DSA signatures of
+several kilobytes where an Ed25519 one is 64 bytes, in every package entry and every floor, whose
+formats and bounds are sized for Ed25519 today.
+**To work out:** the TLS provider — ring offers no ML-KEM and no ML-DSA, rustls offers the hybrid
+key exchange with aws-lc-rs, which [ADR-0012](adr/0012-tls-1-3-two-planes-and-bounded-input.md)
+rejects and `deny.toml` bans, and a pure-Rust ML-KEM in a key-exchange group built here would be
+unaudited; how a Client that knows only Ed25519 keeps verifying a package and a floor while the
+signature grows; where the Client's second verification key lives; and what has to be true before
+the certificates move — ML-DSA in TLS 1.3 as a standard, issuance through rcgen, verification in
+the other OpAMP implementations, and a browser on the Operator plane. It would supersede
+ADR-0012 (the TLS provider), [ADR-0027](adr/0027-packages-signatures-and-delivery.md) (the package
+signature), [ADR-0028](adr/0028-package-versions-high-water-mark-and-floor.md) (the floor's
+signature) and [ADR-0029](adr/0029-the-servers-state-and-its-stores.md) (its stores' TLS without
+aws-lc-rs), and touch [ADR-0018](adr/0018-the-client-updates-itself-from-a-signed-package.md),
+whose self-update rests on the package signature.
 
 ## The channels that put code on the host
 
@@ -374,3 +407,8 @@ measure that has not been taken.
 
 Each open measure adds a row here — its number, and the observable that proves it — and leaves
 with the measure when it moves up into [What already holds](#what-already-holds).
+
+- **H20** — the key exchange: a connection between a Client and the Server negotiates
+  X25519MLKEM768, and one with a peer that offers only X25519 still connects. The signatures: a
+  package and a floor signed both ways verify on a Client that knows only Ed25519 and on one that
+  knows ML-DSA. The certificates: a peer that verifies only classical chains still connects.

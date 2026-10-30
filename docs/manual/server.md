@@ -600,7 +600,8 @@ is not provided.
 
 A Server before 0.5.5 kept its state in two directories, `config_dir` (default `fleet-configs`) and
 `packages_dir` (default `fleet-packages`). This Server reads neither: a `server.toml` naming either
-key stops it at startup. `server migrate` moves an installation once, offline:
+key stops it at startup. `server migrate` moves an installation once, offline. The whole path from
+a 0.5 fleet, Clients included, is [Upgrading from 0.5](upgrade.md).
 
 1. **Stop the Server.** The migration copies files; a Server still writing them would be copied
    half-way. The older Server takes no lock the migration could test, so this step is yours.

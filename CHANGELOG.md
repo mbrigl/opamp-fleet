@@ -40,6 +40,18 @@ once its tag exists.
 
 ### Fixed
 
+- **A Collector that reports its components as a hash no longer trips the per-host rate limit.**
+  The Collector's `opampextension` reports its available components as a hash and sends the map
+  only when asked. The Supervisor Endpoint never asked, the Collector's Agent declared
+  `ReportsAvailableComponents` on the hash alone, and the Server asked for the map on every reply,
+  which the Agent answered with the hash again until the Server throttled the host. Now the
+  Supervisor Endpoint asks the process for the map, the Agent declares the capability only once
+  it holds the map, and the Server asks once per hash on a connection, and again only after the
+  Agent reconnects or restarts. Either end alone stops the exchange, so a fleet may upgrade the
+  Server and the Clients in either order.
+  **What to do:** nothing. A Configuration that sets `reports_available_components: false` under
+  `extensions.opamp.capabilities` to work around this can drop the setting.
+
 - **A stop right after the Client starts ends it cleanly.** Its `SIGTERM` and `SIGINT` handlers
   were installed only once the task waiting for them first ran; a stop before that ended the Client
   by the signal itself. The handlers are now in place before the Client starts anything.
