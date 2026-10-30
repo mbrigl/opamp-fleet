@@ -14,7 +14,7 @@ once its tag exists.
 > rest — is not backfilled here; it is in the git log and in the ADRs. The first four releases were
 > all cut on 2026-08-09, so the dates below say less than the order does.
 
-## [Unreleased]
+## [0.7.1]
 
 ### Added
 
@@ -127,7 +127,7 @@ once its tag exists.
   certificate has a longer serial was already refused by the Server directly; give it a
   certificate of the fleet's client CA.
 
-## [0.7.0]
+## [0.7.0] - 2026-10-25
 
 ### Added
 

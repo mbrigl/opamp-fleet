@@ -947,7 +947,7 @@ dependencies = [
 
 [[package]]
 name = "fleet-agent"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "async-trait",
  "axum",
@@ -998,7 +998,7 @@ dependencies = [
 
 [[package]]
 name = "fleet-core"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "der 0.8.2",
  "git2",
@@ -1016,7 +1016,7 @@ dependencies = [
 
 [[package]]
 name = "fleet-server"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "argon2",
  "axum",
@@ -1056,7 +1056,7 @@ dependencies = [
 
 [[package]]
 name = "fleet-tools"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "clap",
  "dialoguer",
