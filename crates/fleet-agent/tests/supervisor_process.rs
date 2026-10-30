@@ -981,6 +981,53 @@ async fn the_managed_process_is_handed_the_endpoint_token(via: Via) {
 }
 both!(the_managed_process_is_handed_the_endpoint_token);
 
+/// A Managed Process whose kind declares that it gets no Supervisor Endpoint token, because it never
+/// connects to the endpoint, finds none in its environment: its Runner holds an empty one, which is
+/// not set.
+/// Verifies: ADR-draft-client-modes-and-the-gateway
+async fn a_managed_process_whose_kind_declares_no_token_finds_none(via: Via) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let marker = dir.path().join("running");
+    let program = stub_agent();
+    let marker_arg = marker.display().to_string();
+    let (event_tx, _events) = mpsc::channel(64);
+    let (_commands, command_rx) = mpsc::channel(16);
+    let (_shutdown_tx, shutdown) = shutdown_channel();
+    let runner = Runner {
+        endpoint_token: zeroize::Zeroizing::default(),
+        name: "test".to_string(),
+        stop_timeout: Duration::from_secs(5),
+        apply_grace: Duration::ZERO,
+        retain_previous: Duration::ZERO,
+        install: None,
+        archive_key: None,
+        version_probe: None,
+        preflight: None,
+        reload_signal: None,
+        spawner: Spawner::Local,
+        process_account_group: None,
+        supervisor_dir: std::env::temp_dir(),
+        events: EventSender::new(0, event_tx),
+        commands: command_rx,
+        build: Box::new(move || {
+            Some(ProcessSpec {
+                program: program.clone(),
+                args: vec!["--touch".to_string(), marker_arg.clone()],
+                env: Vec::new(),
+                working_dir: None,
+                own_process_group: false,
+                ensure_dirs: Vec::new(),
+            })
+        }),
+    };
+    let (task, _service) = launch(via, runner, shutdown);
+    wait_until_started(&marker).await;
+    let text = std::fs::read_to_string(&marker).expect("marker");
+    assert!(!text.contains("token="), "{text}");
+    task.abort();
+}
+both!(a_managed_process_whose_kind_declares_no_token_finds_none);
+
 /// A kind that declared a reload applies a configuration in place (ADR-0017): the process is
 /// signalled, survives the grace, and the apply is acknowledged without a restart — the process
 /// that was running is still the one running.

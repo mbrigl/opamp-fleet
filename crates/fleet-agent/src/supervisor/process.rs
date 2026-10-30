@@ -710,7 +710,9 @@ pub const ENDPOINT_TOKEN_ENV: &str = "OPAMP_SUPERVISOR_TOKEN";
 pub struct Runner {
     pub name: String,
     /// Handed to the Managed Process as [`ENDPOINT_TOKEN_ENV`] (ADR-0015); wiped when it is
-    /// dropped (ADR-0014).
+    /// dropped (ADR-0014). Empty where the kind declares that its program gets no token, because
+    /// it never connects to the Supervisor Endpoint, and an empty one is not set
+    /// (ADR-draft-client-modes-and-the-gateway clause 28).
     pub endpoint_token: zeroize::Zeroizing<String>,
     pub stop_timeout: Duration,
     /// How long a freshly (re)started process must survive before `ApplyConfig` is acknowledged
@@ -3459,8 +3461,9 @@ mod tests {
 
     /// What the Client asks the second service to start carries no environment of the Client's:
     /// the block's `env` and the Supervisor Endpoint's token, last, and nothing else — the program
-    /// takes the rest from the second service (ADR-0037 clause 22).
-    /// Verifies: ADR-0037
+    /// takes the rest from the second service (ADR-0037 clause 22). A Runner holding no token sets
+    /// none.
+    /// Verifies: ADR-0037, ADR-draft-client-modes-and-the-gateway
     #[cfg(unix)]
     #[tokio::test]
     async fn a_start_through_the_second_service_carries_only_the_blocks_env_and_the_token() {
@@ -3498,6 +3501,17 @@ mod tests {
             launch.endpoint_token.as_deref().map(String::as_str),
             Some("the token")
         );
+
+        // A Runner holding no token, as a kind whose program never connects to the Supervisor
+        // Endpoint builds it, sets none (ADR-draft-client-modes-and-the-gateway clause 28).
+        let (peer, mut asked) = answering(Stream::Stdout, "", 0).await;
+        runner.endpoint_token = zeroize::Zeroizing::default();
+        runner.spawner = Spawner::Channel(peer.channel.clone());
+        runner.try_spawn().await.expect("started");
+        let launch = asked
+            .try_recv()
+            .expect("the start was asked of the service");
+        assert!(launch.endpoint_token.is_none());
     }
 
     /// Where a process account is registered, a tree is staged in a directory its group reads, so
