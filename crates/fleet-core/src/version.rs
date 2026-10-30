@@ -143,6 +143,35 @@ pub fn is_semver(raw: &str) -> bool {
         })
 }
 
+/// An upstream program's number written as SemVer, the way a Package is numbered (ADR-0028
+/// clause 6): fewer than three numeric components are completed with `.0` (`1.19` becomes
+/// `1.19.0`), and a leading zero is dropped from a numeric component (`24.04.1` becomes `24.4.1`).
+/// Both keep the program's own order. A pre-release or build suffix is carried as it is. `None`
+/// when the number cannot be written so.
+///
+/// `opamp-fleetctl package fetch` names a Package by it, and a kind whose program prints such a
+/// number reports its version by it, so the two agree.
+#[must_use]
+pub fn written_as_semver(upstream: &str) -> Option<String> {
+    let split = upstream.find(['-', '+']).unwrap_or(upstream.len());
+    let (core, rest) = upstream.split_at(split);
+    let components: Vec<&str> = core.split('.').collect();
+    let numeric = |c: &&str| !c.is_empty() && c.bytes().all(|b| b.is_ascii_digit());
+    (components.len() <= 3 && components.iter().all(numeric))
+        .then(|| {
+            let mut parts: Vec<&str> = components
+                .iter()
+                .map(|c| match c.trim_start_matches('0') {
+                    "" => "0",
+                    trimmed => trimmed,
+                })
+                .collect();
+            parts.resize(3, "0");
+            format!("{}{rest}", parts.join("."))
+        })
+        .filter(|version| is_semver(version))
+}
+
 /// The identifying part of a version string — everything except the build metadata — or `None`
 /// when the value is not a version (ADR-0033).
 ///
@@ -391,6 +420,25 @@ mod tests {
         if let Some(metadata) = parsed.build {
             assert_eq!(metadata.len(), 7, "{full:?}: metadata is not a short hash");
             assert!(metadata.bytes().all(|b| b.is_ascii_hexdigit()));
+        }
+    }
+
+    /// An upstream number is written as SemVer in its own order: completed with `.0`, a leading
+    /// zero dropped, a suffix carried, and a number that cannot be written so refused
+    /// (ADR-0028 clause 6).
+    /// Verifies: ADR-0028
+    #[test]
+    fn an_upstream_number_is_written_as_semver_in_its_own_order() {
+        assert_eq!(written_as_semver("1.19").as_deref(), Some("1.19.0"));
+        assert_eq!(written_as_semver("24.04.1").as_deref(), Some("24.4.1"));
+        assert_eq!(written_as_semver("2").as_deref(), Some("2.0.0"));
+        assert_eq!(
+            written_as_semver("1.19-rc.1").as_deref(),
+            Some("1.19.0-rc.1")
+        );
+        assert_eq!(written_as_semver("0.158.0").as_deref(), Some("0.158.0"));
+        for unwritable in ["nightly", "1.2.3.4", "1.x", "", "1.0.0-01", "v1.2.3"] {
+            assert_eq!(written_as_semver(unwritable), None, "{unwritable:?}");
         }
     }
 

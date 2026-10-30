@@ -226,30 +226,15 @@ impl AgentKind {
 /// # Errors
 /// Names the number when it cannot be written as SemVer this way.
 fn package_version(upstream: &str) -> Result<String, String> {
-    let split = upstream.find(['-', '+']).unwrap_or(upstream.len());
-    let (core, rest) = upstream.split_at(split);
-    let components: Vec<&str> = core.split('.').collect();
-    let numeric = |c: &&str| !c.is_empty() && c.bytes().all(|b| b.is_ascii_digit());
-    let written = (components.len() <= 3 && components.iter().all(numeric)).then(|| {
-        let mut parts: Vec<&str> = components
-            .iter()
-            .map(|c| match c.trim_start_matches('0') {
-                "" => "0",
-                trimmed => trimmed,
-            })
-            .collect();
-        parts.resize(3, "0");
-        format!("{}{rest}", parts.join("."))
-    });
-    written
-        .filter(|version| fleet_core::version::is_semver(version))
-        .ok_or_else(|| {
-            format!(
-                "upstream's version {upstream:?} cannot be written as SemVer, which a Package \
-                 version is — fetch it by hand and upload it under a SemVer version you choose \
-                 in the same order"
-            )
-        })
+    // The rule lives in the internal crate, so a kind that reports its program's version by it
+    // agrees with the Package this tool names.
+    fleet_core::version::written_as_semver(upstream).ok_or_else(|| {
+        format!(
+            "upstream's version {upstream:?} cannot be written as SemVer, which a Package \
+             version is — fetch it by hand and upload it under a SemVer version you choose \
+             in the same order"
+        )
+    })
 }
 
 /// A Configuration this tool puts on the Server beside the package, when the Server has none of
@@ -1591,9 +1576,9 @@ mod tests {
         );
     }
 
-    /// Upstream `1.19` is fetched under its own tag and named Package `1.19.0`; a leading zero is
-    /// dropped, and a number that cannot be written as SemVer is refused, naming it
-    /// (ADR-0028 clause 6).
+    /// Upstream `1.19` is fetched under its own tag and named Package `1.19.0`, and a number that
+    /// cannot be written as SemVer is refused, naming it (ADR-0028 clause 6). How a number is
+    /// written is tested with `fleet_core::version::written_as_semver`.
     /// Verifies: ADR-0028
     #[test]
     fn fetch_names_the_package_in_semver_and_fetches_upstreams_tag() {
@@ -1605,9 +1590,6 @@ mod tests {
             AgentKind::Otelcol.release_names("0.158.0"),
             Ok(("v0.158.0".to_string(), "0.158.0".to_string()))
         );
-        assert_eq!(package_version("24.04.1").as_deref(), Ok("24.4.1"));
-        assert_eq!(package_version("2").as_deref(), Ok("2.0.0"));
-        assert_eq!(package_version("1.19-rc.1").as_deref(), Ok("1.19.0-rc.1"));
         for unwritable in ["nightly", "1.2.3.4", "1.x", "", "1.0.0-01"] {
             let refusal = AgentKind::Otelcol
                 .release_names(unwritable)
