@@ -72,6 +72,12 @@ pub struct Args {
     /// Write the artifacts and stop — no upload, and no question about one.
     #[arg(long, conflicts_with = "server")]
     no_upload: bool,
+    /// Which repack of this version it is, for an agent whose artifact this tool repacks: 1, the
+    /// default, for the first, 2 and on for a later one of the same version. The second repack of
+    /// 2.14.3 is uploaded as Package `2.14.4-0.r.2`, above the first and below upstream's next
+    /// release (ADR-draft-the-operator-program-opamp-fleetctl clause 28).
+    #[arg(long, value_name = "N", default_value_t = 1)]
+    repack: u32,
 }
 
 /// The agents this tool knows how to fetch. Adding one is this enum, its [`Source`], and nothing
@@ -159,6 +165,15 @@ impl AgentKind {
         Ok((self.tag_of_version(upstream), package_version(upstream)?))
     }
 
+    /// Whether this tool repacks the agent's artifact, rather than uploading it as upstream
+    /// publishes it: only then can one version have a later repack
+    /// (ADR-draft-the-operator-program-opamp-fleetctl clause 28).
+    fn repacked(self) -> bool {
+        match self {
+            AgentKind::Otelcol | AgentKind::OtelcolContrib | AgentKind::Supervisor => false,
+        }
+    }
+
     /// The systems this agent can be fetched for, as the agent menu states them.
     ///
     /// A hint, not the plan: what is actually offered comes from the release itself a step later.
@@ -235,6 +250,53 @@ fn package_version(upstream: &str) -> Result<String, String> {
              in the same order"
         )
     })
+}
+
+/// The Package version of the `repack`-th repack of one upstream version, whose Package version
+/// is `version` (ADR-draft-the-operator-program-opamp-fleetctl clause 28). The first is the version
+/// itself. A later one is `<major>.<minor>.<patch+1>-0.r.<n>`: a pre-release of the next patch, so
+/// it orders above the first repack and below upstream's next release, and its repack number is a
+/// numeric identifier, compared as a number. Build metadata would not do, since two versions that
+/// differ only in it compare equal (ADR-0028 clause 2), and the program keeps reporting the
+/// version it is, which the Server offers a Package only above.
+///
+/// # Errors
+/// Refuses a repack number below 1, a later repack of an agent this tool does not repack, and a
+/// version that is not three numbers.
+fn repack_version(agent: AgentKind, version: &str, repack: u32) -> Result<String, String> {
+    if repack > 1 && !agent.repacked() {
+        return Err(format!(
+            "--repack is for an agent whose artifact this tool repacks; {} is uploaded as its \
+             release publishes it, so a version of it has one artifact only",
+            agent.source().service_name
+        ));
+    }
+    numbered_repack(version, repack)
+}
+
+/// The numbering of [`repack_version`], whichever agent it is for.
+fn numbered_repack(version: &str, repack: u32) -> Result<String, String> {
+    match repack {
+        0 => return Err("--repack counts from 1, the first repack of a version".to_string()),
+        1 => return Ok(version.to_string()),
+        _ => {}
+    }
+    let numbers: Vec<u64> = version
+        .split('.')
+        .map(|part| {
+            (!part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+                .then(|| part.parse().ok())
+                .flatten()
+        })
+        .collect::<Option<_>>()
+        .filter(|numbers: &Vec<u64>| numbers.len() == 3)
+        .ok_or_else(|| {
+            format!("a later repack of {version:?} cannot be numbered: it is not three numbers")
+        })?;
+    let next = numbers[2].checked_add(1).ok_or_else(|| {
+        format!("a later repack of {version:?} cannot be numbered: no next patch")
+    })?;
+    Ok(format!("{}.{}.{next}-0.r.{repack}", numbers[0], numbers[1]))
 }
 
 /// A Configuration this tool puts on the Server beside the package, when the Server has none of
@@ -325,6 +387,7 @@ pub async fn run(args: Args) -> Result<(), String> {
     // The release is fetched under upstream's spelling, and named as a Package in SemVer — before
     // anything is downloaded, so a number that cannot be written so costs nothing.
     let (tag, package_version) = agent.release_names(&version)?;
+    let package_version = repack_version(agent, &package_version, args.repack)?;
 
     let assets = release_assets(&source, &tag).await?;
     let available = plans(agent, &version, &assets).await?;
@@ -1543,6 +1606,61 @@ mod tests {
 
     use super::*;
     use std::io::Read as _;
+
+    /// A later repack of one version is numbered as a pre-release of the next patch, so it orders
+    /// above the first repack and below upstream's next release, its repack number compared as a
+    /// number; the first keeps the version
+    /// (ADR-draft-the-operator-program-opamp-fleetctl clause 28).
+    /// Verifies: ADR-draft-the-operator-program-opamp-fleetctl
+    #[test]
+    fn a_later_repack_orders_between_the_version_and_the_next_release() {
+        use std::cmp::Ordering;
+        let repack = |n| numbered_repack("2.14.3", n);
+        assert_eq!(repack(1).as_deref(), Ok("2.14.3"));
+        assert_eq!(repack(2).as_deref(), Ok("2.14.4-0.r.2"));
+        assert_eq!(repack(10).as_deref(), Ok("2.14.4-0.r.10"));
+        let order = [
+            "2.14.3".to_string(),
+            repack(2).expect("r.2"),
+            repack(3).expect("r.3"),
+            repack(9).expect("r.9"),
+            repack(10).expect("r.10"),
+            repack(11).expect("r.11"),
+            repack(100).expect("r.100"),
+            // Upstream's own pre-release of the next patch still lies above every repack.
+            "2.14.4-rc.1".to_string(),
+            "2.14.4".to_string(),
+        ];
+        for pair in order.windows(2) {
+            assert_eq!(
+                fleet_core::version::precedence(&pair[0], &pair[1]),
+                Some(Ordering::Less),
+                "{pair:?}"
+            );
+        }
+        // Build metadata would compare equal to the first repack, so it is not the form.
+        assert_eq!(
+            fleet_core::version::precedence("2.14.3", "2.14.3+r2"),
+            Some(Ordering::Equal)
+        );
+        repack(0).expect_err("counts from 1");
+        numbered_repack("2.14.3-rc.1", 2).expect_err("not three numbers");
+        numbered_repack("2.14", 2).expect_err("not three numbers");
+        numbered_repack(&format!("1.0.{}", u64::MAX), 2).expect_err("no next patch");
+        // An agent this tool uploads as upstream publishes it has one artifact per version.
+        for agent in [
+            AgentKind::Otelcol,
+            AgentKind::OtelcolContrib,
+            AgentKind::Supervisor,
+        ] {
+            assert!(!agent.repacked(), "{agent:?}");
+            repack_version(agent, "0.158.0", 2).expect_err("not repacked");
+            assert_eq!(
+                repack_version(agent, "0.158.0", 1).as_deref(),
+                Ok("0.158.0")
+            );
+        }
+    }
 
     /// The tag patterns are what keep a version list from offering things that are not releases of
     /// the agent being fetched — the Collector repository tags its builder alongside.

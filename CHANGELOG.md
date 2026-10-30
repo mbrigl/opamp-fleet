@@ -38,6 +38,13 @@ once its tag exists.
   take a host below a floor, stop its Client, remove that type's entry from
   `package-floors.json`, and start it.
 
+- **`opamp-fleetctl package fetch --repack <n>` numbers a later repack of one version**
+  ([ADR-draft-the-operator-program-opamp-fleetctl](docs/adr/draft-the-operator-program-opamp-fleetctl.md)
+  clause 28), for an agent whose artifact the tool repacks. The second repack of `2.14.3` is
+  uploaded as Package `2.14.4-0.r.2`, above every earlier repack and below the next release, and
+  `r.10` orders above `r.9`. `--repack 1`, the default, is the version itself.
+  **What to do:** nothing.
+
 ### Changed
 
 - **The UI colours as TOML only the Client's own configuration**
