@@ -100,7 +100,8 @@ Inside the Server and the Client the code is ports and adapters
 two. Every
 module's role is listed in
 [`dependency_direction.rs`](../crates/fleet-core/tests/dependency_direction.rs), which fails when a
-core module names an adapter or a technology, and when a module has no role.
+core module names an adapter or a technology, when a module has no role, and when a role names
+no module.
 
 - **Server stores** — one port per domain in the core module it serves, shaped so a database or
   an object store could implement it, and speaking in domain types, never paths

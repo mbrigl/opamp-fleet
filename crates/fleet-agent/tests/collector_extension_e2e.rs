@@ -43,16 +43,6 @@ async fn wait_until<T>(what: &str, mut probe: impl FnMut() -> Option<T>) -> T {
     panic!("timed out waiting for {what}");
 }
 
-/// A loopback port nobody holds at the moment — what the Collector's own configuration would name
-/// as its Supervisor Endpoint.
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .expect("bind")
-        .local_addr()
-        .expect("addr")
-        .port()
-}
-
 /// Places the stub where the Collector Supervisor's bare program name resolves.
 fn stage_owned_program(state_dir: &Path, supervisor: &str, program: &str) {
     let program_dir = state_dir
@@ -110,7 +100,7 @@ async fn a_collector_extensions_own_report_reaches_the_fleet_as_its_supervisors_
         .to_string_lossy()
         .into_owned();
     stage_owned_program(&state_dir, "otelcol", &program);
-    let port = free_port();
+    let port = common::spare_port();
     let config_path = dir.path().join("supervisor.toml");
     std::fs::write(
         &config_path,

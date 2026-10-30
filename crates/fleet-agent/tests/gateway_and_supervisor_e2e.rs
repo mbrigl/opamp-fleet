@@ -151,12 +151,6 @@ fn view<'a>(agents: &'a [AgentView], name: &str) -> Option<&'a AgentView> {
     agents.iter().find(|a| a.service_instance_name == name)
 }
 
-/// A free port to hand the Gateway, released before it binds.
-fn free_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-    listener.local_addr().expect("addr").port()
-}
-
 /// One host supervising its own process *and* gatewaying for another Client: three Agents reach the
 /// Server, each its own, over the connections this one Client holds.
 /// Places the stub where a Managed Process must live (ADR-0017): inside the Supervisor's own
@@ -191,7 +185,7 @@ async fn a_host_supervises_and_gateways_at_the_same_time() {
     let (addr, state, dir) = spawn_server().await;
     let state_dir: PathBuf = dir.path().join("client-state");
     let marker = dir.path().join("stub-marker");
-    let gateway_port = free_port();
+    let gateway_port = common::spare_port();
 
     let pki = Pki::new();
     let toml = format!(
@@ -308,7 +302,7 @@ async fn a_verified_offer_restarts_the_gateway_and_leaves_the_supervisors_runnin
     });
 
     let marker = dir.path().join("stub-marker");
-    let gateway_port = free_port();
+    let gateway_port = common::spare_port();
     let state_dir = dir.path().join("client-state");
     let pki = Pki::new();
     let toml = format!(
@@ -448,7 +442,7 @@ async fn an_unreadable_store_of_bindings_refuses_downstream_and_the_host_goes_on
     let (addr, state, dir) = spawn_server().await;
     let state_dir: PathBuf = dir.path().join("client-state");
     let marker = dir.path().join("stub-marker");
-    let gateway_port = free_port();
+    let gateway_port = common::spare_port();
     let store = state_dir.join("gateway-packages").join("bindings");
     std::fs::create_dir_all(store.parent().expect("dir")).expect("create the gateway's dir");
     std::fs::write(&store, "opamp-fleet-gateway-bindings 99\n").expect("write the store");
