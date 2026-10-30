@@ -10,7 +10,7 @@ the keys it makes are the ones to keep off that host.
 
 | Command | Use it to |
 |---|---|
-| **[`package fetch`](#package-fetch)** | fetch a release of a known agent — the OpenTelemetry Collector or this fleet's own Client — verify it, and hand it to the Server with its default configuration |
+| **[`package fetch`](#package-fetch)** | fetch a release of a known agent — the OpenTelemetry Collector, this fleet's own Client, and each agent [its table](#what-it-does) lists — verify it, and hand it to the Server with its default configuration |
 | **[`package pack`, `sha256`, `keygen`, `sign`, `floor`, `public-key`](#packing-and-signing)** | build, hash, and sign a package artifact out of *any* program you have, sign the floor below which no package of a type is taken, and make the package signing key |
 | **[`pki init`, `server-cert`, `bootstrap-ca`, `status`, `p12-extract`](#pki)** | make the fleet's certificate authorities and the Server's or a Gateway's certificate, replace the bootstrap CA, say when the server CA ends, and turn a `bootstrap.p12` into its PEM pair |
 
@@ -59,7 +59,7 @@ $ sha=$(opamp-fleetctl package pack --out promtail-3.0.0.tar.gz ./promtail)
 
 ### What it does
 
-For three agent types it knows where the release lives, what the assets are called, and which
+For each agent type below it knows where the release lives, what the assets are called, and which
 checksum file goes with them:
 
 | `--agent` | Where it fetches from | What arrives |
@@ -104,7 +104,7 @@ Server base URL› https://127.0.0.1:4321
 
 The systems beside each agent are what it is published for — enough to see before the choice that
 an agent offers nothing for the hosts you run. They are a hint, not the offer: the platform
-question below shows what *that release* actually has. One needs a word:
+question below shows what *that release* actually has. Some need a word:
 
 - The **Collectors** add platforms between releases, so only their operating systems are named
   here; the architectures come from the release itself a step later.

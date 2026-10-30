@@ -34,12 +34,9 @@ const SERIES_SHOWN: usize = 3;
 
 /// The member cap a tree package is held to (ADR-0027). Checked while packing rather than
 /// discovered on three hundred hosts at rollout time.
-#[cfg_attr(
-    any(not(test), not(unix)),
-    expect(
-        dead_code,
-        reason = "only an agent whose upstream publishes no installable archive is repacked"
-    )
+#[allow(
+    dead_code,
+    reason = "a kind whose upstream publishes no installable archive repacks with it, and the core carries none"
 )]
 const MAX_TREE_MEMBERS: usize = 10_000;
 
@@ -194,6 +191,15 @@ impl AgentKind {
             // this repository decides it should — and the column's question, "does it run on the
             // hosts I have", deserves the concrete answer where one can be given.
             AgentKind::Supervisor => group_platforms(SUPERVISOR_PLATFORMS.iter().copied()),
+        }
+    }
+
+    /// Whether the release's assets have to be listed to plan the fetch. An agent whose artifacts
+    /// are not assets of its GitHub release says no, sparing a request against a rate-limited
+    /// API.
+    fn needs_assets(self) -> bool {
+        match self {
+            AgentKind::Otelcol | AgentKind::OtelcolContrib | AgentKind::Supervisor => true,
         }
     }
 
@@ -365,6 +371,36 @@ enum Action {
     AsPublished,
 }
 
+impl Action {
+    /// Whether the artifact is this tool's repack rather than what upstream published: every
+    /// action but [`AsPublished`](Self::AsPublished) is a kind's repack (ADR-0032).
+    fn repacks(&self) -> bool {
+        !matches!(self, Action::AsPublished)
+    }
+}
+
+/// What a kind's plans are made from: the release as upstream and this tool name it, its assets,
+/// and the command line, from which a kind reads what only it asks for.
+struct Release<'a> {
+    /// The version as upstream numbers it (`1.19`).
+    version: &'a str,
+    /// Upstream's tag of that version (`v0.158.0`).
+    #[allow(
+        dead_code,
+        reason = "a kind that builds its URLs from the tag reads it"
+    )]
+    tag: &'a str,
+    /// The Package version the artifacts are uploaded as, a later repack's included — what a
+    /// repacked artifact is named by (ADR-0028 clause 6).
+    #[allow(dead_code, reason = "a kind that repacks names its artifact by it")]
+    package_version: &'a str,
+    /// The release's assets as `(name, url)`, empty for an agent that does not need them.
+    assets: &'a [(String, String)],
+    /// The command line, for a flag only one kind takes.
+    #[allow(dead_code, reason = "a kind with a flag of its own reads it")]
+    args: &'a Args,
+}
+
 /// `package fetch`: which agent, which version, which platforms, and whether to upload — each
 /// asked for when its flag is missing.
 ///
@@ -389,8 +425,19 @@ pub async fn run(args: Args) -> Result<(), String> {
     let (tag, package_version) = agent.release_names(&version)?;
     let package_version = repack_version(agent, &package_version, args.repack)?;
 
-    let assets = release_assets(&source, &tag).await?;
-    let available = plans(agent, &version, &assets).await?;
+    let assets = if agent.needs_assets() {
+        release_assets(&source, &tag).await?
+    } else {
+        Vec::new()
+    };
+    let release = Release {
+        version: &version,
+        tag: &tag,
+        package_version: &package_version,
+        assets: &assets,
+        args: &args,
+    };
+    let available = plans(agent, &release).await?;
     if available.is_empty() {
         // For this project's own releases the likeliest reason is a known one, and saying it saves
         // the operator a trip to the release page: older releases carry another name and container,
@@ -583,8 +630,12 @@ fn select_platforms<'p>(available: &'p [Plan], wanted: &[String]) -> Result<Vec<
     }
     let labels: Vec<String> = available
         .iter()
-        .map(|p| match p.action {
-            Action::AsPublished => format!("{}/{}", p.os, p.arch),
+        .map(|p| {
+            if p.action.repacks() {
+                format!("{}/{} (repacked)", p.os, p.arch)
+            } else {
+                format!("{}/{}", p.os, p.arch)
+            }
         })
         .collect();
     let picked = MultiSelect::new()
@@ -707,16 +758,12 @@ async fn release_assets(source: &Source, tag: &str) -> Result<Vec<(String, Strin
 }
 
 /// What this release offers, one entry per platform this fleet can name.
-async fn plans(
-    agent: AgentKind,
-    version: &str,
-    assets: &[(String, String)],
-) -> Result<Vec<Plan>, String> {
+async fn plans(agent: AgentKind, release: &Release<'_>) -> Result<Vec<Plan>, String> {
     match agent {
         AgentKind::Otelcol | AgentKind::OtelcolContrib => {
-            Ok(collector_plans(agent, version, assets))
+            Ok(collector_plans(agent, release.version, release.assets))
         }
-        AgentKind::Supervisor => Ok(supervisor_plans(version, assets)),
+        AgentKind::Supervisor => Ok(supervisor_plans(release.version, release.assets)),
     }
 }
 
@@ -898,12 +945,26 @@ async fn produce(plan: &Plan, out_dir: &Path) -> Result<PathBuf, String> {
         .cloned()
         .ok_or_else(|| "a plan with nothing to fetch".to_string())?;
 
-    match &plan.action {
-        Action::AsPublished => {
-            eprintln!("  as published — the fleet verifies upstream's own hash");
-            Ok(downloaded)
-        }
+    // A kind that repacks answers its step here; the rest of a repack is the same for every kind.
+    let artifact = out_dir.join(&plan.out_name);
+    let repacked: Option<Result<(), String>> = match &plan.action {
+        Action::AsPublished => None,
+    };
+    let Some(repacked) = repacked else {
+        eprintln!("  as published — the fleet verifies upstream's own hash");
+        return Ok(downloaded);
+    };
+    repacked?;
+    // What was downloaded was a means, not a result; leaving it beside the artifact invites
+    // uploading the wrong file.
+    for file in &fetched {
+        let _ = std::fs::remove_file(file);
     }
+    eprintln!(
+        "  repacked  sha256 {}",
+        hex::encode(sha256_file(&artifact)?)
+    );
+    Ok(artifact)
 }
 
 /// The SHA-256 upstream published for this artifact, from whichever form the source uses.
@@ -966,12 +1027,9 @@ fn parse_sums(text: &str, artifact: &Path) -> Option<String> {
 /// signs, and make its bytes depend on the host that packed it. So does anything that is neither a
 /// file nor a directory, which a pack could only hang on or read from outside the tree. A link
 /// pointing at nothing inside the tree is dropped.
-#[cfg_attr(
-    any(not(test), not(unix)),
-    expect(
-        dead_code,
-        reason = "only an agent whose upstream publishes no installable archive is repacked"
-    )
+#[allow(
+    dead_code,
+    reason = "a kind whose upstream publishes no installable archive repacks with it, and the core carries none"
 )]
 fn pack_tree(root: &Path, wrapper: &str, out: &Path) -> Result<(), String> {
     let mut members = Vec::new();
@@ -1007,12 +1065,9 @@ fn pack_tree(root: &Path, wrapper: &str, out: &Path) -> Result<(), String> {
 }
 
 /// Writes the members, in the order given, into `file` as a gzipped tar.
-#[cfg_attr(
-    any(not(test), not(unix)),
-    expect(
-        dead_code,
-        reason = "only an agent whose upstream publishes no installable archive is repacked"
-    )
+#[allow(
+    dead_code,
+    reason = "a kind whose upstream publishes no installable archive repacks with it, and the core carries none"
 )]
 fn write_members(
     root: &Path,
@@ -1084,12 +1139,9 @@ fn write_members(
 /// directory is legitimate duplication and must be packed again. Deduplicating by real path
 /// instead would leave one of the two names empty — and which one, on directory-read order, which
 /// is nobody's guarantee.
-#[cfg_attr(
-    any(not(test), not(unix)),
-    expect(
-        dead_code,
-        reason = "only an agent whose upstream publishes no installable archive is repacked"
-    )
+#[allow(
+    dead_code,
+    reason = "a kind whose upstream publishes no installable archive repacks with it, and the core carries none"
 )]
 fn collect_members(
     root: &Path,
@@ -1143,12 +1195,9 @@ fn collect_members(
 }
 
 /// What a path of the tree is once every link on it is followed inside the tree.
-#[cfg_attr(
-    any(not(test), not(unix)),
-    expect(
-        dead_code,
-        reason = "only an agent whose upstream publishes no installable archive is repacked"
-    )
+#[allow(
+    dead_code,
+    reason = "a kind whose upstream publishes no installable archive repacks with it, and the core carries none"
 )]
 enum Resolution {
     /// A file or directory inside the tree, by its path relative to the root, which holds no link.
@@ -1164,12 +1213,9 @@ enum Resolution {
 
 /// How many links one resolution follows before it counts as a loop — the bound Linux puts on one
 /// path lookup.
-#[cfg_attr(
-    any(not(test), not(unix)),
-    expect(
-        dead_code,
-        reason = "only an agent whose upstream publishes no installable archive is repacked"
-    )
+#[allow(
+    dead_code,
+    reason = "a kind whose upstream publishes no installable archive repacks with it, and the core carries none"
 )]
 const MAX_LINK_HOPS: usize = 40;
 
@@ -1180,12 +1226,9 @@ const MAX_LINK_HOPS: usize = 40;
 /// A `..` above the root or an absolute target leads out, and so does a path that climbs above the
 /// root past a component that does not exist: whether a link leads out is the tree's to say, not
 /// the host's.
-#[cfg_attr(
-    any(not(test), not(unix)),
-    expect(
-        dead_code,
-        reason = "only an agent whose upstream publishes no installable archive is repacked"
-    )
+#[allow(
+    dead_code,
+    reason = "a kind whose upstream publishes no installable archive repacks with it, and the core carries none"
 )]
 fn resolve_inside(root: &Path, base: &Path, path: &Path) -> Result<Resolution, String> {
     use std::path::Component;
@@ -1276,12 +1319,9 @@ fn resolve_inside(root: &Path, base: &Path, path: &Path) -> Result<Resolution, S
 /// the owner's and no setuid, setgid or sticky bit upstream set reaches the signed artifact. Off
 /// Unix it is a decision rather than a reading: a tar written on Windows has no mode to carry, and
 /// a tree whose programs arrive unexecutable is a tree that will not run.
-#[cfg_attr(
-    any(not(test), not(unix)),
-    expect(
-        dead_code,
-        reason = "only an agent whose upstream publishes no installable archive is repacked"
-    )
+#[allow(
+    dead_code,
+    reason = "a kind whose upstream publishes no installable archive repacks with it, and the core carries none"
 )]
 fn mode_of(meta: &std::fs::Metadata) -> u32 {
     #[cfg(unix)]

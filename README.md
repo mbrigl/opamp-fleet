@@ -110,7 +110,7 @@ renews by itself afterwards; the **Operator plane**, where the REST API and the 
 listener of its own and stays on the loopback unless it is published behind a password. The
 Supervisor Endpoint is bound to loopback and admits only the process its Supervisor started, by a
 token. A Supervisor's **kind** is the authority on its agent: `collector` serves every Collector,
-with or without the extension; `command`
+with or without the extension; a wrapped kind knows its agent; `command`
 runs any other program and observes it from the outside. Adding a new kind of managed process
 means writing another kind against the same ports — the core does not change. The terms used here
 (Server, Client, Agent, Client Modes, Supervisor Endpoint, Connection Pool, Foreign Agent, Plugin,
@@ -156,11 +156,11 @@ it (AGENTS.md links here).
   — inside the workspace Cargo builds `opamp` once with every feature any crate asks for, so only a
   build of each feature on its own shows that it stands alone (ADR-0008).
 - **Lint and test `fleet-agent` with fewer Supervisor kinds:**
-  `cargo clippy -p fleet-agent --all-targets --no-default-features -- -D warnings && cargo test -p
+  `cargo clippy -p fleet-agent --all-targets --no-default-features -- -D warnings`, the same with
+  `--features <kind>` for each feature of its `[features]` table but `default`, and `cargo test -p
   fleet-agent --no-default-features`
-  — a wrapped kind, when the code base carries one, is a feature, so only these show that a build
-  leaving
-  one out compiles and refuses its `type` (ADR-0017).
+  — each wrapped kind is a feature, all on by default, so only these show that a build leaving one
+  out compiles and refuses its `type` (ADR-0017).
 - **Check the Windows build:**
   `cargo xwin clippy -p fleet-agent --all-targets --target x86_64-pc-windows-msvc -- -D warnings`
   (needs `cargo install cargo-xwin` and `rustup target add x86_64-pc-windows-msvc`; the Dev

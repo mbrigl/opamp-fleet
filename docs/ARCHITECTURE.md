@@ -27,8 +27,9 @@ than anywhere else, and none beats one that has stopped being true.
    │  └── Gateway (a Client) ◀── OpAMP, mTLS ── other Clients        register, audit record,
    │                                                                 artifacts by SHA-256
    ├── Supervisor Endpoint (loopback) ◀── a Collector's opampextension
-   ├── Managed Processes: Collector, any command — where a process account is registered, under
-   │     it, started by the second service over a Unix socket or named pipe
+   ├── Managed Processes: Collector, each wrapped kind's agent, any command — where a process
+   │     account is registered, under it, started by the second service over a Unix socket or
+   │     named pipe
    ├── package downloads: the Server's own origin, and no other
    ├── own-telemetry destinations: OTLP/HTTP, as the Server offers them
    └── service manager: systemd, launchd or the Windows SCM

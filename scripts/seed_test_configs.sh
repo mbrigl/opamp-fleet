@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Seeds one minimal test Configuration per example Collector from config/supervisor.toml, each
+# Seeds one minimal test Configuration per example supervisor from config/supervisor.toml, each
 # stated for the Agent type that should receive it and held by a Deployment of that name whose
 # Selector aims at it (ADR-0026) — a Configuration has no Selector of its own:
 #

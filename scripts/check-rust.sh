@@ -32,5 +32,11 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 for feature in "" client server; do
   cargo clippy -p opamp --all-targets --locked --no-default-features --features "$feature" -- -D warnings
 done
-cargo clippy -p fleet-agent --all-targets --locked --no-default-features -- -D warnings
+# The wrapped kinds are the features of fleet-agent's [features] table other than `default`, read
+# from there so that a kind adds its feature and nothing here.
+mapfile -t kinds < <(sed -n '/^\[features\]/,/^\[/{/^[a-z0-9_-]* *=/p;}' crates/fleet-agent/Cargo.toml \
+  | cut -d= -f1 | tr -d ' ' | grep -vx default || true)
+for feature in "" "${kinds[@]}"; do
+  cargo clippy -p fleet-agent --all-targets --locked --no-default-features --features "$feature" -- -D warnings
+done
 cargo test -p fleet-agent --locked --no-default-features

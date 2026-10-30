@@ -699,6 +699,10 @@ pub struct Preflight {
 /// is staged.
 pub const STAGED: &str = "${staged}";
 
+/// The health status while `build` yields no process. It carries no reason of its own — the Runner
+/// does not know why — so a kind that does may add one on its way to the core (ADR-0017).
+pub const AWAITING_CONFIGURATION: &str = "awaiting configuration";
+
 /// How to ask a Managed Process for its own version — the program to run and the arguments that
 /// make it print one. `None` on a Runner whose plugin has no such convention.
 #[derive(Clone)]
@@ -1694,7 +1698,7 @@ impl Runner {
         let Some(spec) = (self.build)() else {
             self.events
                 .send(ProcessEvent::Health(unhealthy(
-                    "awaiting configuration".to_string(),
+                    AWAITING_CONFIGURATION.to_string(),
                     String::new(),
                 )))
                 .await;
@@ -1809,9 +1813,9 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 /// covers a Client that was down when a deadline elapsed.
 const SWEEP_INTERVAL: Duration = Duration::from_secs(600);
 
-/// Runs `<program> <args>` once and reports the Managed Process's version as a Description
-/// event, if the output contains one. Best effort by design: a missing binary, a hang, or
-/// versionless output is logged and otherwise ignored — probing must never break supervision.
+/// Runs the probe's `<program> <args>` once and reports the Managed Process's version as a
+/// Description event, if the output contains one. Best effort by design: a missing binary, a hang,
+/// or versionless output is logged and otherwise ignored — probing must never break supervision.
 ///
 /// A later self-report through the Supervisor Endpoint replaces the probed value.
 ///
@@ -2014,18 +2018,18 @@ enum Reloaded {
 /// for an agent that re-reads its configuration on `SIGHUP` (ADR-0017). Off Unix the Runner then
 /// applies by restarting, so one block serves every platform.
 #[cfg(unix)]
-#[expect(
+#[allow(
     dead_code,
-    reason = "only the wrapped kinds that reload by signal call it"
+    reason = "only a wrapped kind that reloads by signal calls it, and the core carries none"
 )]
 pub(crate) fn sighup() -> Option<i32> {
     Some(libc::SIGHUP)
 }
 
 #[cfg(not(unix))]
-#[expect(
+#[allow(
     dead_code,
-    reason = "only the wrapped kinds that reload by signal call it"
+    reason = "only a wrapped kind that reloads by signal calls it, and the core carries none"
 )]
 pub(crate) fn sighup() -> Option<i32> {
     None

@@ -657,7 +657,7 @@ mod tests {
     }
 
     /// The wrapped kinds, each with whether this build's features carry it (ADR-0017 clause 2).
-    const WRAPPED: [(&str, bool); 0] = [];
+    const WRAPPED: &[(&str, bool)] = &[];
 
     /// A build's kinds are the core's two and the wrapped ones its features name — no more, so a
     /// Selector aimed at `supervisor.kind.<type>` never reaches a build without it, and no fewer

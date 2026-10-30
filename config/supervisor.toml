@@ -180,20 +180,17 @@ state_dir = "client-state"
 # Server as its own Agent, all sharing this Client's one connection. Without any block, the
 # Client presents itself as a single Agent, as above.
 #
-# There are two kinds of Supervisor, `collector` and `command`. Both
-# know nothing about the agent they run, so their blocks say everything. A **wrapper** — a kind
-# that knows its agent, when a build carries one — has a block that says which host runs it and
-# little else. A key that a
-# wrapper supplies is refused by name rather than silently overridden, and the message says what
-# supplies the value now.
+# `collector` and `command` know nothing about the agent they run, so their blocks say
+# everything. Every other kind is a **wrapper**: it knows its agent, so its block says which host
+# runs it and little else — a wrapped block is two lines. A key that a wrapper supplies is refused
+# by name rather than silently overridden, and the message says what supplies the value now.
 #
 # This Client reports the kinds it carries as attributes of its own Agent
 # (supervisor.kind.collector = "true", one key per kind), so a Supervisor set the Server rolls out
 # can be aimed at the Clients that can actually run it.
 #
 # Timing is the fleet's policy first. These two apply to every Managed Process; a wrapped kind
-# (when a build carries one) corrects them where its agent demands it, and only
-# an unwrapped block may state its own.
+# corrects them where its agent demands it, and only an unwrapped block may state its own.
 # [supervisors]
 # stop_timeout_secs = 10   # graceful-stop budget before the process is killed
 # apply_grace_secs = 3     # how long a restarted process must survive before a received
@@ -274,7 +271,7 @@ state_dir = "client-state"
 # args = []                # extra arguments, appended after the --config flags
 # endpoint_port = 4321     # the Supervisor Endpoint on 127.0.0.1 the extension connects to
 # stop_timeout_secs = 10   # optional: overrides [supervisors] for this block. Only a kind that
-# apply_grace_secs = 3     # knows nothing about its agent takes these — a wrapper would hold the
+# apply_grace_secs = 3     # knows nothing about its agent takes these — a wrapper holds the
 #                          # value instead, because how long an agent needs is the agent's
 #                          # property, not this host's.
 # [supervisor.env]         # optional environment for the process

@@ -242,9 +242,9 @@ filter.
 **`service.name` means two different things on the two levels.** On the Resource it is the
 *Client's* type (`supervisor`); on the data point it is the type of the Agent the sample is *about*
 — `otelcol`, `fluent-bit`, `supervisor` — the type its Supervisor states, never one its Managed
-Process reports, which is the same value the fleet view shows. One Client reports all
-three side by side, so unlike the platform this differs *within* a single export and cannot live on
-the Resource. The dashboard's **Client type** variable filters the former; the **Type** column and
+Process reports, which is the same value the fleet view shows. One Client reports them side by
+side, so unlike the platform this differs *within* a single export and cannot live on the
+Resource. The dashboard's **Client type** variable filters the former; the **Type** column and
 the series label carry the latter.
 
 The metric panels put all of it to work: a series is *grouped* by

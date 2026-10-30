@@ -13,6 +13,7 @@ is one machine, the Clients are all the others — so each half can be read on i
 | **[Rollout walkthrough](rollout.md)** | both ends at once, end to end: build an artifact, sign it, upload it, aim it, and watch a Foreign Agent be installed and configured entirely from the Server |
 | **[Command-line tools](tools.md)** | get software into the fleet: fetch a known agent's release and hand it to the Server, or build, hash, and sign an artifact out of any program |
 | **[Upgrading from 0.5](upgrade.md)** | take a fleet on a 0.5 release to this one, in order: the Clients' files, the Server and its records, then the Clients' own update |
+| **[Artifact documents](../artifacts/README.md)** | for maintainers: what each wrapped agent's artifact *is* — source, assets, integrity, repack, the delivered tree, and what the Client derives from it. One per wrapped agent |
 
 The two halves interlock in three places, and each is described on both sides: **authentication**
 (the Client presents a client certificate the Server accepts, and a new host is

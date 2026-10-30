@@ -46,6 +46,12 @@ once its tag exists.
   `r.10` orders above `r.9`. `--repack 1`, the default, is the version itself.
   **What to do:** nothing.
 
+- **An artifact document per wrapped agent**, under [`docs/artifacts/`](docs/artifacts/README.md):
+  what the artifact is, per platform — source, assets, integrity, repack, the delivered tree, and
+  what the Client derives from it. Each is pinned by two tests, one on the packing side and one in
+  the kind, so an upstream release that moves a path turns a test red instead of a rollout.
+  **What to do:** nothing.
+
 ### Changed
 
 - **The UI colours as TOML only the Client's own configuration**
