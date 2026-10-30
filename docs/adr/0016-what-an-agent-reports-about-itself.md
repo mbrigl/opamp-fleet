@@ -187,8 +187,11 @@ to the destinations the Server offers, in TLS 1.3 and in cleartext only to a loo
    `service.instance.name`, the non-identifying attributes are `os.type` and `host.arch` in the
    conventions' vocabulary ([ADR-0027](0027-packages-signatures-and-delivery.md)), `os.name`,
    `os.version`, `os.build_id`, `os.description`, `host.name`, `host.id`, `host.cpu.model.name`,
-   `host.ip`, and `host.mac`. What the platform cannot answer is left out: a placeholder would be
-   something false a Selector could match. Nothing is taken from the connection.
+   `host.ip`, and `host.mac`. A Supervisor-backed Agent also reports `supervisor.package.version`,
+   the version of the Package its Supervisor installed, when and from what record
+   [ADR-draft-deployments-and-rollouts](draft-deployments-and-rollouts.md) clause 25 states.
+   What the platform cannot answer is left out: a placeholder would be something false a Selector
+   could match. Nothing is taken from the connection.
 
 6. **`host.ip` and `host.mac` follow the conventions.**
    - Enumerated with `sysinfo`'s `network` feature, the crate the Client already carries for its
@@ -253,7 +256,12 @@ to the destinations the Server offers, in TLS 1.3 and in cleartext only to a loo
     several is a Label's job ([ADR-0024](0024-the-fleet-record-of-agents-and-hosts.md)): a
     `[[supervisor]]` block carrying an `attributes` table fails at startup with a message naming
     the Server's Label. The Client Agent also reports the kinds it was compiled with
-    ([ADR-0017](0017-supervisor-mode-and-its-kinds.md)).
+    ([ADR-0017](0017-supervisor-mode-and-its-kinds.md)). An `[attributes]` key that starts with
+    `supervisor.`, whether TOML spells it quoted, dotted, or as a sub-table under
+    `[attributes.supervisor]`, fails at startup with a message naming the key. That namespace is
+    the Supervisor's own statement: `supervisor.kind.*` (ADR-0017 clause 18) and
+    `supervisor.package.version` (clause 5). An operator who could state one could make every
+    Agent of the host a Client Agent or choose the version a Package is held against.
 
 11. **The fleet view shows the instance name first and the type beneath it.** `AgentView` carries
     `service_name` (the type) and `service_instance_name`; the bundled UI's name column falls back
@@ -798,7 +806,8 @@ description ([ADR-0024](0024-the-fleet-record-of-agents-and-hosts.md)).
   `a_block_may_state_its_agent_type_and_a_reverse_fqdn_is_accepted`,
   `an_empty_agent_type_is_refused_rather_than_treated_as_absent`,
   `attributes_describe_the_host_and_a_block_no_longer_tags_one_agent`,
-  `non_string_attributes_are_rejected` (clauses 1, 10).
+  `non_string_attributes_are_rejected`,
+  `an_attribute_in_the_supervisors_namespace_is_refused_by_name` (clauses 1, 10).
 -
   [`crates/fleet-agent/tests/collector_extension_e2e.rs`](../../crates/fleet-agent/tests/collector_extension_e2e.rs):
   `a_collector_extensions_own_report_reaches_the_fleet_as_its_supervisors_agent` — an extension
