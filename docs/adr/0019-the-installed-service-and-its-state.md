@@ -592,8 +592,9 @@ service's own run uses; the releases and the Server's image
   [kill](https://man7.org/linux/man-pages/man5/systemd.kill.5.html),
   [daemon(7)](https://man7.org/linux/man-pages/man7/daemon.7.html) on `SIGHUP`,
   [`Restart=on-failure`](https://man7.org/linux/man-pages/man5/systemd.service.5.html); launchd
-  (<https://www.launchd.info/>, launchd.plist(5)); Telegraf's Windows service
-  (<https://github.com/influxdata/telegraf/blob/master/docs/WINDOWS_SERVICE.md>); the
+  (<https://www.launchd.info/>, launchd.plist(5)); the OpenTelemetry Collector's MSI, which
+  installs one Windows service named after the distribution
+  (<https://opentelemetry.io/docs/collector/install/binary/windows/>); the
   `WaitToKillServiceTimeout` budget
   (<https://kb.firedaemon.com/support/solutions/articles/4000086193-increasing-service-shutdown-time>);
   [clap derive](https://docs.rs/clap/latest/clap/_derive/index.html).
@@ -617,7 +618,7 @@ service's own run uses; the releases and the Server's image
 - Microsoft's `Program Files` / `ProgramData` guidance; Windows Installer `UpgradeCode` semantics
   (`MajorUpgrade`, `FindRelatedProducts`, `RemoveExistingProducts`); `cargo-deb` variants and
   `cargo-generate-rpm --set-metadata` for differently named packages from one tree; Elastic Agent
-  and Telegraf ship one product per package, multiple instances being multiple installations.
+  ships one product per package, multiple instances being multiple installations.
 - Service accounts: [Service User
   Accounts](https://learn.microsoft.com/en-us/windows/win32/services/service-user-accounts),
   [virtual accounts](https://docs.delinea.com/online-help/privilege-manager/install/upgrades/virtual-accounts.htm),

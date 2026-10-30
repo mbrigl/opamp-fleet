@@ -34,11 +34,12 @@ value.
 
 **A Managed Process is code the Supervisor does not vouch for.** The Server ships its program as a
 Package and its configuration as Configurations, and a Configuration's language can run commands,
-such as a Telegraf `inputs.exec`. Every Managed Process is handed the Supervisor Endpoint's token
+such as an entry that runs a program, or whatever the configuration a `command` Agent's program
+reads makes it run. Every Managed Process is handed the Supervisor Endpoint's token
 ([ADR-0015](0015-client-modes-and-the-gateway.md)), and so is every process it starts, through its
-environment: a Telegraf `inputs.exec`, a GLPI deploy task, a script a `command` Agent runs. Any of
-them can connect to the Endpoint and report a description. Whatever it reports reaches the Server
-as the Supervisor's own statement, and the Server cannot tell the two apart. Admitted
+environment: a command its configuration names, a deploy task, a script a `command` Agent runs.
+Any of them can connect to the Endpoint and report a description. Whatever it reports reaches the
+Server as the Supervisor's own statement, and the Server cannot tell the two apart. Admitted
 unfiltered, such a report could state:
 
 - **Another type.** The next rollout that claims the Agent would pin that type's Configurations to
@@ -154,7 +155,7 @@ to the destinations the Server offers, in TLS 1.3 and in cleartext only to a loo
 
    | Source | When |
    |---|---|
-   | The kind's own type | a wrapped kind states it (`icinga2`, `telegraf`, `glpi-agent`); a block of such a kind carrying `service_name` fails at startup naming the derived value ([ADR-0017](0017-supervisor-mode-and-its-kinds.md)) |
+   | The kind's own type | a wrapped kind states it, the type of the one agent it wraps; a block of such a kind carrying `service_name` fails at startup naming the derived value ([ADR-0017](0017-supervisor-mode-and-its-kinds.md)) |
    | The block key `service_name` | `collector` and `command`; must not be empty, and is not bound by the instance-name grammar, so a reverse FQDN is accepted |
    | The program's file name | the fallback: `otelcol`, `promtail` |
 

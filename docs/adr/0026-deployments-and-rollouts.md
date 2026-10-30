@@ -443,8 +443,8 @@ the test holds back; a Server-driven downgrade.
   Collector reporting `0.98.0` while its status claims `2.0.0` matches a Package at `1.5.0`. What
   limits it is that nothing moves on its own. Conversely, a program self-reporting a number above
   its Package is unreachable by that Package's number until the Package is re-created at the
-  program's number ([ADR-0028](0028-package-versions-high-water-mark-and-floor.md)). Icinga 2
-  and the GLPI Agent report no `service.version`, so for them the claim decides.
+  program's number ([ADR-0028](0028-package-versions-high-water-mark-and-floor.md)). For a
+  program that reports no `service.version`, the claim decides.
 - Negative / trade-offs: a program already running a version cannot be replaced by the fleet's
   Package of that same version; adopting it means publishing under the next version.
 - Follow-ups: an opt-in convergence policy for late Agents; a progressive walk; an audit trail

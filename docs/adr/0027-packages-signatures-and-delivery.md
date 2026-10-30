@@ -45,7 +45,7 @@ The store, and which held artifact can be meant for an Agent:
   would stop matching.
 - **Upstream publishes archives with a checksum.** `opentelemetry-collector-releases` publishes
   `.tar.gz`, `.deb`, `.rpm` and `.msi`, never a bare binary, with a `checksums.txt` of SHA-256
-  values. The GLPI Agent publishes its portable Windows build as a `.zip`.
+  values. Some agents publish their portable Windows build as a `.zip`.
 - **The Agent type is a fact the Server can read.** Every Agent this Client presents reports its
   type as `service.name` ([ADR-0016](0016-what-an-agent-reports-about-itself.md)), which the
   Baseline defines as "a reverse FQDN that uniquely identifies the Agent type".

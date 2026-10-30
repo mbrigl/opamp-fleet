@@ -9,8 +9,8 @@
 ## Context
 
 The Client runs as a system service. Every program its Supervisors start runs under the account
-that starts it, and so does every command their configuration language can name: a Telegraf
-`inputs.exec`, an Icinga 2 `CheckCommand`, a GLPI deploy task
+that starts it, and so does every command their configuration language can name: an exec input,
+a check command, a deploy task
 ([ADR-0017](0017-supervisor-mode-and-its-kinds.md)). The Server sends those configurations. The
 account that starts a program is therefore the most a compromised or misconfigured Server reaches
 on a host. A Managed Process is code the Supervisor does not vouch for
@@ -31,10 +31,10 @@ Forces:
 
 - **Least privilege by default.** A packaged Linux host and a fresh Windows host must not hand a
   Server-delivered command root or `LocalSystem` unless an operator chose it.
-- **Some agents need root.** GLPI Agent reads the DMI tables (`dmidecode`), and its Deploy task
-  installs operating-system packages. Telegraf's `smart` and `ipmi` inputs and many Icinga plugins
-  run through `sudo` or a setuid helper (`check_icmp`, `check_dhcp`). A listener on a port below
-  1024 needs `CAP_NET_BIND_SERVICE`. On Windows a full inventory, an agent that installs a
+- **Some agents need root.** An inventory agent reads the DMI tables (`dmidecode`), and a deploy
+  task installs operating-system packages. Inputs that read SMART or IPMI data and many monitoring
+  plugins run through `sudo` or a setuid helper (`check_icmp`, `check_dhcp`). A listener on a port
+  below 1024 needs `CAP_NET_BIND_SERVICE`. On Windows a full inventory, an agent that installs a
   service, or a reader of the Security event log needs `LocalSystem` or a group. A host with such
   an agent must be able to keep the privileged account, by a choice the operator makes
   explicitly, and that choice must survive an upgrade.
@@ -53,8 +53,8 @@ Forces:
 - **The Client writes the places it needs.** It writes its data root (`supervisor.toml`, `state/`)
   and its layout root (`/opt/<PRODUCT_NAME>`, where the self-update stages versions and switches
   `current`). It writes each Supervisor's directory, and it starts Managed Processes that may
-  write anywhere their kind keeps state: Icinga 2 under `/etc/icinga2` and `/var/lib/icinga2`, and
-  a GLPI Deploy anywhere a package installs.
+  write anywhere their kind keeps state: a monitoring agent under its own directories in `/etc` and
+  `/var/lib`, and a deploy task anywhere a package installs.
 - **Upgrades run unattended.** The Linux post-install runs inside `apt upgrade` and `dnf upgrade`,
   and the MSI inside a major upgrade, often on hosts nobody watches. An upgrade must not change
   which account runs a configured host.
@@ -324,9 +324,8 @@ either account placed.
 8. **A system unit carries only directives that neither set `no_new_privs` nor take away what a
    supported agent needs, and the account decides the set.**
    - **Every system unit** carries `ProtectControlGroups=yes`. Through it `/sys/fs/cgroup` becomes
-     read-only. It does not imply `NoNewPrivileges=`, and none of the supported agents,
-     OpenTelemetry Collector, Telegraf, Icinga 2 with its plugins and GLPI Agent with its tasks,
-     writes the cgroup tree itself.
+     read-only. It does not imply `NoNewPrivileges=`, and none of the agents the core's kinds
+     start writes the cgroup tree itself; a kind of its own states the same of its agent in its ADR.
    - **A unit that runs as root** (`User=root`) also carries `ProtectKernelTunables=yes`,
      `LockPersonality=yes` and `RestrictRealtime=yes`. Under root they imply nothing, because the
      unit holds `CAP_SYS_ADMIN`. They make `/proc/sys` and `/sys` read-only, fix the execution
@@ -334,12 +333,13 @@ either account placed.
    - **Under any other account these three are left out**, because each would set `no_new_privs`
      and break `sudo` and the setuid helpers the agents use.
    - **Left out everywhere:** `NoNewPrivileges=`, for the same reason. `ProtectSystem=` (`yes`,
-     `full` or `strict`) and `RestrictSUIDSGID=`, because a GLPI Deploy task or a
+     `full` or `strict`) and `RestrictSUIDSGID=`, because a deploy task or a
      configuration-management run under the `command` kind installs operating-system packages
-     under root, and Icinga 2 writes `/etc/icinga2`. `ProtectHome=`, because a root service's home
-     is `/root` and a log receiver may read under `/home`. `PrivateTmp=`, because a Managed
-     Process may reach a local daemon through a socket under `/tmp`. `MemoryDenyWriteExecute=`,
-     because it breaks every JIT a check or exec script may run (Java, Node.js, .NET, LuaJIT).
+     under root, and a monitoring agent writes its own directory under `/etc`. `ProtectHome=`,
+     because a root service's home is `/root` and a log receiver may read under `/home`.
+     `PrivateTmp=`, because a Managed Process may reach a local daemon through a socket under
+     `/tmp`. `MemoryDenyWriteExecute=`, because it breaks every JIT a check or exec script may run
+     (Java, Node.js, .NET, LuaJIT).
      `RestrictNamespaces=`, because it breaks `ip netns exec` around a check and any sandboxing
      helper. `CapabilityBoundingSet=`, because it takes from root what root was chosen for, and
      from a setuid helper what it grants. `ProtectKernelModules=`, because it hides
@@ -941,7 +941,7 @@ either account placed.
   Client meant to remove it, and a purge cut short would leave it for the operator to remove.
   Rejected for clause 25.
 - **Keep root as the packaged Linux default.** This is the smallest change, and every agent works.
-  But every packaged host then hands a Server-delivered `inputs.exec` root, and least privilege
+  But every packaged host then hands a Server-delivered command root, and least privilege
   stays something an operator must know to ask for. Rejected.
 - **Keep `LocalSystem` as the Windows default and rely on the process account.** The process
   account needs the second service, is opt-in, and is refused under a `LocalSystem` Client. A
@@ -1108,8 +1108,8 @@ either account placed.
   and the main process of a service: recalled, not re-read. `org.freedesktop.systemd1(5)`
   (`MainPID`); `launchctl(1)` (`print`, whose output it does not promise as an interface).
 - `docs/manual/client.md` and `docs/manual/setup.md`: what operators are told.
-- Telegraf's `use_sudo` inputs, Icinga's setuid plugins, and GLPI Agent's root inventory and
-  Deploy task: recalled from their documentation, not re-read.
+- Agents' inputs that run through `sudo`, setuid monitoring plugins, and an inventory agent's root
+  inventory and deploy task: recalled from their documentation, not re-read.
 - Debian Policy and `dh_installsystemd`, from which the installers knowingly depart (clause 9).
 - WiX's customization guide for the stock dialog sets; Windows Installer's `REMOVE`,
   `UPGRADINGPRODUCTCODE`, `MajorUpgrade` and `Secure` properties.
@@ -1150,10 +1150,10 @@ either account placed.
   accounts: a managed local account per service, named `NT SERVICE\<service name>`, with no
   password to manage, that acts as the computer account on the network.
 - Microsoft, the built-in local groups *Event Log Readers* and *Performance Monitor Users*.
-- The OpenTelemetry Collector's and Telegraf's Windows services, which register as `LocalSystem`
-  unless their installer is told otherwise: the common default this decision departs from.
+- The OpenTelemetry Collector's Windows service, which registers as `LocalSystem` unless its
+  installer is told otherwise: the common default this decision departs from.
 - Recalled, not re-read for this record: the Microsoft pages on `LocalSystem`, virtual accounts
-  and the built-in groups, and the two projects' defaults above, cited for their shape, not for
+  and the built-in groups, and the project's default above, cited for their shape, not for
   detail; and that `SeImpersonatePrivilege` opens paths to `SYSTEM`.
 -
   [SERVICE_REQUIRED_PRIVILEGES_INFO](https://learn.microsoft.com/en-us/windows/win32/api/winsvc/ns-winsvc-service_required_privileges_infow):
@@ -1245,10 +1245,10 @@ either account placed.
   Endpoint's token, and the programs the Client knows of end with its connection. On Linux, the
   Managed Processes cannot read the second service's memory either.
 - Negative / trade-offs: on a fresh host, agents that need root or `LocalSystem` fail under the
-  account. These include GLPI Agent's full inventory and Deploy, Telegraf inputs without a `sudo`
-  rule, any listener on a port below 1024, a file log receiver reading `root:adm` files, and on
-  Windows a full inventory, an agent that installs a service, or a reader of the Security log. The
-  operator either grants what is missing (a `sudoers` entry, a drop-in with
+  account. These include an inventory agent's full inventory and deploy task, inputs without a
+  `sudo` rule, any listener on a port below 1024, a file log receiver reading `root:adm` files, and
+  on Windows a full inventory, an agent that installs a service, or a reader of the Security log.
+  The operator either grants what is missing (a `sudoers` entry, a drop-in with
   `AmbientCapabilities=` or `SupplementaryGroups=`, `usermod -aG adm`, `net localgroup`) or
   chooses root or `LocalSystem` with `--run-as`. The manual and the post-install text say so.
 - Negative / trade-offs: the sandbox is thin under the account. The account is the confinement,
@@ -1285,10 +1285,10 @@ either account placed.
 - Negative / trade-offs: a second service and a private protocol between two processes of one
   build. A restart of the second service stops every Managed Process. The Managed Processes still
   share one account, so they read one another's `config/` and environment. Grants that name the
-  Client's account for an agent, such as a sudoers rule for Telegraf's `use_sudo` or the rights
-  Icinga 2 needs on its directories, must name the process account instead; the manual and the
-  changelog say so. The separation is opt-in, so a host gains it only once its operator creates
-  the account and names it.
+  Client's account for an agent, such as a sudoers rule for an input that runs through `sudo` or
+  the rights an agent needs on its directories, must name the process account instead; the manual
+  and the changelog say so. The separation is opt-in, so a host gains it only once its operator
+  creates the account and names it.
 - Negative, on Windows: a job holds what a program starts itself, not what it has an
   out-of-process broker start for it, such as a WMI process creation or a scheduled task, as a
   process that leaves its process group outlives the stop on Unix. `LocalService` and
@@ -1351,7 +1351,7 @@ names:
     and `the_service_name_carries_no_suffix` (clause 17).
 - `crates/fleet-agent/src/service/run_as.rs`, or the module that decides the account (clause 1):
   - `a_reregistration_without_run_as_keeps_the_units_account`: a unit fixture with
-    `User=telegraf` yields `telegraf`, from the unit.
+    `User=otelcol-contrib` yields `otelcol-contrib`, from the unit.
   - `a_plists_user_name_is_kept`.
   - `run_as_root_is_written_as_user_root`.
   - `a_unit_without_an_account_on_an_account_owned_data_root_takes_the_owner`.

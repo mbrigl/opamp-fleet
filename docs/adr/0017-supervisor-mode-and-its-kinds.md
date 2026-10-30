@@ -98,8 +98,8 @@ question of the same host-local section, answered per Supervisor (clauses 45 to 
 A remote configuration is one of the channels by which the Server causes code to run on a host
 ([`HARDENING.md`](../HARDENING.md), *The channels that put code on the host*): the Server can
 write any files into a Supervisor's own `config/` directory and restart its process, and what the
-agent's configuration language allows, a Telegraf `inputs.exec`, an Icinga `CheckCommand`, a
-Collector receiver bound to any port, it allows as the process's account. Package delivery on the
+agent's configuration language allows, a command a configuration names, a Collector receiver
+bound to any port, it allows as the process's account. Package delivery on the
 same channel stops at a signature the operator's key makes
 ([ADR-0027](0027-packages-signatures-and-delivery.md)); a remote configuration has no such stop.
 An operator may run an agent whose configuration is too sensitive to take from a compromised
@@ -576,7 +576,7 @@ remote configuration and run only on what the operator placed on the host.
     Managed Process, offer connection settings, and configure every Supervisor not named in
     `remote_config_disabled`.
 
-    A command a configuration can run (a Telegraf `inputs.exec`, an Icinga `CheckCommand`, the
+    A command a configuration can run (a check or exec entry an agent's configuration names, the
     configuration a `command` kind's program reads) runs as the account its Managed Process runs
     under. Where a process account is registered, that is the process account, which cannot write
     `supervisor.toml` ([ADR-0037](0037-the-accounts-the-service-runs-under.md)). Where none is,
