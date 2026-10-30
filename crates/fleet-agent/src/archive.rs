@@ -11,7 +11,8 @@
 //! - **The archive chooses as little as it can.** For a single-file package it chooses nothing:
 //!   exactly one member is extracted, to a destination this Client picked, so a member named
 //!   `../../etc/cron.d/x` writes to that destination like any other and there is no traversal to
-//!   defend against. A tree (ADR-0027) cannot work that way — its members keep their own relative
+//!   defend against. Nor does its order choose: an archive holding the member twice is refused. A
+//!   tree (ADR-0027) cannot work that way — its members keep their own relative
 //!   paths — so every path is validated by [`safe_member_path`] *before a byte is written*, and one
 //!   member this Client will not write refuses the whole archive.
 //! - **The output is bounded.** Extraction stops at [`MAX_UNPACKED_BYTES`] — for a tree, across all
@@ -201,11 +202,13 @@ fn locate_program(
     }
 }
 
-/// A member's file name — what a single-file package's `member` is matched against.
-fn file_name_of(path: &Path) -> String {
-    path.file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default()
+/// Whether an archive entry at `path` is a single-file package's `member`: its trailing path
+/// components are the member's, `/`-separated. A bare name is one component, so it matches the
+/// entry's file name wherever the archive keeps it; a longer one says where
+/// (ADR-draft-packages-signatures-and-delivery clause 55). The path is only compared, never written
+/// to, so what it climbs to does not matter.
+fn is_member(path: &Path, member: &str) -> bool {
+    ends_with_components(path, Path::new(member))
 }
 
 /// The error for a single-file package whose member is not in the archive, naming what the archive
@@ -219,6 +222,24 @@ fn no_member_named(member: &str, seen: &[String]) -> String {
             seen.join(", ")
         }
     )
+}
+
+/// The error for a single-file package whose member the archive holds more than once. Which one
+/// would be installed is the archive's order, which nobody chose, so none is
+/// (ADR-draft-packages-signatures-and-delivery clause 55).
+fn several_members_named(member: &str, matched: &[String]) -> String {
+    format!(
+        "{member:?} matches {} members of the archive ({}) — refusing to choose between them",
+        matched.len(),
+        matched.join(", ")
+    )
+}
+
+/// Remembers one entry that is not the member, for [`no_member_named`] — the first eight.
+fn note_seen(seen: &mut Vec<String>, path: &Path) {
+    if seen.len() < 8 && path.file_name().is_some() {
+        seen.push(as_member(path));
+    }
 }
 
 /// Validates one listed member and adds it, refusing the archive past [`MAX_TREE_MEMBERS`].
@@ -328,21 +349,29 @@ fn extract_7z_within(
     for entry in &reader.archive().files {
         accrue_within(&mut declared, entry.size, limit)?;
     }
+    // The header names every entry, so a member held twice is refused before anything decodes.
+    let mut seen: Vec<String> = Vec::new();
+    let mut matched: Vec<String> = Vec::new();
+    for entry in &reader.archive().files {
+        let path = Path::new(&entry.name);
+        if is_7z_file(entry) && is_member(path, member) {
+            matched.push(as_member(path));
+        } else {
+            note_seen(&mut seen, path);
+        }
+    }
+    match matched.len() {
+        0 => return Err(no_member_named(member, &seen)),
+        1 => {}
+        _ => return Err(several_members_named(member, &matched)),
+    }
 
     // The callback's error type is the crate's, and a member past the limit is no fault of the
     // archive format — so the outcome travels out here instead of being dressed as a 7z error.
     let mut outcome: Result<u64, String> = Err(String::new());
-    let mut seen: Vec<String> = Vec::new();
     reader
         .for_each_entries(|entry, entry_reader| {
-            if entry.is_directory {
-                return Ok(true);
-            }
-            let name = file_name_of(Path::new(&entry.name));
-            if name != member {
-                if seen.len() < 8 && !name.is_empty() {
-                    seen.push(name);
-                }
+            if !is_7z_file(entry) || !is_member(Path::new(&entry.name), member) {
                 return Ok(true);
             }
             outcome = copy_within(entry_reader, out, limit)
@@ -359,9 +388,12 @@ fn extract_7z_within(
 
 /// Extracts the member called `member` from the `.tar.gz` at `archive`, writing it to `out`.
 ///
-/// `member` is matched against each entry's **file name**, so `otelcol-contrib` finds the program
-/// whether the archive stores it at the root or under a directory — which is the difference between
-/// how one project and the next lays out a release.
+/// `member` is matched against each entry's **trailing path components**, so `otelcol-contrib`
+/// finds the program whether the archive stores it at the root or under a directory — which is the
+/// difference between how one project and the next lays out a release — and `usr/bin/agent` finds
+/// the one file of that name a kind means among several. Only files are members. An archive
+/// holding the member more than once is refused rather than left to its order
+/// (ADR-draft-packages-signatures-and-delivery clause 55).
 ///
 /// # Errors
 /// Returns an error when the archive cannot be read, holds no such member, or the member exceeds
@@ -384,6 +416,11 @@ fn extract_tar_gz_within(
     // Kept for the error message: an operator who named the wrong member is best served by being
     // told what the archive actually holds.
     let mut seen: Vec<String> = Vec::new();
+    // Every entry that is the member. The archive is read to its end even after the first, because
+    // a second one means the archive's order would be choosing the program
+    // (ADR-draft-packages-signatures-and-delivery clause 55).
+    let mut matched: Vec<String> = Vec::new();
+    let mut written: u64 = 0;
     let mut decompressed: u64 = 0;
     for entry in entries {
         let mut entry = entry.map_err(|e| format!("cannot read the archive: {e}"))?;
@@ -391,23 +428,31 @@ fn extract_tar_gz_within(
             .path()
             .map_err(|e| format!("cannot read an archive entry: {e}"))?
             .into_owned();
-        let name = file_name_of(&path);
-        if name != member {
-            // Reaching the wanted member means skipping this one, and skipping decompresses it in
-            // full to find the next header. Bound that read from the header before it inflates, so
-            // a bomb hidden ahead of the target cannot spend the CPU it hoped to. The matched
-            // member below is bounded by `copy_within` as it is written, which also catches a
-            // header that lies small and then streams big.
+        // A directory of the program's name — a release's `etc/<program>/` — is never the program.
+        let candidate = entry.header().entry_type().is_file() && is_member(&path, member);
+        if !candidate || !matched.is_empty() {
+            // Reading past this entry decompresses it in full to find the next header. Bound that
+            // read from the header before it inflates, so a bomb hidden around the target cannot
+            // spend the CPU it hoped to. The member itself is bounded by `copy_within` as it is
+            // written, which also catches a header that lies small and then streams big.
             accrue_within(&mut decompressed, entry.header().size().unwrap_or(0), limit)?;
-            if seen.len() < 8 && !name.is_empty() {
-                seen.push(name);
+            if candidate {
+                matched.push(as_member(&path));
+            } else {
+                note_seen(&mut seen, &path);
             }
             continue;
         }
-        return copy_within(&mut entry, out, limit)
-            .map_err(|e| format!("cannot unpack {member:?} from the archive: {e}"));
+        written = copy_within(&mut entry, out, limit)
+            .map_err(|e| format!("cannot unpack {member:?} from the archive: {e}"))?;
+        accrue_within(&mut decompressed, written, limit)?;
+        matched.push(as_member(&path));
     }
-    Err(no_member_named(member, &seen))
+    match matched.len() {
+        0 => Err(no_member_named(member, &seen)),
+        1 => Ok(written),
+        _ => Err(several_members_named(member, &matched)),
+    }
 }
 
 /// What unpacking a tree wrote — for the log line, because members outside the program's own
@@ -682,16 +727,40 @@ pub fn extract_tree_7z(
     }
 }
 
+/// Whether a `.zip` entry is a link. Zip has no entry type of its own; a link shows up as a Unix
+/// mode a unix-side packer stored in the external attributes — the same convention the `.7z`
+/// check reads.
+fn is_zip_link<R: std::io::Read>(entry: &zip::read::ZipFile<'_, R>) -> bool {
+    use unix_attributes::{S_IFLNK, S_IFMT};
+    entry
+        .unix_mode()
+        .is_some_and(|mode| mode & S_IFMT == S_IFLNK)
+}
+
+/// Whether a `.7z` entry is a link, by the attribute bits a member may not carry. A reparse point
+/// is a symbolic link by another name; the unix-extension bit puts a mode in the high half, and a
+/// mode may say link too.
+fn is_7z_link(entry: &sevenz_rust2::ArchiveEntry) -> bool {
+    use unix_attributes::{EXTENSION, REPARSE_POINT, S_IFLNK, S_IFMT};
+    let attributes = entry.windows_attributes;
+    entry.has_windows_attributes
+        && (attributes & REPARSE_POINT != 0
+            || (attributes & EXTENSION != 0 && (attributes >> 16) & S_IFMT == S_IFLNK))
+}
+
+/// Whether a `.7z` entry is a regular file, the only kind of entry that can be a single-file
+/// package's member (ADR-draft-packages-signatures-and-delivery clause 55): not a directory, not
+/// a link, and not an anti-item, which deletes rather than installs.
+fn is_7z_file(entry: &sevenz_rust2::ArchiveEntry) -> bool {
+    !entry.is_directory && !entry.is_anti_item && !is_7z_link(entry)
+}
+
 /// Reads every member of a `.7z`, validating each — the counterpart to [`list_tar_gz`].
 fn list_7z(
     archive: &Path,
     key: Option<&str>,
     limit: u64,
 ) -> Result<Vec<std::path::PathBuf>, String> {
-    // Attribute bits a member may not carry. A reparse point is a symbolic link by another name;
-    // the unix-extension bit puts a mode in the high half, and a mode may say link too.
-    use unix_attributes::{EXTENSION, REPARSE_POINT, S_IFLNK, S_IFMT};
-
     let password = key.map(sevenz_rust2::Password::from).unwrap_or_default();
     let reader = sevenz_rust2::ArchiveReader::open(archive, password).map_err(open_7z_error)?;
     let mut members = Vec::new();
@@ -707,13 +776,8 @@ fn list_7z(
                 entry.name
             ));
         }
-        if entry.has_windows_attributes {
-            let attributes = entry.windows_attributes;
-            let is_link = attributes & REPARSE_POINT != 0
-                || (attributes & EXTENSION != 0 && (attributes >> 16) & S_IFMT == S_IFLNK);
-            if is_link {
-                return Err(link_refused(&entry.name));
-            }
+        if is_7z_link(entry) {
+            return Err(link_refused(&entry.name));
         }
         push_member(&mut members, Path::new(&entry.name))?;
     }
@@ -721,8 +785,9 @@ fn list_7z(
 }
 
 /// Extracts the member called `member` from the `.zip` at `archive`, writing it to `out` —
-/// [`extract_tar_gz`] for the third container (ADR-0027 clause 62). Matching is by **file name**, exactly as
-/// there; the bound is [`MAX_UNPACKED_BYTES`] on what is written. Unlike a tar, a zip is read
+/// [`extract_tar_gz`] for the third container (ADR-0027 clause 62). Matching is by **trailing
+/// path components**, and a member held twice is refused, exactly as there; the bound is
+/// [`MAX_UNPACKED_BYTES`] on what is written. Unlike a tar, a zip is read
 /// through its central directory, so members before the match are never decompressed and there is
 /// no skip budget to spend.
 ///
@@ -744,26 +809,30 @@ fn extract_zip_within(
     let mut zip = zip::ZipArchive::new(file).map_err(zip_error)?;
 
     // Find the member by metadata alone — `by_index_raw` reads the central directory and
-    // decompresses nothing.
-    let mut found: Option<usize> = None;
+    // decompresses nothing — and every entry of it, so one held twice is refused
+    // (ADR-draft-packages-signatures-and-delivery clause 55).
+    let mut found: Vec<(usize, String)> = Vec::new();
     let mut seen: Vec<String> = Vec::new();
     for index in 0..zip.len() {
         let entry = zip.by_index_raw(index).map_err(zip_error)?;
-        if entry.is_dir() {
+        if entry.is_dir() || is_zip_link(&entry) {
             continue;
         }
-        let name = file_name_of(Path::new(&*entry.name().map_err(zip_error)?));
-        if name == member {
+        let path = std::path::PathBuf::from(&*entry.name().map_err(zip_error)?);
+        if is_member(&path, member) {
             refuse_encrypted(&entry)?;
-            found = Some(index);
-            break;
-        }
-        if seen.len() < 8 && !name.is_empty() {
-            seen.push(name);
+            found.push((index, as_member(&path)));
+        } else {
+            note_seen(&mut seen, &path);
         }
     }
-    let Some(index) = found else {
-        return Err(no_member_named(member, &seen));
+    let index = match found.as_slice() {
+        [] => return Err(no_member_named(member, &seen)),
+        [(index, _)] => *index,
+        several => {
+            let matched: Vec<String> = several.iter().map(|(_, name)| name.clone()).collect();
+            return Err(several_members_named(member, &matched));
+        }
     };
     let mut entry = zip.by_index(index).map_err(zip_error)?;
     copy_within(&mut entry, out, limit)
@@ -825,8 +894,6 @@ fn list_zip(
     zip: &mut zip::ZipArchive<File>,
     limit: u64,
 ) -> Result<Vec<std::path::PathBuf>, String> {
-    use unix_attributes::{S_IFLNK, S_IFMT};
-
     let mut members = Vec::new();
     let mut declared: u64 = 0;
     for index in 0..zip.len() {
@@ -836,12 +903,8 @@ fn list_zip(
         accrue_within(&mut declared, entry.size(), limit)?;
         refuse_encrypted(&entry)?;
         let name = entry.name().map_err(zip_error)?;
-        // Zip has no entry type of its own; a link shows up as a Unix mode a unix-side packer
-        // stored in the external attributes — the same convention the `.7z` check reads.
-        if let Some(mode) = entry.unix_mode() {
-            if mode & S_IFMT == S_IFLNK {
-                return Err(link_refused(&name));
-            }
+        if is_zip_link(&entry) {
+            return Err(link_refused(&name));
         }
         push_member(&mut members, Path::new(&*name))?;
     }
@@ -995,6 +1058,211 @@ mod tests {
         let err = extract_tar_gz(&archive, "otelcol", &mut out).expect_err("no such member");
         assert!(err.contains("otelcol"), "{err}");
         assert!(err.contains("LICENSE") && err.contains("README"), "{err}");
+    }
+
+    /// Builds a `.tar.gz` of directories (a name ending in `/`) and files, in the order given —
+    /// the order is what a single-file install must not depend on.
+    fn tar_gz_with_dirs(dir: &Path, members: &[(&str, &[u8])]) -> std::path::PathBuf {
+        let path = dir.join("release.tar.gz");
+        let file = File::create(&path).expect("create");
+        let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::fast());
+        let mut builder = tar::Builder::new(encoder);
+        for (name, content) in members {
+            let mut header = tar::Header::new_gnu();
+            if name.ends_with('/') {
+                header.set_entry_type(tar::EntryType::Directory);
+                header.set_size(0);
+                header.set_mode(0o755);
+            } else {
+                header.set_size(content.len() as u64);
+                header.set_mode(0o644);
+            }
+            header.set_cksum();
+            builder
+                .append_data(&mut header, name, *content)
+                .expect("append");
+        }
+        builder
+            .into_inner()
+            .expect("finish tar")
+            .finish()
+            .expect("finish gzip");
+        path
+    }
+
+    /// A member given as a path is the one file whose trailing components are that path, wherever
+    /// the archive puts it in its order: a directory of the program's name and another file of it
+    /// ahead of the program change nothing
+    /// (ADR-draft-packages-signatures-and-delivery clause 55).
+    /// Verifies: ADR-draft-packages-signatures-and-delivery
+    #[test]
+    fn a_member_path_picks_its_file_among_others_of_the_same_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let archive = tar_gz_with_dirs(
+            dir.path(),
+            &[
+                ("./agent-1.0.0/etc/agent/", b""),
+                ("./agent-1.0.0/etc/logrotate.d/agent", b"a logrotate rule"),
+                ("./agent-1.0.0/usr/bin/agent", b"the-program"),
+            ],
+        );
+        let out_path = dir.path().join("out");
+        let mut out = File::create(&out_path).expect("create");
+        extract_tar_gz(&archive, "usr/bin/agent", &mut out).expect("extract");
+        assert_eq!(std::fs::read(&out_path).expect("read"), b"the-program");
+    }
+
+    /// A member the archive holds more than once is refused, naming every place it holds it,
+    /// in each container — and a directory of that name is not one of them
+    /// (ADR-draft-packages-signatures-and-delivery clause 55).
+    /// Verifies: ADR-draft-packages-signatures-and-delivery
+    #[test]
+    fn a_member_held_twice_refuses_the_archive_in_every_container() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let members: &[(&str, &[u8])] = &[
+            ("agent-1.0.0/etc/logrotate.d/agent", b"a logrotate rule"),
+            ("agent-1.0.0/usr/bin/agent", b"the-program"),
+        ];
+        let mut out = File::create(dir.path().join("out")).expect("create");
+        let refusals = [
+            extract_tar_gz(&tar_gz(dir.path(), members), "agent", &mut out),
+            extract_zip(&zip_archive(dir.path(), members), "agent", &mut out),
+            extract_7z(&seven_z(dir.path(), members, None), "agent", &mut out, None),
+        ];
+        for refusal in refusals {
+            let err = refusal.expect_err("ambiguous");
+            assert!(err.contains("matches 2 members"), "{err}");
+            assert!(
+                err.contains("agent-1.0.0/etc/logrotate.d/agent")
+                    && err.contains("agent-1.0.0/usr/bin/agent"),
+                "{err}"
+            );
+        }
+
+        // A directory of the program's name, ahead of it, is no candidate at all.
+        let archive = tar_gz_with_dirs(
+            dir.path(),
+            &[
+                ("agent-1.0.0/agent/", b""),
+                ("agent-1.0.0/bin/agent", b"the-program"),
+            ],
+        );
+        let out_path = dir.path().join("only");
+        let mut only = File::create(&out_path).expect("create");
+        extract_tar_gz(&archive, "agent", &mut only).expect("one file of that name");
+        assert_eq!(std::fs::read(&out_path).expect("read"), b"the-program");
+    }
+
+    /// Only a regular file is a member in a `.zip` and a `.7z` too: a link or an anti-item of the
+    /// program's name, ahead of the program, is no candidate, so it neither installs its target
+    /// text nor makes the archive ambiguous; and an archive holding only such an entry has no
+    /// member (ADR-draft-packages-signatures-and-delivery clause 55).
+    /// Verifies: ADR-draft-packages-signatures-and-delivery
+    #[test]
+    fn a_link_or_an_anti_item_is_no_member_in_a_zip_or_a_7z() {
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        // A zip whose first entry is a symbolic link named `agent`, then the program.
+        let linked_zip = |name: &str, with_program: bool| {
+            let path = dir.path().join(name);
+            let mut writer = zip::ZipWriter::new(File::create(&path).expect("create"));
+            let options = zip::write::SimpleFileOptions::default();
+            writer
+                .add_symlink("agent-1.0.0/agent", "/etc/passwd", options)
+                .expect("link");
+            if with_program {
+                writer
+                    .start_file("agent-1.0.0/bin/agent", options)
+                    .expect("start");
+                writer.write_all(b"the-program").expect("write");
+            }
+            writer.finish().expect("finish");
+            path
+        };
+        // A 7z whose first entry is `agent` marked by `mark`, then the program.
+        let marked_7z = |name: &str, mark: fn(&mut sevenz_rust2::ArchiveEntry), program: bool| {
+            let path = dir.path().join(name);
+            let mut writer = sevenz_rust2::ArchiveWriter::create(&path).expect("create");
+            let mut suspect = sevenz_rust2::ArchiveEntry::new_file("agent-1.0.0/agent");
+            suspect.has_stream = false;
+            mark(&mut suspect);
+            writer
+                .push_archive_entry(suspect, None::<std::io::Cursor<&[u8]>>)
+                .expect("push the suspect entry");
+            if program {
+                writer
+                    .push_archive_entry(
+                        sevenz_rust2::ArchiveEntry::new_file("agent-1.0.0/bin/agent"),
+                        Some(std::io::Cursor::new(&b"the-program"[..])),
+                    )
+                    .expect("push the program");
+            }
+            writer.finish().expect("finish");
+            path
+        };
+        let reparse: fn(&mut sevenz_rust2::ArchiveEntry) = |entry| {
+            entry.has_windows_attributes = true;
+            entry.windows_attributes = FILE_ATTRIBUTE_REPARSE_POINT;
+        };
+        let anti: fn(&mut sevenz_rust2::ArchiveEntry) = |entry| entry.is_anti_item = true;
+
+        let extracted = |result: Result<u64, String>, out: &Path| {
+            result.expect("the one regular file is the member");
+            std::fs::read(out).expect("read")
+        };
+        let out = dir.path().join("out");
+        assert_eq!(
+            extracted(
+                extract_zip(
+                    &linked_zip("link.zip", true),
+                    "agent",
+                    &mut File::create(&out).expect("create")
+                ),
+                &out
+            ),
+            b"the-program"
+        );
+        for (name, mark) in [("link.7z", reparse), ("anti.7z", anti)] {
+            assert_eq!(
+                extracted(
+                    extract_7z(
+                        &marked_7z(name, mark, true),
+                        "agent",
+                        &mut File::create(&out).expect("create"),
+                        None
+                    ),
+                    &out
+                ),
+                b"the-program",
+                "{name}"
+            );
+        }
+
+        // Without the program, nothing of that name is a member.
+        let mut sink = File::create(&out).expect("create");
+        let refusals = [
+            extract_zip(&linked_zip("only-link.zip", false), "agent", &mut sink),
+            extract_7z(
+                &marked_7z("only-link.7z", reparse, false),
+                "agent",
+                &mut sink,
+                None,
+            ),
+            extract_7z(
+                &marked_7z("only-anti.7z", anti, false),
+                "agent",
+                &mut sink,
+                None,
+            ),
+        ];
+        for refusal in refusals {
+            let err = refusal.expect_err("no regular file of that name");
+            assert!(
+                !err.contains("matches"),
+                "no member, not an ambiguous one: {err}"
+            );
+        }
     }
 
     /// Builds a `.tar.gz` whose member name is written straight into the header, bypassing the

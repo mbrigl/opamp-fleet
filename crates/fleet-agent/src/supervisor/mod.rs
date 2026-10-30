@@ -354,15 +354,12 @@ pub fn start_supervisor(
         .map_err(|e| format!("cannot prepare {}: {e}", supervisor_dir.display()))?;
     let config_dir = storage.config_dir();
 
-    // What a package replaces: one file, or — when the block says where the program sits
-    // inside the package — the whole tree under this Supervisor's `program/` (ADR-0027).
-    let install = match program_path {
-        Some(program_path) => crate::supervisor::ports::InstallTarget::Tree {
-            root: supervisor_dir.join(crate::config::PROGRAM_DIR),
-            program_path,
-        },
-        None => crate::supervisor::ports::InstallTarget::Binary(program.path.clone()),
-    };
+    let install = install_target(
+        program_path,
+        plugin.defaults().member,
+        &supervisor_dir,
+        &program.path,
+    );
 
     // Switched off, the Server's last configuration leaves before the kind starts, and what the
     // operator placed in `config/` stays (ADR-0017 clause 49).
@@ -567,6 +564,28 @@ fn forward_shutdown(mut global: Shutdown, stop_tx: watch::Sender<bool>) {
         global.requested().await;
         let _ = stop_tx.send(true);
     });
+}
+
+/// What a package replaces: one file, or — when the block says where the program sits inside the
+/// package — the whole tree under this Supervisor's `program/` (ADR-0027). A single file is found
+/// by its name, or at the place in the archive its kind knows
+/// (ADR-draft-packages-signatures-and-delivery clause 55).
+fn install_target(
+    program_path: Option<std::path::PathBuf>,
+    member: Option<&'static str>,
+    supervisor_dir: &std::path::Path,
+    program: &std::path::Path,
+) -> crate::supervisor::ports::InstallTarget {
+    match program_path {
+        Some(program_path) => crate::supervisor::ports::InstallTarget::Tree {
+            root: supervisor_dir.join(crate::config::PROGRAM_DIR),
+            program_path,
+        },
+        None => crate::supervisor::ports::InstallTarget::Binary {
+            path: program.to_path_buf(),
+            member,
+        },
+    }
 }
 
 #[cfg(test)]
@@ -1653,5 +1672,35 @@ mod tests {
                 && notices[0].contains("already keeps its supervisor set"),
             "{notices:?}"
         );
+    }
+
+    /// The place a kind names for its member reaches the install, and a `program_path` still makes
+    /// it a tree (ADR-draft-packages-signatures-and-delivery clause 55).
+    /// Verifies: ADR-draft-packages-signatures-and-delivery
+    #[test]
+    fn a_kinds_member_reaches_the_single_file_install() {
+        use crate::supervisor::ports::InstallTarget;
+        let dir = std::path::Path::new("/supervisors/agent");
+        let program = dir.join("program/agent");
+        match super::install_target(None, Some("usr/bin/agent"), dir, &program) {
+            InstallTarget::Binary { path, member } => {
+                assert_eq!(path, program);
+                assert_eq!(member, Some("usr/bin/agent"));
+            }
+            other => panic!("a single file, not {other:?}"),
+        }
+        assert!(matches!(
+            super::install_target(None, None, dir, &program),
+            InstallTarget::Binary { member: None, .. }
+        ));
+        assert!(matches!(
+            super::install_target(
+                Some("bin/agent".into()),
+                Some("usr/bin/agent"),
+                dir,
+                &program
+            ),
+            InstallTarget::Tree { .. }
+        ));
     }
 }

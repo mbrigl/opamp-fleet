@@ -521,7 +521,7 @@ async fn a_swapped_binary_is_probed_again_for_its_version(via: Via) {
 
     let mut harness = runner(
         via,
-        Some(InstallTarget::Binary(binary.clone())),
+        Some(InstallTarget::binary(binary.clone())),
         Duration::from_millis(200),
         Some(VersionProbe {
             program: binary.clone(),
@@ -1276,7 +1276,7 @@ fn binary_harness(via: Via, binary: &Path, apply_grace: Duration) -> Harness {
     let program = binary.to_path_buf();
     runner(
         via,
-        Some(InstallTarget::Binary(binary.to_path_buf())),
+        Some(InstallTarget::binary(binary.to_path_buf())),
         apply_grace,
         None,
         move || Some(spec(&program)),
@@ -1301,7 +1301,7 @@ async fn a_package_that_cannot_run_here_is_refused_without_stopping_what_runs(vi
     let program = binary.clone();
     let mut harness = runner_full(
         via,
-        Some(InstallTarget::Binary(binary.clone())),
+        Some(InstallTarget::binary(binary.clone())),
         Duration::from_millis(200),
         Duration::ZERO,
         None,
@@ -1447,7 +1447,7 @@ async fn an_install_with_nothing_to_run_yet_keeps_the_binary_and_succeeds(via: V
     // No configuration yet, so the plugin has nothing to run.
     let mut harness = runner(
         via,
-        Some(InstallTarget::Binary(binary.clone())),
+        Some(InstallTarget::binary(binary.clone())),
         Duration::from_millis(200),
         None,
         || None,
@@ -1680,7 +1680,7 @@ async fn a_successful_update_keeps_the_previous_version_for_the_window(via: Via)
     let program = binary.clone();
     let mut harness = runner_retaining(
         via,
-        Some(InstallTarget::Binary(binary.clone())),
+        Some(InstallTarget::binary(binary.clone())),
         Duration::from_millis(200),
         Duration::from_secs(3600), // keep the predecessor an hour
         None,
@@ -2100,7 +2100,7 @@ mod an_apply_while_the_second_service_is_away {
         preflight: Option<Preflight>,
     ) -> Away {
         let binary = dir.path().join("agent");
-        let install = InstallTarget::Binary(binary.clone());
+        let install = InstallTarget::binary(binary.clone());
         on_target(
             dir,
             install,
@@ -2861,7 +2861,7 @@ mod an_apply_while_the_second_service_is_away {
             stop_timeout: Duration::from_secs(5),
             apply_grace: Duration::from_millis(500),
             retain_previous: Duration::ZERO,
-            install: Some(InstallTarget::Binary(binary.clone())),
+            install: Some(InstallTarget::binary(binary.clone())),
             archive_key: None,
             version_probe: None,
             preflight: None,

@@ -2196,10 +2196,13 @@ binary, whatever anyone forgot to aim. What then happens on the host:
 2. It is **verified** before anything is unpacked: the content hash, and the Ed25519 signature
    against `[packages] verification_key`, always. An offer without a signature is refused before
    anything is downloaded, and an invalid signature refuses the artifact.
-3. It is **unpacked** when it is a `.tar.gz`, a `.7z`, or a `.zip` — the member whose file name
-   matches the configured program, so an upstream release can be uploaded exactly as published. An
-   encrypted `.7z` opens with `[packages] archive_key`; an encrypted `.zip` is refused, because
-   encryption is what `.7z` is for. A bare program artifact is moved into place rather than copied.
+3. It is **unpacked** when it is a `.tar.gz`, a `.7z`, or a `.zip` — the one regular file whose
+   file name matches the configured program, or, for a kind that names where its archive holds
+   the program, the one at that place, so an upstream release can be uploaded exactly as
+   published. A directory, a link or a 7z anti-item of that name is never the member, and an
+   archive holding the program more than once is refused, naming each place. An encrypted `.7z`
+   opens with `[packages] archive_key`; an encrypted `.zip` is refused, because encryption is
+   what `.7z` is for. A bare program artifact is moved into place rather than copied.
 4. It is **swapped** over the program in `program/`, the process restarted, and the new version
    **health-gated** on `apply_grace_secs` — one that will not stay up is **rolled back**.
 5. Progress is reported throughout: `Downloading` (with percent and bytes per second, repeated every

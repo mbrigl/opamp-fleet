@@ -447,7 +447,7 @@ impl InstallTarget {
     /// What the Managed Process is spawned from.
     fn live(&self) -> PathBuf {
         match self {
-            InstallTarget::Binary(path) => path.clone(),
+            InstallTarget::Binary { path, .. } => path.clone(),
             InstallTarget::Tree { root, .. } => root.join(crate::config::TREE_DIR),
         }
     }
@@ -455,7 +455,7 @@ impl InstallTarget {
     /// Where the thing being replaced is kept until the new one has proved itself.
     fn backup(&self) -> PathBuf {
         match self {
-            InstallTarget::Binary(path) => path.with_extension("rollback"),
+            InstallTarget::Binary { path, .. } => path.with_extension("rollback"),
             InstallTarget::Tree { root, .. } => {
                 root.join(format!("{}.rollback", crate::config::TREE_DIR))
             }
@@ -480,7 +480,7 @@ impl InstallTarget {
         group: Option<crate::storage::ProcessAccountGroup>,
     ) -> Result<(), String> {
         let dir = match self {
-            InstallTarget::Binary(path) => path.parent().map(std::path::Path::to_path_buf),
+            InstallTarget::Binary { path, .. } => path.parent().map(std::path::Path::to_path_buf),
             InstallTarget::Tree { root, .. } => Some(root.clone()),
         };
         let Some(dir) = dir else {
@@ -527,22 +527,23 @@ impl InstallTarget {
         archive_key: Option<&str>,
         group: Option<crate::storage::ProcessAccountGroup>,
     ) -> Result<Staged, String> {
-        match self {
-            InstallTarget::Binary(path) => {
-                let temp = stage_executable(artifact, path, archive_key)?;
-                if let Err(e) = share_staged(&temp, group) {
-                    let _ = std::fs::remove_file(&temp);
-                    return Err(e);
-                }
-                Ok(Staged {
-                    root: temp
-                        .parent()
-                        .map(std::path::Path::to_path_buf)
-                        .unwrap_or_default(),
-                    program: temp.clone(),
-                    temp,
-                })
+        let single = |path: &std::path::Path, member: Option<&str>| {
+            let temp = stage_executable(artifact, path, member, archive_key)?;
+            if let Err(e) = share_staged(&temp, group) {
+                let _ = std::fs::remove_file(&temp);
+                return Err(e);
             }
+            Ok(Staged {
+                root: temp
+                    .parent()
+                    .map(std::path::Path::to_path_buf)
+                    .unwrap_or_default(),
+                program: temp.clone(),
+                temp,
+            })
+        };
+        match self {
+            InstallTarget::Binary { path, member } => single(path, *member),
             InstallTarget::Tree { root, program_path } => {
                 let staging = stage_tree(artifact, root, program_path, archive_key, group)?;
                 Ok(Staged {
@@ -648,7 +649,7 @@ impl InstallTarget {
     /// failure than report the one it is already reporting.
     fn remove(&self, path: &std::path::Path) {
         match self {
-            InstallTarget::Binary(_) => {
+            InstallTarget::Binary { .. } => {
                 let _ = std::fs::remove_file(path);
             }
             InstallTarget::Tree { .. } => {
@@ -2056,12 +2057,15 @@ enum GraceOutcome {
 /// error that matters is reported from there rather than from the attempt.
 ///
 /// The artifact may be the program or an archive holding it (ADR-0027). An archive is opened here,
-/// where the binary's name is known, and the member of that name is what gets installed — nothing
+/// where the binary's name is known, and the member of that name — or at the place `member` names,
+/// where the kind knows it (ADR-draft-packages-signatures-and-delivery clause 55) — is what gets
+/// installed — nothing
 /// upstream of this ever repacked the artifact, which is why the hash an Agent verified is the one
 /// its author published. Unpacking always writes; only the raw case can be a move.
 fn stage_executable(
     artifact: &std::path::Path,
     path: &std::path::Path,
+    member: Option<&str>,
     archive_key: Option<&str>,
 ) -> Result<PathBuf, String> {
     let temp = path.with_extension("staged");
@@ -2075,11 +2079,21 @@ fn stage_executable(
         info!(artifact = %artifact.display(), "moved the package artifact into place");
         install::make_executable(&temp)?;
     } else {
-        let member = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .ok_or_else(|| format!("{} has no file name to look for", path.display()))?;
-        install::write_program(artifact, &temp, &member, archive_key)?;
+        // Where the kind knows the member's place in the archive, that place; otherwise the
+        // program's own file name (ADR-0027 clause 55).
+        let member = match member {
+            Some(member) => member.to_string(),
+            None => path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .ok_or_else(|| format!("{} has no file name to look for", path.display()))?,
+        };
+        // A refused archive leaves no staged file behind: a member held twice is refused only
+        // once the first was written, which may be up to the unpack bound.
+        if let Err(e) = install::write_program(artifact, &temp, &member, archive_key) {
+            let _ = std::fs::remove_file(&temp);
+            return Err(e);
+        }
     }
     Ok(temp)
 }
@@ -2369,7 +2383,7 @@ mod tests {
     async fn a_hold_after_a_failed_package_fails_the_configuration_it_owes() {
         let dir = tempfile::tempdir().expect("tempdir");
         let live = dir.path().join("agent");
-        let target = InstallTarget::Binary(live.clone());
+        let target = InstallTarget::binary(live.clone());
         let artifact = dir.path().join("downloaded");
         std::fs::write(&artifact, "#!/bin/sh\nexit 1\n").expect("a program that exits at once");
         let staged = target.stage(&artifact, None, None).expect("stage");
@@ -2428,7 +2442,7 @@ mod tests {
         let live = dir.path().join("agent");
         std::fs::write(&live, "#!/nonexistent/interpreter\n").expect("a predecessor");
         std::fs::set_permissions(&live, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-        let target = InstallTarget::Binary(live.clone());
+        let target = InstallTarget::binary(live.clone());
         let artifact = dir.path().join("downloaded");
         std::fs::write(&artifact, "#!/bin/sh\nexit 1\n").expect("a program that exits at once");
         let staged = target.stage(&artifact, None, None).expect("stage");
@@ -2478,7 +2492,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let live = dir.path().join("agent");
         std::fs::write(&live, b"what ran before").expect("a predecessor");
-        let target = InstallTarget::Binary(live.clone());
+        let target = InstallTarget::binary(live.clone());
         let artifact = dir.path().join("downloaded");
         std::fs::write(&artifact, "#!/bin/sh\nexec sleep 30\n").expect("a program that hangs");
         let staged = target.stage(&artifact, None, None).expect("stage");
@@ -2593,7 +2607,7 @@ mod tests {
             endpoint_token: zeroize::Zeroizing::default(),
             stop_timeout: Duration::from_secs(5),
             apply_grace,
-            install: Some(InstallTarget::Binary(live)),
+            install: Some(InstallTarget::binary(live)),
             retain_previous: Duration::ZERO,
             archive_key: None,
             version_probe: None,
@@ -3076,7 +3090,7 @@ mod tests {
 
         let program = dir.path().join("program/agent");
         std::fs::create_dir_all(program.parent().expect("parent")).expect("mkdir");
-        let target = InstallTarget::Binary(program.clone());
+        let target = InstallTarget::binary(program.clone());
         let staged = target.stage(&artifact, None, None).expect("stage");
         target.commit(&staged).expect("commit");
 
@@ -3126,7 +3140,7 @@ mod tests {
         }
 
         let program = dir.path().join("agent");
-        let target = InstallTarget::Binary(program.clone());
+        let target = InstallTarget::binary(program.clone());
         let staged = target.stage(&artifact, None, None).expect("stage");
         target.commit(&staged).expect("commit");
 
@@ -3137,13 +3151,74 @@ mod tests {
         );
     }
 
+    /// A single file whose kind names its place is installed from that place, past a directory and
+    /// another file of the program's name ahead of it; without the place the same archive holds
+    /// the program twice and is refused, and nothing staged is left behind
+    /// (ADR-draft-packages-signatures-and-delivery clause 55).
+    /// Verifies: ADR-draft-packages-signatures-and-delivery
+    #[test]
+    fn a_member_target_installs_the_file_at_its_kinds_place() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let artifact = dir.path().join("release.tar.gz");
+        {
+            let file = std::fs::File::create(&artifact).expect("create");
+            let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::fast());
+            let mut builder = tar::Builder::new(encoder);
+            let mut dir_header = tar::Header::new_gnu();
+            dir_header.set_entry_type(tar::EntryType::Directory);
+            dir_header.set_size(0);
+            dir_header.set_mode(0o755);
+            dir_header.set_cksum();
+            builder
+                .append_data(&mut dir_header, "agent-2.0.0/etc/agent/", std::io::empty())
+                .expect("append the directory");
+            for (name, content) in [
+                (
+                    "agent-2.0.0/etc/logrotate.d/agent",
+                    b"a logrotate rule".as_slice(),
+                ),
+                ("agent-2.0.0/usr/bin/agent", b"the-program".as_slice()),
+            ] {
+                let mut header = tar::Header::new_gnu();
+                header.set_size(content.len() as u64);
+                header.set_mode(0o755);
+                header.set_cksum();
+                builder
+                    .append_data(&mut header, name, content)
+                    .expect("append");
+            }
+            builder.into_inner().expect("tar").finish().expect("gzip");
+        }
+
+        let program = dir.path().join("agent");
+        let target = InstallTarget::Binary {
+            path: program.clone(),
+            member: Some("usr/bin/agent"),
+        };
+        let staged = target.stage(&artifact, None, None).expect("stage");
+        target.commit(&staged).expect("commit");
+        assert_eq!(std::fs::read(&program).expect("read"), b"the-program");
+
+        let elsewhere = dir.path().join("other");
+        std::fs::create_dir_all(&elsewhere).expect("mkdir");
+        let by_name = InstallTarget::binary(elsewhere.join("agent"));
+        let Err(err) = by_name.stage(&artifact, None, None) else {
+            panic!("the file name alone matches twice");
+        };
+        assert!(err.contains("matches 2 members"), "{err}");
+        assert!(
+            !elsewhere.join("agent.staged").exists(),
+            "a refused archive leaves no staged file"
+        );
+    }
+
     /// ADR-0027: a retained predecessor is swept only once its deadline passes, never before, and
     /// the marker goes with it.
     /// Verifies: ADR-0027
     #[test]
     fn a_retained_backup_is_swept_only_after_its_deadline() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let target = InstallTarget::Binary(dir.path().join("prog"));
+        let target = InstallTarget::binary(dir.path().join("prog"));
         std::fs::write(target.backup(), b"the previous version").expect("write backup");
         target.retain(1000); // deadline: 1000 unix-seconds
         assert!(
@@ -3169,7 +3244,7 @@ mod tests {
     fn a_package_taken_back_whose_predecessor_cannot_be_put_back_stays_live() {
         let dir = tempfile::tempdir().expect("tempdir");
         let targets = [
-            InstallTarget::Binary(dir.path().join("prog")),
+            InstallTarget::binary(dir.path().join("prog")),
             InstallTarget::Tree {
                 root: dir.path().join("tree-root"),
                 program_path: PathBuf::from("bin/prog"),
@@ -3195,7 +3270,7 @@ mod tests {
             assert!(error.contains("cannot restore"), "{error}");
             let program = match &target {
                 InstallTarget::Tree { .. } => live.join("bin/prog"),
-                InstallTarget::Binary(_) => live.clone(),
+                InstallTarget::Binary { .. } => live.clone(),
             };
             assert_eq!(
                 std::fs::read(&program).expect("live"),
@@ -3213,7 +3288,7 @@ mod tests {
     #[test]
     fn a_sweep_leaves_an_unmarked_backup_alone() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let target = InstallTarget::Binary(dir.path().join("prog"));
+        let target = InstallTarget::binary(dir.path().join("prog"));
         std::fs::write(target.backup(), b"unmarked").expect("write backup");
         assert!(!target.sweep(u64::MAX), "no marker, nothing to sweep");
         assert!(target.backup().exists());
@@ -3225,7 +3300,7 @@ mod tests {
     #[test]
     fn dropping_a_backup_clears_its_marker() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let target = InstallTarget::Binary(dir.path().join("prog"));
+        let target = InstallTarget::binary(dir.path().join("prog"));
         std::fs::write(target.backup(), b"old").expect("write");
         target.retain(5000);
         assert!(target.backup_marker().exists());
@@ -3242,7 +3317,7 @@ mod tests {
     fn the_retention_marker_is_the_clients_alone() {
         use std::os::unix::fs::PermissionsExt as _;
         let dir = tempfile::tempdir().expect("tempdir");
-        let target = InstallTarget::Binary(dir.path().join("prog"));
+        let target = InstallTarget::binary(dir.path().join("prog"));
         std::fs::write(target.backup(), b"old").expect("write");
         target.retain(5000);
         let mode = std::fs::metadata(target.backup_marker())
@@ -3655,7 +3730,7 @@ mod tests {
         }
 
         let program = dir.path().join("single").join("agent");
-        let single = InstallTarget::Binary(program.clone());
+        let single = InstallTarget::binary(program.clone());
         single.prepare(Some(group)).expect("prepare");
         let raw = dir.path().join("downloaded");
         std::fs::write(&raw, "#!/bin/sh\nexit 0\n").expect("a bare program");
