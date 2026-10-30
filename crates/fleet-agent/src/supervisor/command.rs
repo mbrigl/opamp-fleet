@@ -99,9 +99,11 @@ impl Plugin for CommandPlugin {
         let version_probe = settings.version_args.clone().map(|args| VersionProbe {
             program: command.clone(),
             args,
+            working_dir: None,
             // A Foreign Agent's version flag is its own convention, and so is its banner: the
             // strict SemVer read stays the default here (ADR-0017 clause 55).
             parse: None,
+            env: Vec::new(),
         });
         // The same arguments, asked of the *staged* program before the running one is stopped
         // (ADR-0017). This kind knows no argument of its own to be safe to run — but an operator
@@ -116,6 +118,7 @@ impl Plugin for CommandPlugin {
         let preflight = settings.version_args.clone().map(|args| Preflight {
             args,
             env: Vec::new(),
+            working_dir: None,
         });
         // What this Foreign Agent will actually be invoked with, after the placeholders were
         // expanded (ADR-0017). The spawn line names the program; the arguments are where a

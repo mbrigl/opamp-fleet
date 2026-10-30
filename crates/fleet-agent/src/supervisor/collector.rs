@@ -145,6 +145,8 @@ impl Plugin for CollectorPlugin {
                 parse: None,
                 program: binary.clone(),
                 args: vec!["--version".to_string()],
+                working_dir: None,
+                env: Vec::new(),
             }),
             // The same `--version`, asked of the *staged* program before the running one is stopped
             // (ADR-0017). It is the same question the probe above asks and the same cost, so asking
@@ -158,6 +160,7 @@ impl Plugin for CollectorPlugin {
             preflight: Some(Preflight {
                 args: vec!["--version".to_string()],
                 env: Vec::new(),
+                working_dir: None,
             }),
             // The Collector has no reload convention — a configuration is applied by restart,
             // the generic behaviour (ADR-0017), which is also what the reference supervisor does.

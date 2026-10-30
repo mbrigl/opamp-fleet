@@ -435,9 +435,13 @@ async fn the_probe_reports_a_version_description() {
     probe_version(
         Spawner::Local,
         "test".to_string(),
-        stub_agent(),
-        vec!["--version".to_string()],
-        None,
+        VersionProbe {
+            program: stub_agent(),
+            args: vec!["--version".to_string()],
+            working_dir: None,
+            parse: None,
+            env: Vec::new(),
+        },
         EventSender::new(0, event_tx),
     )
     .await;
@@ -454,9 +458,13 @@ async fn a_failing_or_versionless_probe_stays_silent() {
     probe_version(
         Spawner::Local,
         "test".to_string(),
-        PathBuf::from("nonexistent-definitely-not-here"),
-        vec![],
-        None,
+        VersionProbe {
+            program: PathBuf::from("nonexistent-definitely-not-here"),
+            args: vec![],
+            working_dir: None,
+            parse: None,
+            env: Vec::new(),
+        },
         EventSender::new(0, event_tx.clone()),
     )
     .await;
@@ -465,9 +473,13 @@ async fn a_failing_or_versionless_probe_stays_silent() {
     probe_version(
         Spawner::Local,
         "test".to_string(),
-        stub_agent(),
-        vec!["--exit-code".to_string(), "0".to_string()],
-        None,
+        VersionProbe {
+            program: stub_agent(),
+            args: vec!["--exit-code".to_string(), "0".to_string()],
+            working_dir: None,
+            parse: None,
+            env: Vec::new(),
+        },
         EventSender::new(0, event_tx),
     )
     .await;
@@ -526,7 +538,9 @@ async fn a_swapped_binary_is_probed_again_for_its_version(via: Via) {
         Some(VersionProbe {
             program: binary.clone(),
             args: vec!["--version".to_string()],
+            working_dir: None,
             parse: None,
+            env: Vec::new(),
         }),
         || None, // an unconfigured Collector: nothing runs, the version is still owed
     );
@@ -1357,6 +1371,7 @@ async fn a_package_that_cannot_run_here_is_refused_without_stopping_what_runs(vi
         Some(Preflight {
             args: vec!["--exit-code".to_string(), "1".to_string()],
             env: Vec::new(),
+            working_dir: None,
         }),
         None,
         move || {
@@ -2970,6 +2985,7 @@ mod an_apply_while_the_second_service_is_away {
         let preflight = Preflight {
             args: vec!["--version".to_string()],
             env: Vec::new(),
+            working_dir: None,
         };
         let mut away = on_with(
             dir,
@@ -3005,6 +3021,7 @@ mod an_apply_while_the_second_service_is_away {
         let preflight = Preflight {
             args: vec!["--exit-code".to_string(), "3".to_string()],
             env: Vec::new(),
+            working_dir: None,
         };
         let mut away = on_with(
             dir,

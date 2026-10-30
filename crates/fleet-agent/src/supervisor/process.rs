@@ -665,8 +665,8 @@ impl InstallTarget {
 /// by a check (ADR-0017).
 #[derive(Debug, Clone)]
 pub struct Staged {
-    /// The staged tree's root, or the staged file's directory. `${staged}` in a
-    /// [`Preflight`]'s environment resolves to this.
+    /// The staged tree's root, or the staged file's directory. [`STAGED`] in a [`Preflight`]
+    /// resolves to this.
     root: PathBuf,
     /// The program itself, inside the staged tree.
     program: PathBuf,
@@ -680,24 +680,45 @@ pub struct Staged {
 /// library the host does not have and a libc too old for the build in one go, and the dynamic
 /// linker's own message — *"version `GLIBC_2.39' not found"* — is what the fleet gets told
 /// (ADR-0017). Whatever is run must be cheap and must not touch state; `--version` is the shape.
+///
+/// [`STAGED`] resolves to the staged tree's root wherever it appears — in an argument, in a value
+/// of the environment, in the working directory — so a tree carrying its own libraries, or a
+/// program that is handed paths into its own tree, is checked against **those** rather than
+/// against the ones the running version happens to leave behind
+/// (ADR-draft-supervisor-mode-and-its-kinds clause 56).
 pub struct Preflight {
     pub args: Vec<String>,
-    /// Environment for the check. `${staged}` in a value resolves to the staged tree's root, so a
-    /// tree carrying its own libraries is checked against **those** rather than against the ones
-    /// the running version happens to leave behind.
+    /// Environment for the check.
     pub env: Vec<(String, String)>,
+    /// Where the check starts. `None` inherits, as the version probe does; a kind whose program
+    /// needs its tree root names `Some(STAGED)`, as it names the live root for the start.
+    pub working_dir: Option<String>,
 }
+
+/// What a [`Preflight`] writes for the staged tree's root, which nobody knows before the package
+/// is staged.
+pub const STAGED: &str = "${staged}";
 
 /// How to ask a Managed Process for its own version — the program to run and the arguments that
 /// make it print one. `None` on a Runner whose plugin has no such convention.
+#[derive(Clone)]
 pub struct VersionProbe {
     pub program: PathBuf,
     pub args: Vec<String>,
+    /// Where the probe starts; `None` inherits. A kind whose program needs its tree root to run at
+    /// all names it here as it does for the start, or the probe asks a program that is not the
+    /// one the Supervisor runs (ADR-draft-supervisor-mode-and-its-kinds clause 56).
+    pub working_dir: Option<PathBuf>,
     /// How to read a version out of what the program printed. `None` is [`find_semver`], the strict
     /// Semantic Versioning read. A program whose version banner is not SemVer, such as
     /// `r2.14.6-1`, would report none at all, so a kind that knows its program's convention says
     /// so here (ADR-0017).
     pub parse: Option<fn(&str) -> Option<String>>,
+    /// Environment for the probe, empty by default. A kind whose start hands its program an
+    /// environment it needs to run at all — a tree's own library path — hands the probe the same,
+    /// or the probe asks a program that cannot start
+    /// (ADR-draft-supervisor-mode-and-its-kinds clause 56).
+    pub env: Vec<(String, String)>,
 }
 
 /// The adapter task driving one Managed Process. The plugin supplies `build`: the current
@@ -1618,9 +1639,7 @@ impl Runner {
             tokio::spawn(probe_version(
                 self.spawner.clone(),
                 self.name.clone(),
-                probe.program.clone(),
-                probe.args.clone(),
-                probe.parse,
+                probe.clone(),
                 self.events.clone(),
             ));
         }
@@ -1801,17 +1820,22 @@ const SWEEP_INTERVAL: Duration = Duration::from_secs(600);
 pub async fn probe_version(
     spawner: Spawner,
     supervisor: String,
-    program: PathBuf,
-    args: Vec<String>,
-    parse: Option<fn(&str) -> Option<String>>,
+    probe: VersionProbe,
     events: EventSender,
 ) {
+    let VersionProbe {
+        program,
+        args,
+        working_dir,
+        parse,
+        env,
+    } = probe;
     let launch = Launch {
         program: program.clone(),
         args,
-        env: Vec::new(),
+        env,
         endpoint_token: None,
-        working_dir: None,
+        working_dir,
         own_process_group: false,
     };
     let output = match spawner.output(&supervisor, &launch).await {
@@ -1901,21 +1925,21 @@ async fn run_preflight(
     staged: &Staged,
     preflight: &Preflight,
 ) -> Preflighted {
+    let root = staged.root.to_string_lossy();
+    let resolve = |value: &str| value.replace(STAGED, &root);
     let launch = Launch {
         program: staged.program.clone(),
-        args: preflight.args.clone(),
+        args: preflight.args.iter().map(|arg| resolve(arg)).collect(),
         env: preflight
             .env
             .iter()
-            .map(|(key, value)| {
-                (
-                    key.clone(),
-                    value.replace("${staged}", &staged.root.to_string_lossy()),
-                )
-            })
+            .map(|(key, value)| (key.clone(), resolve(value)))
             .collect(),
         endpoint_token: None,
-        working_dir: None,
+        working_dir: preflight
+            .working_dir
+            .as_deref()
+            .map(|dir| PathBuf::from(resolve(dir))),
         own_process_group: false,
     };
     let output = match spawner.output(supervisor, &launch).await {
@@ -2506,6 +2530,7 @@ mod tests {
         runner.preflight = Some(Preflight {
             args: Vec::new(),
             env: Vec::new(),
+            working_dir: None,
         });
         let mut s = Supervision {
             child: None,
@@ -3366,21 +3391,28 @@ mod tests {
     }
 
     /// With a process account registered, the version probe is run by the second service, not by
-    /// the Client — the program it names is not even on this host — and what the service relays
-    /// of its output is what the version is read from (ADR-0037 clause 18).
-    /// Verifies: ADR-0037
+    /// the Client — the program it names is not even on this host — in the working directory and
+    /// with the environment its kind names, and what the service relays of its output is what the
+    /// version is read from
+    /// (ADR-0037 clause 18, ADR-draft-supervisor-mode-and-its-kinds clause 56).
+    /// Verifies: ADR-0037, ADR-draft-supervisor-mode-and-its-kinds
     #[cfg(unix)]
     #[tokio::test]
     async fn the_version_probe_runs_through_the_second_service() {
         use crate::supervisor::channel::Stream;
         let (peer, mut asked) = answering(Stream::Stdout, "agent version 1.2.3", 0).await;
         let (event_tx, mut events) = mpsc::channel(4);
+        let env = vec![("LD_LIBRARY_PATH".to_string(), "/nowhere/lib".to_string())];
         probe_version(
             Spawner::Channel(peer.channel.clone()),
             "test".to_string(),
-            PathBuf::from("/nowhere/agent"),
-            vec!["--version".to_string()],
-            None,
+            VersionProbe {
+                program: PathBuf::from("/nowhere/agent"),
+                args: vec!["--version".to_string()],
+                working_dir: Some(PathBuf::from("/nowhere")),
+                parse: None,
+                env: env.clone(),
+            },
             EventSender::new(0, event_tx),
         )
         .await;
@@ -3389,6 +3421,11 @@ mod tests {
             .expect("the probe was asked of the service");
         assert_eq!(launch.program, PathBuf::from("/nowhere/agent"));
         assert_eq!(launch.args, vec!["--version".to_string()]);
+        assert_eq!(launch.working_dir, Some(PathBuf::from("/nowhere")));
+        assert_eq!(
+            launch.env, env,
+            "the probe runs with its kind's environment"
+        );
         let (_, event) = events.try_recv().expect("a probed version");
         let ProcessEvent::Description(description) = event else {
             panic!("expected a Description event, got {event:?}");
@@ -3406,9 +3443,10 @@ mod tests {
     }
 
     /// With a process account registered, the preflight of a staged package is run by the second
-    /// service, with `${staged}` resolved in its environment, and what the program said through the
-    /// service is the reason it is refused (ADR-0037 clause 18).
-    /// Verifies: ADR-0037
+    /// service, with `${staged}` resolved in its arguments, its environment and its working
+    /// directory, and what the program said through the service is the reason it is refused
+    /// (ADR-0037 clause 18, ADR-draft-supervisor-mode-and-its-kinds clause 56).
+    /// Verifies: ADR-0037, ADR-draft-supervisor-mode-and-its-kinds
     #[cfg(unix)]
     #[tokio::test]
     async fn the_preflight_runs_through_the_second_service() {
@@ -3419,8 +3457,9 @@ mod tests {
             temp: PathBuf::from("/nowhere/program/.staging"),
         };
         let preflight = Preflight {
-            args: vec!["--version".to_string()],
+            args: vec!["-I${staged}/lib".to_string(), "--version".to_string()],
             env: vec![("LD_LIBRARY_PATH".to_string(), "${staged}/lib".to_string())],
+            working_dir: Some(STAGED.to_string()),
         };
 
         let (peer, mut asked) = answering(Stream::Stdout, "agent 2.0.0", 0).await;
@@ -3436,6 +3475,14 @@ mod tests {
             .try_recv()
             .expect("the preflight was asked of the service");
         assert_eq!(launch.program, staged.program);
+        assert_eq!(
+            launch.args,
+            vec![
+                "-I/nowhere/program/.staging/lib".to_string(),
+                "--version".to_string()
+            ]
+        );
+        assert_eq!(launch.working_dir, Some(staged.root.clone()));
         assert_eq!(
             launch.env,
             vec![(
@@ -3774,6 +3821,7 @@ mod tests {
         let preflight = Preflight {
             args: vec!["--version".to_string()],
             env: Vec::new(),
+            working_dir: None,
         };
         let outcome = run_preflight(&Spawner::Channel(channel), "test", &staged, &preflight).await;
         let Preflighted::Unreached(e) = outcome else {
