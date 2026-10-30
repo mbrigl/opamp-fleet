@@ -1028,6 +1028,14 @@ impl PackageStore {
             // A refusal naming a number without saying which of the two it was would read like the
             // wrong rule applied — and where both are reported and they disagree, saying that the
             // claim was not consulted is the whole explanation.
+            if let Some(runs) = installed_package_version(description) {
+                // The Supervisor's word about what it installed decides wherever it is reported,
+                // and neither the program's number nor the claim is read beside it.
+                return Err(format!(
+                    "set {id} is not an upgrade for this Agent, whose Supervisor installed \
+                     Package version {runs:?}"
+                ));
+            }
             let running = reported_service_version(description)
                 .filter(|version| fleet_core::version::parse(version).is_some());
             return Err(match (running, claimed_version(set, installed)) {
@@ -1134,10 +1142,13 @@ impl Offerable {
 pub type InstalledVersions = BTreeMap<String, String>;
 
 /// The fourth matching test: a Package reaches an Agent only as an **upgrade** (ADR-0026 clauses 14
-/// to 16).
+/// to 16, ADR-draft-deployments-and-rollouts clauses 14 and 25).
 ///
-/// An Agent reports up to two versions, and they can contradict each other. **What it runs decides**
-/// — the reported `service.version`, a statement about the present. Where it is there and can be
+/// An Agent reports up to three versions, and they can contradict each other. **What it runs
+/// decides** — the version of the Package its Supervisor installed, where the Supervisor reports
+/// one, else the reported `service.version`, a statement about the present. The first is the one a
+/// repack needs: Package `2.14.4-0.r.2` installs a program that reports `2.14.3`, and held against
+/// that, a host that installed it would stay its candidate on every press. Where it is there and can be
 /// ordered, the Package must be strictly greater than it and the claim is not read at all: not to
 /// admit a Package the running version refuses, and not to refuse one it admits.
 ///
@@ -1166,10 +1177,12 @@ fn upgrades(
     };
     // An unorderable `service.version` says nothing at all — it is dropped here rather than
     // refusing, so what remains is either a version to be greater than or no statement.
-    let runs = reported_service_version(description)
-        .filter(|running| fleet_core::version::parse(running).is_some());
+    let runs = installed_package_version(description).or_else(|| {
+        reported_service_version(description)
+            .filter(|running| fleet_core::version::parse(running).is_some())
+    });
     match runs {
-        // The program's own word about the program, in both directions.
+        // What runs, by the Supervisor's word or the program's own, in both directions.
         Some(running) => greater(running),
         // No statement about the present: fall back to the record (ADR-0026). An unorderable claim
         // refuses, which `greater` already does by yielding `None`.
@@ -1178,6 +1191,17 @@ fn upgrades(
             None => true,
         },
     }
+}
+
+/// The version of the Package an Agent's Supervisor reports it installed, as the non-identifying
+/// `supervisor.package.version` (ADR-draft-deployments-and-rollouts clause 25), where it can be
+/// ordered. One that cannot says nothing, as an unorderable `service.version` says nothing.
+fn installed_package_version(description: Option<&AgentDescription>) -> Option<&str> {
+    opamp::attributes::string_value(
+        &description?.non_identifying_attributes,
+        opamp::attributes::SUPERVISOR_PACKAGE_VERSION,
+    )
+    .filter(|version| fleet_core::version::parse(version).is_some())
 }
 
 /// What an Agent claims to have installed under this Package's Agent type, if it claims anything:
@@ -1970,6 +1994,81 @@ mod tests {
         assert_eq!(
             candidates_for(&store, &agent("linux", "amd64", &[]), &nothing),
             [("otelcol".to_string(), "2.0.0".to_string())],
+        );
+    }
+
+    /// ADR-draft-deployments-and-rollouts clauses 14 and 25: where a Supervisor reports the version
+    /// of the Package it installed, a Package is held against that, and the program's own number
+    /// and the claim are not read. A repack's Package carries a version its program does not
+    /// report — the second repack of 2.14.3 is `2.14.4-0.r.2`, and the program it installs still
+    /// says `2.14.3` — so held against the program, a host that installed it stays a candidate on
+    /// every press.
+    // Verifies: ADR-draft-deployments-and-rollouts
+    #[test]
+    fn the_installed_package_version_decides_over_the_program_version() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
+        stored_set(&store, "otelcol", "2.14.4-0.r.2", b"r2");
+        let repacked = id("otelcol", "2.14.4-0.r.2");
+        let installed_at = |installed: &str, program: &str| {
+            let mut description = running_agent(program);
+            description
+                .non_identifying_attributes
+                .push(opamp::attributes::string_attr(
+                    "supervisor.package.version",
+                    installed,
+                ));
+            description
+        };
+        let claims = installed(&[("otelcol", "2.14.3")]);
+
+        // The host on the first repack is moved to the second; the one on the second is not.
+        assert_eq!(
+            candidates_for(&store, &installed_at("2.14.3", "2.14.3"), &claims),
+            [("otelcol".to_string(), "2.14.4-0.r.2".to_string())],
+            "a host on the first repack is offered the second"
+        );
+        assert!(
+            candidates_for(&store, &installed_at("2.14.4-0.r.2", "2.14.3"), &claims).is_empty(),
+            "a host that installed the second repack is no candidate for it, whatever its program says"
+        );
+        let refusal = store
+            .fits_agent(
+                &repacked,
+                Some(&installed_at("2.14.4-0.r.2", "2.14.3")),
+                &claims,
+            )
+            .expect_err("the act at the gate agrees");
+        assert!(
+            refusal.contains("Supervisor installed Package version \"2.14.4-0.r.2\""),
+            "the refusal names the version that decided and where it came from: {refusal}"
+        );
+
+        // Without the attribute, the program's number decides, as before any Supervisor reported
+        // one: the host is a candidate, which is what the attribute exists to end.
+        assert_eq!(
+            candidates_for(&store, &running_agent("2.14.3"), &claims),
+            [("otelcol".to_string(), "2.14.4-0.r.2".to_string())],
+        );
+
+        // It decides in both directions: a program numbered below its Package can no longer be
+        // moved backwards once a Supervisor says what it installed.
+        let store = PackageStore::open(dir.path().to_path_buf()).expect("reopen");
+        stored_set(&store, "otelcol", "1.5.0", b"v15");
+        assert!(
+            !candidates_for(
+                &store,
+                &installed_at("2.0.0", "0.98.0"),
+                &InstalledVersions::new()
+            )
+            .contains(&("otelcol".to_string(), "1.5.0".to_string())),
+            "1.5.0 is below the 2.0.0 the Supervisor installed, whatever the program reports"
+        );
+
+        // An installed version nothing can order says nothing, and the program's number decides.
+        assert!(
+            candidates_for(&store, &installed_at("nightly", "2.14.4-0.r.2"), &claims).is_empty(),
+            "an unorderable attribute falls back to service.version"
         );
     }
 

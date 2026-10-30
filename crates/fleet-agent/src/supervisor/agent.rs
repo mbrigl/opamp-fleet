@@ -2187,6 +2187,68 @@ mod tests {
         );
     }
 
+    /// A Supervisor reports the version of the Package it installed as its own attribute, on the
+    /// next report after the install, and keeps it across a rollback, which leaves the predecessor
+    /// running; it reports none before its first install. The Client Agent reports none, and a
+    /// Managed Process cannot state it (ADR-draft-deployments-and-rollouts clause 25).
+    /// Verifies: ADR-draft-deployments-and-rollouts
+    #[test]
+    fn a_supervisor_reports_the_version_of_the_package_it_installed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let marks: std::sync::Arc<dyn HighWaterMarks> =
+            std::sync::Arc::new(crate::storage::HighWaterFile::open(dir.path()));
+        let mut agent = supervisor_with_marks(&dir.path().join("otelcol"), &marks);
+        let installed = |description: &AgentDescription| {
+            opamp::attributes::string_value(
+                &description.non_identifying_attributes,
+                "supervisor.package.version",
+            )
+            .map(str::to_string)
+        };
+        // A process that names it is not heard: the key is outside `service.*`.
+        agent.set_process_description(AgentDescription {
+            identifying_attributes: vec![string_attr("service.version", "2.14.3")],
+            non_identifying_attributes: vec![string_attr("supervisor.package.version", "9.9.9")],
+        });
+        assert_eq!(installed(&agent.describe()), None, "nothing installed yet");
+
+        assert!(offered(&mut agent, "2.14.4-0.r.2", b"r2").0);
+        agent.package_applied(b"r2".to_vec(), Ok("2.14.4-0.r.2".to_string()));
+        let report = agent.next_report();
+        let description = report
+            .agent_description
+            .expect("the install sends the description again");
+        assert_eq!(installed(&description).as_deref(), Some("2.14.4-0.r.2"));
+        assert_eq!(
+            opamp::attributes::string_value(&description.identifying_attributes, "service.version"),
+            Some("2.14.3"),
+            "the program keeps the version it reports"
+        );
+
+        assert!(offered(&mut agent, "2.14.4-0.r.3", b"r3").0);
+        agent.package_applied(b"r3".to_vec(), Err("would not stay up".to_string()));
+        assert_eq!(
+            installed(&agent.describe()).as_deref(),
+            Some("2.14.4-0.r.2"),
+            "a rollback leaves the predecessor, which is what runs"
+        );
+
+        // A restarted Client restores it from the record.
+        let mut restarted = supervisor_with_marks(&dir.path().join("otelcol"), &marks);
+        restarted.accept_packages();
+        assert_eq!(
+            installed(&restarted.describe()).as_deref(),
+            Some("2.14.4-0.r.2")
+        );
+
+        let client = make_agent(&dir.path().join("client"));
+        assert_eq!(
+            installed(&client.describe()),
+            None,
+            "the Client Agent reports none"
+        );
+    }
+
     /// An installed record an older Client wrote under `1.19` is dropped at load: the Agent
     /// reports no `agent_has_version`, and nothing enters the mark (ADR-0028 clause 10).
     /// Verifies: ADR-0028

@@ -40,7 +40,8 @@ once its tag exists.
 
 - **`opamp-fleetctl package fetch --repack <n>` numbers a later repack of one version**
   ([ADR-draft-the-operator-program-opamp-fleetctl](docs/adr/draft-the-operator-program-opamp-fleetctl.md)
-  clause 28), for an agent whose artifact the tool repacks. The second repack of `2.14.3` is
+  clause 28), for an agent whose artifact the tool repacks; an agent the tool uploads as upstream
+  publishes it refuses a number above 1. The second repack of `2.14.3` is
   uploaded as Package `2.14.4-0.r.2`, above every earlier repack and below the next release, and
   `r.10` orders above `r.9`. `--repack 1`, the default, is the version itself.
   **What to do:** nothing.
@@ -53,6 +54,17 @@ once its tag exists.
   type an earlier release also coloured as TOML is now shown as plain text, whichever Client build
   it reports through; a Server built with that Agent's kind colours it again. **What to do:**
   nothing; the text shown is the same.
+
+- **A Supervisor reports the version of the Package it installed, and the Server holds the next
+  Package against it**
+  ([ADR-draft-deployments-and-rollouts](docs/adr/draft-deployments-and-rollouts.md) clauses 14 and
+  25). A Supervisor-backed Agent reports `supervisor.package.version` once its Supervisor has
+  installed a Package, and the Server's candidate, reach count, fleet view and rollout act compare
+  a Package with it, falling back to `service.version` where it is not reported. A host that
+  installed a repack, whose program reports the upstream version, is no longer a candidate for the
+  same Package on every press, and a program numbered below its Package can no longer be moved
+  backwards once its Supervisor installed one.
+  **What to do:** nothing.
 
 - **A single-file package installs one regular file, never a directory, and an archive holding
   its program twice is refused**

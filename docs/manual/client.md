@@ -1389,7 +1389,9 @@ Every Agent additionally reports, without configuration, everything the protocol
 an Agent and where it runs: `service.name`, `service.instance.name`, `service.instance.id`,
 `os.type`, `os.name`, `os.version`, `os.description`, `host.name`, `host.arch`, and `host.id` — plus
 `service.version`, which for the Client's own Agent is the Client's baked-in version and for a
-Supervisor-backed Agent is whatever the Managed Process reports about itself.
+Supervisor-backed Agent is whatever the Managed Process reports about itself. A Supervisor-backed
+Agent also reports `supervisor.package.version`, the version of the Package its Supervisor last
+installed, once it has installed one; the Server holds the next Package against it.
 
 A Managed Process states only its own `service.*` attributes, such as its version, which replaces
 what the Supervisor reports. It never states the Agent's type: `service.name` is the Supervisor's,
