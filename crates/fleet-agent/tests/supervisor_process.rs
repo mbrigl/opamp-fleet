@@ -1817,6 +1817,7 @@ fn tree_harness(via: Via, root: &Path) -> Harness {
         Some(InstallTarget::Tree {
             root: root.to_path_buf(),
             program_path: inside,
+            links: &[],
         }),
         Duration::from_millis(200),
         None,
@@ -2427,6 +2428,7 @@ mod an_apply_while_the_second_service_is_away {
         let install = InstallTarget::Tree {
             root: root.clone(),
             program_path: inside.clone(),
+            links: &[],
         };
         let mut away = on_target(
             dir,

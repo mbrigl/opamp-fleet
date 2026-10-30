@@ -87,9 +87,10 @@ Five crates in one workspace ([ADR-0008](adr/0008-five-crates-on-tokio-and-axum.
   what a client certificate is known by on the Server and on a Gateway alike — its host, its issuer
   and serial, and the 20-octet bound on its serial — whose rule is the core `x509`, read with
   `x509-parser` by the adapter `x509::read`, with the random serial and the clock skew every issued
-  certificate gets in the adapter `x509::issue` — and the
-  bootstrap certificate's PKCS#12 file, whose rule is core and whose reading and writing with
-  `p12-keystore` is the adapter `pkcs12::file` (ADR-0022).
+  certificate gets in the adapter `x509::issue` — the links a kind's tree package keeps, which
+  `opamp-fleetctl` packs and the Client creates (`tree`) — and the bootstrap certificate's PKCS#12
+  file, whose rule is core and whose reading and writing with `p12-keystore` is the adapter
+  `pkcs12::file` (ADR-0022).
 - **`fleet-server`** — the Server: the fleet and its Hosts, its Configurations, labels, packages
   and Deployments, the Agent plane and the Operator plane.
 - **`fleet-agent`** — the Client in all its modes, the program `supervisor`.

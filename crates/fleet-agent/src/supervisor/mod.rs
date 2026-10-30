@@ -358,6 +358,7 @@ pub fn start_supervisor(
     let install = install_target(
         program_path,
         plugin.defaults().member,
+        plugin.defaults().tree_links,
         &supervisor_dir,
         &program.path,
     );
@@ -574,6 +575,7 @@ fn forward_shutdown(mut global: Shutdown, stop_tx: watch::Sender<bool>) {
 fn install_target(
     program_path: Option<std::path::PathBuf>,
     member: Option<&'static str>,
+    links: &'static [fleet_core::tree::KeptLink],
     supervisor_dir: &std::path::Path,
     program: &std::path::Path,
 ) -> crate::supervisor::ports::InstallTarget {
@@ -581,6 +583,7 @@ fn install_target(
         Some(program_path) => crate::supervisor::ports::InstallTarget::Tree {
             root: supervisor_dir.join(crate::config::PROGRAM_DIR),
             program_path,
+            links,
         },
         None => crate::supervisor::ports::InstallTarget::Binary {
             path: program.to_path_buf(),
@@ -1686,7 +1689,7 @@ mod tests {
         use crate::supervisor::ports::InstallTarget;
         let dir = std::path::Path::new("/supervisors/agent");
         let program = dir.join("program/agent");
-        match super::install_target(None, Some("usr/bin/agent"), dir, &program) {
+        match super::install_target(None, Some("usr/bin/agent"), &[], dir, &program) {
             InstallTarget::Binary { path, member } => {
                 assert_eq!(path, program);
                 assert_eq!(member, Some("usr/bin/agent"));
@@ -1694,13 +1697,14 @@ mod tests {
             other => panic!("a single file, not {other:?}"),
         }
         assert!(matches!(
-            super::install_target(None, None, dir, &program),
+            super::install_target(None, None, &[], dir, &program),
             InstallTarget::Binary { member: None, .. }
         ));
         assert!(matches!(
             super::install_target(
                 Some("bin/agent".into()),
                 Some("usr/bin/agent"),
+                &[],
                 dir,
                 &program
             ),

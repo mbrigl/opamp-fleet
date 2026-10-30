@@ -81,6 +81,7 @@ pub fn start_with(
             InstallTarget::Tree {
                 root: program_dir.clone(),
                 program_path: PathBuf::from(path),
+                links: defaults.tree_links,
             },
         ),
         None => {

@@ -171,6 +171,9 @@ pub enum InstallTarget {
         root: PathBuf,
         /// Where the program sits inside the tree, as written in the configuration.
         program_path: PathBuf,
+        /// The absolute links the kind's tree keeps, the only links the install creates
+        /// (ADR-draft-packages-signatures-and-delivery clause 57).
+        links: &'static [fleet_core::tree::KeptLink],
     },
 }
 
@@ -413,6 +416,11 @@ pub struct KindDefaults {
     /// `None` finds the member by its file name alone (ADR-draft-packages-signatures-and-delivery
     /// clause 55).
     pub member: Option<&'static str>,
+    /// The absolute links a tree package of this kind keeps as links, each by its exact path in
+    /// the tree and its exact target: the only links the tree's install creates, and the only
+    /// links leading out that `opamp-fleetctl` packs
+    /// (ADR-draft-packages-signatures-and-delivery clause 57). Empty for nearly every kind.
+    pub tree_links: &'static [fleet_core::tree::KeptLink],
     /// The Agent *type* this kind presents (ADR-0016). `None` falls back to the program's file
     /// name, which is what the block already said.
     pub service_name: Option<&'static str>,
@@ -452,6 +460,7 @@ impl KindDefaults {
             program: None,
             program_path: None,
             member: None,
+            tree_links: &[],
             service_name: None,
             timing: None,
             endpoint_port: false,

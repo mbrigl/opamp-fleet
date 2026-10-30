@@ -14,7 +14,9 @@
 //!   defend against. Nor does its order choose: an archive holding the member twice is refused. A
 //!   tree (ADR-0027) cannot work that way — its members keep their own relative
 //!   paths — so every path is validated by [`safe_member_path`] *before a byte is written*, and one
-//!   member this Client will not write refuses the whole archive.
+//!   member this Client will not write refuses the whole archive. A `.tar.gz` tree may hold the
+//!   absolute links its kind names by exact path and target, and nothing beneath them; every
+//!   other link refuses it (ADR-draft-packages-signatures-and-delivery clause 57).
 //! - **The output is bounded.** Extraction stops at [`MAX_UNPACKED_BYTES`] — for a tree, across all
 //!   its members, and at [`MAX_TREE_MEMBERS`] members — so an archive that expands without end
 //!   fills a temporary file up to that limit and then fails, rather than a disk. A `.tar.gz` is
@@ -25,6 +27,7 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::path::Path;
 
+use fleet_core::tree::KeptLink;
 use tracing::debug;
 
 /// The largest member this Client will write out of an archive. An agent binary is hundreds of
@@ -490,7 +493,9 @@ fn skipped(member: &Path, summary: &mut TreeSummary) {
 /// `dest/bin/fluent-bit`, and the tree beside it comes along unchanged.
 ///
 /// Every member is validated before anything is written; one that cannot be written safely refuses
-/// the whole archive.
+/// the whole archive. A symbolic link is created only where `kept` names its path in the tree and
+/// its target exactly, and nothing else may sit at or beneath it, so no member is written through
+/// it (ADR-draft-packages-signatures-and-delivery clause 57); any other link refuses the archive.
 ///
 /// # Errors
 /// Returns an error when the archive cannot be read, holds no or several members matching
@@ -499,9 +504,10 @@ fn skipped(member: &Path, summary: &mut TreeSummary) {
 pub fn extract_tree_tar_gz(
     archive: &Path,
     program_path: &Path,
+    kept: &[KeptLink],
     dest: &Path,
 ) -> Result<TreeSummary, String> {
-    extract_tree_tar_gz_within(archive, program_path, dest, MAX_UNPACKED_BYTES)
+    extract_tree_tar_gz_within(archive, program_path, kept, dest, MAX_UNPACKED_BYTES)
 }
 
 /// The same, with the total budget spelled out — the bound is across *all* members, so a tree of
@@ -509,11 +515,13 @@ pub fn extract_tree_tar_gz(
 fn extract_tree_tar_gz_within(
     archive: &Path,
     program_path: &Path,
+    kept: &[KeptLink],
     dest: &Path,
     limit: u64,
 ) -> Result<TreeSummary, String> {
-    let members = list_tar_gz(archive, limit)?;
+    let (members, links) = list_tar_gz(archive, limit)?;
     let prefix = locate_program(&members, program_path)?;
+    check_kept_links(&members, &links, &prefix, kept)?;
 
     let mut tar = open_tar_gz(archive, limit)?;
     let mut summary = TreeSummary::default();
@@ -527,6 +535,11 @@ fn extract_tree_tar_gz_within(
             .map_err(|e| format!("cannot read an archive entry: {e}"))?
             .into_owned();
         let member = safe_member_path(&raw)?;
+        if entry.header().entry_type().is_symlink() {
+            // Checked against `kept` above, before anything was written.
+            write_kept_link(&member, &entry, &prefix, dest)?;
+            continue;
+        }
         let is_dir = entry.header().entry_type().is_dir();
         let written = write_member(
             &member,
@@ -551,6 +564,73 @@ fn extract_tree_tar_gz_within(
         let _ = written;
     }
     Ok(summary)
+}
+
+/// Holds every link of a tree against the kind's `kept` links before anything is written: each
+/// link sits under `prefix` at a path `kept` names with exactly that target, no two links share a
+/// path, and no other member sits at or beneath a link, so nothing is written through one.
+fn check_kept_links(
+    members: &[std::path::PathBuf],
+    links: &[(std::path::PathBuf, std::path::PathBuf)],
+    prefix: &Path,
+    kept: &[KeptLink],
+) -> Result<(), String> {
+    for (n, (link, target)) in links.iter().enumerate() {
+        let named = link
+            .strip_prefix(prefix)
+            .is_ok_and(|relative| fleet_core::tree::is_kept(kept, relative, target));
+        if !named {
+            return Err(format!(
+                "the archive holds a link ({:?} -> {target:?}) its kind does not name with that \
+                 target — refusing the whole archive",
+                as_member(link)
+            ));
+        }
+        let beneath = members
+            .iter()
+            .chain(links[..n].iter().map(|(other, _)| other))
+            .find(|other| other.starts_with(link));
+        if let Some(other) = beneath {
+            return Err(format!(
+                "the archive holds {:?} at or beneath the link {:?} — refusing the whole archive",
+                as_member(other),
+                as_member(link)
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Creates one link [`check_kept_links`] admitted at its place under `dest`, with `prefix`
+/// stripped. Its mode is not set: setting it would follow the link.
+fn write_kept_link<R: Read>(
+    member: &Path,
+    entry: &tar::Entry<'_, R>,
+    prefix: &Path,
+    dest: &Path,
+) -> Result<(), String> {
+    let relative = member
+        .strip_prefix(prefix)
+        .map_err(|_| link_refused(&as_member(member)))?;
+    let target = entry
+        .link_name()
+        .map_err(|e| format!("cannot read the link {}: {e}", as_member(member)))?
+        .ok_or_else(|| link_refused(&as_member(member)))?;
+    let out_path = dest.join(relative);
+    prepare_parent(dest, &out_path)?;
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&target, &out_path)
+            .map_err(|e| format!("cannot create the link {}: {e}", out_path.display()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = target;
+        Err(format!(
+            "the tree keeps the link {} its kind names, and this host keeps no link in a tree",
+            as_member(relative)
+        ))
+    }
 }
 
 /// Writes one member of a tree to its place under `dest`, with `prefix` stripped — the step every
@@ -635,11 +715,21 @@ impl<R: Read> Read for ReadWithin<R> {
     }
 }
 
+/// What [`list_tar_gz`] reads: the files and directories, and apart from them the symbolic links,
+/// each with its target.
+type Listing = (
+    Vec<std::path::PathBuf>,
+    Vec<(std::path::PathBuf, std::path::PathBuf)>,
+);
+
 /// Reads every member path of a `.tar.gz`, validating each — the pass that decides whether the
-/// archive may be unpacked at all, before a byte of it is written.
-fn list_tar_gz(archive: &Path, limit: u64) -> Result<Vec<std::path::PathBuf>, String> {
+/// archive may be unpacked at all, before a byte of it is written. A symbolic link is listed apart,
+/// for [`check_kept_links`] to hold against the kind's, and never as a member the program could be
+/// found at.
+fn list_tar_gz(archive: &Path, limit: u64) -> Result<Listing, String> {
     let mut tar = open_tar_gz(archive, limit)?;
     let mut members = Vec::new();
+    let mut links = Vec::new();
     let mut decompressed: u64 = 0;
     for entry in tar
         .entries()
@@ -650,8 +740,27 @@ fn list_tar_gz(archive: &Path, limit: u64) -> Result<Vec<std::path::PathBuf>, St
         // cannot inflate to fill CPU while the tree is merely being validated.
         accrue_within(&mut decompressed, entry.header().size().unwrap_or(0), limit)?;
         let kind = entry.header().entry_type();
-        // A symbolic or hard link is a member that names a path *outside* itself, which is the one
-        // thing the sanitizer above cannot check by looking at where the member goes.
+        if kind.is_symlink() {
+            let raw = entry
+                .path()
+                .map_err(|e| format!("cannot read an archive entry: {e}"))?
+                .into_owned();
+            let target = entry
+                .link_name()
+                .map_err(|e| format!("cannot read an archive entry: {e}"))?
+                .map(std::borrow::Cow::into_owned)
+                .unwrap_or_default();
+            links.push((safe_member_path(&raw)?, target));
+            if members.len() + links.len() > MAX_TREE_MEMBERS {
+                return Err(format!(
+                    "the archive holds more than {MAX_TREE_MEMBERS} members"
+                ));
+            }
+            continue;
+        }
+        // A hard link, or anything else that is no file and no directory, names a path *outside*
+        // itself or is read from outside the tree, which the sanitizer above cannot check by
+        // looking at where the member goes.
         if !kind.is_file() && !kind.is_dir() {
             return Err(format!(
                 "the archive holds {:?}, which is not a file or a directory ({:?}) — refusing the \
@@ -668,8 +777,13 @@ fn list_tar_gz(archive: &Path, limit: u64) -> Result<Vec<std::path::PathBuf>, St
             .map_err(|e| format!("cannot read an archive entry: {e}"))?
             .into_owned();
         push_member(&mut members, &raw)?;
+        if members.len() + links.len() > MAX_TREE_MEMBERS {
+            return Err(format!(
+                "the archive holds more than {MAX_TREE_MEMBERS} members"
+            ));
+        }
     }
-    Ok(members)
+    Ok((members, links))
 }
 
 /// Extracts a `.7z` **whole** into `dest` (ADR-0027), exactly as [`extract_tree_tar_gz`] does for a
@@ -1469,6 +1583,7 @@ mod tests {
         let err = extract_tree_tar_gz_within(
             &archive,
             Path::new("otelcol"),
+            &[],
             &dir.path().join("tree"),
             1024,
         )
@@ -1515,8 +1630,9 @@ mod tests {
         );
         let dest = dir.path().join("dest");
 
-        let err = extract_tree_tar_gz_within(&archive, Path::new("bin/fluent-bit"), &dest, 4096)
-            .expect_err("the members sum past the budget");
+        let err =
+            extract_tree_tar_gz_within(&archive, Path::new("bin/fluent-bit"), &[], &dest, 4096)
+                .expect_err("the members sum past the budget");
         assert!(err.contains("decompression bomb"), "{err}");
     }
 
@@ -1548,7 +1664,7 @@ mod tests {
         let archive = release(dir.path(), "fluent-bit-3.1.0");
         let dest = dest(dir.path());
 
-        let summary = extract_tree_tar_gz(&archive, Path::new("bin/fluent-bit"), &dest)
+        let summary = extract_tree_tar_gz(&archive, Path::new("bin/fluent-bit"), &[], &dest)
             .expect("unpack the tree");
 
         assert_eq!(summary.files, 3, "every member is written");
@@ -1580,7 +1696,7 @@ mod tests {
             let archive = release(dir.path(), wrapper);
             let dest = dir.path().join(format!("out-{wrapper}"));
             std::fs::create_dir_all(&dest).expect("create");
-            extract_tree_tar_gz(&archive, program_path, &dest).expect("unpack");
+            extract_tree_tar_gz(&archive, program_path, &[], &dest).expect("unpack");
             assert_eq!(
                 std::fs::read(dest.join("bin/fluent-bit")).expect("the program"),
                 b"the-program",
@@ -1605,7 +1721,7 @@ mod tests {
         let dest = dest(dir.path());
 
         let summary =
-            extract_tree_tar_gz(&archive, Path::new("bin/fluent-bit"), &dest).expect("unpack");
+            extract_tree_tar_gz(&archive, Path::new("bin/fluent-bit"), &[], &dest).expect("unpack");
 
         assert_eq!(summary.files, 1);
         assert_eq!(summary.skipped, 1);
@@ -1621,7 +1737,7 @@ mod tests {
         let archive = tar_gz_with_raw_name(dir.path(), "../../etc/cron.d/x", b"pwned");
         let dest = dest(dir.path());
 
-        let err = extract_tree_tar_gz(&archive, Path::new("bin/fluent-bit"), &dest)
+        let err = extract_tree_tar_gz(&archive, Path::new("bin/fluent-bit"), &[], &dest)
             .expect_err("must be refused");
 
         assert!(err.contains("climbs out"), "{err}");
@@ -1639,7 +1755,7 @@ mod tests {
         let archive = tar_gz_with_raw_name(dir.path(), "/etc/cron.d/x", b"pwned");
         let dest = dest(dir.path());
 
-        let err = extract_tree_tar_gz(&archive, Path::new("bin/fluent-bit"), &dest)
+        let err = extract_tree_tar_gz(&archive, Path::new("bin/fluent-bit"), &[], &dest)
             .expect_err("must be refused");
 
         assert!(err.contains("absolute"), "{err}");
@@ -1679,11 +1795,184 @@ mod tests {
         }
         let dest = dest(dir.path());
 
-        let err = extract_tree_tar_gz(&path, Path::new("bin/fluent-bit"), &dest)
+        let err = extract_tree_tar_gz(&path, Path::new("bin/fluent-bit"), &[], &dest)
             .expect_err("must be refused");
 
-        assert!(err.contains("not a file or a directory"), "{err}");
+        assert!(err.contains("its kind does not name"), "{err}");
+        assert!(
+            err.contains(r#""app/lib/passwd" -> "/etc/passwd""#),
+            "{err}"
+        );
         assert_eq!(std::fs::read_dir(&dest).expect("read").count(), 0);
+    }
+
+    /// One entry of a test tree: a file with its bytes, or a symbolic link with its target.
+    enum Entry<'a> {
+        File(&'a str, &'a [u8]),
+        Link(&'a str, &'a str),
+    }
+
+    fn tree_tar_gz(path: &Path, entries: &[Entry<'_>]) {
+        let file = File::create(path).expect("create");
+        let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::fast());
+        let mut builder = tar::Builder::new(encoder);
+        for entry in entries {
+            let mut header = tar::Header::new_gnu();
+            match entry {
+                Entry::File(name, bytes) => {
+                    header.set_size(bytes.len() as u64);
+                    header.set_mode(0o755);
+                    header.set_cksum();
+                    builder
+                        .append_data(&mut header, name, *bytes)
+                        .expect("append");
+                }
+                Entry::Link(name, target) => {
+                    header.set_size(0);
+                    header.set_mode(0o777);
+                    header.set_entry_type(tar::EntryType::Symlink);
+                    builder
+                        .append_link(&mut header, name, target)
+                        .expect("append the link");
+                }
+            }
+        }
+        builder
+            .into_inner()
+            .expect("finish tar")
+            .finish()
+            .expect("finish gzip");
+    }
+
+    const LOADER: KeptLink = KeptLink {
+        path: "runtime/lib64/ld-linux-x86-64.so.2",
+        target: "/lib64/ld-linux-x86-64.so.2",
+    };
+
+    const LOADER_ENTRY: Entry<'static> = Entry::Link(
+        "app/runtime/lib64/ld-linux-x86-64.so.2",
+        "/lib64/ld-linux-x86-64.so.2",
+    );
+
+    /// A link the kind names by its exact path in the tree and its exact target is created as
+    /// that link; the program and the files beside it land as ever.
+    /// Verifies: ADR-draft-packages-signatures-and-delivery
+    #[cfg(unix)]
+    #[test]
+    fn a_link_the_kind_keeps_is_created_as_that_link() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("kept.tar.gz");
+        tree_tar_gz(
+            &path,
+            &[
+                Entry::File("app/AppRun", b"the-program"),
+                LOADER_ENTRY,
+                Entry::File("app/runtime/lib/libc.so.6", b"a-library"),
+            ],
+        );
+        let dest = dest(dir.path());
+
+        let summary =
+            extract_tree_tar_gz(&path, Path::new("AppRun"), &[LOADER], &dest).expect("unpack");
+
+        assert_eq!(summary.files, 2, "{summary:?}");
+        let link = dest.join("runtime/lib64/ld-linux-x86-64.so.2");
+        assert!(std::fs::symlink_metadata(&link)
+            .expect("the link")
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            std::fs::read_link(&link).expect("its target"),
+            Path::new("/lib64/ld-linux-x86-64.so.2")
+        );
+        assert_eq!(
+            std::fs::read(dest.join("AppRun")).expect("program"),
+            b"the-program"
+        );
+    }
+
+    /// Every other link refuses the whole archive before anything is written: one the kind does
+    /// not name, a named path with another target, the named target at another path, a relative
+    /// link, one outside the program's directory, and a member at or beneath a kept link, which
+    /// would be written through it.
+    /// Verifies: ADR-draft-packages-signatures-and-delivery
+    #[test]
+    fn a_link_the_kind_does_not_keep_refuses_the_archive() {
+        let cases: [(&str, &str, Vec<Entry<'_>>, &str); 7] = [
+            (
+                "an unnamed absolute link",
+                "AppRun",
+                vec![Entry::Link("app/lib/passwd", "/etc/passwd"), LOADER_ENTRY],
+                r#""app/lib/passwd" -> "/etc/passwd""#,
+            ),
+            (
+                "a named path with another target",
+                "AppRun",
+                vec![Entry::Link(
+                    "app/runtime/lib64/ld-linux-x86-64.so.2",
+                    "/etc/passwd",
+                )],
+                r#""app/runtime/lib64/ld-linux-x86-64.so.2" -> "/etc/passwd""#,
+            ),
+            (
+                "the named target at another path",
+                "AppRun",
+                vec![Entry::Link(
+                    "app/runtime/lib/ld-linux-x86-64.so.2",
+                    "/lib64/ld-linux-x86-64.so.2",
+                )],
+                "its kind does not name",
+            ),
+            (
+                "a relative link",
+                "AppRun",
+                vec![Entry::Link("app/lib/up", "../AppRun")],
+                r#""app/lib/up" -> "../AppRun""#,
+            ),
+            (
+                "a kept link outside the program's directory",
+                "AppRun",
+                vec![Entry::Link(
+                    "other/runtime/lib64/ld-linux-x86-64.so.2",
+                    "/lib64/ld-linux-x86-64.so.2",
+                )],
+                "its kind does not name",
+            ),
+            (
+                "a member beneath a kept link",
+                "AppRun",
+                vec![
+                    LOADER_ENTRY,
+                    Entry::File("app/runtime/lib64/ld-linux-x86-64.so.2/x", b"through"),
+                ],
+                "at or beneath the link",
+            ),
+            (
+                "a file at a kept link's path",
+                "AppRun",
+                vec![
+                    LOADER_ENTRY,
+                    Entry::File("app/runtime/lib64/ld-linux-x86-64.so.2", b"over"),
+                ],
+                "at or beneath the link",
+            ),
+        ];
+        for (n, (case, program, links, says)) in cases.into_iter().enumerate() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join(format!("case-{n}.tar.gz"));
+            let mut entries = vec![Entry::File("app/AppRun", b"the-program")];
+            entries.extend(links);
+            tree_tar_gz(&path, &entries);
+            let dest = dest(dir.path());
+            let err =
+                extract_tree_tar_gz(&path, Path::new(program), &[LOADER], &dest).expect_err(case);
+            assert!(err.contains(says), "{case}: {err}");
+            assert_eq!(
+                std::fs::read_dir(&dest).expect("read").count(),
+                0,
+                "{case}: nothing is written"
+            );
+        }
     }
 
     /// The other kind of link, which tar spells with its own entry type: it names an existing
@@ -1720,7 +2009,7 @@ mod tests {
         }
         let dest = dest(dir.path());
 
-        let err = extract_tree_tar_gz(&path, Path::new("bin/fluent-bit"), &dest)
+        let err = extract_tree_tar_gz(&path, Path::new("bin/fluent-bit"), &[], &dest)
             .expect_err("must be refused");
 
         assert!(err.contains("not a file or a directory"), "{err}");
@@ -1755,7 +2044,7 @@ mod tests {
         }
         let dest = dest(dir.path());
 
-        let err = extract_tree_tar_gz(&path, Path::new("bin/fluent-bit"), &dest)
+        let err = extract_tree_tar_gz(&path, Path::new("bin/fluent-bit"), &[], &dest)
             .expect_err("must be refused");
 
         assert!(err.contains("more than"), "{err}");
@@ -1783,14 +2072,15 @@ mod tests {
         );
         let dest = dest(dir.path());
 
-        let err = extract_tree_tar_gz_within(&archive, Path::new("bin/fluent-bit"), &dest, 4096)
-            .expect_err("past the total limit");
+        let err =
+            extract_tree_tar_gz_within(&archive, Path::new("bin/fluent-bit"), &[], &dest, 4096)
+                .expect_err("past the total limit");
 
         // Caught while the tree is listed — before extraction decodes anything — because the
         // declared sizes already sum past the budget. No member is near the budget on its own, so a
         // per-member bound would have let the whole tree through.
         assert!(err.contains("decompression bomb"), "{err}");
-        extract_tree_tar_gz_within(&archive, Path::new("bin/fluent-bit"), &dest, 16 * 1024)
+        extract_tree_tar_gz_within(&archive, Path::new("bin/fluent-bit"), &[], &dest, 16 * 1024)
             .expect("the same tree fits in a budget that admits all of it");
     }
 
@@ -1853,7 +2143,7 @@ mod tests {
         let dest = dest(dir.path());
 
         let archive = release(dir.path(), "fluent-bit-3.1.0");
-        let err = extract_tree_tar_gz(&archive, Path::new("bin/fluentbit"), &dest)
+        let err = extract_tree_tar_gz(&archive, Path::new("bin/fluentbit"), &[], &dest)
             .expect_err("no such member");
         assert!(err.contains("bin/fluentbit"), "{err}");
         assert!(
@@ -1868,7 +2158,7 @@ mod tests {
                 ("b/bin/fluent-bit", b"another"),
             ],
         );
-        let err = extract_tree_tar_gz(&ambiguous, Path::new("bin/fluent-bit"), &dest)
+        let err = extract_tree_tar_gz(&ambiguous, Path::new("bin/fluent-bit"), &[], &dest)
             .expect_err("ambiguous");
         assert!(err.contains("matches 2 members"), "{err}");
         assert!(
@@ -1910,7 +2200,7 @@ mod tests {
         }
         let dest = dest(dir.path());
 
-        extract_tree_tar_gz(&path, Path::new("bin/fluent-bit"), &dest).expect("unpack");
+        extract_tree_tar_gz(&path, Path::new("bin/fluent-bit"), &[], &dest).expect("unpack");
 
         let mode = |p: &str| {
             std::fs::metadata(dest.join(p))
@@ -1957,7 +2247,7 @@ mod tests {
         }
         let dest = dest(dir.path());
 
-        extract_tree_tar_gz(&path, Path::new("bin/agent"), &dest).expect("unpack");
+        extract_tree_tar_gz(&path, Path::new("bin/agent"), &[], &dest).expect("unpack");
 
         let mode = |p: &str| {
             std::fs::metadata(dest.join(p))

@@ -2362,7 +2362,7 @@ whole archive:
 | Refused | Why |
 |---|---|
 | a member with `..` in its path, or an absolute path | It names somewhere outside the directory being unpacked into. |
-| a symbolic or hard link | What it points at is not where it sits, which is the one thing a path check cannot judge. |
+| a symbolic or hard link, except an absolute link the Supervisor's kind names by its exact path and target | What it points at is not where it sits, which is the one thing a path check cannot judge. A kind that names one keeps it in a `.tar.gz` tree only, and nothing may sit at or beneath it. |
 | more than 10 000 members, or more than 2 GiB unpacked | An archive that expands without end. |
 
 Members outside the program's own directory — a `LICENSE` beside the wrapper — are not written, and
