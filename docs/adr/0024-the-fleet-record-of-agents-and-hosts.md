@@ -236,8 +236,17 @@ report, its own labels and its Client Agent's labels, in that order of precedenc
     - The grouping behind a Gateway rests on what Agents report. It places Agents for convenience
       inside the trust the Gateway already has, and it never decides admission.
 
-20. **`fleet.*` is reserved, and a label never overrides a reported attribute or a Host value.**
-    - A label whose key starts with `fleet.` is refused (`400`).
+20. **`fleet.*` and `supervisor.*` are reserved, and a label never overrides a reported attribute
+    or a Host value.**
+    - A label whose key starts with `fleet.` is refused (`400`), naming the key.
+    - A label whose key starts with `supervisor.` is refused (`400`), naming the key, the same way.
+      That space is a Supervisor's own statement: the kinds its Client carries and the version of
+      the Package it installed ([ADR-0016](0016-what-an-agent-reports-about-itself.md) clauses 5
+      and 10). A label there would let a Selector match an Agent as if it stated one.
+    - A label the record already holds in either space is ignored: it enters no effective
+      description (clause 18), so no Selector and no package match reads it, no Agent inherits it
+      (clause 19), and the fleet row lists it in `ignored_labels`. The next label set put without
+      it removes it.
     - A label whose key the Agent reports is refused (`409`), naming it. If an Agent starts
       reporting a key it was labelled with before, the reported value wins, and the label is
       listed in `shadowed_labels` on the fleet row rather than dropped in silence.
@@ -468,6 +477,7 @@ provisioned certificates already limit.
   `a_queued_restart_survives_a_restart`, `forgetting_an_agent_releases_its_binding`,
   `a_direct_agent_matches_its_hosts_values_and_none_it_reports_itself`,
   `a_supervisor_agent_inherits_its_client_agents_labels_below_its_own`,
+  `a_stored_label_in_the_supervisors_space_matches_nothing`,
   `behind_a_gateway_agents_sharing_a_host_id_inherit_unless_ambiguous`,
   `a_client_agent_rekeyed_without_a_description_keeps_its_group_inheriting`,
   `forgetting_an_agent_removes_its_labels_and_a_rekey_keeps_them`.
@@ -481,7 +491,8 @@ provisioned certificates already limit.
   `a_label_is_matched_like_a_reported_attribute`,
   `a_label_never_overrides_what_the_agent_reports`,
   `an_agent_that_reported_nothing_can_still_be_labelled`,
-  `empty_keys_and_values_and_fleet_keys_are_refused`,
+  `empty_keys_and_values_and_reserved_keys_are_refused`,
+  `a_stored_label_in_the_supervisors_space_is_ignored`,
   `the_effective_description_takes_each_key_from_the_first_source_that_has_it`.
 - [`revocation.rs`](../../crates/fleet-server/src/revocation.rs) unit tests:
   `an_approval_writes_the_host_before_its_first_report`,
@@ -500,6 +511,7 @@ provisioned certificates already limit.
   `a_silent_agent_is_forgotten_and_returns_as_a_stranger`,
   `forgetting_what_is_not_there_is_reported`, `a_label_moves_an_agent_into_a_rollout_ring`,
   `a_label_may_not_restate_what_the_agent_reports`, `a_label_in_the_fleet_space_is_refused`,
+  `a_label_in_the_supervisors_space_is_refused`,
   `forgetting_an_agent_removes_its_labels`, `the_ui_lists_hosts_and_marks_inherited_labels`;
   [`mutual_tls.rs`](../../crates/fleet-server/tests/mutual_tls.rs):
   `an_approval_writes_the_host_before_its_first_report`,
