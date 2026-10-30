@@ -365,14 +365,14 @@ install any package signed with the operator's key into a Supervisor, and a newe
 build into the Client itself; move the
 fleet to another TLS endpoint its trust accepts, install a certificate for
 the key the Client generated, and set its telemetry destinations; restart a Managed Process; and
-re-key an Agent's `instance_uid`. What an Agent's own configuration language allows — a Telegraf
-`inputs.exec`, an Icinga `CheckCommand` — it allows as the process's account; that is the product.
+re-key an Agent's `instance_uid`. What an Agent's own configuration language allows — a command it
+names, a receiver bound to any port — it allows as the process's account; that is the product.
 The switch of ADR-0017 binds a name: while the Server manages the set, it can remove a listed
 Supervisor and deliver the same agent under a name that is not listed, whose configuration is then
 the Server's again. A host that also sets `server_manages_set = false` closes that: the Server
 can neither remove the listed Supervisor nor add another (ADR-0017). Both keys hold against the
 Server only while every Supervisor whose configuration language can run commands as the Client's
-account — a Telegraf `inputs.exec`, an Icinga `CheckCommand`, the configuration a `command`
+account — a command an agent's configuration names, the configuration a `command`
 kind's program reads — is in `remote_config_disabled`; otherwise the Server can configure such a
 Supervisor to rewrite `supervisor.toml`, and the keys change at the next start. Where a process
 account

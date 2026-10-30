@@ -567,31 +567,31 @@ pub(crate) mod tests {
         let store = DeploymentStore::open(Box::new(memory.clone())).expect("open");
         channel(&store, "stable", &[("channel", "stable")]);
         store
-            .put_package("stable", &id("telegraf", "1.30.0"), false)
+            .put_package("stable", &id("fluent-bit", "3.1.0"), false)
             .expect("the first of its type");
         store
             .put_package("stable", &id("supervisor", "0.4.5"), false)
             .expect("another type is another package");
 
         let refused = store
-            .put_package("stable", &id("telegraf", "1.31.0"), false)
-            .expect_err("a second telegraf is refused");
+            .put_package("stable", &id("fluent-bit", "3.2.0"), false)
+            .expect_err("a second fluent-bit is refused");
         assert!(
-            matches!(&refused, DeploymentError::TypeTaken { held, .. } if held.version == "1.30.0"),
+            matches!(&refused, DeploymentError::TypeTaken { held, .. } if held.version == "3.1.0"),
             "the refusal names what is in the way: {refused}"
         );
 
         // Writing the same one again is not a collision — it is the request arriving twice.
         store
-            .put_package("stable", &id("telegraf", "1.30.0"), false)
+            .put_package("stable", &id("fluent-bit", "3.1.0"), false)
             .expect("idempotent");
         // And replacing is what the operator asks for explicitly.
         let replaced = store
-            .put_package("stable", &id("telegraf", "1.31.0"), true)
+            .put_package("stable", &id("fluent-bit", "3.2.0"), true)
             .expect("replace");
         assert_eq!(
-            replaced.package_for("telegraf"),
-            Some(&id("telegraf", "1.31.0"))
+            replaced.package_for("fluent-bit"),
+            Some(&id("fluent-bit", "3.2.0"))
         );
     }
 
@@ -603,17 +603,17 @@ pub(crate) mod tests {
         let memory = Memory::default();
         let store = DeploymentStore::open(Box::new(memory.clone())).expect("open");
         channel(&store, "stable", &[("channel", "stable")]);
-        let telegraf = id("telegraf", "1.30.0");
+        let fluent_bit = id("fluent-bit", "3.1.0");
         assert_eq!(
-            store.remove_package("stable", &telegraf),
+            store.remove_package("stable", &fluent_bit),
             Err(DeploymentError::NotFound),
             "a package this channel does not hold"
         );
         store
-            .put_package("stable", &telegraf, false)
+            .put_package("stable", &fluent_bit, false)
             .expect("package");
         let stripped = store
-            .remove_package("stable", &telegraf)
+            .remove_package("stable", &fluent_bit)
             .expect("remove the package");
         assert!(stripped.packages.is_empty());
     }
@@ -625,15 +625,15 @@ pub(crate) mod tests {
     fn the_selector_stays_editable_and_keeps_what_the_ring_holds() {
         let memory = Memory::default();
         let store = DeploymentStore::open(Box::new(memory.clone())).expect("open");
-        let telegraf = id("telegraf", "1.30.0");
+        let fluent_bit = id("fluent-bit", "3.1.0");
         channel(&store, "canary", &[("channel", "canary")]);
         store
-            .put_package("canary", &telegraf, false)
+            .put_package("canary", &fluent_bit, false)
             .expect("package");
 
         let widened = channel(&store, "canary", &[("channel", "stable")]);
         assert_eq!(widened.selector["channel"], "stable");
-        assert_eq!(widened.package_for("telegraf"), Some(&telegraf));
+        assert_eq!(widened.package_for("fluent-bit"), Some(&fluent_bit));
     }
 
     fn described(pairs: &[(&str, &str)]) -> AgentDescription {
@@ -701,9 +701,9 @@ pub(crate) mod tests {
         let store = DeploymentStore::open(Box::new(memory.clone())).expect("open");
         channel(&store, "stable", &[("channel", "stable")]);
         channel(&store, "canary", &[("channel", "canary")]);
-        let telegraf = id("telegraf", "1.30.0");
+        let fluent_bit = id("fluent-bit", "3.1.0");
         store
-            .put_package("stable", &telegraf, false)
+            .put_package("stable", &fluent_bit, false)
             .expect("package");
         assert!(!store.get("stable").expect("stable").holds_nothing());
         assert!(store.get("canary").expect("canary").holds_nothing());
@@ -738,7 +738,7 @@ pub(crate) mod tests {
             ["canary", "stable"],
             "a deleted Configuration leaves every Deployment that held it"
         );
-        assert_eq!(store.drop_package(&telegraf).expect("drop"), ["stable"]);
+        assert_eq!(store.drop_package(&fluent_bit).expect("drop"), ["stable"]);
         let stable = store.get("stable").expect("stable");
         assert!(stable.packages.is_empty());
         assert_eq!(

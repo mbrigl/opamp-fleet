@@ -1103,7 +1103,7 @@ mod tests {
             .as_ref()
             .to_vec();
         let mut other_type = offer(hash.clone(), signature.clone());
-        other_type.name = "telegraf".to_string();
+        other_type.name = "otelcol-contrib".to_string();
         assert!(verify_staged(&path, &staged, &other_type, &public).is_err());
         let mut other_version = offer(hash.clone(), signature.clone());
         other_version.version = "0.9.0".to_string();

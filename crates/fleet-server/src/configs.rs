@@ -820,10 +820,10 @@ pub(crate) mod tests {
             .put_saved("otelcol-only", typed(revision("o"), "otelcol"))
             .expect("put");
         store
-            .put_saved("telegraf-only", typed(revision("t"), "telegraf"))
+            .put_saved("fluent-bit-only", typed(revision("f"), "fluent-bit"))
             .expect("put");
         store.put_saved("unheld", revision("u")).expect("put");
-        let held: BTreeSet<String> = ["base", "otelcol-only", "telegraf-only", "missing"]
+        let held: BTreeSet<String> = ["base", "otelcol-only", "fluent-bit-only", "missing"]
             .into_iter()
             .map(String::from)
             .collect();

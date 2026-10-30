@@ -33,7 +33,7 @@ pub struct ProcessSpec {
     pub env: Vec<(String, String)>,
     /// Where the process starts. `None` means **the directory the program lives in**, which the
     /// spawn resolves (ADR-0017): a single-file package's `program/`, a tree package's tree root —
-    /// the latter being exactly what the GLPI Agent's own Windows launcher does by hand. Before
+    /// the latter being exactly what some agents' own Windows launchers do by hand. Before
     /// that rule the process inherited whatever directory the service manager left this Client in,
     /// typically `/`: a default nobody chose. A kind that needs another directory still names one.
     pub working_dir: Option<PathBuf>,
@@ -41,9 +41,8 @@ pub struct ProcessSpec {
     ///
     /// An agent the fleet delivers cannot expect a host prepared by hand: an installation that
     /// fails because a directory is missing is this Client's failure, not the operator's. Many
-    /// agents create nothing themselves — Icinga 2 exits when `DataDir` is absent, the GLPI Agent
-    /// exits when `--vardir` is — so the kind that knows an agent names what that agent needs, and
-    /// the spawn guarantees it.
+    /// agents create nothing themselves and exit when their data or state directory is absent, so
+    /// the kind that knows an agent names what that agent needs, and the spawn guarantees it.
     ///
     /// **Before every spawn, not once at install**, so a directory removed under a running fleet
     /// comes back on the next restart rather than taking the Supervisor down. Created owner-only,
@@ -55,9 +54,9 @@ pub struct ProcessSpec {
     /// outside `program/` precisely because a package swap replaces that whole.
     pub ensure_dirs: Vec<PathBuf>,
     /// Start the process as the leader of its own process group, so the bounded stop can signal
-    /// the **group** rather than one pid (ADR-0017 clause 53). A daemon that runs a worker of its own —
-    /// Icinga 2's umbrella does — otherwise leaves that worker orphaned and running when the stop
-    /// escalates to a kill, holding the very state directory and port the Supervisor manages.
+    /// the **group** rather than one pid (ADR-0017 clause 53). A daemon that runs a worker of its
+    /// own, as an umbrella process does, otherwise leaves that worker orphaned and running when the
+    /// stop escalates to a kill, holding the very state directory and port the Supervisor manages.
     /// Off by default: a process with no children of its own gains nothing from it.
     pub own_process_group: bool,
 }
@@ -694,8 +693,8 @@ pub struct VersionProbe {
     pub program: PathBuf,
     pub args: Vec<String>,
     /// How to read a version out of what the program printed. `None` is [`find_semver`], the strict
-    /// Semantic Versioning read. A program whose version banner is not SemVer — Icinga 2 prints
-    /// `r2.14.6-1` — would report none at all, so a kind that knows its program's convention says
+    /// Semantic Versioning read. A program whose version banner is not SemVer, such as
+    /// `r2.14.6-1`, would report none at all, so a kind that knows its program's convention says
     /// so here (ADR-0017).
     pub parse: Option<fn(&str) -> Option<String>>,
 }

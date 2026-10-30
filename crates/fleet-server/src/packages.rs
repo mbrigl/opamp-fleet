@@ -1948,7 +1948,7 @@ mod tests {
     }
 
     /// ADR-0026 clause 16: a running version that cannot be ordered says nothing, rather than
-    /// refusing, and the claim becomes the whole test. A GLPI Agent numbers itself `1.19` and an
+    /// refusing, and the claim becomes the whole test. One agent numbers itself `1.19` and an
     /// appliance `24.04.1`; failing closed on those would make a program's numbering habit into a
     /// fleet that cannot deliver to it at all.
     #[test]

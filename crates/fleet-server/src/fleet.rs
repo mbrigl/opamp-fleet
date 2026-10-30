@@ -4786,18 +4786,18 @@ mod tests {
     }
 
     /// `delivering_fleet` with two Configurations in `stable`: `base`, for the Agent's type, and
-    /// `telegraf-conf`, typed for another Agent type.
+    /// `fluent-bit-conf`, typed for another Agent type.
     fn mixed_fleet(dir: &std::path::Path) -> (AppState, PackageId) {
         let (state, _, id) = delivering_fleet(dir);
         state
             .save_configuration("base", body("receivers: {}\n"))
             .expect("base");
-        let mut telegraf = body("[agent]\n");
-        telegraf.service_name = "telegraf".to_string();
+        let mut fluent_bit = body("[SERVICE]\n");
+        fluent_bit.service_name = "fluent-bit".to_string();
         state
-            .save_configuration("telegraf-conf", telegraf)
-            .expect("telegraf");
-        for name in ["base", "telegraf-conf"] {
+            .save_configuration("fluent-bit-conf", fluent_bit)
+            .expect("fluent-bit");
+        for name in ["base", "fluent-bit-conf"] {
             state
                 .put_deployment_configuration("stable", name)
                 .expect("hold it");
@@ -4942,7 +4942,7 @@ mod tests {
             .expect("packages")
             .all_packages_hash;
 
-        // `telegraf-conf` stays, so the Deployment still holds something and may be pressed; none
+        // `fluent-bit-conf` stays, so the Deployment still holds something and may be pressed; none
         // of it fits this Agent.
         state
             .remove_deployment_configuration("stable", "base")

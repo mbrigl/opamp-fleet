@@ -400,7 +400,7 @@ What still needs a human, per platform: starting at **boot** (a runner never reb
 the fleet UI, and an **SELinux-enforcing host** (Fedora, RHEL, or SUSE 16 with `getenforce`
 answering `Enforcing`): the `.rpm` install must start — a service dying with `status=203/EXEC` and
 an AVC denial in `ausearch -m avc` is the failure ADR-0019 clause 12 exists to prevent. Each wrapped
-kind — Telegraf, Icinga 2 with its plugins, GLPI Agent with its tasks — under the packaged account
+kind, with its plugins and tasks, under the packaged account
 `opamp-fleet` and under `--run-as root`: it starts, reports, and its `sudo` or setuid helpers still
 work ([ADR-0037](docs/adr/0037-the-accounts-the-service-runs-under.md)). Known platform gaps
 (tracked in the ADR):

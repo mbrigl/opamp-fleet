@@ -929,7 +929,7 @@ mod tests {
             &config_dir.join("extra.json"),
             json(serde_json::json!({
                 "name": "extra",
-                "saved": {"body": "x: 1\n", "service_name": "telegraf"}
+                "saved": {"body": "x: 1\n", "service_name": "fluent-bit"}
             })),
         );
         write(

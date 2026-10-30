@@ -2067,17 +2067,17 @@ mod tests {
 
         std::fs::write(
             &path,
-            "[supervisors]\nremote_config_disabled = [\"otelcol\", \"icinga2\"]\n",
+            "[supervisors]\nremote_config_disabled = [\"otelcol\", \"otelcol-contrib\"]\n",
         )
         .expect("write");
         let listed = ClientConfig::load(&path).expect("load");
         assert_eq!(
             listed.supervisor_defaults.remote_config_disabled,
-            ["otelcol", "icinga2"]
+            ["otelcol", "otelcol-contrib"]
         );
         assert!(listed.remote_config_disabled("otelcol"));
-        assert!(listed.remote_config_disabled("icinga2"));
-        assert!(!listed.remote_config_disabled("telegraf"));
+        assert!(listed.remote_config_disabled("otelcol-contrib"));
+        assert!(!listed.remote_config_disabled("fluent-bit"));
     }
 
     /// A value no block can ever carry fails startup, naming the key and the value (ADR-0017

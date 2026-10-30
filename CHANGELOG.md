@@ -38,6 +38,15 @@ once its tag exists.
   take a host below a floor, stop its Client, remove that type's entry from
   `package-floors.json`, and start it.
 
+### Changed
+
+- **The UI colours as TOML only the Client's own configuration**
+  ([ADR-0031](docs/adr/0031-the-ui-colours-configurations-with-shiki.md)). The core's UI chooses a
+  grammar for `otelcol*`, the Client's own type and `fluent-bit` alone. An Agent of the one other
+  type an earlier release also coloured as TOML is now shown as plain text, whichever Client build
+  it reports through; a Server built with that Agent's kind colours it again. **What to do:**
+  nothing; the text shown is the same.
+
 ### Fixed
 
 - **A Collector that reports its components as a hash no longer trips the per-host rate limit.**

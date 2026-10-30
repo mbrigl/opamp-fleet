@@ -4365,10 +4365,7 @@ mod tests {
                         .expect("connect");
                     let forged =
                         r#"printf 'plain\n'; printf 'ERROR fleet_agent: forged\033[0m\r\n' >&2"#;
-                    let mut child = channel
-                        .start("telegraf-1", sh(forged))
-                        .await
-                        .expect("start");
+                    let mut child = channel.start("contrib-1", sh(forged)).await.expect("start");
                     child.wait().await.expect("ended");
                 });
         });
@@ -4376,7 +4373,7 @@ mod tests {
         let output: Vec<&str> = log.lines().filter(|l| l.contains(" output ")).collect();
         assert_eq!(output.len(), 2, "{log}");
         assert!(
-            output.iter().any(|l| l.contains("supervisor=telegraf-1")
+            output.iter().any(|l| l.contains("supervisor=contrib-1")
                 && l.contains("stream=stdout")
                 && l.contains(r#"line="plain""#)),
             "{log}"

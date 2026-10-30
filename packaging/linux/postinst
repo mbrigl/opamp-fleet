@@ -109,8 +109,8 @@ The configuration lets the Server update this Client itself, from signed package
 [packages] in supervisor.toml to keep that one update manual.
 
 A new installation runs the service, and every Agent it supervises, as the system account
-opamp-fleet, and every upgrade keeps the account the unit names. An Agent that needs root (GLPI
-Agent's full inventory, a Telegraf input without a sudo rule, a port below 1024) needs a sudo rule,
+opamp-fleet, and every upgrade keeps the account the unit names. An Agent that needs root (a full
+hardware inventory, an input without a sudo rule, a port below 1024) needs a sudo rule,
 a drop-in under /etc/systemd/system/opamp-fleet.service.d/, or root, chosen with:
 
   opamp-fleet service install --run-as root
