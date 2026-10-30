@@ -60,6 +60,12 @@ once its tag exists.
   **What to do:** nothing, unless a package of yours holds its program twice: repack it to hold it
   once.
 
+- **Every repack `opamp-fleetctl package fetch` makes stores normalized modes**
+  ([ADR-draft-the-operator-program-opamp-fleetctl](docs/adr/draft-the-operator-program-opamp-fleetctl.md)
+  clause 27): `0o755` for directories and executables and `0o644` for every other file, so no group
+  or world write bit and no setuid bit upstream set reaches the signed artifact.
+  **What to do:** nothing.
+
 ### Fixed
 
 - **A Collector that reports its components as a hash no longer trips the per-host rate limit.**

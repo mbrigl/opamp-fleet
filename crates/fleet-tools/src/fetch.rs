@@ -1223,8 +1223,11 @@ fn resolve_inside(root: &Path, base: &Path, path: &Path) -> Result<Resolution, S
     })
 }
 
-/// The mode to store, which off Unix is a decision rather than a reading: a tar written on Windows
-/// has no mode to carry, and a tree whose programs arrive unexecutable is a tree that will not run.
+/// The mode to store, normalized (ADR-draft-the-operator-program-opamp-fleetctl clause 27):
+/// `0o755` for a file any execute bit is set on, `0o644` for every other, so no write bit beyond
+/// the owner's and no setuid, setgid or sticky bit upstream set reaches the signed artifact. Off
+/// Unix it is a decision rather than a reading: a tar written on Windows has no mode to carry, and
+/// a tree whose programs arrive unexecutable is a tree that will not run.
 #[cfg_attr(
     any(not(test), not(unix)),
     expect(
@@ -1236,7 +1239,11 @@ fn mode_of(meta: &std::fs::Metadata) -> u32 {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        meta.permissions().mode() & 0o777
+        if meta.permissions().mode() & 0o111 == 0 {
+            0o644
+        } else {
+            0o755
+        }
     }
     #[cfg(not(unix))]
     {
@@ -2140,6 +2147,61 @@ mod tests {
             !dest.join("bin/dangling").exists(),
             "a link that names nothing inside the tree is not a member"
         );
+    }
+
+    /// A repack stores normalized modes: a file with any execute bit `0o755`, every other file
+    /// `0o644`, a directory `0o755` — whatever write, setuid, setgid or sticky bits upstream set.
+    ///
+    /// Verifies: ADR-draft-the-operator-program-opamp-fleetctl
+    #[cfg(unix)]
+    #[test]
+    fn a_repack_stores_normalized_modes() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let tree = dir.path().join("tree");
+        std::fs::create_dir_all(tree.join("bin")).expect("create");
+        let mode = |path: &Path, mode: u32| {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).expect("chmod")
+        };
+        for (name, from) in [
+            ("AppRun", 0o4777),
+            ("bin/tool", 0o710),
+            ("bin/data", 0o666),
+            ("bin/private", 0o600),
+        ] {
+            std::fs::write(tree.join(name), name).expect("write");
+            mode(&tree.join(name), from);
+        }
+        mode(&tree.join("bin"), 0o1777);
+
+        let artifact = dir.path().join("packed.tar.gz");
+        pack_tree(&tree, "wrapper", &artifact).expect("pack");
+
+        let file = std::fs::File::open(&artifact).expect("open");
+        let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(file));
+        let modes: std::collections::BTreeMap<String, u32> = archive
+            .entries()
+            .expect("entries")
+            .map(|entry| {
+                let entry = entry.expect("entry");
+                let path = entry.path().expect("path").to_string_lossy().into_owned();
+                (path, entry.header().mode().expect("mode"))
+            })
+            .collect();
+        for (path, want) in [
+            ("wrapper/AppRun", 0o755),
+            ("wrapper/bin/tool", 0o755),
+            ("wrapper/bin/data", 0o644),
+            ("wrapper/bin/private", 0o644),
+        ] {
+            assert_eq!(modes.get(path), Some(&want), "{path} in {modes:?}");
+        }
+        let bin = modes
+            .iter()
+            .find(|(path, _)| path.trim_end_matches('/') == "wrapper/bin")
+            .map(|(_, mode)| *mode);
+        assert_eq!(bin, Some(0o755), "{modes:?}");
     }
 
     /// The bytes of a repack are the tree's alone: the same tree packed twice, and a copy of it
