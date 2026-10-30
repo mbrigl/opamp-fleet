@@ -2474,9 +2474,11 @@ fn an_install_enrols_with_a_bootstrap_p12_and_the_service_runs_on_the_issued_cer
         Some(ca_copy.as_path()),
         "the configuration names the CA copied from the fleet's files"
     );
+    // The copy holds the CA's certificates, encoded again: nothing else the file had is copied.
+    let certificates = |path: &Path| opamp::tls::certificates(&read(path)).expect("certificates");
     assert_eq!(
-        read(&ca_copy),
-        read(&server.dir.path().join("client-ca.pem")),
+        certificates(&ca_copy),
+        certificates(&server.dir.path().join("client-ca.pem")),
         "the copy is not the Server's CA"
     );
     assert_eq!(

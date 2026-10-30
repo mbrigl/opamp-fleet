@@ -58,6 +58,16 @@ once its tag exists.
 
 ### Security
 
+- **`service config` and `service install --interactive` copy only certificates beside the
+  configuration** ([ADR-0037](docs/adr/0037-the-accounts-the-service-runs-under.md) clause 11).
+  The copy `server-ca.pem` is handed to the service's account, which owns the data root and could
+  put a link where the file names its CA: a root-only file behind it was read and handed over. The
+  copy now holds the CA file's certificates, encoded again, and a file that holds none is refused
+  before anything is written. The configuration and the copy are written through the held data
+  root, synced before the rename; a state directory an install creates beneath a root, and the
+  `current` pointer it switches, are reached without following a link. Upgrade: nothing to do; a
+  `server-ca.pem` that is no PEM certificate file fails the next `service config` with its name.
+
 - **On Windows a first install runs the Client under its own virtual account, not `LocalSystem`**
   ([ADR-0020](docs/adr/0020-the-accounts-the-service-runs-under.md)).
   `service install`, the MSI's included, registers `NT SERVICE\<product>` where no service is

@@ -7,6 +7,7 @@
 use std::path::Path;
 
 use fleet_agent::config::ClientConfig;
+use fleet_agent::config_init;
 use fleet_agent::connection::{self, SETTINGS_FILE};
 use fleet_agent::csr;
 use fleet_agent::service::layout::{self, Layout};
@@ -26,6 +27,19 @@ fn config(state_dir: &Path) -> ClientConfig {
 fn is_link(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
 }
+
+/// What lies beside the program for an install: a CA file of one certificate.
+fn fleet_files(dir: &Path) -> config_init::Beside {
+    let key = rcgen::KeyPair::generate().expect("key");
+    let ca = rcgen::CertificateParams::new(vec!["fleet-ca".to_string()])
+        .expect("params")
+        .self_signed(&key)
+        .expect("certificate");
+    std::fs::write(dir.join(config_init::SERVER_CA_FILE), ca.pem()).expect("write the CA");
+    config_init::Beside::in_dir(dir)
+}
+
+const ENDPOINT: &str = "wss://fleet.example.com/v1/opamp";
 
 #[cfg(unix)]
 mod unix {
@@ -278,6 +292,67 @@ mod unix {
         fleet_agent::service::run_as::match_owner(&named, &data_root, &[&data_root.join("state")])
             .expect("the state directory is re-owned through the named data root");
     }
+
+    /// The configuration and the CA copied beside it are written into the data root, which
+    /// belongs to the account: a link at the copy or at its temporary name is replaced, never
+    /// written through, and a link at the configuration's own name is refused, never followed —
+    /// not even to create the file it points at.
+    /// Verifies: ADR-0037
+    #[test]
+    fn the_configuration_is_written_through_no_link() {
+        let data = tempfile::tempdir().expect("data root");
+        let outside = tempfile::tempdir().expect("outside");
+        let program = tempfile::tempdir().expect("program dir");
+        let beside = fleet_files(program.path());
+        let ca = config_init::SERVER_CA_FILE;
+        let copy = plant(data.path(), outside.path(), ca);
+        let temporary = format!("{ca}~");
+        let partial = plant(data.path(), outside.path(), &temporary);
+
+        let path = data.path().join(config_init::FILE_NAME);
+        config_init::run_with_endpoint(&path, ENDPOINT, true, &beside).expect("written");
+
+        assert_untouched(&copy);
+        assert_untouched(&partial);
+        assert!(!is_link(&data.path().join(ca)), "the copy is a file");
+        let mode = path.metadata().expect("meta").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "the configuration is owner-only");
+
+        let data = tempfile::tempdir().expect("data root");
+        let target = outside.path().join("created-through-the-link");
+        let path = data.path().join(config_init::FILE_NAME);
+        std::os::unix::fs::symlink(&target, &path).expect("plant a dangling link");
+        assert!(
+            config_init::run_with_endpoint(&path, ENDPOINT, true, &beside).is_err(),
+            "refused"
+        );
+        assert!(!target.exists(), "nothing is created where the link points");
+    }
+
+    /// The state directory an install creates beneath a root is created one held directory at a
+    /// time: a link the account put on the way is refused, and nothing is created behind it.
+    /// Verifies: ADR-0037
+    #[test]
+    fn the_state_directory_is_created_through_no_link() {
+        let root = tempfile::tempdir().expect("data root");
+        let outside = tempfile::tempdir().expect("outside");
+        std::os::unix::fs::symlink(outside.path(), root.path().join("linked")).expect("plant");
+
+        let through = root.path().join("linked").join("state");
+        assert!(
+            layout::create_state_dir(&through, &[root.path()]).is_err(),
+            "refused"
+        );
+        assert_eq!(
+            std::fs::read_dir(outside.path()).expect("list").count(),
+            0,
+            "nothing is created behind the link"
+        );
+
+        let state = root.path().join("deeper").join("state");
+        layout::create_state_dir(&state, &[root.path()]).expect("created");
+        assert!(state.is_dir() && !is_link(&state));
+    }
 }
 
 #[cfg(windows)]
@@ -382,5 +457,63 @@ mod windows {
             .expect("stored");
         assert_eq!(std::fs::read(&victim).expect("read"), UNTOUCHED);
         assert!(!is_link(&state.path().join(SETTINGS_FILE)));
+    }
+
+    /// On Windows the account holds delete on the data root and may put a junction at its name:
+    /// the configuration and the CA copy are not written into a data root that is a junction.
+    /// Verifies: ADR-0037
+    #[test]
+    fn the_configuration_is_not_written_through_a_data_root_junction() {
+        let parent = tempfile::tempdir().expect("parent");
+        let outside = tempfile::tempdir().expect("outside");
+        let program = tempfile::tempdir().expect("program dir");
+        let beside = fleet_files(program.path());
+        let data = parent.path().join("data");
+        junction(&data, outside.path());
+
+        let path = data.join(config_init::FILE_NAME);
+        assert!(
+            config_init::run_with_endpoint(&path, ENDPOINT, true, &beside).is_err(),
+            "refused"
+        );
+        assert_empty(outside.path());
+        std::fs::remove_dir(&data).expect("remove the junction");
+    }
+
+    /// The state directory an install creates beneath a root is created one held directory at a
+    /// time: a junction the account put on the way is refused, and nothing is created behind it.
+    /// Verifies: ADR-0037
+    #[test]
+    fn the_state_directory_is_created_through_no_junction() {
+        let root = tempfile::tempdir().expect("data root");
+        let outside = tempfile::tempdir().expect("outside");
+        let linked = root.path().join("linked");
+        junction(&linked, outside.path());
+
+        assert!(
+            layout::create_state_dir(&linked.join("state"), &[root.path()]).is_err(),
+            "refused"
+        );
+        assert_empty(outside.path());
+        std::fs::remove_dir(&linked).expect("remove the junction");
+    }
+
+    /// The `current` pointer is switched in a held layout root: a root that is a junction is
+    /// refused, and no pointer is removed or created behind it.
+    /// Verifies: ADR-0037
+    #[test]
+    fn the_current_pointer_is_not_switched_through_a_layout_root_junction() {
+        let parent = tempfile::tempdir().expect("parent");
+        let outside = tempfile::tempdir().expect("outside");
+        let version = tempfile::tempdir().expect("a version directory");
+        let root = parent.path().join("root");
+        junction(&root, outside.path());
+
+        assert!(
+            Layout::new(&root).set_current(version.path()).is_err(),
+            "refused"
+        );
+        assert_empty(outside.path());
+        std::fs::remove_dir(&root).expect("remove the junction");
     }
 }

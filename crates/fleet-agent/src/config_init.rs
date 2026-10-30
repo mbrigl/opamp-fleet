@@ -16,12 +16,13 @@
 //! they are what [`run_with_endpoint`] reuses to serve a packaged install, which has an answer but
 //! no terminal.
 
-use std::io::{IsTerminal, Write as _};
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 use dialoguer::{Input, Password};
 
 use crate::config::ClientConfig;
+use crate::nofollow::HeldDir;
 
 /// The file name written inside the install root when the operator named no `--config` path
 /// (ADR-0019): one rule for systemd, launchd, and the SCM instead of an `/etc` vs `/Library` vs
@@ -345,8 +346,15 @@ pub fn run(
 /// a later answer replaces a copy left by an earlier one, and an answer that already names the
 /// copy — the default an edit offers — is read before anything is written there.
 ///
+/// The answer may name a file the service's account chose: the default is what the file says,
+/// and the copy it names lies in the account's directory. This runs as root or an Administrator
+/// and the copy is handed to the account, so the copy holds the file's certificates and nothing
+/// else, wherever a link at the name leads: a key or a password file yields no certificate and is
+/// refused before anything is written, and a FIFO or a device is refused without being read.
+///
 /// # Errors
-/// Returns an error naming the file that could not be read or written.
+/// Returns an error naming the file that could not be read or written, or that holds no
+/// certificate.
 pub fn copy_ca_beside(answers: Answers, config: &Path) -> Result<(Answers, Vec<PathBuf>), String> {
     let Some(ca) = &answers.ca_file else {
         return Ok((answers, Vec::new()));
@@ -356,10 +364,11 @@ pub fn copy_ca_beside(answers: Answers, config: &Path) -> Result<(Answers, Vec<P
         .parent()
         .map(Path::to_path_buf)
         .ok_or_else(|| format!("{} names no directory", config.display()))?;
-    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    let held = held_dir(&dir)?;
     let to = dir.join(SERVER_CA_FILE);
-    let bytes = std::fs::read(ca).map_err(|e| format!("cannot read {}: {e}", ca.display()))?;
-    write_owner_only(&to, &bytes, None)?;
+    let bytes = read_certificates(ca)?;
+    held.write(SERVER_CA_FILE, &bytes, 0o600)
+        .map_err(|e| format!("cannot write {}: {e}", to.display()))?;
     Ok((
         Answers {
             ca_file: Some(to.clone()),
@@ -369,41 +378,84 @@ pub fn copy_ca_beside(answers: Answers, config: &Path) -> Result<(Answers, Vec<P
     ))
 }
 
-/// Write `bytes` to `to`, owner-only on Unix, through a temporary name beside it, so the file is
-/// never seen half-written and a file already there is replaced in one rename.
+/// The most a CA file may hold: a bundle of many certificates is far below it.
+const MAX_CA_BYTES: u64 = 1 << 20;
+
+/// The certificates of the CA file at `path`, a regular file, encoded again as PEM: what the
+/// copy holds is these and nothing else the file had beside them. A file without a certificate is
+/// refused, and the refusal never repeats what the file holds.
 ///
-/// `owner` (Unix) is set on the open file before the rename, never on the path after it: the
-/// directory may belong to the service's account, which could put a link where the path was.
-fn write_owner_only(to: &Path, bytes: &[u8], owner: Option<(u32, u32)>) -> Result<(), String> {
-    let mut partial = to.as_os_str().to_owned();
-    partial.push(".partial");
-    let partial = PathBuf::from(partial);
-    // A leftover from an interrupted run would make `create_new` refuse.
-    let _ = std::fs::remove_file(&partial);
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o600);
+/// Anything but a regular file is refused before it is opened, and again by what was opened: a
+/// FIFO or a device the service's account placed at the name never holds this step up. On Unix
+/// the open does not block, so a FIFO swapped in between the two looks is refused as well.
+fn read_certificates(path: &Path) -> Result<Vec<u8>, String> {
+    use std::io::Read as _;
+    let not_a_file = || {
+        format!(
+            "{} is not a CA file: not a regular file of at most {MAX_CA_BYTES} bytes",
+            path.display()
+        )
+    };
+    let regular = |meta: &std::fs::Metadata| meta.is_file() && meta.len() <= MAX_CA_BYTES;
+    let before =
+        std::fs::metadata(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    if !regular(&before) {
+        return Err(not_a_file());
     }
-    options
-        .open(&partial)
-        .and_then(|mut file| {
-            file.write_all(bytes)?;
-            #[cfg(unix)]
-            if let Some((uid, gid)) = owner {
-                std::os::unix::fs::fchown(&file, Some(uid), Some(gid))?;
-            }
-            #[cfg(not(unix))]
-            let _ = owner;
-            Ok(())
+    let mut open = std::fs::OpenOptions::new();
+    open.read(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::custom_flags(&mut open, libc::O_NONBLOCK);
+    let file = open
+        .open(path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let meta = file
+        .metadata()
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    if !regular(&meta) {
+        return Err(not_a_file());
+    }
+    let mut bytes = zeroize::Zeroizing::new(Vec::new());
+    file.take(MAX_CA_BYTES)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let certificates = opamp::tls::certificates(&bytes).map_err(|_| {
+        format!(
+            "{} is not a CA file: it holds no PEM certificate",
+            path.display()
+        )
+    })?;
+    Ok(certificates
+        .iter()
+        .flat_map(|der| {
+            crate::tls::pem_block("CERTIFICATE", der)
+                .as_bytes()
+                .to_vec()
         })
-        .and_then(|()| std::fs::rename(&partial, to))
-        .map_err(|e| {
-            let _ = std::fs::remove_file(&partial);
-            format!("cannot write {}: {e}", to.display())
-        })
+        .collect())
+}
+
+/// The directory `dir` a configuration is written in, created where it is missing and held: the
+/// data root, or the directory the administrator named with `--config`. Its name is the
+/// administrator's and is followed on Unix, while on Windows a reparse point there is refused
+/// ([`HeldDir::open_root`]); every name in it is then reached without following a link.
+fn held_dir(dir: &Path) -> Result<HeldDir, String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    HeldDir::open_root(dir).map_err(|e| format!("cannot open {}: {e}", dir.display()))
+}
+
+/// `path` as its held directory and its file name.
+fn held_file(path: &Path) -> Result<(HeldDir, &str), String> {
+    let name = path
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .ok_or_else(|| format!("{} names no file", path.display()))?;
+    let dir = std::path::absolute(path)
+        .map_err(|e| format!("cannot resolve {}: {e}", path.display()))?
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| format!("{} names no directory", path.display()))?;
+    Ok((held_dir(&dir)?, name))
 }
 
 /// Replace the configuration at `path` with `contents`, keeping who owns it.
@@ -412,7 +464,9 @@ fn write_owner_only(to: &Path, bytes: &[u8], owner: Option<(u32, u32)>) -> Resul
 /// new one, never half of either. The new file is owner-only like the one it replaces (ADR-0019
 /// clause 25), and on Unix it is given back to the old file's owner: the file of a service that
 /// runs as its own account belongs to that account (ADR-0037 clause 1), and the administrator
-/// editing it must not take it away.
+/// editing it must not take it away. The owner is set on the new file before the rename, never on
+/// the path after it, in the held directory, so a link the account put at either name is replaced
+/// and never written through (ADR-0037 clause 11).
 fn replace(path: &Path, contents: &str) -> Result<(), String> {
     let meta = std::fs::symlink_metadata(path)
         .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
@@ -430,7 +484,9 @@ fn replace(path: &Path, contents: &str) -> Result<(), String> {
     };
     #[cfg(not(unix))]
     let owner = None;
-    write_owner_only(path, contents.as_bytes(), owner)
+    let (dir, name) = held_file(path)?;
+    dir.write_owned(name, contents.as_bytes(), 0o600, owner)
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
 
 /// Edit the answers into an existing configuration's text, changing only the keys the
@@ -875,32 +931,18 @@ fn commented_top_level_keys() -> &'static str {
 
 /// Create the file, never replacing one that is there, and never wider than its owner on Unix.
 ///
-/// `create_new` is what makes "do not overwrite" a property of the syscall rather than of a check
-/// that raced. The mode is set in the same call for the same reason: the file names where the
+/// "Do not overwrite" is a property of the create itself (`O_EXCL`, `CREATE_NEW`) rather than of
+/// a check that raced, and a link at the name is something that is there: it is refused, never
+/// followed. The mode is set in the same call for the same reason: the file names where the
 /// private key lies and may hold `[packages] archive_key` (ADR-0019 clause 25), before any later
-/// `set_permissions` could narrow it.
+/// mode change could narrow it. The directory is held as [`held_dir`] holds it.
 ///
 /// # Errors
-/// Returns an error if the parent cannot be created or the file already exists.
+/// Returns an error if the directory cannot be created or the file already exists.
 pub fn write_new(path: &Path, contents: &str) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
-        }
-    }
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o600);
-    }
-    let mut file = options
-        .open(path)
-        .map_err(|e| format!("cannot create {}: {e}", path.display()))?;
-    file.write_all(contents.as_bytes())
-        .map_err(|e| format!("cannot write {}: {e}", path.display()))
+    let (dir, name) = held_file(path)?;
+    dir.create_new(name, contents.as_bytes(), 0o600)
+        .map_err(|e| format!("cannot create {}: {e}", path.display()))
 }
 
 /// Whether TLS applies to this endpoint, and the Server's CA is therefore asked for.
@@ -1331,10 +1373,30 @@ mod tests {
 
     const KEY_HEX: &str = "7752550dc567225658fcb0a91322f52497b26c2a65cfc4cff14145fcf8857d4b";
 
+    /// A CA file: one self-signed certificate, as PEM.
+    fn ca_pem() -> String {
+        let key = rcgen::KeyPair::generate().expect("key");
+        rcgen::CertificateParams::new(vec!["fleet-ca".to_string()])
+            .expect("params")
+            .self_signed(&key)
+            .expect("certificate")
+            .pem()
+    }
+
+    /// The certificates `path` holds, by their DER.
+    fn certificates_in(path: &Path) -> Vec<Vec<u8>> {
+        opamp::tls::certificates(&std::fs::read(path).expect("read"))
+            .expect("certificates")
+            .iter()
+            .map(|der| der.to_vec())
+            .collect()
+    }
+
     /// A directory holding what the operator copies beside the program.
     fn fleet_files(dir: &Path) {
+        let ca = ca_pem();
         for (name, content) in [
-            (SERVER_CA_FILE, "ca"),
+            (SERVER_CA_FILE, &ca[..]),
             (BOOTSTRAP_CERT_FILE, "cert"),
             (BOOTSTRAP_KEY_FILE, "key"),
             (VERIFICATION_KEY_FILE, &format!("{KEY_HEX}\n")[..]),
@@ -1545,7 +1607,7 @@ mod tests {
         );
 
         // `--endpoint` takes the CA from the directory named, as it would from beside the program.
-        std::fs::write(dir.path().join(SERVER_CA_FILE), "ca").expect("write");
+        std::fs::write(dir.path().join(SERVER_CA_FILE), ca_pem()).expect("write");
         let named = Beside::in_named_dir(dir.path()).expect("a directory");
         let data = tempfile::tempdir().expect("tempdir");
         let copies = run_with_endpoint(
@@ -1664,11 +1726,11 @@ mod tests {
         let from = tempfile::tempdir().expect("tempdir");
         let to = tempfile::tempdir().expect("tempdir");
         let ca = from.path().join("my-ca.pem");
-        std::fs::write(&ca, "ca").expect("write");
+        std::fs::write(&ca, ca_pem()).expect("write");
         let path = to.path().join(FILE_NAME);
         let (copied, copies) = copy_ca_beside(
             Answers {
-                ca_file: Some(ca),
+                ca_file: Some(ca.clone()),
                 ..answers()
             },
             &path,
@@ -1677,7 +1739,7 @@ mod tests {
 
         let expected = to.path().join(SERVER_CA_FILE);
         assert_eq!(copies, vec![expected.clone()]);
-        assert_eq!(std::fs::read_to_string(&expected).expect("read"), "ca");
+        assert_eq!(certificates_in(&expected), certificates_in(&ca));
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
@@ -1711,7 +1773,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join(FILE_NAME);
         let copy = dir.path().join(SERVER_CA_FILE);
-        std::fs::write(&copy, "ca").expect("write");
+        std::fs::write(&copy, ca_pem()).expect("write");
+        let before = certificates_in(&copy);
 
         copy_ca_beside(
             Answers {
@@ -1721,19 +1784,124 @@ mod tests {
             &path,
         )
         .expect("copy onto itself");
-        assert_eq!(std::fs::read_to_string(&copy).expect("read"), "ca");
+        assert_eq!(certificates_in(&copy), before);
 
         let elsewhere = dir.path().join("new-ca.pem");
-        std::fs::write(&elsewhere, "new ca").expect("write");
+        std::fs::write(&elsewhere, ca_pem()).expect("write");
         copy_ca_beside(
             Answers {
-                ca_file: Some(elsewhere),
+                ca_file: Some(elsewhere.clone()),
                 ..answers()
             },
             &path,
         )
         .expect("copy");
-        assert_eq!(std::fs::read_to_string(&copy).expect("read"), "new ca");
+        assert_eq!(certificates_in(&copy), certificates_in(&elsewhere));
+        assert_ne!(certificates_in(&copy), before);
+    }
+
+    /// `service config` runs as root and hands the copy to the service's account, which may have
+    /// put a link where the file names its CA: a file that holds no certificate is refused before
+    /// anything is written, and what a certificate file holds beside its certificates is not
+    /// copied.
+    /// Verifies: ADR-0037
+    #[test]
+    fn only_certificates_are_copied() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(FILE_NAME);
+        let copy = dir.path().join(SERVER_CA_FILE);
+        let secret = dir.path().join("secret");
+        std::fs::write(&secret, "root:$6$secret:19000:0:99999:7:::\n").expect("write");
+        let refused = copy_ca_beside(
+            Answers {
+                ca_file: Some(secret.clone()),
+                ..answers()
+            },
+            &path,
+        )
+        .expect_err("refused");
+        assert!(
+            !refused.contains("root:"),
+            "the refusal repeats nothing: {refused}"
+        );
+        assert!(!copy.exists(), "nothing is written");
+
+        let key = rcgen::KeyPair::generate().expect("key");
+        let mixed = dir.path().join("mixed.pem");
+        std::fs::write(
+            &mixed,
+            format!("{}secret\n{}", ca_pem(), key.serialize_pem()),
+        )
+        .expect("write");
+        copy_ca_beside(
+            Answers {
+                ca_file: Some(mixed),
+                ..answers()
+            },
+            &path,
+        )
+        .expect("copy");
+        let copied = std::fs::read_to_string(&copy).expect("read");
+        assert!(copied.contains("BEGIN CERTIFICATE"), "{copied}");
+        assert!(!copied.contains("PRIVATE KEY"), "the key is not copied");
+        assert!(!copied.contains("secret"), "nor the text beside it");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_at_the_ca_file_is_refused_without_waiting_for_a_writer() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(FILE_NAME);
+        let fifo = dir.path().join("planted.pem");
+        let name = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).expect("name");
+        // SAFETY: `name` is a valid NUL-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0, "mkfifo");
+        let link = dir.path().join("link.pem");
+        std::os::unix::fs::symlink(&fifo, &link).expect("symlink");
+        for named in [fifo, link] {
+            let (done, wait) = std::sync::mpsc::channel();
+            let answers = Answers {
+                ca_file: Some(named.clone()),
+                ..answers()
+            };
+            let at = path.clone();
+            std::thread::spawn(move || done.send(copy_ca_beside(answers, &at).err()));
+            let refused = wait
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap_or_else(|_| panic!("{} held the copy up", named.display()))
+                .expect("refused");
+            assert!(refused.contains("not a regular file"), "{refused}");
+        }
+    }
+
+    /// A configuration is replaced in its held directory, owner-only and synced, and a link the
+    /// service's account put at the temporary name is replaced, never written through.
+    /// Verifies: ADR-0037
+    #[cfg(unix)]
+    #[test]
+    fn a_replaced_configuration_is_written_through_no_link() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let outside = tempfile::tempdir().expect("outside");
+        let path = dir.path().join(FILE_NAME);
+        std::fs::write(&path, "name = \"old\"\n").expect("write");
+        let victim = outside.path().join("victim");
+        std::fs::write(&victim, "untouched").expect("victim");
+        std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o644)).expect("mode");
+        std::os::unix::fs::symlink(&victim, dir.path().join(format!("{FILE_NAME}~")))
+            .expect("plant");
+
+        replace(&path, "name = \"new\"\n").expect("replaced");
+
+        assert_eq!(std::fs::read_to_string(&victim).expect("read"), "untouched");
+        let mode = victim.metadata().expect("meta").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o644, "the victim keeps its mode");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read"),
+            "name = \"new\"\n"
+        );
+        let mode = path.metadata().expect("meta").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 
     /// An edit changes the keys the questionnaire asked about and nothing else: the operator's

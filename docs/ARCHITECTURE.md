@@ -225,12 +225,19 @@ no module.
   message in `handle` and leaves three
   channels and its description each to a submodule: `packages`, `remote_config`,
   `connection_settings`, and `description`, what the Agent reports about itself.
-  `storage`, `csr`, `connection`, `tls`, the staging in `service::layout` and the re-owning in
-  `service::run_as` reach the state directory and the layout root through the adapter `nofollow`:
-  a directory held open without following a link at its name, read from and written to by name,
-  each file written whole and renamed into place, because a privileged install works in
-  directories the service's account owns
-  ([ADR-0037](adr/0037-the-accounts-the-service-runs-under.md)).
+  `storage`, `csr`, `connection`, `tls`, `config_init`'s writers of `supervisor.toml` and its CA
+  copy, the staging, the state directory's creation and the `current` switch in `service::layout`,
+  and the re-owning in `service::run_as` reach the data root, the state directory and the layout
+  root through the adapter `nofollow`: a directory held open without following a link at its name,
+  read from and written to by name, each file written whole and renamed into place, because a
+  privileged install works in directories the service's account owns
+  ([ADR-0037](adr/0037-the-accounts-the-service-runs-under.md)). The test
+  `privileged_steps_follow_no_link` holds the modules a privileged step runs in to that, with the
+  path-based calls left to them listed and justified. What runs under the Client's or the process
+  account — the self-update's and a Supervisor's program staging through `install`, the rewrite of
+  `supervisor.toml` in `reconfigure`, the Gateway's package cache, and the second service's purge
+  on Windows, which goes by path — works by path in directories that account owns and no other
+  account may write.
 - **Client configuration** — `config` is what `supervisor.toml` may say and the rules it must meet
   ([ADR-0008](adr/0008-five-crates-on-tokio-and-axum.md)); `config_file` reads it from disk, makes
   its

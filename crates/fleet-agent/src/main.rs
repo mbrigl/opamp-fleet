@@ -542,8 +542,7 @@ fn install(
         held_root = hold_data_root(&data_root)?;
     }
     if !state_dir.starts_with(&data_root) {
-        std::fs::create_dir_all(&state_dir)
-            .map_err(|e| format!("cannot create the state directory: {e}"))?;
+        layout::create_state_dir(&state_dir, &[&data_root, &layout_root])?;
     }
     // Nothing may run under an account whose rights this install changes or takes away, nor under
     // a registration it rewrites: on Windows every install stops both services here, and waits
@@ -674,8 +673,7 @@ fn install(
         // account is registered, what it keeps there stays its own (ADR-0037 clause 1): every
         // package upgrade re-registers.
         if let Some(run_as) = &run_as {
-            std::fs::create_dir_all(&state_dir)
-                .map_err(|e| format!("cannot create the state directory: {e}"))?;
+            layout::create_state_dir(&state_dir, &[&data_root, &layout_root])?;
             let kept = process.as_ref();
             let mut skipped =
                 run_as.hand_over(&[&layout_root, &data_root, &state_dir, &config_path], kept)?;

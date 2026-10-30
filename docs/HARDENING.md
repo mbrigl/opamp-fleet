@@ -197,7 +197,14 @@ has:
   that is a link or junction is refused, and on Windows so is a data or layout root that is a
   reparse point; the data root is held open from the install's first write to its last. What
   `service config` re-owns is re-owned as the entry itself, and a file with a second hard link is
-  skipped with a warning.
+  skipped with a warning. `supervisor.toml` and the CA copy beside it are written the same way
+  through the held data root; the copy holds only the certificates of the file the answer names,
+  so a link there hands the account no other file; a state directory the install creates beneath
+  a root is created one held directory at a time; and the `current` pointer is switched in the
+  held layout root on Windows, while on Unix it is switched by name in the layout root, whose own
+  name lies in a directory only root writes, each step acting on the name and following no link.
+  A test holds the modules these steps run in to no path-based write, removal, rename or mode
+  change outside a justified list (`privileged_steps_follow_no_link.rs`).
 - **No credential in `server.toml` authenticates on its own** (ADR-0021 clause 21): an operator's
   Basic password is kept as an Argon2id hash of at least the OWASP minimum, and a value in clear is
   refused at startup without being echoed. The Server offers no credential (ADR-0013).

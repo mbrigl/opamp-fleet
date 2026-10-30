@@ -93,9 +93,17 @@ impl Layout {
     /// unlink-then-relink, which leaves a window with no pointer). On Windows the junction is
     /// recreated; callers only switch while the service is stopped (ADR-0037).
     ///
+    /// The root is held while the pointer changes ([`HeldDir::open_root`]): on Windows the
+    /// service's account holds delete on it, so a root that is a reparse point is refused and the
+    /// root cannot be renamed away and replaced by a junction under the switch (ADR-0037 clauses
+    /// 11 and 13). The names in it are then removed, created and renamed as themselves: a link at
+    /// `current` or at the temporary name is replaced, never followed.
+    ///
     /// # Errors
-    /// Returns an error if the pointer cannot be created.
+    /// Returns an error if the root cannot be held or the pointer cannot be created.
     pub fn set_current(&self, version_dir: &Path) -> Result<(), String> {
+        let _root = HeldDir::open_root(&self.root)
+            .map_err(|e| format!("cannot open {}: {e}", self.root.display()))?;
         #[cfg(unix)]
         {
             let staging = self.root.join(".current.tmp");
@@ -314,6 +322,44 @@ pub fn beneath(dir: &Path, roots: &[&Path]) -> Result<(), String> {
             .collect();
         format!("it is not beneath {}", roots.join(" or "))
     }))
+}
+
+/// Creates the state directory `dir` where it is missing, as `service install` does before it
+/// hands the directory over (ADR-0037 clause 12). Beneath one of `roots`, which belong to the
+/// service's account, the root is created where it is missing, and every component below it is
+/// created and opened as itself, one held directory at a time, so a link the account put on the
+/// way is refused, and nothing is created where it points. A directory outside every root is the
+/// administrator's, named by `--state-dir` or by an earlier registration, and is created as its
+/// path says.
+///
+/// # Errors
+/// Returns an error when a component cannot be created, or is a link or no directory.
+pub fn create_state_dir(dir: &Path, roots: &[&Path]) -> Result<(), String> {
+    let refused =
+        |e: std::io::Error| format!("cannot create the state directory {}: {e}", dir.display());
+    let Some((root, rest)) = roots
+        .iter()
+        .find_map(|root| dir.strip_prefix(root).ok().map(|rest| (*root, rest)))
+    else {
+        return std::fs::create_dir_all(dir).map_err(refused);
+    };
+    // The root's own name is the administrator's (ADR-0037 clause 13).
+    std::fs::create_dir_all(root).map_err(refused)?;
+    let mut held = HeldDir::open_root(root).map_err(refused)?;
+    for component in rest.components() {
+        let std::path::Component::Normal(name) = component else {
+            return Err(format!(
+                "the state directory {} steps out of {} with `.` or `..`",
+                dir.display(),
+                root.display()
+            ));
+        };
+        let name = name
+            .to_str()
+            .ok_or_else(|| format!("the state directory {} is not a UTF-8 path", dir.display()))?;
+        held = held.dir(name, 0o755).map_err(refused)?;
+    }
+    Ok(())
 }
 
 /// Walks `rest` down from `root`, refusing a `.`, a `..` and anything that exists and is not a

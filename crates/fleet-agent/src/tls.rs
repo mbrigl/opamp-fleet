@@ -181,7 +181,7 @@ pub fn pkcs12_identity(
 
 /// `der` as one PEM block, in buffers wiped when they are dropped and sized up front, so none is
 /// grown and left behind (ADR-0014).
-fn pem_block(label: &str, der: &[u8]) -> Zeroizing<String> {
+pub(crate) fn pem_block(label: &str, der: &[u8]) -> Zeroizing<String> {
     use base64::Engine as _;
     let body = Zeroizing::new(base64::engine::general_purpose::STANDARD.encode(der));
     let (begin, end) = (
