@@ -72,6 +72,9 @@ state_dir = "client-state"
 # /api/v1/agents/<uid>/labels): it is keyed by that Agent's uid, matched by the same Selectors, and
 # takes effect without editing a file here. A label on this Client's own Agent holds for all of
 # its Agents.
+#
+# A key starting with "supervisor." fails startup: that namespace is the Supervisor's own
+# statement (the kinds this Client carries, the version of the Package a Supervisor installed).
 # [attributes]
 # env = "prod"
 

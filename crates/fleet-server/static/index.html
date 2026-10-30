@@ -791,6 +791,12 @@
         // The operator's labels (ADR-0024): matched by Selectors exactly like a reported attribute,
         // which is what makes a rollout channel a Server-side decision instead of an edit on the host.
         for (const [key, value] of Object.entries(a.labels || {})) {
+          // A stored label in fleet. or supervisor. matches nothing (ADR-0024 clause 20): shown as
+          // ignored, and left out of the label editor, so the next set put removes it.
+          if ((a.ignored_labels || []).includes(key)) {
+            chips.push(`<span class="pill amber" title="a label in fleet. or supervisor. — no label may speak there, so selectors and package matching ignore it and nothing inherits it; setting this Agent's labels removes it">⚠ ignored ${esc(key)}=${esc(value)}</span>`);
+            continue;
+          }
           const dead = (a.shadowed_labels || []).includes(key);
           chips.push(`<span class="chip${dead ? " " : " selected"}" title="${dead ? "the Agent reports this attribute itself, so the label matches nothing" : "a label: Selectors match it like a reported attribute"}">${dead ? "⚠ " : "🏷 "}${esc(key)}=${esc(value)}</span>`);
         }
@@ -813,7 +819,7 @@
         for (const key of a.ignored_attributes || []) {
           chips.push(`<span class="pill amber" title="the agent reports this, but fleet.* is the Server's own, so it is left out of what selectors match">⚠ ignored ${esc(key)}</span>`);
         }
-        chips.push(`<span class="chip clickable label-btn" data-uid="${esc(a.instance_uid)}" title="Set this Agent's labels — the whole set, as key=value pairs separated by commas. Empty clears them. A key the Agent reports itself is refused, and so is a key starting fleet. — the Server's own. A client agent's labels hold for its client's other agents.">🏷 labels…</span>`);
+        chips.push(`<span class="chip clickable label-btn" data-uid="${esc(a.instance_uid)}" title="Set this Agent's labels — the whole set, as key=value pairs separated by commas. Empty clears them. A key the Agent reports itself is refused, and so is a key starting fleet. — the Server's own — or supervisor. — a Supervisor's. A client agent's labels hold for its client's other agents.">🏷 labels…</span>`);
         if (a.package_conflict) {
           chips.push(`<span class="pill red" title="${esc(a.package_conflict)}">deployment: ambiguous target</span>`);
         }
@@ -1013,7 +1019,9 @@
         const label = e.target.closest(".label-btn");
         if (label) {
           const uid = label.dataset.uid;
-          const current = (agents.find((a) => a.instance_uid === uid) || {}).labels || {};
+          const agent = agents.find((a) => a.instance_uid === uid) || {};
+          const ignored = agent.ignored_labels || [];
+          const current = Object.fromEntries(Object.entries(agent.labels || {}).filter(([k]) => !ignored.includes(k)));
           const asText = Object.entries(current).map(([k, v]) => `${k}=${v}`).join(", ");
           const answer = prompt("Labels for this Agent — key=value, comma separated. Empty clears them.", asText);
           if (answer === null) return;

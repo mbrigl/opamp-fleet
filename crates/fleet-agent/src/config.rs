@@ -48,9 +48,11 @@ pub struct ClientConfig {
     /// Operator-defined attributes (ADR-0016 clause 10), reported as non-identifying attributes of
     /// **every** Agent this Client presents — machine-level tags like `env = "prod"` that
     /// Selectors can match. Attributes the code reports win over configured ones; a configured one
-    /// stands against whatever a Managed Process reports. A `[[supervisor]]` block carrying its own
-    /// `attributes` fails at startup: tagging one Agent is a Server label's job.
-    #[serde(default)]
+    /// stands against whatever a Managed Process reports. A key in the `supervisor.` namespace,
+    /// however the file spells it, fails at startup naming the key: it is the Supervisor's own
+    /// statement. A `[[supervisor]]` block carrying its own `attributes` fails at startup too:
+    /// tagging one Agent is a Server label's job.
+    #[serde(default, deserialize_with = "operator_attributes")]
     pub attributes: BTreeMap<String, String>,
     /// Optional Gateway Mode (ADR-0015); absent means this Client gateways for nobody.
     pub gateway: Option<GatewayConfig>,
@@ -586,6 +588,54 @@ fn secret<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<zeroize::Zeroizing<String>>, D::Error> {
     Option::<String>::deserialize(deserializer).map(|value| value.map(zeroize::Zeroizing::new))
+}
+
+/// `[attributes]`, each value a string, with every key of the `supervisor.` namespace refused by
+/// name (ADR-0016 clause 10). The namespace is refused however TOML spells the key: quoted
+/// (`"supervisor.kind.x"`), dotted (`supervisor.kind.x`), or as the sub-table
+/// `[attributes.supervisor]`. The last two reach here as a table under `supervisor`, which a
+/// map of strings would refuse only as a type error that names neither the key nor the rule.
+fn operator_attributes<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<BTreeMap<String, String>, D::Error> {
+    use serde::de::Error;
+    let raw = BTreeMap::<String, toml::Value>::deserialize(deserializer)?;
+    let mut attributes = BTreeMap::new();
+    for (key, value) in raw {
+        let reserved = opamp::attributes::SUPERVISOR_PREFIX
+            .strip_suffix('.')
+            .is_some_and(|word| key == word && value.is_table());
+        if reserved || key.starts_with(opamp::attributes::SUPERVISOR_PREFIX) {
+            return Err(D::Error::custom(format!(
+                "[attributes] {:?}: a key starting with `supervisor.` is the Supervisor's own \
+                 statement — the kinds this Client carries, the version of the Package a \
+                 Supervisor installed — and cannot be configured. Remove the entry.",
+                first_leaf(key, &value)
+            )));
+        }
+        match value {
+            toml::Value::String(text) => {
+                attributes.insert(key, text);
+            }
+            other => {
+                return Err(D::Error::custom(format!(
+                    "[attributes] {key:?}: expected a string, found {}",
+                    other.type_str()
+                )))
+            }
+        }
+    }
+    Ok(attributes)
+}
+
+/// The dotted key of the first value beneath `key`, so a refusal names the entry as the file
+/// wrote it: `supervisor.kind.x` rather than the table `supervisor` it sits in.
+fn first_leaf(mut key: String, mut value: &toml::Value) -> String {
+    while let Some((name, inner)) = value.as_table().and_then(|table| table.iter().next()) {
+        key = format!("{key}.{name}");
+        value = inner;
+    }
+    key
 }
 
 impl Default for PackagesConfig {
@@ -2226,9 +2276,84 @@ mod tests {
         assert!(error.to_string().contains("Server label"), "{error}");
     }
 
+    /// An operator who could state a `supervisor.*` key could make every Agent of the host a
+    /// Client Agent, or choose the version a Package is held against: the file is refused,
+    /// naming the key and the rule, whichever key of the namespace it is and however TOML spells
+    /// it — quoted, dotted, or as the sub-table `[attributes.supervisor]`.
+    /// Verifies: ADR-0016
+    #[test]
+    fn an_attribute_in_the_supervisors_namespace_is_refused_by_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("supervisor.toml");
+        let spellings = [
+            (
+                "[attributes]\n\"supervisor.kind.collector\" = \"x\"\n",
+                "supervisor.kind.collector",
+            ),
+            (
+                "[attributes]\n\"supervisor.package.version\" = \"x\"\n",
+                "supervisor.package.version",
+            ),
+            (
+                "[attributes]\n\"supervisor.anything\" = \"x\"\n",
+                "supervisor.anything",
+            ),
+            (
+                "[attributes]\nsupervisor.kind.collector = \"true\"\n",
+                "supervisor.kind.collector",
+            ),
+            (
+                "[attributes]\nsupervisor.package.version = \"1.0.0\"\n",
+                "supervisor.package.version",
+            ),
+            (
+                "[attributes.supervisor]\nkind.collector = \"true\"\n",
+                "supervisor.kind.collector",
+            ),
+            (
+                "[attributes.supervisor.package]\nversion = \"1.0.0\"\n",
+                "supervisor.package.version",
+            ),
+            (
+                "[attributes]\nenv = \"prod\"\n[attributes.supervisor]\n",
+                "supervisor",
+            ),
+        ];
+        for (text, key) in spellings {
+            std::fs::write(&path, text).expect("write");
+            let err = ClientConfig::load(&path).expect_err(text);
+            assert!(
+                err.contains(&format!("[attributes] {key:?}")),
+                "{text}: {err}"
+            );
+            assert!(
+                err.contains("is the Supervisor's own statement")
+                    && err.contains("cannot be configured"),
+                "{text}: the rule's own words, not a type error: {err}"
+            );
+        }
+        // Only the namespace is reserved: a key that merely begins with the word is the operator's,
+        // and so is the bare word holding a string.
+        std::fs::write(
+            &path,
+            "[attributes]\nsupervisor_team = \"ops\"\nsupervisor = \"night shift\"\n",
+        )
+        .expect("write");
+        let attributes = ClientConfig::load(&path).expect("loads").attributes;
+        assert_eq!(attributes["supervisor_team"], "ops");
+        assert_eq!(attributes["supervisor"], "night shift");
+    }
+
     #[test]
     fn non_string_attributes_are_rejected() {
-        assert!(toml::from_str::<ClientConfig>("[attributes]\nport = 80\n").is_err());
+        let err =
+            toml::from_str::<ClientConfig>("[attributes]\nport = 80\n").expect_err("an integer");
+        assert!(
+            err.to_string()
+                .contains("[attributes] \"port\": expected a string"),
+            "{err}"
+        );
+        assert!(toml::from_str::<ClientConfig>("[attributes]\nteam.name = \"ops\"\n").is_err());
     }
 
     /// A file written for an earlier version may still hold `[auth]`, with any of the keys it

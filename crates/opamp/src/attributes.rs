@@ -27,6 +27,10 @@ pub const SERVICE_INSTANCE_NAME: &str = "service.instance.name";
 pub const SERVICE_NAMESPACE: &str = "service.namespace";
 /// The version the Agent reports for itself.
 pub const SERVICE_VERSION: &str = "service.version";
+/// The namespace that is the Supervisor's own statement — the kinds a Client carries, the version
+/// of the Package a Supervisor installed — which neither a Managed Process nor an operator's
+/// `[attributes]` may state (ADR-0016 clauses 8 and 10).
+pub const SUPERVISOR_PREFIX: &str = "supervisor.";
 /// The version of the Package a Supervisor installed for its Managed Process — the Supervisor's
 /// statement, never the process's (ADR-0016 clause 8) — and what a Package is held against
 /// where it is reported (ADR-draft-deployments-and-rollouts clauses 14 and 25).

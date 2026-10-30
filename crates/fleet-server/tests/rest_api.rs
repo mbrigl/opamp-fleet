@@ -1705,6 +1705,34 @@ async fn a_label_in_the_fleet_space_is_refused() {
     assert!(agents[0]["labels"].as_object().expect("labels").is_empty());
 }
 
+/// `supervisor.*` is a Supervisor's own statement: a label in it is refused `400` as one in
+/// `fleet.*` is, naming the key, and nothing is stored — so no label makes an Agent look as if
+/// its Client carried a kind, or had installed a Package.
+/// Verifies: ADR-0024
+#[tokio::test]
+async fn a_label_in_the_supervisors_space_is_refused() {
+    let server = spawn().await;
+    let client = reqwest::Client::new();
+    let uid = opamp::uid::InstanceUid::default();
+    report(&client, server.addr, &support::full_report(&uid, "host", 1)).await;
+    for key in ["supervisor.kind.collector", "supervisor.package.version"] {
+        let refused = set_labels(
+            &client,
+            server.rest_addr,
+            &uid,
+            serde_json::json!({key: "true", "rollout": "canary"}),
+        )
+        .await;
+        assert_eq!(refused.status(), 400, "{key}");
+        let body: serde_json::Value = refused.json().await.expect("json");
+        let message = body["error"].as_str().expect("message");
+        assert!(message.contains(key), "it names the key: {message}");
+        assert!(message.contains("Supervisor's reserved"), "{message}");
+    }
+    let agents = agents(&client, server.rest_addr).await;
+    assert!(agents[0]["labels"].as_object().expect("labels").is_empty());
+}
+
 /// One Agent's row of the fleet view.
 async fn agent_view(
     client: &reqwest::Client,
@@ -1930,6 +1958,7 @@ async fn the_ui_lists_hosts_and_marks_inherited_labels() {
         "a.client_agent",
         "a.inherited_labels",
         "a.ignored_attributes",
+        "a.ignored_labels",
         "a.host_attributes",
     ] {
         assert!(
@@ -1957,6 +1986,7 @@ async fn the_ui_lists_hosts_and_marks_inherited_labels() {
         ("AgentView", "inherited_labels"),
         ("AgentView", "host_attributes"),
         ("AgentView", "ignored_attributes"),
+        ("AgentView", "ignored_labels"),
     ] {
         assert!(
             schemas[schema]["properties"][field].is_object(),

@@ -1717,7 +1717,13 @@ comes from.
 If an Agent *starts* reporting a key that was labelled earlier, the reported value wins and the
 fleet row marks the label as shadowed — set, and matching nothing.
 
-**A label whose key starts with `fleet.` is refused with `400`.** That space is the Server's own.
+**A label whose key starts with `fleet.` or `supervisor.` is refused with `400`,** naming the key.
+`fleet.` is the Server's own space. `supervisor.` is a Supervisor's: the kinds its Client carries
+and the version of the Package it installed, which a label must not let a Selector match as if the
+Supervisor had stated them. A label the Agent's record already holds in either space is ignored:
+no Selector and no package match reads it, no Agent inherits it, and the fleet row lists it in
+`ignored_labels`, which the Agents tab shows as an amber *ignored* chip. The UI's label editor
+leaves it out, so the next label set saved removes it; nothing else needs doing.
 
 **Label the Client once.** A Client presents an Agent for itself — the one that reports
 `supervisor.kind.*` — and one per Supervisor. The labels set on the Client's own Agent hold for its

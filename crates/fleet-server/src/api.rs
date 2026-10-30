@@ -657,6 +657,12 @@ struct AgentResponse {
     /// reporting a key that was labelled earlier. Shown rather than dropped in silence.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     shadowed_labels: Vec<String>,
+    /// Labels stored with a key in `fleet.` or `supervisor.`, which no label may speak in
+    /// (ADR-0024 clause 20): ignored by every Selector and by package matching, and inherited by
+    /// no Agent. Listed rather than dropped in silence; the next label set put without them
+    /// removes them.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    ignored_labels: Vec<String>,
     /// The labels of this Agent's Client Agent, which hold for it below its own (ADR-0024
     /// clause 19); empty for the Client Agent itself, for an Agent whose Client the Server cannot
     /// tell, and for an ambiguous one.
@@ -722,6 +728,7 @@ impl From<fleet::AgentView> for AgentResponse {
             stale: view.stale,
             labels: view.labels,
             shadowed_labels: view.shadowed_labels,
+            ignored_labels: view.ignored_labels,
             inherited_labels: view.inherited_labels,
             client_agent: view.client_agent,
             ambiguous: view.ambiguous,

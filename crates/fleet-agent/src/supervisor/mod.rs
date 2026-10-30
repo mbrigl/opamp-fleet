@@ -108,13 +108,14 @@ fn kinds() -> Vec<Box<dyn Plugin>> {
 /// in the schema this project pins, and Selectors resolve over the description, so reporting kinds
 /// there would tell the fleet something it could not act on.
 ///
-/// An operator's own attribute of the same name is left alone — configured values are the host's
-/// statement about itself, and this function only fills in what nothing else said.
+/// The keys are the build's statement alone: `[attributes]` refuses every `supervisor.*` key
+/// (ADR-0016 clause 10), and a value under one of them is replaced by what this build carries.
 fn kind_attributes(mut attributes: BTreeMap<String, String>) -> BTreeMap<String, String> {
     for plugin in kinds() {
-        attributes
-            .entry(format!("supervisor.kind.{}", plugin.kind()))
-            .or_insert_with(|| "true".to_string());
+        attributes.insert(
+            format!("supervisor.kind.{}", plugin.kind()),
+            "true".to_string(),
+        );
     }
     attributes
 }
@@ -639,21 +640,24 @@ mod tests {
     /// can aim a Supervisor set at the Clients that can actually run it — rather than the Server
     /// learning from a `FAILED` that it aimed at a Client too old to have the plugin.
     /// Which keys those are is `a_build_carries_exactly_the_wrapped_kinds_its_features_name`'s;
-    /// this is what the key does to a value the operator already wrote.
-    // Verifies: ADR-0017
+    /// this is what the key does to a value already under it: the build's statement replaces it,
+    /// and the operator's other attributes pass.
+    // Verifies: ADR-draft-supervisor-mode-and-its-kinds
     #[test]
     fn a_client_reports_the_kinds_it_was_compiled_with() {
-        // An operator's own value under the same key is left alone: a configured attribute is the
-        // host's statement about itself, and this only fills in what nothing else said.
         let stated = kind_attributes(
-            [("supervisor.kind.command".to_string(), "no".to_string())]
-                .into_iter()
-                .collect(),
+            [
+                ("supervisor.kind.command".to_string(), "no".to_string()),
+                ("env".to_string(), "prod".to_string()),
+            ]
+            .into_iter()
+            .collect(),
         );
         assert_eq!(
             stated.get("supervisor.kind.command").map(String::as_str),
-            Some("no")
+            Some("true")
         );
+        assert_eq!(stated.get("env").map(String::as_str), Some("prod"));
     }
 
     /// The wrapped kinds, each with whether this build's features carry it (ADR-0017 clause 2).

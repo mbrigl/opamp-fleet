@@ -16,7 +16,11 @@
 //! (ADR-0027), so a label that outranked them would let a typo hand a Windows binary to a Linux
 //! host. Labels annotate; they do not correct. **And nothing an Agent reports or an operator
 //! labels can speak in the Server's name**: `fleet.*` is the Server's own, filled from the Host's
-//! certificate (ADR-0024 clauses 18 and 20).
+//! certificate (ADR-0024 clauses 18 and 20). **Nor can a label speak in a Supervisor's**:
+//! `supervisor.*` is what a Supervisor states about its Client and the Package it installed
+//! (ADR-0016 clause 10), and a label is refused there as in `fleet.*` (ADR-0024 clause 20). A
+//! label already stored with a key in either space is ignored: it enters no effective description
+//! and nothing inherits it, and the fleet row lists it as ignored.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -29,11 +33,28 @@ pub const RESERVED_PREFIX: &str = "fleet.";
 /// it as the Client Agent (ADR-0024 clause 19).
 pub const CLIENT_KIND_PREFIX: &str = "supervisor.kind.";
 
+/// Whether a label key is in a space no label may speak in: the Server's `fleet.` or a
+/// Supervisor's `supervisor.` (ADR-0024 clause 20).
+pub fn is_reserved_label(key: &str) -> bool {
+    key.starts_with(RESERVED_PREFIX) || key.starts_with(opamp::attributes::SUPERVISOR_PREFIX)
+}
+
+/// The labels a Client Agent's group inherits (ADR-0024 clause 19): its own, without the ones in
+/// a reserved space, which match nothing.
+pub fn inheritable(labels: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    labels
+        .iter()
+        .filter(|(key, _)| !is_reserved_label(key))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect()
+}
+
 /// Why a label set was refused (`PUT /api/v1/agents/{uid}/labels`).
 pub enum LabelError {
     /// No Agent of that identity is known. Labels are attached to something the Server has seen.
     UnknownAgent,
-    /// A pair no Selector could use, or a key in the Server's reserved `fleet.` space.
+    /// A pair no Selector could use, or a key in the Server's reserved `fleet.` space or the
+    /// Supervisor's `supervisor.` space.
     Invalid(String),
     /// A label key the Agent already reports. Refused rather than applied: a label that could
     /// override `os.type`, `host.arch`, or `service.name` would let a slip in the UI offer an
@@ -44,8 +65,8 @@ pub enum LabelError {
 }
 
 /// Whether a label set can be applied: an empty key or value can match no Selector and is far
-/// more likely a mistake than an intent, and a `fleet.` key is the Server's own (ADR-0024
-/// clause 20).
+/// more likely a mistake than an intent, a `fleet.` key is the Server's own, and a `supervisor.`
+/// key a Supervisor's (ADR-0024 clause 20).
 pub fn check_pairs(set: &BTreeMap<String, String>) -> Result<(), String> {
     for (key, value) in set {
         if key.trim().is_empty() {
@@ -56,6 +77,14 @@ pub fn check_pairs(set: &BTreeMap<String, String>) -> Result<(), String> {
                 "label {key:?} is in the Server's reserved {RESERVED_PREFIX:?} space — the Server \
                  fills those keys from the certificate of the Host an Agent arrives over; choose \
                  another key"
+            ));
+        }
+        if key.starts_with(opamp::attributes::SUPERVISOR_PREFIX) {
+            return Err(format!(
+                "label {key:?} is in the Supervisor's reserved {:?} space — a Supervisor states \
+                 those keys, the kinds its Client carries and the version of the Package it \
+                 installed; choose another key",
+                opamp::attributes::SUPERVISOR_PREFIX
             ));
         }
         if value.trim().is_empty() {
@@ -115,8 +144,8 @@ impl Sources<'_> {
 }
 
 /// The description a Selector is matched against (ADR-0024 clause 18): the Host's values, what the
-/// Agent reported without its `fleet.*` attributes, its own labels and then its Client Agent's —
-/// each key from the first source that has it.
+/// Agent reported without its `fleet.*` attributes, its own labels and then its Client Agent's,
+/// none in `fleet.*` or `supervisor.*` (clause 20) — each key from the first source that has it.
 ///
 /// Reported wins over every label. The API refuses a colliding key up front, so this is the second
 /// line rather than the first — but it is the one that holds when an Agent *starts* reporting a
@@ -151,7 +180,7 @@ pub fn effective_description(sources: &Sources<'_>) -> Option<AgentDescription> 
         .map(str::to_string)
         .collect();
     for (key, value) in sources.own.iter().chain(sources.inherited) {
-        if ours(key) || !taken.insert(key.clone()) {
+        if is_reserved_label(key) || !taken.insert(key.clone()) {
             continue;
         }
         effective
@@ -184,6 +213,16 @@ pub fn ignored(description: Option<&AgentDescription>) -> Vec<String> {
         .into_iter()
         .filter(|key| key.starts_with(RESERVED_PREFIX))
         .map(str::to_string)
+        .collect()
+}
+
+/// The labels this Agent has in a reserved space (ADR-0024 clause 20) — stored, and matching
+/// nothing. Listed on the fleet row, as a shadowed label is, rather than dropped in silence.
+pub fn ignored_labels(labels: &BTreeMap<String, String>) -> Vec<String> {
+    labels
+        .keys()
+        .filter(|key| is_reserved_label(key))
+        .cloned()
         .collect()
 }
 
@@ -304,16 +343,71 @@ mod tests {
         ));
     }
 
-    /// An empty key or value is refused, and so is a key in the Server's `fleet.` space.
+    /// An empty key or value is refused, and so is a key in the Server's `fleet.` space or the
+    /// Supervisor's `supervisor.` space, each naming the key and its space.
     /// Verifies: ADR-0024
     #[test]
-    fn empty_keys_and_values_and_fleet_keys_are_refused() {
+    fn empty_keys_and_values_and_reserved_keys_are_refused() {
         assert!(check_pairs(&labels(&[("rollout", "canary")])).is_ok());
         assert!(check_pairs(&labels(&[("", "canary")])).is_err());
         assert!(check_pairs(&labels(&[("rollout", "  ")])).is_err());
         let refused = check_pairs(&labels(&[("fleet.x", "1")])).expect_err("reserved");
-        assert!(refused.contains("fleet.x"), "{refused}");
+        assert!(refused.contains("\"fleet.x\""), "{refused}");
+        assert!(refused.contains("the Server's reserved"), "{refused}");
         assert!(check_pairs(&labels(&[("fleetwide", "1")])).is_ok());
+        for key in [
+            "supervisor.kind.collector",
+            "supervisor.package.version",
+            "supervisor.x",
+        ] {
+            let refused = check_pairs(&labels(&[(key, "true")])).expect_err(key);
+            assert!(refused.contains(&format!("{key:?}")), "{refused}");
+            assert!(refused.contains("the Supervisor's reserved"), "{refused}");
+        }
+        assert!(check_pairs(&labels(&[("supervisor", "night shift")])).is_ok());
+        assert!(check_pairs(&labels(&[("supervisor_team", "ops")])).is_ok());
+    }
+
+    /// A label already stored in the Supervisor's space — accepted before the refusal above — is
+    /// ignored: whether the Agent's own or its Client Agent's, it never reaches the effective
+    /// description, so no Selector matches it and package matching never reads it as the version a
+    /// Supervisor installed; the label beside it still matches, and the fleet row lists it.
+    /// Verifies: ADR-0024
+    #[test]
+    fn a_stored_label_in_the_supervisors_space_is_ignored() {
+        let described = described(&[("os.type", "linux")]);
+        let stored = labels(&[
+            ("supervisor.kind.x", "true"),
+            ("supervisor.package.version", "9.9.9"),
+            ("rollout", "canary"),
+        ]);
+        for (own, inherited) in [(&stored, &NONE), (&NONE, &stored)] {
+            let effective = effective_description(&Sources {
+                host: &NONE,
+                reported: Some(&described),
+                own,
+                inherited,
+            })
+            .expect("some");
+            let keys = reported_keys(Some(&effective));
+            assert!(
+                !keys.iter().any(|key| key.starts_with("supervisor.")),
+                "{keys:?}"
+            );
+            assert!(!crate::deployments::matches(
+                &labels(&[("supervisor.kind.x", "true")]),
+                Some(&effective)
+            ));
+            assert!(crate::deployments::matches(
+                &labels(&[("rollout", "canary")]),
+                Some(&effective)
+            ));
+        }
+        assert_eq!(
+            ignored_labels(&stored),
+            ["supervisor.kind.x", "supervisor.package.version"]
+        );
+        assert_eq!(inheritable(&stored), labels(&[("rollout", "canary")]));
     }
 
     /// The Host's values come first, a reported `fleet.*` attribute is left out and listed, the

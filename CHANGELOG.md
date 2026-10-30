@@ -54,6 +54,26 @@ once its tag exists.
 
 ### Changed
 
+- **Breaking: the Client refuses an `[attributes]` key in the `supervisor.` namespace**
+  ([ADR-0016](docs/adr/0016-what-an-agent-reports-about-itself.md) clause 10). The namespace is
+  the Supervisor's own statement. A `supervisor.kind.*` entry made every Agent of the host look
+  like a Client's own Agent to the Server. A `supervisor.package.version` entry chose the version
+  the next Package is held against: on a Supervisor's Agent until its first install, and on the
+  Client's own Agent, which reports none of its own, for as long as the entry stood, so its
+  self-update Packages were held against it. Startup now fails with a message naming the key,
+  whether the file quotes it (`"supervisor.kind.x"`), writes it dotted (`supervisor.kind.x`), or
+  puts it under `[attributes.supervisor]`. **What to do:** remove every such entry from
+  `supervisor.toml` before upgrading, or the Client does not start.
+
+- **The Server refuses a label in the `supervisor.` namespace**
+  ([ADR-0024](docs/adr/0024-the-fleet-record-of-agents-and-hosts.md) clause 20).
+  `PUT /api/v1/agents/{uid}/labels`, which the UI's label editor uses, answers `400` naming the
+  key, as it does for `fleet.`: a Selector would otherwise match such a label as if a Supervisor
+  had stated it. A label already stored in that namespace is ignored: no Selector and no package
+  match reads it, nothing inherits it, and the fleet row lists it in `ignored_labels`. The next
+  label set put without it, as the UI's label editor puts one, removes it. **What to do:**
+  nothing.
+
 - **The UI colours as TOML only the Client's own configuration**
   ([ADR-0031](docs/adr/0031-the-ui-colours-configurations-with-shiki.md)). The core's UI chooses a
   grammar for `otelcol*`, the Client's own type and `fluent-bit` alone. An Agent of the one other
