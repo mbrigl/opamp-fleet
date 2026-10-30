@@ -10,9 +10,10 @@
 //! CA is a renewal and is signed at once; a CSR on an enrolment connection waits until an operator
 //! approves it ([`crate::enrolment`], ADR-0021).
 
+use fleet_core::x509::issue::{random_serial, CLOCK_SKEW};
 use rcgen::{
     CertificateSigningRequestParams, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
-    KeyUsagePurpose, SanType, SerialNumber,
+    KeyUsagePurpose, SanType,
 };
 use x509_parser::prelude::{FromDer, X509Certificate};
 use zeroize::Zeroizing;
@@ -20,8 +21,7 @@ use zeroize::Zeroizing;
 use crate::config::ClientCaConfig;
 use crate::revocation::{CertId, Facts, Signed, SubjectValues};
 
-/// The SAN URI prefix naming the host a certificate was issued to (ADR-0022 clause 11).
-pub const HOST_URI_PREFIX: &str = "urn:opamp-fleet:host:";
+pub use fleet_core::x509::HOST_URI_PREFIX;
 
 /// The issuing authority, loaded once at startup. Holding it parsed is what makes `AppState`'s
 /// capability honest: `AcceptsConnectionSettingsRequest` is declared only while this exists.
@@ -282,58 +282,29 @@ pub fn bootstrap_proof_certificate(csr_pem: &str) -> Result<Option<Vec<u8>>, Str
 #[must_use]
 pub fn cert_id(der: &[u8]) -> Option<CertId> {
     let (_, certificate) = X509Certificate::from_der(der).ok()?;
-    Some(CertId::new(
-        certificate.issuer().as_raw(),
-        &hex::encode(certificate.raw_serial()),
-    ))
+    let (issuer, serial) = fleet_core::x509::read::id(&certificate);
+    Some(CertId { issuer, serial })
 }
 
 /// What a CSR carrying both proofs is answered (ADR-0015 clause 21).
 pub const BOTH_PROOFS: &str =
     "the certificate signing request carries both a renewal proof and a bootstrap proof";
 
-/// 16 bytes from the system's secure random source, the top bit cleared so the serial is a
-/// positive integer (RFC 5280 §4.1.2.2).
-pub(crate) fn random_serial() -> Result<SerialNumber, String> {
-    use ring::rand::SecureRandom as _;
-    let mut bytes = [0u8; 16];
-    ring::rand::SystemRandom::new()
-        .fill(&mut bytes)
-        .map_err(|_| "no secure random source for a serial number".to_string())?;
-    bytes[0] &= 0x7f;
-    Ok(SerialNumber::from_slice(&bytes))
-}
-
 /// What a certificate (DER) says about itself: issuer and serial, subject, the SHA-256 of its
 /// public key, and when it expires — for the register, and for a peer's certificate at admission.
 ///
 /// # Errors
-/// Returns an error when the certificate does not parse.
+/// Returns an error when the certificate does not parse or its serial is longer than 20 octets.
 pub fn facts(der: &[u8]) -> Result<Facts, String> {
     use sha2::{Digest, Sha256};
-    let (_, cert) = X509Certificate::from_der(der)
-        .map_err(|e| format!("the certificate does not parse: {e}"))?;
-    // RFC 5280 4.1.2.2: at most 20 octets, the length the register and every Gateway's list are
-    // bounded on (Q-2). A certificate with a longer serial — only a foreign CA could issue one —
-    // is not taken.
-    if cert.raw_serial().len() > crate::revocation::MAX_SERIAL_HEX / 2 {
-        return Err("the certificate's serial is longer than 20 octets".to_string());
-    }
+    // A serial past RFC 5280's 20 octets is refused here: the register and every Gateway's list
+    // are bounded on that length (Q-2).
+    let cert = fleet_core::x509::read::certificate(der)?;
     let not_after = cert.validity().not_after.timestamp();
-    let host = cert
-        .subject_alternative_name()
-        .ok()
-        .flatten()
-        .and_then(|san| {
-            san.value.general_names.iter().find_map(|name| match name {
-                x509_parser::extensions::GeneralName::URI(uri) => {
-                    uri.strip_prefix(HOST_URI_PREFIX).map(str::to_string)
-                }
-                _ => None,
-            })
-        });
+    let host = fleet_core::x509::read::host(&cert);
+    let (issuer, serial) = fleet_core::x509::read::id(&cert);
     Ok(Facts {
-        id: CertId::new(cert.issuer().as_raw(), &hex::encode(cert.raw_serial())),
+        id: CertId { issuer, serial },
         issuer_name: name_text(cert.issuer()),
         subject: name_text(cert.subject()),
         // The key itself, not its SubjectPublicKeyInfo: the fingerprint an enrolment request is
@@ -603,10 +574,6 @@ fn verify_with(
         .verify(message, signature)
         .map_err(|_| ())
 }
-
-/// How far an issued certificate's life starts before the moment it is signed, so an Agent whose
-/// clock runs a little behind the Server's does not hold a certificate that is not yet valid.
-const CLOCK_SKEW: time::Duration = time::Duration::minutes(5);
 
 /// `now + validity_days`, in the time type rcgen speaks.
 fn not_after(validity_days: u32) -> Result<time::OffsetDateTime, String> {

@@ -22,11 +22,16 @@ pkcs12.workspace = true
 pkcs5.workspace = true
 der.workspace = true
 rcgen.workspace = true
-x509-parser.workspace = true
+x509-parser = { workspace = true, features = ["verify"] }
 # The host a certificate that names none is taken for, on the Server and on a Gateway alike
 # (ADR-0015): the SHA-256 of its issuer and serial.
 sha2.workspace = true
 hex.workspace = true
+# A client certificate as the Server and a Gateway read it, and the serial and start every
+# certificate this project makes gets (`x509`): `verify` checks a CA's signature, `ring` draws the
+# serial and `time` is the date type rcgen speaks — all three already linked by both ends.
+ring.workspace = true
+time.workspace = true
 # The key a `bootstrap.p12` opens to is held in a buffer wiped on drop (ADR-0014). No TLS or
-# crypto backend comes with it (ADR-0012).
+# crypto backend comes with zeroize itself (ADR-0012).
 zeroize.workspace = true

@@ -14,7 +14,6 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use serde::Deserialize;
-use sha2::Digest as _;
 use tokio::sync::watch;
 use tokio::time::Instant;
 use tracing::{info, warn};
@@ -104,7 +103,8 @@ impl RevocationList {
         }
         match certificate_id(der) {
             Some(id) if !held.revoked.contains(&id) => Verdict::Admit,
-            // One the handshake verified always parses; one that does not is not admitted.
+            // One the handshake verified always parses; one that does not, or that the Server would
+            // not take, is not admitted.
             _ => Verdict::Revoked,
         }
     }
@@ -155,16 +155,12 @@ impl RevocationList {
 }
 
 /// A certificate as the Server's register names it: the SHA-256 of its issuer's DER-encoded name,
-/// and its serial in lowercase hex without leading zeros.
+/// and its serial in lowercase hex without leading zeros. `None` for one the Server would not take
+/// either: one that does not parse, or whose serial is longer than the 20 octets the list is
+/// bounded on, which the list therefore cannot judge.
 pub(crate) fn certificate_id(der: &[u8]) -> Option<(String, String)> {
-    let (_, cert) = x509_parser::parse_x509_certificate(der).ok()?;
-    let issuer = hex::encode(sha2::Sha256::digest(cert.issuer().as_raw()));
-    let serial = hex::encode(cert.raw_serial());
-    let serial = serial.trim_start_matches('0');
-    Some((
-        issuer,
-        if serial.is_empty() { "0" } else { serial }.to_string(),
-    ))
+    let certificate = fleet_core::x509::read::certificate(der).ok()?;
+    Some(fleet_core::x509::read::id(&certificate))
 }
 
 #[derive(Deserialize)]
@@ -400,6 +396,26 @@ mod tests {
                 "nothing was taken from the list {how}"
             );
         }
+    }
+
+    /// A certificate the list cannot name, its serial past 20 octets, is not admitted by a fresh
+    /// list that names nothing: the verdict every downstream route takes refuses it.
+    /// Verifies: Q-2
+    #[tokio::test]
+    async fn a_serial_past_twenty_octets_is_not_admitted() {
+        let with_serial = |octets: usize| {
+            let key = rcgen::KeyPair::generate().expect("key");
+            let mut params = rcgen::CertificateParams::new(vec!["edge".into()]).expect("params");
+            let mut serial = vec![0x11; octets];
+            serial[0] = 0x01;
+            params.serial_number = Some(rcgen::SerialNumber::from(serial));
+            params.self_signed(&key).expect("cert").der().to_vec()
+        };
+        let list = RevocationList::new(Duration::from_secs(300));
+        list.replace(HashSet::new(), None);
+        assert_eq!(list.verdict(&with_serial(20)), Verdict::Admit);
+        assert!(certificate_id(&with_serial(21)).is_none());
+        assert_eq!(list.verdict(&with_serial(21)), Verdict::Revoked);
     }
 
     /// A Gateway with no list yet, or one past its age, admits nobody; with a fresh list it admits

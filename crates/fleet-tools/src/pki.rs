@@ -13,9 +13,11 @@ use std::path::{Path, PathBuf};
 use clap::Subcommand;
 use fleet_core::ending::Standing;
 use fleet_core::naming;
+// The serial and the start every certificate gets, as the client CA's (ADR-0032 clause 5).
+use fleet_core::x509::issue::{random_serial, CLOCK_SKEW};
 use rcgen::{
     BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa,
-    Issuer, KeyPair, KeyUsagePurpose, SanType, SerialNumber,
+    Issuer, KeyPair, KeyUsagePurpose, SanType,
 };
 use time::{Duration, OffsetDateTime};
 use x509_parser::prelude::{FromDer, X509Certificate};
@@ -30,9 +32,6 @@ pub const BOOTSTRAP_CA_DAYS: u32 = 365;
 pub const SERVER_DAYS: u32 = 397;
 /// The product the certificates are named for unless told otherwise (ADR-0032 clause 17).
 pub const DEFAULT_PRODUCT: &str = naming::DEFAULT_PRODUCT;
-
-/// How far a certificate's life starts before the moment it is signed, as the client CA's do.
-const CLOCK_SKEW: Duration = Duration::minutes(5);
 
 /// The commands of `opamp-fleetctl pki` (ADR-0032 clause 6, ADR-0028 clause 22).
 #[derive(Subcommand)]
@@ -633,17 +632,6 @@ pub fn exit_code(endings: &[Ending], now: OffsetDateTime) -> u8 {
         1 => 1,
         _ => 2,
     }
-}
-
-/// A serial of 16 random bytes, positive, as the client CA's are (ADR-0032 clause 5).
-fn random_serial() -> Result<SerialNumber, String> {
-    use ring::rand::SecureRandom as _;
-    let mut bytes = [0u8; 16];
-    ring::rand::SystemRandom::new()
-        .fill(&mut bytes)
-        .map_err(|_| "no secure random source for a serial number".to_string())?;
-    bytes[0] &= 0x7f;
-    Ok(SerialNumber::from_slice(&bytes))
 }
 
 // ---------------------------------------------------------------------------------------------

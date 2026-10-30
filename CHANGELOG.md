@@ -98,6 +98,16 @@ once its tag exists.
   check. **What to do:** nothing on upgrade. An administrator's tool that opens the second
   service's process, a debugger or a process explorer, has to run elevated.
 
+- **A Gateway refuses a certificate whose serial is longer than 20 octets, as the Server does**
+  ([ADR-0015](docs/adr/0015-client-modes-and-the-gateway.md)). RFC 5280 allows a serial of at most
+  20 octets, and the Server's register and the revocation list every Gateway fetches are bounded on
+  that length, so the Server already refused such a certificate; a Gateway admitted one its list
+  could not name. A downstream peer presenting one is now answered `401` on `/v1/opamp`, on both
+  transports, on the download route and on `/v1/package-floors`, and binds nothing. Only a foreign
+  CA issues such a certificate. **What to do:** nothing on upgrade. A host behind a Gateway whose
+  certificate has a longer serial was already refused by the Server directly; give it a
+  certificate of the fleet's client CA.
+
 ## [0.7.0]
 
 ### Added
