@@ -19,7 +19,8 @@ name: Checks
 # both (ADR-0010), checked by scripts/check-action-refs.sh --resolve, which reads the tags with git
 # ls-remote; and scripts/check-build-hardening.sh: no checkout keeps the token, the release is gated
 # on advisories and built uncached with pinned tools, and the compiler, the release profile's
-# overflow checks and the crates that forbid unsafe code are as that script lists.
+# overflow checks and the crates that forbid unsafe code are as that script lists. It also runs
+# scripts/check-fuzz-targets.sh: the fuzz matrix, fuzz/Cargo.toml and fuzz/seeds/ name one set.
 #
 # The rust job builds, tests, and lints the Cargo workspace with scripts/check-rust.sh, the commands
 # of README.md → "Build, Test & Run" on the stack of ADR-0008, the same script scripts/check-all.sh
@@ -145,6 +146,10 @@ jobs:
         run: bash scripts/test-check-build-hardening.sh
       - name: Check that checkouts keep no token and the release is gated, uncached and pinned
         run: bash scripts/check-build-hardening.sh
+      - name: Self-test the fuzz target check
+        run: bash scripts/test-check-fuzz-targets.sh
+      - name: Check that fuzz/Cargo.toml, the fuzz matrix and the seeds name the same targets
+        run: bash scripts/check-fuzz-targets.sh
 
   sensors:
     runs-on: ubuntu-latest

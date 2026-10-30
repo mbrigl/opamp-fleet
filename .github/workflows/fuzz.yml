@@ -24,6 +24,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Every [[bin]] of fuzz/Cargo.toml, each with seeds under fuzz/seeds/; one per line, as
+        # scripts/check-fuzz-targets.sh reads them.
         target:
           - frame_decode
           - body_decode

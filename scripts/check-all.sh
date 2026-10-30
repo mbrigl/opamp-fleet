@@ -191,6 +191,8 @@ run "Action reference self-test" scripts/test-check-action-refs.sh
 run "Action references" scripts/check-action-refs.sh
 run "Build hardening self-test" scripts/test-check-build-hardening.sh
 run "Build hardening" scripts/check-build-hardening.sh
+run "Fuzz target self-test" scripts/test-check-fuzz-targets.sh
+run "Fuzz targets" scripts/check-fuzz-targets.sh
 run "Fixture isolation" scripts/test-fixture-isolation.sh
 # The repository settings sensor reads GitHub and runs on a human's instruction (ADR-0002); its
 # self-test runs here.
