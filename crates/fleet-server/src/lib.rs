@@ -164,6 +164,29 @@ impl Records {
             Records::Postgres(db) => Box::new(postgres::ledger::PgLedgerStore::new(db.clone())),
         })
     }
+
+    /// Opens every store on these records through the constructors the Server's startup uses,
+    /// and lets go of them: what `server migrate` checks before it reports a migration done. A
+    /// store the Server opens at startup is opened here too, so a record the first start would
+    /// refuse is refused now. The artifacts are the filesystem's under `data_dir`, and the
+    /// bootstrap record is opened without its CA's key, as a Server without `[enrolment]
+    /// bootstrap_ca` opens it.
+    ///
+    /// # Errors
+    /// Returns the first store's error that does not open, or holds a record that does not decode.
+    pub fn open_every_store(&self, data_dir: &std::path::Path) -> Result<(), String> {
+        let clock: Arc<dyn fleet::Clock> = Arc::new(clock::SystemClock);
+        AppState::on(self)?;
+        let packages =
+            packages::PackageStore::open_on(self, data_dir, &config::BlobsConfig::default())?;
+        PackageOffering::on(self, packages)?;
+        bootstrap::BootstrapCertificates::on(None, self, clock.clone())?;
+        enrolment::Enrolment::open_on(clock.clone(), self.enrolment())?;
+        floors::PackageFloors::open(self.floors())?;
+        revocation::Revocations::open(self.ledger()?, clock, Vec::new())?;
+        fs::FsAuditStore::open(data_dir)?;
+        Ok(())
+    }
 }
 
 /// The default wiring of the fleet's state to its storage adapters (ADR-0009): it lives here, in

@@ -768,15 +768,11 @@ fn assignment(
     }))
 }
 
-/// Opens the new `data_dir` as the Server would, so what would not start fails here.
+/// Opens the new `data_dir` as the Server would, every store `Records` holds and the audit record
+/// beside it, so what would not start fails here.
 fn check_opens(data_dir: &Path, report: &mut Report) {
     let opened = fs::open_data_dir(data_dir, true)
-        .and_then(|()| crate::fleet::AppState::new(data_dir.to_path_buf()).map(|_| ()))
-        .and_then(|()| crate::packages::PackageStore::open(data_dir.to_path_buf()).map(|_| ()))
-        .and_then(|()| fs::FsDeploymentBackend::open(data_dir)?.load().map(|_| ()))
-        .and_then(|()| fs::FsLedgerStore::open(data_dir)?.load().map(|_| ()))
-        .and_then(|()| fs::FsBootstrapStore::open(data_dir)?.load().map(|_| ()))
-        .and_then(|()| fs::FsAuditStore::open(data_dir).map(|_| ()));
+        .and_then(|()| crate::Records::Files(data_dir.to_path_buf()).open_every_store(data_dir));
     match opened {
         Ok(()) => report.line(format!("opened: {} as the Server will", data_dir.display())),
         Err(e) => report.failed(format!("the new data directory does not open: {e}")),
@@ -1321,5 +1317,30 @@ mod tests {
             "{:?}",
             report.lines
         );
+    }
+
+    /// The check opens every store the Server opens at startup: a migrated data directory whose
+    /// floor or enrolment file does not read fails it, as the first start would.
+    /// Verifies: ADR-0029
+    #[test]
+    fn the_check_fails_on_a_floor_or_enrolment_file_the_server_would_refuse() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let old = old_layout(root.path());
+        let data_dir = root.path().join("fleet-data");
+        let report = run(&old.config_dir, &old.packages_dir, &data_dir).expect("migrate");
+        assert!(!report.trust_failed, "{:?}", report.lines);
+
+        for name in [fs::PACKAGE_FLOORS, fs::ENROLMENT] {
+            write(&data_dir.join(name), b"not json");
+            let mut report = Report::default();
+            check_opens(&data_dir, &mut report);
+            assert!(report.trust_failed, "{name}: {:?}", report.lines);
+            assert!(
+                report.lines.iter().any(|line| line.contains(name)),
+                "{name}: {:?}",
+                report.lines
+            );
+            std::fs::remove_file(data_dir.join(name)).expect("remove");
+        }
     }
 }
