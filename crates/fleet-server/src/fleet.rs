@@ -153,16 +153,33 @@ pub struct Assignment {
 
 impl Assignment {
     /// An assignment as a store holds it, its Package as the two parts of its identity, decided
-    /// here so every store reads it by the same rule (ADR-0029). Each store names the
-    /// record before the message.
+    /// here so every store reads it by the rules its write met (ADR-0029): the Deployment's and
+    /// each Configuration's name in the ADR-0019 grammar, the Package's identity in the token
+    /// rule, and each revision named by a content hash, the form [`revision_hash`] gives it.
+    /// Whether the revision is still retained is not asked here. Each store names the record
+    /// before the message.
+    ///
+    /// [`revision_hash`]: crate::configs::revision_hash
     ///
     /// # Errors
-    /// Returns an error when the Package's identity breaks the token rule.
+    /// Returns the rule the assignment breaks.
     pub fn load(
         deployment: String,
         package: Option<(&str, &str)>,
         configurations: BTreeMap<String, String>,
     ) -> Result<Self, String> {
+        crate::configs::validate_name(&deployment)
+            .map_err(|e| format!("the assignment's deployment {deployment:?}: {e}"))?;
+        for (name, revision) in &configurations {
+            crate::configs::validate_name(name)
+                .map_err(|e| format!("the assignment's configuration {name:?}: {e}"))?;
+            if !crate::blobs::is_hash(revision) {
+                return Err(format!(
+                    "the assignment's configuration {name:?}: revision {revision:?} is no content \
+                     hash"
+                ));
+            }
+        }
         let package = package
             .map(|(agent_type, version)| PackageId::load(agent_type, version))
             .transpose()
@@ -3615,6 +3632,29 @@ fn refuse_unreleasable(
 #[cfg(test)]
 mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// A stored assignment is loaded by the rules its write met: its Deployment and Configuration
+    /// names keep the name grammar, and each revision it pins is named by a content hash. Whether
+    /// the revision is still retained is not asked.
+    /// Verifies: ADR-0026, ADR-0029
+    #[test]
+    fn an_assignment_is_loaded_by_the_rules_it_was_written_by() {
+        use super::Assignment;
+        use std::collections::BTreeMap;
+        let hash = "0".repeat(64);
+        let pins = |name: &str, hash: &str| BTreeMap::from([(name.to_string(), hash.to_string())]);
+        Assignment::load("stable".to_string(), None, pins("base", &hash))
+            .expect("a well-formed assignment loads, retained or not");
+        let deployment = Assignment::load("Stable".to_string(), None, pins("base", &hash))
+            .expect_err("a Deployment name outside the grammar");
+        assert!(deployment.contains("\"Stable\""), "{deployment}");
+        let configuration = Assignment::load("stable".to_string(), None, pins("Base", &hash))
+            .expect_err("a Configuration name outside the grammar");
+        assert!(configuration.contains("\"Base\""), "{configuration}");
+        let revision = Assignment::load("stable".to_string(), None, pins("base", "0123abcd"))
+            .expect_err("a revision that is no content hash");
+        assert!(revision.contains("\"0123abcd\""), "{revision}");
+    }
 
     /// The host derived for a certificate that names none is the one this Server derived before
     /// the derivation moved into `fleet-core`: hosts already in the register keep their ids.

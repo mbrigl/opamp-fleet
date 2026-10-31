@@ -248,7 +248,7 @@ pub(crate) mod tests {
             assignment: Some(crate::fleet::Assignment {
                 deployment: "stable".to_string(),
                 package: Some(PackageId::new("otelcol", "1.2.3").expect("package id")),
-                configurations: BTreeMap::from([("base".to_string(), "0123abcd".to_string())]),
+                configurations: BTreeMap::from([("base".to_string(), "0123abcd".repeat(8))]),
             }),
             labels: BTreeMap::from([("rollout".to_string(), "canary".to_string())]),
             host: Some("0192f0c4-host".to_string()),

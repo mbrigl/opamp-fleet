@@ -73,7 +73,10 @@ struct DeploymentMeta {
     configurations: Vec<String>,
 }
 
+/// One Package a Deployment holds. Unknown fields are refused, as the PostgreSQL store refuses
+/// them in its `packages` column.
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PackageRefMeta {
     agent_type: String,
     version: String,
