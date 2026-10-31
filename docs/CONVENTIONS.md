@@ -21,3 +21,8 @@ skimmed. The design revision drops what prevented nothing
 - **Code cites a clause, never a place in a document** — a comment that relies on a decision
   names the ADR and its clause (`ADR-0037 clause 25`), never "point N", a paragraph, or a line.
   A normalization remaps clauses by their map; a place in a document it cannot follow.
+- **A connection's behaviour is tested over each protocol the listener offers** — a plane served
+  over TLS offers HTTP/2 and HTTP/1.1 by ALPN, and HTTP/2 drops the connection-specific headers
+  (`Connection`, `Keep-Alive`, `Upgrade`, `Transfer-Encoding`), so a behaviour that closes, keeps
+  or upgrades a connection by one of them is tested over HTTP/2 as well as HTTP/1.1, or restricted
+  to the one it works on.

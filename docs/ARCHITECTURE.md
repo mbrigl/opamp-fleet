@@ -9,7 +9,7 @@
 > **Kept current by:** Markus Brigl. A document everyone may edit and nobody owns is
 > the one that goes stale.
 >
-> **Last design revision:** none yet, due after 20 changes. The revision that ran moves the
+> **Last design revision:** 2026-10-31, due after 20 changes. The revision that ran moves the
 > date; the number is this project's to set; a sensor counts the changes outside `docs/` since
 > the commit that set the date and says when the next is due
 > ([ADR-0006](adr/0006-feature-layer.md)).
@@ -20,12 +20,15 @@ What sits outside the system and what crosses its boundary. A diagram earns its 
 than anywhere else, and none beats one that has stopped being true.
 
 ```text
- operator ── REST / bundled UI ──▶ Operator plane :4321 ─┐
-                                                         │  Server (Linux)
- Client ──── OpAMP, mTLS ──────────────▶ Agent plane :4320 ─┘   │
-   │  ▲                                                          └─▶ data_dir: fleet state,
-   │  └── Gateway (a Client) ◀── OpAMP, mTLS ── other Clients        register, audit record,
-   │                                                                 artifacts by SHA-256
+ operator ─────── REST / bundled UI ─▶ Operator plane :4321 ┐
+ opamp-fleetctl ─ REST, uploads ─────▶ Operator plane :4321 ┤
+ Client ── OpAMP; downloads, floors, ─▶ Agent plane :4320 ──┤
+   │  ▲     revocations; mTLS                               └─ Server (Linux)
+   │  │                                                        ├─▶ data_dir: fleet state, register,
+   │  │                                                        │   audit record, artifacts
+   │  │                                                        ├─▶ PostgreSQL: records
+   │  │                                                        └─▶ S3 bucket: artifacts
+   │  └── Gateway (a Client) ◀── OpAMP, mTLS ── other Clients
    ├── Supervisor Endpoint (loopback) ◀── a Collector's opampextension
    ├── Managed Processes: Collector, any command — where a process account is registered, under
    │     it, started by the second service over a Unix socket or named pipe
@@ -50,6 +53,9 @@ than anywhere else, and none beats one that has stopped being true.
   Client fetches only from its own Server's origin, or from its Gateway. What arrives is checked
   against its hash and the operator's signature
   ([ADR-0027](adr/0027-packages-signatures-and-delivery.md)).
+- **The Server's stores** are its `data_dir` by default; its records may live in one PostgreSQL
+  database and its artifacts in one bucket of an S3-compatible store instead, both reached over
+  TLS beyond the loopback ([ADR-0029](adr/0029-the-servers-state-and-its-stores.md)).
 - **The service manager** starts the Client and restarts it after a self-update
   ([ADR-0018](adr/0018-the-client-updates-itself-from-a-signed-package.md)). Where a process
   account is registered, it also runs the second service, which starts the Managed Processes
@@ -66,16 +72,18 @@ golden path and the test pattern an agent copies from are named here.
 Five crates in one workspace ([ADR-0008](adr/0008-five-crates-on-tokio-and-axum.md)):
 
 - **`opamp`** — the OpAMP communication layer, publishable on its own
-  ([ADR-0008](adr/0008-five-crates-on-tokio-and-axum.md)). Always the
-  generated types, framing and the endpoint's body rules. Behind `client`, an Agent's protocol state
-  machine, the two transports, and `client::connection`, which builds a connection, its TLS and its
-  HTTP client from a `Connection` the application fills in. Behind `server`, the endpoint around a
+  ([ADR-0008](adr/0008-five-crates-on-tokio-and-axum.md)). Always, without a feature, the
+  generated types (`proto`), the framing (`frame`), the endpoint's body rules (`endpoint`), the
+  `InstanceUid` (`uid`) and the attribute keys (`attributes`). Behind the feature `client`, an
+  Agent's protocol state machine, the two transports, the reconnect backoff with jitter
+  (`client::backoff`), and `client::connection`, which builds a connection, its TLS and its HTTP
+  client from a `Connection` the application fills in. Behind `server`, the endpoint around a
   `Handler`, `server::listen`, the listener with its TLS and its bounds on connection setup, and
   `server::pace`, the floor every body and WebSocket message it serves is held to. The server
   side takes a WebSocket over through hyper's upgrade and reads its frames with
   `tokio-tungstenite`, the library the client side uses too.
-  `tls` reads PEM and installs the ring provider. It reads no file and knows nothing of this
-  project.
+  `tls`, behind either feature, reads PEM and installs the ring provider. It reads no file and
+  knows nothing of this project.
 - **`fleet-core`** — what the Server and the Client implement identically beyond the protocol: the
   version, the platform aliases, the statements a package signature and a floor cover
   ([ADR-0028](adr/0028-package-versions-high-water-mark-and-floor.md)), the
@@ -89,8 +97,12 @@ Five crates in one workspace ([ADR-0008](adr/0008-five-crates-on-tokio-and-axum.
   certificate gets in the adapter `x509::issue` — and the
   bootstrap certificate's PKCS#12 file, whose rule is core and whose reading and writing with
   `p12-keystore` is the adapter `pkcs12::file` (ADR-0022).
-- **`fleet-server`** — the Server: the fleet and its Hosts, its Configurations, labels, packages
-  and Deployments, the Agent plane and the Operator plane.
+- **`fleet-server`** — the Server, the program `server`: the fleet and its Hosts, its
+  Configurations, labels (`labels`, which also makes the effective description Selectors match),
+  packages and Deployments, the Agent plane and the Operator plane, whose credential check is
+  `credentials`. Besides serving, the program runs `pki status` (`pki`, which also warns the
+  running Server of an ending certificate), `hash-credential`, `audit-verify`, `migrate` and
+  `migrate-to-postgres`, each before anything is served.
 - **`fleet-agent`** — the Client in all its modes, the program `supervisor`.
 - **`fleet-tools`** — the operator tool, the one program `opamp-fleetctl`: its `package` commands
   fetch, pack, hash and sign package artifacts — or sign a Package's signing file from the UI
@@ -99,12 +111,13 @@ Five crates in one workspace ([ADR-0008](adr/0008-five-crates-on-tokio-and-axum.
 Inside the Server and the Client the code is ports and adapters
 ([ADR-0009](adr/0009-ports-and-adapters.md)): a **core** that holds the domain and owns its
 **ports**, **adapters** that bind a port to a technology, and a **composition root** — `lib.rs`,
-`main.rs`, and on the Client `supervisor`, `service::runtime` and `service::enrol` — that wires the
-two. Every
-module's role is listed in
+`main.rs`, and on the Client `supervisor`, `service::runtime` and `service::enrol`, with the test
+stubs `bin::stub_agent` and `bin::stub_crasher` — that wires the two. The role of every module of
+the five crates is listed in
 [`dependency_direction.rs`](../crates/fleet-core/tests/dependency_direction.rs), which fails when a
-core module names an adapter or a technology, when a module has no role, and when a role names
-no module.
+core module names an adapter or a technology, when a module file has no role, and when a role
+names no module; it reads only what a core module names, so a dependency between two adapters
+is not its to decide.
 
 - **Server stores** — one port per domain in the core module it serves, shaped so a database or
   an object store could implement it, and speaking in domain types, never paths
@@ -115,7 +128,8 @@ no module.
   `DeploymentStore` in `deployments`; `PackageBackend` and `BlobStore` (`blobs`, artifact bytes by
   SHA-256) under the `PackageStore` in `packages`, the bytes in `data_dir` or, with
   `[blobs] store = "s3"`, in one bucket of an S3-compatible store through the adapter in `s3`, which
-  bridges the synchronous port onto a runtime of its own (`bridge`)
+  bridges the synchronous port onto a runtime of its own (`bridge`), and at startup copies into
+  the bucket, hashed again, every referenced artifact it lacks from `data_dir/blobs/`
   ([ADR-0029](adr/0029-the-servers-state-and-its-stores.md)); `BootstrapStore` under the
   `BootstrapCertificates` in `bootstrap`; `EnrolmentStore` under the `Enrolment` in `enrolment`;
   `FloorStore` under the `PackageFloors` in `floors`, the floor the operator signed per Agent type
@@ -132,8 +146,9 @@ no module.
   `data_dir` into the database offline
   ([ADR-0029](adr/0029-the-servers-state-and-its-stores.md)). The core's
   constructors take the ports — `AppState::with_stores`, `PackageStore::with_backend`,
-  `PackageOffering::with_deployments`, `BootstrapCertificates::open`, `Enrolment::open_on` — and
-  `lib.rs` chooses the adapters by `[database]` in `Records`, which `AppState::on`,
+  `PackageOffering::with_deployments`, `BootstrapCertificates::open`, `Enrolment::open_on`,
+  `PackageFloors::open`, `Revocations::open` — and `lib.rs` defines `Records`, which `main.rs`
+  opens to choose the adapters by `[database]`, and which `AppState::on`,
   `PackageStore::open_on`, `PackageOffering::on` and `BootstrapCertificates::on` take, and wires
   the filesystem adapters in `AppState::new`, `PackageStore::open`,
   `PackageOffering::new` and `BootstrapCertificates::on_disk`. `migrate` is the one module that
@@ -225,19 +240,22 @@ no module.
   message in `handle` and leaves three
   channels and its description each to a submodule: `packages`, `remote_config`,
   `connection_settings`, and `description`, what the Agent reports about itself.
-  `storage`, `csr`, `connection`, `tls`, `config_init`'s writers of `supervisor.toml` and its CA
-  copy, the staging, the state directory's creation and the `current` switch in `service::layout`,
-  and the re-owning in `service::run_as` reach the data root, the state directory and the layout
+  `storage`, `csr`, `connection`, `tls`, `floors`, the install's hold on the data root in
+  `main.rs`, `config_init`'s writers of `supervisor.toml` and its CA copy, the staging, the state
+  directory's creation and the `current` switch in `service::layout`, the re-owning in
+  `service::run_as`, and the Gateway's cache directory and its bindings journal in
+  `gateway::cache` and `gateway::store` reach the data root, the state directory and the layout
   root through the adapter `nofollow`: a directory held open without following a link at its name,
   read from and written to by name, each file written whole and renamed into place, because a
   privileged install works in directories the service's account owns
   ([ADR-0037](adr/0037-the-accounts-the-service-runs-under.md)). The test
-  `privileged_steps_follow_no_link` holds the modules a privileged step runs in to that, with the
-  path-based calls left to them listed and justified. What runs under the Client's or the process
-  account — the self-update's and a Supervisor's program staging through `install`, the rewrite of
-  `supervisor.toml` in `reconfigure`, the Gateway's package cache, and the second service's purge
-  on Windows, which goes by path — works by path in directories that account owns and no other
-  account may write.
+  `privileged_steps_follow_no_link` holds `main.rs`, `config_init`, `service/`, `csr`, `connection`
+  and `tls` to that, with the path-based calls that change a file left to them listed and
+  justified; it does not look at reads. What runs under the Client's or the process account — the
+  self-update's and a Supervisor's program staging through `install`, the rewrite of
+  `supervisor.toml` in `reconfigure`, the Gateway's cached artifacts, and the second service's
+  purge on Windows, which goes by path — works by path in directories that account owns and no
+  other account may write.
 - **Client configuration** — `config` is what `supervisor.toml` may say and the rules it must meet
   ([ADR-0008](adr/0008-five-crates-on-tokio-and-axum.md)); `config_file` reads it from disk, makes
   its
@@ -296,9 +314,12 @@ The few paths worth following end to end, such as a request, a job, or a build, 
 lives between them. Only what a newcomer would otherwise reconstruct from code.
 
 **A Configuration reaches an Agent.** An operator saves a Configuration through `api`, puts it
-into a Deployment in `deployments`, and rolls the Deployment out; `fleet` replaces the assignment of
-every Agent the Deployment's Selector claims with one release — the Package for its type and every
-Configuration that fits its type, pinned by revision hash in `configs` — composes each Agent's
+into a Deployment in `deployments`, and rolls the Deployment out, or out to one Agent; `fleet`
+replaces the assignment of every Agent the Deployment's Selector claims and the release would move
+with one release — the Package for its type where it is a candidate, else the one pinned stays,
+and every Configuration that fits its type, pinned by revision hash in `configs` — and skips an
+Agent another Deployment claims too, whose conflict it reports on that Agent; it composes each
+Agent's
 configuration and pushes the offer over the Agent's WebSocket, or answers the next poll with it.
 On the Client, `engine` routes the offer to the Agent's Supervisor, which writes the entries into
 the Supervisor's `config/` directory and restarts its process; the Agent reports `APPLIED` or
@@ -392,7 +413,11 @@ every record at startup and answers from memory.
 A restart restores the fleet from them and shows each Agent disconnected until it reports; an
 installation an older Server wrote is moved there once by `server migrate`. The Client keeps its
 state
-under `state_dir`: the issued certificate and key, the connection settings the Server offered,
-and per Supervisor a directory with `config/` and `program/`. An installed Client runs from
+under `state_dir`, among it the issued certificate and key, the connection settings the Server
+offered, `instance-uid`, `package-high-water.json`, `package-floors.json`, the self-update's
+`update-marker.json` and `update-outcome.json`, `logs/`, a Gateway's `gateway-packages/` with its
+bindings journal, and the Supervisors' root, by default `supervisors/`, with per Supervisor a
+directory holding `config/`, `program/` and the staging directory `packages/`. An installed
+Client runs from
 `versions/<version>/` through the `current` pointer
 ([ADR-0037](adr/0037-the-accounts-the-service-runs-under.md)).
