@@ -8,13 +8,15 @@ and the layout root. `service install` and `service config` read `supervisor.tom
 existing file and the verification key file by path too; the test `privileged_steps_follow_no_link`
 lists only calls that change a file, so it cannot see this.
 
-The file also has two writers with different rules: `reconfigure` replaces it by path, keeps the old
-file's mode and does not sync before the rename; `config_init` writes it through a held directory,
-always 0600, synced. One file, one way to replace it.
+The file also has two writers with rules that conflict on purpose: `reconfigure::write_replacement`
+replaces it by path, keeps the operator's existing mode (0600 for a new file) and does not sync
+before the rename, as ADR-0017 clause 30 decides for a Server-driven apply; `config_init` writes it
+through a held directory, always 0600, synced.
 
 Route the privileged reads through `nofollow`, add the path-based read calls to the test's banned
-list with their justified exceptions, and give `supervisor.toml` one replacement whose mode rule is
-written down once.
+list with their justified exceptions, and give `supervisor.toml` one replacement. Which mode rule it
+applies is the human's: both kept, each named by its caller, or one rule, and `propose-adr` is
+needed for one that departs from ADR-0017 clause 30.
 
 ## Acceptance criteria
 
@@ -23,12 +25,13 @@ written down once.
 - [ ] Given a path-based read added to a privileged module, when the no-link test runs, then it
   fails and names the call.
 - [ ] Given a Server-delivered `[[supervisor]]` change and a `service config`, when each rewrites
-  `supervisor.toml`, then both go through one function with one mode rule, and the file is synced
-  before its rename.
+  `supervisor.toml`, then both go through one function, the file is synced before its rename, and
+  the mode each gives is the one the human chose (with an ADR where it departs from ADR-0017 clause
+  30).
 
 ## Read first
 
-- ADR-0037 clause 11 (header, Decision, Enforcement).
+- ADR-0037 clause 11 (header, Decision, Enforcement); ADR-0017 clause 30.
 - `crates/fleet-agent/tests/privileged_steps_follow_no_link.rs`,
   `crates/fleet-agent/src/nofollow.rs`, `config_file.rs`, `config_init.rs`, `reconfigure.rs`.
 

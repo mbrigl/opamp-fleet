@@ -1,4 +1,4 @@
-# Ticket: Reading and issuing certificates is written once, for the Server and the operator tool
+# Ticket: When a certificate ends is read once, for the Server and the operator tool
 
 ## What to build
 
@@ -9,13 +9,10 @@ dependencies. `fleet-core` carries both today, for `x509::read` and `csr`, so th
 and the copy it allowed is verbatim: `Ending` and `read_ending` in `crates/fleet-server/src/pki.rs`
 and `crates/fleet-tools/src/pki.rs`, and the status table formatted in both `main.rs` files.
 
-Beside it, under ADR-0008 clause 16 and without a new decision: loading a CA's certificate and key
-into an issuer is written three times (`ClientCa::from_config`, `BootstrapCa::from_config`, the
-tool's `load_authority`), "the first certificate of a PEM file" five times, and the client-auth leaf
-settings twice, while `fleet_core::x509::issue` holds only the serial and the clock skew.
-
 Propose the ADR that supersedes ADR-0032's clause on reading the end; once the human has reviewed
-it, move the ending reading and the PEM and issuer helpers into `fleet-core` and delete the copies.
+it, move the reading of the end and the status line into `fleet-core` and delete the copies. The CA
+loading and PEM helpers need no decision and are
+docs/plan/revision-2026-10-31/25-ca-loading-and-pem-helpers-live-in-fleet-core.md.
 
 ## Acceptance criteria
 
@@ -24,15 +21,13 @@ it, move the ending reading and the PEM and issuer helpers into `fleet-core` and
   3 and 4).
 - [ ] Given `server pki status` and `opamp-fleetctl pki status` over the same certificate, when both
   run, then they print the same verdict from one function.
-- [ ] Given the CA loading of the Server and the tool, when either loads a cert and key pair, then
-  both go through one `fleet-core` function, tested once.
 
 ## Read first
 
 - ADR-0032 clause 6 and its Alternatives considered; ADR-0008 clause 16.
 - The `propose-adr` skill.
-- `crates/fleet-server/src/ca.rs`, `crates/fleet-server/src/pki.rs`,
-  `crates/fleet-tools/src/pki.rs`, `crates/fleet-core/src/x509/`.
+- `crates/fleet-server/src/pki.rs`, `crates/fleet-tools/src/pki.rs`,
+  `crates/fleet-core/src/ending.rs`.
 
 ## Blocked by
 

@@ -1,4 +1,4 @@
-# Ticket: The second service's channel is split by side, and `service` and `supervisor` stop depending on each other
+# Ticket: The second service's channel is split, and `service` and `supervisor` stop the cycle
 
 ## What to build
 

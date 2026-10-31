@@ -4,9 +4,11 @@
 
 `docs/CONVENTIONS.md` asks that code cite an ADR by its clause (`ADR-0037 clause 25`), never by a
 place in a document. The tree holds 1604 such citations and none that cites a place, and every
-clause number cited lies within its ADR's numbered clauses (counted during this revision). A
-convention a check can decide is the check, not an entry; and a number beyond an ADR's clauses, or a
-clause of a superseded ADR, is a stale citation nobody sees today.
+clause number cited lies within its ADR's numbered clauses. Verified with a scan of every `ADR-NNNN
+clause N` under `crates/`, `scripts/`, `packaging/`, `fuzz/` and `.github/` against the numbered
+clauses of each ADR's Decision. A convention a check can decide is the check, not an entry; and a
+number beyond an ADR's clauses, or a clause of a superseded ADR, is a stale citation nobody sees
+today.
 
 Extend `check-docs.sh` (or the traceability check) so every `ADR-NNNN clause N` in a tracked file
 names a numbered clause of the Decision of an ADR in force, and so a citation by "point", paragraph

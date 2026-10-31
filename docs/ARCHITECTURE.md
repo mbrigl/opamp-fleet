@@ -102,7 +102,7 @@ Five crates in one workspace ([ADR-0008](adr/0008-five-crates-on-tokio-and-axum.
   packages and Deployments, the Agent plane and the Operator plane, whose credential check is
   `credentials`. Besides serving, the program runs `pki status` (`pki`, which also warns the
   running Server of an ending certificate), `hash-credential`, `audit-verify`, `migrate` and
-  `migrate-to-postgres`, each before anything is served.
+  `migrate-to-postgres`, each in place of serving: it does its work and the process exits.
 - **`fleet-agent`** — the Client in all its modes, the program `supervisor`.
 - **`fleet-tools`** — the operator tool, the one program `opamp-fleetctl`: its `package` commands
   fetch, pack, hash and sign package artifacts — or sign a Package's signing file from the UI
@@ -313,23 +313,20 @@ is not its to decide.
 The few paths worth following end to end, such as a request, a job, or a build, and where state
 lives between them. Only what a newcomer would otherwise reconstruct from code.
 
-**A Configuration reaches an Agent.** An operator saves a Configuration through `api`, puts it
-into a Deployment in `deployments`, and rolls the Deployment out, or out to one Agent; `fleet`
-replaces the assignment of every Agent the Deployment's Selector claims and the release would move
-with one release — the Package for its type where it is a candidate, else the one pinned stays,
-and every Configuration that fits its type, pinned by revision hash in `configs` — and skips an
-Agent another Deployment claims too, whose conflict it reports on that Agent; it composes each
-Agent's
-configuration and pushes the offer over the Agent's WebSocket, or answers the next poll with it.
-On the Client, `engine` routes the offer to the Agent's Supervisor, which writes the entries into
-the Supervisor's `config/` directory and restarts its process; the Agent reports `APPLIED` or
-`FAILED` with the reason, and the Server stops offering once the reported hash matches
+**A Configuration reaches an Agent.** An operator saves a Configuration through `api`, puts it into
+a Deployment in `deployments`, and rolls the Deployment out, or out to one Agent; `fleet` replaces
+the assignment of every Agent the Deployment's Selector claims and the release would move with one
+release — the Package for its type where it is a candidate, else the one pinned stays, and every
+Configuration that fits its type, pinned by revision hash in `configs` — and skips an Agent another
+Deployment claims too, whose conflict it reports on that Agent; it composes each Agent's
+configuration and pushes the offer over the Agent's WebSocket, or answers the next poll with it. On
+the Client, `engine` routes the offer to the Agent's Supervisor, which writes the entries into the
+Supervisor's `config/` directory and restarts its process; the Agent reports `APPLIED` or `FAILED`
+with the reason, and the Server stops offering once the reported hash matches
 ([ADR-0025](adr/0025-configurations-and-the-rest-api.md),
-[ADR-0026](adr/0026-deployments-and-rollouts.md)). A
-Configuration typed for the Client
-itself carries `[[supervisor]]` blocks, which `reconfigure` checks and writes into
-`supervisor.toml` before it starts or stops anything
-([ADR-0017](adr/0017-supervisor-mode-and-its-kinds.md)).
+[ADR-0026](adr/0026-deployments-and-rollouts.md)). A Configuration typed for the Client itself
+carries `[[supervisor]]` blocks, which `reconfigure` checks and writes into `supervisor.toml` before
+it starts or stops anything ([ADR-0017](adr/0017-supervisor-mode-and-its-kinds.md)).
 
 **An Agent is placed under its Host.** Each Agent record names the Host it last arrived over — its
 own, or the Gateway's behind one. `fleet` derives from it, per Agent, what its effective description
@@ -402,22 +399,19 @@ waits, and the Supervisor retries with backoff
 **Where state lives.** The Server keeps all of its state under one `data_dir`, one directory per
 domain and owner-only: `configurations/`, `deployments/`, `packages/` (metadata) and `blobs/` (the
 artifacts, named by SHA-256, unless a bucket keeps them), `agents/` (each Agent's record, its labels
-inside), `hosts/`,
-`certificates/` (the register), `revocations.json`, `bootstrap/`, `enrolment.json` (the window and
-its queue), `package-floors.json` (the floor of each Agent type) and `audit/`
-([ADR-0029](adr/0029-the-servers-state-and-its-stores.md)).
-With `[database] store = "postgres"` the records are rows of one PostgreSQL database instead, and
-`data_dir` keeps `audit/` and, with the filesystem blob store, `blobs/`
-([ADR-0029](adr/0029-the-servers-state-and-its-stores.md)); the Server still loads
-every record at startup and answers from memory.
-A restart restores the fleet from them and shows each Agent disconnected until it reports; an
-installation an older Server wrote is moved there once by `server migrate`. The Client keeps its
-state
-under `state_dir`, among it the issued certificate and key, the connection settings the Server
-offered, `instance-uid`, `package-high-water.json`, `package-floors.json`, the self-update's
-`update-marker.json` and `update-outcome.json`, `logs/`, a Gateway's `gateway-packages/` with its
-bindings journal, and the Supervisors' root, by default `supervisors/`, with per Supervisor a
-directory holding `config/`, `program/` and the staging directory `packages/`. An installed
-Client runs from
-`versions/<version>/` through the `current` pointer
+inside), `hosts/`, `certificates/` (the register), `revocations.json`, `bootstrap/`,
+`enrolment.json` (the window and its queue), `package-floors.json` (the floor of each Agent type)
+and `audit/` ([ADR-0029](adr/0029-the-servers-state-and-its-stores.md)). With `[database] store =
+"postgres"` the records are rows of one PostgreSQL database instead, and `data_dir` keeps `audit/`
+and, with the filesystem blob store, `blobs/`
+([ADR-0029](adr/0029-the-servers-state-and-its-stores.md)); the Server still loads every record at
+startup and answers from memory. A restart restores the fleet from them and shows each Agent
+disconnected until it reports; an installation an older Server wrote is moved there once by `server
+migrate`. The Client keeps its state under `state_dir`, among it the issued certificate and key, the
+connection settings the Server offered, `instance-uid`, `package-high-water.json`,
+`package-floors.json`, the self-update's `update-marker.json` and `update-outcome.json`, `logs/`, a
+Gateway's `gateway-packages/` with its bindings journal, and the Supervisors' root, by default
+`supervisors/`, with per Supervisor a directory holding, among them, `config/`, `program/`, the
+staging directory `packages/`, `installed-package.json` and `remote-config.pb`. An installed Client
+runs from `versions/<version>/` through the `current` pointer
 ([ADR-0037](adr/0037-the-accounts-the-service-runs-under.md)).

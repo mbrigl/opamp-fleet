@@ -7,8 +7,10 @@ A new module, opamp's `random`, was added on a ticket branch without a role in
 test and lint", after the whole workspace had built and every check had finished, because check-all
 prints its results once all have run. `dependency_direction.rs` and
 `privileged_steps_follow_no_link.rs` read source text and use only `std`: each compiles with `rustc
---test` alone, `CARGO_MANIFEST_DIR` set to its crate, and runs in under a second (tried during this
-revision).
+--test` alone, `CARGO_MANIFEST_DIR` set to its crate, and runs in under a second. Verified with
+`CARGO_MANIFEST_DIR=$PWD/crates/fleet-core rustc --test
+crates/fleet-core/tests/dependency_direction.rs`: 5 tests in 0.8 s, and the same for the no-link
+test.
 
 Add a check script that compiles and runs the source-reading tests this way, list it in check-all
 and in `checks.yml` as check 9 of `check-docs.sh` requires, and let the hooks of

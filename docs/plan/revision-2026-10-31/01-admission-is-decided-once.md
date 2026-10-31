@@ -10,13 +10,13 @@ list is configured, and the two ask about revocation through different calls. Th
 also carries a field-by-field copy of the admission state.
 
 Build one admission of a presented certificate that both middlewares call, so a host is admitted or
-refused for the same reason on both routes, and reduce the download guard to the shared admission
-plus what only the download needs (its rate bucket).
+refused by the same admission check on both routes (each route keeps its own message), and reduce
+the download guard to the shared admission plus what only the download needs (its rate bucket).
 
 ## Acceptance criteria
 
 - [ ] Given a client certificate whose facts cannot be read, when it is presented to `/v1/opamp` and
-  to the package download route, then both refuse it with the same reason, whether or not a
+  to the package download route, then both refuse it, by the same admission check, whether or not a
   revocation list is configured.
 - [ ] Given a revoked certificate, when it is presented to either route, then both refuse it through
   the same revocation check.
