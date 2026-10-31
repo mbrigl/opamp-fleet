@@ -55,6 +55,20 @@ impl Bridge {
     }
 }
 
+impl Bridge {
+    /// Starts `future` on the adapter's runtime and leaves it running there: work that lasts as
+    /// long as the adapter, such as a connection that listens.
+    pub fn spawn<F>(&self, future: F)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        self.runtime
+            .as_ref()
+            .expect("the runtime lives as long as the bridge")
+            .spawn(future);
+    }
+}
+
 impl Drop for Bridge {
     fn drop(&mut self) {
         if let Some(runtime) = self.runtime.take() {

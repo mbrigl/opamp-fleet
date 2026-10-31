@@ -103,6 +103,7 @@ impl LedgerStore for PgLedgerStore {
                 .await
                 .map_err(sql)?;
             write_revocations(&*transaction, &changed).await?;
+            super::notify::notify(&*transaction, super::notify::REVOCATION).await?;
             transaction.commit().await.map_err(sql)
         })?;
         *written = revocations.to_vec();

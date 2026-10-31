@@ -385,6 +385,8 @@ password_file = "/run/secrets/fleet-db-password"
 | Key | Default | Meaning |
 |---|---|---|
 | `store` | `"fs"` | `"fs"` or `"postgres"`. Any other value fails startup naming the key; so do `"postgres"` without a `[database.postgres]` section and a `[database.postgres]` section beside `"fs"`. |
+| `lease_renew_secs` | `10` | With `"postgres"` alone: how often an instance renews its lease, from 1 to 3600. Set with `"fs"`, it fails startup naming it. |
+| `lease_secs` | `30` | With `"postgres"` alone: how long after its last renewal a lease lapses, at least three renewals and at most 3600. Set with `"fs"`, it fails startup naming it. |
 | `postgres.host` | — | Required with `"postgres"`. The database's host name or IP address — what its certificate must name. |
 | `postgres.port` | `5432` | Its port. |
 | `postgres.dbname` | — | Required with `"postgres"`. The database. The Server does not create it. |
@@ -411,13 +413,21 @@ after it. A database whose schema needs a newer Server stops the start, naming b
 left unchanged. The Server creates tables and indexes, and nothing else: the database, the role,
 its rights and extensions, replication and backups are the operator's.
 
-One Server per database schema: the Server holds a lock on the schema it works in — its role's
-default — while it runs, and a second one started against the same database and schema stops,
-naming the database. The lock lives on a connection of its own; when that
-connection ends while the Server runs — the database restarted, the session was ended, the host
-is gone — the lock is gone with it, and the Server logs an error naming the database and refuses
-every write from then on, so it never writes beside a second Server. Restart it once the database
-answers.
+Every Server on PostgreSQL is an instance: before it opens either listener it takes a lease in the
+database under an instance id of its own, renews it every `lease_renew_secs`, and keeps its
+listeners open only while it can prove it. One that cannot renew before its lease lapses ends every
+session, closes both listeners, and takes a new lease under a new instance id once the database
+answers again.
+
+An instance whose blobs are files (`[blobs] store = "fs"`) or whose CA key is a file (`[client_ca]
+key_file`, `[enrolment] bootstrap_ca_key_file`) must be alone on its database schema: it holds a
+lock on the schema it works in — its role's default — while it runs, and a second instance started
+against the same database and schema stops, naming the key that makes it alone. The lock lives on
+a connection of its own; when that connection ends while the Server runs — the database
+restarted, the session was ended, the host is gone — the lock is gone with it, and the Server logs
+an error naming the database, ends every session, refuses every write from then on, and exits.
+Restart it once the database answers. With the blobs in S3 and no CA key in a file, any number of
+instances share one database.
 
 With `"postgres"`, `data_dir` holds the audit record (`audit/`) and, with the filesystem blob
 store, the artifacts (`blobs/`), and nothing else. A record of the filesystem store found there —

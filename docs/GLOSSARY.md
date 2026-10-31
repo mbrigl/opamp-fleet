@@ -34,9 +34,18 @@ invent.
 ## The two ends
 
 - **Server** — this project's control plane. It tells Agents which configuration they should be
-  running and records what they report back. There is exactly one Server per fleet. It is
-  **API-first**: its primary interface is the OpenAPI REST API, and it ships only a rudimentary UI,
-  so any external portal can integrate it. The Server runs on Linux only.
+  running and records what they report back. There is exactly one Server per fleet, run by one or
+  more **Server instances**. It is **API-first**: its primary interface is the OpenAPI REST API,
+  and it ships only a rudimentary UI, so any external portal can integrate it. The Server runs on
+  Linux only.
+- **Server instance** — one running process of the Server. On PostgreSQL every instance holds a
+  **lease** under an instance id of its own, a random UUID that is not persisted, and any number of
+  them serve one fleet from the shared database and object store; on the filesystem store there is
+  one instance.
+  _Avoid:_ node, replica, Server (for one process of several).
+- **Lease** — a Server instance's claim, renewed in the database, that it is alive and may serve.
+  An instance opens its listeners only while it holds a lease it can prove, and a lease that is not
+  renewed lapses.
 - **Client** — this project's client deployable: the process an operator installs on a machine to
   place it under management. One Client process runs in one or more **Client Modes** and may present
   itself to the Server as several **Agents**. It is the OpAMP Client in the protocol's sense.
