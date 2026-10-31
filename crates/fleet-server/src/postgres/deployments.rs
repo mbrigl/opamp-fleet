@@ -193,6 +193,11 @@ mod tests {
         .expect_err("the core refuses it");
         let err = open().load().map(|_| ()).expect_err("refused");
         assert!(err.ends_with(&core), "{err}");
+        let naming = &err[..err.len() - core.len()];
+        assert!(
+            naming.to_lowercase().contains("stable"),
+            "the record is named: {err}"
+        );
     }
 
     /// Verifies: ADR-0029

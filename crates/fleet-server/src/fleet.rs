@@ -153,7 +153,7 @@ pub struct Assignment {
 
 impl Assignment {
     /// An assignment as a store holds it, its Package as the two parts of its identity, decided
-    /// here so every store reads it by the same rule (ADR-0029 clause 6). Each store names the
+    /// here so every store reads it by the same rule (ADR-0029). Each store names the
     /// record before the message.
     ///
     /// # Errors
