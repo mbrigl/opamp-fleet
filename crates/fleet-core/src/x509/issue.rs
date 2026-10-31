@@ -39,9 +39,9 @@ pub enum Role {
     Server,
 }
 
-/// Makes `params` a leaf of `role` and nothing more, whatever they held before: `CA:FALSE`,
-/// `digitalSignature`, the extended key usage of its role alone, and a random serial of its own,
-/// which it returns. Its names and its life are the caller's.
+/// Makes `params` a leaf of `role`: it sets `CA:FALSE`, `digitalSignature` alone, the extended
+/// key usage of its role alone, and a random serial of its own, which it returns, whatever these
+/// held before. Its names, its life and any other extension are the caller's.
 ///
 /// # Errors
 /// Returns an error when the system has no secure random source.
@@ -126,8 +126,10 @@ mod tests {
         let missing = dir.path().join("none.pem");
         let error = authority(&cert_file, &cert_der, &missing).expect_err("refused");
         assert!(error.contains("none.pem"), "{error}");
-        let error = authority(&cert_file, &cert_der, &cert_file).expect_err("not a key");
-        assert!(error.contains("ca.pem"), "{error}");
+        let not_a_key = dir.path().join("not-a-key.pem");
+        std::fs::write(&not_a_key, "not a key").expect("write");
+        let error = authority(&cert_file, &cert_der, &not_a_key).expect_err("not a key");
+        assert!(error.contains("not-a-key.pem"), "{error}");
     }
 
     /// A leaf is what its role says and nothing more, whatever the parameters asked for.

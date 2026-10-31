@@ -592,11 +592,8 @@ impl Ending {
 /// Returns the message to print when the file cannot be read or holds no certificate.
 pub fn read_ending(file: &Path) -> Result<Ending, String> {
     let pem = std::fs::read(file).map_err(|e| format!("cannot read {}: {e}", file.display()))?;
-    let der = opamp::tls::certificates(&pem)
-        .map_err(|e| format!("cannot read {}: {e}", file.display()))?
-        .into_iter()
-        .next()
-        .ok_or_else(|| format!("{} holds no certificate", file.display()))?;
+    let der = opamp::tls::first_certificate(&pem)
+        .map_err(|e| format!("cannot read {}: {e}", file.display()))?;
     let (_, cert) = X509Certificate::from_der(der.as_ref())
         .map_err(|e| format!("cannot read {}: {e}", file.display()))?;
     Ok(Ending {
@@ -707,20 +704,15 @@ fn server_certificate(
             params.subject_alt_names.push(san);
         }
     }
-    leaf(params, Role::Server, ca, days)
+    leaf(params, ca, days)
 }
 
-/// Signs a leaf of `role`: `CA:FALSE`, `digitalSignature`, the role's extended key usage, a random
+/// Signs a server certificate's leaf: `CA:FALSE`, `digitalSignature`, `serverAuth`, a random
 /// serial, and a life that never reaches past the CA's end (ADR-0032 clause 13).
-fn leaf(
-    mut params: CertificateParams,
-    role: Role,
-    ca: &Authority,
-    days: u32,
-) -> Result<Made, String> {
+fn leaf(mut params: CertificateParams, ca: &Authority, days: u32) -> Result<Made, String> {
     let key = KeyPair::generate().map_err(|e| format!("cannot make a key: {e}"))?;
     let (not_before, not_after, cut) = life(days, Some(ca.end))?;
-    let serial = issue::leaf(&mut params, role)?;
+    let serial = issue::leaf(&mut params, Role::Server)?;
     params.not_before = not_before;
     params.not_after = not_after;
     let cert = params
