@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Self-test of scripts/sensor-plan-frontier.sh. Verifies: ADR-0006
+# Self-test of scripts/sensor-plan-frontier.sh. Verifies: ADR-draft-feature-layer
 #
 # Each case builds a throwaway git repository under a temporary directory with tickets under
 # docs/plan/, runs the sensor against it, and asserts the exit code and a line a reader would
@@ -108,7 +108,7 @@ ticket "$d" docs/plan/s/01-first.md "None (can start immediately)" "unattended"
 ticket "$d" docs/plan/s/02-second.md "[01-first](01-first.md)" "unattended"
 expect 1 "a blocker written as a link fails rather than freeing its ticket" "$d" "docs/plan/s/02-second.md: '## Blocked by' names '- [01-first](01-first.md)'"
 
-# Verifies: ADR-0006
+# Verifies: ADR-draft-feature-layer
 d="$(repo name-with-space)"
 ticket "$d" "docs/plan/x/01-a b.md" "None (can start immediately)" "unattended"
 expect 1 "a ticket whose name the claim refuses fails rather than reaching the frontier" "$d" \
@@ -213,9 +213,9 @@ expect_claim 0 "a claim at a fixed date succeeds" "$work/a" docs/plan/s/04-same.
 expect_claim 2 "a second claim at the same date and identity is refused" "$work/b" docs/plan/s/04-same.md origin
 unset GIT_AUTHOR_DATE GIT_COMMITTER_DATE
 
-# --- a plan on a feat/ branch: read and claimed from that base (ADR-0006) -------------------
+# --- a plan on a feat/ branch: read and claimed from that base (ADR-draft-feature-layer) ---
 
-# Verifies: ADR-0006
+# Verifies: ADR-draft-feature-layer
 d="$(repo feat-base)"
 git -C "${d:?}" checkout -q -b feat/x
 ticket "$d" docs/plan/f/01-first.md "None (can start immediately)" "with the human"
