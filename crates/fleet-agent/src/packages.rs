@@ -192,14 +192,11 @@ const MAX_REDIRECTS: usize = 5;
 /// (`send_download`) — and per-operation timeouts rather than one for the whole transfer, since a
 /// large artifact over a modest link legitimately takes minutes.
 pub(crate) fn download_client(tls: opamp::client::ClientTls) -> Result<reqwest::Client, String> {
-    let builder = reqwest::Client::builder()
-        .use_rustls_tls()
-        .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(std::time::Duration::from_secs(30))
-        .read_timeout(std::time::Duration::from_secs(60));
-    tls.apply(builder)?
-        .build()
-        .map_err(|e| format!("cannot build the download client: {e}"))
+    tls.https_client(opamp::client::Timeouts::PerOperation {
+        connect: std::time::Duration::from_secs(30),
+        read: std::time::Duration::from_secs(60),
+    })
+    .map_err(|e| format!("the download client: {e}"))
 }
 
 /// Where a download may go (ADR-0027 clause 51): this Client's own Server origin — the scheme, host

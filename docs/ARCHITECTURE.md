@@ -77,9 +77,11 @@ Five crates in one workspace ([ADR-0008](adr/0008-five-crates-on-tokio-and-axum.
   `InstanceUid` (`uid`) and the attribute keys (`attributes`). Behind the feature `client`, an
   Agent's protocol state machine, the two transports, the reconnect backoff with jitter
   (`client::backoff`), and `client::connection`, which builds a connection, its TLS and its HTTP
-  client from a `Connection` the application fills in. Behind `server`, the endpoint around a
-  `Handler`, `server::listen`, the listener with its TLS and its bounds on connection setup, and
-  `server::pace`, the floor every body and WebSocket message it serves is held to. The server
+  client from a `Connection` the application fills in, and every other HTTPS client of the Client
+  through `ClientTls::https_client`: TLS 1.3, no redirect followed, bounded by its `Timeouts`.
+  Behind `server`, the endpoint around a `Handler`, `server::listen`, the listener with its TLS
+  and its bounds on connection setup, and `server::pace`, the floor every body and WebSocket
+  message it serves is held to. The server
   side takes a WebSocket over through hyper's upgrade and reads its frames with
   `tokio-tungstenite`, the library the client side uses too.
   `tls`, behind either feature, reads PEM and installs the ring provider. It reads no file and

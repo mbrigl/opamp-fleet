@@ -22,6 +22,36 @@ use crate::tls::{certificates, client_builder, private_key, root_store, Identity
 /// How long one plain-HTTP exchange, and the probe, may take.
 pub const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How long an HTTPS client may take over one request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Timeouts {
+    /// One bound on the whole request, from its start to the end of its body.
+    Total(Duration),
+    /// A bound on connecting and one on each read, for a body whose transfer legitimately takes
+    /// longer than any fixed bound on the whole would allow.
+    PerOperation {
+        /// How long the connection, its TLS handshake included, may take.
+        connect: Duration,
+        /// How long a single read may wait.
+        read: Duration,
+    },
+}
+
+/// What every HTTPS client of a Client starts from: rustls, no redirect followed, and `timeouts`.
+/// A redirect is never followed by the client itself: a caller that may go to another address
+/// checks each hop where it knows which addresses are allowed.
+fn https_builder(timeouts: Timeouts) -> reqwest::ClientBuilder {
+    let builder = reqwest::Client::builder()
+        .use_rustls_tls()
+        .redirect(reqwest::redirect::Policy::none());
+    match timeouts {
+        Timeouts::Total(total) => builder.timeout(total),
+        Timeouts::PerOperation { connect, read } => {
+            builder.connect_timeout(connect).read_timeout(read)
+        }
+    }
+}
+
 /// Whom a client trusts and what it presents, as PEM.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ClientTls {
@@ -102,6 +132,17 @@ impl ClientTls {
         let identity = reqwest::Identity::from_pem(&pem)
             .map_err(|e| format!("cannot present the client certificate: {e}"))?;
         Ok(builder.identity(identity))
+    }
+
+    /// An HTTPS client with this trust and identity, TLS 1.3 only, following no redirect, bounded
+    /// by `timeouts`: the one way a Client builds a client for `https://`.
+    ///
+    /// # Errors
+    /// Returns an error when the CA or the identity cannot be used, or the client cannot be built.
+    pub fn https_client(&self, timeouts: Timeouts) -> Result<reqwest::Client, String> {
+        self.apply(https_builder(timeouts))?
+            .build()
+            .map_err(|e| format!("cannot build the HTTPS client: {e}"))
     }
 }
 
@@ -202,10 +243,7 @@ impl Connection {
     /// # Errors
     /// Returns an error when the TLS material or the credential cannot be used.
     pub fn http_client(&self) -> Result<reqwest::Client, String> {
-        let mut builder = reqwest::Client::builder()
-            .use_rustls_tls()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(HTTP_TIMEOUT);
+        let mut builder = https_builder(Timeouts::Total(HTTP_TIMEOUT));
         if let Some(value) = &self.authorization {
             let mut value = reqwest::header::HeaderValue::from_str(value)
                 .map_err(|e| format!("the credentials are not a valid header: {e}"))?;

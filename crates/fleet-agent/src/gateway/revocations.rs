@@ -229,14 +229,8 @@ async fn fetch_within(
     limit: usize,
 ) -> Result<Option<usize>, String> {
     let url = crate::packages::resolve_url(PATH, &config.endpoint)?;
-    let builder = reqwest::Client::builder()
-        .use_rustls_tls()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(30));
     let client = crate::tls::client_tls(config)?
-        .apply(builder)?
-        .build()
-        .map_err(|e| format!("cannot build the client: {e}"))?;
+        .https_client(opamp::client::Timeouts::Total(Duration::from_secs(30)))?;
     // Admitted by this Gateway's certificate alone: no `Authorization` (ADR-0021 clause 3).
     let mut request = client.get(&url);
     if let Some(etag) = list.etag() {
