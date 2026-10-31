@@ -84,21 +84,25 @@ impl LedgerStore for PgLedgerStore {
         issued: &Issued,
         bounds: &RegisterBounds,
     ) -> Result<Registered, String> {
-        self.register_minting(issued, bounds, None)
+        self.register_minting(issued, bounds, None, None)
     }
 
     /// [`register_issued`](LedgerStore::register_issued), and the Host an approval mints written in
     /// the same transaction when the store has no row of it, else its valid until moved forward:
-    /// a certificate is registered with its Host's row or not at all.
+    /// a certificate is registered with its Host's row or not at all. An approval's bootstrap
+    /// certificate is looked up in the list the transaction holds, so a revocation another
+    /// instance committed first refuses it.
     fn register_minting(
         &self,
         issued: &Issued,
         bounds: &RegisterBounds,
         mint: Option<(&str, &Host)>,
+        bootstrap: Option<&CertId>,
     ) -> Result<Registered, String> {
         let issued = issued.clone();
         let bounds = *bounds;
         let mint = mint.map(|(host, entry)| (host.to_string(), entry.clone()));
+        let bootstrap = bootstrap.cloned();
         self.database.run(move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
@@ -121,6 +125,11 @@ impl LedgerStore for PgLedgerStore {
             let held = usize::try_from(held).unwrap_or(usize::MAX);
             if held >= bounds.size {
                 return Ok(Registered::Full(register_full(held)));
+            }
+            if let Some(bootstrap) = &bootstrap {
+                if names(&*transaction, bootstrap).await? {
+                    return Ok(Registered::BootstrapRevoked);
+                }
             }
             if let Some(predecessor) = &issued.predecessor {
                 let decided = decide_renewal(&*transaction, id, predecessor, &bounds).await?;
@@ -821,6 +830,23 @@ async fn decide_renewal(
         return Ok(Registered::Full(CHAIN_FULL.to_string()));
     }
     Ok(Registered::Registered)
+}
+
+/// Whether a revocation in the list names the certificate `id`, by its serial under one of the
+/// issuers it names.
+pub(crate) async fn names(client: &impl GenericClient, id: &CertId) -> Result<bool, String> {
+    Ok(client
+        .query_one(
+            "SELECT EXISTS ( \
+                 SELECT 1 FROM revocations r, \
+                     json_array_elements_text(r.revoked -> 'certificate' -> 'issuers') i \
+                 WHERE r.revoked -> 'certificate' ->> 'serial' = $2 AND i = $1 \
+             )",
+            &[&id.issuer, &id.serial],
+        )
+        .await
+        .map_err(sql)?
+        .get(0))
 }
 
 /// Writes the entries of the list at their positions, in one statement.
@@ -1578,7 +1604,7 @@ mod tests {
         };
         let entry = issued("0a", None);
         assert!(matches!(
-            store.register_minting(&entry, &full, Some(("h", &minted))),
+            store.register_minting(&entry, &full, Some(("h", &minted)), None),
             Ok(Registered::Full(_))
         ));
         let ledger = store.load().expect("load");
@@ -1592,12 +1618,63 @@ mod tests {
             per_root: 8,
         };
         assert_eq!(
-            store.register_minting(&entry, &open, Some(("h", &minted))),
+            store.register_minting(&entry, &open, Some(("h", &minted)), None),
             Ok(Registered::Registered)
         );
         let ledger = store.load().expect("load");
         assert_eq!(ledger.issued, [entry]);
         assert_eq!(ledger.hosts, BTreeMap::from([("h".to_string(), minted)]));
+    }
+
+    /// An approval whose bootstrap certificate the list names registers nothing, and neither
+    /// does its Host: the register's write reads the list it holds, so a revocation another
+    /// instance committed first wins (ADR-0021 clause 28).
+    /// Verifies: ADR-0021
+    #[test]
+    fn an_approval_of_a_revoked_bootstrap_certificate_registers_nothing() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let store = PgLedgerStore::new(test.open());
+        let bootstrap = CertId::new(b"bootstrap CA", "b5");
+        store
+            .add_revocation(
+                &Revocation {
+                    id: "r1".to_string(),
+                    revoked: Revoked::Certificate {
+                        authority: "bootstrap".to_string(),
+                        issuers: vec![bootstrap.issuer.clone()],
+                        serial: bootstrap.serial.clone(),
+                    },
+                    revoked_ms: 1,
+                },
+                100,
+            )
+            .expect("revoke");
+        let open = RegisterBounds {
+            size: 8,
+            per_root: 8,
+        };
+        let minted = host(&[], false);
+        let entry = issued("0a", None);
+        assert_eq!(
+            store.register_minting(&entry, &open, Some(("h", &minted)), Some(&bootstrap)),
+            Ok(Registered::BootstrapRevoked)
+        );
+        let ledger = store.load().expect("load");
+        assert!(
+            ledger.issued.is_empty() && ledger.hosts.is_empty(),
+            "{ledger:?}"
+        );
+        assert_eq!(
+            store.register_minting(
+                &entry,
+                &open,
+                Some(("h", &minted)),
+                Some(&CertId::new(b"bootstrap CA", "b6"))
+            ),
+            Ok(Registered::Registered)
+        );
     }
 
     /// An instance whose view of the Hosts is stale cannot bind an `instance_uid` another

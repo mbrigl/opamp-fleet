@@ -294,7 +294,11 @@ pub trait LedgerStore: Send + Sync {
     /// in the same write by a store that writes the Hosts by act
     /// ([`writes_hosts_by_act`](Self::writes_hosts_by_act)): its row as `mint` holds it when the
     /// store has none, else its valid until moved forward, so a certificate is never registered
-    /// without its Host's row. One that writes the Hosts whole writes `mint` with them.
+    /// without its Host's row. One that writes the Hosts whole writes `mint` with them. An
+    /// approval names the bootstrap certificate its request came with, `bootstrap`: a store that
+    /// other instances share refuses it as [`Registered::BootstrapRevoked`] when the list it reads
+    /// in the write names it, so a revocation another instance committed before the approval wins
+    /// (ADR-0021 clause 28); a store that is its only writer leaves that to the list in memory.
     ///
     /// # Errors
     /// Returns an error when it cannot be written; the register and the Hosts are then as they
@@ -304,8 +308,9 @@ pub trait LedgerStore: Send + Sync {
         issued: &Issued,
         bounds: &RegisterBounds,
         mint: Option<(&str, &Host)>,
+        bootstrap: Option<&CertId>,
     ) -> Result<Registered, String> {
-        let _ = mint;
+        let _ = (mint, bootstrap);
         self.register_issued(issued, bounds)
     }
 
@@ -468,6 +473,8 @@ pub enum Registered {
     Full(String),
     /// The chain the entry renews holds a revoked certificate.
     Revoked,
+    /// The bootstrap certificate an approved request came with is revoked.
+    BootstrapRevoked,
 }
 
 /// The refusal of a register at its size.
@@ -480,6 +487,9 @@ pub(crate) const CHAIN_FULL: &str = "this certificate's chain has been renewed t
 
 /// The refusal of a renewal whose chain holds a revoked certificate.
 pub const RENEWS_REVOKED: &str = "the certificate this renews, or one it renewed, is revoked";
+
+/// The refusal of an approval whose request came with a bootstrap certificate the list names.
+pub const BOOTSTRAP_REVOKED: &str = "the bootstrap certificate the request came with is revoked";
 
 /// Decides a register write from a register a store holds whole, each entry by its predecessor,
 /// and the certificates the list names, by the rules of [`LedgerStore::register_issued`]: what a
@@ -918,7 +928,36 @@ impl Revocations {
         instance_uid: &[u8],
         predecessor: Option<CertId>,
     ) -> Result<(), String> {
+        self.record_with(facts, instance_uid, predecessor, None)
+    }
+
+    /// [`record`](Self::record) for an approved enrolment request, whose bootstrap certificate,
+    /// `bootstrap`, is checked against the list in the same write: a revoked one is refused with
+    /// [`BOOTSTRAP_REVOKED`], here and by a store other instances share, which reads the list in
+    /// the write (ADR-0021 clause 28).
+    ///
+    /// # Errors
+    /// As [`record`](Self::record), and [`BOOTSTRAP_REVOKED`] for a revoked bootstrap certificate.
+    pub fn record_approved(
+        &self,
+        facts: Facts,
+        instance_uid: &[u8],
+        bootstrap: &CertId,
+    ) -> Result<(), String> {
+        self.record_with(facts, instance_uid, None, Some(bootstrap))
+    }
+
+    fn record_with(
+        &self,
+        facts: Facts,
+        instance_uid: &[u8],
+        predecessor: Option<CertId>,
+        bootstrap: Option<&CertId>,
+    ) -> Result<(), String> {
         let mut state = self.state.lock().expect("revocation lock");
+        if bootstrap.is_some_and(|bootstrap| state.revoked().contains(bootstrap)) {
+            return Err(BOOTSTRAP_REVOKED.to_string());
+        }
         let forgotten = self.prune(&mut state)?;
         // The approval that mints a host id writes the Host (ADR-0024 clause 15): an issuance that
         // renews nothing and names a host the register does not know yet. A store that writes the
@@ -941,6 +980,7 @@ impl Revocations {
             instance_uid,
             predecessor,
             mint.as_ref().map(|(host, entry)| (host.as_str(), entry)),
+            bootstrap,
         );
         // Every issuance moves its Host's valid until forward (ADR-0024 clause 15).
         let act = match (&recorded, mint, &facts.host) {
@@ -983,6 +1023,7 @@ impl Revocations {
         instance_uid: &[u8],
         predecessor: Option<CertId>,
         mint: Option<(&str, &Host)>,
+        bootstrap: Option<&CertId>,
     ) -> Result<(), String> {
         let limit = if predecessor.is_some() {
             MAX_ISSUED - ENROLMENT_RESERVE
@@ -1022,10 +1063,14 @@ impl Revocations {
             size: limit,
             per_root: MAX_DESCENDANTS_PER_ROOT,
         };
-        match self.store.register_minting(&issued, &bounds, mint)? {
+        match self
+            .store
+            .register_minting(&issued, &bounds, mint, bootstrap)?
+        {
             Registered::Registered => {}
             Registered::Full(why) => return Err(why),
             Registered::Revoked => return Err(RENEWS_REVOKED.to_string()),
+            Registered::BootstrapRevoked => return Err(BOOTSTRAP_REVOKED.to_string()),
         }
         state.insert(issued);
         Ok(())
@@ -2487,6 +2532,33 @@ mod tests {
             revocations.revoke_certificate("bootstrap", "01"),
             Err(RevokeError::Invalid(_))
         ));
+    }
+
+    /// An approval whose request came with a revoked bootstrap certificate registers nothing: the
+    /// list wins over the approval (ADR-0021 clause 28).
+    /// Verifies: ADR-0021
+    #[test]
+    fn an_approval_of_a_revoked_bootstrap_certificate_registers_nothing() {
+        let store = Memory::default();
+        let (revocations, _) = open(&store);
+        revocations
+            .record(facts("a1", FAR), &[1; 16], None)
+            .expect("record");
+        revocations
+            .revoke_certificate("client", "00:A1")
+            .expect("revoke");
+        assert_eq!(
+            revocations.record_approved(on_host("e5", "h5"), &[5; 16], &id("a1")),
+            Err(BOOTSTRAP_REVOKED.to_string())
+        );
+        assert!(
+            revocations.issued_entry(&id("e5")).is_none(),
+            "nothing registered"
+        );
+        revocations
+            .record_approved(on_host("e6", "h6"), &[6; 16], &id("d4"))
+            .expect("a bootstrap certificate the list does not name");
+        assert!(revocations.issued_entry(&id("e6")).is_some());
     }
 
     /// What ADR-0021 clause 28 answers for `id`, worked out from the list and the register as they

@@ -956,7 +956,8 @@ carries it shows *not issued here*. Only a revoked certificate is deleted; a val
 nothing is deleted and the answer is `503`.
 
 When issuing, the Server holds at most 10 000 valid ones, revoked ones included until they end or
-are deleted, and answers a request beyond that `409`. It answers `409` too while it holds no
+are deleted, counted over every instance on one database, and answers a request beyond that
+`409`. It answers `409` too while it holds no
 `bootstrap_ca_key_file` or once the bootstrap CA has ended, `503` while the audit record cannot be
 written, since no key is handed out unrecorded, and `400` for a subject attribute it does not know,
 a value out of bounds,
@@ -985,7 +986,8 @@ whose certificate its host has not collected included; that host enrols again in
 **While it is open, an enrolling host may send a certificate request and nothing else.** The
 Server creates no Agent record for it and offers it nothing but the issued certificate. The request
 waits in a queue of at most 1024, of which the requests of one bootstrap certificate hold at most
-`max_pending_per_bootstrap`, 256 by default. A request beyond either bound is answered
+`max_pending_per_bootstrap`, 256 by default; with several instances on one database both bounds
+count the queue they share. A request beyond either bound is answered
 `Unavailable` and the host retries later; one beyond its bootstrap certificate's share is recorded
 in the audit as `enrolment.refused` with `reason` `bootstrap_share` and the certificate's serial,
 once per certificate and window. A re-sent request that already waits is never refused. The Client

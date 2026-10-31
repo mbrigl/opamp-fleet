@@ -3625,15 +3625,17 @@ async fn revoke(
             // A revoked bootstrap certificate's PKCS#12 file goes before the answer (ADR-0029
             // clause 11); the download refuses it either way.
             let crate::revocation::Revoked::Certificate {
-                authority, serial, ..
+                authority,
+                issuers,
+                serial,
             } = &entry.revoked;
             let mut withdrawn = 0;
             if authority == "bootstrap" {
-                // The requests it carried wait no longer (ADR-0021 clause 28); approving one is
-                // refused either way.
-                withdrawn = state.enrolment().map_or(0, |enrolment| {
-                    enrolment.withdraw(&|bootstrap| revocations.is_certificate_revoked(bootstrap))
-                });
+                // The requests it carried wait no longer, on every instance (ADR-0021 clause 28);
+                // approving one is refused either way.
+                withdrawn = state
+                    .enrolment()
+                    .map_or(0, |enrolment| enrolment.withdraw_revoked(issuers, serial));
                 if let Some(Err(e)) = state.bootstrap().map(|b| b.forget_p12(serial)) {
                     // Said, not swallowed: lifting this revocation would make the file
                     // downloadable again.
