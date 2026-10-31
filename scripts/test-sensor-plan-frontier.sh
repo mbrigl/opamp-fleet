@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
 #
-# Self-test of scripts/sensor-plan-frontier.sh. Verifies: ADR-0006
+# Self-test of scripts/sensor-plan-frontier.sh. Verifies: ADR-draft-feature-layer
 #
 # Each case builds a throwaway git repository under a temporary directory with tickets under
 # docs/plan/, runs the sensor against it, and asserts the exit code and a line a reader would
 # meet. The cases cover an empty plan, the three lists and the mode a frontier ticket carries, a
 # claim by a local and by a remote branch, a blocker closed by deleting its file, a path inside
 # an HTML comment, the spec that is no ticket, and the tickets the sensor cannot place: without
-# a section it reads, or with a blocker that is no path. The claim script of the work-tickets
-# skill is exercised with it: a claim in one repository, and a claim on a remote that a second
-# clone's claim of the same ticket loses, also when the branch there points at main itself.
+# a section it reads, or with a blocker that is no path, and a plan read on a feat/ base. The
+# claim script of the work-tickets skill is exercised with it: a claim in one repository, a claim
+# on a remote that a second clone's claim of the same ticket loses, also when the branch there
+# points at main itself, and a claim from a feat/ base, on the remote where it is there and by
+# the local branch where it is not.
 #
 # Verifies: ADR-0002
 # Inputs: scripts/sensor-plan-frontier.sh .agents/skills/work-tickets/claim.sh scripts/lib/
@@ -42,12 +44,14 @@ ticket() {
     "$3" "$4" > "$1/$2"
 }
 
-# expect <exit code> <name> <dir> <needle> — run the sensor; its output must contain the needle.
+# expect <exit code> <name> <dir> <needle> [sensor args] — run the sensor; its output must
+# contain the needle.
 expect() {
   local want="$1" name="$2" dir="$3" needle="$4"
+  shift 4
   local out rc
   fixture "$dir"
-  out="$(bash "$SENSOR" "$dir" 2>&1)"; rc=$?
+  out="$(bash "$SENSOR" "$dir" "$@" 2>&1)"; rc=$?
   if [[ $rc -eq "$want" && "$out" == *"$needle"* ]]; then
     passed=$((passed + 1))
     return
@@ -104,7 +108,7 @@ ticket "$d" docs/plan/s/01-first.md "None (can start immediately)" "unattended"
 ticket "$d" docs/plan/s/02-second.md "[01-first](01-first.md)" "unattended"
 expect 1 "a blocker written as a link fails rather than freeing its ticket" "$d" "docs/plan/s/02-second.md: '## Blocked by' names '- [01-first](01-first.md)'"
 
-# Verifies: ADR-0006
+# Verifies: ADR-draft-feature-layer
 d="$(repo name-with-space)"
 ticket "$d" "docs/plan/x/01-a b.md" "None (can start immediately)" "unattended"
 expect 1 "a ticket whose name the claim refuses fails rather than reaching the frontier" "$d" \
@@ -112,20 +116,45 @@ expect 1 "a ticket whose name the claim refuses fails rather than reaching the f
 
 # --- claims: the skill's claim script, in one repository and across two clones -------------
 
-# claim <dir> <ticket> [remote] — run the claim script in a fixture, or in its subdirectory
+# claim <dir> <ticket> [claim args] — run the claim script in a fixture, or in its subdirectory
 # $SUBDIR when set; prints its exit code.
 claim() {
   fixture "$1"
-  (cd "$1/${SUBDIR:-}" && GIT_AUTHOR_NAME=fixture GIT_AUTHOR_EMAIL=fixture@example.invalid \
+  local dir="$1"
+  shift
+  (cd "$dir/${SUBDIR:-}" && GIT_AUTHOR_NAME=fixture GIT_AUTHOR_EMAIL=fixture@example.invalid \
     GIT_COMMITTER_NAME=fixture GIT_COMMITTER_EMAIL=fixture@example.invalid \
-    bash "$CLAIM" "$2" ${3:+"$3"} >/dev/null 2>&1)
+    bash "$CLAIM" "$@" >/dev/null 2>"$work/claim.err")
   echo $?
 }
 
-# expect_claim <exit code> <name> <dir> <ticket> [remote] — the claim must end with that code.
+# on_remote <remote> <branch> — whether the remote has the branch.
+# shellcheck disable=SC2317 # run by check
+on_remote() { git ls-remote --exit-code --heads "$1" "$2" >/dev/null 2>&1; }
+
+# has_branch <dir> <branch> — whether the repository has the local branch.
+# shellcheck disable=SC2317 # run by check
+has_branch() { git -C "${1:?}" show-ref --verify --quiet "refs/heads/$2"; }
+
+# not <command...> — the command fails.
+# shellcheck disable=SC2317 # run by check
+not() { ! "$@"; }
+
+# expect_refusal <needle> <name> <dir> <ticket> [claim args] — the claim must exit 1 and say why.
+expect_refusal() {
+  local needle="$1" name="$2" rc
+  shift 2
+  rc="$(claim "$@")"
+  check "$name (exit $rc: $(cat "$work/claim.err"))" \
+    test "$rc" -eq 1 -a -n "$(grep -F -- "$needle" "$work/claim.err")"
+}
+
+# expect_claim <exit code> <name> <dir> <ticket> [claim args] — the claim must end with that
+# code.
 expect_claim() {
   local want="$1" name="$2" rc
-  rc="$(claim "$3" "$4" ${5:+"$5"})"
+  shift 2
+  rc="$(claim "$@")"
   if [[ "$rc" -eq "$want" ]]; then
     passed=$((passed + 1))
     return
@@ -183,6 +212,62 @@ export GIT_AUTHOR_DATE="2026-01-01T00:00:00Z" GIT_COMMITTER_DATE="2026-01-01T00:
 expect_claim 0 "a claim at a fixed date succeeds" "$work/a" docs/plan/s/04-same.md origin
 expect_claim 2 "a second claim at the same date and identity is refused" "$work/b" docs/plan/s/04-same.md origin
 unset GIT_AUTHOR_DATE GIT_COMMITTER_DATE
+
+# --- a plan on a feat/ branch: read and claimed from that base (ADR-draft-feature-layer) ---
+
+# Verifies: ADR-draft-feature-layer
+d="$(repo feat-base)"
+git -C "${d:?}" checkout -q -b feat/x
+ticket "$d" docs/plan/f/01-first.md "None (can start immediately)" "with the human"
+ticket "$d" docs/plan/f/02-second.md "docs/plan/f/01-first.md" "with the human"
+commit_plan "$d"
+git -C "${d:?}" checkout -q main
+expect 0 "the checkout of main has none of the feat/ plan" "$d" "no open tickets under docs/plan/."
+expect 0 "the frontier is read on a named feat/ base" "$d" \
+  "on feat/x: 2 open, 1 on the frontier, 0 claimed, 1 blocked." --base feat/x
+expect 1 "a base that does not exist is refused" "$d" "no branch 'feat/none'" --base feat/none
+expect_refusal "claim it with --base feat/<name>" "a ticket only on a feat/ branch is refused \
+from main, naming the way to claim it" "$d" docs/plan/f/01-first.md
+expect_refusal "the base is main or a feat/ branch" \
+  "a base that is neither main nor a feat/ branch is refused" "$d" docs/plan/f/01-first.md --base dev
+expect_refusal "one ticket and one remote" "a third argument is refused" "$d" \
+  docs/plan/f/01-first.md origin extra --base feat/x
+expect_refusal "is no remote" "a remote that reads as an option is refused" "$d" \
+  docs/plan/f/01-first.md --upload-pack=x --base feat/x
+expect_refusal "cannot reach" "a remote that cannot be reached makes no local claim" "$d" \
+  docs/plan/f/01-first.md "$work/no-such-remote.git" --base feat/x
+check "the unreached remote left no local claim" not has_branch "$d" ticket/f/01-first
+expect_claim 0 "a ticket is claimed from the feat/ branch that carries it" "$d" \
+  docs/plan/f/01-first.md --base feat/x
+check "a claim from a feat/ base starts at that base" \
+  test "$(git -C "$d" rev-parse ticket/f/01-first)" == "$(git -C "$d" rev-parse feat/x)"
+expect_claim 2 "a second claim from the feat/ base is refused" "$d" docs/plan/f/01-first.md --base feat/x
+expect 0 "a claim from a feat/ base takes its ticket off that frontier" "$d" \
+  "- docs/plan/f/01-first.md — ticket/f/01-first" --base feat/x
+
+seed="$(repo feat-seed)"
+git -C "${seed:?}" checkout -q -b feat/shared
+ticket "$seed" docs/plan/f/01-first.md "None (can start immediately)" "with the human"
+commit_plan "$seed"
+git -C "${seed:?}" checkout -q -b feat/local
+ticket "$seed" docs/plan/f/02-local.md "None (can start immediately)" "with the human"
+commit_plan "$seed"
+git init -q --bare -b main "$work/feat-remote.git"
+git -C "${seed:?}" push -q "$work/feat-remote.git" main feat/shared
+git clone -q "$work/feat-remote.git" "$work/fa" 2>/dev/null
+git clone -q "$work/feat-remote.git" "$work/fb" 2>/dev/null
+git -C "$work/fa" branch -q feat/shared origin/feat/shared
+expect_claim 0 "a claim from a feat/ base on the remote is made there" "$work/fa" \
+  docs/plan/f/01-first.md origin --base feat/shared
+check "a claim from a feat/ base the remote has is pushed" \
+  on_remote "$work/feat-remote.git" ticket/f/01-first
+expect_claim 2 "a second clone's claim from that feat/ base on the remote is refused" "$work/fb" \
+  docs/plan/f/01-first.md origin --base feat/shared
+expect_claim 0 "a feat/ base the remote does not have is claimed by the local branch" "$seed" \
+  docs/plan/f/02-local.md "$work/feat-remote.git" --base feat/local
+check "a claim from a local feat/ base pushes nothing" \
+  not on_remote "$work/feat-remote.git" ticket/f/02-local
+check "a claim from a local feat/ base is the local branch" has_branch "$seed" ticket/f/02-local
 
 # --- summary ---------------------------------------------------------------------------------
 

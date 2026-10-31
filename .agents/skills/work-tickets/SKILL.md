@@ -20,16 +20,19 @@ Two roles: the **dispatcher** claims tickets and starts the sessions that work t
 
 1. Where the harness ADR has claims made on a remote, fetch it first
    (`git fetch --prune <remote>`), so that the claims of other clones are seen. Run
-   [`scripts/sensor-plan-frontier.sh`](../../../scripts/sensor-plan-frontier.sh). Its
-   frontier is what may be claimed; the claimed and the blocked are not.
+   [`scripts/sensor-plan-frontier.sh`](../../../scripts/sensor-plan-frontier.sh) on the base
+   the plan lies on: `main`, or with `--base feat/<name>` the `feat/` branch that carries it.
+   Its frontier is what may be claimed; the claimed and the blocked are not.
 2. Choose. Alone, one ticket. In parallel, only tickets whose *Mode* says unattended and that
    touch nothing the harness ADR keeps with the human, and no more than its cap on open agent
    work allows, counting the branches of agents whose work is not yet on `main`, claims included. A
    ticket "with the human" is worked in a session the human sits in, never dispatched.
 3. Claim each with [`claim.sh`](claim.sh): `.agents/skills/work-tickets/claim.sh <ticket path>`
-   creates the branch `ticket/<spec>/<NN>-<slug>` at `main`, and with the remote the harness
-   ADR names as a second argument creates it on that remote first, so the claim holds across
-   clones. Exit code 2 says another session was first: choose again. Then isolate the claim in a
+   creates the branch `ticket/<spec>/<NN>-<slug>` at `main`, or with `--base feat/<name>` at the
+   `feat/` branch that carries the plan, and with the remote the harness ADR names as a second
+   argument creates it on that remote first, so the claim holds across clones; a `feat/` base
+   the remote does not have is claimed by the local branch alone. Exit code 2 says another
+   session was first: choose again. Then isolate the claim in a
    worktree, `git worktree add .scratch/worktrees/<spec>-<NN>-<slug> ticket/<spec>/<NN>-<slug>`,
    in the ignored `.scratch/`, so it stays where the repository is mounted. Should that fail, the
    claim is still this session's: clear the path and add the worktree again, rather than
@@ -56,13 +59,14 @@ Two roles: the **dispatcher** claims tickets and starts the sessions that work t
 
 1. Each finished branch goes to a fresh session that did not write it, through
    [`review`](../review/SKILL.md), of the agent and model the harness ADR names for reviewing.
-2. The branch reaches `main` by its pull request, or merges into the `feat/` branch the human
-   names ([`AGENTS.md` §6](../../../AGENTS.md#6-project-rules)); its hand-off is the pull
-   request's description or the merge's message. A ticket whose spec has no ticket file left
-   hands that spec to [`design-revision`](../design-revision/SKILL.md).
+2. The branch merges back into its base: into `main` by its pull request, or into the `feat/`
+   branch it was claimed from ([`AGENTS.md` §6](../../../AGENTS.md#6-project-rules)); its
+   hand-off is the pull request's description or the merge's message. A ticket whose spec has no
+   ticket file left hands that spec to [`design-revision`](../design-revision/SKILL.md).
 3. Remove each finished worktree (`git worktree remove .scratch/worktrees/<spec>-<NN>-<slug>`)
    and, once its work is on `main`, its branch: a ticket merged into a `feat/` branch keeps its
-   branch until then, since `main` still has its file and the branch is what claims it; prune
+   branch until that branch has reached `main`, since the human may still rework the `feat/`
+   branch, the merge included, and the ticket branch holds its work and its claim; prune
    the branches a remote has deleted (`git fetch --prune`),
    since the sensor reads remote ones as claims; run it again, and claim from the new frontier.
    A claim given up without a merge is released by deleting its branch; on a remote, ask

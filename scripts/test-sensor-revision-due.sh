@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Self-test of scripts/sensor-revision-due.sh. Verifies: ADR-0006
+# Self-test of scripts/sensor-revision-due.sh. Verifies: ADR-draft-feature-layer
 #
 # Each case builds a throwaway git repository under a temporary directory with a
 # docs/ARCHITECTURE.md carrying the 'Last design revision' line and commits on chosen dates,

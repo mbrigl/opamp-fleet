@@ -2,27 +2,34 @@
 #
 # Claims a ticket under docs/plan/ by its branch, ticket/<spec>/<NN>-<slug> (ADR-0006).
 #
-# Without a remote, the claim is the local branch, created at main: it holds among the sessions
-# that share this repository, its worktrees included, because git refuses a branch that exists.
+# A ticket is claimed from its base: main, or with --base the feat/ branch that carries its plan.
+# The ticket branch starts at the base, and its work merges back into it.
+#
+# Without a remote, the claim is the local branch, created at the base: it holds among the
+# sessions that share this repository, its worktrees included, because git refuses a branch that
+# exists.
 #
 # With a remote, the claim is made on the remote first, so that it holds among clones on other
 # machines too. The push creates the branch and nothing else: '--force-with-lease=<ref>:' with
 # an empty value lets it through only while the branch does not exist there. It pushes an empty
-# commit on top of the remote's main rather than main itself, because a push of a commit the
+# commit on top of the remote's base rather than the base itself, because a push of a commit the
 # branch already points at reports success without checking the lease, and two clones claiming
-# at the same main would both win; a nonce keeps two claims made in the same second apart. The
-# push skips the pre-push hook: the commit carries the tree of the remote's main unchanged, so
+# at the same base would both win; a nonce keeps two claims made in the same second apart. The
+# push skips the pre-push hook: the commit carries the tree of the remote's base unchanged, so
 # the checks have nothing to decide on it, and running the build for a claim costs minutes.
-# Only the harness ADR grants this push (AGENTS.md, section 6). A claim given up is released by
-# deleting its branch where it was made; on a remote that is a push the grant does not cover,
-# so a human makes it.
+# Only the harness ADR grants this push (AGENTS.md, section 6). A feat/ base the remote does not
+# have is this repository's alone, and its tickets are claimed by the local branch only. A claim
+# given up is released by deleting its branch where it was made; on a remote that is a push the
+# grant does not cover, so a human makes it.
 #
-# The ticket must be on main, local or the remote's: the worker's worktree starts from there,
-# and other clones read the frontier from there.
+# The ticket must be on the base, local or the remote's: the worker's worktree starts from
+# there, and other sessions read the frontier from there. A local feat/ base is a local branch;
+# one only fetched is named by its remote-tracking ref, as origin/feat/<name>, to the sensor, and
+# claimed with the remote.
 #
 # Pure bash + git. Usage, anywhere in the repository the dispatcher works in, with the ticket's
 # path from the repository's root:
-#     .agents/skills/work-tickets/claim.sh docs/plan/<spec>/<NN>-<slug>.md [remote]
+#     .agents/skills/work-tickets/claim.sh docs/plan/<spec>/<NN>-<slug>.md [remote] [--base feat/<name>]
 # Prints the branch on success. Exit code 0 when this session holds the claim, 2 when another
 # session was first, 1 on anything else.
 set -uo pipefail
@@ -30,7 +37,26 @@ set -uo pipefail
 # shellcheck source-path=SCRIPTDIR source=../../../scripts/lib/ticket.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../../../scripts/lib/ticket.sh"
 
-ticket="${1:-}" remote="${2:-}"
+ticket="" remote="" base_name="main"
+while (($#)); do
+  case "$1" in
+    --base) base_name="${2:-}"; shift 2 || { echo "claim: --base needs a branch" >&2; exit 1; } ;;
+    *)
+      if [[ -z "$ticket" ]]; then ticket="$1"
+      elif [[ -z "$remote" ]]; then remote="$1"
+      else echo "claim: one ticket and one remote, not '$1' as well" >&2; exit 1
+      fi
+      shift ;;
+  esac
+done
+if [[ "$remote" == -* ]]; then
+  echo "claim: '$remote' is no remote" >&2
+  exit 1
+fi
+if [[ "$base_name" != main && ! "$base_name" =~ ^feat/[A-Za-z0-9._/-]+$ ]]; then
+  echo "claim: the base is main or a feat/ branch, not '$base_name'" >&2
+  exit 1
+fi
 
 top="$(git rev-parse --show-toplevel 2>/dev/null)" || { echo "claim: not inside a git repository" >&2; exit 1; }
 cd "$top" || exit 1
@@ -46,20 +72,37 @@ if git show-ref --verify --quiet "refs/heads/$branch"; then
   exit 2
 fi
 
-# The base is main as the claim is made from it: the local one, or the remote's as just fetched.
-# FETCH_HEAD rather than <remote>/main, which a single-branch clone or a narrowed refspec never
+# A feat/ base the remote does not have is claimed by the local branch alone. Only an answer
+# that the branch is absent says so: a remote that cannot be reached holds claims this session
+# cannot see.
+if [[ -n "$remote" && "$base_name" != main ]]; then
+  git ls-remote --exit-code --heads -- "$remote" "refs/heads/$base_name" >/dev/null 2>&1
+  case $? in
+    0) ;;
+    2)
+      echo "claim: $remote has no $base_name — the claim is this repository's alone" >&2
+      remote=""
+      ;;
+    *) echo "claim: cannot reach $remote to claim from $base_name" >&2; exit 1 ;;
+  esac
+fi
+
+# The base as the claim is made from it: the local branch, or the remote's as just fetched.
+# FETCH_HEAD rather than <remote>/<base>, which a single-branch clone or a narrowed refspec never
 # updates, and which a URL in place of a remote name does not have.
 if [[ -z "$remote" ]]; then
-  base="$(git rev-parse --verify -q "main^{commit}")" \
-    || { echo "claim: there is no main to claim from" >&2; exit 1; }
+  base="$(git rev-parse --verify -q "refs/heads/$base_name^{commit}")" \
+    || { echo "claim: there is no $base_name to claim from" >&2; exit 1; }
 else
-  git fetch --quiet "$remote" main || exit 1
+  git fetch --quiet "$remote" "$base_name" || exit 1
   base="$(git rev-parse --verify -q "FETCH_HEAD^{commit}")" || exit 1
 fi
-# The worker's worktree starts from the base, and other clones read the frontier from it, so a
-# ticket that is not on main yet is not claimable.
+# The worker's worktree starts from the base, and other sessions read the frontier from it, so
+# a ticket that is not on the base yet is not claimable.
 if ! git cat-file -e "$base:$ticket" 2>/dev/null; then
-  echo "claim: $ticket is not on main${remote:+ of $remote} — land the plan first" >&2
+  hint="land the plan there first"
+  [[ "$base_name" == main ]] && hint+=", or claim it with --base feat/<name> from the feat/ branch that carries it"
+  echo "claim: $ticket is not on $base_name${remote:+ of $remote} — $hint" >&2
   exit 1
 fi
 
