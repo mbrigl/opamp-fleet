@@ -176,7 +176,7 @@ impl Assignment {
             if !crate::blobs::is_hash(revision) {
                 return Err(format!(
                     "the assignment's configuration {name:?}: revision {revision:?} is no content \
-                     hash"
+                     hash, 64 lowercase hexadecimal digits"
                 ));
             }
         }

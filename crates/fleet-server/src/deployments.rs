@@ -72,7 +72,8 @@ impl Deployment {
     /// so every store refuses what a write would (ADR-0029 clause 6): a name or a Configuration
     /// name outside the ADR-0019 grammar, a Selector [`check_selector`] refuses, a Package
     /// identity outside the token rule, and a second Package of an Agent type, in the words of
-    /// [`DeploymentError::TypeTaken`]. Each store names the record before the message.
+    /// [`DeploymentError::TypeTaken`], even one that repeats the first: no store keeps two. Each
+    /// store names the record before the message.
     ///
     /// # Errors
     /// Returns the rule the Deployment breaks.
