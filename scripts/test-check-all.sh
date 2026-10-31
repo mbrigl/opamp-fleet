@@ -20,6 +20,9 @@ set -uo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib/selftest.sh"
 RUNNER="$ROOT/scripts/check-all.sh"
 
+# The cases read no real disk: the guard on free space has cases of its own below.
+export FLEET_MIN_FREE_GB=0
+
 # g <dir> <git args...> — git in the fixture with an identity, so that commits need no config.
 g() {
   local dir="$1"; shift
@@ -135,6 +138,31 @@ if [[ "$out" != *"need bash"* && "$out" == *"RAN "* ]]; then
   passed=$((passed + 1))
 else
   failed=$((failed + 1)); echo "FAIL: bash 4.4 passes the guard silently" >&2
+fi
+
+# A disk with less free space than FLEET_MIN_FREE_GB stops the runner before any check, naming
+# what is free and where; with enough space the guard says nothing, and a threshold that is no
+# number is refused.
+# Verifies: ADR-0002
+d="$(repo short-disk)"
+out="$(FLEET_MIN_FREE_GB=20 CHECK_ALL_FREE_GB=7 CARGO_TARGET_DIR="$d/target" \
+  bash "$d/scripts/check-all.sh" 2>&1)"; rc=$?
+if ((rc == 1)) && [[ "$out" == *"only 7 GB free"* && "$out" == *"$d/target"* && "$out" != *"RAN "* ]]; then
+  passed=$((passed + 1))
+else
+  failed=$((failed + 1)); echo "FAIL: a short disk stops the runner before any check (exit $rc)" >&2
+fi
+out="$(FLEET_MIN_FREE_GB=20 CHECK_ALL_FREE_GB=20 bash "$d/scripts/check-all.sh" 2>&1)"
+if [[ "$out" != *"GB free"* && "$out" == *"RAN "* ]]; then
+  passed=$((passed + 1))
+else
+  failed=$((failed + 1)); echo "FAIL: enough space passes the guard silently" >&2
+fi
+out="$(FLEET_MIN_FREE_GB=lots bash "$d/scripts/check-all.sh" 2>&1)"; rc=$?
+if ((rc == 2)) && [[ "$out" == *"FLEET_MIN_FREE_GB must be a number"* ]]; then
+  passed=$((passed + 1))
+else
+  failed=$((failed + 1)); echo "FAIL: a threshold that is no number is refused (exit $rc)" >&2
 fi
 
 d="$(repo untouched)"
