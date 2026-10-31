@@ -966,8 +966,10 @@ fn create_private_dir(dir: &Path) -> Result<(), String> {
         .map_err(|e| format!("cannot create {}: {e}", dir.display()))
 }
 
-/// Writes a new file; a key is `0600` from the moment it exists.
-fn write_file(path: &Path, contents: &[u8], key: bool) -> Result<(), String> {
+/// Writes a new file; a key is `0600` from the moment it exists, and an existing file is never
+/// replaced. The one writer of every private key the tool makes (ADR-0032). A write that fails
+/// part-way removes what it wrote, so nothing is left half written to be refused as existing.
+pub(crate) fn write_file(path: &Path, contents: &[u8], key: bool) -> Result<(), String> {
     use std::io::Write as _;
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
@@ -978,12 +980,23 @@ fn write_file(path: &Path, contents: &[u8], key: bool) -> Result<(), String> {
     }
     #[cfg(not(unix))]
     let _ = key;
-    let mut file = options
-        .open(path)
-        .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    let mut file = options.open(path).map_err(|e| {
+        if key && e.kind() == std::io::ErrorKind::AlreadyExists {
+            format!(
+                "{} exists, and a private key is never replaced: move it away or delete it first",
+                path.display()
+            )
+        } else {
+            format!("cannot write {}: {e}", path.display())
+        }
+    })?;
     file.write_all(contents)
         .and_then(|()| file.sync_all())
-        .map_err(|e| format!("cannot write {}: {e}", path.display()))
+        .map_err(|e| {
+            drop(file);
+            let _ = std::fs::remove_file(path);
+            format!("cannot write {}: {e}", path.display())
+        })
 }
 
 /// Whether two directories sit on one file system (ADR-0032 clause 8).
