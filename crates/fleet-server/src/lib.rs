@@ -164,6 +164,36 @@ impl Records {
             Records::Postgres(db) => Box::new(postgres::ledger::PgLedgerStore::new(db.clone())),
         })
     }
+
+    /// Opens every store on these records through the constructors the Server's startup uses,
+    /// and lets go of them: what `server migrate` checks before it reports a migration done. A
+    /// store the Server opens at startup is opened here too, so a record the first start would
+    /// refuse is refused now. The artifacts and the audit record are the filesystem's under
+    /// `data_dir`, and the bootstrap record is opened without its CA's key, as a Server without
+    /// `[enrolment] bootstrap_ca` opens it. The bootstrap record and the register forget what
+    /// has ended by `clock` as they open, so a check that must leave the records as it found
+    /// them passes a clock at which nothing has ended.
+    ///
+    /// # Errors
+    /// Returns the first store's error that does not open, or holds a record that does not decode.
+    pub(crate) fn open_every_store(
+        &self,
+        data_dir: &std::path::Path,
+        clock: Arc<dyn fleet::Clock>,
+    ) -> Result<(), String> {
+        use audit_log::AuditStore as _;
+        AppState::on(self)?;
+        let packages =
+            packages::PackageStore::open_on(self, data_dir, &config::BlobsConfig::default())?;
+        PackageOffering::on(self, packages)?;
+        bootstrap::BootstrapCertificates::on(None, self, clock.clone())?;
+        enrolment::Enrolment::open_on(clock.clone(), self.enrolment())?;
+        floors::PackageFloors::open(self.floors())?;
+        revocation::Revocations::open(self.ledger()?, clock, Vec::new())?;
+        // The audit log's start reads the chain's tail before it writes.
+        fs::FsAuditStore::open(data_dir)?.tail()?;
+        Ok(())
+    }
 }
 
 /// The default wiring of the fleet's state to its storage adapters (ADR-0009): it lives here, in
@@ -174,6 +204,7 @@ impl AppState {
     /// (ADR-0029) — one JSON file per Agent, its labels inside, under `agents/`, and one per
     /// Configuration under `configurations/` — restoring every persisted Configuration and Agent
     /// record. A store that cannot be opened (or holds an unparsable file) fails startup loudly.
+    /// For the tests of this crate and the others; the Server opens through [`on`](Self::on).
     ///
     /// # Errors
     /// Returns an error when a store cannot be opened or holds an unparsable record.
@@ -204,7 +235,8 @@ impl AppState {
 /// The default wiring of the package store to its filesystem adapter (ADR-0009).
 impl packages::PackageStore {
     /// Opens the store in the data directory `data_dir`, loading every persisted Package
-    /// (ADR-0027, ADR-0029).
+    /// (ADR-0027, ADR-0029). For the tests of this crate and the others; the Server opens
+    /// through [`open_on`](Self::open_on).
     ///
     /// # Errors
     /// Returns an error when the store cannot be opened, or a Package in it cannot be read, does
@@ -264,7 +296,8 @@ impl packages::PackageStore {
 /// The default wiring of the package offering to the Deployments' filesystem adapter (ADR-0009).
 impl PackageOffering {
     /// Arms the **Deployments** beside the package store, from `deployments/` in the data
-    /// directory `data_dir` (ADR-0027, ADR-0029).
+    /// directory `data_dir` (ADR-0027, ADR-0029). For the tests of this crate and the others; the
+    /// Server opens through [`on`](Self::on).
     ///
     /// # Errors
     /// Returns an error when the Deployments cannot be opened or one of them cannot be read.
@@ -287,7 +320,8 @@ impl PackageOffering {
 /// The default wiring of the bootstrap record to its filesystem adapter (ADR-0009, ADR-0029).
 impl bootstrap::BootstrapCertificates {
     /// Opens the record in the data directory `data_dir`, one file per certificate under
-    /// `bootstrap/` (ADR-0029), forgetting what has ended.
+    /// `bootstrap/` (ADR-0029), forgetting what has ended. For the tests of this crate and the
+    /// others; the Server opens through [`on`](Self::on).
     ///
     /// # Errors
     /// Returns an error when the directory cannot be opened or a file in it cannot be read.

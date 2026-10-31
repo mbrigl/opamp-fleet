@@ -152,9 +152,12 @@ is not its to decide.
   opens to choose the adapters by `[database]`, and which `AppState::on`,
   `PackageStore::open_on`, `PackageOffering::on` and `BootstrapCertificates::on` take, and wires
   the filesystem adapters in `AppState::new`, `PackageStore::open`,
-  `PackageOffering::new` and `BootstrapCertificates::on_disk`. `migrate` is the one module that
-  reads the layout of an older Server, for `server migrate`, and nothing in the running Server
-  calls it.
+  `PackageOffering::new` and `BootstrapCertificates::on_disk`, which the tests use.
+  `Records::open_every_store` opens every store through the constructors that take `Records`
+  and lets go of them, at a clock it is given, so a check forgets nothing that has ended.
+  `migrate` is the one module that reads the layout of an older Server, for `server migrate`,
+  which checks what it wrote through `open_every_store`, and nothing in the running Server calls
+  it. A store the Server opens at startup is added to `open_every_store` too.
 - **The golden path** — a Server store: the port `FloorStore` in the core module `floors`, its
   filesystem adapter in `fs::floors`, its PostgreSQL adapter in `postgres::floors`, and the one
   `contract` test there that runs on both stores. A new store copies its shape and its test
