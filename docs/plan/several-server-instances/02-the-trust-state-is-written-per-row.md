@@ -65,16 +65,33 @@ Done:
   `an_instance_with_an_older_floor_in_memory_cannot_lower_the_stored_one`.
 - The port contracts of the ledger and the floors run on both stores with the new calls.
 
-Decided by the human, to be built next:
+Done in part two:
 
-- Criterion 3: the register's write of a renewal walks the predecessor chain and reads the list in
-  its own transaction, a recursive query on PostgreSQL, and refuses a renewal whose chain holds a
-  revoked certificate. No cache decides it.
-- Criterion 4: the bindings move into a table of their own, `instance_uid` its key, migrated from
-  the arrays of `hosts`. The approval of an enrolment binds; a second binding is refused naming the
-  `instance_uid` and the Host it is bound to.
-- Criterion 5: both bounds the register has, its size and the descendants of one root, are counted
-  in the write, with the register held against every other writer, as the revocation list is.
-- The enrolment queue is one row per request, its bound counted in the write under the same kind
-  of hold.
+- Criterion 3: the ledger port's `register_issued` walks the predecessor chain and reads the list
+  in its own transaction (one recursive query on PostgreSQL, the register held against every other
+  writer and the list against every adder) and refuses a renewal whose chain holds a revoked
+  certificate. Decided by `a_stale_instance_cannot_register_the_renewal_of_a_revoked_certificate`.
+- Criterion 5: the same write counts the register's size and the entries below the chain's root.
+  Decided by `the_register_write_decides_from_the_filesystem` and `..._from_postgres`, and by
+  `two_writers_at_the_registers_bound_write_one_entry_between_them`, which fails without the lock.
+- Bindings: `host_bindings` (migration 4), one row per `instance_uid`, filled from the Hosts'
+  arrays; a report that would bind an `instance_uid` another Host holds is refused naming it.
+  Decided by `a_stale_instance_cannot_bind_an_agent_another_host_holds`,
+  `two_binders_of_one_instance_uid_bind_it_once` and `the_bindings_move_out_of_the_hosts_arrays`.
+
+Open, each for the human:
+
+- Criterion 4 asks for the refusal when two approvals bind one `instance_uid`, and the human
+  decided that the approval binds. ADR-0024 and its restatement
+  (ADR-draft-the-fleet-record-of-agents-and-hosts, "Its first report binds it") decide that the
+  first report binds, and tests their Enforcement names pin it
+  (`a_host_speaks_for_the_agents_bound_to_it_and_a_gateway_for_any`,
+  `an_approval_writes_the_host_before_its_first_report`). Built so far: the first report binds,
+  through the unique row, so the second Host's first report is refused naming the binding. Binding
+  at the approval needs the restatement revised first, as an ADR commit the human reviews.
+- An `instance_uid` two Hosts' arrays hold fails migration 4, naming it, for the operator to
+  release; whether the migration should instead keep one binding by a rule is the human's.
+- During a rolling update a release before the bindings' table binds through the Hosts' arrays
+  only, which this release does not read (ticket 11's expand-then-contract).
+- The enrolment queue per row with its bound counted in the write: not built yet.
 - Criteria 6 and 7 follow once the rest is built.
