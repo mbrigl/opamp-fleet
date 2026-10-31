@@ -478,7 +478,16 @@ pub(crate) async fn client(pool: &Pool) -> Result<Object, String> {
 /// A database error as text: the server's own message where it sent one.
 pub(crate) fn sql(error: tokio_postgres::Error) -> String {
     match error.as_db_error() {
-        Some(db) => format!("{}: {} ({})", db.severity(), db.message(), db.code().code()),
+        // The detail names the row a constraint refused, such as the key two rows share.
+        Some(db) => match db.detail() {
+            Some(detail) => format!(
+                "{}: {} ({}): {detail}",
+                db.severity(),
+                db.message(),
+                db.code().code()
+            ),
+            None => format!("{}: {} ({})", db.severity(), db.message(), db.code().code()),
+        },
         None => match std::error::Error::source(&error) {
             Some(source) => format!("{error}: {source}"),
             None => error.to_string(),

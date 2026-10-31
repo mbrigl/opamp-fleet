@@ -307,11 +307,47 @@ pub trait LedgerStore: Send + Sync {
     /// Returns an error when it cannot be written; the list is then as it was.
     fn remove_revocation(&self, id: &str) -> Result<bool, String>;
 
+    /// Binds `instance_uid` to `host`, unless another Host holds it: the binding is one row the
+    /// store holds once for every instance
+    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// clause 19). A store that is its only writer binds what the Server decided in memory.
+    ///
+    /// # Errors
+    /// Returns an error when it cannot be written.
+    fn bind(&self, instance_uid: &str, host: &str) -> Result<Bound, String> {
+        let _ = (instance_uid, host);
+        Ok(Bound::Bound)
+    }
+
+    /// Releases `instance_uid` from `host`, when `host` holds it.
+    ///
+    /// # Errors
+    /// Returns an error when it cannot be written.
+    fn unbind(&self, instance_uid: &str, host: &str) -> Result<(), String> {
+        let _ = (instance_uid, host);
+        Ok(())
+    }
+
     /// Replaces the hosts and what each speaks for.
     ///
     /// # Errors
     /// Returns an error when they cannot be written.
     fn save_hosts(&self, hosts: &BTreeMap<String, Host>) -> Result<(), String>;
+}
+
+/// What the store found when it was asked to bind an `instance_uid`.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Bound {
+    /// The `instance_uid` is bound to the Host asked for.
+    Bound,
+    /// Another Host holds it: this one.
+    Taken(String),
+}
+
+/// The refusal of a binding another Host holds.
+#[must_use]
+pub fn bound_elsewhere(instance_uid: &str, host: &str) -> String {
+    format!("the Agent {instance_uid} is bound to the host {host}")
 }
 
 /// The bounds a register write counts (ADR-0029 clause 9).
@@ -891,6 +927,7 @@ impl Revocations {
         let mut state = self.state.lock().expect("revocation lock");
         let binds = Self::admits(&state, host, &uid)?;
         if binds {
+            self.bind(&mut state, &uid, host)?;
             state
                 .hosts
                 .entry(host.to_string())
@@ -900,7 +937,6 @@ impl Revocations {
                 })
                 .instance_uids
                 .insert(uid.clone());
-            state.owners.insert(uid, host.to_string());
         }
         let extended = state
             .hosts
@@ -931,7 +967,34 @@ impl Revocations {
         if let Some(entry) = state.hosts.get_mut(&host) {
             entry.instance_uids.remove(&uid);
         }
+        self.store.unbind(&uid, &host)?;
         self.save_hosts(state)
+    }
+
+    /// Binds `uid` to `host` in the store and in `state`. A binding another Host holds refuses
+    /// it, naming that Host, and is what `state` holds from then on; one a Gateway's Host holds
+    /// moves, as a Gateway binds nothing it carries.
+    fn bind(&self, state: &mut State, uid: &str, host: &str) -> Result<(), String> {
+        let mut bound = self.store.bind(uid, host)?;
+        if let Bound::Taken(holder) = &bound {
+            if state.hosts.get(holder).is_some_and(|entry| entry.gateway) {
+                self.store.unbind(uid, holder)?;
+                bound = self.store.bind(uid, host)?;
+            }
+        }
+        match bound {
+            Bound::Bound => {
+                state.owners.insert(uid.to_string(), host.to_string());
+                Ok(())
+            }
+            Bound::Taken(holder) => {
+                if let Some(entry) = state.hosts.get_mut(&holder) {
+                    entry.instance_uids.insert(uid.to_string());
+                }
+                state.owners.insert(uid.to_string(), holder.clone());
+                Err(bound_elsewhere(uid, &holder))
+            }
+        }
     }
 
     /// Whether `host` may report for `uid`, and whether that would bind it.
@@ -987,9 +1050,12 @@ impl Revocations {
         };
         if let Some(entry) = state.hosts.get_mut(&host) {
             entry.instance_uids.remove(&old);
-            entry.instance_uids.insert(new.clone());
         }
-        state.owners.insert(new, host);
+        self.store.unbind(&old, &host)?;
+        self.bind(&mut state, &new, &host)?;
+        if let Some(entry) = state.hosts.get_mut(&host) {
+            entry.instance_uids.insert(new);
+        }
         self.save_hosts(state)
     }
 

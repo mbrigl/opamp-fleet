@@ -8,8 +8,8 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 
 use crate::revocation::{
-    add_to, named_in, register_into, remove_from, Added, CertId, Host, Issued, Ledger, LedgerStore,
-    RegisterBounds, Registered, Revocation,
+    add_to, named_in, register_into, remove_from, Added, Bound, CertId, Host, Issued, Ledger,
+    LedgerStore, RegisterBounds, Registered, Revocation,
 };
 
 /// Three places in the data directory, each owner-only: the register in `certificates/`, one file
@@ -207,6 +207,16 @@ impl LedgerStore for FsLedgerStore {
             self.put_issued(issued)?;
         }
         Ok(decided)
+    }
+
+    /// Answers from the Hosts as last written, which the next write of the Hosts carries the
+    /// binding into: another Host speaking for `instance_uid` holds it.
+    fn bind(&self, instance_uid: &str, host: &str) -> Result<Bound, String> {
+        let written = self.written_hosts.lock().expect("hosts lock");
+        Ok(written
+            .iter()
+            .find(|(name, entry)| *name != host && entry.instance_uids.contains(instance_uid))
+            .map_or(Bound::Bound, |(holder, _)| Bound::Taken(holder.clone())))
     }
 
     /// Writes each Host that changed since the last write, and removes each one that is gone.

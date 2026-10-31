@@ -10,7 +10,8 @@ use tokio_postgres::GenericClient;
 
 use super::{client, signed, sql, unsigned, Database};
 use crate::revocation::{
-    Added, CertId, Facts, Host, Issued, Ledger, LedgerStore, RegisterBounds, Registered, Revocation,
+    Added, Bound, CertId, Facts, Host, Issued, Ledger, LedgerStore, RegisterBounds, Registered,
+    Revocation,
 };
 
 /// The ledger in `certificates`, `revocations` and `hosts`. A revocation is written as the one row
@@ -201,6 +202,56 @@ impl LedgerStore for PgLedgerStore {
     }
 
     /// The Hosts that changed are written and the ones that are gone deleted, in one transaction.
+    /// One row per binding, its `instance_uid` the key: a binding another Host holds is left as it
+    /// is and answered with that Host.
+    fn bind(&self, instance_uid: &str, host: &str) -> Result<Bound, String> {
+        let (instance_uid, host) = (instance_uid.to_string(), host.to_string());
+        self.database.run(move |pool| async move {
+            let mut client = client(&pool).await?;
+            let transaction = client.transaction().await.map_err(sql)?;
+            transaction
+                .execute(
+                    "INSERT INTO host_bindings (instance_uid, host) VALUES ($1, $2) \
+                     ON CONFLICT (instance_uid) DO NOTHING",
+                    &[&instance_uid, &host],
+                )
+                .await
+                .map_err(sql)?;
+            let holder: String = transaction
+                .query_one(
+                    "SELECT host FROM host_bindings WHERE instance_uid = $1",
+                    &[&instance_uid],
+                )
+                .await
+                .map_err(sql)?
+                .get(0);
+            transaction.commit().await.map_err(sql)?;
+            Ok(if holder == host {
+                Bound::Bound
+            } else {
+                Bound::Taken(holder)
+            })
+        })
+    }
+
+    fn unbind(&self, instance_uid: &str, host: &str) -> Result<(), String> {
+        let (instance_uid, host) = (instance_uid.to_string(), host.to_string());
+        self.database.run(move |pool| async move {
+            let client = client(&pool).await?;
+            client
+                .execute(
+                    "DELETE FROM host_bindings WHERE instance_uid = $1 AND host = $2",
+                    &[&instance_uid, &host],
+                )
+                .await
+                .map_err(sql)?;
+            Ok(())
+        })
+    }
+
+    /// Writes each Host that changed since the last commit, and removes each one that is gone with
+    /// its bindings. The `instance_uids` a Host's row keeps are those this instance holds, for a
+    /// release before the bindings' table; the bindings are read from that table.
     fn save_hosts(&self, hosts: &BTreeMap<String, Host>) -> Result<(), String> {
         let mut written = self.written_hosts.lock().expect("hosts lock");
         let changed: Vec<(String, Host)> = hosts
@@ -223,6 +274,10 @@ impl LedgerStore for PgLedgerStore {
                 .execute("DELETE FROM hosts WHERE host = ANY($1)", &[&gone])
                 .await
                 .map_err(sql)?;
+            transaction
+                .execute("DELETE FROM host_bindings WHERE host = ANY($1)", &[&gone])
+                .await
+                .map_err(sql)?;
             for (host, entry) in &changed {
                 write_host(&*transaction, host, entry).await?;
             }
@@ -231,6 +286,24 @@ impl LedgerStore for PgLedgerStore {
         hosts.clone_into(&mut written);
         Ok(())
     }
+}
+
+/// Binds every `instance_uid` `entry` speaks for to `host`, in a database that holds no binding of
+/// them yet: what an import of a data directory writes.
+pub(crate) async fn write_bindings(
+    client: &impl GenericClient,
+    host: &str,
+    entry: &Host,
+) -> Result<(), String> {
+    let uids: Vec<&str> = entry.instance_uids.iter().map(String::as_str).collect();
+    client
+        .execute(
+            "INSERT INTO host_bindings (instance_uid, host) SELECT unnest($1::text[]), $2",
+            &[&uids, &host],
+        )
+        .await
+        .map_err(sql)?;
+    Ok(())
 }
 
 /// The whole ledger. A row that does not decode fails, naming it.
@@ -325,6 +398,21 @@ pub(crate) async fn read_all(client: &impl GenericClient) -> Result<Ledger, Stri
                 valid_until_ms: row.get::<_, Option<i64>>(5).map(unsigned),
             },
         );
+    }
+    // A Host speaks for the `instance_uid`s bound to it in their own table, whatever its row's
+    // array says.
+    for entry in hosts.values_mut() {
+        entry.instance_uids.clear();
+    }
+    for row in client
+        .query("SELECT instance_uid, host FROM host_bindings", &[])
+        .await
+        .map_err(sql)?
+    {
+        let host: String = row.get(1);
+        if let Some(entry) = hosts.get_mut(&host) {
+            entry.instance_uids.insert(row.get(0));
+        }
     }
     Ok(Ledger {
         issued,
@@ -601,7 +689,16 @@ mod tests {
             ("a".to_string(), host(&["01", "02"], false)),
             ("gateway/1".to_string(), host(&[], true)),
         ]);
+        for uid in ["01", "02"] {
+            assert_eq!(store.bind(uid, "a").expect("bind"), Bound::Bound);
+        }
         store.save_hosts(&hosts).expect("save");
+        assert_eq!(
+            store.bind("01", "b").expect("bind"),
+            Bound::Taken("a".into()),
+            "an instance_uid one Host holds is not bound to another"
+        );
+        assert_eq!(store.bind("01", "a").expect("bind"), Bound::Bound);
 
         let reopened = open();
         let ledger = reopened.load().expect("load");
@@ -623,6 +720,7 @@ mod tests {
         );
         let shorter = vec![wider, revocation("r3", "0d"), revocation("r5", "0f")];
         let fewer = BTreeMap::from([("a".to_string(), host(&["01"], false))]);
+        reopened.unbind("02", "a").expect("unbind");
         reopened.save_hosts(&fewer).expect("save");
         let ledger = open().load().expect("load");
         assert_eq!(ledger.issued, [renewal]);
@@ -902,6 +1000,144 @@ mod tests {
         );
     }
 
+    /// The bindings move out of the Hosts' arrays of a database a release before them wrote: each
+    /// `instance_uid` an array holds is bound to its Host. An `instance_uid` two Hosts' arrays hold
+    /// fails the migration, naming it, and changes nothing.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    #[test]
+    fn the_bindings_move_out_of_the_hosts_arrays() {
+        use crate::postgres::schema::{MIGRATIONS, SCHEMA_TABLE};
+        for (hosts, moved) in [
+            (
+                BTreeMap::from([
+                    ("a".to_string(), host(&["01", "02"], false)),
+                    ("b".to_string(), host(&["03"], false)),
+                ]),
+                true,
+            ),
+            (
+                BTreeMap::from([
+                    ("a".to_string(), host(&["01"], false)),
+                    ("b".to_string(), host(&["01"], false)),
+                ]),
+                false,
+            ),
+        ] {
+            let Some(test) = TestDatabase::named() else {
+                return;
+            };
+            let database = test.open();
+            PgLedgerStore::new(database.clone())
+                .save_hosts(&hosts)
+                .expect("save");
+            // The database as the release before the bindings left it.
+            test.sql(&format!(
+                "DROP TABLE host_bindings; DELETE FROM {SCHEMA_TABLE} WHERE version = 4"
+            ));
+            let applied = database.apply_schema(MIGRATIONS);
+            if moved {
+                assert_eq!(applied.expect("migrate").versions, [4]);
+                assert_eq!(
+                    PgLedgerStore::new(database.clone())
+                        .load()
+                        .expect("load")
+                        .hosts,
+                    hosts
+                );
+            } else {
+                let error = applied.expect_err("two Hosts hold 01");
+                assert!(error.contains("(instance_uid)=(01)"), "{error}");
+                assert!(
+                    test.rows("SELECT 1 WHERE to_regclass('host_bindings') IS NOT NULL")
+                        .is_empty(),
+                    "nothing changed"
+                );
+            }
+        }
+    }
+
+    /// Two instances binding one `instance_uid` at once, each to a Host of its own, bind it once:
+    /// in every round two binders race behind a barrier, and exactly one binds while the other is
+    /// answered with the Host that holds it.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    #[test]
+    fn two_binders_of_one_instance_uid_bind_it_once() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let stores = [
+            Arc::new(PgLedgerStore::new(database.clone())),
+            Arc::new(PgLedgerStore::new(database.clone())),
+        ];
+        for round in 0..20 {
+            let barrier = Arc::new(std::sync::Barrier::new(2));
+            let uid = format!("{round:02x}");
+            let answers: Vec<Bound> = std::thread::scope(|scope| {
+                let racers: Vec<_> = stores
+                    .iter()
+                    .enumerate()
+                    .map(|(racer, store)| {
+                        let (barrier, uid) = (barrier.clone(), uid.clone());
+                        scope.spawn(move || {
+                            barrier.wait();
+                            store.bind(&uid, &format!("host-{racer}")).expect("bind")
+                        })
+                    })
+                    .collect();
+                racers
+                    .into_iter()
+                    .map(|racer| racer.join().expect("racer"))
+                    .collect()
+            });
+            assert_eq!(
+                answers.iter().filter(|a| **a == Bound::Bound).count(),
+                1,
+                "round {round}: {answers:?}"
+            );
+        }
+    }
+
+    /// An instance whose view of the Hosts is stale cannot bind an `instance_uid` another
+    /// instance bound to another Host: B never hears of A's binding, and its report is refused
+    /// naming the Host that holds the Agent, by which B decides from then on.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    #[test]
+    fn a_stale_instance_cannot_bind_an_agent_another_host_holds() {
+        use crate::revocation::{bound_elsewhere, Revocations};
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        struct Now;
+        impl crate::fleet::Clock for Now {
+            fn now_ms(&self) -> u64 {
+                1
+            }
+        }
+        let instance = || {
+            Revocations::open(
+                Box::new(PgLedgerStore::new(database.clone())),
+                Arc::new(Now),
+                Vec::new(),
+            )
+            .expect("open")
+        };
+        let (a, b) = (instance(), instance());
+        let subject = SubjectValues::default();
+        a.check_report("h1", &subject, 1_000, b"\x01\x02")
+            .expect("A binds it to h1");
+        let refused = b
+            .check_report("h2", &subject, 1_000, b"\x01\x02")
+            .expect_err("B is refused");
+        assert_eq!(refused, bound_elsewhere("0102", "h1"));
+        assert_eq!(
+            b.may_report("h2", b"\x01\x02"),
+            Err("this certificate belongs to another host than that Agent's".to_string()),
+            "B holds the binding that holds"
+        );
+    }
+
     /// A save of the Hosts that fails part-way leaves them as they were, and the next save still
     /// writes what changed: the adapter's memory follows only what committed.
     /// Verifies: ADR-0029
@@ -912,6 +1148,7 @@ mod tests {
         };
         let store = PgLedgerStore::new(test.open());
         let before = BTreeMap::from([("a".to_string(), host(&["01"], false))]);
+        store.bind("01", "a").expect("bind");
         store.save_hosts(&before).expect("save");
         test.sql("ALTER TABLE hosts ADD CONSTRAINT not_b CHECK (host <> 'b')");
         let after = BTreeMap::from([
@@ -921,6 +1158,7 @@ mod tests {
         store.save_hosts(&after).expect_err("b cannot be written");
         assert_eq!(store.load().expect("load").hosts, before);
         test.sql("ALTER TABLE hosts DROP CONSTRAINT not_b");
+        store.bind("02", "a").expect("bind");
         store.save_hosts(&after).expect("save");
         assert_eq!(store.load().expect("load").hosts, after);
     }

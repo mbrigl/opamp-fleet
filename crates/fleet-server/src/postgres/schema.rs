@@ -28,7 +28,7 @@ pub const SCHEMA_TABLE: &str = "fleet_schema";
 
 /// Every table the migrations create, so that a database holding any of them is recognised as one
 /// the Server already wrote ([`super::Database::server_tables`]).
-pub const TABLES: [&str; 16] = [
+pub const TABLES: [&str; 17] = [
     "configurations",
     "configuration_revisions",
     "deployments",
@@ -44,6 +44,7 @@ pub const TABLES: [&str; 16] = [
     "enrolment_requests",
     "package_floors",
     "leases",
+    "host_bindings",
     // Not tables of the records, but the Server's all the same.
     SCHEMA_TABLE,
 ];
@@ -66,6 +67,13 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 3,
         oldest_server: "0.6.1",
         sql: LEASES,
+    },
+    // A table only added and filled from the Hosts; the release before it keeps the Hosts'
+    // arrays, which this release writes too.
+    Migration {
+        version: 4,
+        oldest_server: "0.6.1",
+        sql: HOST_BINDINGS,
     },
 ];
 
@@ -219,6 +227,20 @@ CREATE TABLE leases (
     renewed_at timestamptz NOT NULL,
     expires_at timestamptz NOT NULL
 );
+";
+
+/// Which Host each `instance_uid` is bound to: one row per binding, the `instance_uid` its key, so
+/// no two Hosts hold one
+/// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+/// clause 19). It is filled from the arrays of `hosts`; an `instance_uid` two Hosts' arrays hold
+/// fails the migration, naming it, and changes nothing, for the operator to decide.
+const HOST_BINDINGS: &str = r"
+CREATE TABLE host_bindings (
+    instance_uid text PRIMARY KEY,
+    host text NOT NULL
+);
+INSERT INTO host_bindings (instance_uid, host)
+    SELECT uid, host FROM hosts, unnest(instance_uids) AS uid;
 ";
 
 /// This Server's version, `MAJOR.MINOR.PATCH`: the base of the version it reports, so a
