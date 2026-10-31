@@ -81,12 +81,13 @@ first: a push that only creates the branch, with an empty commit of its own on t
 the base, because a push of a commit the branch already points at succeeds without creating
 anything, and two clones would both win. A `feat/` branch that is not on the remote is the one
 repository's alone, and its tickets are claimed by the local branch only. That push skips the
-pre-push hook: its commit carries the tree of the remote's `main` unchanged, so the checks have
-nothing to decide. That push is the one the harness ADR may grant without an instruction per push
-([`AGENTS.md` §6](../../AGENTS.md#6-project-rules)); a project whose sessions share a repository
-grants none. A ticket is claimable once it is on its base, where the worker's branch starts and
-other sessions read it; the frontier is read on the base a session names, else on the branch it
-has checked out, so a check run on a `feat/` branch sees that branch's plan. A claim given up is
+pre-push hook: its commit carries the tree of the remote's copy of the base unchanged, so the
+checks have nothing to decide. That push is the one the harness ADR may grant without an
+instruction per push ([`AGENTS.md` §6](../../AGENTS.md#6-project-rules)); a project whose
+sessions share a repository grants none. A ticket is claimable once it is on its base, where the
+worker's branch starts and other sessions read it; the frontier is read on the base a session
+names, else on the branch it has checked out, so a check run on a `feat/` branch sees that
+branch's plan. A claim given up is
 released by deleting its branch: a local one by the session that made it, one on a remote by a
 human, since the push the harness ADR grants only creates. A ticket merged into a
 `feat/` branch keeps its branch until that branch has reached `main`: until then the human may
