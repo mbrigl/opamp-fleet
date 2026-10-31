@@ -61,7 +61,7 @@ pub fn check_organization(value: &str) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    // Verifies: ADR-0032
+    // Verifies: ADR-draft-the-operator-program-opamp-fleetctl
     #[test]
     fn a_leaf_is_named_for_its_ca_with_ca_turned_into_certificate() {
         assert_eq!(
@@ -77,7 +77,7 @@ mod tests {
         assert!(leaf_common_name(&format!("{longest} Bootstrap CA")).len() <= MAX_COMMON_NAME);
     }
 
-    // Verifies: ADR-0032
+    // Verifies: ADR-draft-the-operator-program-opamp-fleetctl
     #[test]
     fn a_product_and_an_organization_keep_to_their_grammar() {
         assert!(check_product("OpAMP Fleet Dev").is_ok());

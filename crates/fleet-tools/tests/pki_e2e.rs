@@ -42,7 +42,7 @@ fn authority(file: &Path, role: &str) -> fleet_server::revocation::Authority {
     }
 }
 
-// Verifies: ADR-0032
+// Verifies: ADR-draft-the-operator-program-opamp-fleetctl
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_fleet_made_by_pki_init_admits_an_enrolled_host() {
     opamp::tls::install_ring_provider();

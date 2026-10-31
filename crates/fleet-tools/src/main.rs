@@ -71,7 +71,7 @@ mod tests {
             .collect()
     }
 
-    // Verifies: ADR-0032, ADR-0028
+    // Verifies: ADR-draft-the-operator-program-opamp-fleetctl, ADR-0028
     #[test]
     fn the_program_has_two_trees_holding_the_operator_commands() {
         let cli = Cli::command();
@@ -106,7 +106,7 @@ mod tests {
         );
     }
 
-    // Verifies: ADR-0032
+    // Verifies: ADR-draft-the-operator-program-opamp-fleetctl
     #[test]
     fn the_version_flag_reports_the_baked_version() {
         let err = Cli::try_parse_from(["opamp-fleetctl", "--version"])

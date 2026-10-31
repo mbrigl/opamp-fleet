@@ -1703,7 +1703,7 @@ mod tests {
     /// The release also carries the operator tool's archives, named like the Client's
     /// (ADR-0032 clause 3); they are selected by stem, never by version and platform alone, so none
     /// of them becomes the `supervisor` Package's entry for its platform (ADR-0034 clause 5).
-    // Verifies: ADR-0032
+    // Verifies: ADR-draft-the-operator-program-opamp-fleetctl
     #[test]
     fn the_supervisor_passes_over_the_operator_tools_archives() {
         let assets = vec![
@@ -1817,7 +1817,7 @@ mod tests {
     /// names left which one to directory-read order. A cycle is still not followed, and a link
     /// pointing at nothing is dropped.
     ///
-    /// Verifies: ADR-0032
+    /// Verifies: ADR-draft-the-operator-program-opamp-fleetctl
     #[cfg(unix)]
     #[test]
     fn a_linked_directory_is_packed_under_both_names_and_a_cycle_does_not_hang() {
@@ -1861,7 +1861,7 @@ mod tests {
     /// the root is the first ancestor of the walk, so a link right under it to `..` or to the root
     /// packs no second copy of the tree; each such link is packed as an empty directory.
     ///
-    /// Verifies: ADR-0032
+    /// Verifies: ADR-draft-the-operator-program-opamp-fleetctl
     #[cfg(unix)]
     #[test]
     fn a_link_to_the_root_is_not_followed() {
@@ -1924,7 +1924,7 @@ mod tests {
     /// exception. The error names each such link by its path in the tree and its target, quoted,
     /// in the order of their paths, and only those.
     ///
-    /// Verifies: ADR-0032
+    /// Verifies: ADR-draft-the-operator-program-opamp-fleetctl
     #[cfg(unix)]
     #[test]
     fn a_link_out_of_the_tree_fails_the_repack_naming_it() {
@@ -1985,7 +1985,7 @@ mod tests {
     /// A name from upstream reaches the operator's terminal quoted and escaped, so a control
     /// character in it cannot rewrite what the operator reads.
     ///
-    /// Verifies: ADR-0032
+    /// Verifies: ADR-draft-the-operator-program-opamp-fleetctl
     #[cfg(unix)]
     #[test]
     fn a_link_out_of_the_tree_is_named_escaped() {
@@ -2012,7 +2012,7 @@ mod tests {
     /// read from outside the tree, so either, and a link to one, fails it, named, before anything
     /// is written.
     ///
-    /// Verifies: ADR-0032
+    /// Verifies: ADR-draft-the-operator-program-opamp-fleetctl
     #[cfg(unix)]
     #[test]
     fn a_member_that_is_neither_file_nor_directory_fails_the_repack() {
@@ -2044,7 +2044,7 @@ mod tests {
     /// names far more than 10 000 members, and the repack stops at the cap instead of walking
     /// them all — without the bound, this walk would not end in any time a test waits.
     ///
-    /// Verifies: ADR-0032
+    /// Verifies: ADR-draft-the-operator-program-opamp-fleetctl
     #[cfg(unix)]
     #[test]
     fn a_tree_whose_links_multiply_it_stops_at_the_member_cap() {
@@ -2071,7 +2071,7 @@ mod tests {
     /// A repack that fails while it writes takes back what it wrote, since half an artifact is one
     /// somebody might sign. A member the walk saw but that cannot be read is the failure here.
     ///
-    /// Verifies: ADR-0032
+    /// Verifies: ADR-draft-the-operator-program-opamp-fleetctl
     #[cfg(unix)]
     #[test]
     fn a_repack_that_fails_while_writing_leaves_no_artifact() {
@@ -2100,7 +2100,7 @@ mod tests {
     /// through other links on the way, and one that names nothing inside the tree is dropped —
     /// however it climbs, as long as it does not climb out.
     ///
-    /// Verifies: ADR-0032
+    /// Verifies: ADR-draft-the-operator-program-opamp-fleetctl
     #[cfg(unix)]
     #[test]
     fn a_link_inside_the_tree_is_packed_under_its_name() {
@@ -2145,7 +2145,7 @@ mod tests {
     /// The bytes of a repack are the tree's alone: the same tree packed twice, and a copy of it
     /// packed from elsewhere on the host, give the same artifact.
     ///
-    /// Verifies: ADR-0032
+    /// Verifies: ADR-draft-the-operator-program-opamp-fleetctl
     #[cfg(unix)]
     #[test]
     fn the_same_tree_repacks_to_the_same_bytes() {

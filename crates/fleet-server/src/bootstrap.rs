@@ -905,7 +905,7 @@ mod tests {
         assert!(store.1.lock().unwrap().is_empty(), "no file kept");
     }
 
-    /// Verifies: ADR-0032
+    /// Verifies: ADR-draft-the-operator-program-opamp-fleetctl
     #[test]
     fn a_certificate_lives_ten_days_by_default_at_most_ninety_and_never_past_its_ca() {
         let (record, _, _) = fixture(u64::MAX);
@@ -927,7 +927,7 @@ mod tests {
     }
 
     /// A CA that has ended signs nothing: its certificate would be dead on arrival.
-    /// Verifies: ADR-0032
+    /// Verifies: ADR-draft-the-operator-program-opamp-fleetctl
     #[test]
     fn an_ended_ca_issues_nothing() {
         let (record, _, _) = fixture(1_000);
@@ -936,7 +936,7 @@ mod tests {
 
     /// After the bootstrap CA is replaced, what the old one issued no longer passes the
     /// handshake, so it is no longer listed.
-    /// Verifies: ADR-0032
+    /// Verifies: ADR-draft-the-operator-program-opamp-fleetctl
     #[test]
     fn what_a_replaced_ca_issued_is_forgotten() {
         let (record, clock, store) = fixture(u64::MAX);

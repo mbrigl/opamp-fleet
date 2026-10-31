@@ -96,7 +96,7 @@ mod tests {
 
     /// One reading of a certificate's end, and one line for it: what both `pki status` commands
     /// print over the same certificate.
-    /// Verifies: ADR-0032
+    /// Verifies: ADR-draft-the-operator-program-opamp-fleetctl
     #[test]
     fn a_certificate_s_end_is_read_and_put_in_one_line() {
         let now = OffsetDateTime::now_utc();

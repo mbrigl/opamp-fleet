@@ -60,7 +60,7 @@ mod tests {
         standing(NOW - lived * DAY, NOW + left * DAY, NOW)
     }
 
-    // Verifies: ADR-0032
+    // Verifies: ADR-draft-the-operator-program-opamp-fleetctl
     #[test]
     fn thirty_days_ahead_or_the_last_third_of_a_shorter_life() {
         assert_eq!(lived(0, 400), Standing::Fine);
@@ -71,7 +71,7 @@ mod tests {
         assert_eq!(lived(7, 3), Standing::Ending);
     }
 
-    // Verifies: ADR-0032
+    // Verifies: ADR-draft-the-operator-program-opamp-fleetctl
     #[test]
     fn status_exits_by_the_worst_end() {
         assert_eq!(exit_code([lived(0, 400)]), 0);

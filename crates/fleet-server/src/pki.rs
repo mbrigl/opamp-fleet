@@ -184,7 +184,7 @@ mod tests {
         }
     }
 
-    // Verifies: ADR-0032
+    // Verifies: ADR-draft-the-operator-program-opamp-fleetctl
     #[test]
     fn the_server_records_what_is_ending_and_what_has_ended() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -222,7 +222,7 @@ mod tests {
     /// The running Server judges the certificate it serves, read at startup, not whatever the
     /// file holds a day later: a file replaced without a restart neither silences the warning
     /// for the certificate still served nor goes unsaid (ADR-0032 clause 21).
-    /// Verifies: ADR-0032
+    /// Verifies: ADR-draft-the-operator-program-opamp-fleetctl
     #[test]
     fn a_file_replaced_without_a_restart_neither_silences_the_warning_nor_goes_unsaid() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -270,7 +270,7 @@ mod tests {
         assert_eq!(depended_on(&config), [PathBuf::from("server.pem")]);
     }
 
-    // Verifies: ADR-0032
+    // Verifies: ADR-draft-the-operator-program-opamp-fleetctl
     #[test]
     fn status_exits_by_the_worst_end() {
         let now = OffsetDateTime::now_utc();
