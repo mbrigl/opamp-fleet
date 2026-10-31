@@ -501,7 +501,7 @@ async fn a_shutdown_closes_the_websocket_sessions_before_serve_returns() {
     recv(&mut socket).await;
     assert!(state.snapshot()[0].connected);
 
-    fleet_server::listen::shut_down(&handle);
+    fleet_server::listen::shut_down(&handle, Duration::from_secs(1));
     tokio::time::timeout(Duration::from_secs(15), serving)
         .await
         .expect("serve returns within the drain")

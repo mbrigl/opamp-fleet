@@ -9,14 +9,6 @@ use std::time::Duration;
 use opamp::server::listen::{Handle, Listener};
 use rustls::ServerConfig;
 
-/// How long connections are given to finish once shutdown has been asked for.
-///
-/// Bounded on purpose: an Agent's WebSocket is idle most of the time and would otherwise decide
-/// how long a restart takes. Its session is told to close at once, with the close code for a server
-/// going away; whatever has not ended by the deadline is cut, and only then does the record flush
-/// that follows shutdown (ADR-0024) run.
-pub const SHUTDOWN_DRAIN: Duration = Duration::from_secs(10);
-
 /// A plane on an already-bound listener, over TLS when `tls` is given, holding at most
 /// `max_connections` at once (ADR-0012). `handle` is shared by both planes, so one signal drains
 /// both.
@@ -34,10 +26,15 @@ pub fn plane(
     }
 }
 
-/// Asks both planes to stop and gives their connections [`SHUTDOWN_DRAIN`] to end.
+/// Asks both planes to stop: neither takes a new connection, and the WebSocket sessions are closed
+/// spread over `drain`, so their Agents come back to the other instances, or to this one once it is
+/// started again, without arriving all at once
+/// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+/// clause 3). What is still open shortly after the window is cut, and only then does the record
+/// flush that follows shutdown (ADR-0024) run.
 ///
 /// A free function rather than a call at the signal site, so the two planes cannot end up with
 /// different ideas of what shutting down means.
-pub fn shut_down(handle: &Handle) {
-    handle.graceful_shutdown(Some(SHUTDOWN_DRAIN));
+pub fn shut_down(handle: &Handle, drain: Duration) {
+    handle.drain_spread(drain);
 }

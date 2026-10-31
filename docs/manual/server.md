@@ -62,8 +62,11 @@ the `RUST_LOG` environment variable (default `info`); everything else is in the 
 and the `FLEET_SERVER__…` variables over it. `server pki status` reads the same configuration, from
 the same places.
 
-Stopping the Server is `SIGTERM`/`Ctrl-C`. Configurations and packages are persisted to disk, so a
-restart resumes with the same fleet state; Agents reconnect on their own.
+Stopping the Server is `SIGTERM`/`Ctrl-C`. Both listeners close at once, and the WebSocket sessions
+are closed spread over `drain_secs` (default 20 seconds), so their Agents do not all reconnect in
+the same instant; what is still open 2 seconds later is cut, and then the fleet's records are
+written. Configurations and packages are persisted to disk, so a restart resumes with the same
+fleet state; Agents reconnect on their own, each after a delay drawn over 30 seconds.
 
 The Server refuses to start without `[tls]` and `[tls] client_ca_file`, and the refusal names what
 is missing. It also refuses an `[auth]` section, and a credential key in `[connection_offer]`: the
@@ -152,13 +155,17 @@ configuration. The image works with a read-only root filesystem; the Server
 writes under its data directory alone.
 
 ```console
-$ docker run -d --name opamp-fleet-server --read-only \
+$ docker run -d --name opamp-fleet-server --read-only --stop-timeout 30 \
     -p 4320:4320 -p 4321:4321 \
     -v opamp-fleet-data:/var/lib/opamp-fleet \
     -v /etc/opamp-fleet:/etc/opamp-fleet:ro \
     ghcr.io/mbrigl/opamp-fleet-server@sha256:<digest> \
     --config /etc/opamp-fleet/server.toml
 ```
+
+`--stop-timeout 30` gives a stop more than `drain_secs` (20 seconds by default) and the 2 seconds
+after it. Docker's own default of 10 seconds ends the Server with `SIGKILL` before it has written
+the fleet's records; an orchestrator's grace period needs the same room.
 
 A bind mount for the data directory must be writable by UID `65532`. There is no `HEALTHCHECK` —
 the image has no shell to run one and the Server has no health endpoint — so probe a TCP connection
@@ -220,6 +227,8 @@ configures the Server.
 |---|---|---|
 | `listen` | `"127.0.0.1:4320"` | The **Agent plane**, as `address:port`: the OpAMP endpoint and the package downloads. `4320` is the protocol's default port. Serve the fleet with `"0.0.0.0:4320"`. |
 | `max_connections` | `10000` | The connections the Agent plane holds at once. A connection past it is closed on accept. Raise it together with the process's file-descriptor limit for a larger fleet. `0` is refused at startup. |
+| `max_new_connections_per_sec` | `200` | The new Agent-plane connections taken a second, each a full TLS handshake and admission. A connection past it completes its handshake and is answered `503` with a `Retry-After` of 1 to 30 seconds, then closed. `0` is refused at startup. |
+| `drain_secs` | `20` | How long a stop spreads the closing of the WebSocket sessions over, from `0` to `300`; `0` closes them all at once. What is still open 2 seconds after it is cut. An orchestrator's stop timeout must be longer, or the fleet's records are not written. |
 | `data_dir` | `"fleet-data"` | Where the Server keeps **all** of its state, one directory per domain: see [Where the Server keeps its state](#where-the-server-keeps-its-state). Created owner-only when missing. `config_dir` and `packages_dir` are gone: a file naming either fails startup and names `server migrate` ([Upgrading to one data directory](#upgrading-to-one-data-directory)). |
 | `max_message_size_bytes` | `67108864` (64 MiB) | The largest OpAMP message accepted or sent, in either direction and on either transport. The protocol requires a limit and recommends this value; a fleet of status reports needs far less. An oversized HTTP request is answered `413`, an oversized WebSocket message closes the connection with `1009`. A request or message that has begun and delivers less than 64 KiB in a minute is answered `408`, or closes its connection with `1008`. |
 | `max_package_size_bytes` | `1073741824` (1 GiB) | The largest artifact the package-upload route accepts. A package is a program, not a message — an `otelcol-contrib` binary is a few hundred megabytes — so this bound is far larger, and it applies to that one route. The upload has no deadline, but like every request body it must deliver 64 KiB in each minute once it has begun, or it is answered `408`. |
@@ -1965,13 +1974,16 @@ Each plane is bounded before a request is parsed:
 - **A connection cap per plane**: `max_connections` (default 10 000) for the Agent plane and
   `[rest] max_connections` (default 256) for the Operator plane. A connection past the cap is
   closed on accept, before the TLS handshake, while the ones already held keep working.
+- **A rate of new connections** on the Agent plane: `max_new_connections_per_sec` (default 200).
+  A connection past it is answered `503` with a `Retry-After` drawn from 1 to 30 seconds, over
+  HTTP/1.1 so the connection closes after the answer.
 - **The TLS handshake** must complete within 10 seconds, and a peer has 30 seconds to send its
   HTTP/1 request headers.
 - **HTTP/2** allows 100 concurrent streams per connection. A keep-alive ping goes out every 30
   seconds, and a peer that leaves one unanswered for 20 seconds is dropped.
 
-Only the caps are keys, because they depend on the size of the fleet. The other bounds are the
-same in every deployment.
+Only the caps and the rate are keys, because they depend on the size of the fleet. The other bounds
+are the same in every deployment.
 
 ## The fleet's own telemetry
 
