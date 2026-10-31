@@ -152,11 +152,32 @@ if ((rc == 1)) && [[ "$out" == *"only 7 GB free"* && "$out" == *"$d/target"* && 
 else
   failed=$((failed + 1)); echo "FAIL: a short disk stops the runner before any check (exit $rc)" >&2
 fi
+out="$(FLEET_MIN_FREE_GB=20 CHECK_ALL_FREE_GB=19 bash "$d/scripts/check-all.sh" 2>&1)"; rc=$?
+if ((rc == 1)) && [[ "$out" == *"only 19 GB free"* ]]; then
+  passed=$((passed + 1))
+else
+  failed=$((failed + 1)); echo "FAIL: one GB below the threshold stops the runner (exit $rc)" >&2
+fi
 out="$(FLEET_MIN_FREE_GB=20 CHECK_ALL_FREE_GB=20 bash "$d/scripts/check-all.sh" 2>&1)"
 if [[ "$out" != *"GB free"* && "$out" == *"RAN "* ]]; then
   passed=$((passed + 1))
 else
   failed=$((failed + 1)); echo "FAIL: enough space passes the guard silently" >&2
+fi
+# A leading zero is read in base 10, not as octal.
+out="$(FLEET_MIN_FREE_GB=08 CHECK_ALL_FREE_GB=7 bash "$d/scripts/check-all.sh" 2>&1)"; rc=$?
+if ((rc == 1)) && [[ "$out" == *"needs 8 GB"* ]]; then
+  passed=$((passed + 1))
+else
+  failed=$((failed + 1)); echo "FAIL: a threshold of 08 is eight GB (exit $rc)" >&2
+fi
+# The real free space, read through df: no disk here has a million TB free.
+out="$(cd "$d" && FLEET_MIN_FREE_GB=999999999 CARGO_TARGET_DIR=rel/target \
+  bash "$d/scripts/check-all.sh" 2>&1)"; rc=$?
+if ((rc == 1)) && [[ "$out" == *"GB free on the file system of $d/rel/target"* ]]; then
+  passed=$((passed + 1))
+else
+  failed=$((failed + 1)); echo "FAIL: df is read, against an absolute target directory (exit $rc)" >&2
 fi
 out="$(FLEET_MIN_FREE_GB=lots bash "$d/scripts/check-all.sh" 2>&1)"; rc=$?
 if ((rc == 2)) && [[ "$out" == *"FLEET_MIN_FREE_GB must be a number"* ]]; then

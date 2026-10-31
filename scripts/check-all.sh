@@ -64,15 +64,18 @@ esac
 # check starts, and a short disk stops the run with what is free where. CHECK_ALL_FREE_GB stands
 # in for the space found, for the self-test.
 min_free="${FLEET_MIN_FREE_GB:-20}"
-if [[ ! "$min_free" =~ ^[0-9]+$ ]]; then
+if [[ ! "$min_free" =~ ^[0-9]{1,9}$ ]]; then
   echo "check-all: FLEET_MIN_FREE_GB must be a number of GB, not '$min_free'" >&2
   exit 2
 fi
+# Read in base 10: a leading zero would make bash read it as octal.
+min_free=$((10#$min_free))
 if ((min_free > 0)); then
   target="${CARGO_TARGET_DIR:-$ROOT/target}"
+  # Cargo reads a relative target directory against the working directory.
+  [[ "$target" == /* ]] || target="$PWD/$target"
   probe="$target"
-  while [[ ! -d "$probe" && "$probe" == */* ]]; do probe="${probe%/*}"; done
-  [[ -d "$probe" ]] || probe="$ROOT"
+  while [[ ! -d "$probe" ]]; do probe="${probe%/*}"; [[ -n "$probe" ]] || probe=/; done
   free_gb="${CHECK_ALL_FREE_GB:-$(df -Pk "$probe" | awk 'NR == 2 { print int($4 / 1048576) }')}"
   if ((free_gb < min_free)); then
     echo "check-all: only $free_gb GB free on the file system of $target; the build needs $min_free GB. Reclaim space with 'cargo clean', or by removing target/debug/incremental and old target directories in /tmp, or set FLEET_MIN_FREE_GB lower on a smaller machine." >&2
