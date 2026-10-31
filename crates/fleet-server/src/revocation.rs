@@ -319,16 +319,44 @@ pub trait LedgerStore: Send + Sync {
         Ok(Bound::Bound)
     }
 
-    /// Releases `instance_uid` from `host`, when `host` holds it.
+    /// Releases `instance_uid` from whichever Host the store holds it for, whatever this instance
+    /// holds in memory, and answers that Host: `None` when the store holds no binding of it. A
+    /// store that is its only writer answers from what it last wrote.
     ///
     /// # Errors
     /// Returns an error when it cannot be written.
-    fn unbind(&self, instance_uid: &str, host: &str) -> Result<(), String> {
-        let _ = (instance_uid, host);
+    fn unbind(&self, instance_uid: &str) -> Result<Option<String>, String> {
+        let _ = instance_uid;
+        Ok(None)
+    }
+
+    /// Moves the binding of `old` to `new`, for the Host the store holds `old` for, in one write:
+    /// `None` when the store holds no binding of `old`, else that Host and how `new` was bound.
+    ///
+    /// # Errors
+    /// Returns an error when it cannot be written; both bindings are then as they were.
+    fn rebind(&self, old: &str, new: &str) -> Result<Option<(String, Bound)>, String> {
+        let Some(host) = self.unbind(old)? else {
+            return Ok(None);
+        };
+        let bound = self.bind(new, &host)?;
+        Ok(Some((host, bound)))
+    }
+
+    /// Releases every `instance_uid` bound to `host`: what marking it as a Gateway does, since a
+    /// Gateway's Host is bound none (ADR-0024 clause 16).
+    ///
+    /// # Errors
+    /// Returns an error when it cannot be written.
+    fn unbind_host(&self, host: &str) -> Result<(), String> {
+        let _ = host;
         Ok(())
     }
 
-    /// Replaces the hosts and what each speaks for.
+    /// Writes the Hosts as `hosts` holds them, each one that changed since the last write and each
+    /// one that is gone, with the `instance_uid`s each speaks for. A store that keeps the bindings
+    /// in rows of their own ([`bind`](Self::bind)) writes a Host's own fields here and removes
+    /// the bindings of a Host that is gone; the `instance_uid`s it reads back are those rows.
     ///
     /// # Errors
     /// Returns an error when they cannot be written.
@@ -372,12 +400,12 @@ pub enum Registered {
 }
 
 /// The refusal of a register at its size.
-fn register_full(held: usize) -> String {
+pub(crate) fn register_full(held: usize) -> String {
     format!("the register holds {held} certificates already")
 }
 
 /// The refusal of a chain at its bound.
-const CHAIN_FULL: &str = "this certificate's chain has been renewed too often";
+pub(crate) const CHAIN_FULL: &str = "this certificate's chain has been renewed too often";
 
 /// The refusal of a renewal whose chain holds a revoked certificate.
 pub const RENEWS_REVOKED: &str = "the certificate this renews, or one it renewed, is revoked";
@@ -578,7 +606,49 @@ struct State {
     rebuilds: usize,
 }
 
+/// Which Host each `instance_uid` the Hosts list belongs to.
+fn owners_of(hosts: &BTreeMap<String, Host>) -> BTreeMap<String, String> {
+    hosts
+        .iter()
+        .flat_map(|(host, entry)| {
+            entry
+                .instance_uids
+                .iter()
+                .map(move |uid| (uid.clone(), host.clone()))
+        })
+        .collect()
+}
+
 impl State {
+    /// Takes up `issued` as the register, with every entry's root, every root's count, and the
+    /// earliest end a prune waits for.
+    fn take_up_register(&mut self, issued: Vec<Issued>) {
+        self.issued.clear();
+        self.roots.clear();
+        self.descendants.clear();
+        self.earliest_expiry_ms = u64::MAX;
+        for issued in issued {
+            self.earliest_expiry_ms = self.earliest_expiry_ms.min(issued.facts.not_after_ms);
+            self.issued.insert(issued.facts.id.clone(), issued);
+        }
+        // A Host's valid until may pass before any certificate in the register expires
+        // (ADR-0024 clause 15); one written before it had a valid until is pruned at once,
+        // so it takes the register's latest `not_after` for it.
+        for host in self.hosts.values().filter(|host| !host.gateway) {
+            self.earliest_expiry_ms = self
+                .earliest_expiry_ms
+                .min(host.valid_until_ms.unwrap_or(0));
+        }
+        // Each root by the predecessor links themselves, not by the order entries load in.
+        let ids: Vec<CertId> = self.issued.keys().cloned().collect();
+        for id in ids {
+            let root = self.chain_root(&id);
+            *self.descendants.entry(root.clone()).or_default() += 1;
+            self.roots.insert(id, root);
+        }
+        self.revoked = None;
+    }
+
     /// Every certificate the list names, by issuer and serial.
     fn named(&self) -> BTreeSet<CertId> {
         named_in(&self.revocations)
@@ -725,42 +795,14 @@ impl Revocations {
                     roots: BTreeMap::new(),
                     descendants: BTreeMap::new(),
                     earliest_expiry_ms: u64::MAX,
-                    owners: ledger
-                        .hosts
-                        .iter()
-                        .flat_map(|(host, entry)| {
-                            entry
-                                .instance_uids
-                                .iter()
-                                .map(move |uid| (uid.clone(), host.clone()))
-                        })
-                        .collect(),
+                    owners: owners_of(&ledger.hosts),
                     hosts: ledger.hosts,
                     hosts_version: 0,
                     revoked: None,
                     #[cfg(test)]
                     rebuilds: 0,
                 };
-                for issued in ledger.issued {
-                    state.earliest_expiry_ms =
-                        state.earliest_expiry_ms.min(issued.facts.not_after_ms);
-                    state.issued.insert(issued.facts.id.clone(), issued);
-                }
-                // A Host's valid until may pass before any certificate in the register expires
-                // (ADR-0024 clause 15); one written before it had a valid until is pruned at once,
-                // so it takes the register's latest `not_after` for it.
-                for host in state.hosts.values().filter(|host| !host.gateway) {
-                    state.earliest_expiry_ms = state
-                        .earliest_expiry_ms
-                        .min(host.valid_until_ms.unwrap_or(0));
-                }
-                // Each root by the predecessor links themselves, not by the order entries load in.
-                let ids: Vec<CertId> = state.issued.keys().cloned().collect();
-                for id in ids {
-                    let root = state.chain_root(&id);
-                    *state.descendants.entry(root.clone()).or_default() += 1;
-                    state.roots.insert(id, root);
-                }
+                state.take_up_register(ledger.issued);
                 state
             }),
             store,
@@ -961,27 +1003,27 @@ impl Revocations {
     pub fn release(&self, instance_uid: &[u8]) -> Result<(), String> {
         let uid = hex::encode(instance_uid);
         let mut state = self.state.lock().expect("revocation lock");
-        let Some(host) = state.owners.remove(&uid) else {
-            return Ok(());
-        };
-        if let Some(entry) = state.hosts.get_mut(&host) {
-            entry.instance_uids.remove(&uid);
+        // The store answers for the binding, as another instance may have made it after this one
+        // last read the Hosts.
+        let stored = self.store.unbind(&uid)?;
+        let held = state.owners.remove(&uid);
+        for host in [stored, held].into_iter().flatten() {
+            if let Some(entry) = state.hosts.get_mut(&host) {
+                entry.instance_uids.remove(&uid);
+            }
         }
-        self.store.unbind(&uid, &host)?;
         self.save_hosts(state)
     }
 
     /// Binds `uid` to `host` in the store and in `state`. A binding another Host holds refuses
-    /// it, naming that Host, and is what `state` holds from then on; one a Gateway's Host holds
-    /// moves, as a Gateway binds nothing it carries.
+    /// it, naming that Host, and is what `state` holds from then on.
     fn bind(&self, state: &mut State, uid: &str, host: &str) -> Result<(), String> {
-        let mut bound = self.store.bind(uid, host)?;
-        if let Bound::Taken(holder) = &bound {
-            if state.hosts.get(holder).is_some_and(|entry| entry.gateway) {
-                self.store.unbind(uid, holder)?;
-                bound = self.store.bind(uid, host)?;
-            }
-        }
+        let bound = self.store.bind(uid, host)?;
+        Self::take_up(state, uid, host, bound)
+    }
+
+    /// Takes up in `state` what the store answered for binding `uid` to `host`.
+    fn take_up(state: &mut State, uid: &str, host: &str, bound: Bound) -> Result<(), String> {
         match bound {
             Bound::Bound => {
                 state.owners.insert(uid.to_string(), host.to_string());
@@ -1045,14 +1087,26 @@ impl Revocations {
     pub fn rebind(&self, old: &[u8], new: &[u8]) -> Result<(), String> {
         let (old, new) = (hex::encode(old), hex::encode(new));
         let mut state = self.state.lock().expect("revocation lock");
-        let Some(host) = state.owners.remove(&old) else {
-            return Ok(());
+        let held = state.owners.remove(&old);
+        if let Some(host) = &held {
+            if let Some(entry) = state.hosts.get_mut(host) {
+                entry.instance_uids.remove(&old);
+            }
+        }
+        // The store moves the binding it holds, whatever this instance holds in memory.
+        let moved = self.store.rebind(&old, &new)?;
+        let (host, bound) = match (moved, held) {
+            (Some((host, bound)), _) => (host, bound),
+            (None, Some(host)) => {
+                let bound = self.store.bind(&new, &host)?;
+                (host, bound)
+            }
+            (None, None) => return Ok(()),
         };
         if let Some(entry) = state.hosts.get_mut(&host) {
             entry.instance_uids.remove(&old);
         }
-        self.store.unbind(&old, &host)?;
-        self.bind(&mut state, &new, &host)?;
+        Self::take_up(&mut state, &new, &host, bound)?;
         if let Some(entry) = state.hosts.get_mut(&host) {
             entry.instance_uids.insert(new);
         }
@@ -1072,6 +1126,15 @@ impl Revocations {
                 .any(|issued| issued.facts.host.as_deref() == Some(host));
         if !known {
             return Ok(false);
+        }
+        if gateway {
+            // A Gateway's Host is bound no `instance_uid`: it carries other hosts' Agents
+            // (ADR-0024 clause 16).
+            self.store.unbind_host(host)?;
+            state.owners.retain(|_, owner| owner != host);
+            if let Some(entry) = state.hosts.get_mut(host) {
+                entry.instance_uids.clear();
+            }
         }
         let entry = state.hosts.entry(host.to_string()).or_default();
         entry.gateway = gateway;
@@ -1333,6 +1396,29 @@ impl Revocations {
         state.revoked = None;
         drop(state);
         self.changes.send_modify(|rev| *rev += 1);
+        Ok(())
+    }
+
+    /// Reads the register and the Hosts again from the store, as another instance may have changed
+    /// them, so what this instance admits follows what is stored: an `instance_uid` another instance
+    /// bound, released or moved, a Host it marked, and the entries it registered
+    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// clause 19). The revocation list is read again too, and announced when it changed.
+    ///
+    /// # Errors
+    /// Returns an error when the store cannot be read; what is held is then kept.
+    pub fn reload_ledger(&self) -> Result<(), String> {
+        let mut state = self.state.lock().expect("revocation lock");
+        let ledger = self.store.load()?;
+        state.owners = owners_of(&ledger.hosts);
+        state.hosts = ledger.hosts;
+        state.take_up_register(ledger.issued);
+        let changed = state.revocations != ledger.revocations;
+        state.revocations = ledger.revocations;
+        drop(state);
+        if changed {
+            self.changes.send_modify(|rev| *rev += 1);
+        }
         Ok(())
     }
 

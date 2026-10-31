@@ -79,19 +79,30 @@ Done in part two:
   Decided by `a_stale_instance_cannot_bind_an_agent_another_host_holds`,
   `two_binders_of_one_instance_uid_bind_it_once` and `the_bindings_move_out_of_the_hosts_arrays`.
 
-Open, each for the human:
+- Review findings on part two: a Gateway's Host is bound none, in migration 4, an import and the
+  binding itself, and marking a Host as a Gateway releases its bindings; a release and a re-key
+  act on the binding the store holds, whatever the instance holds in memory, a re-key in one
+  transaction, and a release takes the `instance_uid` out of the Hosts' arrays too; every register
+  write, binding and write of the Hosts carries a `certificate` or `host` notification, on which
+  an instance reads the register and the Hosts again. Decided by
+  `a_release_a_rekey_and_a_gateway_mark_hold_for_every_instance`,
+  `a_binding_another_instance_changes_reaches_an_instance_that_follows` and the ledger contract.
 
-- Criterion 4 asks for the refusal when two approvals bind one `instance_uid`, and the human
-  decided that the approval binds. ADR-0024 and its restatement
-  (ADR-draft-the-fleet-record-of-agents-and-hosts, "Its first report binds it") decide that the
-  first report binds, and tests their Enforcement names pin it
-  (`a_host_speaks_for_the_agents_bound_to_it_and_a_gateway_for_any`,
-  `an_approval_writes_the_host_before_its_first_report`). Built so far: the first report binds,
-  through the unique row, so the second Host's first report is refused naming the binding. Binding
-  at the approval needs the restatement revised first, as an ADR commit the human reviews.
-- An `instance_uid` two Hosts' arrays hold fails migration 4, naming it, for the operator to
-  release; whether the migration should instead keep one binding by a rule is the human's.
-- During a rolling update a release before the bindings' table binds through the Hosts' arrays
-  only, which this release does not read (ticket 11's expand-then-contract).
+Decided by the human:
+
+- An `instance_uid` is bound by a Host's first report, as ADR-0024 and its restatement decide, not
+  by the approval of an enrolment; criterion 4 says so. Built.
+- An `instance_uid` two Hosts' arrays hold fails migration 4, naming it and the Hosts, and changes
+  nothing; the operator releases it from all but one. Built.
+
+Open:
+
 - The enrolment queue per row with its bound counted in the write: not built yet.
+- The bootstrap entries' bound, which clause 19 of
+  ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+  names, is not counted in the write; it is counted in memory per instance.
+- During a rolling update a release before the bindings' table binds through the Hosts' arrays
+  only. This release honours those arrays when it binds and takes a released `instance_uid` out of
+  them, but a binding this release makes is in the arrays only once a write of the Hosts carries
+  it; ticket 11 decides the rest.
 - Criteria 6 and 7 follow once the rest is built.

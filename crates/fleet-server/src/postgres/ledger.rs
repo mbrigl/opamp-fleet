@@ -8,10 +8,11 @@ use std::sync::{Arc, Mutex};
 
 use tokio_postgres::GenericClient;
 
+use super::notify::{notify, CERTIFICATE, HOST};
 use super::{client, signed, sql, unsigned, Database};
 use crate::revocation::{
-    Added, Bound, CertId, Facts, Host, Issued, Ledger, LedgerStore, RegisterBounds, Registered,
-    Revocation,
+    register_full, Added, Bound, CertId, Facts, Host, Issued, Ledger, LedgerStore, RegisterBounds,
+    Registered, Revocation, CHAIN_FULL,
 };
 
 /// The ledger in `certificates`, `revocations` and `hosts`. A revocation is written as the one row
@@ -52,6 +53,7 @@ impl LedgerStore for PgLedgerStore {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
             write_issued(&*transaction, &issued).await?;
+            notify(&*transaction, CERTIFICATE).await?;
             transaction.commit().await.map_err(sql)
         })
     }
@@ -68,6 +70,7 @@ impl LedgerStore for PgLedgerStore {
                 )
                 .await
                 .map_err(sql)?;
+            notify(&*transaction, CERTIFICATE).await?;
             transaction.commit().await.map_err(sql)
         })
     }
@@ -104,9 +107,7 @@ impl LedgerStore for PgLedgerStore {
                 .get(0);
             let held = usize::try_from(held).unwrap_or(usize::MAX);
             if held >= bounds.size {
-                return Ok(Registered::Full(format!(
-                    "the register holds {held} certificates already"
-                )));
+                return Ok(Registered::Full(register_full(held)));
             }
             if let Some(predecessor) = &issued.predecessor {
                 let decided = decide_renewal(&*transaction, id, predecessor, &bounds).await?;
@@ -115,6 +116,7 @@ impl LedgerStore for PgLedgerStore {
                 }
             }
             write_issued(&*transaction, &issued).await?;
+            notify(&*transaction, CERTIFICATE).await?;
             transaction.commit().await.map_err(sql)?;
             Ok(Registered::Registered)
         })
@@ -201,15 +203,29 @@ impl LedgerStore for PgLedgerStore {
         })
     }
 
-    /// The Hosts that changed are written and the ones that are gone deleted, in one transaction.
     /// One row per binding, its `instance_uid` the key: a binding another Host holds is left as it
-    /// is and answered with that Host.
+    /// is and answered with that Host. Until no instance of the release before runs, an
+    /// `instance_uid` another Host's array lists, as that release binds it, is answered as that
+    /// Host's too; a Gateway's array binds nothing (ADR-0024 clause 16).
     fn bind(&self, instance_uid: &str, host: &str) -> Result<Bound, String> {
         let (instance_uid, host) = (instance_uid.to_string(), host.to_string());
         self.database.run(move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
-            transaction
+            if let Some(row) = transaction
+                .query_opt(
+                    "SELECT host FROM hosts WHERE NOT gateway AND host <> $2 \
+                     AND $1 = ANY(instance_uids) \
+                     AND NOT EXISTS (SELECT 1 FROM host_bindings WHERE instance_uid = $1) \
+                     ORDER BY host LIMIT 1",
+                    &[&instance_uid, &host],
+                )
+                .await
+                .map_err(sql)?
+            {
+                return Ok(Bound::Taken(row.get(0)));
+            }
+            let inserted = transaction
                 .execute(
                     "INSERT INTO host_bindings (instance_uid, host) VALUES ($1, $2) \
                      ON CONFLICT (instance_uid) DO NOTHING",
@@ -225,6 +241,9 @@ impl LedgerStore for PgLedgerStore {
                 .await
                 .map_err(sql)?
                 .get(0);
+            if inserted > 0 {
+                notify(&*transaction, HOST).await?;
+            }
             transaction.commit().await.map_err(sql)?;
             Ok(if holder == host {
                 Bound::Bound
@@ -234,18 +253,70 @@ impl LedgerStore for PgLedgerStore {
         })
     }
 
-    fn unbind(&self, instance_uid: &str, host: &str) -> Result<(), String> {
-        let (instance_uid, host) = (instance_uid.to_string(), host.to_string());
+    fn unbind(&self, instance_uid: &str) -> Result<Option<String>, String> {
+        let instance_uid = instance_uid.to_string();
         self.database.run(move |pool| async move {
-            let client = client(&pool).await?;
-            client
+            let mut client = client(&pool).await?;
+            let transaction = client.transaction().await.map_err(sql)?;
+            let host = unbind_in(&*transaction, &instance_uid).await?;
+            if host.is_some() {
+                notify(&*transaction, HOST).await?;
+            }
+            transaction.commit().await.map_err(sql)?;
+            Ok(host)
+        })
+    }
+
+    /// One transaction: the binding of `old` is removed and `new` bound to its Host, so no other
+    /// instance sees the Host speaking for neither.
+    fn rebind(&self, old: &str, new: &str) -> Result<Option<(String, Bound)>, String> {
+        let (old, new) = (old.to_string(), new.to_string());
+        self.database.run(move |pool| async move {
+            let mut client = client(&pool).await?;
+            let transaction = client.transaction().await.map_err(sql)?;
+            let Some(host) = unbind_in(&*transaction, &old).await? else {
+                return Ok(None);
+            };
+            transaction
                 .execute(
-                    "DELETE FROM host_bindings WHERE instance_uid = $1 AND host = $2",
-                    &[&instance_uid, &host],
+                    "INSERT INTO host_bindings (instance_uid, host) VALUES ($1, $2) \
+                     ON CONFLICT (instance_uid) DO NOTHING",
+                    &[&new, &host],
                 )
                 .await
                 .map_err(sql)?;
-            Ok(())
+            let holder: String = transaction
+                .query_one(
+                    "SELECT host FROM host_bindings WHERE instance_uid = $1",
+                    &[&new],
+                )
+                .await
+                .map_err(sql)?
+                .get(0);
+            notify(&*transaction, HOST).await?;
+            transaction.commit().await.map_err(sql)?;
+            let bound = if holder == host {
+                Bound::Bound
+            } else {
+                Bound::Taken(holder)
+            };
+            Ok(Some((host, bound)))
+        })
+    }
+
+    fn unbind_host(&self, host: &str) -> Result<(), String> {
+        let host = host.to_string();
+        self.database.run(move |pool| async move {
+            let mut client = client(&pool).await?;
+            let transaction = client.transaction().await.map_err(sql)?;
+            let removed = transaction
+                .execute("DELETE FROM host_bindings WHERE host = $1", &[&host])
+                .await
+                .map_err(sql)?;
+            if removed > 0 {
+                notify(&*transaction, HOST).await?;
+            }
+            transaction.commit().await.map_err(sql)
         })
     }
 
@@ -281,6 +352,7 @@ impl LedgerStore for PgLedgerStore {
             for (host, entry) in &changed {
                 write_host(&*transaction, host, entry).await?;
             }
+            notify(&*transaction, HOST).await?;
             transaction.commit().await.map_err(sql)
         })?;
         hosts.clone_into(&mut written);
@@ -288,13 +360,43 @@ impl LedgerStore for PgLedgerStore {
     }
 }
 
+/// Removes the binding of `instance_uid` inside the caller's transaction: the Host it was bound to,
+/// `None` when it was bound to none. The Hosts' arrays, which a release before the bindings' table
+/// binds by, lose it too, so neither release finds it bound once it is released.
+async fn unbind_in(
+    client: &impl GenericClient,
+    instance_uid: &str,
+) -> Result<Option<String>, String> {
+    let host = client
+        .query_opt(
+            "DELETE FROM host_bindings WHERE instance_uid = $1 RETURNING host",
+            &[&instance_uid],
+        )
+        .await
+        .map_err(sql)?
+        .map(|row| row.get(0));
+    client
+        .execute(
+            "UPDATE hosts SET instance_uids = array_remove(instance_uids, $1) \
+             WHERE $1 = ANY(instance_uids)",
+            &[&instance_uid],
+        )
+        .await
+        .map_err(sql)?;
+    Ok(host)
+}
+
 /// Binds every `instance_uid` `entry` speaks for to `host`, in a database that holds no binding of
-/// them yet: what an import of a data directory writes.
+/// them yet: what an import of a data directory writes. A Gateway's Host is bound none
+/// (ADR-0024 clause 16), whatever its file lists.
 pub(crate) async fn write_bindings(
     client: &impl GenericClient,
     host: &str,
     entry: &Host,
 ) -> Result<(), String> {
+    if entry.gateway {
+        return Ok(());
+    }
     let uids: Vec<&str> = entry.instance_uids.iter().map(String::as_str).collect();
     client
         .execute(
@@ -409,9 +511,18 @@ pub(crate) async fn read_all(client: &impl GenericClient) -> Result<Ledger, Stri
         .await
         .map_err(sql)?
     {
-        let host: String = row.get(1);
-        if let Some(entry) = hosts.get_mut(&host) {
-            entry.instance_uids.insert(row.get(0));
+        let (uid, host): (String, String) = (row.get(0), row.get(1));
+        match hosts.get_mut(&host) {
+            Some(entry) => {
+                entry.instance_uids.insert(uid);
+            }
+            // A binding whose Host has no row still holds its `instance_uid` against every other
+            // Host; it is named, for an operator to release.
+            None => tracing::warn!(
+                instance_uid = %uid,
+                host = %host,
+                "an instance_uid is bound to a Host the database holds no row of"
+            ),
         }
     }
     Ok(Ledger {
@@ -513,9 +624,7 @@ async fn decide_renewal(
     }
     let below = usize::try_from(row.get::<_, i64>(1)).unwrap_or(usize::MAX);
     if below >= bounds.per_root {
-        return Ok(Registered::Full(
-            "this certificate's chain has been renewed too often".to_string(),
-        ));
+        return Ok(Registered::Full(CHAIN_FULL.to_string()));
     }
     Ok(Registered::Registered)
 }
@@ -720,7 +829,11 @@ mod tests {
         );
         let shorter = vec![wider, revocation("r3", "0d"), revocation("r5", "0f")];
         let fewer = BTreeMap::from([("a".to_string(), host(&["01"], false))]);
-        reopened.unbind("02", "a").expect("unbind");
+        assert_eq!(
+            reopened.unbind("02").expect("unbind"),
+            Some("a".to_string()),
+            "a release answers the Host the store held the instance_uid for"
+        );
         reopened.save_hosts(&fewer).expect("save");
         let ledger = open().load().expect("load");
         assert_eq!(ledger.issued, [renewal]);
@@ -729,6 +842,29 @@ mod tests {
             "the entries left, in the order they were added"
         );
         assert_eq!(ledger.hosts, fewer);
+
+        // A Gateway's Host is bound none, whatever its record lists (ADR-0024 clause 16): the next
+        // Host that reports an instance_uid it lists binds it. A Host that is gone takes its
+        // bindings with it.
+        let store = open();
+        store.load().expect("load");
+        let with_gateway = BTreeMap::from([
+            ("a".to_string(), host(&["01"], false)),
+            ("gateway/1".to_string(), host(&["09"], true)),
+        ]);
+        store.save_hosts(&with_gateway).expect("save");
+        assert_eq!(
+            store.bind("09", "c").expect("bind"),
+            Bound::Bound,
+            "an instance_uid a Gateway's Host lists is bound by the next Host that reports it"
+        );
+        let without_a = BTreeMap::from([("gateway/1".to_string(), host(&["09"], true))]);
+        store.save_hosts(&without_a).expect("save");
+        assert_eq!(
+            store.bind("01", "b").expect("bind"),
+            Bound::Bound,
+            "a Host that is gone holds no instance_uid"
+        );
     }
 
     /// Verifies: ADR-0029
@@ -1032,7 +1168,8 @@ mod tests {
                 .expect("save");
             // The database as the release before the bindings left it.
             test.sql(&format!(
-                "DROP TABLE host_bindings; DELETE FROM {SCHEMA_TABLE} WHERE version = 4"
+                "DROP TABLE host_bindings; DROP INDEX certificates_predecessor; \
+                 DELETE FROM {SCHEMA_TABLE} WHERE version = 4"
             ));
             let applied = database.apply_schema(MIGRATIONS);
             if moved {
@@ -1138,6 +1275,116 @@ mod tests {
             b.may_report("h2", b"\x01\x02"),
             Err("this certificate belongs to another host than that Agent's".to_string()),
             "B holds the binding that holds"
+        );
+    }
+
+    /// The instances on one schema, each opened over its own adapter, at a clock that never moves.
+    fn instances_on(database: &Arc<Database>) -> impl Fn() -> crate::revocation::Revocations + '_ {
+        struct Now;
+        impl crate::fleet::Clock for Now {
+            fn now_ms(&self) -> u64 {
+                1
+            }
+        }
+        move || {
+            crate::revocation::Revocations::open(
+                Box::new(PgLedgerStore::new(database.clone())),
+                Arc::new(Now),
+                Vec::new(),
+            )
+            .expect("open")
+        }
+    }
+
+    /// A release and a re-key hold for every instance, whatever the instance that makes them holds
+    /// in memory: B never heard of A's bindings, and what it releases and moves is what a third
+    /// instance finds stored; a Gateway's mark leaves its Host bound none in the store
+    /// (ADR-0024 clauses 10 and 16).
+    /// Verifies: ADR-0024
+    #[test]
+    fn a_release_a_rekey_and_a_gateway_mark_hold_for_every_instance() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let instance = instances_on(&database);
+        let (a, b) = (instance(), instance());
+        let subject = SubjectValues::default();
+        for uid in [b"\x01", b"\x02", b"\x03"] {
+            a.check_report("h1", &subject, 1_000, uid)
+                .expect("A binds it to h1");
+        }
+        a.check_report("g", &subject, 1_000, b"\x04")
+            .expect("A binds it to g");
+
+        b.release(b"\x01")
+            .expect("B releases what it never heard of");
+        b.rebind(b"\x02", b"\x05")
+            .expect("B moves what it never heard of");
+        assert!(a.set_gateway("g", true).expect("mark"));
+
+        let c = instance();
+        c.check_report("h2", &subject, 1_000, b"\x01")
+            .expect("a released instance_uid is bound by the next Host that reports it");
+        c.check_report("h2", &subject, 1_000, b"\x02")
+            .expect("a re-keyed instance_uid is free");
+        assert_eq!(
+            c.speaks_for("h1"),
+            crate::revocation::SpeaksFor::Agents(["03", "05"].map(String::from).into()),
+            "the new instance_uid is bound to the Host the old one was"
+        );
+        assert!(c.check_report("h2", &subject, 1_000, b"\x05").is_err());
+        c.check_report("h2", &subject, 1_000, b"\x04")
+            .expect("a Gateway's Host is bound none");
+    }
+
+    /// What one instance binds, releases and moves reaches every other that follows the
+    /// notifications, without a restart: B admits by A's release and A's re-key once it hears of
+    /// them (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// clause 19).
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    #[test]
+    fn a_binding_another_instance_changes_reaches_an_instance_that_follows() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let instance = instances_on(&database);
+        let a = instance();
+        let subject = SubjectValues::default();
+        a.check_report("h1", &subject, 1_000, b"\x01")
+            .expect("bind");
+        a.check_report("h1", &subject, 1_000, b"\x02")
+            .expect("bind");
+        let b = Arc::new(instance());
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        {
+            let _entered = runtime.enter();
+            crate::instance::follow_revocations(&database, b.clone());
+        }
+        let eventually = |condition: &dyn Fn() -> bool| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while std::time::Instant::now() < deadline {
+                if condition() {
+                    return true;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            false
+        };
+        assert!(b.may_report("h2", b"\x01").is_err(), "B holds A's binding");
+
+        a.release(b"\x01").expect("release");
+        assert!(
+            eventually(&|| b.may_report("h2", b"\x01").is_ok()),
+            "B hears of the release"
+        );
+        a.rebind(b"\x02", b"\x03").expect("re-key");
+        assert!(
+            eventually(
+                &|| b.may_report("h2", b"\x02").is_ok() && b.may_report("h2", b"\x03").is_err()
+            ),
+            "B hears of the re-key"
         );
     }
 

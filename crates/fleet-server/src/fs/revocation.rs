@@ -211,7 +211,8 @@ impl LedgerStore for FsLedgerStore {
 
     /// Answers from the Hosts as last written, which the next write of the Hosts carries the
     /// binding into: another Host speaking for `instance_uid` holds it, unless it is marked as a
-    /// Gateway, which binds nothing it carries.
+    /// Gateway. A Gateway's Host is bound none (ADR-0024 clause 16), but its file may list
+    /// `instance_uid`s a release before this one kept there, and no migration rewrites the files.
     fn bind(&self, instance_uid: &str, host: &str) -> Result<Bound, String> {
         let written = self.written_hosts.lock().expect("hosts lock");
         Ok(written
@@ -220,6 +221,16 @@ impl LedgerStore for FsLedgerStore {
                 *name != host && !entry.gateway && entry.instance_uids.contains(instance_uid)
             })
             .map_or(Bound::Bound, |(holder, _)| Bound::Taken(holder.clone())))
+    }
+
+    /// Answers the Host the Hosts as last written bind `instance_uid` to; the next write of the
+    /// Hosts carries the release.
+    fn unbind(&self, instance_uid: &str) -> Result<Option<String>, String> {
+        let written = self.written_hosts.lock().expect("hosts lock");
+        Ok(written
+            .iter()
+            .find(|(_, entry)| !entry.gateway && entry.instance_uids.contains(instance_uid))
+            .map(|(holder, _)| holder.clone()))
     }
 
     /// Writes each Host that changed since the last write, and removes each one that is gone.

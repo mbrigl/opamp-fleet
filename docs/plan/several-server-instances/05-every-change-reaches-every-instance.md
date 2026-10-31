@@ -5,10 +5,13 @@
 Every change that concerns a live session is one `NOTIFY` on one channel in the transaction that
 commits it: an assignment, a Package or Deployment published, a restart, a revocation added or
 lifted, an enrolment decided, the window opened or closed, labels, an Agent forgotten or taken, a
-floor set or removed. Each instance acts on the sessions it holds. A lost listening connection, or a
-kind it does not know, counts as every notification: it drops its caches, re-reads the revocation
-list, the assignments, the holders, the labels, the enrolment state and the floors. The revocation
-list has one version, so a Gateway's `ETag` answered by one instance is answered `304` by any.
+floor set or removed. Ticket 02 sends `certificate` for a register entry written or removed and
+`host` for a Host written or an `instance_uid` bound or released, and an instance reads the register
+and the Hosts again on each; `floor` is sent and not yet followed. Each instance acts on the
+sessions it holds. A lost listening connection, or a kind it does not know, counts as every
+notification: it drops its caches, re-reads the revocation list, the assignments, the holders, the
+labels, the enrolment state and the floors. The revocation list has one version, so a Gateway's
+`ETag` answered by one instance is answered `304` by any.
 
 ## Acceptance criteria
 

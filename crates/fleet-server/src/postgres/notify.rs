@@ -23,6 +23,12 @@ pub const REVOCATION: &str = "revocation";
 /// The kind a package floor set or removed is announced as.
 pub const FLOOR: &str = "floor";
 
+/// The kind a register entry written or removed is announced as.
+pub const CERTIFICATE: &str = "certificate";
+
+/// The kind a Host written or removed, or an `instance_uid` bound or released, is announced as.
+pub const HOST: &str = "host";
+
 /// How long a listener waits before it connects again after its connection ended.
 const RECONNECT: Duration = Duration::from_secs(1);
 

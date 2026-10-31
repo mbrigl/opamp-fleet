@@ -24,7 +24,7 @@ use tracing::{error, info, warn};
 
 use crate::config::LeaseTimes;
 use crate::postgres::lease::Taken;
-use crate::postgres::notify::{Heard, REVOCATION};
+use crate::postgres::notify::{Heard, CERTIFICATE, HOST, REVOCATION};
 use crate::postgres::Database;
 use crate::revocation::Revocations;
 
@@ -265,7 +265,10 @@ fn lock_lost(held: &watch::Sender<Option<String>>, instance_id: &str) {
 /// Takes up the revocations other instances commit
 /// (ADR-draft-admission-by-client-certificate-and-revocation clause 32): each one announced, and
 /// every time the listening connection is made, since what was committed before it was not heard,
-/// the list is read again and the sessions check themselves against it.
+/// the list is read again and the sessions check themselves against it. A Host or a register entry
+/// another instance writes is taken up the same way, with the whole ledger
+/// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+/// clause 19).
 pub fn follow_revocations(database: &Database, revocations: Arc<Revocations>) {
     let (heard, mut hearing) = tokio::sync::mpsc::unbounded_channel();
     database.listen(move |what| {
@@ -273,17 +276,24 @@ pub fn follow_revocations(database: &Database, revocations: Arc<Revocations>) {
     });
     tokio::spawn(async move {
         while let Some(what) = hearing.recv().await {
-            let reread = match &what {
-                Heard::Notified(kind) => kind == REVOCATION,
+            // A revocation is read on its own; a Host or a register entry another instance wrote
+            // is read with the whole ledger, as is everything once the connection is made again.
+            let whole = match &what {
+                Heard::Notified(kind) if kind == REVOCATION => false,
+                Heard::Notified(kind) if kind == HOST || kind == CERTIFICATE => true,
+                Heard::Notified(_) => continue,
                 Heard::Listening => true,
             };
-            if !reread {
-                continue;
-            }
             let revocations = revocations.clone();
-            let read = tokio::task::spawn_blocking(move || revocations.reload_revocations())
-                .await
-                .unwrap_or_else(|e| Err(e.to_string()));
+            let read = tokio::task::spawn_blocking(move || {
+                if whole {
+                    revocations.reload_ledger()
+                } else {
+                    revocations.reload_revocations()
+                }
+            })
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()));
             if let Err(e) = read {
                 warn!(error = %e, "could not read the revocations other instances committed");
             }

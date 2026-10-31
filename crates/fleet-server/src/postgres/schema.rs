@@ -68,8 +68,9 @@ pub const MIGRATIONS: &[Migration] = &[
         oldest_server: "0.6.1",
         sql: LEASES,
     },
-    // A table only added and filled from the Hosts; the release before it keeps the Hosts'
-    // arrays, which this release writes too.
+    // A table and an index only added, the table filled from the Hosts; the release before it
+    // keeps binding in the Hosts' arrays, which this release writes too and honours when it binds.
+    // What two releases side by side still leave open is ticket 11's.
     Migration {
         version: 4,
         oldest_server: "0.6.1",
@@ -232,14 +233,17 @@ CREATE TABLE leases (
 /// Which Host each `instance_uid` is bound to: one row per binding, the `instance_uid` its key, so
 /// no two Hosts hold one
 /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
-/// clause 19). It is filled from the arrays of `hosts`; an `instance_uid` two Hosts' arrays hold
-/// fails the migration, naming it and the Hosts, and changes nothing, for the operator to decide.
+/// clause 19). It is filled from the arrays of the Hosts not marked as Gateways, as a Gateway's
+/// Host is bound none (ADR-0024 clause 16); an `instance_uid` two such Hosts' arrays hold fails the
+/// migration, naming it and the Hosts, and changes nothing, for the operator to decide. A renewal's
+/// walk down its chain finds an entry's renewals by the index on the predecessor.
 const HOST_BINDINGS: &str = r"
 DO $$
 DECLARE taken record;
 BEGIN
     SELECT uid, string_agg(host, ', ' ORDER BY host) AS holders INTO taken
         FROM hosts, unnest(instance_uids) AS uid
+        WHERE NOT gateway
         GROUP BY uid HAVING count(*) > 1 ORDER BY uid LIMIT 1;
     IF FOUND THEN
         RAISE EXCEPTION 'the instance_uid % is bound to the Hosts %; release it from all but one '
@@ -251,7 +255,8 @@ CREATE TABLE host_bindings (
     host text NOT NULL
 );
 INSERT INTO host_bindings (instance_uid, host)
-    SELECT uid, host FROM hosts, unnest(instance_uids) AS uid;
+    SELECT uid, host FROM hosts, unnest(instance_uids) AS uid WHERE NOT gateway;
+CREATE INDEX certificates_predecessor ON certificates (predecessor_issuer, predecessor_serial);
 ";
 
 /// This Server's version, `MAJOR.MINOR.PATCH`: the base of the version it reports, so a
