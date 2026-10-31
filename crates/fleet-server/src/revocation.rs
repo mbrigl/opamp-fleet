@@ -271,6 +271,25 @@ pub trait LedgerStore: Send + Sync {
     /// Returns an error when it cannot be removed.
     fn remove_issued(&self, id: &CertId) -> Result<(), String>;
 
+    /// Writes one register entry, deciding from what is stored: the register's bounds are
+    /// counted, and a renewal whose chain holds a revoked certificate is refused, in the write
+    /// itself, so both hold for every instance on one store together and no instance with a stale
+    /// view can pass them
+    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// clause 19). A store that is its only writer decides as [`register_into`] does; the one
+    /// that only puts what the Server decided in memory is answered `Registered`.
+    ///
+    /// # Errors
+    /// Returns an error when it cannot be written; the register is then as it was.
+    fn register_issued(
+        &self,
+        issued: &Issued,
+        bounds: &RegisterBounds,
+    ) -> Result<Registered, String> {
+        let _ = bounds;
+        self.put_issued(issued).map(|()| Registered::Registered)
+    }
+
     /// Adds `entry` to the list, deciding from what is stored: an entry of the same id is kept, its
     /// issuers widened by those `entry` names beside them ([`widened`]), and a list already
     /// holding `bound` entries takes no more. The bound is counted
@@ -293,6 +312,117 @@ pub trait LedgerStore: Send + Sync {
     /// # Errors
     /// Returns an error when they cannot be written.
     fn save_hosts(&self, hosts: &BTreeMap<String, Host>) -> Result<(), String>;
+}
+
+/// The bounds a register write counts (ADR-0029 clause 9).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RegisterBounds {
+    /// The entries the register may hold before this one: [`MAX_ISSUED`], and for a renewal
+    /// [`ENROLMENT_RESERVE`] fewer.
+    pub size: usize,
+    /// The entries one chain may hold below its root: [`MAX_DESCENDANTS_PER_ROOT`].
+    pub per_root: usize,
+}
+
+/// What the store found when it was asked to register a certificate.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Registered {
+    /// The entry is in the register now.
+    Registered,
+    /// A bound would be passed: the text says which.
+    Full(String),
+    /// The chain the entry renews holds a revoked certificate.
+    Revoked,
+}
+
+/// The refusal of a register at its size.
+fn register_full(held: usize) -> String {
+    format!("the register holds {held} certificates already")
+}
+
+/// The refusal of a chain at its bound.
+const CHAIN_FULL: &str = "this certificate's chain has been renewed too often";
+
+/// The refusal of a renewal whose chain holds a revoked certificate.
+pub const RENEWS_REVOKED: &str = "the certificate this renews, or one it renewed, is revoked";
+
+/// Decides a register write from a register a store holds whole, each entry by its predecessor,
+/// and the certificates the list names, by the rules of [`LedgerStore::register_issued`]: what a
+/// store that is its only writer decides with. An entry of the same id is replaced and counts
+/// once.
+pub(crate) fn register_into(
+    links: &BTreeMap<CertId, Option<CertId>>,
+    named: &BTreeSet<CertId>,
+    issued: &Issued,
+    bounds: &RegisterBounds,
+) -> Registered {
+    let id = &issued.facts.id;
+    let held = links.len() - usize::from(links.contains_key(id));
+    if held >= bounds.size {
+        return Registered::Full(register_full(held));
+    }
+    let up = |from: &CertId| {
+        let mut chain = vec![from.clone()];
+        // A chain is never longer than the register; the bound also ends a damaged cycle.
+        for _ in 0..=links.len() {
+            match links.get(chain.last().expect("one")).cloned().flatten() {
+                Some(predecessor) => chain.push(predecessor),
+                None => break,
+            }
+        }
+        chain
+    };
+    let Some(predecessor) = &issued.predecessor else {
+        return Registered::Registered;
+    };
+    let chain = up(predecessor);
+    if chain.iter().any(|at| named.contains(at)) {
+        return Registered::Revoked;
+    }
+    let root = chain.last().expect("one");
+    // Each entry's root, every chain walked once.
+    let mut roots: BTreeMap<&CertId, &CertId> = BTreeMap::new();
+    for start in links.keys() {
+        let mut path = Vec::new();
+        let mut at = start;
+        let found = loop {
+            if let Some(known) = roots.get(at) {
+                break *known;
+            }
+            path.push(at);
+            match links.get(at).and_then(Option::as_ref) {
+                Some(predecessor) if path.len() <= links.len() => at = predecessor,
+                _ => break at,
+            }
+        };
+        for on in path {
+            roots.insert(on, found);
+        }
+    }
+    let below = links
+        .keys()
+        .filter(|at| *at != id && roots.get(at).copied() == Some(root))
+        .count();
+    if below >= bounds.per_root {
+        return Registered::Full(CHAIN_FULL.to_string());
+    }
+    Registered::Registered
+}
+
+/// Every certificate `revocations` name, by issuer and serial.
+pub(crate) fn named_in(revocations: &[Revocation]) -> BTreeSet<CertId> {
+    revocations
+        .iter()
+        .flat_map(|entry| {
+            let Revoked::Certificate {
+                issuers, serial, ..
+            } = &entry.revoked;
+            issuers.iter().map(|issuer| CertId {
+                issuer: issuer.clone(),
+                serial: serial.clone(),
+            })
+        })
+        .collect()
 }
 
 /// What the store found when it was asked to add a revocation.
@@ -415,18 +545,7 @@ struct State {
 impl State {
     /// Every certificate the list names, by issuer and serial.
     fn named(&self) -> BTreeSet<CertId> {
-        self.revocations
-            .iter()
-            .flat_map(|entry| {
-                let Revoked::Certificate {
-                    issuers, serial, ..
-                } = &entry.revoked;
-                issuers.iter().map(|issuer| CertId {
-                    issuer: issuer.clone(),
-                    serial: serial.clone(),
-                })
-            })
-            .collect()
+        named_in(&self.revocations)
     }
 
     /// Every revoked certificate (ADR-0021 clause 28), built once after the list or the register
@@ -699,14 +818,11 @@ impl Revocations {
             MAX_ISSUED
         };
         if state.issued.len() >= limit {
-            return Err(format!(
-                "the register holds {} certificates already",
-                state.issued.len()
-            ));
+            return Err(register_full(state.issued.len()));
         }
         let root = state.root_below(predecessor.as_ref(), &facts.id);
         if state.descendants.get(&root).copied().unwrap_or(0) >= MAX_DESCENDANTS_PER_ROOT {
-            return Err("this certificate's chain has been renewed too often".to_string());
+            return Err(CHAIN_FULL.to_string());
         }
         if let Some(host) = &facts.host {
             let now = self.clock.now_ms();
@@ -730,7 +846,15 @@ impl Revocations {
             predecessor,
             issued_ms: self.clock.now_ms(),
         };
-        self.store.put_issued(&issued)?;
+        let bounds = RegisterBounds {
+            size: limit,
+            per_root: MAX_DESCENDANTS_PER_ROOT,
+        };
+        match self.store.register_issued(&issued, &bounds)? {
+            Registered::Registered => {}
+            Registered::Full(why) => return Err(why),
+            Registered::Revoked => return Err(RENEWS_REVOKED.to_string()),
+        }
         state.insert(issued);
         Ok(())
     }

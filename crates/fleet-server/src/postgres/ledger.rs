@@ -9,7 +9,9 @@ use std::sync::{Arc, Mutex};
 use tokio_postgres::GenericClient;
 
 use super::{client, signed, sql, unsigned, Database};
-use crate::revocation::{Added, CertId, Facts, Host, Issued, Ledger, LedgerStore, Revocation};
+use crate::revocation::{
+    Added, CertId, Facts, Host, Issued, Ledger, LedgerStore, RegisterBounds, Registered, Revocation,
+};
 
 /// The ledger in `certificates`, `revocations` and `hosts`. A revocation is written as the one row
 /// it adds or removes, deciding in its transaction from what the table holds, as other instances
@@ -66,6 +68,54 @@ impl LedgerStore for PgLedgerStore {
                 .await
                 .map_err(sql)?;
             transaction.commit().await.map_err(sql)
+        })
+    }
+
+    /// One transaction that holds the register against every other writer and the list against
+    /// every adder, then decides from what both hold: the register's size, the chain the entry
+    /// renews walked to its root, whether a certificate on it is revoked, and how many entries
+    /// that root already has below it.
+    fn register_issued(
+        &self,
+        issued: &Issued,
+        bounds: &RegisterBounds,
+    ) -> Result<Registered, String> {
+        let issued = issued.clone();
+        let bounds = *bounds;
+        self.database.run(move |pool| async move {
+            let mut client = client(&pool).await?;
+            let transaction = client.transaction().await.map_err(sql)?;
+            transaction
+                .batch_execute(
+                    "LOCK TABLE certificates IN SHARE ROW EXCLUSIVE MODE; \
+                     LOCK TABLE revocations IN SHARE MODE",
+                )
+                .await
+                .map_err(sql)?;
+            let id = &issued.facts.id;
+            let held: i64 = transaction
+                .query_one(
+                    "SELECT count(*) FROM certificates WHERE NOT (issuer = $1 AND serial = $2)",
+                    &[&id.issuer, &id.serial],
+                )
+                .await
+                .map_err(sql)?
+                .get(0);
+            let held = usize::try_from(held).unwrap_or(usize::MAX);
+            if held >= bounds.size {
+                return Ok(Registered::Full(format!(
+                    "the register holds {held} certificates already"
+                )));
+            }
+            if let Some(predecessor) = &issued.predecessor {
+                let decided = decide_renewal(&*transaction, id, predecessor, &bounds).await?;
+                if decided != Registered::Registered {
+                    return Ok(decided);
+                }
+            }
+            write_issued(&*transaction, &issued).await?;
+            transaction.commit().await.map_err(sql)?;
+            Ok(Registered::Registered)
         })
     }
 
@@ -324,6 +374,64 @@ pub(crate) async fn write_issued(
     Ok(())
 }
 
+/// The chain a renewal of `predecessor` continues, walked to its root in the register by one
+/// recursive query, with whether a revocation names a certificate on it, and the entries that root
+/// already has below it: `Registered` when neither refuses the renewal. The walk is bounded by the
+/// register's size, which also ends a cycle a damaged table could hold.
+async fn decide_renewal(
+    client: &impl GenericClient,
+    id: &CertId,
+    predecessor: &CertId,
+    bounds: &RegisterBounds,
+) -> Result<Registered, String> {
+    let row = client
+        .query_one(
+            "WITH RECURSIVE up (issuer, serial, depth) AS ( \
+                 SELECT $1::text, $2::text, 0 \
+                 UNION ALL \
+                 SELECT c.predecessor_issuer, c.predecessor_serial, up.depth + 1 \
+                 FROM certificates c JOIN up ON c.issuer = up.issuer AND c.serial = up.serial \
+                 WHERE c.predecessor_issuer IS NOT NULL \
+                   AND up.depth < (SELECT count(*) FROM certificates) \
+             ), root AS ( \
+                 SELECT issuer, serial FROM up ORDER BY depth DESC LIMIT 1 \
+             ), down (issuer, serial) AS ( \
+                 SELECT issuer, serial FROM root \
+                 UNION \
+                 SELECT c.issuer, c.serial \
+                 FROM certificates c JOIN down \
+                   ON c.predecessor_issuer = down.issuer AND c.predecessor_serial = down.serial \
+             ) \
+             SELECT \
+                 EXISTS ( \
+                     SELECT 1 FROM up, revocations r, \
+                         json_array_elements_text(r.revoked -> 'certificate' -> 'issuers') i \
+                     WHERE r.revoked -> 'certificate' ->> 'serial' = up.serial \
+                       AND i = up.issuer \
+                 ), \
+                 (SELECT count(*) FROM down JOIN certificates c USING (issuer, serial) \
+                  WHERE NOT (c.issuer = $3 AND c.serial = $4))",
+            &[
+                &predecessor.issuer,
+                &predecessor.serial,
+                &id.issuer,
+                &id.serial,
+            ],
+        )
+        .await
+        .map_err(sql)?;
+    if row.get::<_, bool>(0) {
+        return Ok(Registered::Revoked);
+    }
+    let below = usize::try_from(row.get::<_, i64>(1)).unwrap_or(usize::MAX);
+    if below >= bounds.per_root {
+        return Ok(Registered::Full(
+            "this certificate's chain has been renewed too often".to_string(),
+        ));
+    }
+    Ok(Registered::Registered)
+}
+
 /// Writes the entries of the list at their positions, in one statement.
 pub(crate) async fn write_revocations(
     client: &impl GenericClient,
@@ -540,6 +648,192 @@ mod tests {
         };
         let database = test.open();
         contract(&|| Box::new(PgLedgerStore::new(database.clone())));
+    }
+
+    /// A register write's contract on either store: it decides from what is stored, and a write it
+    /// refuses leaves the register as it was. The register's size counts the other entries, an
+    /// entry written again counting once; a renewal whose chain holds a revoked certificate is
+    /// refused, the chain walked past a root the register never held; and a chain at its bound
+    /// below its root takes no more.
+    fn register_contract(open: &dyn Fn() -> Box<dyn LedgerStore>) {
+        let store = open();
+        store.load().expect("empty");
+        let bounds = RegisterBounds {
+            size: 3,
+            per_root: 2,
+        };
+        let registered = |issued: &Issued| store.register_issued(issued, &bounds).expect("write");
+        // 0a renews 09, which the register never held: 09 is the root of the chain.
+        let (root, renewal) = (issued("0a", Some("09")), issued("0b", Some("0a")));
+        assert_eq!(registered(&root), Registered::Registered);
+        assert_eq!(registered(&renewal), Registered::Registered);
+        assert_eq!(
+            registered(&renewal),
+            Registered::Registered,
+            "an entry written again counts once"
+        );
+        assert_eq!(
+            registered(&issued("0c", Some("0b"))),
+            Registered::Full("this certificate's chain has been renewed too often".into()),
+            "two below the root 09 already"
+        );
+        assert_eq!(registered(&issued("1a", None)), Registered::Registered);
+        assert_eq!(
+            registered(&issued("2a", None)),
+            Registered::Full("the register holds 3 certificates already".into())
+        );
+        let wider = RegisterBounds {
+            size: 10,
+            per_root: 10,
+        };
+        assert_eq!(
+            store
+                .add_revocation(&revocation("r9", &CertId::new(b"ca", "09").serial), 10)
+                .expect("revoke"),
+            Added::Added
+        );
+        assert_eq!(
+            store
+                .register_issued(&issued("0c", Some("0b")), &wider)
+                .expect("write"),
+            Registered::Revoked,
+            "the root two renewals up is revoked"
+        );
+        assert_eq!(
+            store
+                .register_issued(&issued("1b", Some("1a")), &wider)
+                .expect("write"),
+            Registered::Registered,
+            "another chain is not"
+        );
+        let ids: BTreeSet<CertId> = open()
+            .load()
+            .expect("load")
+            .issued
+            .into_iter()
+            .map(|entry| entry.facts.id)
+            .collect();
+        let expected: BTreeSet<CertId> = ["0a", "0b", "1a", "1b"]
+            .into_iter()
+            .map(|serial| CertId::new(b"ca", serial))
+            .collect();
+        assert_eq!(ids, expected, "nothing refused was written");
+    }
+
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    #[test]
+    fn the_register_write_decides_from_the_filesystem() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        register_contract(&|| Box::new(FsLedgerStore::open(dir.path()).expect("open")));
+    }
+
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    #[test]
+    fn the_register_write_decides_from_postgres() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        register_contract(&|| Box::new(PgLedgerStore::new(database.clone())));
+    }
+
+    /// Two instances registering at once count the register's size together: in every round two
+    /// writers race for the one place left, behind a barrier, and exactly one is written while the
+    /// other finds the register full.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    #[test]
+    fn two_writers_at_the_registers_bound_write_one_entry_between_them() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let stores = [
+            Arc::new(PgLedgerStore::new(database.clone())),
+            Arc::new(PgLedgerStore::new(database.clone())),
+        ];
+        const ROUNDS: usize = 20;
+        for round in 0..ROUNDS {
+            let barrier = Arc::new(std::sync::Barrier::new(2));
+            let answers: Vec<Registered> = std::thread::scope(|scope| {
+                let racers: Vec<_> = stores
+                    .iter()
+                    .enumerate()
+                    .map(|(racer, store)| {
+                        let barrier = barrier.clone();
+                        scope.spawn(move || {
+                            let entry = issued(&format!("{round:02x}{racer:02x}"), None);
+                            let bounds = RegisterBounds {
+                                size: round + 1,
+                                per_root: ROUNDS,
+                            };
+                            barrier.wait();
+                            store.register_issued(&entry, &bounds).expect("write")
+                        })
+                    })
+                    .collect();
+                racers
+                    .into_iter()
+                    .map(|racer| racer.join().expect("racer"))
+                    .collect()
+            });
+            let written = answers
+                .iter()
+                .filter(|answer| **answer == Registered::Registered)
+                .count();
+            assert_eq!(written, 1, "round {round}: {answers:?}");
+        }
+        assert_eq!(stores[0].load().expect("load").issued.len(), ROUNDS);
+    }
+
+    /// An instance whose view of the list is stale cannot register the renewal of a certificate
+    /// another instance revoked: B never hears of the revocation through A, and the register write
+    /// refuses the renewal from what the database holds.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    #[test]
+    fn a_stale_instance_cannot_register_the_renewal_of_a_revoked_certificate() {
+        use crate::revocation::{Authority, Revocations, RENEWS_REVOKED};
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        struct Now;
+        impl crate::fleet::Clock for Now {
+            fn now_ms(&self) -> u64 {
+                1
+            }
+        }
+        let instance = || {
+            Revocations::open(
+                Box::new(PgLedgerStore::new(database.clone())),
+                Arc::new(Now),
+                vec![Authority {
+                    role: "client".into(),
+                    subject: CertId::new(b"ca", "00").issuer,
+                    name: "CN=ca".into(),
+                }],
+            )
+            .expect("open")
+        };
+        let a = instance();
+        a.record(issued("0a", None).facts, b"\x01", None)
+            .expect("enrol");
+        let b = instance();
+        a.revoke_certificate("client", "0a").expect("revoke");
+        let mut renewal = issued("0b", Some("0a")).facts;
+        renewal.host = None;
+        let refused = b
+            .record(renewal, b"\x01", Some(CertId::new(b"ca", "0a")))
+            .expect_err("refused");
+        assert_eq!(refused, RENEWS_REVOKED);
+        assert_eq!(
+            PgLedgerStore::new(database.clone())
+                .load()
+                .expect("load")
+                .issued
+                .len(),
+            1,
+            "the renewal was not written"
+        );
     }
 
     /// Two instances adding at once count the bound together: in every round two adders race for
