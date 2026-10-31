@@ -22,6 +22,7 @@ use opamp::server::{
     Closing, Handler, Outbound, Rejection, Reply, RequestInfo, Settings, Unreadable,
 };
 use opamp::uid::InstanceUid;
+use rustls::pki_types::CertificateDer;
 use tokio::sync::watch;
 use tracing::{debug, info};
 
@@ -44,17 +45,80 @@ pub use opamp::endpoint::{OPAMP_PATH, PROTOBUF_CONTENT_TYPE};
 /// enrolment window open. Repeated failures from one peer address are throttled.
 #[derive(Default)]
 pub struct Admission {
+    /// What every route of the Agent plane asks of a presented certificate, shared with the
+    /// download route's guard.
+    checks: Arc<Checks>,
+    enrolment: Option<Arc<Enrolment>>,
+    /// When a plain-HTTP peer presenting a certificate was last recorded as admitted.
+    admitted: Mutex<HashMap<(IpAddr, Option<String>), Instant>>,
+}
+
+/// The rules of admission every route of the Agent plane holds a presented certificate to, one
+/// copy for `/v1/opamp` and the package download alike (ADR-0021 clauses 6, 18, 31 and 33).
+#[derive(Clone, Default)]
+struct Checks {
     /// The connection must have carried a certificate. The certificate itself is already verified
     /// — rustls refuses one it cannot chain — so this is a presence check, never a second
     /// verification.
     require_client_certificate: bool,
     issuers: Issuers,
-    enrolment: Option<Arc<Enrolment>>,
     throttle: Option<Arc<Throttle>>,
     revocations: Option<Arc<Revocations>>,
     audit: Option<Arc<dyn Audit>>,
-    /// When a plain-HTTP peer presenting a certificate was last recorded as admitted.
-    admitted: Mutex<HashMap<(IpAddr, Option<String>), Instant>>,
+}
+
+/// Why a presented certificate is not admitted, named as the audit record names the check.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Refused {
+    /// None was presented where one is required, or what was presented cannot be read.
+    Certificate,
+    /// It has ended.
+    Expired,
+    /// It, or a certificate it renewed, is revoked.
+    Revoked,
+}
+
+impl Refused {
+    fn check(self) -> &'static str {
+        match self {
+            Refused::Certificate => "certificate",
+            Refused::Expired => "expired",
+            Refused::Revoked => "revoked",
+        }
+    }
+}
+
+impl Checks {
+    /// The one admission of a presented certificate: present where one is required, readable,
+    /// not ended, and not revoked. Answers what it proves, or why it is refused. The handshake
+    /// verified it, so it parses; one that does not is refused all the same, revocation list or
+    /// none.
+    fn certificate(
+        &self,
+        certificate: Option<&CertificateDer<'static>>,
+    ) -> Result<Option<crate::revocation::Facts>, Refused> {
+        let Some(certificate) = certificate else {
+            return if self.require_client_certificate {
+                Err(Refused::Certificate)
+            } else {
+                Ok(None)
+            };
+        };
+        let facts = crate::ca::facts(certificate.as_ref()).map_err(|_| Refused::Certificate)?;
+        // The handshake checked the certificate's validity once per connection; a kept-alive one
+        // outlives it, so each request is checked again (ADR-0021 clauses 6 and 33).
+        if expired(facts.not_after_ms) {
+            return Err(Refused::Expired);
+        }
+        if self
+            .revocations
+            .as_ref()
+            .is_some_and(|revocations| revocations.is_certificate_revoked(&facts.id))
+        {
+            return Err(Refused::Revoked);
+        }
+        Ok(Some(facts))
+    }
 }
 
 /// How often a plain-HTTP peer's admission is recorded: once per address and certificate per
@@ -141,7 +205,10 @@ impl Admission {
 
     pub fn new(require_client_certificate: bool) -> Self {
         Admission {
-            require_client_certificate,
+            checks: Arc::new(Checks {
+                require_client_certificate,
+                ..Checks::default()
+            }),
             ..Admission::default()
         }
     }
@@ -150,7 +217,7 @@ impl Admission {
     /// `enrolment`'s window is open.
     #[must_use]
     pub fn with_enrolment(mut self, issuers: Issuers, enrolment: Option<Arc<Enrolment>>) -> Self {
-        self.issuers = issuers;
+        Arc::make_mut(&mut self.checks).issuers = issuers;
         self.enrolment = enrolment;
         self
     }
@@ -158,20 +225,21 @@ impl Admission {
     /// Throttles repeated failures from one peer address (ADR-0021 clause 19).
     #[must_use]
     pub fn with_throttle(mut self, throttle: Arc<Throttle>) -> Self {
-        self.throttle = Some(throttle);
+        Arc::make_mut(&mut self.checks).throttle = Some(throttle);
         self
     }
 
     /// Records every decision in `audit` (ADR-0023).
     #[must_use]
     pub fn with_audit(mut self, audit: Option<Arc<dyn Audit>>) -> Self {
-        self.audit = audit;
+        Arc::make_mut(&mut self.checks).audit = audit;
         self
     }
 
     /// `client` or `bootstrap` for a certificate one of this Server's CAs issued.
     fn issuers_role(&self, issuer: &str) -> Option<String> {
-        self.revocations
+        self.checks
+            .revocations
             .as_ref()
             .and_then(|revocations| revocations.authority_of(issuer))
             .map(|authority| authority.role.clone())
@@ -214,12 +282,15 @@ impl Admission {
     /// Refuses a revoked certificate (ADR-0021 clause 31).
     #[must_use]
     pub fn with_revocations(mut self, revocations: Option<Arc<Revocations>>) -> Self {
-        self.revocations = revocations;
+        Arc::make_mut(&mut self.checks).revocations = revocations;
         self
     }
 
     fn required(&self) -> bool {
-        self.require_client_certificate || self.throttle.is_some() || self.revocations.is_some()
+        let checks = &self.checks;
+        checks.require_client_certificate
+            || checks.throttle.is_some()
+            || checks.revocations.is_some()
     }
 }
 
@@ -246,11 +317,9 @@ fn unauthorized(text: &'static str) -> Response {
 /// `/v1/opamp`, and a certificate from the client CA — a bootstrap certificate is not enough.
 #[derive(Clone, Default)]
 pub struct DownloadGuard {
-    require_client_certificate: bool,
-    issuers: Issuers,
-    throttle: Option<Arc<Throttle>>,
-    revocations: Option<Arc<Revocations>>,
-    audit: Option<Arc<dyn Audit>>,
+    /// The admission `/v1/opamp` holds a certificate to.
+    checks: Arc<Checks>,
+    /// What only a download is counted against.
     agent_rate: Option<Arc<AgentRate>>,
 }
 
@@ -259,11 +328,7 @@ impl Admission {
     #[must_use]
     pub fn download_guard(&self) -> DownloadGuard {
         DownloadGuard {
-            require_client_certificate: self.require_client_certificate,
-            issuers: self.issuers.clone(),
-            throttle: self.throttle.clone(),
-            revocations: self.revocations.clone(),
-            audit: self.audit.clone(),
+            checks: self.checks.clone(),
             agent_rate: None,
         }
     }
@@ -280,7 +345,10 @@ impl DownloadGuard {
 
 /// Wraps the download route in its guard.
 pub fn guard_download(router: Router, guard: DownloadGuard) -> Router {
-    if !guard.require_client_certificate && guard.throttle.is_none() && guard.agent_rate.is_none() {
+    if !guard.checks.require_client_certificate
+        && guard.checks.throttle.is_none()
+        && guard.agent_rate.is_none()
+    {
         return router;
     }
     router.layer(middleware::from_fn_with_state(
@@ -297,7 +365,7 @@ async fn admit_download(
     let peer = peer_ip(&request);
     let path = request.uri().path().to_string();
     let record = |event: &str, outcome: &str| {
-        guard.audit.as_ref().map(|audit| {
+        guard.checks.audit.as_ref().map(|audit| {
             audit.record(
                 Entry::new(event, outcome)
                     .peer(peer)
@@ -306,7 +374,7 @@ async fn admit_download(
             )
         })
     };
-    if let (Some(throttle), Some(peer)) = (&guard.throttle, peer) {
+    if let (Some(throttle), Some(peer)) = (&guard.checks.throttle, peer) {
         if let Some(wait) = throttle.retry_after(peer) {
             let _ = record("download.throttled", "throttled");
             return throttled(wait);
@@ -316,28 +384,18 @@ async fn admit_download(
         .extensions()
         .get::<PeerCertificate>()
         .and_then(|peer| peer.0.as_ref());
-    let facts = certificate.and_then(|cert| crate::ca::facts(cert.as_ref()).ok());
-    let member = match certificate {
-        Some(cert) => {
-            guard.issuers.classify(cert.as_ref()) == Peer::Member
-                && !facts
-                    .as_ref()
-                    .is_some_and(|facts| expired(facts.not_after_ms))
-                && !guard.revocations.as_ref().is_some_and(|revocations| {
-                    facts
-                        .as_ref()
-                        .is_none_or(|facts| revocations.is_certificate_revoked(&facts.id))
-                })
-        }
-        None => !guard.require_client_certificate,
-    };
-    if !member {
-        if let (Some(throttle), Some(peer)) = (&guard.throttle, peer) {
+    // Admitted as `/v1/opamp` admits, and then only with a certificate of the client CA: a
+    // bootstrap certificate is not enough for a download (ADR-0021 clause 18).
+    let admitted = guard.checks.certificate(certificate).ok().filter(|_| {
+        certificate.is_none_or(|cert| guard.checks.issuers.classify(cert.as_ref()) == Peer::Member)
+    });
+    let Some(facts) = admitted else {
+        if let (Some(throttle), Some(peer)) = (&guard.checks.throttle, peer) {
             throttle.failed(peer);
         }
         let _ = record("download.refused", "refused");
         return unauthorized("the package download requires a certificate of the fleet");
-    }
+    };
     // What the certificate proves, read once: counted here, and handed to the route, which serves
     // only what is offered to an Agent of the host it names (ADR-0024 clause 16).
     let proofs = certificate.map(|cert| Proofs {
@@ -352,14 +410,14 @@ async fn admit_download(
     if let Some(agent_rate) = &guard.agent_rate {
         let proofs = proofs.clone().unwrap_or_default();
         let subject = proofs.subject(peer);
-        let gateway = is_gateway(&subject, guard.revocations.as_ref());
+        let gateway = is_gateway(&subject, guard.checks.revocations.as_ref());
         // A download names no Agent, so through a Gateway it counts in the aggregate alone. Over
         // the limit is no failure: the throttle of ADR-0021 clause 19 is not fed.
         if let Err(bucket) = agent_rate.admit(&subject, gateway, None) {
-            if let Some(audit) = &guard.audit {
+            if let Some(audit) = &guard.checks.audit {
                 audit.refusal(
                     proofs
-                        .throttled_entry(peer, guard.revocations.as_ref(), bucket)
+                        .throttled_entry(peer, guard.checks.revocations.as_ref(), bucket)
                         .with("route", "download"),
                 );
             }
@@ -391,7 +449,7 @@ pub fn router(state: Arc<AppState>, admission: Admission) -> Router {
         )
         .route(PACKAGE_FLOORS_PATH, axum::routing::get(package_floors))
         .with_state(state.clone());
-    let fleet = Fleet(state, admission.issuers.clone());
+    let fleet = Fleet(state, admission.checks.issuers.clone());
     let mut router = opamp::server::router(Arc::new(fleet), settings).merge(gateways);
     if admission.required() {
         // The outermost layer: every plain-HTTP POST and the upgrade GET — checked before the
@@ -561,7 +619,7 @@ async fn admit(
     // `Authorization` header is not read here or anywhere behind it (ADR-0021 clause 1).
     let peer = peer_ip(&request);
     let record_refusal = |event: &str, outcome: &str, check: &str| {
-        if let Some(audit) = &admission.audit {
+        if let Some(audit) = &admission.checks.audit {
             audit.refusal(
                 Entry::new(event, outcome)
                     .peer(peer)
@@ -570,14 +628,14 @@ async fn admit(
             );
         }
     };
-    if let (Some(throttle), Some(peer)) = (&admission.throttle, peer) {
+    if let (Some(throttle), Some(peer)) = (&admission.checks.throttle, peer) {
         if let Some(wait) = throttle.retry_after(peer) {
             record_refusal("admission.throttled", "throttled", "throttle");
             return throttled(wait);
         }
     }
     let refuse = |check: &str, response: Response| {
-        if let (Some(throttle), Some(peer)) = (&admission.throttle, peer) {
+        if let (Some(throttle), Some(peer)) = (&admission.checks.throttle, peer) {
             throttle.failed(peer);
         }
         record_refusal("admission.refused", "refused", check);
@@ -592,74 +650,35 @@ async fn admit(
         .extensions()
         .get::<PeerCertificate>()
         .and_then(|peer| peer.0.clone());
-    if admission.require_client_certificate && certificate.is_none() {
-        debug!("refused: the OpAMP endpoint requires a client certificate");
-        return refuse(
-            "certificate",
-            (
-                StatusCode::UNAUTHORIZED,
-                "the OpAMP endpoint requires a client certificate",
-            )
-                .into_response(),
-        );
-    }
-    let presented = match certificate
-        .as_ref()
-        .map(|cert| crate::ca::facts(cert.as_ref()))
-    {
-        None => None,
-        Some(Ok(facts)) => Some(facts),
-        // The handshake verified it, so it parses; one that does not is not admitted.
-        Some(Err(_)) => {
-            return refuse(
-                "certificate",
-                unauthorized("the OpAMP endpoint requires a certificate of the fleet"),
-            )
+    let presented = match admission.checks.certificate(certificate.as_ref()) {
+        Ok(presented) => presented,
+        Err(refused) => {
+            debug!(check = refused.check(), "refused a certificate");
+            if refused == Refused::Revoked {
+                // That the certificate was revoked is not said (ADR-0021 clause 31).
+                if let Some(audit) = &admission.checks.audit {
+                    let serial = certificate
+                        .as_ref()
+                        .and_then(|cert| crate::ca::facts(cert.as_ref()).ok())
+                        .map(|facts| facts.id.serial);
+                    audit.refusal(
+                        Entry::new("admission.revoked_proof", "refused")
+                            .peer(peer)
+                            .with("serial", serial),
+                    );
+                }
+            }
+            let text = if certificate.is_none() {
+                "the OpAMP endpoint requires a client certificate"
+            } else {
+                "the OpAMP endpoint requires a certificate of the fleet"
+            };
+            return refuse(refused.check(), unauthorized(text));
         }
     };
-    // The handshake checked the certificate's validity once per connection; a kept-alive one
-    // outlives it, so each request is checked again (ADR-0021 clauses 6 and 33).
-    if presented
-        .as_ref()
-        .is_some_and(|facts| expired(facts.not_after_ms))
-    {
-        debug!("refused: an expired certificate");
-        return refuse(
-            "expired",
-            unauthorized("the OpAMP endpoint requires a certificate of the fleet"),
-        );
-    }
-    if let Some(revocations) = &admission.revocations {
-        let proofs = Proofs {
-            der: None,
-            certificate: presented
-                .as_ref()
-                .map(|facts| (facts.id.clone(), facts.not_after_ms)),
-            host: None,
-            subject_values: crate::revocation::SubjectValues::default(),
-        };
-        // That the certificate was revoked is not said (ADR-0021 clause 31).
-        if proofs.revoked(revocations) {
-            debug!("refused: a revoked certificate");
-            if let Some(audit) = &admission.audit {
-                audit.refusal(
-                    Entry::new("admission.revoked_proof", "refused")
-                        .peer(peer)
-                        .with(
-                            "serial",
-                            presented.as_ref().map(|facts| facts.id.serial.clone()),
-                        ),
-                );
-            }
-            return refuse(
-                "revoked",
-                unauthorized("the OpAMP endpoint requires a certificate of the fleet"),
-            );
-        }
-    }
     let classified = certificate
         .as_ref()
-        .map(|cert| admission.issuers.classify(cert.as_ref()))
+        .map(|cert| admission.checks.issuers.classify(cert.as_ref()))
         .unwrap_or(Peer::Member);
     if let Peer::Enrolling { .. } = &classified {
         // A bootstrap certificate opens nothing outside an enrolment window (ADR-0022 clause 9).
@@ -675,7 +694,7 @@ async fn admit(
                 .into_response();
         }
     }
-    if let Some(audit) = &admission.audit {
+    if let Some(audit) = &admission.checks.audit {
         let serial = presented.as_ref().map(|facts| facts.id.serial.as_str());
         if admission.worth_recording(websocket, peer, serial) {
             let entry = Entry::new("admission.admitted", "admitted")

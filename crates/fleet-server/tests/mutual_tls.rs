@@ -108,6 +108,17 @@ impl Pki {
         (cert.pem(), key.serialize_pem())
     }
 
+    /// A certificate and key signed by this CA, for `name`, carrying `serial` as its serial
+    /// number: one longer than RFC 5280's 20 octets passes the handshake and cannot be read as the
+    /// register reads a certificate.
+    fn issue_with_serial(&self, name: &str, serial: &[u8]) -> (String, String) {
+        let key = KeyPair::generate().expect("key");
+        let mut params = CertificateParams::new(vec![name.to_string()]).expect("params");
+        params.serial_number = Some(rcgen::SerialNumber::from_slice(serial));
+        let cert = params.signed_by(&key, &self.issuer()).expect("signed");
+        (cert.pem(), key.serialize_pem())
+    }
+
     /// A certificate and key signed by this CA, for `name`.
     fn issue(&self, name: &str) -> (String, String) {
         let key = KeyPair::generate().expect("key");
@@ -532,6 +543,43 @@ async fn a_client_certificate_is_required_in_the_handshake_on_the_agent_plane() 
     let agents = format!("https://localhost:{}/api/v1/agents", served.operator_port);
     let response = without.get(&agents).send().await.expect("send");
     assert!(response.status().is_success(), "{:?}", response.status());
+}
+
+/// A certificate the handshake accepts but whose facts cannot be read, here one whose serial is
+/// longer than 20 octets, is refused on `/v1/opamp` and on the package download alike, by the same
+/// admission check, with no revocation list configured as with one.
+/// Verifies: ADR-0021
+#[tokio::test]
+async fn a_certificate_whose_facts_cannot_be_read_is_refused_on_both_routes() {
+    let pki = Pki::new();
+    for setup in [Setup::default(), revocations_setup(&pki)] {
+        let listed = setup.revocations;
+        let served = serve(&pki, setup).await;
+        let (cert, key) = pki.issue_with_serial("edge-01", &[0x42; 21]);
+        let http = client(&served.ca_pem, Some((&cert, &key)));
+        let opamp = http
+            .post(&served.endpoint)
+            .header(reqwest::header::CONTENT_TYPE, "application/x-protobuf")
+            .body(report(&InstanceUid::default()).encode_to_vec())
+            .send()
+            .await
+            .expect("the handshake accepts it");
+        assert_eq!(
+            opamp.status(),
+            reqwest::StatusCode::UNAUTHORIZED,
+            "/v1/opamp, revocation list: {listed}"
+        );
+        let download = served.endpoint.replace(
+            "/v1/opamp",
+            "/api/v1/packages/otelcol/1.0.0/file?os=linux&arch=amd64",
+        );
+        let response = http.get(&download).send().await.expect("send");
+        assert_eq!(
+            response.status(),
+            reqwest::StatusCode::UNAUTHORIZED,
+            "the download, revocation list: {listed}"
+        );
+    }
 }
 
 /// The certificate is the whole of admission: a member presenting one is admitted on both
