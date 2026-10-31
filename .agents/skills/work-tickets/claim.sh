@@ -23,7 +23,9 @@
 # grant does not cover, so a human makes it.
 #
 # The ticket must be on the base, local or the remote's: the worker's worktree starts from
-# there, and other sessions read the frontier from there.
+# there, and other sessions read the frontier from there. A local feat/ base is a local branch;
+# one only fetched is named by its remote-tracking ref, as origin/feat/<name>, to the sensor, and
+# claimed with the remote.
 #
 # Pure bash + git. Usage, anywhere in the repository the dispatcher works in, with the ticket's
 # path from the repository's root:
@@ -39,9 +41,18 @@ ticket="" remote="" base_name="main"
 while (($#)); do
   case "$1" in
     --base) base_name="${2:-}"; shift 2 || { echo "claim: --base needs a branch" >&2; exit 1; } ;;
-    *) if [[ -z "$ticket" ]]; then ticket="$1"; else remote="$1"; fi; shift ;;
+    *)
+      if [[ -z "$ticket" ]]; then ticket="$1"
+      elif [[ -z "$remote" ]]; then remote="$1"
+      else echo "claim: one ticket and one remote, not '$1' as well" >&2; exit 1
+      fi
+      shift ;;
   esac
 done
+if [[ "$remote" == -* ]]; then
+  echo "claim: '$remote' is no remote" >&2
+  exit 1
+fi
 if [[ "$base_name" != main && ! "$base_name" =~ ^feat/[A-Za-z0-9._/-]+$ ]]; then
   echo "claim: the base is main or a feat/ branch, not '$base_name'" >&2
   exit 1
@@ -61,10 +72,19 @@ if git show-ref --verify --quiet "refs/heads/$branch"; then
   exit 2
 fi
 
-# A feat/ base the remote does not have is claimed by the local branch alone.
-if [[ -n "$remote" && "$base_name" != main ]] \
-  && ! git ls-remote --exit-code --heads "$remote" "refs/heads/$base_name" >/dev/null 2>&1; then
-  remote=""
+# A feat/ base the remote does not have is claimed by the local branch alone. Only an answer
+# that the branch is absent says so: a remote that cannot be reached holds claims this session
+# cannot see.
+if [[ -n "$remote" && "$base_name" != main ]]; then
+  git ls-remote --exit-code --heads -- "$remote" "refs/heads/$base_name" >/dev/null 2>&1
+  case $? in
+    0) ;;
+    2)
+      echo "claim: $remote has no $base_name — the claim is this repository's alone" >&2
+      remote=""
+      ;;
+    *) echo "claim: cannot reach $remote to claim from $base_name" >&2; exit 1 ;;
+  esac
 fi
 
 # The base as the claim is made from it: the local branch, or the remote's as just fetched.
@@ -80,7 +100,9 @@ fi
 # The worker's worktree starts from the base, and other sessions read the frontier from it, so
 # a ticket that is not on the base yet is not claimable.
 if ! git cat-file -e "$base:$ticket" 2>/dev/null; then
-  echo "claim: $ticket is not on $base_name${remote:+ of $remote} — land the plan there first" >&2
+  hint="land the plan there first"
+  [[ "$base_name" == main ]] && hint+=", or claim it with --base feat/<name> from the feat/ branch that carries it"
+  echo "claim: $ticket is not on $base_name${remote:+ of $remote} — $hint" >&2
   exit 1
 fi
 

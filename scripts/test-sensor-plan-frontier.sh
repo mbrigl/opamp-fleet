@@ -124,8 +124,29 @@ claim() {
   shift
   (cd "$dir/${SUBDIR:-}" && GIT_AUTHOR_NAME=fixture GIT_AUTHOR_EMAIL=fixture@example.invalid \
     GIT_COMMITTER_NAME=fixture GIT_COMMITTER_EMAIL=fixture@example.invalid \
-    bash "$CLAIM" "$@" >/dev/null 2>&1)
+    bash "$CLAIM" "$@" >/dev/null 2>"$work/claim.err")
   echo $?
+}
+
+# on_remote <remote> <branch> — whether the remote has the branch.
+# shellcheck disable=SC2317 # run by check
+on_remote() { git ls-remote --exit-code --heads "$1" "$2" >/dev/null 2>&1; }
+
+# has_branch <dir> <branch> — whether the repository has the local branch.
+# shellcheck disable=SC2317 # run by check
+has_branch() { git -C "${1:?}" show-ref --verify --quiet "refs/heads/$2"; }
+
+# not <command...> — the command fails.
+# shellcheck disable=SC2317 # run by check
+not() { ! "$@"; }
+
+# expect_refusal <needle> <name> <dir> <ticket> [claim args] — the claim must exit 1 and say why.
+expect_refusal() {
+  local needle="$1" name="$2" rc
+  shift 2
+  rc="$(claim "$@")"
+  check "$name (exit $rc: $(cat "$work/claim.err"))" \
+    test "$rc" -eq 1 -a -n "$(grep -F -- "$needle" "$work/claim.err")"
 }
 
 # expect_claim <exit code> <name> <dir> <ticket> [claim args] — the claim must end with that
@@ -205,16 +226,21 @@ expect 0 "the checkout of main has none of the feat/ plan" "$d" "no open tickets
 expect 0 "the frontier is read on a named feat/ base" "$d" \
   "on feat/x: 2 open, 1 on the frontier, 0 claimed, 1 blocked." --base feat/x
 expect 1 "a base that does not exist is refused" "$d" "no branch 'feat/none'" --base feat/none
-expect_claim 1 "a ticket only on a feat/ branch is refused from main" "$d" docs/plan/f/01-first.md
-expect_claim 1 "a base that is neither main nor a feat/ branch is refused" "$d" \
-  docs/plan/f/01-first.md --base dev
+expect_refusal "claim it with --base feat/<name>" "a ticket only on a feat/ branch is refused \
+from main, naming the way to claim it" "$d" docs/plan/f/01-first.md
+expect_refusal "the base is main or a feat/ branch" \
+  "a base that is neither main nor a feat/ branch is refused" "$d" docs/plan/f/01-first.md --base dev
+expect_refusal "one ticket and one remote" "a third argument is refused" "$d" \
+  docs/plan/f/01-first.md origin extra --base feat/x
+expect_refusal "is no remote" "a remote that reads as an option is refused" "$d" \
+  docs/plan/f/01-first.md --upload-pack=x --base feat/x
+expect_refusal "cannot reach" "a remote that cannot be reached makes no local claim" "$d" \
+  docs/plan/f/01-first.md "$work/no-such-remote.git" --base feat/x
+check "the unreached remote left no local claim" not has_branch "$d" ticket/f/01-first
 expect_claim 0 "a ticket is claimed from the feat/ branch that carries it" "$d" \
   docs/plan/f/01-first.md --base feat/x
-if [[ "$(git -C "$d" rev-parse ticket/f/01-first)" == "$(git -C "$d" rev-parse feat/x)" ]]; then
-  passed=$((passed + 1))
-else
-  failed=$((failed + 1)); echo "FAIL: a claim from a feat/ base starts at that base" >&2
-fi
+check "a claim from a feat/ base starts at that base" \
+  test "$(git -C "$d" rev-parse ticket/f/01-first)" == "$(git -C "$d" rev-parse feat/x)"
 expect_claim 2 "a second claim from the feat/ base is refused" "$d" docs/plan/f/01-first.md --base feat/x
 expect 0 "a claim from a feat/ base takes its ticket off that frontier" "$d" \
   "- docs/plan/f/01-first.md — ticket/f/01-first" --base feat/x
@@ -233,21 +259,15 @@ git clone -q "$work/feat-remote.git" "$work/fb" 2>/dev/null
 git -C "$work/fa" branch -q feat/shared origin/feat/shared
 expect_claim 0 "a claim from a feat/ base on the remote is made there" "$work/fa" \
   docs/plan/f/01-first.md origin --base feat/shared
-if git ls-remote --exit-code --heads "$work/feat-remote.git" ticket/f/01-first >/dev/null 2>&1; then
-  passed=$((passed + 1))
-else
-  failed=$((failed + 1)); echo "FAIL: a claim from a feat/ base the remote has is pushed" >&2
-fi
+check "a claim from a feat/ base the remote has is pushed" \
+  on_remote "$work/feat-remote.git" ticket/f/01-first
 expect_claim 2 "a second clone's claim from that feat/ base on the remote is refused" "$work/fb" \
   docs/plan/f/01-first.md origin --base feat/shared
 expect_claim 0 "a feat/ base the remote does not have is claimed by the local branch" "$seed" \
   docs/plan/f/02-local.md "$work/feat-remote.git" --base feat/local
-if ! git ls-remote --exit-code --heads "$work/feat-remote.git" ticket/f/02-local >/dev/null 2>&1 \
-  && git -C "$seed" show-ref --verify --quiet refs/heads/ticket/f/02-local; then
-  passed=$((passed + 1))
-else
-  failed=$((failed + 1)); echo "FAIL: a claim from a local feat/ base pushes nothing" >&2
-fi
+check "a claim from a local feat/ base pushes nothing" \
+  not on_remote "$work/feat-remote.git" ticket/f/02-local
+check "a claim from a local feat/ base is the local branch" has_branch "$seed" ticket/f/02-local
 
 # --- summary ---------------------------------------------------------------------------------
 

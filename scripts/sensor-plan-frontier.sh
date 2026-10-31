@@ -44,14 +44,20 @@ PLAN="docs/plan"
 PLAN_ROOT="$ROOT"
 if [[ -n "$base_name" ]]; then
   if ! git -C "$ROOT" rev-parse --verify -q "$base_name^{commit}" >/dev/null; then
-    echo "Plan frontier sensor: there is no branch '$base_name' to read the plan on" >&2
+    echo "Plan frontier sensor: there is no branch '$base_name' to read the plan on; one only fetched is named by its remote-tracking ref, as origin/$base_name" >&2
     exit 1
   fi
   PLAN_ROOT="$(mktemp -d)"
   trap 'rm -rf "$PLAN_ROOT"' EXIT
-  if git -C "$ROOT" cat-file -e "$base_name:$PLAN" 2>/dev/null; then
-    git -C "$ROOT" archive "$base_name" "$PLAN" | tar -x -C "$PLAN_ROOT"
-  fi
+  # Each file is read as the base holds it, by ls-tree and cat-file rather than an archive, which
+  # .gitattributes could make leave a file out or rewrite it.
+  while IFS= read -r -d '' path; do
+    mkdir -p "$PLAN_ROOT/${path%/*}"
+    git -C "$ROOT" cat-file blob "$base_name:$path" > "$PLAN_ROOT/$path" || {
+      echo "Plan frontier sensor: cannot read $path on '$base_name'" >&2
+      exit 1
+    }
+  done < <(git -C "$ROOT" ls-tree -r -z --name-only "$base_name" -- "$PLAN")
 fi
 
 # section <file> <heading> — the lines of a '## <heading>' section, HTML comments removed;
