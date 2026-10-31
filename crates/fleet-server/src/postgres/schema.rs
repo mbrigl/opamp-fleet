@@ -233,8 +233,19 @@ CREATE TABLE leases (
 /// no two Hosts hold one
 /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
 /// clause 19). It is filled from the arrays of `hosts`; an `instance_uid` two Hosts' arrays hold
-/// fails the migration, naming it, and changes nothing, for the operator to decide.
+/// fails the migration, naming it and the Hosts, and changes nothing, for the operator to decide.
 const HOST_BINDINGS: &str = r"
+DO $$
+DECLARE taken record;
+BEGIN
+    SELECT uid, string_agg(host, ', ' ORDER BY host) AS holders INTO taken
+        FROM hosts, unnest(instance_uids) AS uid
+        GROUP BY uid HAVING count(*) > 1 ORDER BY uid LIMIT 1;
+    IF FOUND THEN
+        RAISE EXCEPTION 'the instance_uid % is bound to the Hosts %; release it from all but one '
+            'before this release starts', taken.uid, taken.holders;
+    END IF;
+END $$;
 CREATE TABLE host_bindings (
     instance_uid text PRIMARY KEY,
     host text NOT NULL

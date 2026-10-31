@@ -18,8 +18,8 @@ operator.
   asked to store a floor below the stored one, then it answers `409`
 - [ ] Given a certificate revoked through A, when its successor is presented for renewal on B, then
   B follows it back to the revoked predecessor and refuses it
-- [ ] Given two enrolments binding one `instance_uid` to two Hosts on two instances, when both are
-  approved, then one is refused naming the binding
+- [ ] Given one `instance_uid` reported by two Hosts on two instances, when each first report would
+  bind it, then one is refused naming the binding
 - [ ] Given the register at its bound across the fleet, when either instance would add to it, then
   the request is answered as the bound says
 - [ ] Given the port contracts of the ledger, the enrolment and the floors, when they run on both

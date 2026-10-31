@@ -1046,7 +1046,10 @@ mod tests {
                 );
             } else {
                 let error = applied.expect_err("two Hosts hold 01");
-                assert!(error.contains("(instance_uid)=(01)"), "{error}");
+                assert!(
+                    error.contains("the instance_uid 01 is bound to the Hosts a, b"),
+                    "{error}"
+                );
                 assert!(
                     test.rows("SELECT 1 WHERE to_regclass('host_bindings') IS NOT NULL")
                         .is_empty(),
