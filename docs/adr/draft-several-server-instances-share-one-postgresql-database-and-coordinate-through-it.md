@@ -119,10 +119,10 @@ every change that concerns a live session by one `NOTIFY`.
 
    An orderly shutdown, on `SIGTERM` among others, drains the instance. It closes both listeners at
    once, so no new connection reaches it, and answers the requests already in flight on either
-   plane. It ends the WebSocket sessions it carries with close code `1001` (going away), spread
-   evenly over `drain_secs` (default 20, from 0 to 300; 0 ends them all at once), so its Agents
-   reconnect to the other instances without arriving all at once. Then it writes the presence of
-   its Agents, closes its audit chain
+   plane. It ends the WebSocket sessions it carries with close code `1001` (going away), each at an
+   instant drawn uniformly over `drain_secs` (default 20, from 0 to 300; 0 ends them all at once),
+   so its Agents reconnect to the other instances without arriving all at once. Then it writes the
+   presence of its Agents, closes its audit chain
    ([ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance](draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance.md)
    clause 3) and releases its lease. The default leaves the rest of an orchestrator's usual grace
    period of 30 seconds for those writes. `drain_secs` applies on the filesystem store as well,

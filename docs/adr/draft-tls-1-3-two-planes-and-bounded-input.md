@@ -212,10 +212,14 @@ Agent plane with token buckets.
      dropped alone waits 15 seconds on average.
    - The Server completes at most `max_new_connections_per_sec` (default 200) new Agent-plane
      connections a second, each a full TLS 1.3 handshake and admission; that is the rate it must
-     absorb. A WebSocket upgrade past it is answered `503` before the upgrade completes, and a
-     plain-HTTP request past it `503`, each with a `Retry-After` of whole seconds drawn uniformly
-     from 1 to 30, so the refused peers come back spread rather than together. A fleet of more
-     than 6 000 Agents meets the bound after a restart, and its `Retry-After` spreads it further.
+     absorb. It counts connections, not requests, so the routine polls of a large fleet are never
+     refused. A connection past it completes its handshake, is offered HTTP/1.1 alone, and is
+     answered `503` to every request, a WebSocket upgrade before it completes, with a
+     `Retry-After` of whole seconds drawn uniformly from 1 to 30, and then closed; HTTP/2 has no
+     way to close a connection after one answer, and a pooled one would be refused for as long as
+     it lived. The refused peers come back spread rather than together. A fleet of more than 6 000
+     Agents meets the bound after a restart, and its `Retry-After` spreads it further. The bound
+     limits the admissions, not the handshakes: a refused connection still costs one.
    - The Client honours `Retry-After` on a refused upgrade as it does on plain HTTP: a `429` or
      `503` waits the `Retry-After` it carries, or the next backoff step when it carries none,
      whichever is longer.
@@ -312,10 +316,12 @@ Agent plane with token buckets.
     on both planes' acceptors: `axum_server`'s default value, named in this code so it reads as a
     decision.
 
-17. **Shutdown is one bounded drain for both planes.** One `axum_server::Handle` is shared by both
-    listeners. An interrupt calls `graceful_shutdown` with `SHUTDOWN_DRAIN` (10 s), whatever has
-    not ended by then is cut, and the Agent-record flush of
-    [ADR-0024](0024-the-fleet-record-of-agents-and-hosts.md) runs afterwards.
+17. **Shutdown is one bounded drain for both planes.** One `Handle` is shared by both listeners. A
+    stop closes both listeners at once and tells each WebSocket session to close at an instant
+    drawn uniformly over `drain_secs`
+    ([ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it](draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md)
+    clause 3); whatever has not ended 2 seconds after that window is cut, and the Agent-record
+    flush of [ADR-0024](0024-the-fleet-record-of-agents-and-hosts.md) runs afterwards.
 
 18. **No request timeout, but a floor on the pace of every body and every message; no
     `tower-http`, no `server.toml` key for these bounds.** The long routes stay long: nothing has
@@ -983,8 +989,10 @@ in `crates/fleet-server/src/agent_rate.rs`, `a_host_is_one_bucket_whatever_its_a
 `two_certificates_of_one_host_share_a_bucket_and_two_hosts_do_not` and
 `a_bootstrap_certificate_shared_by_two_addresses_is_two_buckets`.
 
-**Not mechanically decidable:** clauses 16 and 17. A 10-second handshake deadline and a 10-second
-shutdown drain are named constants in `listen.rs`, and no test waits them out; review keeps both
-planes on `listen::plane` and the shared `Handle`. Clause 20: the HTTP/2 stream cap and keep-alive
+Clause 17: `a_spread_drain_closes_the_sessions_over_its_window`.
+
+**Not mechanically decidable:** clause 16. A 10-second handshake deadline is a named constant in
+`listen.rs`, and no test waits it out; review keeps both planes on `listen::plane` and the shared
+`Handle`. Clause 20: the HTTP/2 stream cap and keep-alive
 bounds are named constants set in `opamp::server::listen`, and the workspace has no HTTP/2 client
 to drive a peer past them; review checks that every listener goes through `Listener::serve`.
