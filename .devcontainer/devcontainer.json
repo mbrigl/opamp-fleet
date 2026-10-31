@@ -29,7 +29,7 @@
 
   // DevContainer Features layered on top of the base image. The container intentionally has NO
   // access to the host Docker daemon (no socket mount) — see ADR-0004. Manage the host's containers
-  // from a host-side VS Code extension instead (README → "Host container management").
+  // from a host-side VS Code extension instead (README → "Dev Container").
   "features": {
     // GitHub CLI (`gh`) — used by the coding agent for GitHub operations and as the git
     // credential helper. A push and every gh action wait for a human instruction

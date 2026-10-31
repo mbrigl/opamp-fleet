@@ -6,116 +6,54 @@
 [![Audit](https://github.com/mbrigl/opamp-fleet/actions/workflows/audit.yml/badge.svg)](https://github.com/mbrigl/opamp-fleet/actions/workflows/audit.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
-**OpAMP Fleet** is a Rust implementation of OpenTelemetry
-[OpAMP](https://opentelemetry.io/docs/specs/opamp/)-based
-fleet management: an API-first **Server** that manages a fleet over the protocol and exposes an
-OpenAPI-described REST API for any UI or portal, and a **Client** that supervises many managed
-processes at once — OpenTelemetry Collectors and, through plugins, foreign agents that do not speak
-OpAMP — and that can equally run as a **gateway** multiplexing other clients upstream. The work is
-driven by a written
-**specification** ([`docs/SPECIFICATION.md`](docs/SPECIFICATION.md)) and **Architecture Decision
-Records** ([`docs/adr/`](docs/adr/)), so intent and the reasoning behind every structural choice
-stay
-explicit and reviewable. How much of the protocol each end implements is tracked in
-[`docs/CONFORMANCE.md`](docs/CONFORMANCE.md); candidate measures for hardening the Client–Server
-link further are collected — as a backlog, not as decisions — in
-[`docs/HARDENING.md`](docs/HARDENING.md).
+**OpAMP Fleet** manages a fleet of telemetry agents over OpenTelemetry
+[OpAMP](https://opentelemetry.io/docs/specs/opamp/), written in Rust: a **Server** that decides what
+every agent runs, and a **Client** that runs the agents of a host and reports what they really run
+— OpenTelemetry Collectors and agents that never spoke OpAMP alike.
 
-> **📖 Running it? Read the [User Manual](docs/manual/README.md)** — what each end can do, how to
-> start it, and every configuration key, split into [Server](docs/manual/server.md) and
-> [Client](docs/manual/client.md). Setting up a fleet for the first time? Start with
-> [Setting up a fleet](docs/manual/setup.md): the certificates, both configurations, and enrolment,
-> in order.
+> **📖 Running it? Read the [User Manual](docs/manual/README.md).** Setting up a fleet for the
+> first time? Start with [Setting up a fleet](docs/manual/setup.md).
 
-> For agent instructions, see [`AGENTS.md`](AGENTS.md) — the single source of truth for all coding
-agents.
+> Working on it? The rules for humans and coding agents alike are in [`AGENTS.md`](AGENTS.md).
 
 ## Overview
 
-A telemetry fleet is a heap of agents on a heap of machines, each configured by a local file. That
-works for one agent and breaks down for a fleet: changing what a hundred agents do means reaching a
-hundred machines, and nobody can say with certainty what each one is *actually* running.
-Configuration
-drifts, rollouts are ad-hoc, and a bad configuration shows up as missing telemetry rather than as a
-report.
+A fleet of agents, each configured by a local file, drifts: changing what a hundred agents do means
+reaching a hundred machines, and nobody can say for certain what each one actually runs. OpAMP
+closes that loop — an agent takes its configuration over the protocol and reports back what it
+applied and how it is doing. OpAMP Fleet implements both ends:
 
-[OpAMP](https://opentelemetry.io/docs/specs/opamp/) — the Open Agent Management Protocol — closes
-that
-loop: an agent accepts configuration over the protocol and reports back what it applied and how it
-is
-doing. **OpAMP Fleet** is a Rust implementation of both ends, built for a *heterogeneous* fleet —
-OpenTelemetry Collectors **and** agents that were never built to speak OpAMP:
+- **Server** — an API-first control plane on Linux. It holds what the fleet should run, tracks what
+  each agent reports, and reconfigures only an agent whose configuration differs. Its contract is
+  an OpenAPI-described REST API, so any portal can drive it; the bundled UI is deliberately simple.
+- **Client** — one process, installed as an OS service on Linux, macOS and Windows, that updates
+  itself from a signed package. In **Supervisor Mode** it runs many Supervisors, each managing one
+  process; in **Gateway Mode** it folds other Clients' connections onto a few upstream ones. Both
+  modes combine on one host.
+- **Kinds behind a hexagonal core** — a Supervisor's kind knows its agent: `collector` serves every
+  OpenTelemetry Collector, `command` runs any other program and watches it from outside. A new kind
+  of agent is a new kind behind the same ports; the core does not change.
+- **The protocol on the record** — both ends implement OpAMP as completely as it allows, against a
+  pinned version, and [`docs/CONFORMANCE.md`](docs/CONFORMANCE.md) states each capability's status.
 
-- **Server** — an API-first control plane (Linux). It holds the configuration the fleet should run,
-  tracks what each agent reports back, and only reconfigures an agent whose configuration actually
-  differs. Its contract is an **OpenAPI-described REST API**, so any UI or portal can read the
-  fleet's
-  state and change what it runs; the Server ships only a rudimentary UI of its own and is built to
-  be
-  integrated into an existing portal.
-- **Client** — one process, installed as a native operating-system service on Linux, macOS, and
-  Windows and able to update its own binary in place. It has two **modes**, independent of each
-  other
-  and combinable on the same host: **Supervisor Mode** runs **many supervisors at once**, each
-  managing one process, applying the configuration it is sent and reporting health and effective
-  configuration back; **Gateway Mode** accepts other clients' OpAMP connections and folds them onto
-  a
-  small pool of upstream ones, so a fleet can grow past one connection per agent. Every supervisor
-  also exposes a **Supervisor Endpoint** on loopback — not a mode of its own, but part of what a
-  supervisor is — because the Collector's `opampextension` is a *client only* and needs something to
-  connect to; a Collector carrying it reports through that endpoint instead of being watched from
-  outside. A Collector supervisor manages a Collector natively; a
-  **custom supervisor** manages a **foreign agent** — an agent of a kind the project does not
-  already
-  know, needing a plugin written for it — by translating its lifecycle into the protocol.
-- **Plugins over a hexagonal core** — supervisors are plugins behind stable ports. Bringing a new
-  kind
-  of process under management means writing a plugin, not changing the core, so the same control
-  loop
-  reaches agents OpAMP was never designed for.
-- **The protocol, in full and on the record** — both ends implement OpAMP as completely as the
-  protocol allows, against a pinned upstream version, with every capability's status and maturity
-  written down in [`docs/CONFORMANCE.md`](docs/CONFORMANCE.md) rather than left to be discovered.
-
-The goal is one place — reachable by any UI — to decide what every agent in the fleet runs and to
-see
-what each one is really running, whether or not it speaks OpAMP. The full problem statement, goals,
-vocabulary, and non-goals live in the **specification**
-([`docs/SPECIFICATION.md`](docs/SPECIFICATION.md));
-the reasoning behind each structural choice lives in the ADRs ([`docs/adr/`](docs/adr/)).
+The [specification](docs/SPECIFICATION.md) holds the goals, the vocabulary and the non-goals; the
+[Architecture Decision Records](docs/adr/) hold the reasoning behind every structural choice.
+[`docs/HARDENING.md`](docs/HARDENING.md) collects candidate hardening measures as a backlog.
 
 ## Architecture
-
-The picture keeps the shape of the [OpAMP reference
-architecture](https://opentelemetry.io/docs/specs/opamp/)
-— a supervisor owning a Collector, exchanging OpAMP with a backend — and extends it with what makes
-OpAMP Fleet different: an **API-first Server** on two listeners, whose contract is an OpenAPI REST
-API, a single **Client** whose two modes compose freely, **Supervisors** whose compiled-in kinds
-each know their agent behind a hexagonal core — each exposing a **Supervisor Endpoint** for a
-Collector that speaks the protocol itself — and a **Connection Pool** that carries many Agents over
-few connections, every one of them admitted by a client certificate.
 
 ![The Server with its Operator and Agent planes, the Client with Supervisor Mode and Gateway Mode, and the agents, Collectors and downstream Clients they serve](docs/images/architecture.png)
 
 *The image carries its [Excalidraw](https://excalidraw.com) scene: open the PNG there to edit it,
 and export it again with "Embed scene" switched on.*
 
-On the wire the Server sees only **Agents**, told apart by `instance_uid` and never by the
-connection
-that carried them — so whether an Agent is a Supervisor running a Collector or a Foreign Agent, a
-Collector reporting through its own `opampextension`, or a Client several hops away behind a
-Gateway is invisible to it. Every connection to the **Agent plane** is TLS 1.3 with a client
-certificate, which the Server's client CA issues once an operator approves a host's enrolment and
-renews by itself afterwards; the **Operator plane**, where the REST API and the UI live, is a
-listener of its own and stays on the loopback unless it is published behind a password. The
-Supervisor Endpoint is bound to loopback and admits only the process its Supervisor started, by a
-token. A Supervisor's **kind** is the authority on its agent: `collector` serves every Collector,
-with or without the extension; `command`
-runs any other program and observes it from the outside. Adding a new kind of managed process
-means writing another kind against the same ports — the core does not change. The terms used here
-(Server, Client, Agent, Client Modes, Supervisor Endpoint, Connection Pool, Foreign Agent, Plugin,
-Port,
-Selector, Package, Deployment, …) are defined in [`docs/SPECIFICATION.md`](docs/SPECIFICATION.md).
+The Server sees only **Agents**, told apart by `instance_uid` and never by the connection that
+carried them: a Supervisor's process, a Collector reporting through its own `opampextension`, and a
+Client several hops behind a Gateway look alike to it. Every connection to the **Agent plane** is
+TLS 1.3 with a client certificate, which the Server's CA issues once an operator approves a host's
+enrolment. The **Operator plane** — the REST API and the UI — is a listener of its own and stays on
+the loopback unless it is published behind a password. How the code is cut into crates and modules
+is in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ## Prerequisites
 
@@ -137,370 +75,134 @@ Selector, Package, Deployment, …) are defined in [`docs/SPECIFICATION.md`](doc
 
 ## Build, Test & Run
 
-The toolchain is **Rust stable**, provided by the Dev Container; the code is one Cargo workspace 
-with five crates — `opamp` (the OpAMP communication layer, publishable on its own, with an Agent's
-client and a server endpoint with their TLS and listener behind the `client` and `server` features,
-ADR-0008),
-`fleet-core` (what both ends share beyond the protocol), `fleet-server` (the Server),
-`fleet-agent` (the Client, in all its modes), and `fleet-tools` (the operator command-line tools,
-ADR-0008). 
-This section is the single source for build/test/run commands — both humans and agents rely on 
-it (AGENTS.md links here).
+One Cargo workspace on Rust stable, which the Dev Container provides; its five crates are described
+in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). This section is the single source of the build,
+test and run commands, for humans and agents alike. [`scripts/check-rust.sh`](scripts/check-rust.sh)
+runs the build, test and lint commands and the first two rows of the table below, locally through
+`scripts/check-all.sh` before every push and in CI as the `rust` job of
+[`checks.yml`](.github/workflows/checks.yml); [`ci.yml`](.github/workflows/ci.yml) release-builds
+the Client for Linux, Windows and macOS and the Server for Linux.
 
 - **Build:** `cargo build --workspace`
 - **Test:** `cargo test --workspace`
 - **Lint:** `cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings`
-- **Lint `opamp` per feature:**
-  `for f in "" client server; do cargo clippy -p opamp --all-targets --no-default-features
-  --features "$f" -- -D warnings; done`
-  — inside the workspace Cargo builds `opamp` once with every feature any crate asks for, so only a
-  build of each feature on its own shows that it stands alone (ADR-0008).
-- **Lint and test `fleet-agent` with fewer Supervisor kinds:**
-  `cargo clippy -p fleet-agent --all-targets --no-default-features -- -D warnings && cargo test -p
-  fleet-agent --no-default-features`
-  — a wrapped kind, when the code base carries one, is a feature, so only these show that a build
-  leaving
-  one out compiles and refuses its `type` (ADR-0017).
-- **Check the Windows build:**
-  `cargo xwin clippy -p fleet-agent --all-targets --target x86_64-pc-windows-msvc -- -D warnings`
-  (needs `cargo install cargo-xwin` and `rustup target add x86_64-pc-windows-msvc`; the Dev
-  Container carries the `llvm-lib` it requires). Worth running whenever a change touches
-  platform-gated code or the tests around it: CI builds the Client on Windows and macOS, and a
-  `#[cfg(unix)]` mistake compiles perfectly well on Linux.
-- **Check the supply chain:** `cargo deny check` (needs `cargo install cargo-deny`): advisories,
-  licences, sources and banned crates, as [`deny.toml`](deny.toml) sets them; reviewed advisories
-  are recorded there with a reason
-- **Fuzz a parser:** `cargo +nightly fuzz run <target> fuzz/corpus/<target> fuzz/seeds/<target>`
-  (needs `cargo install cargo-fuzz` and a nightly toolchain); the targets are listed in
-  [`fuzz/Cargo.toml`](fuzz/Cargo.toml), and every parser that reads bytes from the network or a
-  downloaded artifact has one (specification Q-2)
-- **Check interop against `opamp-go`:**
-  `cargo test -p fleet-agent --test interop_opamp_go -- --ignored --nocapture --test-threads=1`
-  (needs a Go toolchain on `PATH`, which nothing else here needs and the Dev Container does not
-  ship); the scheduled `Interop` workflow runs it weekly, and
-  [`interop/README.md`](interop/README.md) says what it covers and how a red run is triaged
-  (ADR-0011)
-- **Make development certificates:** `scripts/dev-pki.sh` — both binaries refuse to run without
-  TLS (ADR-0012); it runs the operator tool's `opamp-fleetctl pki init` (ADR-0032), no other tool,
-  and writes the set and a `server.toml` and `supervisor.toml` that use it to `.dev-pki/`. The
-  development Client enrols with the bootstrap certificate; `scripts/seed_test_configs.sh --enrol`
-  approves it.
-  The VS Code launch configurations run it when `.dev-pki/` has no configuration yet
+- **Make development certificates:** `scripts/dev-pki.sh` writes them, a `server.toml` and a
+  `supervisor.toml` to `.dev-pki/`; `scripts/seed_test_configs.sh --enrol` approves the development
+  Client's enrolment
 - **Run the Server:** `cargo run -p fleet-server -- --config .dev-pki/server.toml`
 - **Run the Client:** `cargo run -p fleet-agent -- --config .dev-pki/supervisor.toml`
-- **Run the operator tool:** `cargo run --bin opamp-fleetctl -- package fetch` (fetch a known
-  agent's release and hand it to the Server), `cargo run --bin opamp-fleetctl -- package --help`
-  (build, hash, and sign an artifact out of any program) or `cargo run --bin opamp-fleetctl -- pki
-  --help` (the fleet's certificates) — documented in [the manual](docs/manual/tools.md). Every
-  release also publishes it for Linux and macOS (ADR-0032).
+- **Run the operator tool:** `cargo run --bin opamp-fleetctl -- package fetch` (a known agent's
+  release, handed to the Server), `-- package --help` (build, hash and sign an artifact) or
+  `-- pki --help` (the fleet's certificates), documented in [the manual](docs/manual/tools.md)
 
-Both binaries read a TOML configuration file
-([ADR-0030](docs/adr/0030-the-servers-configuration.md));
-every setting has a default except the TLS material, without which neither starts. The annotated
-examples live in [`config/`](config/). [`scripts/check-rust.sh`](scripts/check-rust.sh) runs
-exactly these build/test/lint commands, locally through `scripts/check-all.sh` and in CI as the
-`rust` job of [`.github/workflows/checks.yml`](.github/workflows/checks.yml), whose jobs also check
-the Client on Windows and macOS and the stores against a real S3 and PostgreSQL;
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml) release-builds the Client for Linux,
-Windows, and macOS and the Server for Linux, which `scripts/check-all.sh` does for the local
-platform.
+The checks beyond these, each for what the plain build cannot show:
 
-**Releases** ([ADR-0034](docs/adr/0034-releases-attestations-and-the-server-image.md),
-[ADR-0033](docs/adr/0033-the-products-version.md)): the version is
-`[workspace.package] version` in [`Cargo.toml`](Cargo.toml), and the `Release` workflow makes the
-`version/*` tag from it before it builds — so bumping the version is an ordinary reviewed commit and
-nobody types a tag. Running it publishes one archive per platform,
-`supervisor_<version>_<os>_<arch>.tar.gz` for Linux, macOS and Windows on the architectures each
-ships on, a CycloneDX SBOM `<stem>.cdx.json` beside each archive of the Client and of the operator
-tool, and a `SHA256SUMS` file. Every asset is a subject of one build-provenance attestation, which
-the workflow verifies before it creates the release
-([ADR-0034](docs/adr/0034-releases-attestations-and-the-server-image.md));
-an operator checks a download with
-`gh attestation verify SHA256SUMS --repo mbrigl/opamp-fleet --signer-workflow
-mbrigl/opamp-fleet/.github/workflows/release.yml`
-and then `sha256sum -c --ignore-missing SHA256SUMS`. The files are named after the **Set** an
-operator uploads them
-to, not after the product inside them
-([ADR-0034](docs/adr/0034-releases-attestations-and-the-server-image.md)) — and the program
-inside them and its configuration file are called `supervisor` too. The dpkg/rpm/MSI package and
-the service carry the **product's** name, `opamp-fleet`
-([ADR-0019](docs/adr/0019-the-installed-service-and-its-state.md),
-[ADR-0037](docs/adr/0037-the-accounts-the-service-runs-under.md)): that is the name that
-identifies an *installation*, and a second one is a second build rather than a flag. The fields are
-separated by `_` because a name and a version both
-contain `-` ([ADR-0034](docs/adr/0034-releases-attestations-and-the-server-image.md)),
-and the last two are exactly what an Agent reports as `os.type` and `host.arch` (`linux_amd64`,
-`darwin_arm64`, …), so uploading a whole release under one package
-name needs no translation ([ADR-0027](docs/adr/0027-packages-signatures-and-delivery.md)). Started
-with `dry_run` (the default) it builds and packs everything and
-publishes nothing. Before it builds anything at all it checks that the version is still free — a
-`version/*` tag or a release already carrying that number fails the run on the spot, dry or not, so
-a
-forgotten bump costs seconds rather than five build jobs — and the built binary must report the
-version the artifacts are named after. Each archive is also a
-ready package artifact: the same file an operator downloads is the one a fleet is handed for a
-Client
-[self-update](docs/manual/client.md#updating-the-client-itself).
+| Check | Command | When, and what it needs |
+|---|---|---|
+| `opamp` per feature | `for f in "" client server; do cargo clippy -p opamp --all-targets --no-default-features --features "$f" -- -D warnings; done` | each feature stands alone (ADR-0008); run by `check-rust.sh` |
+| fewer Supervisor kinds | `cargo clippy -p fleet-agent --all-targets --no-default-features -- -D warnings && cargo test -p fleet-agent --no-default-features` | a build leaving a wrapped kind out compiles and refuses its `type` (ADR-0017); run by `check-rust.sh` |
+| Windows build | `cargo xwin clippy -p fleet-agent --all-targets --target x86_64-pc-windows-msvc -- -D warnings` | on a change to platform-gated code; needs `cargo install cargo-xwin` and `rustup target add x86_64-pc-windows-msvc`; CI builds the Client on Windows |
+| supply chain | `cargo deny check` | as [`deny.toml`](deny.toml) sets it; needs `cargo install cargo-deny`; the `Security audit` workflow runs it weekly and on lockfile changes |
+| fuzzing | `cargo +nightly fuzz run <target> fuzz/corpus/<target> fuzz/seeds/<target>` | the targets are in [`fuzz/Cargo.toml`](fuzz/Cargo.toml); needs `cargo install cargo-fuzz` and nightly; the `Fuzz` workflow runs them daily |
+| interop with `opamp-go` | `cargo test -p fleet-agent --test interop_opamp_go -- --ignored --nocapture --test-threads=1` | needs a Go toolchain, which the Dev Container does not ship; the `Interop` workflow runs it weekly; see [`interop/README.md`](interop/README.md) |
+| service smoke | `FLEET_SMOKE_THROWAWAY=1 scripts/check-service-smoke.sh` | registers services and accounts, so a throwaway machine only; see [below](#the-service-smoke-test) |
 
-The **Server** ships as a container image and nowhere else
-([ADR-0034](docs/adr/0034-releases-attestations-and-the-server-image.md)):
-`ghcr.io/mbrigl/opamp-fleet-server:<version>` for `linux/amd64` and `linux/arm64`, built by
-[`packaging/container/Containerfile`](packaging/container/Containerfile) from the Server binaries
-the
-release built and checked, on a distroless base pinned by digest, with no shell, running as UID
-65532. The release pushes it by digest, attests the digest, verifies it, and only then tags it with
-the version; there is no `latest` tag, and the release notes name the digest to deploy. Its SBOMs
-are
-`server_<version>_linux_<arch>.cdx.json` beside the other assets. Check an image with
-`gh attestation verify oci://ghcr.io/mbrigl/opamp-fleet-server@<digest> --repo mbrigl/opamp-fleet
---signer-workflow mbrigl/opamp-fleet/.github/workflows/release.yml`;
-running it is in [the Server's manual](docs/manual/server.md#in-a-container).
+Both binaries read a TOML file; every setting has a default except the TLS material. The annotated
+examples are in [`config/`](config/).
+
+### Releases
+
+The version is `[workspace.package] version` in [`Cargo.toml`](Cargo.toml), so bumping it is a
+reviewed commit. The `Release` workflow makes the `version/*` tag from it, then builds and publishes
+the Client's archive and native packages per platform, the operator tool, an SBOM beside each,
+`SHA256SUMS`, and the Server's image `ghcr.io/mbrigl/opamp-fleet-server:<version>`, every one
+attested (ADR-0033, ADR-0034). Started with `dry_run`, the default, it builds everything and
+publishes nothing. How an operator checks a download is in
+[the manual](docs/manual/tools.md#getting-it), and the image in
+[the Server's manual](docs/manual/server.md#in-a-container).
+
+### The service smoke test
+
+The `Service smoke` workflow installs the Client as a real service on Linux, macOS and Windows,
+weekly and on demand: install, start, the Agent appearing in the fleet, its process killed and
+restarted by the manager, a stop that stays stopped, uninstall, and an install that enrols with a
+`bootstrap.p12`. Its test is `#[ignore]`d, so an ordinary `cargo test` installs nothing.
+
+What still needs a human, per platform:
+
+- starting at **boot**, the service's [log](docs/manual/client.md#where-the-services-logs-are), and
+  the Agent in the fleet UI;
+- an **SELinux-enforcing host**: the `.rpm` install must start, and a service dying with
+  `status=203/EXEC` and an AVC denial is the failure ADR-0019 clause 12 prevents;
+- each wrapped kind under the packaged account `opamp-fleet` and under `--run-as root`: it starts,
+  reports, and its `sudo` or setuid helpers still work (ADR-0037).
 
 ## Usage
 
-This section is a tour. The complete operator reference — every option and every configuration key
-of both ends — is the **[User Manual](docs/manual/README.md)**:
-[Setting up a fleet](docs/manual/setup.md) · [Server](docs/manual/server.md) ·
-[Client](docs/manual/client.md) · [Command-line tools](docs/manual/tools.md).
+The [quick start](docs/manual/README.md#quick-start-a-closed-loop-on-one-machine) in the User Manual
+closes the loop on one machine: a Server, a Client, a Configuration rolled out through a
+Deployment, and the Agent reporting it applied. From there:
 
-A minimal closed control loop on one machine:
-
-1. **Start the Server:** `cargo run -p fleet-server -- --config config/server.toml` — it serves two
-   planes on two ports ([ADR-0012](docs/adr/0012-tls-1-3-two-planes-and-bounded-input.md)).
-   The **Agent plane** on `4320`: the OpAMP endpoint at `/v1/opamp` (plain HTTP **and** WebSocket,
-   [ADR-0012](docs/adr/0012-tls-1-3-two-planes-and-bounded-input.md)) and the package downloads the
-   offers point
-   at. The **Operator plane** on `127.0.0.1:4321`: the REST API under `/api/v1/`
-   ([ADR-0025](docs/adr/0025-configurations-and-the-rest-api.md)), the API
-   docs, and the bundled UI at `/` — on loopback, because it is open until `[rest.auth]` guards it
-   with Basic credentials
-   ([ADR-0021](docs/adr/0021-admission-by-client-certificate-and-revocation.md)).
-2. **Start a Client:** `cargo run -p fleet-agent -- --config config/supervisor.toml` — it connects
-   over
-   WebSocket by default (`ws://127.0.0.1:4320/v1/opamp`), reports its description and health, and
-   appears in the fleet. Point `endpoint` at an `http(s)://` URL to use the polling transport
-   instead.
-3. **Open the UI** at <http://127.0.0.1:4321/> — the Agent is listed as *Connected*. Press
-   **Configurations**, create a Configuration with its configuration text, and press **OK**. Then
-   press **Deployments**, create a deployment whose Selector (`key=value` pairs an Agent's reported
-   attributes must equal, never empty) matches the Agent, add the Configuration, press **OK**, and
-   press the row's **Roll out** — a Configuration reaches Agents only through a Deployment
-   ([ADR-0026](docs/adr/0026-deployments-and-rollouts.md)).
-4. **Watch the loop close:** a WebSocket Client the Deployment claims receives the configuration
-   within a second, an HTTP Client on its next poll. The Agent stores it (under its `state_dir`),
-   reports it **Applied** with the matching hash, and its effective configuration shows up in the
-   table. Distributing the same configuration again sends nothing — the config-hash comparison
-   gates every push. An Agent receives every Configuration its Deployment holds for its type as
-   named entries and merges them itself; an Agent in no Deployment is left running what it already
-   runs.
-
-The same operations are available to any portal through the REST API — the OpenAPI document at
-`/api/v1/openapi.json` is the contract to generate a client from:
-
-```console
-$ curl http://127.0.0.1:4321/api/v1/agents                   # the fleet, with reported attributes
-$ curl http://127.0.0.1:4321/api/v1/configurations           # every Configuration
-$ curl -X PUT -H 'Content-Type: application/json' \
-       -d '{"service_name": "otelcol", "body": "receivers: {}"}' \
-       http://127.0.0.1:4321/api/v1/configurations/linux-base  # content for one Agent type
-$ curl -X PUT -H 'Content-Type: application/json' -d '{"selector": {"os.type": "linux"}}' \
-       http://127.0.0.1:4321/api/v1/deployments/linux       # aimed at a subset
-$ curl -X PUT http://127.0.0.1:4321/api/v1/deployments/linux/configurations/linux-base
-$ curl -X POST http://127.0.0.1:4321/api/v1/deployments/linux/rollout  # distribute
-
-# Content the agent reads by path rather than is configured with (ADR-0025): written next to the
-# configuration under its own name, never passed to the process as configuration.
-$ curl -X PUT -H 'Content-Type: application/json' \
-       -d '{"service_name": "otelcol", "body": "rules: []", "role": "supplementary"}' \
-       http://127.0.0.1:4321/api/v1/configurations/ruleset
-
-# A package defines a Set (ADR-0027), identified by name, Agent type, and version, with one entry
-# per platform (ADR-0027); each Agent is offered the entry that fits it. Saving stages a draft —
-# nothing reaches the fleet until the Set is published (ADR-0026).
-$ curl -X PUT -H 'Content-Type: application/json' -d '{}' \
-       http://127.0.0.1:4321/api/v1/packages/otelcol/otelcol-contrib/0.109.0
-$ curl -X PUT --data-binary @otelcol-linux-amd64.tar.gz \
-       http://127.0.0.1:4321/api/v1/packages/otelcol/otelcol-contrib/0.109.0/entries/linux/amd64
-$ curl -X PUT -H 'Content-Type: application/json' -d '{"published": true}' \
-       http://127.0.0.1:4321/api/v1/packages/otelcol/otelcol-contrib/0.109.0/publication
-
-# Rolling back is a publication move (ADR-0027): retract the newest version, and the fleet falls
-# back to the newest one still published under the same name.
-$ curl -X PUT -H 'Content-Type: application/json' -d '{"published": false}' \
-       http://127.0.0.1:4321/api/v1/packages/otelcol/otelcol-contrib/0.109.0/publication
-```
-
-For TLS, give the Server a certificate (`[tls]` in `server.toml`) and the Client a `wss://` or
-`https://` endpoint — plus `ca_file` under `[tls]` when the certificate comes from a private CA.
-The UI and the REST API can present a certificate of their own, for example from your
-organization's PKI, under `[rest.tls]`; without it they present `[tls]`'s.
-
-### Running as an OS service
-
-The Client registers *itself* as a native service on Linux (systemd), macOS (launchd), and Windows
-(SCM) — [ADR-0019](docs/adr/0019-the-installed-service-and-its-state.md):
-
-```console
-$ supervisor service install --config /etc/opamp/supervisor.toml     # system service (root/Administrator)
-$ supervisor service start
-$ supervisor service status
-$ supervisor service stop
-$ supervisor service uninstall                                   # never deletes layout or state
-```
-
-- **One service per build:** the service is named after the product, `opamp-fleet`, with no suffix
-  and nothing to look up — so the verbs above take no name at all. A second installation on one
-  host is a second *build* with its own `PRODUCT_NAME`, not a runtime flag
-  ([ADR-0019](docs/adr/0019-the-installed-service-and-its-state.md)).
-- **Two roots:** `--root <dir>` given alone puts everything under the one directory it names;
-  nothing is ever installed to a fixed path. Without it, a Linux system install splits the
-  defaults: the executable layout — `versions/supervisor-<version>-<commit>/` and the `current`
-  pointer the service runs from — lives at `/opt/opamp-fleet`, while `supervisor.toml` and the
-  default `state/` directory stay at `/var/lib/opamp-fleet` (SELinux never lets systemd execute a
-  binary under `/var/lib`). `--data-root <dir>` names that second half explicitly. macOS, Windows
-  and user scope keep one directory for everything — including a Windows host installed by the
-  MSI, where `Program Files` holds the delivered payload and the layout goes under
-  `%ProgramData%\opamp-fleet`, because the self-update rewrites the layout at runtime and
-  `Program Files` is not a tree a service account should be able to write.
-- **Scope:** `--user` targets the user-level manager (development); the default is a system
-  service that starts at boot.
-- Stopping the service sends the OpAMP `agent_disconnect` goodbye (`SIGTERM` on Unix, an SCM stop
-  control on Windows); after a crash the manager restarts the service, after an explicit stop it
-  stays down.
-- **Self-update** ([ADR-0018](docs/adr/0018-the-client-updates-itself-from-a-signed-package.md)):
-  the Client is always its own
-  Agent, so the Server can see which version each host runs. Letting the Server *replace* that
-  version is a consent that stands by default, takes effect once a verification key is set, and
-  takes only the package named after the Client's own Agent type, `supervisor` — anything else is
-  refused, because a package aimed at the whole fleet would otherwise be written over the Client
-  itself:
-
-  ```toml
-  [packages]
-  self_update = true               # the default; false keeps this Client's update manual
-  verification_key = "<hex-encoded Ed25519 public key>"
-  ```
-
-  A new version is staged beside the running one under `versions/`, run once to prove it is this
-  program at the version offered, and switched to by moving `current`. The Client then exits and
-  the service manager starts the new version; one that does not reach the Server within a few
-  restarts is rolled back to its predecessor, and either outcome is reported to the Server by
-  whichever version came up.
-
-The **`Service smoke` workflow** exercises the real thing on an ephemeral runner — install, start,
-the Agent appearing in the fleet, its process killed and brought back by the manager, an explicit
-stop that stays stopped, uninstall — and an install that enrols with a `bootstrap.p12` from
-`--fleet-files`, whose service then reaches the Server on the certificate it was issued. It runs
-weekly and on demand rather than per push (it installs a system service and waits on timers), on
-Linux, macOS and Windows. The test is `crates/fleet-agent/tests/service_smoke.rs`; it is
-`#[ignore]`d, so an ordinary `cargo test` never installs anything.
-
-What still needs a human, per platform: starting at **boot** (a runner never reboots), the logs
-(`journalctl -u opamp-fleet` on Linux, Console/`log show` on macOS), the Agent in
-the fleet UI, and an **SELinux-enforcing host** (Fedora, RHEL, or SUSE 16 with `getenforce`
-answering `Enforcing`): the `.rpm` install must start — a service dying with `status=203/EXEC` and
-an AVC denial in `ausearch -m avc` is the failure ADR-0019 clause 12 exists to prevent. Each wrapped
-kind, with its plugins and tasks, under the packaged account
-`opamp-fleet` and under `--run-as root`: it starts, reports, and its `sudo` or setuid helpers still
-work ([ADR-0037](docs/adr/0037-the-accounts-the-service-runs-under.md)). Known platform gaps
-(tracked in the ADR):
-launchd `status` is advisory and `install` does not auto-start there. The SCM still discards a
-Windows service's stderr, but the service now writes its own rotating log under
-`<state_dir>/logs` on every platform (ADR-0019), which is where to look when the manager shows a
-service that will not start.
+- [Setting up a fleet](docs/manual/setup.md) — the certificates, both configurations, enrolment;
+- [Rollout walkthrough](docs/manual/rollout.md) — an artifact built, signed, uploaded, rolled out;
+- [Running the Client as an OS service](docs/manual/client.md#running-it-as-an-os-service);
+- [the REST API](docs/manual/server.md#the-rest-api), whose contract is the OpenAPI document at
+  `/api/v1/openapi.json`.
 
 ## Project Layout
 
 ```
-README.md             # overview & setup for humans
+README.md             # this overview
 CHANGELOG.md          # operator-facing changes: what an upgrade needs edited or moved
-AGENTS.md             # single source of truth for coding agents
+AGENTS.md             # the working rules, for coding agents and humans alike
 CONTRIBUTING.md       # how to contribute, pointing at the rules
 SECURITY.md           # how to report a vulnerability, and what the configuration guarantees
 CODE_OF_CONDUCT.md    # the standards everyone taking part is held to
-LICENSE               # the license the project is released under
-NOTICE                # the copyright notice the Apache License asks to be carried along
-docs/SPECIFICATION.md # the specification: problem, goals, success criteria
-docs/GLOSSARY.md      # the vocabulary everyone uses, kept current inline
-docs/CONVENTIONS.md   # how this project writes what no check decides, kept current inline
-docs/ARCHITECTURE.md  # the system as it currently stands
-docs/CONFORMANCE.md   # OpAMP Protocol Baseline + capability conformance matrix
-docs/HARDENING.md     # candidate hardening measures for the Client-Server link (a backlog)
-docs/adr/             # Architecture Decision Records (+ template)
+LICENSE               # the Apache License 2.0
+NOTICE                # the copyright notice the license asks to be carried along
+docs/                 # specification, architecture, glossary, conventions, conformance, hardening
+docs/adr/             # Architecture Decision Records
 docs/manual/          # the user manual: setting up a fleet, then Server, Client, and the tools
-docs/images/          # the figures the documents show
-docs/plan/            # open work: feature specs and their tickets, deleted as they land
 Cargo.toml            # the Cargo workspace and the product's version
 Cargo.lock            # the resolved dependency graph, committed
-rust-toolchain.toml   # pinned Rust toolchain (an exact stable release + rustfmt + clippy)
+rust-toolchain.toml   # the pinned Rust toolchain
 deny.toml             # cargo-deny: advisories, licences, sources and banned crates
 crates/               # opamp (shared) · fleet-core · fleet-server · fleet-agent · fleet-tools
 config/               # annotated example configuration files (server.toml, supervisor.toml)
-packaging/            # what release.yml packs with: Linux maintainer scripts, WiX, Containerfile
+packaging/            # what the release packs with: Linux maintainer scripts, WiX, Containerfile
 fuzz/                 # the fuzz targets of every parser that reads untrusted bytes
 interop/              # the Go side of the interop check against opamp-go
 observability/        # the development observability stack, run on the host
-scripts/check-all.sh  # runs the checks, sensors, and self-tests, as the hooks and CI do
-scripts/check-*.sh    # checks: each fails on what breaks a rule; check-rust.sh builds and tests
-scripts/sensor-*.sh   # sensors: report for the reviewer; sensor-repo-settings.sh runs by hand
-scripts/test-*.sh     # self-tests of the checks, the sensors, the hooks, the setup, and the scripts
-                      # run by hand
-scripts/lib/          # what the scripts share: the ADR header, git, the ticket path, the self-tests
-scripts/*.sh          # run by hand: number-adrs.sh, ready-for-main.sh, drop-merged-branch.sh
-                      # (steps 7 and 8 of the integration branches), and the development tools
-                      # dev-pki.sh, install_tools.sh, seed_test_configs.sh, vendor-shiki.sh
+scripts/              # check-all.sh, the checks, sensors and their self-tests, the dev tools
 .githooks/            # git hooks: nothing lands on main locally; checks before a merge and a push
-.github/workflows/    # checks.yml runs the checks; ci.yml, release.yml and the scheduled workflows;
-                      # review-binding.yml reads each pull request's hand-off
-.github/              # Dependabot, issue & pull request templates, code owners
-.devcontainer/        # Dev Container definition (base image + Features + the OTLP forwarder)
+.github/              # the workflows, Dependabot, templates and code owners
+.devcontainer/        # the Dev Container definition
 .vscode/              # shared editor settings
+.agents/skills/       # the procedures of AGENTS.md as Agent Skills, one directory each
+.claude/              # pointers for Claude Code to AGENTS.md and the skills; its permissions
 .editorconfig         # editor-neutral formatting baseline
-.gitattributes        # line-ending normalization (LF everywhere), the ADR index merged by its driver
+.gitattributes        # LF everywhere, and the ADR index merged by its driver
 .gitignore            # what git leaves out, .scratch/ for session artifacts among it
-.agents/skills/       # the procedures of AGENTS.md as Agent Skills, one directory each (ADR-0003),
-                      # with the scripts and templates they carry (claim.sh, remap.sh, ticket.md)
-.claude/CLAUDE.md     # pointer for Claude Code to read AGENTS.md
-.claude/skills/       # pointers (one symlink per skill) for Claude Code to read .agents/skills/
-.claude/settings.json # Claude Code permissions: deny reading .env files (see SECURITY.md)
 ```
-
 
 ## Dev Container
 
-The environment is defined by [`.devcontainer/devcontainer.json`](.devcontainer/devcontainer.json):
-a prebuilt base image with Dev Container Features and VS Code extensions layered on top — no
-Dockerfile. Customise it by
-adding Features, switching the base image, or adding extensions. Features are pinned by major tag
-and resolved in the committed `devcontainer-lock.json`. Extensions are listed by identifier only,
-because a published extension version cannot be repointed and a version suffix is VS Code-specific.
+The environment is [`.devcontainer/devcontainer.json`](.devcontainer/devcontainer.json): a
+prebuilt base image with Dev Container Features, pinned in the committed `devcontainer-lock.json`,
+and VS Code extensions on top — no Dockerfile.
 
-### The observability stack runs beside it
-
-The development observability stack — Collector, ClickHouse and Grafana — is a Compose project of
-its own in [`observability/`](observability/README.md). It runs on the **host**, apart from the
-container, and is started when you want it:
+The development observability stack — Collector, ClickHouse and Grafana — runs on the **host**,
+started when you want it, and the container reaches it on its own loopback; see
+[`observability/`](observability/README.md):
 
 ```sh
 docker compose -f observability/compose.yaml up -d     # on the host, from the repository root
 ```
 
-The container reaches the Collector through the host. Since the Client sends own telemetry in
-plaintext to a loopback IP literal alone
-([ADR-0016](docs/adr/0016-what-an-agent-reports-about-itself.md)),
-[`.devcontainer/forward-otlp.sh`](.devcontainer/forward-otlp.sh) puts the host's Collector on the
-container's loopback on every start: `http://127.0.0.1:4318` inside the container is the Collector
-on the host, so a `server.toml` naming `http://127.0.0.1:4318/v1/logs` means the same thing in both
-places. Grafana is on <http://localhost:3001> in the host's browser.
-
-### Host container management
-
-The Dev Container deliberately has **no access to the host Docker daemon**: the socket is not
-mounted ([ADR-0004](docs/adr/0004-dev-container-runtime.md)). To manage the host's containers from
-VS Code, run the **Container Tools** extension (`ms-azuretools.vscode-containers`) on the **host**
-side: install it in your host VS Code. [`.vscode/settings.json`](.vscode/settings.json) already pins
-it to run locally via `remote.extensionKind`, so it keeps talking to the host engine even when this
-folder is reopened in the container.
+The container has **no access to the host's Docker daemon**
+([ADR-0004](docs/adr/0004-dev-container-runtime.md)). To manage the host's containers from VS Code,
+install the **Container Tools** extension in the host's VS Code;
+[`.vscode/settings.json`](.vscode/settings.json) keeps it running on the host.
 
 ## Coding Agents
 
