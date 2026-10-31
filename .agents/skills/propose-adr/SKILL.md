@@ -61,7 +61,9 @@ in the record.
    starting `**Not mechanically decidable:**` with the reason
    ([ADR-0002](../../../docs/adr/0002-decisions-verified-by-tests.md)).
 7. Add the index row in [`docs/adr/README.md`](../../../docs/adr/README.md), status and *Applies
-   to* mirrored verbatim. For a supersession, flip the old ADR's status line in the same change.
+   to* mirrored verbatim. For a supersession, name the old ADR in `Supersedes` and leave its
+   status line: the human flips it when accepting this one
+   ([mechanics](../../../docs/adr/README.md#mechanics)).
 8. Run [`scripts/check-docs.sh`](../../../scripts/check-docs.sh).
 
 ## 4. Submit
