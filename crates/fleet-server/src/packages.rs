@@ -198,9 +198,19 @@ impl PackageId {
     /// Parses the `<agent_type>@<version>` form the [`Display`] impl writes — the Package's
     /// directory name, and the persisted shape of a package assignment (ADR-0026).
     pub fn parse(text: &str) -> Result<Self, String> {
+        let (agent_type, version) = Self::split(text)?;
+        PackageId::load(agent_type, version)
+    }
+
+    /// The two parts of the `<agent_type>@<version>` form, unchecked: what a store holds in one
+    /// field, before [`load`](Self::load) or a constructor that calls it decides on them.
+    ///
+    /// # Errors
+    /// Returns an error when `text` is not two parts around one `@`.
+    pub fn split(text: &str) -> Result<(&str, &str), String> {
         let mut parts = text.split('@');
         match (parts.next(), parts.next(), parts.next()) {
-            (Some(agent_type), Some(version), None) => PackageId::load(agent_type, version),
+            (Some(agent_type), Some(version), None) => Ok((agent_type, version)),
             _ => Err(format!(
                 "{text:?} is not an <agent type>@<version> package identity"
             )),
@@ -250,6 +260,43 @@ pub struct Entry {
     /// package sign` makes it. `None` until one is written; new bytes remove it, because a
     /// signature covers the hash (ADR-0027). An entry without one is offered to nobody.
     pub signature: Option<Vec<u8>>,
+}
+
+impl Entry {
+    /// An entry as a store holds it, its fields mapped from a row or a file and decided here, so
+    /// every store refuses what a write would (ADR-0029 clause 6): a platform outside the token
+    /// rule, a hash that is no blob's name (ADR-0029 clause 13), and a signature of another length
+    /// than an Ed25519 one (ADR-0027 clause 18). Each store names the record before the message.
+    ///
+    /// # Errors
+    /// Returns the rule the entry breaks.
+    pub fn load(
+        os: &str,
+        arch: &str,
+        sha256: &str,
+        size: u64,
+        signature: Option<Vec<u8>>,
+    ) -> Result<Self, String> {
+        let platform = Platform::new(os, arch).map_err(|e| format!("invalid platform: {e}"))?;
+        let content_hash = hex::decode(sha256)
+            .ok()
+            .filter(|_| crate::blobs::is_hash(sha256))
+            .ok_or_else(|| format!("invalid sha256 {sha256:?}"))?;
+        if let Some(signature) = &signature {
+            if signature.len() != ED25519_SIGNATURE_LEN {
+                return Err(format!(
+                    "invalid signature: {} bytes, not {ED25519_SIGNATURE_LEN}",
+                    signature.len()
+                ));
+            }
+        }
+        Ok(Entry {
+            platform,
+            content_hash,
+            size,
+            signature,
+        })
+    }
 }
 
 /// What the Server found when it checked an entry's signature (ADR-0027) — feedback for the

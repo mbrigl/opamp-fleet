@@ -159,14 +159,10 @@ impl Envelope {
                     let package = assignment
                         .package
                         .as_deref()
-                        .map(PackageId::parse)
+                        .map(PackageId::split)
                         .transpose()
                         .map_err(|e| format!("invalid package in the assignment: {e}"))?;
-                    Ok::<_, String>(crate::fleet::Assignment {
-                        deployment: assignment.deployment,
-                        package,
-                        configurations: assignment.configurations,
-                    })
+                    Assignment::load(assignment.deployment, package, assignment.configurations)
                 })
                 .transpose()?,
             labels: self.labels,

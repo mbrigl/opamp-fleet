@@ -14,7 +14,6 @@ use super::{client, signed, sql, unsigned, Database};
 use crate::agent_store::{AgentStore, PersistedAgent, Pin};
 use crate::configs::Configuration;
 use crate::fleet::{Assignment, Transport};
-use crate::packages::PackageId;
 
 /// The Agents in `agents` and `agent_assignment_configurations`. The integrity queries are
 /// answered from the assignments this adapter last read or committed, as the filesystem adapter
@@ -230,23 +229,16 @@ pub(crate) async fn read_all(
             serde_json::from_value(row.get(13)).map_err(|e| named(format!("labels: {e}")))?;
         let configurations = released.remove(&key).unwrap_or_default();
         let deployment: Option<String> = row.get(15);
-        let package = match (
-            row.get::<_, Option<String>>(16),
-            row.get::<_, Option<String>>(17),
-        ) {
-            (Some(agent_type), Some(version)) => Some(
-                PackageId::load(&agent_type, &version)
-                    .map_err(|e| named(format!("invalid package in the assignment: {e}")))?,
-            ),
+        let (agent_type, version): (Option<String>, Option<String>) = (row.get(16), row.get(17));
+        let package = match (agent_type.as_deref(), version.as_deref()) {
+            (Some(agent_type), Some(version)) => Some((agent_type, version)),
             (None, None) => None,
             _ => return Err(named("half a package in the assignment".to_string())),
         };
         let assignment = match deployment {
-            Some(deployment) => Some(Assignment {
-                deployment,
-                package,
-                configurations,
-            }),
+            Some(deployment) => {
+                Some(Assignment::load(deployment, package, configurations).map_err(named)?)
+            }
             None if package.is_none() && configurations.is_empty() => None,
             None => return Err(named("an assignment without its Deployment".to_string())),
         };
@@ -375,8 +367,9 @@ mod tests {
     /// The port's contract on either store: what is written is loaded back whole, wire types and
     /// all; a record without an assignment stays without one; a re-key moves the record; the
     /// integrity queries follow what is stored; and a rollout's revisions and assignments are
-    /// both present.
-    fn contract(open: Open<'_>) {
+    /// both present. A stored assignment the core refuses fails the load with the core's words:
+    /// `misname` gives the assignment of the record it is handed the Package `otel col@1.0.0`.
+    fn contract(open: Open<'_>, misname: &dyn Fn(&InstanceUid)) {
         let (store, _) = open();
         assert!(store.load().expect("empty").is_empty());
         let (one, two, three) = (
@@ -435,18 +428,42 @@ mod tests {
         store.remove(&one).expect("removing the absent is fine");
         assert_eq!(store.pinning(Pin::Configuration("base")), 1);
         assert_eq!(open().0.load().expect("load").len(), 1);
+
+        misname(&three);
+        let core = Assignment::load(
+            "stable".to_string(),
+            Some(("otel col", "1.0.0")),
+            BTreeMap::new(),
+        )
+        .map(|_| ())
+        .expect_err("the core refuses it");
+        let err = open().0.load().map(|_| ()).expect_err("refused");
+        assert!(err.ends_with(&core), "{err}");
+        assert!(
+            err.contains(&three.to_string()),
+            "the record is named: {err}"
+        );
     }
 
     /// Verifies: ADR-0029
     #[test]
     fn the_agent_port_contract_holds_on_the_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
-        contract(&|| {
-            (
-                Box::new(FsAgentStore::open(dir.path()).expect("open")),
-                Box::new(FsConfigBackend::open(dir.path()).expect("open")),
-            )
-        });
+        contract(
+            &|| {
+                (
+                    Box::new(FsAgentStore::open(dir.path()).expect("open")),
+                    Box::new(FsConfigBackend::open(dir.path()).expect("open")),
+                )
+            },
+            &|uid| {
+                let file = dir.path().join(format!("agents/{uid}.json"));
+                let mut envelope: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&file).expect("read")).expect("json");
+                envelope["assignment"]["package"] = "otel col@1.0.0".into();
+                std::fs::write(&file, envelope.to_string()).expect("write");
+            },
+        );
     }
 
     /// Verifies: ADR-0029
@@ -456,14 +473,21 @@ mod tests {
             return;
         };
         let database = test.open();
-        contract(&|| {
-            (
-                Box::new(PgAgentStore::new(database.clone())),
-                Box::new(super::super::configs::PgConfigBackend::new(
-                    database.clone(),
-                )),
-            )
-        });
+        contract(
+            &|| {
+                (
+                    Box::new(PgAgentStore::new(database.clone())),
+                    Box::new(super::super::configs::PgConfigBackend::new(
+                        database.clone(),
+                    )),
+                )
+            },
+            &|_| {
+                test.sql(
+                    "UPDATE agents SET package_agent_type = 'otel col', package_version = '1.0.0'",
+                );
+            },
+        );
     }
 
     /// A rollout whose last record cannot be written leaves none of its assignments behind, on

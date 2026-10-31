@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::packages::{Entry, Package, PackageBackend, PackageId, Platform};
+use crate::packages::{Entry, Package, PackageBackend, PackageId};
 
 /// One file per Package, `<agent_type>@<version>.json`, owner-only.
 pub struct FsPackageBackend {
@@ -46,37 +46,16 @@ impl PackageBackend for FsPackageBackend {
             }
             let mut entries = BTreeMap::new();
             for entry in meta.entries {
-                let platform = Platform::new(&entry.os, &entry.arch)
-                    .map_err(|e| format!("invalid platform in {}: {e}", path.display()))?;
-                let content_hash = hex::decode(&entry.sha256)
-                    .ok()
-                    .filter(|_| crate::blobs::is_hash(&entry.sha256))
-                    .ok_or_else(|| format!("invalid sha256 in {}", path.display()))?;
+                let named = |e: String| format!("{}: {e}", path.display());
                 let signature = entry
                     .signature_hex
                     .map(hex::decode)
                     .transpose()
-                    .map_err(|e| format!("invalid signature in {}: {e}", path.display()))?;
-                // Held to the length a write is held to (ADR-0027 clause 18).
-                if let Some(signature) = &signature {
-                    if signature.len() != crate::packages::ED25519_SIGNATURE_LEN {
-                        return Err(format!(
-                            "invalid signature in {}: {} bytes, not {}",
-                            path.display(),
-                            signature.len(),
-                            crate::packages::ED25519_SIGNATURE_LEN
-                        ));
-                    }
-                }
-                entries.insert(
-                    platform.clone(),
-                    Entry {
-                        platform,
-                        content_hash,
-                        size: entry.size,
-                        signature,
-                    },
-                );
+                    .map_err(|e| named(format!("invalid signature: {e}")))?;
+                let entry =
+                    Entry::load(&entry.os, &entry.arch, &entry.sha256, entry.size, signature)
+                        .map_err(named)?;
+                entries.insert(entry.platform.clone(), entry);
             }
             packages.push(Package { id, entries });
         }

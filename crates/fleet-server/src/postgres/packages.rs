@@ -8,7 +8,7 @@ use std::sync::Arc;
 use tokio_postgres::GenericClient;
 
 use super::{client, signed, sql, unsigned, Database};
-use crate::packages::{Entry, Package, PackageBackend, PackageId, Platform, ED25519_SIGNATURE_LEN};
+use crate::packages::{Entry, Package, PackageBackend, PackageId};
 
 /// The Packages in `packages` and `package_entries`.
 pub struct PgPackageBackend {
@@ -93,31 +93,16 @@ pub(crate) async fn read_all(client: &impl GenericClient) -> Result<Vec<Package>
         let package = packages
             .get_mut(&id)
             .ok_or_else(|| named("an entry of a Package that is not there".to_string()))?;
-        let platform = Platform::new(row.get(2), row.get(3))
-            .map_err(|e| named(format!("invalid platform: {e}")))?;
         let sha256: String = row.get(4);
-        let content_hash = hex::decode(&sha256)
-            .ok()
-            .filter(|_| crate::blobs::is_hash(&sha256))
-            .ok_or_else(|| named(format!("invalid sha256 {sha256:?}")))?;
-        let signature: Option<Vec<u8>> = row.get(6);
-        if let Some(signature) = &signature {
-            if signature.len() != ED25519_SIGNATURE_LEN {
-                return Err(named(format!(
-                    "invalid signature: {} bytes, not {ED25519_SIGNATURE_LEN}",
-                    signature.len()
-                )));
-            }
-        }
-        package.entries.insert(
-            platform.clone(),
-            Entry {
-                platform,
-                content_hash,
-                size: unsigned(row.get(5)),
-                signature,
-            },
-        );
+        let entry = Entry::load(
+            row.get(2),
+            row.get(3),
+            &sha256,
+            unsigned(row.get(5)),
+            row.get(6),
+        )
+        .map_err(named)?;
+        package.entries.insert(entry.platform.clone(), entry);
     }
     Ok(packages.into_values().collect())
 }
@@ -165,6 +150,7 @@ pub(crate) async fn write(client: &impl GenericClient, package: &Package) -> Res
 mod tests {
     use super::*;
     use crate::fs::FsPackageBackend;
+    use crate::packages::{Platform, ED25519_SIGNATURE_LEN};
     use crate::postgres::testing::TestDatabase;
 
     fn package(version: &str, platforms: &[(&str, &str, u8)]) -> Package {
@@ -219,8 +205,9 @@ mod tests {
     }
 
     /// The port's contract on either store: what is written is loaded back, a put replaces the
-    /// entries whole, and a removal tolerates absence.
-    fn contract(open: &dyn Fn() -> Box<dyn PackageBackend>) {
+    /// entries whole, and a removal tolerates absence. A stored entry the core refuses fails the
+    /// load with the core's words: `shorten` cuts the signature of the one entry left to 3 bytes.
+    fn contract(open: &dyn Fn() -> Box<dyn PackageBackend>, shorten: &dyn Fn()) {
         let store = open();
         assert!(store.load().expect("empty").is_empty());
         let one = package("1.2.3", &[("linux", "amd64", 1), ("windows", "amd64", 2)]);
@@ -234,13 +221,36 @@ mod tests {
         store.remove(&two.id).expect("remove");
         store.remove(&two.id).expect("removing the absent is fine");
         assert_eq!(loaded(&*open()), [shown(&narrowed)]);
+
+        shorten();
+        let core = Entry::load(
+            "linux",
+            "arm64",
+            &hex::encode([6; 32]),
+            6 << 40,
+            Some(vec![1, 2, 3]),
+        )
+        .map(|_| ())
+        .expect_err("the core refuses it");
+        let err = open().load().map(|_| ()).expect_err("refused");
+        assert!(err.ends_with(&core), "{err}");
+        assert!(err.contains("otelcol@1.2.3"), "the record is named: {err}");
     }
 
     /// Verifies: G-19, ADR-0029
     #[test]
     fn the_package_port_contract_holds_on_the_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
-        contract(&|| Box::new(FsPackageBackend::open(dir.path()).expect("open")));
+        let file = dir.path().join("packages/otelcol@1.2.3.json");
+        contract(
+            &|| Box::new(FsPackageBackend::open(dir.path()).expect("open")),
+            &|| {
+                let mut meta: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&file).expect("read")).expect("json");
+                meta["entries"][0]["signature_hex"] = "010203".into();
+                std::fs::write(&file, meta.to_string()).expect("write");
+            },
+        );
     }
 
     /// Verifies: G-19, ADR-0029
@@ -250,7 +260,10 @@ mod tests {
             return;
         };
         let database = test.open();
-        contract(&|| Box::new(PgPackageBackend::new(database.clone())));
+        contract(
+            &|| Box::new(PgPackageBackend::new(database.clone())),
+            &|| test.sql("UPDATE package_entries SET signature = '\\x010203'::bytea"),
+        );
     }
 
     /// A put that fails part-way — on the second entry, after the first was written — leaves the

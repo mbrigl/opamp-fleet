@@ -68,6 +68,40 @@ pub struct Deployment {
 }
 
 impl Deployment {
+    /// A Deployment as a store holds it, its fields mapped from a row or a file and decided here,
+    /// so every store refuses what a write would (ADR-0029 clause 6): a name or a Configuration
+    /// name outside the ADR-0019 grammar, a Selector [`check_selector`] refuses, and a Package
+    /// identity outside the token rule. Each store names the record before the message.
+    ///
+    /// # Errors
+    /// Returns the rule the Deployment breaks.
+    pub fn load(
+        name: String,
+        selector: BTreeMap<String, String>,
+        packages: impl IntoIterator<Item = (String, String)>,
+        configurations: impl IntoIterator<Item = String>,
+    ) -> Result<Self, String> {
+        validate_name(&name).map_err(|e| format!("name {name:?}: {e}"))?;
+        check_selector(&selector)?;
+        let mut held = BTreeMap::new();
+        for (agent_type, version) in packages {
+            let id = PackageId::load(&agent_type, &version)?;
+            held.insert(id.agent_type.clone(), id);
+        }
+        let mut names = BTreeSet::new();
+        for configuration in configurations {
+            validate_name(&configuration)
+                .map_err(|e| format!("configuration {configuration:?}: {e}"))?;
+            names.insert(configuration);
+        }
+        Ok(Deployment {
+            name,
+            selector,
+            packages: held,
+            configurations: names,
+        })
+    }
+
     /// The Package this Deployment holds for an Agent of `agent_type`, if any.
     pub fn package_for(&self, agent_type: &str) -> Option<&PackageId> {
         self.packages.get(agent_type)

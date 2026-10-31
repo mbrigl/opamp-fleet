@@ -160,7 +160,10 @@ is not its to decide.
   it. A store the Server opens at startup is added to `open_every_store` too.
 - **The golden path** — a Server store: the port `FloorStore` in the core module `floors`, its
   filesystem adapter in `fs::floors`, its PostgreSQL adapter in `postgres::floors`, and the one
-  `contract` test there that runs on both stores. A new store copies its shape and its test
+  `contract` test there that runs on both stores. An adapter maps a row or a file to fields and
+  loads the record through the core's constructor (`Entry::load`, `Deployment::load`,
+  `Assignment::load`), so a rule is decided once; the contract test plants a record the core
+  refuses on each store. A new store copies its shape and its test
   ([ADR-0009](adr/0009-ports-and-adapters.md),
   [ADR-0029](adr/0029-the-servers-state-and-its-stores.md)).
 - **Server listeners** — `tls` reads the `[tls]`, `[rest.tls]` and `[enrolment]` files into the
