@@ -38,3 +38,7 @@ base64.workspace = true
 # The key a `bootstrap.p12` opens to is held in a buffer wiped on drop (ADR-0014). No TLS or
 # crypto backend comes with zeroize itself (ADR-0012).
 zeroize.workspace = true
+
+[dev-dependencies]
+# A CA's files written for the test that loads them.
+tempfile = "3"

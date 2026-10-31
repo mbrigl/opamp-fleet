@@ -97,7 +97,9 @@ Five crates in one workspace ([ADR-0008](adr/0008-five-crates-on-tokio-and-axum.
   what a client certificate is known by on the Server and on a Gateway alike — its host, its issuer
   and serial, and the 20-octet bound on its serial — whose rule is the core `x509`, read with
   `x509-parser` by the adapter `x509::read`, with the random serial and the clock skew every issued
-  certificate gets in the adapter `x509::issue` — and the
+  certificate gets, the shape of a leaf by its role and the loading of a CA from its certificate
+  and key file, by the Server's two CAs and the operator tool alike, in the adapter `x509::issue`;
+  the first certificate of a CA file is read by `opamp::tls::first_certificate` — and the
   bootstrap certificate's PKCS#12 file, whose rule is core and whose reading and writing with
   `p12-keystore` is the adapter `pkcs12::file` (ADR-0022).
 - **`fleet-server`** — the Server, the program `server`: the fleet and its Hosts, its
