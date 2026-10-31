@@ -271,17 +271,100 @@ pub trait LedgerStore: Send + Sync {
     /// Returns an error when it cannot be removed.
     fn remove_issued(&self, id: &CertId) -> Result<(), String>;
 
-    /// Replaces the list.
+    /// Adds `entry` to the list, deciding from what is stored: an entry of the same id is kept, its
+    /// issuers widened by those `entry` names beside them ([`widened`]), and a list already
+    /// holding `bound` entries takes no more. The bound is counted
+    /// in the write itself, so it holds for every instance on one store together
+    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// clause 19).
     ///
     /// # Errors
-    /// Returns an error when it cannot be written.
-    fn save_revocations(&self, revocations: &[Revocation]) -> Result<(), String>;
+    /// Returns an error when it cannot be written; the list is then as it was.
+    fn add_revocation(&self, entry: &Revocation, bound: usize) -> Result<Added, String>;
+
+    /// Removes the entry `id` from the list: `false` when the list holds none.
+    ///
+    /// # Errors
+    /// Returns an error when it cannot be written; the list is then as it was.
+    fn remove_revocation(&self, id: &str) -> Result<bool, String>;
 
     /// Replaces the hosts and what each speaks for.
     ///
     /// # Errors
     /// Returns an error when they cannot be written.
     fn save_hosts(&self, hosts: &BTreeMap<String, Host>) -> Result<(), String>;
+}
+
+/// What the store found when it was asked to add a revocation.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Added {
+    /// The entry is on the list now.
+    Added,
+    /// The list held an entry revoking the same: this one, unchanged.
+    Present(Revocation),
+    /// The list held an entry of the same id under fewer issuers: this one, now under the issuers
+    /// of both.
+    Widened(Revocation),
+    /// The list is at its bound.
+    Full,
+}
+
+/// Adds `entry` to a list a store holds whole, by the rules of
+/// [`LedgerStore::add_revocation`]: what a store that is its only writer decides with.
+pub(crate) fn add_to(list: &mut Vec<Revocation>, entry: &Revocation, bound: usize) -> Added {
+    if let Some(held) = list.iter_mut().find(|held| held.id == entry.id) {
+        return match widened(held, entry) {
+            Some(wider) => {
+                *held = wider.clone();
+                Added::Widened(wider)
+            }
+            None => Added::Present(held.clone()),
+        };
+    }
+    if list.len() >= bound {
+        return Added::Full;
+    }
+    list.push(entry.clone());
+    Added::Added
+}
+
+/// The entry `held` under the issuers of both it and `entry`, when `entry`, of the same id, names
+/// an issuer `held` does not: a serial revoked under one CA of a rotation and again under the CA
+/// file of both is revoked under both (ADR-draft-admission-by-client-certificate-and-revocation
+/// clause 27). `None` when `held` covers `entry` already. It keeps the time `held` was revoked.
+#[must_use]
+pub fn widened(held: &Revocation, entry: &Revocation) -> Option<Revocation> {
+    let Revoked::Certificate {
+        authority,
+        issuers,
+        serial,
+    } = &held.revoked;
+    let Revoked::Certificate { issuers: more, .. } = &entry.revoked;
+    let added: Vec<&String> = more
+        .iter()
+        .filter(|issuer| !issuers.contains(issuer))
+        .collect();
+    if added.is_empty() {
+        return None;
+    }
+    let mut issuers = issuers.clone();
+    issuers.extend(added.into_iter().cloned());
+    Some(Revocation {
+        id: held.id.clone(),
+        revoked: Revoked::Certificate {
+            authority: authority.clone(),
+            issuers,
+            serial: serial.clone(),
+        },
+        revoked_ms: held.revoked_ms,
+    })
+}
+
+/// Removes the entry `id` from a list a store holds whole: whether it held one.
+pub(crate) fn remove_from(list: &mut Vec<Revocation>, id: &str) -> bool {
+    let before = list.len();
+    list.retain(|entry| entry.id != id);
+    list.len() != before
 }
 
 /// Why a revocation was refused.
@@ -925,23 +1008,33 @@ impl Revocations {
         })
     }
 
+    /// Adds the entry through the store, which decides from what it holds: another instance may
+    /// have added the same revocation, or filled the list, since this one last read it.
     fn add(&self, revoked: Revoked) -> Result<Revocation, RevokeError> {
         let mut state = self.state.lock().expect("revocation lock");
-        if let Some(existing) = state.revocations.iter().find(|e| e.revoked == revoked) {
-            return Ok(existing.clone());
-        }
-        if state.revocations.len() >= MAX_REVOCATIONS {
-            return Err(RevokeError::Full);
-        }
         let entry = Revocation {
             id: entry_id(&revoked),
             revoked,
             revoked_ms: self.clock.now_ms(),
         };
-        state.revocations.push(entry.clone());
-        if let Err(e) = self.store.save_revocations(&state.revocations) {
-            state.revocations.pop();
-            return Err(RevokeError::Store(e));
+        let entry = match self
+            .store
+            .add_revocation(&entry, MAX_REVOCATIONS)
+            .map_err(RevokeError::Store)?
+        {
+            Added::Added => entry,
+            Added::Present(existing) => existing,
+            Added::Widened(wider) => wider,
+            Added::Full => return Err(RevokeError::Full),
+        };
+        match state
+            .revocations
+            .iter_mut()
+            .find(|held| held.id == entry.id)
+        {
+            Some(held) if *held == entry => return Ok(entry),
+            Some(held) => *held = entry.clone(),
+            None => state.revocations.push(entry.clone()),
         }
         state.revoked = None;
         drop(state);
@@ -966,16 +1059,14 @@ impl Revocations {
     /// Returns an error when the store cannot write it.
     pub fn lift(&self, id: &str) -> Result<bool, String> {
         let mut state = self.state.lock().expect("revocation lock");
-        let Some(index) = state.revocations.iter().position(|e| e.id == id) else {
-            return Ok(false);
-        };
-        let entry = state.revocations.remove(index);
-        if let Err(e) = self.store.save_revocations(&state.revocations) {
-            state.revocations.insert(index, entry);
-            return Err(e);
+        // The store decides: another instance may have added the entry, or lifted it.
+        let lifted = self.store.remove_revocation(id)?;
+        let before = state.revocations.len();
+        state.revocations.retain(|entry| entry.id != id);
+        if state.revocations.len() != before {
+            state.revoked = None;
         }
-        state.revoked = None;
-        Ok(true)
+        Ok(lifted)
     }
 
     /// Whether `certificate`, or a certificate it renewed, is revoked (ADR-0021 clause 28).
@@ -1150,18 +1241,22 @@ impl Revocations {
             self.store.remove_issued(id)?;
             state.remove(id);
         }
-        let before = state.revocations.len();
-        state.revocations.retain(|entry| {
-            let Revoked::Certificate {
-                issuers, serial, ..
-            } = &entry.revoked;
-            !gone
-                .iter()
-                .any(|id| &id.serial == serial && issuers.contains(&id.issuer))
-        });
-        if state.revocations.len() != before {
+        let dropped: Vec<String> = state
+            .revocations
+            .iter()
+            .filter(|entry| {
+                let Revoked::Certificate {
+                    issuers, serial, ..
+                } = &entry.revoked;
+                gone.iter()
+                    .any(|id| &id.serial == serial && issuers.contains(&id.issuer))
+            })
+            .map(|entry| entry.id.clone())
+            .collect();
+        for id in &dropped {
+            self.store.remove_revocation(id)?;
+            state.revocations.retain(|entry| &entry.id != id);
             state.revoked = None;
-            self.store.save_revocations(&state.revocations)?;
         }
         Ok(forgotten)
     }
@@ -1210,9 +1305,18 @@ mod tests {
                 .retain(|i| &i.facts.id != id);
             Ok(())
         }
-        fn save_revocations(&self, revocations: &[Revocation]) -> Result<(), String> {
-            self.0.lock().expect("lock").revocations = revocations.to_vec();
-            Ok(())
+        fn add_revocation(&self, entry: &Revocation, bound: usize) -> Result<Added, String> {
+            Ok(add_to(
+                &mut self.0.lock().expect("lock").revocations,
+                entry,
+                bound,
+            ))
+        }
+        fn remove_revocation(&self, id: &str) -> Result<bool, String> {
+            Ok(remove_from(
+                &mut self.0.lock().expect("lock").revocations,
+                id,
+            ))
         }
         fn save_hosts(&self, hosts: &BTreeMap<String, Host>) -> Result<(), String> {
             self.0.lock().expect("lock").hosts = hosts.clone();
@@ -1677,8 +1781,11 @@ mod tests {
         fn remove_issued(&self, id: &CertId) -> Result<(), String> {
             self.0.remove_issued(id)
         }
-        fn save_revocations(&self, revocations: &[Revocation]) -> Result<(), String> {
-            self.0.save_revocations(revocations)
+        fn add_revocation(&self, entry: &Revocation, bound: usize) -> Result<Added, String> {
+            self.0.add_revocation(entry, bound)
+        }
+        fn remove_revocation(&self, id: &str) -> Result<bool, String> {
+            self.0.remove_revocation(id)
         }
         fn save_hosts(&self, _: &BTreeMap<String, Host>) -> Result<(), String> {
             Err("the disk is full".into())
@@ -1702,8 +1809,11 @@ mod tests {
         fn remove_issued(&self, id: &CertId) -> Result<(), String> {
             self.inner.remove_issued(id)
         }
-        fn save_revocations(&self, revocations: &[Revocation]) -> Result<(), String> {
-            self.inner.save_revocations(revocations)
+        fn add_revocation(&self, entry: &Revocation, bound: usize) -> Result<Added, String> {
+            self.inner.add_revocation(entry, bound)
+        }
+        fn remove_revocation(&self, id: &str) -> Result<bool, String> {
+            self.inner.remove_revocation(id)
         }
         fn save_hosts(&self, hosts: &BTreeMap<String, Host>) -> Result<(), String> {
             if self.failing.load(Ordering::SeqCst) {
@@ -1824,8 +1934,11 @@ mod tests {
         fn remove_issued(&self, id: &CertId) -> Result<(), String> {
             self.inner.remove_issued(id)
         }
-        fn save_revocations(&self, revocations: &[Revocation]) -> Result<(), String> {
-            self.inner.save_revocations(revocations)
+        fn add_revocation(&self, entry: &Revocation, bound: usize) -> Result<Added, String> {
+            self.inner.add_revocation(entry, bound)
+        }
+        fn remove_revocation(&self, id: &str) -> Result<bool, String> {
+            self.inner.remove_revocation(id)
         }
         fn save_hosts(&self, hosts: &BTreeMap<String, Host>) -> Result<(), String> {
             self.writing.send(()).map_err(|e| e.to_string())?;
@@ -2158,21 +2271,17 @@ mod tests {
     #[test]
     fn the_list_and_the_register_are_bounded() {
         let store = Memory::default();
-        store
-            .save_revocations(
-                &(0..MAX_REVOCATIONS)
-                    .map(|n| Revocation {
-                        id: n.to_string(),
-                        revoked: Revoked::Certificate {
-                            authority: "client".into(),
-                            issuers: vec![name_hash(CA)],
-                            serial: format!("{n:x}"),
-                        },
-                        revoked_ms: NOW,
-                    })
-                    .collect::<Vec<_>>(),
-            )
-            .expect("seed");
+        store.0.lock().expect("lock").revocations = (0..MAX_REVOCATIONS)
+            .map(|n| Revocation {
+                id: n.to_string(),
+                revoked: Revoked::Certificate {
+                    authority: "client".into(),
+                    issuers: vec![name_hash(CA)],
+                    serial: format!("{n:x}"),
+                },
+                revoked_ms: NOW,
+            })
+            .collect();
         let (revocations, _) = open(&store);
         assert_eq!(
             revocations.revoke_certificate("client", "abcdef0123"),

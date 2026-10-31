@@ -511,15 +511,18 @@ mod tests {
         };
         ledger.put_issued(&issued).expect("issued");
         ledger
-            .save_revocations(&[Revocation {
-                id: "r1".into(),
-                revoked: Revoked::Certificate {
-                    authority: "client".into(),
-                    issuers: vec![issued.facts.id.issuer.clone()],
-                    serial: "0b".into(),
+            .add_revocation(
+                &Revocation {
+                    id: "r1".into(),
+                    revoked: Revoked::Certificate {
+                        authority: "client".into(),
+                        issuers: vec![issued.facts.id.issuer.clone()],
+                        serial: "0b".into(),
+                    },
+                    revoked_ms: 2,
                 },
-                revoked_ms: 2,
-            }])
+                1,
+            )
             .expect("revocations");
         ledger
             .save_hosts(&BTreeMap::from([(

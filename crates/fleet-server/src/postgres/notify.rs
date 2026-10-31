@@ -20,6 +20,9 @@ const CHANNEL: &str = "'opamp_fleet:' || coalesce(current_schema(), '')";
 /// The kind a revocation added or lifted is announced as.
 pub const REVOCATION: &str = "revocation";
 
+/// The kind a package floor set or removed is announced as.
+pub const FLOOR: &str = "floor";
+
 /// How long a listener waits before it connects again after its connection ended.
 const RECONNECT: Duration = Duration::from_secs(1);
 

@@ -7,7 +7,9 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
-use crate::revocation::{CertId, Host, Issued, Ledger, LedgerStore, Revocation};
+use crate::revocation::{
+    add_to, remove_from, Added, CertId, Host, Issued, Ledger, LedgerStore, Revocation,
+};
 
 /// Three places in the data directory, each owner-only: the register in `certificates/`, one file
 /// per certificate, so a renewal writes one small file; the list in `revocations.json`; and the
@@ -101,9 +103,24 @@ impl FsLedgerStore {
                 file = %self.revocations.display(),
                 "dropped credential revocations: the Agent plane admits by client certificate alone"
             );
-            self.save_revocations(&revocations)?;
+            self.write_revocations(&revocations)?;
         }
         Ok(revocations)
+    }
+
+    /// The list as persisted, empty when there is none yet.
+    fn read_revocations(&self) -> Result<Vec<Revocation>, String> {
+        match std::fs::read(&self.revocations) {
+            Ok(bytes) => self.certificate_revocations(&bytes),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(e) => Err(format!("cannot read {}: {e}", self.revocations.display())),
+        }
+    }
+
+    /// Replaces the list in one step: this store is its only writer.
+    fn write_revocations(&self, revocations: &[Revocation]) -> Result<(), String> {
+        let json = serde_json::to_vec_pretty(revocations).expect("the list serializes");
+        super::replace_owner_only(&self.revocations, &json)
     }
 
     fn load_hosts(&self) -> Result<BTreeMap<String, Host>, String> {
@@ -135,11 +152,7 @@ impl LedgerStore for FsLedgerStore {
             }
             issued.push(entry);
         }
-        let revocations = match std::fs::read(&self.revocations) {
-            Ok(bytes) => self.certificate_revocations(&bytes)?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-            Err(e) => return Err(format!("cannot read {}: {e}", self.revocations.display())),
-        };
+        let revocations = self.read_revocations()?;
         let hosts = self.load_hosts()?;
         hosts.clone_into(&mut self.written_hosts.lock().expect("hosts lock"));
         Ok(Ledger {
@@ -185,9 +198,22 @@ impl LedgerStore for FsLedgerStore {
         Ok(())
     }
 
-    fn save_revocations(&self, revocations: &[Revocation]) -> Result<(), String> {
-        let json = serde_json::to_vec_pretty(revocations).expect("the list serializes");
-        super::replace_owner_only(&self.revocations, &json)
+    fn add_revocation(&self, entry: &Revocation, bound: usize) -> Result<Added, String> {
+        let mut list = self.read_revocations()?;
+        let added = add_to(&mut list, entry, bound);
+        if matches!(added, Added::Added | Added::Widened(_)) {
+            self.write_revocations(&list)?;
+        }
+        Ok(added)
+    }
+
+    fn remove_revocation(&self, id: &str) -> Result<bool, String> {
+        let mut list = self.read_revocations()?;
+        if !remove_from(&mut list, id) {
+            return Ok(false);
+        }
+        self.write_revocations(&list)?;
+        Ok(true)
     }
 }
 
@@ -228,9 +254,10 @@ mod tests {
             },
             revoked_ms: 2,
         };
-        store
-            .save_revocations(std::slice::from_ref(&revocation))
-            .expect("save");
+        assert_eq!(
+            store.add_revocation(&revocation, 1).expect("add"),
+            crate::revocation::Added::Added
+        );
         let reopened = FsLedgerStore::open(dir.path()).expect("open");
         let ledger = reopened.load().expect("load");
         assert_eq!(ledger.issued, vec![issued.clone()]);
