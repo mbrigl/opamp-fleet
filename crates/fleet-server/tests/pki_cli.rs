@@ -87,7 +87,7 @@ fn server_host_files(dir: &Path, client_ca_left: i64) -> String {
     )
 }
 
-// Verifies: ADR-0032
+// Verifies: ADR-draft-the-operator-program-opamp-fleetctl
 #[test]
 fn status_reads_the_server_hosts_certificates_and_the_server_makes_none() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -149,7 +149,7 @@ fn status_reads_the_server_hosts_certificates_and_the_server_makes_none() {
     assert!(!dir.path().join("s").exists(), "nothing was written");
 }
 
-// Verifies: ADR-0032
+// Verifies: ADR-draft-the-operator-program-opamp-fleetctl
 #[test]
 fn the_server_warns_at_startup_about_a_ca_that_is_ending_and_serves_on() {
     let dir = tempfile::tempdir().expect("tempdir");

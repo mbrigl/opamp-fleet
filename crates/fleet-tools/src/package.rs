@@ -794,7 +794,7 @@ mod tests {
 
     /// `keygen` creates the key file owner-only from the moment it exists, through the writer `pki
     /// init` uses, and refuses to replace a file that exists, leaving it as it was.
-    /// Verifies: ADR-0032
+    /// Verifies: ADR-draft-the-operator-program-opamp-fleetctl
     #[test]
     fn keygen_writes_the_key_owner_only_and_never_replaces_one() {
         let dir = tempfile::tempdir().expect("tempdir");

@@ -11,7 +11,6 @@
 use std::path::{Path, PathBuf};
 
 use clap::Subcommand;
-use fleet_core::ending::Standing;
 use fleet_core::naming;
 // The serial and the start every certificate gets, as the client CA's (ADR-0032 clause 5).
 use fleet_core::x509::issue::{self, random_serial, Role, CLOCK_SKEW};
@@ -545,48 +544,9 @@ pub fn p12_extract(file: &Path, password: &str, out: &Path) -> Result<Vec<String
 // When they end
 // ---------------------------------------------------------------------------------------------
 
-/// When one certificate ends, as `pki status` lists it.
-#[derive(Debug, Clone)]
-pub struct Ending {
-    pub file: PathBuf,
-    pub subject: String,
-    pub serial: String,
-    pub not_before: OffsetDateTime,
-    pub not_after: OffsetDateTime,
-}
+pub use fleet_core::ending::read::Ending;
 
-impl Ending {
-    /// Where this end stands at `now`, by the rule the Server judges by.
-    #[must_use]
-    pub fn standing(&self, now: OffsetDateTime) -> Standing {
-        fleet_core::ending::standing(
-            self.not_before.unix_timestamp(),
-            self.not_after.unix_timestamp(),
-            now.unix_timestamp(),
-        )
-    }
-
-    /// The line `pki status` prints for it: standing, days left, end, serial, subject and file —
-    /// the columns of the Server's `pki status`.
-    #[must_use]
-    pub fn line(&self, now: OffsetDateTime) -> String {
-        let standing = match self.standing(now) {
-            Standing::Fine => "ok",
-            Standing::Ending => "ENDS SOON",
-            Standing::Ended => "ENDED",
-        };
-        format!(
-            "{standing:9} {} days  {}  serial {}  {}  ({})",
-            (self.not_after - now).whole_days(),
-            self.not_after.date(),
-            self.serial,
-            self.subject,
-            self.file.display()
-        )
-    }
-}
-
-/// Reads the first certificate of a PEM file.
+/// Reads the end of the first certificate of a PEM file.
 ///
 /// # Errors
 /// Returns the message to print when the file cannot be read or holds no certificate.
@@ -594,15 +554,7 @@ pub fn read_ending(file: &Path) -> Result<Ending, String> {
     let pem = std::fs::read(file).map_err(|e| format!("cannot read {}: {e}", file.display()))?;
     let der = opamp::tls::first_certificate(&pem)
         .map_err(|e| format!("cannot read {}: {e}", file.display()))?;
-    let (_, cert) = X509Certificate::from_der(der.as_ref())
-        .map_err(|e| format!("cannot read {}: {e}", file.display()))?;
-    Ok(Ending {
-        file: file.to_path_buf(),
-        subject: cert.subject().to_string(),
-        serial: hex::encode(cert.raw_serial()),
-        not_before: cert.validity().not_before.to_datetime(),
-        not_after: cert.validity().not_after.to_datetime(),
-    })
+    Ending::read(file, der.as_ref())
 }
 
 /// `pki status` (ADR-0032 clause 22): the server CA in the offline directory, with its end.
@@ -624,7 +576,7 @@ pub fn status(offline_dir: &Path) -> Result<Vec<Ending>, String> {
 /// something has ended.
 #[must_use]
 pub fn exit_code(endings: &[Ending], now: OffsetDateTime) -> u8 {
-    match fleet_core::ending::exit_code(endings.iter().map(|ending| ending.standing(now))) {
+    match fleet_core::ending::read::exit_code(endings, now) {
         0 => 0,
         1 => 1,
         _ => 2,
@@ -1041,7 +993,7 @@ mod tests {
             .to_vec()
     }
 
-    // Verifies: ADR-0032
+    // Verifies: ADR-draft-the-operator-program-opamp-fleetctl
     #[test]
     fn init_splits_what_the_server_needs_from_what_stays_offline() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -1090,7 +1042,7 @@ mod tests {
 
     /// The package signing key lands offline, and what it signs passes the Client's check under
     /// the `verification_key` the fragment names (ADR-0032 clause 7).
-    // Verifies: ADR-0032
+    // Verifies: ADR-draft-the-operator-program-opamp-fleetctl
     #[test]
     fn init_makes_the_package_signing_key_offline_and_names_its_public_half() {
         use ring::signature::{Ed25519KeyPair, KeyPair as _, UnparsedPublicKey, ED25519};
@@ -1125,7 +1077,7 @@ mod tests {
         );
     }
 
-    // Verifies: ADR-0032
+    // Verifies: ADR-draft-the-operator-program-opamp-fleetctl
     #[cfg(unix)]
     #[test]
     fn keys_are_owner_only_and_new_directories_private() {
@@ -1152,7 +1104,7 @@ mod tests {
         }
     }
 
-    // Verifies: ADR-0032
+    // Verifies: ADR-draft-the-operator-program-opamp-fleetctl
     #[test]
     fn a_second_init_refuses_and_writes_nothing() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -1172,7 +1124,7 @@ mod tests {
         );
     }
 
-    // Verifies: ADR-0032
+    // Verifies: ADR-draft-the-operator-program-opamp-fleetctl
     #[test]
     fn the_cas_have_their_own_subjects_and_sign_no_ca() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -1213,7 +1165,7 @@ mod tests {
 
     /// Every CA and the server certificate are named by product and role, with the operator's
     /// organization, in the order O, OU, CN (ADR-0032 clauses 9, 10 and 18).
-    // Verifies: ADR-0032
+    // Verifies: ADR-draft-the-operator-program-opamp-fleetctl
     #[test]
     fn init_names_every_certificate_by_product_role_and_organization() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -1246,7 +1198,7 @@ mod tests {
 
     /// `server-cert` carries the server CA's O and OU, and a flag replaces one alone (ADR-0032
     /// clause 10).
-    // Verifies: ADR-0032
+    // Verifies: ADR-draft-the-operator-program-opamp-fleetctl
     #[test]
     fn server_cert_takes_the_cas_organization_and_a_flag_replaces_it() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -1284,7 +1236,7 @@ mod tests {
 
     /// A product or an organization outside its grammar is refused, and nothing is written
     /// (ADR-0032 clauses 17 and 18).
-    // Verifies: ADR-0032
+    // Verifies: ADR-draft-the-operator-program-opamp-fleetctl
     #[test]
     fn a_bad_product_or_organization_is_refused() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -1300,7 +1252,7 @@ mod tests {
         assert!(!root.path().join("server").exists(), "nothing was written");
     }
 
-    // Verifies: ADR-0032
+    // Verifies: ADR-draft-the-operator-program-opamp-fleetctl
     #[test]
     fn a_server_certificate_names_what_is_dialled_and_the_loopback() {
         use x509_parser::extensions::GeneralName;
@@ -1332,7 +1284,7 @@ mod tests {
         );
     }
 
-    // Verifies: ADR-0032
+    // Verifies: ADR-draft-the-operator-program-opamp-fleetctl
     #[test]
     fn a_wildcard_an_empty_name_and_a_bad_product_are_refused() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -1350,7 +1302,7 @@ mod tests {
         assert!(!root.path().join("server").exists(), "nothing was written");
     }
 
-    // Verifies: ADR-0032
+    // Verifies: ADR-draft-the-operator-program-opamp-fleetctl
     #[test]
     fn a_certificate_never_outlives_its_ca() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -1373,7 +1325,7 @@ mod tests {
             .any(|l| l.starts_with("notice: the certificate ends with")));
     }
 
-    // Verifies: ADR-0032
+    // Verifies: ADR-draft-the-operator-program-opamp-fleetctl
     #[test]
     fn server_cert_signs_with_the_offline_server_ca() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -1396,7 +1348,7 @@ mod tests {
     }
 
     /// `bootstrap-ca` makes a CA of the bootstrap CA's subject and life, refusing to overwrite.
-    // Verifies: ADR-0032
+    // Verifies: ADR-draft-the-operator-program-opamp-fleetctl
     #[test]
     fn bootstrap_ca_makes_a_new_ca_for_the_server() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -1424,7 +1376,7 @@ mod tests {
         );
     }
 
-    // Verifies: ADR-0032
+    // Verifies: ADR-draft-the-operator-program-opamp-fleetctl
     #[test]
     fn status_lists_the_offline_certificates_and_a_fresh_set_is_not_ending() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -1451,7 +1403,7 @@ mod tests {
     }
 
     /// The bootstrap CA lives a year, the server CA and the client CA ten (ADR-0032 clause 13).
-    // Verifies: ADR-0032
+    // Verifies: ADR-draft-the-operator-program-opamp-fleetctl
     #[test]
     fn the_bootstrap_ca_lives_a_year_and_the_others_ten() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -1470,6 +1422,29 @@ mod tests {
         }
     }
 
+    /// `opamp-fleetctl pki status` and `server pki status` over the same certificate print the
+    /// same line, read and worded by the one function in `fleet-core`.
+    /// Verifies: ADR-draft-the-operator-program-opamp-fleetctl
+    #[test]
+    fn both_status_commands_print_one_line_for_one_certificate() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let file = root.path().join("server-ca.pem");
+        let key = KeyPair::generate().expect("key");
+        let mut params = CertificateParams::default();
+        params.distinguished_name.push(DnType::CommonName, "fleet");
+        let now = OffsetDateTime::now_utc();
+        params.not_before = now - Duration::days(380);
+        params.not_after = now + Duration::days(20);
+        std::fs::write(&file, params.self_signed(&key).expect("sign").pem()).expect("write");
+
+        let tool = read_ending(&file).expect("tool").line(now);
+        let server = fleet_server::pki::read_ending(&file)
+            .expect("server")
+            .line(now);
+        assert_eq!(tool, server);
+        assert!(tool.starts_with("ENDS SOON 19 days  "), "{tool}");
+    }
+
     /// A `bootstrap.p12` under `password`, of a fresh key and a certificate for it, in `dir`.
     fn bootstrap_p12(dir: &Path, password: &str) -> (PathBuf, KeyPair) {
         let key = KeyPair::generate().expect("key");
@@ -1485,7 +1460,7 @@ mod tests {
         (file, key)
     }
 
-    /// Verifies: ADR-0032
+    /// Verifies: ADR-draft-the-operator-program-opamp-fleetctl
     #[test]
     fn p12_extract_writes_the_certificate_and_its_key_the_key_owner_only() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1519,7 +1494,7 @@ mod tests {
         }
     }
 
-    /// Verifies: ADR-0032
+    /// Verifies: ADR-draft-the-operator-program-opamp-fleetctl
     #[test]
     fn p12_extract_refuses_what_does_not_open_and_writes_nothing() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1540,7 +1515,7 @@ mod tests {
         assert!(!out.exists(), "nothing was written");
     }
 
-    /// Verifies: ADR-0032
+    /// Verifies: ADR-draft-the-operator-program-opamp-fleetctl
     #[test]
     fn p12_extract_overwrites_neither_file() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1596,7 +1571,7 @@ mod tests {
         assert_eq!(made_key(made).as_str(), "key");
     }
 
-    /// Verifies: ADR-0032
+    /// Verifies: ADR-draft-the-operator-program-opamp-fleetctl
     #[test]
     fn the_password_comes_from_a_file_or_a_terminal_and_never_from_a_flag() {
         let dir = tempfile::tempdir().expect("tempdir");

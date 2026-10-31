@@ -55,6 +55,8 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             // Reading what a CSR asks for, with `x509-parser`.
             ("csr", Adapter),
             ("ending", Core),
+            // A certificate's end read with `x509-parser` and `time`.
+            ("ending::read", Adapter),
             ("host", Core),
             ("naming", Core),
             ("package", Core),

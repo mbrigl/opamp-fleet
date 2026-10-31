@@ -900,7 +900,7 @@ mod tests {
 
     /// A host certificate's subject is the Server's: the common name derived from the client CA's
     /// and nothing of the request's (ADR-0022 clause 11 and ADR-0032 clause 19).
-    /// Verifies: ADR-0032
+    /// Verifies: ADR-draft-the-operator-program-opamp-fleetctl
     #[test]
     fn a_host_certificate_is_named_by_its_ca_not_by_its_request() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -921,7 +921,7 @@ mod tests {
 
     /// A CA whose certificates' name would exceed 64 characters stops the Server at startup
     /// (ADR-0032 clause 19).
-    /// Verifies: ADR-0032
+    /// Verifies: ADR-draft-the-operator-program-opamp-fleetctl
     #[test]
     fn a_ca_whose_certificates_name_is_too_long_is_refused() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -942,7 +942,7 @@ mod tests {
     }
 
     /// The bootstrap CA names its certificates as the client CA does (ADR-0032 clause 19).
-    /// Verifies: ADR-0032
+    /// Verifies: ADR-draft-the-operator-program-opamp-fleetctl
     #[test]
     fn a_bootstrap_certificate_is_named_by_its_ca() {
         use crate::bootstrap::BootstrapSigner as _;

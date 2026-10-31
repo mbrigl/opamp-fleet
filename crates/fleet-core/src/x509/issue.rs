@@ -105,7 +105,7 @@ mod tests {
 
     /// The authority a CA's files load to signs a leaf that verifies under that CA, and a key file
     /// that cannot be read or holds no key is refused, naming it.
-    /// Verifies: ADR-0032
+    /// Verifies: ADR-draft-the-operator-program-opamp-fleetctl
     #[test]
     fn an_authority_loaded_from_its_files_signs_what_its_certificate_verifies() {
         use x509_parser::prelude::{FromDer as _, X509Certificate};
@@ -133,7 +133,7 @@ mod tests {
     }
 
     /// A leaf is what its role says and nothing more, whatever the parameters asked for.
-    /// Verifies: ADR-0032
+    /// Verifies: ADR-draft-the-operator-program-opamp-fleetctl
     #[test]
     fn a_leaf_is_its_role_alone() {
         for (role, purpose) in [
@@ -153,7 +153,7 @@ mod tests {
     }
 
     /// A serial is 16 bytes, positive, and not the one before.
-    /// Verifies: ADR-0032
+    /// Verifies: ADR-draft-the-operator-program-opamp-fleetctl
     #[test]
     fn a_serial_is_sixteen_random_positive_bytes() {
         let first = random_serial().expect("serial").to_bytes();

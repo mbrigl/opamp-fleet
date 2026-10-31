@@ -4512,7 +4512,7 @@ async fn a_revoked_bootstrap_certificate_is_deleted_from_the_list_and_stays_refu
 /// Without the bootstrap CA's key the Server issues nothing and says why, a request outside the
 /// bounds is refused, and one naming only a customer, a site and a password is issued (ADR-0022
 /// clauses 1 and 3, ADR-0032 clause 14 and ADR-0021 clause 17).
-/// Verifies: ADR-0022, ADR-0032
+/// Verifies: ADR-0022, ADR-draft-the-operator-program-opamp-fleetctl
 #[tokio::test]
 async fn issuing_needs_the_key_and_a_request_within_bounds() {
     let pki = Pki::new();

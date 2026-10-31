@@ -1,7 +1,9 @@
 //! When a certificate counts as ending (ADR-0032 clause 21): one rule, plain date arithmetic on
 //! Unix seconds, so the operator tool's `pki status`, the Server's `pki status` and the running
-//! Server judge alike. Each program reads the certificate itself; this module only judges the
-//! dates.
+//! Server judge alike. [`read`] reads a certificate's end and puts it in the line `pki status`
+//! prints (ADR-draft-the-operator-program-opamp-fleetctl clause 6).
+
+pub mod read;
 
 /// How far ahead an end is announced, in days — or, for a certificate whose whole life is shorter
 /// than three times this, the last third of its life.
@@ -58,7 +60,7 @@ mod tests {
         standing(NOW - lived * DAY, NOW + left * DAY, NOW)
     }
 
-    // Verifies: ADR-0032
+    // Verifies: ADR-draft-the-operator-program-opamp-fleetctl
     #[test]
     fn thirty_days_ahead_or_the_last_third_of_a_shorter_life() {
         assert_eq!(lived(0, 400), Standing::Fine);
@@ -69,7 +71,7 @@ mod tests {
         assert_eq!(lived(7, 3), Standing::Ending);
     }
 
-    // Verifies: ADR-0032
+    // Verifies: ADR-draft-the-operator-program-opamp-fleetctl
     #[test]
     fn status_exits_by_the_worst_end() {
         assert_eq!(exit_code([lived(0, 400)]), 0);
