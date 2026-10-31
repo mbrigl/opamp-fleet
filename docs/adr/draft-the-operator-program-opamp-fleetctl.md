@@ -110,9 +110,10 @@ This serves **G-17** (the connection is secured and the Agent is identified), **
 This ADR restates [ADR-0032](0032-the-operator-program-opamp-fleetctl.md) in full. It changes where
 a certificate's end is read: once, in `fleet-core`, with the line `pki status` prints for it,
 rather than in each program. The reason ADR-0032 gave against that, the internal crate's first
-`x509-parser` and `time` dependencies, has lapsed: `fleet-core` carries both, and the PEM reader
-with them, for `x509` and `csr`, and the reading and the line were written twice, verbatim, in
-`fleet-server` and `fleet-tools`.
+`x509-parser` and `time` dependencies, has lapsed: `fleet-core` carries both, for `x509` and
+`csr`, and the reading and the line were written twice, verbatim, in `fleet-server` and
+`fleet-tools`. The file stays each program's to read, through `opamp::tls`, the one reader of a
+certificate's PEM (ADR-0008 clause 17).
 
 ## Decision
 
@@ -172,8 +173,9 @@ step of setting up or running a fleet needs `openssl` or another external tool.
    ([ADR-0021](0021-admission-by-client-certificate-and-revocation.md)) and bootstrap
    certificates ([ADR-0022](0022-bootstrap-certificates-and-enrolment.md)). When a certificate
    counts as ending (clause 21) is one rule in `fleet-core`, plain date arithmetic, and reading a
-   certificate's end from its file, with the days it has left and the line `pki status` prints
-   for it, is one function there, so both commands and the running Server read and judge alike.
+   certificate's end, with the days it has left and the line `pki status` prints for it, is one
+   function there, over the first certificate each program reads from the file through
+   `opamp::tls`, so both commands and the running Server read and judge alike.
    None of the commands makes a host certificate or a bootstrap certificate.
 
 7. **`init` writes two directories, and the split is the point.** `--server-dir` receives what the
