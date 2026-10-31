@@ -24,11 +24,14 @@ Run in a fresh session. Name the entry point with the human:
 - **A template release:** a derived project takes up a later release. The inputs add the
   template's ADRs and specification scaffold at the tag the `Template release` line of
   [`README.md`](../../../README.md) names and at the new tag, and the release notes. What changed
-  between the two tags is what enters. Where the project has normalized before, the maps in the
-  commit bodies of its normalizations, read in order, say which of its ADRs restates which
-  template ADR. `AGENTS.md` is taken up as the release has it, except the ADR rules of
-  [§3](../../../AGENTS.md#3-adr-rules) that an ADR of the project on the ADR process changed:
-  those keep the project's wording, as its opening note says.
+  between the two tags is what enters. A template ADR the release corrected in place enters by
+  the normalization, a correction that changes a decision as one of its
+  [supersessions](#3-the-supersessions), never as an edit of an accepted ADR outside a normalization
+  ([ADR-0005](../../../docs/adr/0005-template-releases.md)). Where the project has normalized
+  before, the maps in the commit bodies of its normalizations, read in order, say which of its
+  ADRs restates which template ADR. `AGENTS.md` is taken up as the release has it, except the
+  ADR rules of [§3](../../../AGENTS.md#3-adr-rules) that an ADR of the project on the ADR
+  process changed: those keep the project's wording, as its opening note says.
 
 An adoption or a template release brings the template's git hooks and its repository settings
 with its files:

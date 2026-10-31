@@ -9,7 +9,7 @@
 #   1. The rules in effect on main, from every ruleset that targets it: a pull request required,
 #      merge commit the only merge method, with no linear history required and a merge queue,
 #      if any, merging by merge commit, the Code Owners review, the required status checks
-#      against the job names between the 'required-checks' markers of README.md, a branch up to
+#      against the names between the 'required-checks' markers of README.md, a branch up to
 #      date before it merges, and force pushes and the branch's deletion blocked.
 #   2. Secret scanning with push protection. GitHub shows it to an admin of the repository only;
 #      to anyone else the sensor says it could not read it.
@@ -46,10 +46,11 @@ repo="$(cd "$ROOT" && "$GH" repo view --json nameWithOwner --jq .nameWithOwner 2
 findings=()
 finding() { findings+=("$1"); }
 
-# The required checks README.md names, between its 'required-checks' markers.
+# The required checks README.md names, between its 'required-checks' markers: job names, and the
+# check runs of a matrix job, '<job> (<values>)', one per line.
 # shellcheck disable=SC2016  # the backticks are literal Markdown, not a command substitution
-expected="$(sed -n '/required-checks begin/,/required-checks end/p' "$ROOT/README.md" 2>/dev/null \
-  | grep -oE '`[a-z][a-z0-9-]*`' | tr -d '`' | sort -u | tr '\n' ' ')"
+mapfile -t expected < <(sed -n '/required-checks begin/,/required-checks end/p' "$ROOT/README.md" 2>/dev/null \
+  | grep -oE '`[a-z][a-z0-9-]*( \([^`()]+\))?`' | tr -d '`' | sort -u)
 
 # 1. The rules in effect on main, one line per rule of every ruleset, fields split by a tab:
 # 'pull_request <methods> <code owners>', 'strict <true|false>' and one 'check <name>' per
@@ -90,16 +91,17 @@ else
   fi
   mapfile -t actual < <(grep "^check$tab" <<< "$rules" | cut -f2- | sort -u)
   if ! grep -q "^strict$tab" <<< "$rules"; then
-    finding "main: no status checks are required — README names: ${expected% }"
+    finding "main: no status checks are required — README names: ${expected[*]}"
   else
     grep -qx "strict${tab}true" <<< "$rules" \
       || finding "main: a branch need not be up to date with main before it merges"
-    for name in $expected; do
+    for name in "${expected[@]}"; do
       printf '%s\n' "${actual[@]}" | grep -qxF -- "$name" \
         || finding "main: the required checks lack '$name', which README names"
     done
     for name in "${actual[@]}"; do
-      [[ " $expected" == *" $name "* ]] || finding "main: the required check '$name' is not among those README names"
+      printf '%s\n' "${expected[@]}" | grep -qxF -- "$name" \
+        || finding "main: the required check '$name' is not among those README names"
     done
   fi
   # Two rules that make a merge commit impossible whatever the pull request rule allows.

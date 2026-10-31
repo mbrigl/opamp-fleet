@@ -34,7 +34,11 @@ The sensors come in three kinds:
 Whichever fits, the ADR names the build, test, and lint commands of the README; the one script
 under `scripts/` that runs them, which `scripts/check-all.sh` invokes with a `run` line and a job
 of `checks.yml` runs after setting up the toolchain; and, for each column of the table below, a
-tool or "none" and why, and where it runs.
+tool or "none" and why, and where it runs. A job with a matrix, such as one per operating
+system, reports one check run per entry, so the README's required checks name those,
+`build (ubuntu-latest)`, and not the job. A job of `checks.yml` keeps the name GitHub gives it,
+with no `name:` of its own, since check 9 holds the required checks to the job's id. A workflow
+that publishes, such as a release, is named on a `# Not a gate:` line of `scripts/check-all.sh`.
 
 ## Does not fit
 
