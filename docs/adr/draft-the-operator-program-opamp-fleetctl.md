@@ -172,8 +172,8 @@ step of setting up or running a fleet needs `openssl` or another external tool.
    ([ADR-0021](0021-admission-by-client-certificate-and-revocation.md)) and bootstrap
    certificates ([ADR-0022](0022-bootstrap-certificates-and-enrolment.md)). When a certificate
    counts as ending (clause 21) is one rule in `fleet-core`, plain date arithmetic, and reading a
-   certificate's end from its file, with the line `pki status` prints for it, is one function
-   there, so both commands and the running Server read and judge alike.
+   certificate's end from its file, with the days it has left and the line `pki status` prints
+   for it, is one function there, so both commands and the running Server read and judge alike.
    None of the commands makes a host certificate or a bootstrap certificate.
 
 7. **`init` writes two directories, and the split is the point.** `--server-dir` receives what the
