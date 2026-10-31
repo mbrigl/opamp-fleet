@@ -145,22 +145,16 @@ fn not_an_enrolment(report: &AgentToServer, presented: &[u8]) -> Option<&'static
     if *report != only {
         return Some("an enrolling peer sends a certificate signing request and nothing else");
     }
-    // Read as the Server reads it: one PEM block, nothing around it (ADR-0015).
-    let Ok(Some(encoded)) = fleet_core::csr::der(&csr.csr).and_then(|der| {
-        fleet_core::csr::requested_uri(&der, fleet_core::bootstrap_proof::URI_PREFIX)
-    }) else {
-        return Some("an enrolling peer's certificate signing request carries no bootstrap proof");
+    // Read as the Server reads it: one PEM block, nothing around it, and its proof by the one
+    // reader of a proof (ADR-0015).
+    let none = "an enrolling peer's certificate signing request carries no bootstrap proof";
+    let Ok(der) = fleet_core::csr::der(&csr.csr) else {
+        return Some(none);
     };
-    let content = {
-        use base64::Engine as _;
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(encoded)
-    };
-    match content
-        .ok()
-        .as_deref()
-        .and_then(fleet_core::bootstrap_proof::decode)
-    {
-        Some((certificate, _)) if certificate == presented => None,
+    match fleet_core::csr::proof(&der, fleet_core::csr::ProofKind::Bootstrap) {
+        Ok(Some(proof)) if proof.certificate == presented => None,
+        Ok(None) | Err(fleet_core::csr::ProofError::Request) => Some(none),
+        Err(fleet_core::csr::ProofError::Both) => Some(fleet_core::csr::BOTH_PROOFS),
         _ => Some("an enrolling peer's bootstrap proof does not name the certificate it presented"),
     }
 }
@@ -1291,6 +1285,39 @@ mod tests {
             let why = not_an_enrolment(&enrolment(uid, crafted), &presented).expect("forwarded");
             assert!(why.contains("bootstrap proof"), "{why}");
         }
+    }
+
+    /// A request carrying a renewal proof beside its bootstrap proof is not forwarded: the Gateway
+    /// refuses it by the refusal the Server makes, `fleet_core::csr::proof`'s (ADR-0015
+    /// clause 21).
+    /// Verifies: ADR-0015
+    #[test]
+    fn an_enrolment_request_with_both_proofs_is_refused() {
+        use base64::Engine as _;
+        let uid = InstanceUid::default();
+        let presented = certificate();
+        let content = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(fleet_core::bootstrap_proof::encode(&presented, b"sig"));
+        let key = rcgen::KeyPair::generate().expect("key");
+        let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).expect("params");
+        for uri in [
+            format!("{}{content}", fleet_core::bootstrap_proof::URI_PREFIX),
+            format!("{}{content}", fleet_core::renewal::URI_PREFIX),
+        ] {
+            params
+                .subject_alt_names
+                .push(rcgen::SanType::URI(uri.try_into().expect("uri")));
+        }
+        let csr = params
+            .serialize_request(&key)
+            .expect("csr")
+            .pem()
+            .expect("pem")
+            .into_bytes();
+        assert_eq!(
+            not_an_enrolment(&enrolment(uid, csr), &presented),
+            Some(fleet_core::csr::BOTH_PROOFS)
+        );
     }
 
     /// An enrolling peer's request is forwarded only when its bootstrap proof embeds the very

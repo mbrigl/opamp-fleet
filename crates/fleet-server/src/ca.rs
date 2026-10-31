@@ -167,36 +167,20 @@ impl ClientCa {
     /// # Errors
     /// Returns the `BadRequest` text for a proof that does not hold.
     pub fn renewal_proof(&self, csr_pem: &str) -> Result<Option<Facts>, String> {
-        use base64::Engine as _;
         use sha2::{Digest, Sha256};
         // The proof and the key it covers come from the one request this CSR is (ADR-0015
         // clause 18), and so does the key `sign` certifies.
-        let (csr_der, request) = read(csr_pem)?;
-        let Some(encoded) = request
-            .params
-            .subject_alt_names
-            .iter()
-            .find_map(|san| match san {
-                SanType::URI(uri) => uri.as_str().strip_prefix(fleet_core::renewal::URI_PREFIX),
-                _ => None,
-            })
+        let (csr_der, _) = read(csr_pem)?;
+        let Some(fleet_core::csr::Proof {
+            certificate: old_der,
+            signature,
+        }) = fleet_core::csr::proof(&csr_der, fleet_core::csr::ProofKind::Renewal)
+            .map_err(|e| e.to_string())?
         else {
             return Ok(None);
         };
-        // Neither proof stands beside the other (ADR-0015 clause 21).
-        if request.params.subject_alt_names.iter().any(|san| {
-            matches!(san, SanType::URI(uri)
-                if uri.as_str().starts_with(fleet_core::bootstrap_proof::URI_PREFIX))
-        }) {
-            return Err(BOTH_PROOFS.to_string());
-        }
         let refused = |why: &str| format!("the renewal proof does not hold: {why}");
-        let content = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(encoded)
-            .map_err(|_| refused("it is not base64url"))?;
-        let (old_der, signature) =
-            fleet_core::renewal::decode(&content).ok_or_else(|| refused("it does not parse"))?;
-        let (_, old) = X509Certificate::from_der(old_der)
+        let (_, old) = X509Certificate::from_der(&old_der)
             .map_err(|_| refused("its certificate does not parse"))?;
         let (_, ca) = X509Certificate::from_der(&self.ca_der)
             .map_err(|_| refused("the CA does not parse"))?;
@@ -207,9 +191,9 @@ impl ClientCa {
         }
         let new_key = Sha256::digest(requested_key(&csr_der)?);
         let statement = fleet_core::renewal::statement(&new_key);
-        verify_with(old.public_key(), &statement, signature)
+        verify_with(old.public_key(), &statement, &signature)
             .map_err(|()| refused("its signature does not verify with the certificate's key"))?;
-        facts(old_der).map(Some)
+        facts(&old_der).map(Some)
     }
 
     pub fn validity_days(&self) -> u32 {
@@ -226,56 +210,47 @@ impl ClientCa {
 /// Returns the `BadRequest` text for a proof that does not hold, and for a request that carries a
 /// renewal proof beside it.
 pub fn bootstrap_proof(csr_pem: &str) -> Result<Option<Vec<u8>>, String> {
-    use base64::Engine as _;
     use sha2::{Digest, Sha256};
     let csr_der = fleet_core::csr::der(csr_pem.as_bytes())?;
-    let Some(encoded) =
-        fleet_core::csr::requested_uri(&csr_der, fleet_core::bootstrap_proof::URI_PREFIX)?
+    let Some(fleet_core::csr::Proof {
+        certificate: der,
+        signature,
+    }) = fleet_core::csr::proof(&csr_der, fleet_core::csr::ProofKind::Bootstrap)
+        .map_err(|e| e.to_string())?
     else {
         return Ok(None);
     };
-    if fleet_core::csr::requested_uri(&csr_der, fleet_core::renewal::URI_PREFIX)?.is_some() {
-        return Err(BOTH_PROOFS.to_string());
-    }
     let refused = |why: &str| format!("the bootstrap proof does not hold: {why}");
-    let content = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(encoded)
-        .map_err(|_| refused("it is not base64url"))?;
-    let (der, signature) = fleet_core::bootstrap_proof::decode(&content)
-        .ok_or_else(|| refused("it does not parse"))?;
     let (_, certificate) =
-        X509Certificate::from_der(der).map_err(|_| refused("its certificate does not parse"))?;
+        X509Certificate::from_der(&der).map_err(|_| refused("its certificate does not parse"))?;
     if !certificate.validity().is_valid() {
         return Err(refused("its certificate is not valid now"));
     }
     let new_key = Sha256::digest(requested_key(&csr_der)?);
     let statement = fleet_core::bootstrap_proof::statement(&new_key);
-    verify_with(certificate.public_key(), &statement, signature)
+    verify_with(certificate.public_key(), &statement, &signature)
         .map_err(|()| refused("its signature does not verify with the certificate's key"))?;
-    Ok(Some(der.to_vec()))
+    Ok(Some(der))
 }
 
 /// The certificate (DER) a CSR's bootstrap proof embeds, read without checking the proof.
 /// `Ok(None)` for a request without a proof.
 ///
 /// # Errors
-/// Returns the `BadRequest` text for a request that is not one PEM block, or a proof that does not
-/// parse.
+/// Returns the `BadRequest` text for a request that is not one PEM block, a proof that does not
+/// parse, and a request that carries a renewal proof beside it.
 pub fn bootstrap_proof_certificate(csr_pem: &str) -> Result<Option<Vec<u8>>, String> {
-    use base64::Engine as _;
     let csr_der = fleet_core::csr::der(csr_pem.as_bytes())?;
-    let Some(encoded) =
-        fleet_core::csr::requested_uri(&csr_der, fleet_core::bootstrap_proof::URI_PREFIX)?
+    let Some(fleet_core::csr::Proof {
+        certificate: der, ..
+    }) = fleet_core::csr::proof(&csr_der, fleet_core::csr::ProofKind::Bootstrap)
+        .map_err(|e| e.to_string())?
     else {
         return Ok(None);
     };
-    let unparsed = || "the bootstrap proof does not hold: it does not parse".to_string();
-    let content = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(encoded)
-        .map_err(|_| unparsed())?;
-    let (der, _) = fleet_core::bootstrap_proof::decode(&content).ok_or_else(unparsed)?;
-    X509Certificate::from_der(der).map_err(|_| unparsed())?;
-    Ok(Some(der.to_vec()))
+    X509Certificate::from_der(&der)
+        .map_err(|_| "the bootstrap proof does not hold: it does not parse".to_string())?;
+    Ok(Some(der))
 }
 
 /// The issuer and serial of the certificate (DER) `der`, or `None` when it does not parse.
@@ -285,10 +260,6 @@ pub fn cert_id(der: &[u8]) -> Option<CertId> {
     let (issuer, serial) = fleet_core::x509::read::id(&certificate);
     Some(CertId { issuer, serial })
 }
-
-/// What a CSR carrying both proofs is answered (ADR-0015 clause 21).
-pub const BOTH_PROOFS: &str =
-    "the certificate signing request carries both a renewal proof and a bootstrap proof";
 
 /// What a certificate (DER) says about itself: issuer and serial, subject, the SHA-256 of its
 /// public key, and when it expires — for the register, and for a peer's certificate at admission.
@@ -1428,6 +1399,28 @@ mod tests {
             for refused in refusals {
                 let why = refused.expect_err("read past its first block");
                 assert!(why.contains("exactly one PEM block"), "{why}");
+            }
+        }
+    }
+
+    /// A request carrying both proofs is refused, in either order, by every reader of a proof on
+    /// the Server, by the one refusal `fleet_core::csr::proof` makes (ADR-0015 clause 21).
+    /// Verifies: ADR-0015
+    #[test]
+    fn a_request_with_both_proofs_is_refused_by_every_reader() {
+        let ca = client_ca(30);
+        let uri = |prefix: &str| SanType::URI(format!("{prefix}AAAA").try_into().expect("uri"));
+        let bootstrap = || uri(fleet_core::bootstrap_proof::URI_PREFIX);
+        let renewal = || uri(fleet_core::renewal::URI_PREFIX);
+        for sans in [vec![bootstrap(), renewal()], vec![renewal(), bootstrap()]] {
+            let request = csr_with("edge-01", sans);
+            let refusals = [
+                ca.renewal_proof(&request).map(|_| ()),
+                bootstrap_proof(&request).map(|_| ()),
+                bootstrap_proof_certificate(&request).map(|_| ()),
+            ];
+            for refused in refusals {
+                assert_eq!(refused, Err(fleet_core::csr::BOTH_PROOFS.to_string()));
             }
         }
     }

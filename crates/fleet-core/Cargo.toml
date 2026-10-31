@@ -32,6 +32,9 @@ hex.workspace = true
 # serial and `time` is the date type rcgen speaks — all three already linked by both ends.
 ring.workspace = true
 time.workspace = true
+# A proof a certificate signing request carries is base64url in a requested SAN URI (ADR-0015),
+# read the same way on the Server and on a Gateway.
+base64.workspace = true
 # The key a `bootstrap.p12` opens to is held in a buffer wiped on drop (ADR-0014). No TLS or
 # crypto backend comes with zeroize itself (ADR-0012).
 zeroize.workspace = true
