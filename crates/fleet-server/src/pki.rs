@@ -3,46 +3,19 @@
 //! `server pki status` says when each certificate the Server host depends on ends, and the running
 //! Server reads the same ends and warns before one of them does. The Server makes no certificate
 //! authority, no server certificate and no bootstrap certificate: those are made by the operator
-//! tool's `pki` commands, on the operator's machine (ADR-0032). When a certificate counts as ending
-//! is [`fleet_core::ending`], so both programs judge alike.
+//! tool's `pki` commands, on the operator's machine (ADR-0032). When a certificate counts as ending,
+//! and how its end is read and said, is [`fleet_core::ending`], so both programs judge alike.
 
 use std::path::{Path, PathBuf};
 
 use fleet_core::ending::Standing;
 use time::OffsetDateTime;
-use x509_parser::prelude::{FromDer, X509Certificate};
 
 use crate::config::ServerConfig;
 
-/// When one certificate ends, as `server pki status` lists it and the running Server watches it.
-#[derive(Debug, Clone)]
-pub struct Ending {
-    pub file: PathBuf,
-    pub subject: String,
-    pub serial: String,
-    pub not_before: OffsetDateTime,
-    pub not_after: OffsetDateTime,
-}
+pub use fleet_core::ending::read::Ending;
 
-impl Ending {
-    /// Where this end stands at `now`.
-    #[must_use]
-    pub fn standing(&self, now: OffsetDateTime) -> Standing {
-        fleet_core::ending::standing(
-            self.not_before.unix_timestamp(),
-            self.not_after.unix_timestamp(),
-            now.unix_timestamp(),
-        )
-    }
-
-    /// Whole days left at `now`, negative once ended.
-    #[must_use]
-    pub fn days_left(&self, now: OffsetDateTime) -> i64 {
-        (self.not_after - now).whole_days()
-    }
-}
-
-/// Reads the first certificate of a PEM file.
+/// Reads the end of the first certificate of a PEM file.
 ///
 /// # Errors
 /// Returns the message to print when the file cannot be read or holds no certificate.
@@ -50,15 +23,7 @@ pub fn read_ending(file: &Path) -> Result<Ending, String> {
     let pem = std::fs::read(file).map_err(|e| format!("cannot read {}: {e}", file.display()))?;
     let der = opamp::tls::first_certificate(&pem)
         .map_err(|e| format!("cannot read {}: {e}", file.display()))?;
-    let (_, cert) = X509Certificate::from_der(der.as_ref())
-        .map_err(|e| format!("cannot read {}: {e}", file.display()))?;
-    Ok(Ending {
-        file: file.to_path_buf(),
-        subject: cert.subject().to_string(),
-        serial: hex::encode(cert.raw_serial()),
-        not_before: cert.validity().not_before.to_datetime(),
-        not_after: cert.validity().not_after.to_datetime(),
-    })
+    Ending::read(file, der.as_ref())
 }
 
 /// The certificates a running Server depends on (ADR-0032 clause 21): its own on each plane
@@ -101,7 +66,7 @@ pub fn status(config: &ServerConfig) -> Result<Vec<Ending>, String> {
 /// when something has ended.
 #[must_use]
 pub fn exit_code(endings: &[Ending], now: OffsetDateTime) -> i32 {
-    fleet_core::ending::exit_code(endings.iter().map(|ending| ending.standing(now)))
+    fleet_core::ending::read::exit_code(endings, now)
 }
 
 /// The certificates a running Server depends on as it read them at startup, which is what it
