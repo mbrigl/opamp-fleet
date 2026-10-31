@@ -290,6 +290,25 @@ pub trait LedgerStore: Send + Sync {
         self.put_issued(issued).map(|()| Registered::Registered)
     }
 
+    /// [`register_issued`](Self::register_issued), with the Host an approval mints, `mint`, written
+    /// in the same write by a store that writes the Hosts by act
+    /// ([`writes_hosts_by_act`](Self::writes_hosts_by_act)): its row as `mint` holds it when the
+    /// store has none, else its valid until moved forward, so a certificate is never registered
+    /// without its Host's row. One that writes the Hosts whole writes `mint` with them.
+    ///
+    /// # Errors
+    /// Returns an error when it cannot be written; the register and the Hosts are then as they
+    /// were.
+    fn register_minting(
+        &self,
+        issued: &Issued,
+        bounds: &RegisterBounds,
+        mint: Option<(&str, &Host)>,
+    ) -> Result<Registered, String> {
+        let _ = mint;
+        self.register_issued(issued, bounds)
+    }
+
     /// Adds `entry` to the list, deciding from what is stored: an entry of the same id is kept, its
     /// issuers widened by those `entry` names beside them ([`widened`]), and a list already
     /// holding `bound` entries takes no more. The bound is counted
@@ -317,6 +336,16 @@ pub trait LedgerStore: Send + Sync {
     fn bind(&self, instance_uid: &str, host: &str) -> Result<Bound, String> {
         let _ = (instance_uid, host);
         Ok(Bound::Bound)
+    }
+
+    /// [`bind`](Self::bind), the Host's row made first as `row` holds it when a store that writes
+    /// the Hosts by act has none, in the same write, so no binding stands without its Host's row.
+    ///
+    /// # Errors
+    /// Returns an error when it cannot be written; nothing is then written.
+    fn bind_seen(&self, instance_uid: &str, host: &str, row: &Host) -> Result<Bound, String> {
+        let _ = row;
+        self.bind(instance_uid, host)
     }
 
     /// Releases `instance_uid` from whichever Host the store holds it for, whatever this instance
@@ -891,25 +920,34 @@ impl Revocations {
     ) -> Result<(), String> {
         let mut state = self.state.lock().expect("revocation lock");
         let forgotten = self.prune(&mut state)?;
-        let minted = predecessor.is_none();
-        let recorded = self.admit(&mut state, facts.clone(), instance_uid, predecessor);
         // The approval that mints a host id writes the Host (ADR-0024 clause 15): an issuance that
-        // renews nothing and names a host the register does not know yet.
-        // Every issuance moves its Host's valid until forward (ADR-0024 clause 15).
-        let act = match (&recorded, minted, &facts.host) {
-            (Ok(()), true, Some(host)) if !state.hosts.contains_key(host) => {
-                let now = self.clock.now_ms();
-                let entry = Host {
+        // renews nothing and names a host the register does not know yet. A store that writes the
+        // Hosts by act writes it with the register entry, so neither stands without the other.
+        let mint = match (&predecessor, &facts.host) {
+            (None, Some(host)) if !state.hosts.contains_key(host) => Some((
+                host.clone(),
+                Host {
                     subject: facts.subject_values.clone(),
-                    approved_ms: Some(now),
+                    approved_ms: Some(self.clock.now_ms()),
                     valid_until_ms: Some(facts.not_after_ms),
                     ..Host::default()
-                };
+                },
+            )),
+            _ => None,
+        };
+        let recorded = self.admit(
+            &mut state,
+            facts.clone(),
+            instance_uid,
+            predecessor,
+            mint.as_ref().map(|(host, entry)| (host.as_str(), entry)),
+        );
+        // Every issuance moves its Host's valid until forward (ADR-0024 clause 15).
+        let act = match (&recorded, mint, &facts.host) {
+            (Ok(()), Some((host, entry)), _) => {
                 state.hosts.insert(host.clone(), entry.clone());
-                Some(HostAct::Seen {
-                    host: host.clone(),
-                    entry,
-                })
+                let by_act = self.store.writes_hosts_by_act();
+                (!by_act).then_some(HostAct::Seen { host, entry })
             }
             (Ok(()), _, Some(host))
                 if state
@@ -944,6 +982,7 @@ impl Revocations {
         facts: Facts,
         instance_uid: &[u8],
         predecessor: Option<CertId>,
+        mint: Option<(&str, &Host)>,
     ) -> Result<(), String> {
         let limit = if predecessor.is_some() {
             MAX_ISSUED - ENROLMENT_RESERVE
@@ -983,7 +1022,7 @@ impl Revocations {
             size: limit,
             per_root: MAX_DESCENDANTS_PER_ROOT,
         };
-        match self.store.register_issued(&issued, &bounds)? {
+        match self.store.register_minting(&issued, &bounds, mint)? {
             Registered::Registered => {}
             Registered::Full(why) => return Err(why),
             Registered::Revoked => return Err(RENEWS_REVOKED.to_string()),
@@ -1022,7 +1061,12 @@ impl Revocations {
     ) -> Result<(), String> {
         let uid = hex::encode(instance_uid);
         let mut state = self.state.lock().expect("revocation lock");
-        let binds = Self::admits(&state, host, &uid)? && self.bind(&mut state, &uid, host)?;
+        let row = Host {
+            subject: subject.clone(),
+            valid_until_ms: Some(not_after_ms),
+            ..Host::default()
+        };
+        let binds = Self::admits(&state, host, &uid)? && self.bind(&mut state, &uid, host, &row)?;
         if binds {
             state
                 .hosts
@@ -1082,8 +1126,8 @@ impl Revocations {
     /// Binds `uid` to `host` in the store and in `state`, and answers whether it is bound. A
     /// binding another Host holds refuses it, naming that Host, and is what `state` holds from
     /// then on; a Host the store holds marked as a Gateway is bound none.
-    fn bind(&self, state: &mut State, uid: &str, host: &str) -> Result<bool, String> {
-        let bound = self.store.bind(uid, host)?;
+    fn bind(&self, state: &mut State, uid: &str, host: &str, row: &Host) -> Result<bool, String> {
+        let bound = self.store.bind_seen(uid, host, row)?;
         Self::take_up(state, uid, host, bound)
     }
 
@@ -1574,6 +1618,9 @@ impl Revocations {
             .map(|(name, _)| name.clone())
             .collect();
         if !ended.is_empty() {
+            // Dropped from memory by what this instance knows; the store forgets each only while
+            // what it holds says so. A Host another instance extended stays stored, and this
+            // instance speaks for it again from its next read of the ledger.
             state.hosts.retain(|name, _| !ended.contains(name));
             state.owners.retain(|_, owner| !ended.contains(owner));
         }

@@ -271,42 +271,55 @@ fn lock_lost(held: &watch::Sender<Option<String>>, instance_id: &str) {
 /// clause 19). What is heard while a read runs is taken up by one read after it, and a read that
 /// fails is tried again until one holds.
 pub fn follow_revocations(database: &Database, revocations: Arc<Revocations>) {
-    let (heard, mut hearing) = tokio::sync::mpsc::unbounded_channel();
+    let (heard, hearing) = tokio::sync::mpsc::unbounded_channel();
     database.listen(move |what| {
         let _ = heard.send(what);
     });
-    tokio::spawn(async move {
-        while let Some(what) = hearing.recv().await {
-            let mut due = calls_for_a_read(&what);
-            // Everything heard by now is answered by the one read.
-            while let Ok(more) = hearing.try_recv() {
-                due |= calls_for_a_read(&more);
-            }
-            if !due {
-                continue;
-            }
-            let mut wait = RELOAD_RETRY_FIRST;
-            loop {
-                let revocations = revocations.clone();
-                let read = tokio::task::spawn_blocking(move || revocations.reload_ledger())
-                    .await
-                    .unwrap_or_else(|e| Err(e.to_string()));
-                let Err(e) = read else { break };
-                warn!(error = %e, "could not read the ledger other instances committed");
-                tokio::time::sleep(wait).await;
-                wait = (wait * 2).min(RELOAD_RETRY_MAX);
-                // What was heard while waiting is answered by the read tried again.
-                while hearing.try_recv().is_ok() {}
-            }
+    let read = move || revocations.reload_ledger();
+    tokio::spawn(take_up(hearing, read, RELOAD_RETRY_FIRST, RELOAD_RETRY_MAX));
+}
+
+/// Answers what is heard with `read`, until nothing more can be heard: everything heard by the
+/// time a read starts is answered by that one read, and a read that fails is tried again after
+/// `first`, each wait doubled up to `longest`.
+async fn take_up<R>(
+    mut hearing: tokio::sync::mpsc::UnboundedReceiver<Heard>,
+    read: R,
+    first: Duration,
+    longest: Duration,
+) where
+    R: Fn() -> Result<(), String> + Clone + Send + 'static,
+{
+    while let Some(what) = hearing.recv().await {
+        let mut due = calls_for_a_read(&what);
+        // Everything heard by now is answered by the one read.
+        while let Ok(more) = hearing.try_recv() {
+            due |= calls_for_a_read(&more);
         }
-    });
+        if !due {
+            continue;
+        }
+        let mut wait = first;
+        loop {
+            let read = read.clone();
+            let done = tokio::task::spawn_blocking(read)
+                .await
+                .unwrap_or_else(|e| Err(e.to_string()));
+            let Err(e) = done else { break };
+            warn!(error = %e, "could not read the ledger other instances committed");
+            tokio::time::sleep(wait).await;
+            wait = (wait * 2).min(longest);
+            // What was heard while waiting is answered by the read tried again.
+            while hearing.try_recv().is_ok() {}
+        }
+    }
 }
 
 /// The first wait before a failed read of the ledger is tried again; each next one doubles.
-const RELOAD_RETRY_FIRST: std::time::Duration = std::time::Duration::from_millis(250);
+const RELOAD_RETRY_FIRST: Duration = Duration::from_millis(250);
 
 /// The longest wait before a failed read of the ledger is tried again.
-const RELOAD_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(10);
+const RELOAD_RETRY_MAX: Duration = Duration::from_secs(10);
 
 /// Whether what was heard calls for the ledger to be read again: a revocation, a Host or a
 /// register entry another instance wrote, and the connection made again.
@@ -478,5 +491,103 @@ async fn bind_again(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use super::{take_up, Heard};
+
+    /// A reader that fails its first `failing` reads and counts every read.
+    fn reader(failing: usize) -> (Arc<AtomicUsize>, impl Fn() -> Result<(), String> + Clone) {
+        let reads = Arc::new(AtomicUsize::new(0));
+        let counted = reads.clone();
+        let read = move || {
+            let read = counted.fetch_add(1, Ordering::SeqCst);
+            if read < failing {
+                Err("the database is away".to_string())
+            } else {
+                Ok(())
+            }
+        };
+        (reads, read)
+    }
+
+    /// What is heard before a read starts is answered by one read, and what calls for none is
+    /// passed over (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// clause 19).
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    #[tokio::test]
+    async fn what_is_heard_at_once_is_answered_by_one_read() {
+        let (heard, hearing) = tokio::sync::mpsc::unbounded_channel();
+        for kind in ["host", "certificate", "revocation"] {
+            heard.send(Heard::Notified(kind.to_string())).expect("send");
+        }
+        heard.send(Heard::Listening).expect("send");
+        heard
+            .send(Heard::Notified("floor".to_string()))
+            .expect("send");
+        drop(heard);
+        let (reads, read) = reader(0);
+        take_up(
+            hearing,
+            read,
+            Duration::from_millis(1),
+            Duration::from_millis(4),
+        )
+        .await;
+        assert_eq!(reads.load(Ordering::SeqCst), 1);
+
+        let (heard, hearing) = tokio::sync::mpsc::unbounded_channel();
+        heard
+            .send(Heard::Notified("floor".to_string()))
+            .expect("send");
+        drop(heard);
+        let (reads, read) = reader(0);
+        take_up(
+            hearing,
+            read,
+            Duration::from_millis(1),
+            Duration::from_millis(4),
+        )
+        .await;
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            0,
+            "a floor calls for no read of the ledger"
+        );
+    }
+
+    /// A read that fails is tried again, each wait longer, until one holds.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    #[tokio::test]
+    async fn a_read_that_fails_is_tried_again_until_one_holds() {
+        let (heard, hearing) = tokio::sync::mpsc::unbounded_channel();
+        heard
+            .send(Heard::Notified("host".to_string()))
+            .expect("send");
+        drop(heard);
+        let (reads, read) = reader(3);
+        let started = tokio::time::Instant::now();
+        take_up(
+            hearing,
+            read,
+            Duration::from_millis(10),
+            Duration::from_millis(25),
+        )
+        .await;
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            4,
+            "three failures, then the read that holds"
+        );
+        assert!(
+            started.elapsed() >= Duration::from_millis(10 + 20 + 25),
+            "each wait doubles, up to the longest"
+        );
     }
 }

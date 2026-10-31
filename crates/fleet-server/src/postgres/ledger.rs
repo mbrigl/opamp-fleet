@@ -84,8 +84,21 @@ impl LedgerStore for PgLedgerStore {
         issued: &Issued,
         bounds: &RegisterBounds,
     ) -> Result<Registered, String> {
+        self.register_minting(issued, bounds, None)
+    }
+
+    /// [`register_issued`](LedgerStore::register_issued), and the Host an approval mints written in
+    /// the same transaction when the store has no row of it, else its valid until moved forward:
+    /// a certificate is registered with its Host's row or not at all.
+    fn register_minting(
+        &self,
+        issued: &Issued,
+        bounds: &RegisterBounds,
+        mint: Option<(&str, &Host)>,
+    ) -> Result<Registered, String> {
         let issued = issued.clone();
         let bounds = *bounds;
+        let mint = mint.map(|(host, entry)| (host.to_string(), entry.clone()));
         self.database.run(move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
@@ -117,6 +130,11 @@ impl LedgerStore for PgLedgerStore {
             }
             write_issued(&*transaction, &issued).await?;
             notify(&*transaction, CERTIFICATE).await?;
+            if let Some((host, entry)) = &mint {
+                if write_seen(&*transaction, host, entry).await? {
+                    notify(&*transaction, HOST).await?;
+                }
+            }
             transaction.commit().await.map_err(sql)?;
             Ok(Registered::Registered)
         })
@@ -203,26 +221,35 @@ impl LedgerStore for PgLedgerStore {
         })
     }
 
-    /// One row per binding, its `instance_uid` the key: a binding another Host holds is left as it
-    /// is and answered with that Host. A Host whose row is marked as a Gateway is bound none
-    /// (ADR-0024 clause 16); its row is held for the transaction, so a mark committed meanwhile is
-    /// seen, and a mark that waits for it releases what it bound. Until no instance of the release
-    /// before runs, an `instance_uid` another Host's array lists, as that release binds it, is
-    /// answered as that Host's too, and a new binding goes into the Host's array as well; a
-    /// Gateway's array binds nothing.
     fn bind(&self, instance_uid: &str, host: &str) -> Result<Bound, String> {
-        let (instance_uid, host) = (instance_uid.to_string(), host.to_string());
+        self.bind_seen(instance_uid, host, &Host::default())
+    }
+
+    /// One row per binding, its `instance_uid` the key: a binding another Host holds is left as it
+    /// is and answered with that Host, and nothing is written. The Host's row is made first, as
+    /// `row` holds it, when the store has none, so no binding stands without its Host's row, and
+    /// that row is held for the
+    /// transaction: a Gateway mark committed before it is seen, and one that waits for it releases
+    /// what it bound. A Host whose row is marked as a Gateway is bound none (ADR-0024 clause 16).
+    /// The hold is one that conflicts with itself, so two binders of one Host wait for each other
+    /// rather than both holding a share of the row they then write. Until no instance of the
+    /// release before runs, an `instance_uid` another Host's array lists, as that release binds it,
+    /// is answered as that Host's too, and a new binding goes into the Host's array as well; a
+    /// Gateway's array binds nothing.
+    fn bind_seen(&self, instance_uid: &str, host: &str, row: &Host) -> Result<Bound, String> {
+        let (instance_uid, host, row) = (instance_uid.to_string(), host.to_string(), row.clone());
         self.database.run(move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
-            let gateway = transaction
-                .query_opt(
-                    "SELECT gateway FROM hosts WHERE host = $1 FOR SHARE",
+            let made = insert_host_row(&*transaction, &host, &row).await?;
+            let gateway: bool = transaction
+                .query_one(
+                    "SELECT gateway FROM hosts WHERE host = $1 FOR NO KEY UPDATE",
                     &[&host],
                 )
                 .await
                 .map_err(sql)?
-                .is_some_and(|row| row.get::<_, bool>(0));
+                .get(0);
             if gateway {
                 return Ok(Bound::Gateway);
             }
@@ -255,16 +282,18 @@ impl LedgerStore for PgLedgerStore {
                 .await
                 .map_err(sql)?
                 .get(0);
+            if holder != host {
+                // Refused: the transaction is dropped, so the row made for it is not kept either.
+                return Ok(Bound::Taken(holder));
+            }
             if inserted > 0 {
                 append_to_array(&*transaction, &instance_uid, &host).await?;
+            }
+            if made || inserted > 0 {
                 notify(&*transaction, HOST).await?;
             }
             transaction.commit().await.map_err(sql)?;
-            Ok(if holder == host {
-                Bound::Bound
-            } else {
-                Bound::Taken(holder)
-            })
+            Ok(Bound::Bound)
         })
     }
 
@@ -350,30 +379,7 @@ impl LedgerStore for PgLedgerStore {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
             let changed = match &act {
-                HostAct::Seen { host, entry } => {
-                    let uids: Vec<&str> = entry.instance_uids.iter().map(String::as_str).collect();
-                    let subject =
-                        serde_json::to_value(&entry.subject).expect("subject values serialize");
-                    transaction
-                        .execute(
-                            "INSERT INTO hosts (host, gateway, instance_uids, subject, \
-                             approved_ms, valid_until_ms) VALUES ($1, $2, $3, $4, $5, $6) \
-                             ON CONFLICT (host) DO UPDATE SET valid_until_ms = \
-                             GREATEST(hosts.valid_until_ms, EXCLUDED.valid_until_ms) \
-                             WHERE EXCLUDED.valid_until_ms IS NOT NULL",
-                            &[
-                                host,
-                                &entry.gateway,
-                                &uids,
-                                &subject,
-                                &entry.approved_ms.map(signed),
-                                &entry.valid_until_ms.map(signed),
-                            ],
-                        )
-                        .await
-                        .map_err(sql)?
-                        > 0
-                }
+                HostAct::Seen { host, entry } => write_seen(&*transaction, host, entry).await?,
                 HostAct::Extended(untils) => {
                     let mut changed = false;
                     for (host, until) in untils {
@@ -507,6 +513,53 @@ async fn unbind_in(
         .await
         .map_err(sql)?;
     Ok(host)
+}
+
+/// Makes `host`'s row as `entry` holds it when the store has none, its array empty: what binds the
+/// Host is its rows in `host_bindings`, each listed in the array by the act that binds it. Answers
+/// whether it made the row.
+async fn insert_host_row(
+    client: &impl GenericClient,
+    host: &str,
+    entry: &Host,
+) -> Result<bool, String> {
+    let subject = serde_json::to_value(&entry.subject).expect("subject values serialize");
+    let made = client
+        .execute(
+            "INSERT INTO hosts (host, gateway, instance_uids, subject, approved_ms, \
+             valid_until_ms) VALUES ($1, $2, '{}', $3, $4, $5) \
+             ON CONFLICT (host) DO NOTHING",
+            &[
+                &host,
+                &entry.gateway,
+                &subject,
+                &entry.approved_ms.map(signed),
+                &entry.valid_until_ms.map(signed),
+            ],
+        )
+        .await
+        .map_err(sql)?;
+    Ok(made > 0)
+}
+
+/// A Host an approval or a first report makes: its row as `entry` holds it when the store has
+/// none, else only its valid until moved forward to `entry`'s. Answers whether a row changed.
+async fn write_seen(client: &impl GenericClient, host: &str, entry: &Host) -> Result<bool, String> {
+    if insert_host_row(client, host, entry).await? {
+        return Ok(true);
+    }
+    let Some(until) = entry.valid_until_ms else {
+        return Ok(false);
+    };
+    let moved = client
+        .execute(
+            "UPDATE hosts SET valid_until_ms = GREATEST(valid_until_ms, $2) WHERE host = $1 \
+             AND (valid_until_ms IS NULL OR valid_until_ms < $2)",
+            &[&host, &signed(until)],
+        )
+        .await
+        .map_err(sql)?;
+    Ok(moved > 0)
 }
 
 /// Lists `instance_uid` in `host`'s array inside the caller's transaction, as a release before the
@@ -1379,6 +1432,174 @@ mod tests {
         }
     }
 
+    /// Two instances binding two `instance_uid`s to one Host at once both bind theirs: the row
+    /// each holds while it binds is a hold that waits for the other, not a share both take and
+    /// then write, which the database would break as a deadlock
+    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// clause 19).
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    #[test]
+    fn two_binders_of_one_host_bind_both_without_a_deadlock() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let stores = [
+            Arc::new(PgLedgerStore::new(database.clone())),
+            Arc::new(PgLedgerStore::new(database.clone())),
+        ];
+        stores[0]
+            .save_hosts(&BTreeMap::from([("h".to_string(), host(&[], false))]))
+            .expect("save");
+        for round in 0..20 {
+            let barrier = Arc::new(std::sync::Barrier::new(2));
+            let answers: Vec<Result<Bound, String>> = std::thread::scope(|scope| {
+                let racers: Vec<_> = stores
+                    .iter()
+                    .enumerate()
+                    .map(|(racer, store)| {
+                        let barrier = barrier.clone();
+                        scope.spawn(move || {
+                            barrier.wait();
+                            store.bind(&format!("{round:02x}{racer}"), "h")
+                        })
+                    })
+                    .collect();
+                racers
+                    .into_iter()
+                    .map(|racer| racer.join().expect("racer"))
+                    .collect()
+            });
+            assert_eq!(
+                answers,
+                [Ok(Bound::Bound), Ok(Bound::Bound)],
+                "round {round}"
+            );
+        }
+    }
+
+    /// A Gateway's mark and a binding to its Host made at once never leave a binding to it: the
+    /// binding waits for the mark and sees it, or the mark waits for the binding and releases it
+    /// (ADR-0024 clause 16). The Host has no row before either.
+    /// Verifies: ADR-0024
+    #[test]
+    fn a_gateway_mark_and_a_binding_at_once_leave_the_gateway_bound_none() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let (marker, binder) = (
+            PgLedgerStore::new(database.clone()),
+            PgLedgerStore::new(database.clone()),
+        );
+        for round in 0..20 {
+            let gateway = format!("gateway/{round}");
+            let barrier = std::sync::Barrier::new(2);
+            std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    barrier.wait();
+                    marker
+                        .write_host_act(&HostAct::Gateway {
+                            host: gateway.clone(),
+                            gateway: true,
+                        })
+                        .expect("mark");
+                });
+                scope.spawn(|| {
+                    barrier.wait();
+                    binder
+                        .bind(&format!("{round:02x}"), &gateway)
+                        .expect("bind");
+                });
+            });
+        }
+        assert_eq!(
+            test.rows(
+                "SELECT b.instance_uid FROM host_bindings b JOIN hosts h ON h.host = b.host \
+                 WHERE h.gateway"
+            ),
+            Vec::<Vec<Option<String>>>::new()
+        );
+    }
+
+    /// A binding is made with its Host's row, in one write, so no binding stands without the Host
+    /// it binds to; one another Host holds writes nothing, the row it would have made included
+    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// clause 19).
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    #[test]
+    fn a_binding_is_made_with_its_hosts_row() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let store = PgLedgerStore::new(database.clone());
+        let row = Host {
+            subject: SubjectValues {
+                country: "AT".into(),
+                ..Default::default()
+            },
+            valid_until_ms: Some(42),
+            ..Host::default()
+        };
+        assert_eq!(store.bind_seen("01", "h1", &row), Ok(Bound::Bound));
+        assert_eq!(
+            store.bind_seen("01", "h2", &row),
+            Ok(Bound::Taken("h1".to_string()))
+        );
+        let hosts = PgLedgerStore::new(database.clone())
+            .load()
+            .expect("load")
+            .hosts;
+        let mut bound = row.clone();
+        bound.instance_uids.insert("01".to_string());
+        assert_eq!(hosts, BTreeMap::from([("h1".to_string(), bound)]));
+    }
+
+    /// A certificate an approval mints a Host for is registered with the Host's row or not at all:
+    /// the row is made in the register's own write, with the approval, and a refused write makes
+    /// neither (ADR-0024 clause 15).
+    /// Verifies: ADR-0024
+    #[test]
+    fn an_approvals_host_is_written_with_its_register_entry_or_not_at_all() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let store = PgLedgerStore::new(database.clone());
+        let minted = Host {
+            approved_ms: Some(3),
+            valid_until_ms: Some(9),
+            ..host(&[], false)
+        };
+        let full = RegisterBounds {
+            size: 0,
+            per_root: 8,
+        };
+        let entry = issued("0a", None);
+        assert!(matches!(
+            store.register_minting(&entry, &full, Some(("h", &minted))),
+            Ok(Registered::Full(_))
+        ));
+        let ledger = store.load().expect("load");
+        assert!(
+            ledger.issued.is_empty() && ledger.hosts.is_empty(),
+            "{ledger:?}"
+        );
+
+        let open = RegisterBounds {
+            size: 8,
+            per_root: 8,
+        };
+        assert_eq!(
+            store.register_minting(&entry, &open, Some(("h", &minted))),
+            Ok(Registered::Registered)
+        );
+        let ledger = store.load().expect("load");
+        assert_eq!(ledger.issued, [entry]);
+        assert_eq!(ledger.hosts, BTreeMap::from([("h".to_string(), minted)]));
+    }
+
     /// An instance whose view of the Hosts is stale cannot bind an `instance_uid` another
     /// instance bound to another Host: B never hears of A's binding, and its report is refused
     /// naming the Host that holds the Agent, by which B decides from then on.
@@ -1477,6 +1698,29 @@ mod tests {
         assert!(c.check_report("h2", &subject, 1_000, b"\x05").is_err());
         c.check_report("h2", &subject, 1_000, b"\x04")
             .expect("a Gateway's Host is bound none");
+    }
+
+    /// A stale instance re-keys only what the store binds: after another instance released the
+    /// old `instance_uid`, a re-key on an instance that never heard of the release binds nothing,
+    /// and the new `instance_uid` is bound by the next Host that reports it (ADR-0024 clause 10).
+    /// Verifies: ADR-0024
+    #[test]
+    fn a_stale_rekey_binds_nothing_another_instance_released() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let instance = instances_on(&database);
+        let subject = SubjectValues::default();
+        let a = instance();
+        a.check_report("h1", &subject, 1_000, b"\x01")
+            .expect("A binds it to h1");
+        instance().release(b"\x01").expect("B releases it");
+        a.rebind(b"\x01", b"\x02")
+            .expect("A, stale, re-keys what the store no longer binds");
+        instance()
+            .check_report("h2", &subject, 1_000, b"\x02")
+            .expect("the new instance_uid is free for the next Host that reports it");
     }
 
     /// What one instance binds, releases and moves reaches every other that follows the

@@ -10,12 +10,12 @@ both versions.
 Ticket 02 left this ticket one such pair: migration 4 moved the bindings of `instance_uid`s into
 `host_bindings`, and the release before it binds through the Hosts' arrays only. The new release
 honours the arrays when it binds, lists each binding in its Host's array in the same transaction,
-and takes a released `instance_uid` out of them. What is left: a Host's first binding is made before
-its row exists, and its row, the binding in its array, is written by the next transaction, so an
-instance of the release before can bind the same `instance_uid` to another Host between the two.
-Migration 4 still names 0.6.1 as the oldest release it serves; decide whether it should name this
-release, or a Host's first binding write its row in the same transaction, until the contract step
-drops the arrays.
+and takes a released `instance_uid` out of them. A Host's first binding makes its row in the same
+transaction, so the binding and its array are committed together. What is left: an instance of
+the release before reads only the arrays, and binds through them alone, so a binding it makes is
+seen by the new release only as an array entry, and one the new release makes is seen by it once
+committed. Migration 4 still names 0.6.1 as the oldest release it serves; decide whether it should
+name this release until the contract step drops the arrays.
 
 ## Acceptance criteria
 

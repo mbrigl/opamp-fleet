@@ -101,6 +101,19 @@ Done in part two:
   `a_renewal_another_instance_registers_is_revoked_with_its_root_on_an_instance_that_follows`,
   `an_instance_uid_only_an_array_lists_is_that_hosts`,
   `the_bindings_leave_a_gateways_array_behind` and `an_import_binds_nothing_to_a_gateways_host`.
+- Third review findings on part two: a binding holds its Host's row with a hold that conflicts
+  with itself, so two binders of one Host wait for each other rather than deadlock; it makes the
+  Host's row first when there is none, in the same write, so no binding stands without its row
+  and a Gateway mark is seen or waits; the Host an approval mints is written in the register's own
+  transaction, so a certificate is never registered without it; a re-key on PostgreSQL moves only
+  what the store binds; the follower's coalescing and its retries are tested. Decided by
+  `two_binders_of_one_host_bind_both_without_a_deadlock`,
+  `a_gateway_mark_and_a_binding_at_once_leave_the_gateway_bound_none`,
+  `a_binding_is_made_with_its_hosts_row`,
+  `an_approvals_host_is_written_with_its_register_entry_or_not_at_all`,
+  `a_stale_rekey_binds_nothing_another_instance_released`,
+  `what_is_heard_at_once_is_answered_by_one_read` and
+  `a_read_that_fails_is_tried_again_until_one_holds`.
 
 Decided by the human:
 
@@ -117,6 +130,9 @@ Open:
   names, is not counted in the write; it is counted in memory per instance.
 - During a rolling update a release before the bindings' table binds through the Hosts' arrays
   only. This release honours those arrays when it binds, lists each binding it makes in its Host's
-  array in the same write, and takes a released `instance_uid` out of them; ticket 11 decides the
-  rest.
+  array in the same write as the Host's row, and takes a released `instance_uid` out of them;
+  ticket 11 decides the rest.
+- Where an instance holds the state lock: every act on a Host and every read of the ledger runs
+  under it, and a report's under the fleet lock as well; whether a read is made outside it and
+  swapped in under it is a question for the human before G-20's load test.
 - Criteria 6 and 7 follow once the rest is built.
