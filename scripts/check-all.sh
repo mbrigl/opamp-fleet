@@ -27,9 +27,11 @@
 # Usage:
 #     scripts/check-all.sh [--changed]        (or: bash scripts/check-all.sh [--changed])
 # CHECK_ALL_JOBS=<n> runs at most n checks at once, 1 one after another; the default is the
-# number of processors.
-# Exit code 0 when every check passes, 1 when any of them fails, 2 on an unknown argument or a
-# CHECK_ALL_JOBS that is no number from 1 up.
+# number of processors. FLEET_MIN_FREE_GB=<n> is the free space, in GB, the build needs on the
+# file system of its target directory; the default is 20, and 0 turns the guard off.
+# Exit code 0 when every check passes, 1 when any of them fails or the disk is short, 2 on an
+# unknown argument, a CHECK_ALL_JOBS that is no number from 1 up, or a FLEET_MIN_FREE_GB that is
+# no number.
 
 set -uo pipefail
 
@@ -56,6 +58,30 @@ case "${1:-}" in
   --changed) changed_mode=1 ;;
   *) echo "check-all: unknown argument '$1' — usage: scripts/check-all.sh [--changed]" >&2; exit 2 ;;
 esac
+
+# A full disk fails the build with a linker bus error or ENOSPC, which reads as a failure of the
+# code. So the free space of the file system that holds the target directory is read before any
+# check starts, and a short disk stops the run with what is free where. CHECK_ALL_FREE_GB stands
+# in for the space found, for the self-test.
+min_free="${FLEET_MIN_FREE_GB:-20}"
+if [[ ! "$min_free" =~ ^[0-9]{1,9}$ ]]; then
+  echo "check-all: FLEET_MIN_FREE_GB must be a number of GB, not '$min_free'" >&2
+  exit 2
+fi
+# Read in base 10: a leading zero would make bash read it as octal.
+min_free=$((10#$min_free))
+if ((min_free > 0)); then
+  target="${CARGO_TARGET_DIR:-$ROOT/target}"
+  # Cargo reads a relative target directory against the working directory.
+  [[ "$target" == /* ]] || target="$PWD/$target"
+  probe="$target"
+  while [[ ! -d "$probe" ]]; do probe="${probe%/*}"; [[ -n "$probe" ]] || probe=/; done
+  free_gb="${CHECK_ALL_FREE_GB:-$(df -Pk "$probe" | awk 'NR == 2 { print int($4 / 1048576) }')}"
+  if ((free_gb < min_free)); then
+    echo "check-all: only $free_gb GB free on the file system of $target; the build needs $min_free GB. Reclaim space with 'cargo clean', or by removing target/debug/incremental and old target directories in /tmp, or set FLEET_MIN_FREE_GB lower on a smaller machine." >&2
+    exit 1
+  fi
+fi
 
 # The paths changed against the merge base with origin/main, else main, read once: the local
 # main may lag the remote's, or a clone without the hooks may have moved it. On main, or without
