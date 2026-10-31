@@ -28,6 +28,9 @@ impl Default for Backoff {
 impl Backoff {
     const START: Duration = Duration::from_secs(1);
     const CAP: Duration = Duration::from_secs(60);
+    /// The window the first reconnect after a lost connection is drawn over: the default heartbeat
+    /// interval.
+    pub const AFTER_LOSS: Duration = Duration::from_secs(30);
 
     #[must_use]
     pub fn new() -> Self {
@@ -38,29 +41,25 @@ impl Backoff {
         self.next = Self::START;
     }
 
+    /// The delay before the first reconnect after an established connection was lost, drawn
+    /// uniformly over `[0, AFTER_LOSS)`; the failures after it start the exponential steps again
+    /// (ADR-draft-tls-1-3-two-planes-and-bounded-input clause 4).
+    ///
+    /// The draw starts at zero, unlike [`advance`](Self::advance): the floor of equal jitter is
+    /// what puts a whole fleet into the same half second once its Server goes away, and a fleet
+    /// lost together is what this spreads.
+    pub fn after_loss(&mut self) -> Duration {
+        self.reset();
+        let window = u64::try_from(Self::AFTER_LOSS.as_nanos()).unwrap_or(u64::MAX);
+        Duration::from_nanos(crate::random::below(window))
+    }
+
     /// The delay to wait now — somewhere in `[ceiling/2, ceiling)`; subsequent failures wait longer.
     pub fn advance(&mut self) -> Duration {
         let ceiling = self.next;
         self.next = (self.next * 2).min(Self::CAP);
         let half = ceiling / 2;
-        half + Duration::from_nanos(random_below(half.as_nanos() as u64))
-    }
-}
-
-/// A uniform draw over `[0, bound)`, from the system's randomness — `ring` is already linked for
-/// package signature verification, so this needs no new dependency for a handful of jitter bits.
-///
-/// A randomness source that will not answer is not worth failing a reconnect over: the fallback is
-/// `0`, which degrades the delay to `ceiling/2` — still a valid backoff, just without the spread.
-fn random_below(bound: u64) -> u64 {
-    use ring::rand::SecureRandom;
-    if bound == 0 {
-        return 0;
-    }
-    let mut bytes = [0u8; 8];
-    match ring::rand::SystemRandom::new().fill(&mut bytes) {
-        Ok(()) => u64::from_le_bytes(bytes) % bound,
-        Err(_) => 0,
+        half + Duration::from_nanos(crate::random::below(half.as_nanos() as u64))
     }
 }
 
@@ -94,6 +93,34 @@ mod tests {
         assert!(
             within(after_reset, Duration::from_secs(1)),
             "{after_reset:?}"
+        );
+    }
+
+    /// The first reconnect after a lost connection is drawn over the whole of `[0, 30 s)`, not its
+    /// upper half, and the failures after it start again from the first exponential step.
+    /// Verifies: ADR-draft-tls-1-3-two-planes-and-bounded-input
+    #[test]
+    fn the_first_reconnect_after_a_lost_connection_is_drawn_over_thirty_seconds() {
+        let mut backoff = Backoff::new();
+        for _ in 0..5 {
+            backoff.advance();
+        }
+        let draws: Vec<Duration> = (0..200).map(|_| backoff.after_loss()).collect();
+        assert!(draws.iter().all(|d| *d < Backoff::AFTER_LOSS), "{draws:?}");
+        // Two hundred uniform draws: some fall in the first and some in the last tenth, which
+        // equal jitter's floor of 15 s would never allow.
+        assert!(
+            draws.iter().any(|d| *d < Duration::from_secs(3)),
+            "{draws:?}"
+        );
+        assert!(
+            draws.iter().any(|d| *d >= Duration::from_secs(27)),
+            "{draws:?}"
+        );
+        let next = backoff.advance();
+        assert!(
+            next >= Duration::from_millis(500) && next < Duration::from_secs(1),
+            "{next:?}"
         );
     }
 
