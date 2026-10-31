@@ -11,8 +11,8 @@ use tokio_postgres::GenericClient;
 use super::notify::{notify, CERTIFICATE, HOST};
 use super::{client, signed, sql, unsigned, Database};
 use crate::revocation::{
-    register_full, Added, Bound, CertId, Facts, Host, Issued, Ledger, LedgerStore, RegisterBounds,
-    Registered, Revocation, CHAIN_FULL,
+    register_full, Added, Bound, CertId, Facts, Host, HostAct, Issued, Ledger, LedgerStore,
+    RegisterBounds, Registered, Revocation, CHAIN_FULL,
 };
 
 /// The ledger in `certificates`, `revocations` and `hosts`. A revocation is written as the one row
@@ -204,14 +204,28 @@ impl LedgerStore for PgLedgerStore {
     }
 
     /// One row per binding, its `instance_uid` the key: a binding another Host holds is left as it
-    /// is and answered with that Host. Until no instance of the release before runs, an
-    /// `instance_uid` another Host's array lists, as that release binds it, is answered as that
-    /// Host's too; a Gateway's array binds nothing (ADR-0024 clause 16).
+    /// is and answered with that Host. A Host whose row is marked as a Gateway is bound none
+    /// (ADR-0024 clause 16); its row is held for the transaction, so a mark committed meanwhile is
+    /// seen, and a mark that waits for it releases what it bound. Until no instance of the release
+    /// before runs, an `instance_uid` another Host's array lists, as that release binds it, is
+    /// answered as that Host's too, and a new binding goes into the Host's array as well; a
+    /// Gateway's array binds nothing.
     fn bind(&self, instance_uid: &str, host: &str) -> Result<Bound, String> {
         let (instance_uid, host) = (instance_uid.to_string(), host.to_string());
         self.database.run(move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
+            let gateway = transaction
+                .query_opt(
+                    "SELECT gateway FROM hosts WHERE host = $1 FOR SHARE",
+                    &[&host],
+                )
+                .await
+                .map_err(sql)?
+                .is_some_and(|row| row.get::<_, bool>(0));
+            if gateway {
+                return Ok(Bound::Gateway);
+            }
             if let Some(row) = transaction
                 .query_opt(
                     "SELECT host FROM hosts WHERE NOT gateway AND host <> $2 \
@@ -242,6 +256,7 @@ impl LedgerStore for PgLedgerStore {
                 .map_err(sql)?
                 .get(0);
             if inserted > 0 {
+                append_to_array(&*transaction, &instance_uid, &host).await?;
                 notify(&*transaction, HOST).await?;
             }
             transaction.commit().await.map_err(sql)?;
@@ -293,6 +308,9 @@ impl LedgerStore for PgLedgerStore {
                 .await
                 .map_err(sql)?
                 .get(0);
+            if holder == host {
+                append_to_array(&*transaction, &new, &host).await?;
+            }
             notify(&*transaction, HOST).await?;
             transaction.commit().await.map_err(sql)?;
             let bound = if holder == host {
@@ -314,6 +332,111 @@ impl LedgerStore for PgLedgerStore {
                 .await
                 .map_err(sql)?;
             if removed > 0 {
+                notify(&*transaction, HOST).await?;
+            }
+            transaction.commit().await.map_err(sql)
+        })
+    }
+
+    fn writes_hosts_by_act(&self) -> bool {
+        true
+    }
+
+    /// One transaction on the rows the act names, each field decided from what is stored, so no
+    /// instance writes back another instance's change from a stale copy.
+    fn write_host_act(&self, act: &HostAct) -> Result<(), String> {
+        let act = act.clone();
+        self.database.run(move |pool| async move {
+            let mut client = client(&pool).await?;
+            let transaction = client.transaction().await.map_err(sql)?;
+            let changed = match &act {
+                HostAct::Seen { host, entry } => {
+                    let uids: Vec<&str> = entry.instance_uids.iter().map(String::as_str).collect();
+                    let subject =
+                        serde_json::to_value(&entry.subject).expect("subject values serialize");
+                    transaction
+                        .execute(
+                            "INSERT INTO hosts (host, gateway, instance_uids, subject, \
+                             approved_ms, valid_until_ms) VALUES ($1, $2, $3, $4, $5, $6) \
+                             ON CONFLICT (host) DO UPDATE SET valid_until_ms = \
+                             GREATEST(hosts.valid_until_ms, EXCLUDED.valid_until_ms) \
+                             WHERE EXCLUDED.valid_until_ms IS NOT NULL",
+                            &[
+                                host,
+                                &entry.gateway,
+                                &uids,
+                                &subject,
+                                &entry.approved_ms.map(signed),
+                                &entry.valid_until_ms.map(signed),
+                            ],
+                        )
+                        .await
+                        .map_err(sql)?
+                        > 0
+                }
+                HostAct::Extended(untils) => {
+                    let mut changed = false;
+                    for (host, until) in untils {
+                        changed |= transaction
+                            .execute(
+                                "UPDATE hosts SET valid_until_ms = \
+                                 GREATEST(valid_until_ms, $2) WHERE host = $1 \
+                                 AND (valid_until_ms IS NULL OR valid_until_ms < $2)",
+                                &[host, &signed(*until)],
+                            )
+                            .await
+                            .map_err(sql)?
+                            > 0;
+                    }
+                    changed
+                }
+                HostAct::Gateway { host, gateway } => {
+                    let subject = serde_json::to_value(crate::revocation::SubjectValues::default())
+                        .expect("subject values serialize");
+                    transaction
+                        .execute(
+                            "INSERT INTO hosts (host, gateway, instance_uids, subject) \
+                             VALUES ($1, $2, '{}', $3) \
+                             ON CONFLICT (host) DO UPDATE SET gateway = EXCLUDED.gateway",
+                            &[host, gateway, &subject],
+                        )
+                        .await
+                        .map_err(sql)?;
+                    if *gateway {
+                        transaction
+                            .execute("DELETE FROM host_bindings WHERE host = $1", &[host])
+                            .await
+                            .map_err(sql)?;
+                        transaction
+                            .execute(
+                                "UPDATE hosts SET instance_uids = '{}' WHERE host = $1",
+                                &[host],
+                            )
+                            .await
+                            .map_err(sql)?;
+                    }
+                    true
+                }
+                HostAct::Forgotten { hosts, now_ms } => {
+                    let gone: Vec<String> = transaction
+                        .query(
+                            "DELETE FROM hosts WHERE host = ANY($1) AND NOT gateway \
+                             AND valid_until_ms <= $2 RETURNING host",
+                            &[hosts, &signed(*now_ms)],
+                        )
+                        .await
+                        .map_err(sql)?
+                        .iter()
+                        .map(|row| row.get(0))
+                        .collect();
+                    transaction
+                        .execute("DELETE FROM host_bindings WHERE host = ANY($1)", &[&gone])
+                        .await
+                        .map_err(sql)?;
+                    !gone.is_empty()
+                }
+            };
+            if changed {
                 notify(&*transaction, HOST).await?;
             }
             transaction.commit().await.map_err(sql)
@@ -384,6 +507,24 @@ async fn unbind_in(
         .await
         .map_err(sql)?;
     Ok(host)
+}
+
+/// Lists `instance_uid` in `host`'s array inside the caller's transaction, as a release before the
+/// bindings' table binds by it; a Host with no row yet takes it with the row its act writes.
+async fn append_to_array(
+    client: &impl GenericClient,
+    instance_uid: &str,
+    host: &str,
+) -> Result<(), String> {
+    client
+        .execute(
+            "UPDATE hosts SET instance_uids = array_append(instance_uids, $1) \
+             WHERE host = $2 AND NOT $1 = ANY(instance_uids)",
+            &[&instance_uid, &host],
+        )
+        .await
+        .map_err(sql)?;
+    Ok(())
 }
 
 /// Binds every `instance_uid` `entry` speaks for to `host`, in a database that holds no binding of
@@ -1418,5 +1559,223 @@ mod tests {
         store.bind("02", "a").expect("bind");
         store.save_hosts(&after).expect("save");
         assert_eq!(store.load().expect("load").hosts, after);
+    }
+
+    /// An `instance_uid` another Host's array lists, and no binding row holds, is answered as that
+    /// Host's while the release before the bindings' table may still run beside this one: it binds
+    /// by the arrays alone.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    #[test]
+    fn an_instance_uid_only_an_array_lists_is_that_hosts() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let store = PgLedgerStore::new(test.open());
+        store
+            .save_hosts(&BTreeMap::from([("a".to_string(), host(&["01"], false))]))
+            .expect("save");
+        assert!(test
+            .rows("SELECT 1 FROM host_bindings WHERE instance_uid = '01'")
+            .is_empty());
+        assert_eq!(store.bind("01", "b"), Ok(Bound::Taken("a".to_string())));
+        assert_eq!(store.bind("01", "a"), Ok(Bound::Bound));
+    }
+
+    /// A Gateway's Host is bound none when the bindings leave the arrays: an `instance_uid` a
+    /// Gateway's array and a Host's array both list moves to the Host, and the migration passes
+    /// (ADR-0024 clause 16).
+    /// Verifies: ADR-0024
+    #[test]
+    fn the_bindings_leave_a_gateways_array_behind() {
+        use crate::postgres::schema::{MIGRATIONS, SCHEMA_TABLE};
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        PgLedgerStore::new(database.clone())
+            .save_hosts(&BTreeMap::from([
+                ("g".to_string(), host(&["01"], true)),
+                ("h".to_string(), host(&["01"], false)),
+            ]))
+            .expect("save");
+        test.sql(&format!(
+            "DROP TABLE host_bindings; DROP INDEX certificates_predecessor; \
+             DELETE FROM {SCHEMA_TABLE} WHERE version = 4"
+        ));
+        assert_eq!(
+            database.apply_schema(MIGRATIONS).expect("migrate").versions,
+            [4]
+        );
+        assert_eq!(
+            test.rows("SELECT instance_uid, host FROM host_bindings"),
+            [vec![Some("01".to_string()), Some("h".to_string())]]
+        );
+    }
+
+    /// An import binds none of the `instance_uid`s a Gateway's file lists (ADR-0024 clause 16).
+    /// Verifies: ADR-0024
+    #[test]
+    fn an_import_binds_nothing_to_a_gateways_host() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        database
+            .run(|pool| async move {
+                let client = client(&pool).await?;
+                write_bindings(&**client, "g", &host(&["01"], true)).await?;
+                write_bindings(&**client, "h", &host(&["02"], false)).await
+            })
+            .expect("write");
+        assert_eq!(
+            test.rows("SELECT instance_uid, host FROM host_bindings"),
+            [vec![Some("02".to_string()), Some("h".to_string())]]
+        );
+    }
+
+    /// A register entry another instance writes reaches an instance that follows, without a
+    /// restart, and a revocation of its chain's root revokes it there: B learns of A's renewal from
+    /// its notification alone, and then refuses it once the root is revoked
+    /// (ADR-draft-admission-by-client-certificate-and-revocation clause 28).
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    #[test]
+    fn a_renewal_another_instance_registers_is_revoked_with_its_root_on_an_instance_that_follows() {
+        use crate::revocation::Revoked;
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let instance = instances_on(&database);
+        let a = instance();
+        let b = Arc::new(instance());
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        {
+            let _entered = runtime.enter();
+            crate::instance::follow_revocations(&database, b.clone());
+        }
+        let eventually = |condition: &dyn Fn() -> bool| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while std::time::Instant::now() < deadline {
+                if condition() {
+                    return true;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            false
+        };
+        let root = issued("0a", None).facts;
+        let renewal = issued("0b", Some("0a")).facts;
+        a.record(root.clone(), b"\x01", None).expect("root");
+        a.record(renewal.clone(), b"\x01", Some(root.id.clone()))
+            .expect("renewal");
+        assert!(
+            eventually(&|| b.issued_entry(&renewal.id).is_some()),
+            "B hears of the renewal A registered"
+        );
+        assert!(!b.is_certificate_revoked(&renewal.id));
+        PgLedgerStore::new(database.clone())
+            .add_revocation(
+                &Revocation {
+                    id: "r".into(),
+                    revoked: Revoked::Certificate {
+                        authority: "client".into(),
+                        issuers: vec![root.id.issuer.clone()],
+                        serial: root.id.serial.clone(),
+                    },
+                    revoked_ms: 1,
+                },
+                10,
+            )
+            .expect("revoke the root");
+        assert!(
+            eventually(&|| b.is_certificate_revoked(&renewal.id)),
+            "B refuses the renewal of a revoked root"
+        );
+    }
+
+    /// An approval's fields survive a first report another instance makes from a stale view: B
+    /// never heard of A's approval, makes the Host at its first report, and what is stored is
+    /// still the approved Host, its valid until moved forward.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    #[test]
+    fn an_approval_survives_a_first_report_on_an_instance_that_never_heard_of_it() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let instance = instances_on(&database);
+        let b = instance();
+        let a = instance();
+        let approved = issued("0a", None).facts;
+        let host = approved.host.clone().expect("a host");
+        a.record(approved.clone(), b"\x01", None).expect("approve");
+        b.check_report(&host, &SubjectValues::default(), 50, b"\x02")
+            .expect("B's first report");
+        let stored = PgLedgerStore::new(database.clone())
+            .load()
+            .expect("load")
+            .hosts
+            .remove(&host)
+            .expect("the Host");
+        assert_eq!(stored.approved_ms, Some(1), "the approval is kept");
+        assert_eq!(
+            stored.subject, approved.subject_values,
+            "its subject is kept"
+        );
+        assert_eq!(
+            stored.valid_until_ms,
+            Some(50),
+            "its valid until moved forward"
+        );
+        assert!(stored.instance_uids.contains("02"));
+    }
+
+    /// No instance writes a Host's mark back from a stale copy: B takes the Gateway mark away, A
+    /// never heard of it and moves the Host's valid until forward at its next report, and the
+    /// Host stays unmarked (ADR-0024 clause 16).
+    /// Verifies: ADR-0024
+    #[test]
+    fn a_stale_instance_does_not_write_a_gateways_mark_back() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let instance = instances_on(&database);
+        let a = instance();
+        let subject = SubjectValues::default();
+        a.check_report("g", &subject, 10, b"\x01").expect("report");
+        assert!(a.set_gateway("g", true).expect("mark"));
+        let b = instance();
+        assert!(b.set_gateway("g", false).expect("unmark"));
+        a.check_report("g", &subject, 20, b"\x02")
+            .expect("A, stale, extends the Host");
+        let c = instance();
+        assert!(!c.is_gateway("g"), "the mark B took away stays away");
+    }
+
+    /// A Host the store holds marked as a Gateway is bound none, however stale the binder's view:
+    /// B never heard of A's mark, its report from the Gateway binds nothing, and the
+    /// `instance_uid` stays free for the Host that carries it (ADR-0024 clause 16).
+    /// Verifies: ADR-0024
+    #[test]
+    fn a_stale_instance_binds_nothing_to_a_gateways_host() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let instance = instances_on(&database);
+        let a = instance();
+        let subject = SubjectValues::default();
+        a.check_report("g", &subject, 10, b"\x01").expect("report");
+        let b = instance();
+        assert!(a.set_gateway("g", true).expect("mark"));
+        b.check_report("g", &subject, 10, b"\x02")
+            .expect("B reports for the Gateway");
+        assert!(test
+            .rows("SELECT 1 FROM host_bindings WHERE host = 'g'")
+            .is_empty());
+        instance()
+            .check_report("h", &subject, 10, b"\x02")
+            .expect("the instance_uid is free");
     }
 }

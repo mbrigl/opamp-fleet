@@ -9,11 +9,13 @@ both versions.
 
 Ticket 02 left this ticket one such pair: migration 4 moved the bindings of `instance_uid`s into
 `host_bindings`, and the release before it binds through the Hosts' arrays only. The new release
-honours the arrays when it binds and takes a released `instance_uid` out of them, but a binding it
-makes reaches the arrays only with its next write of the Hosts, so an instance of the release before
-can bind the same `instance_uid` to another Host meanwhile. Migration 4 still names 0.6.1 as the
-oldest release it serves; decide whether it should name this release, or the new release write the
-arrays in the same transaction as the binding until the contract step drops them.
+honours the arrays when it binds, lists each binding in its Host's array in the same transaction,
+and takes a released `instance_uid` out of them. What is left: a Host's first binding is made before
+its row exists, and its row, the binding in its array, is written by the next transaction, so an
+instance of the release before can bind the same `instance_uid` to another Host between the two.
+Migration 4 still names 0.6.1 as the oldest release it serves; decide whether it should name this
+release, or a Host's first binding write its row in the same transaction, until the contract step
+drops the arrays.
 
 ## Acceptance criteria
 

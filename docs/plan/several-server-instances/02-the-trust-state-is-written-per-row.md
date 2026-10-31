@@ -87,6 +87,20 @@ Done in part two:
   an instance reads the register and the Hosts again. Decided by
   `a_release_a_rekey_and_a_gateway_mark_hold_for_every_instance`,
   `a_binding_another_instance_changes_reaches_an_instance_that_follows` and the ledger contract.
+- Re-review findings on part two: on PostgreSQL every act on a Host is one transaction on its row,
+  written under the lock a reload reads under, each field decided from what is stored (a valid
+  until only moves forward, an approval and a subject are written only into a Host with no row
+  yet, a Host is forgotten only while its stored valid until has passed), so no instance writes
+  another's change back from a stale copy and no reload drops a write not yet committed; marking
+  a Gateway and releasing its bindings is one write, and a binding refuses a Host stored as a
+  Gateway; what an instance hears while it reads the ledger is answered by one read after it, a
+  failed read is tried again, and a revocation is read with the whole ledger. Decided by
+  `an_approval_survives_a_first_report_on_an_instance_that_never_heard_of_it`,
+  `a_stale_instance_does_not_write_a_gateways_mark_back`,
+  `a_stale_instance_binds_nothing_to_a_gateways_host`,
+  `a_renewal_another_instance_registers_is_revoked_with_its_root_on_an_instance_that_follows`,
+  `an_instance_uid_only_an_array_lists_is_that_hosts`,
+  `the_bindings_leave_a_gateways_array_behind` and `an_import_binds_nothing_to_a_gateways_host`.
 
 Decided by the human:
 
@@ -102,7 +116,7 @@ Open:
   ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
   names, is not counted in the write; it is counted in memory per instance.
 - During a rolling update a release before the bindings' table binds through the Hosts' arrays
-  only. This release honours those arrays when it binds and takes a released `instance_uid` out of
-  them, but a binding this release makes is in the arrays only once a write of the Hosts carries
-  it; ticket 11 decides the rest.
+  only. This release honours those arrays when it binds, lists each binding it makes in its Host's
+  array in the same write, and takes a released `instance_uid` out of them; ticket 11 decides the
+  rest.
 - Criteria 6 and 7 follow once the rest is built.

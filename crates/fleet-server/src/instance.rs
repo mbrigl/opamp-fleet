@@ -265,10 +265,11 @@ fn lock_lost(held: &watch::Sender<Option<String>>, instance_id: &str) {
 /// Takes up the revocations other instances commit
 /// (ADR-draft-admission-by-client-certificate-and-revocation clause 32): each one announced, and
 /// every time the listening connection is made, since what was committed before it was not heard,
-/// the list is read again and the sessions check themselves against it. A Host or a register entry
-/// another instance writes is taken up the same way, with the whole ledger
+/// the ledger is read again and the sessions check themselves against it. A Host or a register
+/// entry another instance writes is taken up the same way
 /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
-/// clause 19).
+/// clause 19). What is heard while a read runs is taken up by one read after it, and a read that
+/// fails is tried again until one holds.
 pub fn follow_revocations(database: &Database, revocations: Arc<Revocations>) {
     let (heard, mut hearing) = tokio::sync::mpsc::unbounded_channel();
     database.listen(move |what| {
@@ -276,29 +277,44 @@ pub fn follow_revocations(database: &Database, revocations: Arc<Revocations>) {
     });
     tokio::spawn(async move {
         while let Some(what) = hearing.recv().await {
-            // A revocation is read on its own; a Host or a register entry another instance wrote
-            // is read with the whole ledger, as is everything once the connection is made again.
-            let whole = match &what {
-                Heard::Notified(kind) if kind == REVOCATION => false,
-                Heard::Notified(kind) if kind == HOST || kind == CERTIFICATE => true,
-                Heard::Notified(_) => continue,
-                Heard::Listening => true,
-            };
-            let revocations = revocations.clone();
-            let read = tokio::task::spawn_blocking(move || {
-                if whole {
-                    revocations.reload_ledger()
-                } else {
-                    revocations.reload_revocations()
-                }
-            })
-            .await
-            .unwrap_or_else(|e| Err(e.to_string()));
-            if let Err(e) = read {
-                warn!(error = %e, "could not read the revocations other instances committed");
+            let mut due = calls_for_a_read(&what);
+            // Everything heard by now is answered by the one read.
+            while let Ok(more) = hearing.try_recv() {
+                due |= calls_for_a_read(&more);
+            }
+            if !due {
+                continue;
+            }
+            let mut wait = RELOAD_RETRY_FIRST;
+            loop {
+                let revocations = revocations.clone();
+                let read = tokio::task::spawn_blocking(move || revocations.reload_ledger())
+                    .await
+                    .unwrap_or_else(|e| Err(e.to_string()));
+                let Err(e) = read else { break };
+                warn!(error = %e, "could not read the ledger other instances committed");
+                tokio::time::sleep(wait).await;
+                wait = (wait * 2).min(RELOAD_RETRY_MAX);
+                // What was heard while waiting is answered by the read tried again.
+                while hearing.try_recv().is_ok() {}
             }
         }
     });
+}
+
+/// The first wait before a failed read of the ledger is tried again; each next one doubles.
+const RELOAD_RETRY_FIRST: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// The longest wait before a failed read of the ledger is tried again.
+const RELOAD_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Whether what was heard calls for the ledger to be read again: a revocation, a Host or a
+/// register entry another instance wrote, and the connection made again.
+fn calls_for_a_read(what: &Heard) -> bool {
+    match what {
+        Heard::Notified(kind) => kind == REVOCATION || kind == HOST || kind == CERTIFICATE,
+        Heard::Listening => true,
+    }
 }
 
 /// The two planes as the binary builds them (ADR-0012): what each serves, its TLS and how many

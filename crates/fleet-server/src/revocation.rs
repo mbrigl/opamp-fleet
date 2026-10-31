@@ -353,10 +353,33 @@ pub trait LedgerStore: Send + Sync {
         Ok(())
     }
 
+    /// Whether the store writes each act on a Host as one transaction on the row it names
+    /// ([`write_host_act`](Self::write_host_act)), so no instance writes another instance's change
+    /// back from a stale copy; one that is its only writer writes the Hosts whole with
+    /// [`save_hosts`](Self::save_hosts) instead.
+    fn writes_hosts_by_act(&self) -> bool {
+        false
+    }
+
+    /// Writes one act on the Hosts, deciding each field from what is stored: a valid until only
+    /// moves forward, an approval and a subject are written only into a Host that has no row yet,
+    /// and a Host is forgotten only while what is stored says it has ended
+    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// clause 19). A store that writes the Hosts whole writes nothing here.
+    ///
+    /// # Errors
+    /// Returns an error when it cannot be written; the Hosts are then as they were.
+    fn write_host_act(&self, act: &HostAct) -> Result<(), String> {
+        let _ = act;
+        Ok(())
+    }
+
     /// Writes the Hosts as `hosts` holds them, each one that changed since the last write and each
     /// one that is gone, with the `instance_uid`s each speaks for. A store that keeps the bindings
     /// in rows of their own ([`bind`](Self::bind)) writes a Host's own fields here and removes
-    /// the bindings of a Host that is gone; the `instance_uid`s it reads back are those rows.
+    /// the bindings of a Host that is gone; the `instance_uid`s it reads back are those rows. One
+    /// that writes the Hosts by act ([`writes_hosts_by_act`](Self::writes_hosts_by_act)) is
+    /// written so by the Server only through its acts; this writes what an import carries.
     ///
     /// # Errors
     /// Returns an error when they cannot be written.
@@ -370,6 +393,25 @@ pub enum Bound {
     Bound,
     /// Another Host holds it: this one.
     Taken(String),
+    /// The Host asked for is marked as a Gateway, which is bound none (ADR-0024 clause 16).
+    Gateway,
+}
+
+/// One act on the Hosts, written as one transaction on the rows it names by a store that writes
+/// them so ([`LedgerStore::write_host_act`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HostAct {
+    /// A Host an approval or a first report makes: written as `entry` holds it when the store has
+    /// no row of it, else only its valid until moved forward to `entry`'s.
+    Seen { host: String, entry: Host },
+    /// Valid untils moved forward, each never back.
+    Extended(Vec<(String, u64)>),
+    /// A Host marked as a Gateway, or no longer; marking it releases every `instance_uid` bound to
+    /// it in the same write.
+    Gateway { host: String, gateway: bool },
+    /// Hosts whose valid until had passed at `now_ms`, forgotten with their bindings, each only
+    /// while what is stored still says so.
+    Forgotten { hosts: Vec<String>, now_ms: u64 },
 }
 
 /// The refusal of a binding another Host holds.
@@ -854,19 +896,20 @@ impl Revocations {
         // The approval that mints a host id writes the Host (ADR-0024 clause 15): an issuance that
         // renews nothing and names a host the register does not know yet.
         // Every issuance moves its Host's valid until forward (ADR-0024 clause 15).
-        let hosts = match (&recorded, minted, &facts.host) {
+        let act = match (&recorded, minted, &facts.host) {
             (Ok(()), true, Some(host)) if !state.hosts.contains_key(host) => {
                 let now = self.clock.now_ms();
-                state.hosts.insert(
-                    host.clone(),
-                    Host {
-                        subject: facts.subject_values.clone(),
-                        approved_ms: Some(now),
-                        valid_until_ms: Some(facts.not_after_ms),
-                        ..Host::default()
-                    },
-                );
-                Some(Self::hosts_changed(&mut state))
+                let entry = Host {
+                    subject: facts.subject_values.clone(),
+                    approved_ms: Some(now),
+                    valid_until_ms: Some(facts.not_after_ms),
+                    ..Host::default()
+                };
+                state.hosts.insert(host.clone(), entry.clone());
+                Some(HostAct::Seen {
+                    host: host.clone(),
+                    entry,
+                })
             }
             (Ok(()), _, Some(host))
                 if state
@@ -874,9 +917,21 @@ impl Revocations {
                     .get_mut(host)
                     .is_some_and(|entry| entry.extend(facts.not_after_ms)) =>
             {
-                Some(Self::hosts_changed(&mut state))
+                Some(HostAct::Extended(vec![(host.clone(), facts.not_after_ms)]))
             }
-            _ => forgotten,
+            _ => None,
+        };
+        if self.store.writes_hosts_by_act() {
+            // Written under the lock, so a reload this instance makes meanwhile reads it back.
+            if let Some(act) = act {
+                self.write_act_logged(&act);
+            }
+            return recorded;
+        }
+        let hosts = if act.is_some() {
+            Some(Self::hosts_changed(&mut state))
+        } else {
+            forgotten
         };
         drop(state);
         self.write_forgotten(hosts);
@@ -967,9 +1022,8 @@ impl Revocations {
     ) -> Result<(), String> {
         let uid = hex::encode(instance_uid);
         let mut state = self.state.lock().expect("revocation lock");
-        let binds = Self::admits(&state, host, &uid)?;
+        let binds = Self::admits(&state, host, &uid)? && self.bind(&mut state, &uid, host)?;
         if binds {
-            self.bind(&mut state, &uid, host)?;
             state
                 .hosts
                 .entry(host.to_string())
@@ -987,19 +1041,26 @@ impl Revocations {
         if extended {
             state.earliest_expiry_ms = state.earliest_expiry_ms.min(not_after_ms);
         }
-        if binds || extended {
-            self.save_hosts(state)
-        } else {
-            Ok(())
+        if !(binds || extended) {
+            return Ok(());
         }
+        if self.store.writes_hosts_by_act() {
+            let Some(entry) = state.hosts.get(host).cloned() else {
+                return Ok(());
+            };
+            return self.store.write_host_act(&HostAct::Seen {
+                host: host.to_string(),
+                entry,
+            });
+        }
+        self.save_hosts(state)
     }
 
     /// Releases `instance_uid` from the Host it is bound to, when an operator forgets its Agent
     /// (ADR-0024 clause 10): the next host that reports it binds it.
     ///
     /// # Errors
-    /// Returns an error when the release cannot be written; it holds in memory all the same, and
-    /// the next write of the hosts carries it.
+    /// Returns an error when the release cannot be written; nothing is released then.
     pub fn release(&self, instance_uid: &[u8]) -> Result<(), String> {
         let uid = hex::encode(instance_uid);
         let mut state = self.state.lock().expect("revocation lock");
@@ -1012,22 +1073,27 @@ impl Revocations {
                 entry.instance_uids.remove(&uid);
             }
         }
+        if self.store.writes_hosts_by_act() {
+            return Ok(());
+        }
         self.save_hosts(state)
     }
 
-    /// Binds `uid` to `host` in the store and in `state`. A binding another Host holds refuses
-    /// it, naming that Host, and is what `state` holds from then on.
-    fn bind(&self, state: &mut State, uid: &str, host: &str) -> Result<(), String> {
+    /// Binds `uid` to `host` in the store and in `state`, and answers whether it is bound. A
+    /// binding another Host holds refuses it, naming that Host, and is what `state` holds from
+    /// then on; a Host the store holds marked as a Gateway is bound none.
+    fn bind(&self, state: &mut State, uid: &str, host: &str) -> Result<bool, String> {
         let bound = self.store.bind(uid, host)?;
         Self::take_up(state, uid, host, bound)
     }
 
-    /// Takes up in `state` what the store answered for binding `uid` to `host`.
-    fn take_up(state: &mut State, uid: &str, host: &str, bound: Bound) -> Result<(), String> {
+    /// Takes up in `state` what the store answered for binding `uid` to `host`: whether it is
+    /// bound.
+    fn take_up(state: &mut State, uid: &str, host: &str, bound: Bound) -> Result<bool, String> {
         match bound {
             Bound::Bound => {
                 state.owners.insert(uid.to_string(), host.to_string());
-                Ok(())
+                Ok(true)
             }
             Bound::Taken(holder) => {
                 if let Some(entry) = state.hosts.get_mut(&holder) {
@@ -1035,6 +1101,14 @@ impl Revocations {
                 }
                 state.owners.insert(uid.to_string(), holder.clone());
                 Err(bound_elsewhere(uid, &holder))
+            }
+            Bound::Gateway => {
+                if let Some(entry) = state.hosts.get_mut(host) {
+                    entry.gateway = true;
+                    entry.instance_uids.clear();
+                }
+                state.owners.retain(|_, owner| owner != host);
+                Ok(false)
             }
         }
     }
@@ -1093,22 +1167,29 @@ impl Revocations {
                 entry.instance_uids.remove(&old);
             }
         }
-        // The store moves the binding it holds, whatever this instance holds in memory.
+        // The store moves the binding it holds, whatever this instance holds in memory. A store
+        // that is its only writer answers from what it last wrote, so the binding this instance
+        // holds is the one it moves.
+        let by_act = self.store.writes_hosts_by_act();
         let moved = self.store.rebind(&old, &new)?;
         let (host, bound) = match (moved, held) {
             (Some((host, bound)), _) => (host, bound),
-            (None, Some(host)) => {
+            (None, Some(host)) if !by_act => {
                 let bound = self.store.bind(&new, &host)?;
                 (host, bound)
             }
-            (None, None) => return Ok(()),
+            (None, _) => return Ok(()),
         };
         if let Some(entry) = state.hosts.get_mut(&host) {
             entry.instance_uids.remove(&old);
         }
-        Self::take_up(&mut state, &new, &host, bound)?;
-        if let Some(entry) = state.hosts.get_mut(&host) {
-            entry.instance_uids.insert(new);
+        if Self::take_up(&mut state, &new, &host, bound)? {
+            if let Some(entry) = state.hosts.get_mut(&host) {
+                entry.instance_uids.insert(new);
+            }
+        }
+        if by_act {
+            return Ok(());
         }
         self.save_hosts(state)
     }
@@ -1127,10 +1208,18 @@ impl Revocations {
         if !known {
             return Ok(false);
         }
+        if self.store.writes_hosts_by_act() {
+            // The mark and the release of every binding it ends are one write.
+            self.store.write_host_act(&HostAct::Gateway {
+                host: host.to_string(),
+                gateway,
+            })?;
+        } else if gateway {
+            self.store.unbind_host(host)?;
+        }
         if gateway {
             // A Gateway's Host is bound no `instance_uid`: it carries other hosts' Agents
             // (ADR-0024 clause 16).
-            self.store.unbind_host(host)?;
             state.owners.retain(|_, owner| owner != host);
             if let Some(entry) = state.hosts.get_mut(host) {
                 entry.instance_uids.clear();
@@ -1143,7 +1232,9 @@ impl Revocations {
         if !gateway {
             state.earliest_expiry_ms = state.earliest_expiry_ms.min(until);
         }
-        self.save_hosts(state)?;
+        if !self.store.writes_hosts_by_act() {
+            self.save_hosts(state)?;
+        }
         Ok(true)
     }
 
@@ -1162,6 +1253,14 @@ impl Revocations {
             if let Err(e) = self.write_hosts(version, &hosts) {
                 tracing::warn!(error = %e, "cannot write the hosts");
             }
+        }
+    }
+
+    /// Writes an act the register's write or a prune made on the Hosts. They do not depend on it,
+    /// so a failure is logged; the next act on the Host carries its valid until forward.
+    fn write_act_logged(&self, act: &HostAct) {
+        if let Err(e) = self.store.write_host_act(act) {
+            tracing::warn!(error = %e, "cannot write the hosts");
         }
     }
 
@@ -1378,32 +1477,16 @@ impl Revocations {
             .is_some_and(|host| host.gateway)
     }
 
-    /// Reads the list again from the store, as another instance may have changed it, and
-    /// announces it, so every open session checks itself against what is stored
-    /// (ADR-draft-admission-by-client-certificate-and-revocation clause 32).
-    ///
-    /// # Errors
-    /// Returns an error when the store cannot be read; the list held is then kept.
-    pub fn reload_revocations(&self) -> Result<(), String> {
-        // Read under the lock a revocation of this instance's own is written under, so one written
-        // meanwhile is never put back out of what is held.
-        let mut state = self.state.lock().expect("revocation lock");
-        let ledger = self.store.load()?;
-        if state.revocations == ledger.revocations {
-            return Ok(());
-        }
-        state.revocations = ledger.revocations;
-        state.revoked = None;
-        drop(state);
-        self.changes.send_modify(|rev| *rev += 1);
-        Ok(())
-    }
-
     /// Reads the register and the Hosts again from the store, as another instance may have changed
     /// them, so what this instance admits follows what is stored: an `instance_uid` another instance
     /// bound, released or moved, a Host it marked, and the entries it registered
     /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
-    /// clause 19). The revocation list is read again too, and announced when it changed.
+    /// clause 19). The revocation list is read again too, and announced when it changed, so every
+    /// open session checks itself against what is stored
+    /// (ADR-draft-admission-by-client-certificate-and-revocation clause 32).
+    ///
+    /// It reads under the lock every act of this instance's own is written under, so an act
+    /// written meanwhile is never put back out of what is held.
     ///
     /// # Errors
     /// Returns an error when the store cannot be read; what is held is then kept.
@@ -1476,10 +1559,12 @@ impl Revocations {
                 *until = (*until).max(issued.facts.not_after_ms);
             }
         }
-        let mut changed = false;
+        let mut extended = Vec::new();
         for (name, host) in &mut state.hosts {
             if let Some(until) = latest.get(name.as_str()) {
-                changed |= host.extend(*until);
+                if host.extend(*until) {
+                    extended.push((name.clone(), *until));
+                }
             }
         }
         let ended: BTreeSet<String> = state
@@ -1491,9 +1576,22 @@ impl Revocations {
         if !ended.is_empty() {
             state.hosts.retain(|name, _| !ended.contains(name));
             state.owners.retain(|_, owner| !ended.contains(owner));
-            changed = true;
         }
-        let forgotten = changed.then(|| Self::hosts_changed(state));
+        let changed = !extended.is_empty() || !ended.is_empty();
+        let forgotten = if self.store.writes_hosts_by_act() {
+            if !extended.is_empty() {
+                self.write_act_logged(&HostAct::Extended(extended));
+            }
+            if !ended.is_empty() {
+                self.write_act_logged(&HostAct::Forgotten {
+                    hosts: ended.into_iter().collect(),
+                    now_ms: now,
+                });
+            }
+            None
+        } else {
+            changed.then(|| Self::hosts_changed(state))
+        };
         // Kept entries that have expired are revoked ancestors' chains: the next prune is due when
         // the first entry still valid expires, or the first Host's valid until passes.
         state.earliest_expiry_ms = state
