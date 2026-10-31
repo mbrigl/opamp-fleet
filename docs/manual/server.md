@@ -600,7 +600,8 @@ is not provided.
 
 A Server before 0.5.5 kept its state in two directories, `config_dir` (default `fleet-configs`) and
 `packages_dir` (default `fleet-packages`). This Server reads neither: a `server.toml` naming either
-key stops it at startup. `server migrate` moves an installation once, offline:
+key stops it at startup. `server migrate` moves an installation once, offline. The whole path from
+a 0.5 fleet, Clients included, is [Upgrading from 0.5](upgrade.md).
 
 1. **Stop the Server.** The migration copies files; a Server still writing them would be copied
    half-way. The older Server takes no lock the migration could test, so this step is yours.
@@ -1521,8 +1522,8 @@ Package between the two can move its package backwards — a Collector calling i
 an `otelcol` Package at `2.0.0` can be assigned a `1.5.0`. Nothing moves on its own: a rollout is
 an explicit act and you see the version you press. This reaches only Agents that report a
 `service.version` of their own — the Client itself, and an OpAMP-aware Managed Process such as a
-Collector carrying `opampextension`. An Icinga 2 or a GLPI Agent reports none, so its Packages
-keep being matched on the package status alone. **Number a Package the way the program it carries
+Collector carrying `opampextension`. A program that reports none keeps its Packages matched on
+the package status alone. **Number a Package the way the program it carries
 numbers itself**, and neither case arises.
 
 Versions are still kept side by side — a new version is a new Package, and the older artifact

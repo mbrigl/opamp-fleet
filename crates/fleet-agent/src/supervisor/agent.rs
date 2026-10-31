@@ -2069,7 +2069,7 @@ mod tests {
         let _ = agent.next_report();
 
         for (offer, reason) in [
-            (package_offer("telegraf", "1.30.0", b"other"), "telegraf"),
+            (package_offer("fluent-bit", "3.1.0", b"other"), "fluent-bit"),
             (package_offer("otelcol", "0.109.0", b"older"), "older"),
         ] {
             let handled = agent.handle(&ServerToAgent {

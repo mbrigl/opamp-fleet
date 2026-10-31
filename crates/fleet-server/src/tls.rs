@@ -9,9 +9,10 @@
 
 use std::path::Path;
 
+use fleet_core::x509::read::Ca;
 use opamp::server::listen::{ClientAuth, ServerTls};
 use opamp::tls::Identity;
-use x509_parser::prelude::{FromDer, SubjectPublicKeyInfo, X509Certificate};
+use x509_parser::prelude::{FromDer, X509Certificate};
 
 use crate::config::{EnrolmentConfig, RestTlsConfig, TlsConfig};
 use crate::revocation::{name_hash, Authority, CertId, SubjectValues};
@@ -36,15 +37,6 @@ pub struct Issuers {
     members: Vec<Ca>,
     /// The CAs of `bootstrap_ca_file`.
     bootstrap: Vec<Ca>,
-}
-
-/// One certificate of a CA file, as far as it is read: its subject, raw and as text, and its
-/// public key (`SubjectPublicKeyInfo`, DER).
-#[derive(Clone, Debug)]
-struct Ca {
-    subject: Vec<u8>,
-    name: String,
-    key: Vec<u8>,
 }
 
 /// What the certificate a connection carries makes it (ADR-0021).
@@ -74,13 +66,7 @@ impl Issuers {
         let Ok((_, parsed)) = X509Certificate::from_der(certificate) else {
             return enrolling(certificate);
         };
-        let issuer = parsed.issuer().as_raw();
-        let member = self.bootstrap.is_empty()
-            || self.members.iter().any(|ca| {
-                ca.subject == issuer
-                    && SubjectPublicKeyInfo::from_der(&ca.key)
-                        .is_ok_and(|(_, key)| parsed.verify_signature(Some(&key)).is_ok())
-            });
+        let member = self.bootstrap.is_empty() || self.members.iter().any(|ca| ca.issued(&parsed));
         if member {
             return Peer::Member;
         }
@@ -99,12 +85,7 @@ impl Issuers {
     pub fn bootstrap_issued(&self, certificate: &[u8]) -> Result<Peer, String> {
         let (_, parsed) = X509Certificate::from_der(certificate)
             .map_err(|_| "its certificate does not parse".to_string())?;
-        let issuer = parsed.issuer().as_raw();
-        if !self.bootstrap.iter().any(|ca| {
-            ca.subject == issuer
-                && SubjectPublicKeyInfo::from_der(&ca.key)
-                    .is_ok_and(|(_, key)| parsed.verify_signature(Some(&key)).is_ok())
-        }) {
+        if !self.bootstrap.iter().any(|ca| ca.issued(&parsed)) {
             return Err("its certificate was not issued by the bootstrap CA".to_string());
         }
         // As webpki checks an end-entity certificate for client authentication: no CA, and an
@@ -132,12 +113,15 @@ pub fn enrolling(certificate: &[u8]) -> Peer {
     use sha2::{Digest, Sha256};
     let fingerprint = hex::encode(Sha256::digest(certificate));
     match X509Certificate::from_der(certificate) {
-        Ok((_, parsed)) => Peer::Enrolling {
-            subject: crate::ca::name_text(parsed.subject()),
-            carried: Box::new(crate::ca::carried_subject(parsed.subject())),
-            fingerprint,
-            id: CertId::new(parsed.issuer().as_raw(), &hex::encode(parsed.raw_serial())),
-        },
+        Ok((_, parsed)) => {
+            let (issuer, serial) = fleet_core::x509::read::id(&parsed);
+            Peer::Enrolling {
+                subject: crate::ca::name_text(parsed.subject()),
+                carried: Box::new(crate::ca::carried_subject(parsed.subject())),
+                fingerprint,
+                id: CertId { issuer, serial },
+            }
+        }
         Err(_) => Peer::Enrolling {
             subject: String::new(),
             carried: Box::new(Err("the certificate does not parse".to_string())),
@@ -263,13 +247,7 @@ fn cas(path: &Path, pem: &[u8]) -> Result<Vec<Ca>, String> {
         .map_err(|e| in_file(path, &e))?
         .iter()
         .map(|der| {
-            X509Certificate::from_der(der.as_ref())
-                .map(|(_, cert)| Ca {
-                    subject: cert.subject().as_raw().to_vec(),
-                    name: cert.subject().to_string(),
-                    key: cert.public_key().raw.to_vec(),
-                })
-                .map_err(|e| format!("cannot parse {}: {e}", path.display()))
+            Ca::of(der.as_ref()).map_err(|e| format!("cannot parse {}: {e}", path.display()))
         })
         .collect()
 }

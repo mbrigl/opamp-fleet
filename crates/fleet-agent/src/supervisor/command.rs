@@ -39,9 +39,8 @@ struct CommandSettings {
 }
 
 /// The keys this kind does not take (ADR-0017), each with what answers it. Refused by name rather
-/// than met with serde's "unknown field", for the reason `icinga2` refuses its own: a block
-/// carrying one expects a Client that needs it, and the operator deleting the line deserves to be
-/// told where the value went.
+/// than met with serde's "unknown field", because a block carrying one expects a Client that needs
+/// it, and the operator deleting the line deserves to be told where the value went.
 const RETIRED: &[(&str, &str)] = &[
     (
         "working_dir",

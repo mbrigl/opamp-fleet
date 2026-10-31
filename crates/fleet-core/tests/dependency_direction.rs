@@ -1,7 +1,8 @@
 //! The dependency direction of ADR-0009: a module of the core depends on no adapter and on no
 //! technology. Every source file of the workspace's library crates has a role in `ROLES`; the core
 //! files are read and every path they name is held to the rule. A new module fails until it is
-//! given a role, so where it belongs is decided when it is written.
+//! given a role, so where it belongs is decided when it is written, and a role whose module is
+//! gone fails until it is removed, so the table never names a module the tree lacks.
 //!
 //! The test reads source text, not the compiled crate, so every `cfg` branch is checked whatever
 //! the host — the Windows and macOS paths included. Code under `#[cfg(test)]` is not checked.
@@ -64,6 +65,11 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             ("rate", Core),
             ("renewal", Core),
             ("version", Core),
+            // What a client certificate is known by; read with `x509-parser`, and issued with
+            // `ring` and `rcgen`.
+            ("x509", Core),
+            ("x509::issue", Adapter),
+            ("x509::read", Adapter),
         ],
     ),
     (
@@ -101,7 +107,6 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             ("fs::deployments", Adapter),
             ("fs::enrolment", Adapter),
             ("fs::floors", Adapter),
-            ("fs::labels", Adapter),
             ("fs::packages", Adapter),
             ("fs::revocation", Adapter),
             ("listen", Adapter),
@@ -775,12 +780,24 @@ fn reexports() -> Reexports {
 fn the_core_depends_on_no_adapter_and_no_technology() {
     let locked = locked_crates();
     let reexports = reexports();
-    let (mut broken, mut unclassified) = (Vec::new(), Vec::new());
+    let (mut broken, mut unclassified, mut stale) = (Vec::new(), Vec::new(), Vec::new());
     for &(krate, roles) in ROLES {
         let src = crates_dir().join(krate).join("src");
         let mut files = Vec::new();
         rust_files(&src, &mut files);
         files.sort();
+        let mut modules = Vec::new();
+        for file in &files {
+            let module = module_path(&src, file);
+            let tokens = without_test_code(tokenize(&fs::read_to_string(file).unwrap()));
+            modules.extend(inline_modules(&module, &tokens));
+            modules.push(module);
+        }
+        stale.extend(
+            roles_without_module(roles, &modules)
+                .into_iter()
+                .map(|m| format!("{krate}: {m}")),
+        );
         for file in files {
             let module = module_path(&src, &file);
             let Some(&(_, role)) = roles.iter().find(|(m, _)| *m == module) else {
@@ -811,9 +828,57 @@ fn the_core_depends_on_no_adapter_and_no_technology() {
         "modules without a role in ROLES: {unclassified:#?}"
     );
     assert!(
+        stale.is_empty(),
+        "roles in ROLES without a source file: {stale:#?}"
+    );
+    assert!(
         broken.is_empty(),
         "a core module depends on an adapter or a technology: {broken:#?}"
     );
+}
+
+/// The modules a file declares with a body of their own (`mod name { … }`), as module paths
+/// under the file's own module. `opamp::proto` is one: it has a role and no file of its own.
+fn inline_modules(module: &str, tokens: &[(Token, usize)]) -> Vec<String> {
+    tokens
+        .windows(3)
+        .filter_map(|w| match (&w[0].0, &w[1].0, &w[2].0) {
+            (Token::Ident(m), Token::Ident(name), Token::Punct('{')) if m == "mod" => {
+                Some(if module.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{module}::{name}")
+                })
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The roles of a crate that name no module of its source files, nor one declared inline in
+/// them: a module removed or moved without its entry.
+fn roles_without_module(roles: &[(&'static str, Role)], modules: &[String]) -> Vec<&'static str> {
+    roles
+        .iter()
+        .map(|&(m, _)| m)
+        .filter(|m| !modules.iter().any(|f| f == m))
+        .collect()
+}
+
+/// The reverse half of the table's check: a role is reported once its module has no file, and
+/// not while it has one.
+#[test]
+fn a_role_without_a_source_file_is_reported() {
+    let roles: &[(&str, Role)] = &[("", Root), ("fs", Adapter), ("fs::gone", Adapter)];
+    let modules = vec![String::new(), "fs".to_owned()];
+    assert_eq!(roles_without_module(roles, &modules), vec!["fs::gone"]);
+    let modules = vec![String::new(), "fs".to_owned(), "fs::gone".to_owned()];
+    assert!(roles_without_module(roles, &modules).is_empty());
+
+    let src = "pub mod proto { include!(\"x.rs\"); }\nmod file;\n#[cfg(test)]\nmod tests {}";
+    let tokens = without_test_code(tokenize(src));
+    assert_eq!(inline_modules("", &tokens), vec!["proto"]);
+    assert_eq!(inline_modules("fs", &tokens), vec!["fs::proto"]);
 }
 
 /// The reader the test stands on: a path in a string, a comment, or test code is not a

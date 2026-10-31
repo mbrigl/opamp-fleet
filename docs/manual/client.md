@@ -320,7 +320,7 @@ is registered, every Managed Process its Supervisors spawn — runs as one accou
 install hands its files over to it: the configuration file, the state directory, **and the
 executable layout**. The layout too because the self-update runs *inside* the service — a layout the
 account cannot write would silently end [server-driven updates](#updating-the-client-itself) for
-that host. The account is the most a Server-delivered command, such as a Telegraf `inputs.exec`,
+that host. The account is the most a Server-delivered command, such as one a Configuration names,
 reaches on the host.
 
 Which account it is:
@@ -405,11 +405,11 @@ Two consequences to weigh before using it:
 - **The account is a trust boundary.** Whoever holds it can replace the binary in the layout, and
   the packaged `/usr/bin/opamp-fleet` symlink resolves through that layout's `current`
   pointer — an administrator invoking the CLI executes account-owned code.
-- **The account's limits are the fleet's.** Under an account other than root, GLPI Agent's full
-  inventory and its Deploy task, a Telegraf input without a `sudo` rule, a listener on a port below
-  1024, and a log receiver reading `root:adm` files fail — that trade-off is the point. Grant what
-  is missing (a `sudoers` entry, `usermod -aG adm opamp-fleet`, or a drop-in, below), or choose
-  root with `opamp-fleet service install --run-as root`.
+- **The account's limits are the fleet's.** Under an account other than root, an inventory
+  agent's full inventory and its deploy task, an input without a `sudo` rule, a listener on a port
+  below 1024, and a log receiver reading `root:adm` files fail — that trade-off is the point. Grant
+  what is missing (a `sudoers` entry, `usermod -aG adm opamp-fleet`, or a drop-in, below), or
+  choose root with `opamp-fleet service install --run-as root`.
 
 Re-running `install` with a different `--run-as` re-registers and re-owns the same directories.
 Without the flag it keeps the account; a plain re-install does not return a host to root.
@@ -472,7 +472,7 @@ What the separation gives and what it does not:
 
 - A Managed Process, and anything it starts, cannot read the Client's key, certificates,
   package state, logs or environment, nor write the program it runs. A command a Configuration
-  makes it run — a Telegraf `inputs.exec`, an Icinga `CheckCommand` — runs as the process account.
+  makes it run — a check, an exec input — runs as the process account.
 - All Managed Processes share the one process account, so they still read one another's `config/`
   and environment.
 - None of them can take the second service's place through its socket or pipe, as far as the
@@ -498,8 +498,8 @@ What the separation gives and what it does not:
   the reason in `error`, follows where the service manager cannot be asked: on Linux that needs
   systemd's system bus, on macOS `launchctl print`.
 - A grant an agent needs names the process account, not the Client's: a `sudoers` rule for
-  Telegraf's `use_sudo`, the rights Icinga 2 needs on its directories, a supplementary group such
-  as `adm`. On Linux, what a Managed Process needs from
+  an input that runs through `sudo`, the rights an agent needs on its directories, a supplementary
+  group such as `adm`. On Linux, what a Managed Process needs from
   systemd — a capability for a port below 1024, a supplementary group — goes into a drop-in for
   the second service, `/etc/systemd/system/opamp-fleet-agents.service.d/`, which `service install`
   never touches either.
@@ -1885,10 +1885,10 @@ effect when the Client next starts.
   unless it is named in `remote_config_disabled`. With both set, the Server can no longer remove a
   listed Supervisor and add the same agent under a name that is not listed.
 - **What the key holds, and what it does not.** It holds against the Server only while every
-  Supervisor whose configuration language can run commands as the Client's account — a Telegraf
-  `inputs.exec`, an Icinga `CheckCommand`, the configuration a `command` Supervisor's program
-  reads — is named in `remote_config_disabled`. Otherwise the Server can configure such a
-  Supervisor to rewrite this file, and the key changes at the next start. Where a
+  Supervisor whose configuration language can run commands as the Client's account — a command
+  an agent's configuration names, or whatever the configuration a `command` Supervisor's program
+  reads makes it run — is named in `remote_config_disabled`. Otherwise the Server can configure
+  such a Supervisor to rewrite this file, and the key changes at the next start. Where a
   [process account](#managed-processes-under-a-process-account) is registered, those commands run
   under it, and it cannot write this file. A signed Client build
   can still replace the Client itself where `[packages] self_update` consents, and that build reads
@@ -1903,8 +1903,9 @@ effect when the Client next starts.
 ### Switching remote configuration off for one Supervisor
 
 Some agents should not take their configuration from the fleet: one whose configuration language
-can run commands, such as Telegraf's `inputs.exec` or an Icinga `CheckCommand`, or one another
-system already configures. Name them in `[supervisors]`:
+can run commands, such as an entry that runs a program, or whatever the configuration a
+`command` Supervisor's program reads makes it run, or one another system already configures. Name
+them in `[supervisors]`:
 
 ```toml
 [supervisors]

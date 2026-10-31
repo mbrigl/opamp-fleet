@@ -62,7 +62,7 @@ checked by a test, and whose colours come from each look's stylesheet.
 3. **The grammar follows the Agent type, and anything else stays plain.** The UI chooses the
    grammar from the Agent's reported `service.name`:
    - `otelcol`, `otelcol-contrib` and any name starting `otelcol` → YAML;
-   - this fleet's own Client (`supervisor`) and `telegraf` → TOML;
+   - this fleet's own Client (`supervisor`) → TOML;
    - `fluent-bit` → INI;
    - any other type → no colouring, the text shown plain.
 
@@ -138,5 +138,5 @@ Tests that carry `Verifies: ADR-0031`, in
 - `the_ui_serves_the_pinned_shiki_bundle`: the embedded `shiki.js` has the pinned SHA-256, and
   `GET /shiki.js` answers the file with a JavaScript content type, under the unchanged CSP.
 - `the_ui_colours_an_effective_configuration_by_the_agents_type`: the UI loads `/shiki.js` and
-  maps `otelcol*` to YAML, `supervisor` and `telegraf` to TOML, and `fluent-bit` to INI, and each
+  maps `otelcol*` to YAML, `supervisor` to TOML, and `fluent-bit` to INI, and each
   of the three stylesheets defines the CSS-variables theme's colours for light and dark.

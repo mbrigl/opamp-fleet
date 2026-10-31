@@ -124,11 +124,37 @@ impl HeldDir {
     /// # Errors
     /// Returns an error when the file cannot be written or renamed into place.
     pub fn write(&self, name: &str, contents: &[u8], mode: u32) -> io::Result<()> {
+        self.write_owned(name, contents, mode, None)
+    }
+
+    /// Writes `contents` as [`write`](Self::write) does, and on Unix gives the new file `owner`
+    /// (user and group) through its descriptor before it is renamed over `name`, never by path
+    /// after it. On Windows `owner` is not used: a new file takes what the directory passes on.
+    ///
+    /// # Errors
+    /// Returns an error when the file cannot be written, given its owner, or renamed into place.
+    pub fn write_owned(
+        &self,
+        name: &str,
+        contents: &[u8],
+        mode: u32,
+        owner: Option<(u32, u32)>,
+    ) -> io::Result<()> {
         check_name(name)?;
         // `~` is in no name a config-map entry is stored under (`storage::entry_file_name`), so
         // the temporary name never collides with a file this directory is meant to hold.
         let temporary = format!("{name}~");
-        sys::write(self, name, &temporary, contents, mode)
+        sys::write(self, name, &temporary, contents, mode, owner)
+    }
+
+    /// Creates the file `name` with `contents`, with `mode` on Unix, and never replaces what
+    /// stands at the name: a file, or a link to anywhere, makes it fail with `AlreadyExists`.
+    ///
+    /// # Errors
+    /// Returns an error when something stands at `name`, or the file cannot be written.
+    pub fn create_new(&self, name: &str, contents: &[u8], mode: u32) -> io::Result<()> {
+        check_name(name)?;
+        sys::create_new(self, name, contents, mode)
     }
 
     /// Makes what was created, renamed or removed in this directory durable. On Windows NTFS
@@ -373,6 +399,7 @@ mod sys {
         temporary: &str,
         contents: &[u8],
         mode: u32,
+        owner: Option<(u32, u32)>,
     ) -> io::Result<()> {
         let dir = held.fd.as_raw_fd();
         let temporary = c_name(OsStr::new(temporary))?;
@@ -390,6 +417,9 @@ mod sys {
         .and_then(|fd| {
             // The umask may have narrowed the mode the open asked for.
             fchmod(&fd, mode)?;
+            if let Some((uid, gid)) = owner {
+                std::os::unix::fs::fchown(&fd, Some(uid), Some(gid))?;
+            }
             let mut file = File::from(fd);
             file.write_all(contents)?;
             file.sync_all()
@@ -397,6 +427,32 @@ mod sys {
         .and_then(|()| renameat(dir, &temporary, &c_name(OsStr::new(name))?));
         if written.is_err() {
             let _ = unlinkat(dir, &temporary);
+        }
+        written
+    }
+
+    pub(super) fn create_new(
+        held: &HeldDir,
+        name: &str,
+        contents: &[u8],
+        mode: u32,
+    ) -> io::Result<()> {
+        let dir = held.fd.as_raw_fd();
+        let c = c_name(OsStr::new(name))?;
+        // `O_EXCL` fails on any name that exists, a link included, and never follows one.
+        let fd = openat(
+            dir,
+            &c,
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            mode,
+        )?;
+        let written = fchmod(&fd, mode).and_then(|()| {
+            let mut file = File::from(fd);
+            file.write_all(contents)?;
+            file.sync_all()
+        });
+        if written.is_err() {
+            let _ = unlinkat(dir, &c);
         }
         written
     }
@@ -541,6 +597,7 @@ mod sys {
         temporary: &str,
         contents: &[u8],
         _mode: u32,
+        _owner: Option<(u32, u32)>,
     ) -> io::Result<()> {
         let temporary = held.path.join(temporary);
         // A leftover from an interrupted run would make `create_new` refuse; a link goes as a link.
@@ -559,6 +616,26 @@ mod sys {
             .and_then(|()| std::fs::rename(&temporary, held.path.join(name)));
         if written.is_err() {
             let _ = std::fs::remove_file(&temporary);
+        }
+        written
+    }
+
+    pub(super) fn create_new(
+        held: &HeldDir,
+        name: &str,
+        contents: &[u8],
+        _mode: u32,
+    ) -> io::Result<()> {
+        let path = held.path.join(name);
+        // `CREATE_NEW` fails on any name that exists, a link or a junction included.
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        let written = file.write_all(contents).and_then(|()| file.sync_all());
+        if written.is_err() {
+            drop(file);
+            let _ = std::fs::remove_file(&path);
         }
         written
     }

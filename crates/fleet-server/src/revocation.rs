@@ -50,30 +50,7 @@ impl CertId {
     }
 }
 
-/// The SHA-256 of a DER-encoded name, hex.
-#[must_use]
-pub fn name_hash(der: &[u8]) -> String {
-    hex::encode(Sha256::digest(der))
-}
-
-/// The most hex digits a serial has: RFC 5280's 20 octets.
-pub const MAX_SERIAL_HEX: usize = 40;
-
-/// `00:0A:1b` and `a1b` are one serial.
-#[must_use]
-pub fn normalize_serial(serial: &str) -> String {
-    let hex: String = serial
-        .chars()
-        .filter(|c| !matches!(c, ':' | ' '))
-        .map(|c| c.to_ascii_lowercase())
-        .collect();
-    let trimmed = hex.trim_start_matches('0');
-    if trimmed.is_empty() {
-        "0".to_string()
-    } else {
-        trimmed.to_string()
-    }
-}
+pub use fleet_core::x509::{name_hash, normalize_serial, MAX_SERIAL_HEX};
 
 /// A CA whose certificates can be revoked: the client CA or the bootstrap CA (ADR-0021 clause 27).
 #[derive(Clone, Debug, PartialEq, Eq)]

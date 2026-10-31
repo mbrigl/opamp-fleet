@@ -457,10 +457,9 @@ fn group_platforms<'p>(pairs: impl Iterator<Item = (&'p str, &'p str)>) -> Strin
 /// Its own function so the width rule below is testable against the very lines the menu shows,
 /// rather than against a copy of them that drifts.
 fn agent_menu_labels() -> Vec<String> {
-    // Asked of clap rather than written out again. A second list of the same agents is exactly how
-    // `icinga2` came to be missing from this prompt while `--agent icinga2` worked: adding a
-    // variant is one place, and the menu now follows it whether or not anyone remembers this
-    // function.
+    // Asked of clap rather than written out again. A second list of the same agents is how an
+    // agent goes missing from this prompt while `--agent` accepts it: adding a variant is one
+    // place, and the menu follows it whether or not anyone remembers this function.
     let agents = AgentKind::value_variants();
     // The systems beside each name, in a column: the choice that follows this one is a platform,
     // and an agent that publishes nothing for the systems an operator runs is better seen here
@@ -581,8 +580,8 @@ fn upload_target(args: &Args) -> Result<Option<String>, String> {
 /// The newest version of each of the last [`SERIES_SHOWN`] release series, newest first.
 ///
 /// A *series* is a `major.minor` line, and only its newest patch is offered: nobody installing
-/// 2.16 wants 2.16.3 when 2.16.5 exists, and an agent that patches often — Icinga 2 published five
-/// 2.16 patches — would otherwise fill the whole list with one line and hide every version an
+/// 2.16 wants 2.16.3 when 2.16.5 exists, and an agent that patches often — five patches of one
+/// series — would otherwise fill the whole list with one line and hide every version an
 /// operator might actually be looking for. Where an agent's versions carry no patch number at all,
 /// every version is its own series and this is simply the last three.
 ///
@@ -1027,7 +1026,7 @@ fn write_members(
 ///
 /// Links are followed, and that is the whole difficulty. A link to a *directory* has to be
 /// descended into and packed **at the name the link carries**, because that name is one the agent
-/// uses: the GLPI AppImage reaches its Perl library through `usr/share/perl/5.26`, a link to
+/// uses: a tree may reach its Perl library through `usr/share/perl/5.26`, a link to
 /// `5.26.1`, and a tree where that path is an empty directory is one whose agent cannot find a
 /// single module. So the contents are packed under both names, exactly as `tar -h` writes them.
 ///
@@ -1535,8 +1534,8 @@ mod tests {
 
     /// Every agent the `--agent` flag accepts is also offered when the flag is omitted.
     ///
-    /// The two came apart once — `icinga2` was reachable by flag and absent from the prompt for as
-    /// long as the prompt kept its own list — so what is asserted here is that the menu is built
+    /// The two come apart as soon as the prompt keeps its own list — an agent reachable by flag
+    /// and absent from the prompt — so what is asserted here is that the menu is built
     /// from the same variants clap validates against.
     #[test]
     fn the_prompt_offers_every_agent_the_flag_accepts() {
@@ -1625,30 +1624,33 @@ mod tests {
         assert_eq!(versions, vec!["0.158.0", "0.10.0", "0.9.0"]);
     }
 
-    /// The list offers release *series*, not tags. Icinga 2 is the agent that makes the difference
-    /// visible: five 2.16 patches would have been the entire list, so the one question an operator
+    /// The list offers release *series*, not tags. An agent that patches often makes the
+    /// difference visible: five 2.16 patches would have been the entire list, so the one question an operator
     /// asks it — which versions can I still go back to — would have no answer in it. Only the
     /// newest patch of a series is offered, because an older one of the same line is not a choice
     /// anybody makes.
     #[test]
     fn the_version_list_offers_the_newest_patch_of_each_recent_series() {
-        let icinga: Vec<String> = [
+        let often_patched: Vec<String> = [
             "2.16.5", "2.16.4", "2.16.3", "2.16.2", "2.16.1", "2.16.0", "2.15.2", "2.15.1",
             "2.14.6", "2.13.10",
         ]
         .map(str::to_string)
         .to_vec();
         assert_eq!(
-            super::newest_per_series(&icinga),
+            super::newest_per_series(&often_patched),
             ["2.16.5", "2.15.2", "2.14.6"]
         );
 
         // An agent that versions in two parts has no patch to collapse, so every version is its own
-        // series and the list is simply the last three (GLPI tags `1.15`, `1.14`, …).
-        let glpi: Vec<String> = ["1.15", "1.14", "1.13", "1.12"]
+        // series and the list is simply the last three (tags `1.15`, `1.14`, …).
+        let two_part: Vec<String> = ["1.15", "1.14", "1.13", "1.12"]
             .map(str::to_string)
             .to_vec();
-        assert_eq!(super::newest_per_series(&glpi), ["1.15", "1.14", "1.13"]);
+        assert_eq!(
+            super::newest_per_series(&two_part),
+            ["1.15", "1.14", "1.13"]
+        );
 
         // Fewer series than asked for is the whole list, not an error — a young repository has
         // nothing else to offer.
@@ -1809,7 +1811,7 @@ mod tests {
     }
 
     /// A directory reached through a link is packed **under the linked name too**, with its
-    /// contents — the regression this exists for. The GLPI AppImage reaches its Perl library
+    /// contents — the regression this exists for. A tree may reach its Perl library
     /// through `usr/share/perl/5.26`, a link to `5.26.1`; packing that name as an empty directory
     /// produced a tree whose agent could not find a single module, and packing only one of the two
     /// names left which one to directory-read order. A cycle is still not followed, and a link
@@ -2175,13 +2177,15 @@ mod tests {
     #[test]
     fn a_published_checksum_is_read_from_either_shape() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let artifact = dir.path().join("telegraf-1.39.3_linux_amd64.tar.gz");
+        let artifact = dir
+            .path()
+            .join("otelcol-contrib_0.115.0_linux_amd64.tar.gz");
         std::fs::write(&artifact, b"x").expect("write");
 
         let sums = dir.path().join("sums");
         std::fs::write(
             &sums,
-            "aaaa  other.tar.gz\nbbbb *telegraf-1.39.3_linux_amd64.tar.gz\n",
+            "aaaa  other.tar.gz\nbbbb *otelcol-contrib_0.115.0_linux_amd64.tar.gz\n",
         )
         .expect("write");
         // Read through the same code the network path uses, with a `file:` URL standing in for the

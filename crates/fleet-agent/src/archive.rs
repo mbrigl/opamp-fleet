@@ -260,8 +260,8 @@ pub enum Kind {
     TarGz,
     /// A 7z container, which may be encrypted (ADR-0027).
     SevenZ,
-    /// A zip container (ADR-0027 clause 62) — the form the GLPI Agent's portable Windows build is
-    /// published in, taken as published so the hash an Agent verifies stays upstream's own.
+    /// A zip container (ADR-0027 clause 62) — the form some agents publish their portable Windows
+    /// build in, taken as published so the hash an Agent verifies stays upstream's own.
     /// Read-only here, and never encrypted: a confidential artifact is a `.7z`.
     Zip,
 }
@@ -1797,7 +1797,7 @@ mod tests {
     #[test]
     fn detects_a_zip_by_its_signature_and_an_empty_one_too() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let archive = zip_archive(dir.path(), &[("glpi-agent.bat", b"wrapper")]);
+        let archive = zip_archive(dir.path(), &[("example-agent.bat", b"wrapper")]);
         assert_eq!(detect(&archive).expect("detect"), Kind::Zip);
 
         // An empty zip is nothing but the end-of-central-directory marker. Detecting it as a zip
@@ -1819,12 +1819,15 @@ mod tests {
             dir.path(),
             &[
                 ("LICENSE", b"text"),
-                ("GLPI-Agent/perl/bin/glpi-agent.exe", b"the-program"),
+                (
+                    "example-agent/runtime/bin/example-agent.exe",
+                    b"the-program",
+                ),
             ],
         );
         let out_path = dir.path().join("out");
         let mut out = File::create(&out_path).expect("create");
-        let written = extract_zip(&archive, "glpi-agent.exe", &mut out).expect("extract");
+        let written = extract_zip(&archive, "example-agent.exe", &mut out).expect("extract");
         assert_eq!(written, b"the-program".len() as u64);
         assert_eq!(std::fs::read(&out_path).expect("read"), b"the-program");
 
@@ -1833,7 +1836,7 @@ mod tests {
         assert!(err.contains("LICENSE"), "names what it holds: {err}");
     }
 
-    /// The case ADR-0027 clause 62 adds the format for: the GLPI portable zip, taken as published — the
+    /// The case ADR-0027 clause 62 adds the format for: a portable zip, taken as published — the
     /// tree lands whole, directory entries and all, with the member outside counted as skipped.
     #[test]
     fn a_zip_tree_lands_whole_with_the_wrapper_directory_dropped() {
@@ -1842,15 +1845,18 @@ mod tests {
             dir.path(),
             &[
                 ("stray-readme", b"outside"),
-                ("GLPI-Agent/etc/", b""),
-                ("GLPI-Agent/etc/agent.cfg", b"server ="),
-                ("GLPI-Agent/perl/bin/glpi-agent.exe", b"the-program"),
-                ("GLPI-Agent/perl/bin/glpi-agent", b"the-script"),
+                ("example-agent/etc/", b""),
+                ("example-agent/etc/agent.conf", b"server ="),
+                (
+                    "example-agent/runtime/bin/example-agent.exe",
+                    b"the-program",
+                ),
+                ("example-agent/runtime/bin/example-agent", b"the-script"),
             ],
         );
         let dest = dest(dir.path());
 
-        let summary = extract_tree_zip(&archive, Path::new("perl/bin/glpi-agent.exe"), &dest)
+        let summary = extract_tree_zip(&archive, Path::new("runtime/bin/example-agent.exe"), &dest)
             .expect("unpack the tree");
 
         assert_eq!(summary.files, 3, "every file member is written");
@@ -1859,11 +1865,11 @@ mod tests {
             "the stray member is counted, not silent"
         );
         assert_eq!(
-            std::fs::read(dest.join("perl/bin/glpi-agent.exe")).expect("the program"),
+            std::fs::read(dest.join("runtime/bin/example-agent.exe")).expect("the program"),
             b"the-program"
         );
         assert_eq!(
-            std::fs::read(dest.join("etc/agent.cfg")).expect("the config"),
+            std::fs::read(dest.join("etc/agent.conf")).expect("the config"),
             b"server ="
         );
         assert!(!dest.join("stray-readme").exists());

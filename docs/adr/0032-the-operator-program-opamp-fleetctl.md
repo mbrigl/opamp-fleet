@@ -95,7 +95,7 @@ The forces:
   unpacks it on the operator's host and repacks the tree before it is signed. A tree package
   carries no link ([ADR-0027](0027-packages-signatures-and-delivery.md)), so the repack
   dereferences links: a linked directory is packed under the linked name with its contents,
-  because that name is one the agent uses (the GLPI AppImage reaches its Perl library through
+  because that name is one the agent uses (a tree may reach its Perl library through
   `usr/share/perl/5.26`, a link to `5.26.1`). Resolving a link with `std::fs::metadata` and
   reading it with `File::open` follows an absolute target and a `../..` target out of the tree
   into the operator host's own file system. Such a link would pack the operator's files into an
@@ -359,8 +359,8 @@ tool; the file modes the repack keeps, including group- and world-writable bits 
 which the repack leaves as upstream set them and the Client applies as
 [ADR-0037](0037-the-accounts-the-service-runs-under.md) clause 23 states; a kind's own removal,
 before packing, of links it
-knows upstream leaves behind (as the GLPI repack removes `.DirIcon`), which each kind states where
-it is decided; hard links, which are files of the tree; and the trust in the extracted tree's
+knows upstream leaves behind (as an AppImage's repack removes `.DirIcon`), which each kind states
+where it is decided; hard links, which are files of the tree; and the trust in the extracted tree's
 origin, which the hash of what was downloaded settles.
 
 ## Alternatives considered
@@ -540,9 +540,9 @@ origin, which the hash of what was downloaded settles.
   out-of-tree link belongs to. Recalled, not re-read.
 - Reproducible Builds (reproducible-builds.org): an artifact's bytes must not depend on the build
   host's file system beyond its declared inputs. Recalled, not re-read.
-- The extraction of the GLPI AppImage on the `feat/glpi` branch, whose comment says the Debian
-  packaging leaves links "pointing at files no tree carries". Whether any of them is absolute is
-  not verified.
+- A wrapped kind's AppImage repack, on that kind's branch, whose extraction of an AppImage built
+  from Debian packages leaves links pointing at files no tree carries. Whether any of them is
+  absolute is not verified.
 - This project's own requirements:
   [ADR-0021](0021-admission-by-client-certificate-and-revocation.md) on admission, the client CA
   and how the Server signs;
@@ -592,8 +592,8 @@ origin, which the hash of what was downloaded settles.
 - Negative / trade-offs: an extracted key lies in the clear on whatever disk `--out` names, as
   the PEM pair the Client's install takes does. Protecting that directory is the operator's job.
 - Negative / trade-offs: an upstream tree with an absolute or escaping link does not repack until
-  the kind removes that link by name. If the GLPI AppImage's Debian leftovers are absolute, the
-  GLPI repack has to name them, which the kind's change does with its tests. Resolving a link
+  the kind removes that link by name. If an AppImage's Debian leftovers are absolute, that
+  kind's repack has to name them, which the kind's change does with its tests. Resolving a link
   component by component inside the tree is more code than calling `metadata`; it is bounded by
   the member cap and by the ancestor guard against cycles.
 - Follow-ups: encrypting the offline keys; replacing a CA without every host enrolling again, and

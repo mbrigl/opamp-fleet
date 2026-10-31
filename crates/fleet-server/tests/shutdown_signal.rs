@@ -3,8 +3,9 @@
 //! fleet record is flushed. The test reads the Server's log on stderr, where it is written.
 #![cfg(unix)]
 
+mod ports;
+
 use std::io::{BufRead, BufReader};
-use std::net::TcpListener;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -29,9 +30,7 @@ fn sigterm_shuts_the_server_down_gracefully() {
     std::fs::write(dir.path().join("key.pem"), cert.signing_key.serialize_pem())
         .expect("write key");
 
-    // Two distinct free ports: both listeners are held until the configuration names them.
-    let agent = TcpListener::bind("127.0.0.1:0").expect("bind");
-    let operator = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let (agent, operator) = (ports::spare_port(), ports::spare_port());
     let config = dir.path().join("server.toml");
     std::fs::write(
         &config,
@@ -46,15 +45,14 @@ fn sigterm_shuts_the_server_down_gracefully() {
                 "[rest]\n",
                 "listen = \"127.0.0.1:{operator}\"\n",
             ),
-            agent = agent.local_addr().expect("addr").port(),
-            operator = operator.local_addr().expect("addr").port(),
+            agent = agent,
+            operator = operator,
             data = dir.path().join("data"),
             cert = dir.path().join("cert.pem"),
             key = dir.path().join("key.pem"),
         ),
     )
     .expect("write server.toml");
-    drop((agent, operator));
 
     let mut server = ServerUnderTest(
         Command::new(env!("CARGO_BIN_EXE_server"))

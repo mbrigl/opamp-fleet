@@ -137,12 +137,12 @@ mod tests {
     #[test]
     fn a_deployment_survives_a_reopen() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let telegraf = id("telegraf", "1.30.0");
+        let fluent_bit = id("fluent-bit", "3.1.0");
         {
             let store = open(dir.path()).expect("open");
             channel(&store, "canary", &[("channel", "canary"), ("env", "prod")]);
             store
-                .put_package("canary", &telegraf, false)
+                .put_package("canary", &fluent_bit, false)
                 .expect("package");
             store
                 .put_configuration("canary", "base")
@@ -153,7 +153,7 @@ mod tests {
         let canary = reopened.get("canary").expect("canary");
         assert_eq!(canary.selector["channel"], "canary");
         assert_eq!(canary.selector["env"], "prod");
-        assert_eq!(canary.package_for("telegraf"), Some(&telegraf));
+        assert_eq!(canary.package_for("fluent-bit"), Some(&fluent_bit));
         assert_eq!(
             canary.configurations.iter().collect::<Vec<_>>(),
             ["base"],

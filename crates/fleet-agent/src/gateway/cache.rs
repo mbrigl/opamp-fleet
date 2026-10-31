@@ -54,10 +54,6 @@ pub const ROUTE: &str = "/api/v1/packages/{agent_type}/{version}/file";
 /// What every offered path on the Server's download route begins with.
 const ROUTE_PREFIX: &str = "/api/v1/packages/";
 
-/// The SAN URI prefix naming the host a certificate was issued to (ADR-0022 clause 11), as the
-/// Server writes it.
-const HOST_URI_PREFIX: &str = "urn:opamp-fleet:host:";
-
 /// How many fetches run at a time (ADR-0027 clause 41): a rollout rarely offers more distinct
 /// artifacts at once, and each one holds a reservation of up to the per-artifact limit.
 const CONCURRENT_FETCHES: usize = 4;
@@ -113,17 +109,11 @@ impl Artifact {
     }
 }
 
-/// The host a certificate names (`urn:opamp-fleet:host:<id>`), if it names one.
+/// The host a certificate names (`urn:opamp-fleet:host:<id>`), if it names one and the Server
+/// would take it.
 #[must_use]
 pub fn host_of(der: &[u8]) -> Option<String> {
-    let (_, cert) = x509_parser::parse_x509_certificate(der).ok()?;
-    let san = cert.subject_alternative_name().ok()??;
-    san.value.general_names.iter().find_map(|name| match name {
-        x509_parser::extensions::GeneralName::URI(uri) => {
-            uri.strip_prefix(HOST_URI_PREFIX).map(str::to_string)
-        }
-        _ => None,
-    })
+    fleet_core::x509::read::host(&fleet_core::x509::read::certificate(der).ok()?)
 }
 
 /// The host a downstream certificate speaks as (ADR-0015 clause 15): the one it names, else the
@@ -140,8 +130,8 @@ pub fn speaker_of(der: &[u8]) -> Option<String> {
 /// its `notAfter`, and the certificate as the revocation list names it.
 #[must_use]
 pub fn end_of(der: &[u8]) -> Option<End> {
-    let (_, cert) = x509_parser::parse_x509_certificate(der).ok()?;
-    let (issuer, serial) = crate::gateway::revocations::certificate_id(der)?;
+    let cert = fleet_core::x509::read::certificate(der).ok()?;
+    let (issuer, serial) = fleet_core::x509::read::id(&cert);
     Some(End {
         not_after: cert.validity().not_after.timestamp(),
         issuer,
@@ -1827,7 +1817,9 @@ mod tests {
         let key = rcgen::KeyPair::generate().expect("key");
         let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).expect("params");
         params.subject_alt_names.push(rcgen::SanType::URI(
-            format!("{HOST_URI_PREFIX}{host}").try_into().expect("uri"),
+            format!("{}{host}", fleet_core::x509::HOST_URI_PREFIX)
+                .try_into()
+                .expect("uri"),
         ));
         params.self_signed(&key).expect("cert").der().to_vec()
     }

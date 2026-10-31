@@ -34,6 +34,7 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use axum::http::{header, StatusCode};
+use fleet_core::x509::read::Ca;
 use opamp::proto::{AgentToServer, ServerToAgent};
 use opamp::server::listen::{
     ClientAuth, Handle, Listener, PeerCertificate, ServerTls, HEADER_READ_TIMEOUT,
@@ -93,19 +94,10 @@ pub struct Members {
     client_cas: Option<Arc<Vec<Ca>>>,
 }
 
-/// One CA certificate of a PEM file, as far as it is read: its subject (DER and text) and its
-/// `SubjectPublicKeyInfo` (DER).
-struct Ca {
-    subject: Vec<u8>,
-    key: Vec<u8>,
-    name: String,
-}
-
 impl Members {
     /// Whether the peer presenting `certificate` (DER, verified by the handshake) is enrolling.
     #[must_use]
     pub fn enrolling(&self, certificate: &[u8]) -> bool {
-        use x509_parser::prelude::{FromDer as _, SubjectPublicKeyInfo};
         let Some(cas) = &self.client_cas else {
             return false;
         };
@@ -113,11 +105,7 @@ impl Members {
         let Ok((_, parsed)) = x509_parser::parse_x509_certificate(certificate) else {
             return true;
         };
-        !cas.iter().any(|ca| {
-            parsed.issuer().as_raw() == ca.subject.as_slice()
-                && SubjectPublicKeyInfo::from_der(&ca.key)
-                    .is_ok_and(|(_, key)| parsed.verify_signature(Some(&key)).is_ok())
-        })
+        !cas.iter().any(|ca| ca.issued(&parsed))
     }
 }
 
@@ -458,13 +446,7 @@ fn cas_of(path: &std::path::Path, pem: &[u8]) -> Result<Vec<Ca>, String> {
         .map_err(|e| format!("cannot read {}: {e}", path.display()))?
         .iter()
         .map(|der| {
-            x509_parser::parse_x509_certificate(der.as_ref())
-                .map(|(_, cert)| Ca {
-                    subject: cert.subject().as_raw().to_vec(),
-                    key: cert.public_key().raw.to_vec(),
-                    name: cert.subject().to_string(),
-                })
-                .map_err(|e| format!("cannot parse {}: {e}", path.display()))
+            Ca::of(der.as_ref()).map_err(|e| format!("cannot parse {}: {e}", path.display()))
         })
         .collect()
 }
@@ -1672,6 +1654,36 @@ mod tests {
             Reply::Refuse(status, _) => assert_eq!(status, StatusCode::FORBIDDEN),
             _ => panic!("a report whose binding cannot be stored was forwarded"),
         }
+    }
+
+    /// A downstream certificate whose serial is longer than RFC 5280's 20 octets is refused `401`
+    /// on both transports, as the Server refuses it on its own `/v1/opamp`; one of 20 octets is
+    /// admitted. The list is bounded on 20 octets, so it could not judge the longer one.
+    /// Verifies: Q-2, ADR-0015
+    #[tokio::test]
+    async fn a_certificate_with_a_serial_past_twenty_octets_is_refused_as_the_server_refuses_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let forwarding = forwarding(dir.path()).await;
+        let in_a_year = time::OffsetDateTime::now_utc() + time::Duration::days(365);
+        let with_serial = |octets: usize| {
+            let mut serial = vec![0x11; octets];
+            serial[0] = 0x01;
+            certificate_until("long-serial", in_a_year, &serial)
+        };
+        for transport in [Transport::WebSocket, Transport::Http] {
+            assert!(
+                connecting(&forwarding, transport, &with_serial(20)).is_ok(),
+                "20 octets over {transport:?}"
+            );
+            match connecting(&forwarding, transport, &with_serial(21)) {
+                Err(rejection) => assert_eq!(rejection.status, StatusCode::UNAUTHORIZED),
+                Ok(_) => panic!("a 21-octet serial was admitted over {transport:?}"),
+            }
+        }
+        // Nor does it name a host or an end the bindings could take.
+        assert!(cache::host_of(&with_serial(21)).is_none());
+        assert!(cache::end_of(&with_serial(21)).is_none());
+        assert!(cache::speaker_of(&with_serial(21)).is_none());
     }
 
     /// A request's view as the endpoint hands it to the handler: `certificate` presented, over

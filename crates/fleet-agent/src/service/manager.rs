@@ -3456,9 +3456,9 @@ mod tests {
     /// Verifies: ADR-0037
     #[test]
     fn the_units_account_is_its_last_service_user() {
-        let unit = "[Unit]\nDescription=opamp-fleet\n\n[Service]\nExecStart=/x\nUser=telegraf\n\
-                    \n[Install]\nWantedBy=multi-user.target\n";
-        assert_eq!(unit_account(unit).as_deref(), Some("telegraf"));
+        let unit = "[Unit]\nDescription=opamp-fleet\n\n[Service]\nExecStart=/x\n\
+                    User=otelcol-contrib\n\n[Install]\nWantedBy=multi-user.target\n";
+        assert_eq!(unit_account(unit).as_deref(), Some("otelcol-contrib"));
         assert_eq!(
             unit_account("[Service]\nUser=a\nUser=b\n").as_deref(),
             Some("b")

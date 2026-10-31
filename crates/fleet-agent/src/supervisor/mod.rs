@@ -97,8 +97,8 @@ fn kinds() -> Vec<Box<dyn Plugin>> {
 
 /// The kinds this Client was compiled with, as attributes of its own Agent (ADR-0017 clause 18).
 ///
-/// A `type` is something a Client either carries or does not, and a Server rolling a `glpi` set at
-/// a Client without that plugin should learn it by not aiming there rather than from a `FAILED`
+/// A `type` is something a Client either carries or does not, and a Server rolling a wrapped kind's
+/// set at a Client without that plugin should learn it by not aiming there rather than from a `FAILED`
 /// afterwards.
 ///
 /// **One key per kind**, not one list, because of how matching works here: a Selector is equality
@@ -641,7 +641,7 @@ mod tests {
     const WRAPPED: [(&str, bool); 0] = [];
 
     /// A build's kinds are the core's two and the wrapped ones its features name — no more, so a
-    /// Selector aimed at `supervisor.kind.glpi` never reaches a build without it, and no fewer
+    /// Selector aimed at `supervisor.kind.<type>` never reaches a build without it, and no fewer
     /// (ADR-0017 clauses 2 and 18).
     // Verifies: ADR-0017
     #[test]

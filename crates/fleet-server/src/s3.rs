@@ -948,6 +948,24 @@ mod tests {
         }
     }
 
+    /// A `ca_file` that holds no certificate fails startup naming the key, as one that cannot be
+    /// read does, rather than leaving the store verified against the public roots alone (ADR-0029
+    /// clause 17).
+    /// Verifies: ADR-0029
+    #[test]
+    fn a_ca_file_without_a_certificate_fails_startup() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("ca.pem");
+        for content in ["", "not a certificate\n"] {
+            std::fs::write(&path, content).expect("write");
+            let mut config = config("https://s3.example");
+            config.ca_file = Some(path.clone());
+            let err = S3BlobStore::open(&config).err().expect("refused");
+            assert!(err.contains("[blobs.s3] ca_file"), "{err}");
+            assert!(err.contains("no certificates"), "{err}");
+        }
+    }
+
     /// The marker that makes [`aws_variables_child`] check the environment it was started with.
     const CHILD: &str = "FLEET_TEST_AWS_VARIABLES_CHILD";
 

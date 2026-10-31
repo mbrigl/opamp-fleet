@@ -36,7 +36,7 @@ pub struct SamplingTarget {
     /// The operator's name for it.
     pub instance_name: String,
     /// The Agent *type* it is reported under — `service.name` (ADR-0016). Per Agent rather than on
-    /// the Resource: one Client reports its own `supervisor` beside an `otelcol` and an `icinga2`,
+    /// the Resource: one Client reports its own `supervisor` beside an `otelcol` and a `fluent-bit`,
     /// so unlike the platform this differs *within* a single export.
     pub service_name: String,
     /// The process to sample: this one for the Client's own Agent, the Managed Process for a

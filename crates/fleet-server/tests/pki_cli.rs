@@ -3,6 +3,8 @@
 //! certificate it depends on that is ending.
 #![cfg(unix)]
 
+mod ports;
+
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::process::{Child, Command, Output, Stdio};
@@ -153,21 +155,19 @@ fn the_server_warns_at_startup_about_a_ca_that_is_ending_and_serves_on() {
     let dir = tempfile::tempdir().expect("tempdir");
     let sections = server_host_files(dir.path(), 10);
 
-    let agent = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-    let operator = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let (agent, operator) = (ports::spare_port(), ports::spare_port());
     let config = dir.path().join("server.toml");
     std::fs::write(
         &config,
         format!(
             "listen = \"127.0.0.1:{}\"\ndata_dir = {:?}\n{}\n[rest]\nlisten = \"127.0.0.1:{}\"\n",
-            agent.local_addr().expect("addr").port(),
+            agent,
             dir.path().join("data").display().to_string(),
             sections,
-            operator.local_addr().expect("addr").port(),
+            operator,
         ),
     )
     .expect("write server.toml");
-    drop((agent, operator));
 
     let mut running = ServerUnderTest(
         Command::new(env!("CARGO_BIN_EXE_server"))
@@ -312,20 +312,18 @@ fn status_reads_its_configuration_without_config_from_the_variable_or_the_enviro
 #[test]
 fn the_server_logs_the_keys_its_environment_set_before_it_serves() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let agent = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-    let operator = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let (agent, operator) = (ports::spare_port(), ports::spare_port());
     let config = dir.path().join("server.toml");
     std::fs::write(
         &config,
         format!(
             "listen = \"127.0.0.1:{}\"\n{}\n[rest]\nlisten = \"127.0.0.1:{}\"\n",
-            agent.local_addr().expect("addr").port(),
+            agent,
             server_host_files(dir.path(), 3000),
-            operator.local_addr().expect("addr").port(),
+            operator,
         ),
     )
     .expect("write server.toml");
-    drop((agent, operator));
     let data = dir.path().join("data-from-the-environment");
 
     let mut running = ServerUnderTest(

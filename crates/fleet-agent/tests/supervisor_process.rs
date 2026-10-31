@@ -324,8 +324,8 @@ async fn apply_package(
 // ── The directories an agent writes into ─────────────────────────────────────
 
 /// An agent the fleet delivers arrives on a host nobody prepared, and several of the agents this
-/// project wraps create nothing themselves: Icinga 2 exits when `DataDir` is absent, the GLPI Agent
-/// exits when `--vardir` is. So the kind names what its agent writes into and the spawn makes it —
+/// project wraps create nothing themselves and exit when their data or state directory is absent.
+/// So the kind names what its agent writes into and the spawn makes it —
 /// otherwise a correct installation ends in a crash loop over a missing directory.
 async fn the_directories_an_agent_writes_into_are_made_before_it_runs(via: Via) {
     let dir = tempfile::tempdir().expect("tempdir");

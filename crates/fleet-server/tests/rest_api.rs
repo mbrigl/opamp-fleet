@@ -1317,7 +1317,7 @@ async fn the_ui_serves_the_pinned_shiki_bundle() {
 
 /// The UI loads the vendored Shiki bundle without waiting for it, chooses the grammar of an
 /// Agent's effective configuration by the type the Agent reports — `otelcol*` YAML, the fleet's
-/// own Client and Telegraf TOML, Fluent Bit INI, anything else none — and each look defines the
+/// own Client TOML, Fluent Bit INI, anything else none — and each look defines the
 /// CSS-variables theme's colours in its light and its dark theme. The project's TOML and INI token
 /// rules in the bundle name only those colours, so no look needs a variable of its own for them.
 /// Verifies: ADR-0031
@@ -1339,9 +1339,9 @@ async fn the_ui_colours_an_effective_configuration_by_the_agents_type() {
     );
     assert!(
         html.contains(
-            r#"const CONFIG_GRAMMARS = new Map([["supervisor", "toml"], ["telegraf", "toml"], ["fluent-bit", "ini"]]);"#
+            r#"const CONFIG_GRAMMARS = new Map([["supervisor", "toml"], ["fluent-bit", "ini"]]);"#
         ),
-        "supervisor and telegraf are not TOML, or fluent-bit is not INI"
+        "supervisor is not TOML, or fluent-bit is not INI"
     );
     assert!(
         html.contains(

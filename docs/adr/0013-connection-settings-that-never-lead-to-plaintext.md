@@ -22,8 +22,9 @@ An offered endpoint on the loopback stays within Q-1's wording, which forbids se
 configuration or a package unencrypted beyond the loopback, but it leaves the Server's identity
 unproven: a `ws://` or `http://` endpoint has no TLS to verify. Whoever listens on that port of the
 Client's host then speaks to the Client as its Server. Any local account can open such a port. It
-can send Supervisor sets and configurations whose language runs commands, such as a Telegraf
-`inputs.exec`, and these run with the rights of the account the Client's service runs under
+can send Supervisor sets and configurations whose language runs commands, such as an entry that
+runs a program, or whatever the configuration a `command` kind's program reads makes it run, and
+these run with the rights of the account the Client's service runs under
 ([ADR-0037](0037-the-accounts-the-service-runs-under.md)). A Server needs to send only one such
 offer, whether it is compromised or misconfigured. The real Server cannot undo the move, because
 the Client never connects to it again, and the persisted endpoint outranks `supervisor.toml`.

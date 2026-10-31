@@ -37,9 +37,11 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+      # The version the advisories job of release.yml gates a tag with, so both read the
+      # advisory database alike.
       - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
-          tool: cargo-deny
+          tool: cargo-deny@0.20.2
       # The workspace and the fuzz targets, which have a lockfile of their own (fuzz/Cargo.lock).
       - name: cargo deny
         run: bash scripts/check-deny.sh

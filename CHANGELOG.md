@@ -14,7 +14,7 @@ once its tag exists.
 > rest — is not backfilled here; it is in the git log and in the ADRs. The first four releases were
 > all cut on 2026-08-09, so the dates below say less than the order does.
 
-## [Unreleased]
+## [0.7.1]
 
 ### Added
 
@@ -38,13 +38,44 @@ once its tag exists.
   take a host below a floor, stop its Client, remove that type's entry from
   `package-floors.json`, and start it.
 
+### Changed
+
+- **The UI colours as TOML only the Client's own configuration**
+  ([ADR-0031](docs/adr/0031-the-ui-colours-configurations-with-shiki.md)). The core's UI chooses a
+  grammar for `otelcol*`, the Client's own type and `fluent-bit` alone. An Agent of the one other
+  type an earlier release also coloured as TOML is now shown as plain text, whichever Client build
+  it reports through; a Server built with that Agent's kind colours it again. **What to do:**
+  nothing; the text shown is the same.
+
 ### Fixed
+
+- **A Collector that reports its components as a hash no longer trips the per-host rate limit.**
+  The Collector's `opampextension` reports its available components as a hash and sends the map
+  only when asked. The Supervisor Endpoint never asked, the Collector's Agent declared
+  `ReportsAvailableComponents` on the hash alone, and the Server asked for the map on every reply,
+  which the Agent answered with the hash again until the Server throttled the host. Now the
+  Supervisor Endpoint asks the process for the map, the Agent declares the capability only once
+  it holds the map, and the Server asks once per hash on a connection, and again only after the
+  Agent reconnects or restarts. Either end alone stops the exchange, so a fleet may upgrade the
+  Server and the Clients in either order.
+  **What to do:** nothing. A Configuration that sets `reports_available_components: false` under
+  `extensions.opamp.capabilities` to work around this can drop the setting.
 
 - **A stop right after the Client starts ends it cleanly.** Its `SIGTERM` and `SIGINT` handlers
   were installed only once the task waiting for them first ran; a stop before that ended the Client
   by the signal itself. The handlers are now in place before the Client starts anything.
 
 ### Security
+
+- **`service config` and `service install --interactive` copy only certificates beside the
+  configuration** ([ADR-0037](docs/adr/0037-the-accounts-the-service-runs-under.md) clause 11).
+  The copy `server-ca.pem` is handed to the service's account, which owns the data root and could
+  put a link where the file names its CA: a root-only file behind it was read and handed over. The
+  copy now holds the CA file's certificates, encoded again, and a file that holds none is refused
+  before anything is written. The configuration and the copy are written through the held data
+  root, synced before the rename; a state directory an install creates beneath a root, and the
+  `current` pointer it switches, are reached without following a link. Upgrade: nothing to do; a
+  `server-ca.pem` that is no PEM certificate file fails the next `service config` with its name.
 
 - **On Windows a first install runs the Client under its own virtual account, not `LocalSystem`**
   ([ADR-0020](docs/adr/0020-the-accounts-the-service-runs-under.md)).
@@ -86,7 +117,17 @@ once its tag exists.
   check. **What to do:** nothing on upgrade. An administrator's tool that opens the second
   service's process, a debugger or a process explorer, has to run elevated.
 
-## [0.7.0]
+- **A Gateway refuses a certificate whose serial is longer than 20 octets, as the Server does**
+  ([ADR-0015](docs/adr/0015-client-modes-and-the-gateway.md)). RFC 5280 allows a serial of at most
+  20 octets, and the Server's register and the revocation list every Gateway fetches are bounded on
+  that length, so the Server already refused such a certificate; a Gateway admitted one its list
+  could not name. A downstream peer presenting one is now answered `401` on `/v1/opamp`, on both
+  transports, on the download route and on `/v1/package-floors`, and binds nothing. Only a foreign
+  CA issues such a certificate. **What to do:** nothing on upgrade. A host behind a Gateway whose
+  certificate has a longer serial was already refused by the Server directly; give it a
+  certificate of the fleet's client CA.
+
+## [0.7.0] - 2026-10-25
 
 ### Added
 

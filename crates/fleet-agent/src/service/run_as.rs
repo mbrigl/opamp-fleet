@@ -2160,10 +2160,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_reregistration_without_run_as_keeps_the_units_account() {
-        let unit = registered(Some("telegraf"));
+        let unit = registered(Some("otelcol-contrib"));
         let (account, source) =
             choose(None, Some(&unit), Path::new(DATA_ROOT), unasked).expect("decided");
-        assert_eq!(account, "telegraf");
+        assert_eq!(account, "otelcol-contrib");
         assert_eq!(source, Source::Registered(PathBuf::from(UNIT)));
         assert!(source.describe().contains(UNIT), "{}", source.describe());
 
@@ -2225,10 +2225,10 @@ mod tests {
     #[test]
     fn a_unit_without_an_account_on_an_account_owned_data_root_takes_the_owner() {
         let (account, source) = choose(None, Some(&registered(None)), Path::new(DATA_ROOT), || {
-            Ok(Some("telegraf".to_string()))
+            Ok(Some("otelcol-contrib".to_string()))
         })
         .expect("decided");
-        assert_eq!(account, "telegraf");
+        assert_eq!(account, "otelcol-contrib");
         assert_eq!(source, Source::DataRootOwner(PathBuf::from(DATA_ROOT)));
         assert!(
             source.describe().contains(DATA_ROOT),

@@ -30,7 +30,7 @@ The forces:
   adds it back, under the same name or another.
 - **A version that does not compare cannot be refused by order.** `precedence` in
   `crates/fleet-core/src/version.rs` returns `None` for any value that is not SemVer. If an
-  operator ever signed a build under a version such as `1.19`, which upstream GLPI Agent releases
+  operator ever signed a build under a version such as `1.19`, which some upstream agents' releases
   use, an ordering test that lets an incomparable version through lets the Server offer that build
   over any installed version, however new.
 - **The Client's own update has a floor no Server act lowers:** the binary that is running

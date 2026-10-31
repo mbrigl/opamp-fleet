@@ -82,8 +82,11 @@ Five crates in one workspace ([ADR-0008](adr/0008-five-crates-on-tokio-and-axum.
   renewal proof and
   the bootstrap proof a CSR carries — read from a CSR by the adapter `csr` — the host a
   certificate that names none is taken for, when a certificate counts as ending, what a
-  certificate is called, the token buckets the Server and a Gateway count a sender in (`rate`) —
-  and the
+  certificate is called, the token buckets the Server and a Gateway count a sender in (`rate`),
+  what a client certificate is known by on the Server and on a Gateway alike — its host, its issuer
+  and serial, and the 20-octet bound on its serial — whose rule is the core `x509`, read with
+  `x509-parser` by the adapter `x509::read`, with the random serial and the clock skew every issued
+  certificate gets in the adapter `x509::issue` — and the
   bootstrap certificate's PKCS#12 file, whose rule is core and whose reading and writing with
   `p12-keystore` is the adapter `pkcs12::file` (ADR-0022).
 - **`fleet-server`** — the Server: the fleet and its Hosts, its Configurations, labels, packages
@@ -100,7 +103,8 @@ Inside the Server and the Client the code is ports and adapters
 two. Every
 module's role is listed in
 [`dependency_direction.rs`](../crates/fleet-core/tests/dependency_direction.rs), which fails when a
-core module names an adapter or a technology, and when a module has no role.
+core module names an adapter or a technology, when a module has no role, and when a role names
+no module.
 
 - **Server stores** — one port per domain in the core module it serves, shaped so a database or
   an object store could implement it, and speaking in domain types, never paths
@@ -221,12 +225,19 @@ core module names an adapter or a technology, and when a module has no role.
   message in `handle` and leaves three
   channels and its description each to a submodule: `packages`, `remote_config`,
   `connection_settings`, and `description`, what the Agent reports about itself.
-  `storage`, `csr`, `connection`, `tls`, the staging in `service::layout` and the re-owning in
-  `service::run_as` reach the state directory and the layout root through the adapter `nofollow`:
-  a directory held open without following a link at its name, read from and written to by name,
-  each file written whole and renamed into place, because a privileged install works in
-  directories the service's account owns
-  ([ADR-0037](adr/0037-the-accounts-the-service-runs-under.md)).
+  `storage`, `csr`, `connection`, `tls`, `config_init`'s writers of `supervisor.toml` and its CA
+  copy, the staging, the state directory's creation and the `current` switch in `service::layout`,
+  and the re-owning in `service::run_as` reach the data root, the state directory and the layout
+  root through the adapter `nofollow`: a directory held open without following a link at its name,
+  read from and written to by name, each file written whole and renamed into place, because a
+  privileged install works in directories the service's account owns
+  ([ADR-0037](adr/0037-the-accounts-the-service-runs-under.md)). The test
+  `privileged_steps_follow_no_link` holds the modules a privileged step runs in to that, with the
+  path-based calls left to them listed and justified. What runs under the Client's or the process
+  account — the self-update's and a Supervisor's program staging through `install`, the rewrite of
+  `supervisor.toml` in `reconfigure`, the Gateway's package cache, and the second service's purge
+  on Windows, which goes by path — works by path in directories that account owns and no other
+  account may write.
 - **Client configuration** — `config` is what `supervisor.toml` may say and the rules it must meet
   ([ADR-0008](adr/0008-five-crates-on-tokio-and-axum.md)); `config_file` reads it from disk, makes
   its
