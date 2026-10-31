@@ -17,8 +17,6 @@ use zeroize::Zeroizing;
 
 use crate::config::ClientCaConfig;
 use crate::revocation::{CertId, Facts, Signed};
-#[cfg(test)]
-use crate::subject::name::carried_subject;
 use crate::subject::name::{distinguished_name, name_text, subject_values};
 use crate::subject::{Attribute, SubjectValues};
 
@@ -650,6 +648,7 @@ fn at_ms(ms: u64) -> Result<time::OffsetDateTime, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::subject::name::carried_subject;
     use rcgen::{ExtendedKeyUsagePurpose, KeyUsagePurpose};
 
     /// A CA and a Client, end to end: the Client's key never leaves it, and what comes back is a

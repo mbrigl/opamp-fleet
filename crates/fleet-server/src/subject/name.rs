@@ -7,7 +7,7 @@ use super::{Attribute, SubjectValues};
 
 /// A name as text, for the operator to read: `C=AT, O=…, organizationIdentifier=…, CN=…`. The
 /// parser's own registry knows no `organizationIdentifier` and would print its OID.
-pub fn name_text(name: &x509_parser::x509::X509Name<'_>) -> String {
+pub(crate) fn name_text(name: &x509_parser::x509::X509Name<'_>) -> String {
     use x509_parser::oid_registry::{OidEntry, OidRegistry};
     static REGISTRY: std::sync::LazyLock<OidRegistry<'static>> = std::sync::LazyLock::new(|| {
         let mut registry = OidRegistry::default().with_all_crypto().with_x509();
@@ -26,7 +26,7 @@ pub fn name_text(name: &x509_parser::x509::X509Name<'_>) -> String {
 
 /// The values of a subject a Host carries (ADR-0024 clause 15), each the first of its attribute.
 /// A value that is not a string is left out.
-pub fn subject_values(name: &x509_parser::x509::X509Name<'_>) -> SubjectValues {
+pub(crate) fn subject_values(name: &x509_parser::x509::X509Name<'_>) -> SubjectValues {
     let mut values = SubjectValues::default();
     for attribute in Attribute::CARRIED {
         let first = name
@@ -40,8 +40,8 @@ pub fn subject_values(name: &x509_parser::x509::X509Name<'_>) -> SubjectValues {
 }
 
 /// The six values a bootstrap certificate's subject carries into a host certificate, read under
-/// the rules they were issued by (ADR-0022 clause 1 and ADR-0015 clause 23): each attribute at most once, a
-/// country of two upper-case letters as a `PrintableString`, every other value of 1 to 64
+/// the rules they were issued by (ADR-0022 clause 1 and ADR-0015 clause 23): each attribute at
+/// most once, a country of two upper-case letters as a `PrintableString`, every other value of 1 to 64
 /// characters without a control character as a `UTF8String` or a `PrintableString`, and an
 /// organization and an organizational unit present. Every other attribute, the common name
 /// included, is passed over. The certificate may come from a foreign PKI, so nothing in it is
@@ -49,7 +49,9 @@ pub fn subject_values(name: &x509_parser::x509::X509Name<'_>) -> SubjectValues {
 ///
 /// # Errors
 /// Returns why the subject cannot be carried, naming the attribute.
-pub fn carried_subject(name: &x509_parser::x509::X509Name<'_>) -> Result<SubjectValues, String> {
+pub(crate) fn carried_subject(
+    name: &x509_parser::x509::X509Name<'_>,
+) -> Result<SubjectValues, String> {
     use x509_parser::der_parser::asn1_rs::Tag;
     let mut values = SubjectValues::default();
     let mut seen = Vec::new();
@@ -100,7 +102,7 @@ pub fn carried_subject(name: &x509_parser::x509::X509Name<'_>) -> Result<Subject
 ///
 /// # Errors
 /// Returns an error for a country that a `PrintableString` cannot hold.
-pub fn distinguished_name(
+pub(crate) fn distinguished_name(
     attributes: &[(Attribute, String)],
 ) -> Result<rcgen::DistinguishedName, String> {
     let mut name = rcgen::DistinguishedName::new();

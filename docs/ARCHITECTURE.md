@@ -197,8 +197,8 @@ is not its to decide.
   ([ADR-0021](adr/0021-admission-by-client-certificate-and-revocation.md),
   [ADR-0024](adr/0024-the-fleet-record-of-agents-and-hosts.md)). `subject` holds the attributes
   a certificate's subject carries, each with its object identifier once, the rules a value meets
-  and the values a Host carries; its adapter `subject::name` reads them from an X.509 name and
-  writes one for `ca` and `tls`
+  and the values a Host carries; its adapter `subject::name` reads them from an X.509 name for
+  `ca` and `tls` and writes one for `ca`
   ([ADR-0022](adr/0022-bootstrap-certificates-and-enrolment.md)).
   `agent_rate` holds the token buckets that bound how often an admitted host, an Agent behind a
   marked Gateway, and the Gateway as a whole are heard, in the bounded tables of

@@ -140,7 +140,7 @@ pub struct Proofs {
     pub host: Option<String>,
     /// The certificate's subject values, which a Host made at its first report carries
     /// (ADR-0024 clause 15).
-    pub subject_values: crate::revocation::SubjectValues,
+    pub subject_values: crate::subject::SubjectValues,
 }
 
 impl Proofs {
