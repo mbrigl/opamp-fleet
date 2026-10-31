@@ -65,19 +65,16 @@ Done:
   `an_instance_with_an_older_floor_in_memory_cannot_lower_the_stored_one`.
 - The port contracts of the ledger and the floors run on both stores with the new calls.
 
-Open, each a decision for the human before it is built:
+Decided by the human, to be built next:
 
-- Criterion 3, the renewal of a revoked predecessor on an instance whose view is stale: the
-  register's write of a renewal becomes a call that walks the predecessor chain and reads the
-  list in its transaction (a recursive query) and refuses; or admission reads the chain and the
-  list from the database at each renewal, uncached; a cache dropped by the notification alone does
-  not hold when the notification is held back.
-- Criterion 4, one `instance_uid` to one Host: the Hosts table keeps the bindings as an array, on
-  which no unique constraint can stand. The bindings move into a table of their own,
-  `instance_uid` its key, migrated from the arrays; which act binds (the approval, or the first
-  report a Host admits) and what the refusal names are to be decided.
-- Criterion 5, the register's bounds across the fleet: which bound (the register's size, the
-  descendants of one root) is counted in the write, and by which lock (the table, or the chain's
-  root).
-- The enrolment queue per row, and its bound across the fleet: the enrolment port's shape.
+- Criterion 3: the register's write of a renewal walks the predecessor chain and reads the list in
+  its own transaction, a recursive query on PostgreSQL, and refuses a renewal whose chain holds a
+  revoked certificate. No cache decides it.
+- Criterion 4: the bindings move into a table of their own, `instance_uid` its key, migrated from
+  the arrays of `hosts`. The approval of an enrolment binds; a second binding is refused naming the
+  `instance_uid` and the Host it is bound to.
+- Criterion 5: both bounds the register has, its size and the descendants of one root, are counted
+  in the write, with the register held against every other writer, as the revocation list is.
+- The enrolment queue is one row per request, its bound counted in the write under the same kind
+  of hold.
 - Criteria 6 and 7 follow once the rest is built.
