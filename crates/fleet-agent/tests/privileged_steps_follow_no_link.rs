@@ -10,12 +10,12 @@
 //! `storage::handle` and `win32::files`.
 //!
 //! This test reads the source text of those modules, every `cfg` branch included, and fails on
-//! each path-based call that changes the file system, unless `ALLOWED` names it with its reason.
+//! each path-based call that changes or reads a file, unless `ALLOWED` names it with its reason.
 //! An entry that no longer matches fails too, so the list stays what the code does. Code under
 //! `#[cfg(test)]` is not checked.
 //!
-//! The run-time Client, the second service and the Gateway are not here: each writes only in
-//! directories its own account owns and no other account may write to (ADR-0037 clause 21).
+//! The run-time Client, the second service and the Gateway are not here: each works only in
+//! directories its own account owns, and clause 11 covers the privileged steps alone.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -53,7 +53,7 @@ const PRIVILEGED: &[(&str, &str)] = &[
     ),
 ];
 
-/// Calls that change the file system by path. `fs::` stands for `std::fs::`, `tokio::fs::` and
+/// Calls that change or read a file by path. `fs::` stands for `std::fs::`, `tokio::fs::` and
 /// `std::os::unix::fs::` alike.
 const BANNED: &[&str] = &[
     "fs::write(",
@@ -92,15 +92,16 @@ const ALLOWED: &[(&str, &str, &str, &str)] = &[
         "src/config_file.rs",
         "load",
         "fs::read_to_string(",
-        "the run-time Client's read of its own file, in a directory its own account owns (ADR-0037 \
-         clause 21); every privileged step reads through `load_held`",
+        "the run-time Client's read of its own file, in a directory its own account owns, which \
+         ADR-0037 clause 11 does not cover; every privileged step reads through `load_held`",
     ),
     (
         "src/config_init.rs",
         "in_dir",
         "fs::read_to_string(",
         "the verification key the operator put beside the program or in `--fleet-files`: a \
-         directory the operator fills, not one of the account's",
+         directory the operator fills when `service install` runs from a payload or a download, \
+         not one of the account's",
     ),
     (
         "src/config_init.rs",
@@ -137,27 +138,25 @@ const ALLOWED: &[(&str, &str, &str, &str)] = &[
         "src/service/runtime.rs",
         "recovery_state_dir",
         "fs::read_to_string(",
-        "the run-time Client, in its own account's directories (ADR-0037 clause 21)",
-    ),
-    (
-        "src/service/runtime.rs",
-        "run_until_shutdown",
-        "File::open(",
-        "the run-time Client, in its own account's directories (ADR-0037 clause 21)",
+        "the run-time Client, in its own account's directories, which ADR-0037 clause 11 does \
+         not cover",
     ),
     (
         "src/tls.rs",
         "pkcs12_identity",
         "File::open(",
         "the `bootstrap.p12` the operator put beside the program or in `--fleet-files`, not in one \
-         of the account's directories; a regular file only, read at its size",
+         of the account's directories when `service install` runs from a payload or a download; a \
+         regular file only, read at its size",
     ),
     (
         "src/tls.rs",
         "read",
         "fs::read(",
-        "the files `[tls]` names, where the operator put them, which may be reached through a link \
-         the operator made; what the state directory holds is read through `state_file`",
+        "the files `[tls]` names, by the path `supervisor.toml` gives; among them the CA copy \
+         `service install` put in the data root, which the account owns, so a link the account \
+         placed there is followed: an open gap, filed as a ticket of its own; what the state \
+         directory holds is read through `state_file`",
     ),
     (
         "src/config_init.rs",
@@ -271,6 +270,16 @@ fn declared_fn(line: &str) -> Option<&str> {
     None
 }
 
+/// Whether `code` makes the call `banned`: `FloorFile::open(` is not `File::open(`.
+fn contains_call(code: &str, banned: &str) -> bool {
+    code.match_indices(banned).any(|(at, _)| {
+        !code[..at]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_')
+    })
+}
+
 /// The banned calls in `text`, outside comments and the test module, by function and call.
 fn calls(text: &str) -> Vec<(String, &'static str, usize)> {
     let lines: Vec<&str> = text.lines().collect();
@@ -293,7 +302,7 @@ fn calls(text: &str) -> Vec<(String, &'static str, usize)> {
             function = name.to_string();
         }
         for banned in BANNED {
-            if code.contains(banned) {
+            if contains_call(code, banned) {
                 found.push((function.clone(), *banned, index + 1));
             }
             // `use std::fs::{remove_file, …}` would let the call go by its bare name.
@@ -368,7 +377,7 @@ fn privileged_modules_change_the_account_s_directories_through_held_directories_
 fn the_scanner_finds_path_based_calls_by_function() {
     let src = r#"
         use std::fs::remove_file;
-        pub(crate) fn a() { std::fs::write(p, b); let _ = std::fs::read(p); }
+        pub(crate) fn a() { std::fs::write(p, b); let _ = std::fs::read(p); FloorFile::open(p); }
         // std::fs::rename(a, b) in a comment
         async fn b() {
             tokio::fs::remove_dir_all(p).await;

@@ -1740,6 +1740,13 @@ mod tests {
         let mode = std::fs::metadata(&path).expect("stat").permissions().mode() & 0o777;
         assert_eq!(mode, 0o640, "the operator's mode is kept, got {mode:o}");
         assert_eq!(std::fs::read_to_string(&victim).expect("read"), "untouched");
+        // The link stood at the temporary name the one replacement uses, and was removed as
+        // itself: an apply that wrote by another way would have left it.
+        assert!(
+            std::fs::symlink_metadata(dir.path().join("supervisor.toml~")).is_err(),
+            "the link at the temporary name is gone"
+        );
+        assert!(!std::fs::symlink_metadata(&path).expect("stat").is_symlink());
         assert!(std::fs::read_to_string(&path)
             .expect("read")
             .contains("name = \"new\""));

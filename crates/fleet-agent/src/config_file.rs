@@ -11,8 +11,8 @@ use crate::nofollow::HeldDir;
 impl ClientConfig {
     /// Loads the file, or the defaults when it does not exist. A file that exists but does not
     /// parse is an error — never silently ignored. What the run-time Client reads, in a directory
-    /// its own account owns (ADR-0037 clause 21); a privileged step reads through
-    /// [`load_held`](Self::load_held).
+    /// its own account owns, which ADR-0037 clause 11 does not cover; a privileged step reads
+    /// through [`load_held`](Self::load_held).
     pub fn load(path: &Path) -> Result<Self, String> {
         Self::load_with(path, |path| std::fs::read_to_string(path))
     }
@@ -360,6 +360,7 @@ pub(crate) fn read_held(path: &Path) -> Result<zeroize::Zeroizing<Vec<u8>>, Stri
 /// directory, with `mode` and, on Unix, `owner` set through its descriptor, synced, and renamed
 /// over the name, so a Client starting meanwhile reads the old file or the new one, never half of
 /// either, and a link at either name is replaced and never written through (ADR-0037 clause 11).
+/// The directory is synced after the rename, so an apply reported applied survives a power loss.
 /// The mode is the caller's: owner-only for an install or a `service config` (ADR-0019 clause
 /// 25), the operator's own for an apply (ADR-0017 clause 30).
 pub(crate) fn replace(
@@ -370,6 +371,7 @@ pub(crate) fn replace(
 ) -> Result<(), String> {
     let (dir, name) = held_file(path)?;
     dir.write_owned(name, contents, mode, owner)
+        .and_then(|()| dir.sync())
         .map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
 

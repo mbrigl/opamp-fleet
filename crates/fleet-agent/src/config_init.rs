@@ -909,7 +909,8 @@ fn commented_top_level_keys() -> &'static str {
 /// a check that raced, and a link at the name is something that is there: it is refused, never
 /// followed. The mode is set in the same call for the same reason: the file names where the
 /// private key lies and may hold `[packages] archive_key` (ADR-0019 clause 25), before any later
-/// mode change could narrow it. The directory is held as [`held_dir`](crate::config_file::held_dir) holds it.
+/// mode change could narrow it. The directory is held as
+/// [`held_dir`](crate::config_file::held_dir) holds it.
 ///
 /// # Errors
 /// Returns an error if the directory cannot be created or the file already exists.
