@@ -1010,6 +1010,7 @@ dependencies = [
  "rcgen",
  "ring",
  "sha2",
+ "tempfile",
  "time",
  "x509-parser",
  "zeroize",
