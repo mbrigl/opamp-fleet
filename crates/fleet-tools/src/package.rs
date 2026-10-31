@@ -180,7 +180,7 @@ pub fn run(command: Command) -> Result<(), String> {
             .block_on(crate::fetch::run(args)),
         Command::Keygen { out } => {
             let (pkcs8, public_key) = signing_key()?;
-            write_private_key(&out, &pkcs8)?;
+            crate::pki::write_file(&out, &pkcs8, true)?;
             eprintln!(
                 "wrote the private key to {} (keep it secret)",
                 out.display()
@@ -477,18 +477,6 @@ fn load_key(path: &PathBuf) -> Result<Ed25519KeyPair, String> {
         .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     Ed25519KeyPair::from_pkcs8(&pkcs8)
         .map_err(|_| format!("{} is not a valid PKCS#8 Ed25519 key", path.display()))
-}
-
-/// Writes the private key, owner-read/write only on Unix — it is a secret.
-fn write_private_key(path: &PathBuf, bytes: &[u8]) -> Result<(), String> {
-    std::fs::write(path, bytes).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-            .map_err(|e| format!("cannot restrict {}: {e}", path.display()))?;
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -802,6 +790,36 @@ mod tests {
                 .verify(b"tampered", &signature)
                 .is_err()
         );
+    }
+
+    /// `keygen` creates the key file owner-only from the moment it exists, through the writer `pki
+    /// init` uses, and refuses to replace a file that exists, leaving it as it was.
+    /// Verifies: ADR-0032
+    #[test]
+    fn keygen_writes_the_key_owner_only_and_never_replaces_one() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let keyfile = dir.path().join("signing.pk8");
+        run(Command::Keygen {
+            out: keyfile.clone(),
+        })
+        .expect("keygen");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&keyfile)
+                .expect("metadata")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600, "{mode:o}");
+        }
+        let written = std::fs::read(&keyfile).expect("read");
+        let err = run(Command::Keygen {
+            out: keyfile.clone(),
+        })
+        .expect_err("an existing key is not replaced");
+        assert!(err.contains("never replaced"), "{err}");
+        assert!(err.contains(&keyfile.display().to_string()), "{err}");
+        assert_eq!(std::fs::read(&keyfile).expect("read"), written);
     }
 
     /// `package floor` signs the floor statement of the type and the version, which verifies
