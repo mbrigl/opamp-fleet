@@ -3316,8 +3316,8 @@ struct HostSubject {
     organization_identifier: String,
 }
 
-impl From<crate::revocation::SubjectValues> for HostSubject {
-    fn from(values: crate::revocation::SubjectValues) -> Self {
+impl From<crate::subject::SubjectValues> for HostSubject {
+    fn from(values: crate::subject::SubjectValues) -> Self {
         HostSubject {
             country: values.country,
             state: values.state,

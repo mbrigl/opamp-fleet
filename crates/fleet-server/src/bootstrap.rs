@@ -18,7 +18,8 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use crate::fleet::Clock;
-use crate::revocation::{CertId, SubjectValues};
+use crate::revocation::CertId;
+pub use crate::subject::Attribute;
 
 /// A bootstrap certificate's life when the request names none (ADR-0032 clause 14).
 pub const DEFAULT_VALIDITY_DAYS: u32 = 10;
@@ -28,9 +29,6 @@ pub const MAX_VALIDITY_DAYS: u32 = 90;
 
 /// The valid bootstrap certificates the record holds at most (ADR-0029 clause 11).
 pub const MAX_VALID: usize = 10_000;
-
-/// The longest value of a subject attribute: RFC 5280's upper bound for the names that have one.
-pub const MAX_VALUE_CHARS: usize = 64;
 
 const DAY_MS: u64 = 24 * 60 * 60 * 1000;
 
@@ -59,133 +57,6 @@ pub struct Subject {
     /// Server's choosing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub organization_identifier: Option<String>,
-}
-
-/// An attribute of a bootstrap certificate's subject, in the order a certificate lists them
-/// (ADR-0022 clause 1).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Attribute {
-    Country,
-    State,
-    Locality,
-    Organization,
-    OrganizationalUnit,
-    OrganizationIdentifier,
-    CommonName,
-}
-
-impl Attribute {
-    /// The six attributes a host certificate carries over from its bootstrap certificate, in
-    /// certificate order (ADR-0022 clauses 1, 11 and 12 and ADR-0015 clause 23).
-    pub const CARRIED: [Attribute; 6] = [
-        Attribute::Country,
-        Attribute::State,
-        Attribute::Locality,
-        Attribute::Organization,
-        Attribute::OrganizationalUnit,
-        Attribute::OrganizationIdentifier,
-    ];
-
-    /// The name a request, a list and a refusal give it.
-    #[must_use]
-    pub fn key(self) -> &'static str {
-        match self {
-            Attribute::Country => "country",
-            Attribute::State => "state",
-            Attribute::Locality => "locality",
-            Attribute::Organization => "organization",
-            Attribute::OrganizationalUnit => "organizational_unit",
-            Attribute::OrganizationIdentifier => "organization_identifier",
-            Attribute::CommonName => "common_name",
-        }
-    }
-
-    /// Its object identifier, X.520.
-    #[must_use]
-    pub fn oid(self) -> &'static str {
-        match self {
-            Attribute::Country => "2.5.4.6",
-            Attribute::State => "2.5.4.8",
-            Attribute::Locality => "2.5.4.7",
-            Attribute::Organization => "2.5.4.10",
-            Attribute::OrganizationalUnit => "2.5.4.11",
-            Attribute::OrganizationIdentifier => "2.5.4.97",
-            Attribute::CommonName => "2.5.4.3",
-        }
-    }
-
-    /// Whether a certificate carries it as a `PrintableString`; every other attribute is a
-    /// `UTF8String`.
-    #[must_use]
-    pub fn printable(self) -> bool {
-        self == Attribute::Country
-    }
-
-    /// Checks a value against ADR-0022 clause 1: a country of exactly two upper-case letters,
-    /// any other value 1 to [`MAX_VALUE_CHARS`] characters without a control character.
-    ///
-    /// # Errors
-    /// Returns why the value is refused, naming the attribute.
-    pub fn check(self, value: &str) -> Result<(), String> {
-        let name = self.key();
-        if self == Attribute::Country {
-            if value.len() == 2 && value.bytes().all(|b| b.is_ascii_uppercase()) {
-                return Ok(());
-            }
-            return Err(format!(
-                "{name} must be two upper-case letters, an ISO 3166-1 alpha-2 code"
-            ));
-        }
-        let chars = value.chars().count();
-        if chars == 0 || chars > MAX_VALUE_CHARS {
-            return Err(format!("{name} must be 1 to {MAX_VALUE_CHARS} characters"));
-        }
-        if value.chars().any(char::is_control) {
-            return Err(format!("{name} must not carry a control character"));
-        }
-        Ok(())
-    }
-
-    /// Its value in `values`; empty when they hold none.
-    #[must_use]
-    pub fn of(self, values: &SubjectValues) -> &str {
-        match self {
-            Attribute::Country => &values.country,
-            Attribute::State => &values.state,
-            Attribute::Locality => &values.locality,
-            Attribute::Organization => &values.organization,
-            Attribute::OrganizationalUnit => &values.organizational_unit,
-            Attribute::OrganizationIdentifier => &values.organization_identifier,
-            Attribute::CommonName => "",
-        }
-    }
-
-    /// Puts `value` into `values` as this attribute's; a common name has no place there.
-    pub fn set(self, values: &mut SubjectValues, value: String) {
-        let slot = match self {
-            Attribute::Country => &mut values.country,
-            Attribute::State => &mut values.state,
-            Attribute::Locality => &mut values.locality,
-            Attribute::Organization => &mut values.organization,
-            Attribute::OrganizationalUnit => &mut values.organizational_unit,
-            Attribute::OrganizationIdentifier => &mut values.organization_identifier,
-            Attribute::CommonName => return,
-        };
-        *slot = value;
-    }
-}
-
-/// The attributes `values` hold, in certificate order, ending with `common_name`: the subject of
-/// a host certificate (ADR-0022 clause 11).
-#[must_use]
-pub fn carried_attributes(values: &SubjectValues, common_name: &str) -> Vec<(Attribute, String)> {
-    let mut attributes: Vec<(Attribute, String)> = Attribute::CARRIED
-        .into_iter()
-        .filter(|attribute| !attribute.of(values).is_empty())
-        .map(|attribute| (attribute, attribute.of(values).to_string()))
-        .collect();
-    attributes.push((Attribute::CommonName, common_name.to_string()));
-    attributes
 }
 
 impl Subject {
