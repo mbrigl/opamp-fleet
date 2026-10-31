@@ -13,8 +13,12 @@
 # a blocker that is neither a path under docs/plan/ nor 'None', such as a link, because then it
 # cannot place or claim that ticket.
 #
+# The frontier is read on a base, as the claim takes tickets from it (ADR-0006): without --base
+# the plan of the checkout, which is main's where the dispatcher works; with --base, the plan as
+# that branch holds it, main or the feat/ branch that carries a plan, whatever is checked out.
+#
 # Pure bash + git + coreutils/awk. Usage:
-#     scripts/sensor-plan-frontier.sh [repository root]
+#     scripts/sensor-plan-frontier.sh [repository root] [--base <branch>]
 # The root defaults to this repository; scripts/test-sensor-plan-frontier.sh passes fixtures.
 # Exit code 0 when every ticket was read, 1 otherwise.
 
@@ -23,8 +27,32 @@ set -uo pipefail
 # shellcheck source-path=SCRIPTDIR source=lib/ticket.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib/ticket.sh"
 
-ROOT="$(cd "${1:-$(dirname "${BASH_SOURCE[0]}")/..}" && pwd)"
+root_arg="" base_name=""
+while (($#)); do
+  case "$1" in
+    --base)
+      base_name="${2:-}"
+      shift 2 || { echo "Plan frontier sensor: --base needs a branch" >&2; exit 1; }
+      ;;
+    *) root_arg="$1"; shift ;;
+  esac
+done
+ROOT="$(cd "${root_arg:-$(dirname "${BASH_SOURCE[0]}")/..}" && pwd)"
 PLAN="docs/plan"
+
+# PLAN_ROOT holds the plan the sensor reads: the checkout, or a copy of the base's.
+PLAN_ROOT="$ROOT"
+if [[ -n "$base_name" ]]; then
+  if ! git -C "$ROOT" rev-parse --verify -q "$base_name^{commit}" >/dev/null; then
+    echo "Plan frontier sensor: there is no branch '$base_name' to read the plan on" >&2
+    exit 1
+  fi
+  PLAN_ROOT="$(mktemp -d)"
+  trap 'rm -rf "$PLAN_ROOT"' EXIT
+  if git -C "$ROOT" cat-file -e "$base_name:$PLAN" 2>/dev/null; then
+    git -C "$ROOT" archive "$base_name" "$PLAN" | tar -x -C "$PLAN_ROOT"
+  fi
+fi
 
 # section <file> <heading> — the lines of a '## <heading>' section, HTML comments removed;
 # prints nothing and returns 1 when the section is missing.
@@ -56,12 +84,12 @@ branches() {
 }
 
 tickets=()
-if [[ -d "$ROOT/$PLAN" ]]; then
-  while IFS= read -r f; do tickets+=("${f#"$ROOT"/}"); done \
-    < <(find "$ROOT/$PLAN" -mindepth 2 -maxdepth 2 -type f -name '[0-9][0-9]-*.md' | LC_ALL=C sort)
+if [[ -d "$PLAN_ROOT/$PLAN" ]]; then
+  while IFS= read -r f; do tickets+=("${f#"$PLAN_ROOT"/}"); done \
+    < <(find "$PLAN_ROOT/$PLAN" -mindepth 2 -maxdepth 2 -type f -name '[0-9][0-9]-*.md' | LC_ALL=C sort)
 fi
 if ((${#tickets[@]} == 0)); then
-  echo "Plan frontier sensor: no open tickets under $PLAN/."
+  echo "Plan frontier sensor: no open tickets under $PLAN/${base_name:+ on $base_name}."
   exit 0
 fi
 
@@ -73,7 +101,7 @@ for t in "${tickets[@]}"; do
     continue
   fi
   branch="$(ticket_branch "$t")"
-  if ! blockers="$(section "$ROOT/$t" "Blocked by")"; then
+  if ! blockers="$(section "$PLAN_ROOT/$t" "Blocked by")"; then
     errors+=("$t: no '## Blocked by' section — name the blocking tickets by path, or 'None (can start immediately)'")
     continue
   fi
@@ -84,7 +112,7 @@ for t in "${tickets[@]}"; do
     errors+=("$t: '## Blocked by' names '${odd#"${odd%%[![:space:]]*}"}', which is no path under $PLAN/ — write each blocker as its path, or 'None (can start immediately)'")
     continue
   fi
-  if ! mode="$(section "$ROOT/$t" "Mode")"; then
+  if ! mode="$(section "$PLAN_ROOT/$t" "Mode")"; then
     errors+=("$t: no '## Mode' section — say 'unattended' or 'with the human', and why")
     continue
   fi
@@ -99,7 +127,7 @@ for t in "${tickets[@]}"; do
   fi
   open=()
   while IFS= read -r p; do
-    [[ -n "$p" && "$p" != "$t" && -f "$ROOT/$p" ]] && open+=("$p")
+    [[ -n "$p" && "$p" != "$t" && -f "$PLAN_ROOT/$p" ]] && open+=("$p")
   done < <(grep -oE "$PLAN/[A-Za-z0-9._/-]+\.md" <<< "$blockers" | LC_ALL=C sort -u)
   if ((${#open[@]})); then
     blocked+=("$t — by ${open[*]}")
@@ -114,7 +142,7 @@ if ((${#errors[@]})); then
   exit 1
 fi
 
-echo "Plan frontier sensor: ${#tickets[@]} open, ${#frontier[@]} on the frontier, ${#claimed[@]} claimed, ${#blocked[@]} blocked."
+echo "Plan frontier sensor${base_name:+ on $base_name}: ${#tickets[@]} open, ${#frontier[@]} on the frontier, ${#claimed[@]} claimed, ${#blocked[@]} blocked."
 # list <heading> <items...> — one block of the report, left out while it is empty.
 list() {
   local heading="$1"

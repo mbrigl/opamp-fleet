@@ -7,9 +7,11 @@
 # meet. The cases cover an empty plan, the three lists and the mode a frontier ticket carries, a
 # claim by a local and by a remote branch, a blocker closed by deleting its file, a path inside
 # an HTML comment, the spec that is no ticket, and the tickets the sensor cannot place: without
-# a section it reads, or with a blocker that is no path. The claim script of the work-tickets
-# skill is exercised with it: a claim in one repository, and a claim on a remote that a second
-# clone's claim of the same ticket loses, also when the branch there points at main itself.
+# a section it reads, or with a blocker that is no path, and a plan read on a feat/ base. The
+# claim script of the work-tickets skill is exercised with it: a claim in one repository, a claim
+# on a remote that a second clone's claim of the same ticket loses, also when the branch there
+# points at main itself, and a claim from a feat/ base, on the remote where it is there and by
+# the local branch where it is not.
 #
 # Verifies: ADR-0002
 # Inputs: scripts/sensor-plan-frontier.sh .agents/skills/work-tickets/claim.sh scripts/lib/
@@ -42,12 +44,14 @@ ticket() {
     "$3" "$4" > "$1/$2"
 }
 
-# expect <exit code> <name> <dir> <needle> — run the sensor; its output must contain the needle.
+# expect <exit code> <name> <dir> <needle> [sensor args] — run the sensor; its output must
+# contain the needle.
 expect() {
   local want="$1" name="$2" dir="$3" needle="$4"
+  shift 4
   local out rc
   fixture "$dir"
-  out="$(bash "$SENSOR" "$dir" 2>&1)"; rc=$?
+  out="$(bash "$SENSOR" "$dir" "$@" 2>&1)"; rc=$?
   if [[ $rc -eq "$want" && "$out" == *"$needle"* ]]; then
     passed=$((passed + 1))
     return
@@ -112,20 +116,24 @@ expect 1 "a ticket whose name the claim refuses fails rather than reaching the f
 
 # --- claims: the skill's claim script, in one repository and across two clones -------------
 
-# claim <dir> <ticket> [remote] — run the claim script in a fixture, or in its subdirectory
+# claim <dir> <ticket> [claim args] — run the claim script in a fixture, or in its subdirectory
 # $SUBDIR when set; prints its exit code.
 claim() {
   fixture "$1"
-  (cd "$1/${SUBDIR:-}" && GIT_AUTHOR_NAME=fixture GIT_AUTHOR_EMAIL=fixture@example.invalid \
+  local dir="$1"
+  shift
+  (cd "$dir/${SUBDIR:-}" && GIT_AUTHOR_NAME=fixture GIT_AUTHOR_EMAIL=fixture@example.invalid \
     GIT_COMMITTER_NAME=fixture GIT_COMMITTER_EMAIL=fixture@example.invalid \
-    bash "$CLAIM" "$2" ${3:+"$3"} >/dev/null 2>&1)
+    bash "$CLAIM" "$@" >/dev/null 2>&1)
   echo $?
 }
 
-# expect_claim <exit code> <name> <dir> <ticket> [remote] — the claim must end with that code.
+# expect_claim <exit code> <name> <dir> <ticket> [claim args] — the claim must end with that
+# code.
 expect_claim() {
   local want="$1" name="$2" rc
-  rc="$(claim "$3" "$4" ${5:+"$5"})"
+  shift 2
+  rc="$(claim "$@")"
   if [[ "$rc" -eq "$want" ]]; then
     passed=$((passed + 1))
     return
@@ -183,6 +191,63 @@ export GIT_AUTHOR_DATE="2026-01-01T00:00:00Z" GIT_COMMITTER_DATE="2026-01-01T00:
 expect_claim 0 "a claim at a fixed date succeeds" "$work/a" docs/plan/s/04-same.md origin
 expect_claim 2 "a second claim at the same date and identity is refused" "$work/b" docs/plan/s/04-same.md origin
 unset GIT_AUTHOR_DATE GIT_COMMITTER_DATE
+
+# --- a plan on a feat/ branch: read and claimed from that base (ADR-0006) -------------------
+
+# Verifies: ADR-0006
+d="$(repo feat-base)"
+git -C "${d:?}" checkout -q -b feat/x
+ticket "$d" docs/plan/f/01-first.md "None (can start immediately)" "with the human"
+ticket "$d" docs/plan/f/02-second.md "docs/plan/f/01-first.md" "with the human"
+commit_plan "$d"
+git -C "${d:?}" checkout -q main
+expect 0 "the checkout of main has none of the feat/ plan" "$d" "no open tickets under docs/plan/."
+expect 0 "the frontier is read on a named feat/ base" "$d" \
+  "on feat/x: 2 open, 1 on the frontier, 0 claimed, 1 blocked." --base feat/x
+expect 1 "a base that does not exist is refused" "$d" "no branch 'feat/none'" --base feat/none
+expect_claim 1 "a ticket only on a feat/ branch is refused from main" "$d" docs/plan/f/01-first.md
+expect_claim 1 "a base that is neither main nor a feat/ branch is refused" "$d" \
+  docs/plan/f/01-first.md --base dev
+expect_claim 0 "a ticket is claimed from the feat/ branch that carries it" "$d" \
+  docs/plan/f/01-first.md --base feat/x
+if [[ "$(git -C "$d" rev-parse ticket/f/01-first)" == "$(git -C "$d" rev-parse feat/x)" ]]; then
+  passed=$((passed + 1))
+else
+  failed=$((failed + 1)); echo "FAIL: a claim from a feat/ base starts at that base" >&2
+fi
+expect_claim 2 "a second claim from the feat/ base is refused" "$d" docs/plan/f/01-first.md --base feat/x
+expect 0 "a claim from a feat/ base takes its ticket off that frontier" "$d" \
+  "- docs/plan/f/01-first.md — ticket/f/01-first" --base feat/x
+
+seed="$(repo feat-seed)"
+git -C "${seed:?}" checkout -q -b feat/shared
+ticket "$seed" docs/plan/f/01-first.md "None (can start immediately)" "with the human"
+commit_plan "$seed"
+git -C "${seed:?}" checkout -q -b feat/local
+ticket "$seed" docs/plan/f/02-local.md "None (can start immediately)" "with the human"
+commit_plan "$seed"
+git init -q --bare -b main "$work/feat-remote.git"
+git -C "${seed:?}" push -q "$work/feat-remote.git" main feat/shared
+git clone -q "$work/feat-remote.git" "$work/fa" 2>/dev/null
+git clone -q "$work/feat-remote.git" "$work/fb" 2>/dev/null
+git -C "$work/fa" branch -q feat/shared origin/feat/shared
+expect_claim 0 "a claim from a feat/ base on the remote is made there" "$work/fa" \
+  docs/plan/f/01-first.md origin --base feat/shared
+if git ls-remote --exit-code --heads "$work/feat-remote.git" ticket/f/01-first >/dev/null 2>&1; then
+  passed=$((passed + 1))
+else
+  failed=$((failed + 1)); echo "FAIL: a claim from a feat/ base the remote has is pushed" >&2
+fi
+expect_claim 2 "a second clone's claim from that feat/ base on the remote is refused" "$work/fb" \
+  docs/plan/f/01-first.md origin --base feat/shared
+expect_claim 0 "a feat/ base the remote does not have is claimed by the local branch" "$seed" \
+  docs/plan/f/02-local.md "$work/feat-remote.git" --base feat/local
+if ! git ls-remote --exit-code --heads "$work/feat-remote.git" ticket/f/02-local >/dev/null 2>&1 \
+  && git -C "$seed" show-ref --verify --quiet refs/heads/ticket/f/02-local; then
+  passed=$((passed + 1))
+else
+  failed=$((failed + 1)); echo "FAIL: a claim from a local feat/ base pushes nothing" >&2
+fi
 
 # --- summary ---------------------------------------------------------------------------------
 
