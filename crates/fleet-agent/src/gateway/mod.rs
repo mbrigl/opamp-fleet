@@ -153,7 +153,7 @@ fn not_an_enrolment(report: &AgentToServer, presented: &[u8]) -> Option<&'static
     };
     match fleet_core::csr::proof(&der, fleet_core::csr::ProofKind::Bootstrap) {
         Ok(Some(proof)) if proof.certificate == presented => None,
-        Ok(None) | Err(fleet_core::csr::ProofError::Request) => Some(none),
+        Ok(None) => Some(none),
         Err(fleet_core::csr::ProofError::Both) => Some(fleet_core::csr::BOTH_PROOFS),
         _ => Some("an enrolling peer's bootstrap proof does not name the certificate it presented"),
     }
@@ -1318,6 +1318,68 @@ mod tests {
             not_an_enrolment(&enrolment(uid, csr), &presented),
             Some(fleet_core::csr::BOTH_PROOFS)
         );
+    }
+
+    /// A Gateway and the Server read a request's bootstrap proof by the one reader, so they agree
+    /// on it: the Gateway forwards a request exactly when the Server reads from it the
+    /// certificate the peer presented, and both refuse a request carrying both proofs by the same
+    /// words. No proof, a torn one and one that is not base64url are refused by both.
+    /// Verifies: ADR-0015
+    #[test]
+    fn a_gateway_and_the_server_read_a_bootstrap_proof_alike() {
+        use base64::Engine as _;
+        let uid = InstanceUid::default();
+        let presented = certificate();
+        let content = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(fleet_core::bootstrap_proof::encode(&presented, b"sig"));
+        let bootstrap = fleet_core::bootstrap_proof::URI_PREFIX;
+        let renewal = fleet_core::renewal::URI_PREFIX;
+        let cases: [(&str, Vec<String>); 5] = [
+            ("no proof", vec![]),
+            (
+                "the presented certificate",
+                vec![format!("{bootstrap}{content}")],
+            ),
+            (
+                "both proofs",
+                vec![
+                    format!("{bootstrap}{content}"),
+                    format!("{renewal}{content}"),
+                ],
+            ),
+            (
+                "a torn proof",
+                vec![format!("{bootstrap}{}", &content[..8])],
+            ),
+            ("not base64url", vec![format!("{bootstrap}*not*base64*")]),
+        ];
+        for (case, uris) in cases {
+            let key = rcgen::KeyPair::generate().expect("key");
+            let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).expect("params");
+            for uri in uris {
+                params
+                    .subject_alt_names
+                    .push(rcgen::SanType::URI(uri.try_into().expect("uri")));
+            }
+            let pem = params
+                .serialize_request(&key)
+                .expect("csr")
+                .pem()
+                .expect("pem");
+            let gateway = not_an_enrolment(&enrolment(uid, pem.clone().into_bytes()), &presented);
+            let server = fleet_server::ca::bootstrap_proof_certificate(&pem);
+            let server_admits = matches!(&server, Ok(Some(der)) if *der == presented);
+            assert_eq!(
+                gateway.is_none(),
+                server_admits,
+                "{case}: {gateway:?} / {server:?}"
+            );
+            if let Err(why) = &server {
+                if why == fleet_core::csr::BOTH_PROOFS {
+                    assert_eq!(gateway, Some(fleet_core::csr::BOTH_PROOFS), "{case}");
+                }
+            }
+        }
     }
 
     /// An enrolling peer's request is forwarded only when its bootstrap proof embeds the very
