@@ -3745,8 +3745,8 @@ mod tests {
     }
 
     /// A peer that is not the second service is no refusal of the service's, which no restart
-    /// mends: the service is away, and is tried again on a new connection, checked anew, until the
-    /// process the manager names serves the socket.
+    /// mends: the service is away, and is tried again on a new connection until the start gives
+    /// up. On a paused clock, since the start waits out [`RECONNECT`].
     /// Verifies: ADR-0037
     #[tokio::test(start_paused = true)]
     async fn a_peer_that_is_not_the_second_service_is_away_and_tried_anew() {
@@ -3771,7 +3771,19 @@ mod tests {
             asked.load(Ordering::SeqCst) > 1,
             "asked once: the peer was not tried again"
         );
+    }
 
+    /// Each connection is checked anew: the manager is asked once per connection, the two that
+    /// it says another process serves are dropped, and the third, served by the process it names,
+    /// is the one the start goes through. On real time: a paused clock jumps to the next timer
+    /// whenever the runtime has nothing ready, so a moment's real delay before the service
+    /// answers, on a busy machine or beside tests that start processes, would run out the Client's
+    /// handshake on the third connection and make a fourth.
+    /// Verifies: ADR-0037
+    #[tokio::test]
+    async fn each_connection_to_the_second_service_is_checked_anew() {
+        let service = service(own_uid());
+        let me = std::process::id();
         let asked = Arc::new(AtomicU64::new(0));
         let restarted = {
             let asked = Arc::clone(&asked);
