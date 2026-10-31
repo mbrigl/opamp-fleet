@@ -134,6 +134,7 @@ impl Records {
         super::ledger::write_revocations(client, &revocations).await?;
         for (host, entry) in &self.ledger.hosts {
             super::ledger::write_host(client, host, entry).await?;
+            super::ledger::write_bindings(client, host, entry).await?;
         }
         for (entry, file) in &self.bootstrap {
             super::bootstrap::write(client, entry, file.as_deref()).await?;

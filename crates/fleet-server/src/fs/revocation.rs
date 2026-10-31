@@ -8,7 +8,8 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 
 use crate::revocation::{
-    add_to, remove_from, Added, CertId, Host, Issued, Ledger, LedgerStore, Revocation,
+    add_to, named_in, register_into, remove_from, Added, Bound, CertId, Host, Issued, Ledger,
+    LedgerStore, RegisterBounds, Registered, Revocation,
 };
 
 /// Three places in the data directory, each owner-only: the register in `certificates/`, one file
@@ -21,6 +22,9 @@ pub struct FsLedgerStore {
     hosts: PathBuf,
     /// The Hosts as last written, so a write of the Hosts touches only the files that changed.
     written_hosts: Mutex<BTreeMap<String, Host>>,
+    /// Each register entry by its predecessor, once read: what a register write decides from
+    /// without reading every file again, as this store is its only writer.
+    links: Mutex<Option<BTreeMap<CertId, Option<CertId>>>>,
 }
 
 /// One Host as persisted: `hosts/<host>.json`, its name inside so the file name can be checked
@@ -70,6 +74,7 @@ impl FsLedgerStore {
             revocations: root.join(super::REVOCATIONS),
             hosts,
             written_hosts: Mutex::new(BTreeMap::new()),
+            links: Mutex::new(None),
         })
     }
 
@@ -155,6 +160,12 @@ impl LedgerStore for FsLedgerStore {
         let revocations = self.read_revocations()?;
         let hosts = self.load_hosts()?;
         hosts.clone_into(&mut self.written_hosts.lock().expect("hosts lock"));
+        *self.links.lock().expect("links lock") = Some(
+            issued
+                .iter()
+                .map(|entry| (entry.facts.id.clone(), entry.predecessor.clone()))
+                .collect(),
+        );
         Ok(Ledger {
             issued,
             revocations,
@@ -164,11 +175,62 @@ impl LedgerStore for FsLedgerStore {
 
     fn put_issued(&self, issued: &Issued) -> Result<(), String> {
         let json = serde_json::to_vec_pretty(issued).expect("a register entry serializes");
-        super::replace_owner_only(&self.path(&issued.facts.id), &json)
+        super::replace_owner_only(&self.path(&issued.facts.id), &json)?;
+        if let Some(links) = self.links.lock().expect("links lock").as_mut() {
+            links.insert(issued.facts.id.clone(), issued.predecessor.clone());
+        }
+        Ok(())
     }
 
     fn remove_issued(&self, id: &CertId) -> Result<(), String> {
-        super::remove_file(&self.path(id))
+        super::remove_file(&self.path(id))?;
+        if let Some(links) = self.links.lock().expect("links lock").as_mut() {
+            links.remove(id);
+        }
+        Ok(())
+    }
+
+    fn register_issued(
+        &self,
+        issued: &Issued,
+        bounds: &RegisterBounds,
+    ) -> Result<Registered, String> {
+        if self.links.lock().expect("links lock").is_none() {
+            self.load()?;
+        }
+        let named = named_in(&self.read_revocations()?);
+        let decided = {
+            let links = self.links.lock().expect("links lock");
+            register_into(links.as_ref().expect("read"), &named, issued, bounds)
+        };
+        if decided == Registered::Registered {
+            self.put_issued(issued)?;
+        }
+        Ok(decided)
+    }
+
+    /// Answers from the Hosts as last written, which the next write of the Hosts carries the
+    /// binding into: another Host speaking for `instance_uid` holds it, unless it is marked as a
+    /// Gateway. A Gateway's Host is bound none (ADR-0024 clause 16), but its file may list
+    /// `instance_uid`s a release before this one kept there, and no migration rewrites the files.
+    fn bind(&self, instance_uid: &str, host: &str) -> Result<Bound, String> {
+        let written = self.written_hosts.lock().expect("hosts lock");
+        Ok(written
+            .iter()
+            .find(|(name, entry)| {
+                *name != host && !entry.gateway && entry.instance_uids.contains(instance_uid)
+            })
+            .map_or(Bound::Bound, |(holder, _)| Bound::Taken(holder.clone())))
+    }
+
+    /// Answers the Host the Hosts as last written bind `instance_uid` to; the next write of the
+    /// Hosts carries the release.
+    fn unbind(&self, instance_uid: &str) -> Result<Option<String>, String> {
+        let written = self.written_hosts.lock().expect("hosts lock");
+        Ok(written
+            .iter()
+            .find(|(_, entry)| !entry.gateway && entry.instance_uids.contains(instance_uid))
+            .map(|(holder, _)| holder.clone()))
     }
 
     /// Writes each Host that changed since the last write, and removes each one that is gone.

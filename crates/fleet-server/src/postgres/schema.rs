@@ -28,7 +28,7 @@ pub const SCHEMA_TABLE: &str = "fleet_schema";
 
 /// Every table the migrations create, so that a database holding any of them is recognised as one
 /// the Server already wrote ([`super::Database::server_tables`]).
-pub const TABLES: [&str; 16] = [
+pub const TABLES: [&str; 17] = [
     "configurations",
     "configuration_revisions",
     "deployments",
@@ -44,6 +44,7 @@ pub const TABLES: [&str; 16] = [
     "enrolment_requests",
     "package_floors",
     "leases",
+    "host_bindings",
     // Not tables of the records, but the Server's all the same.
     SCHEMA_TABLE,
 ];
@@ -66,6 +67,14 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 3,
         oldest_server: "0.6.1",
         sql: LEASES,
+    },
+    // A table and an index only added, the table filled from the Hosts; the release before it
+    // keeps binding in the Hosts' arrays, which this release writes too and honours when it binds.
+    // What two releases side by side still leave open is ticket 11's.
+    Migration {
+        version: 4,
+        oldest_server: "0.6.1",
+        sql: HOST_BINDINGS,
     },
 ];
 
@@ -219,6 +228,35 @@ CREATE TABLE leases (
     renewed_at timestamptz NOT NULL,
     expires_at timestamptz NOT NULL
 );
+";
+
+/// Which Host each `instance_uid` is bound to: one row per binding, the `instance_uid` its key, so
+/// no two Hosts hold one
+/// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+/// clause 19). It is filled from the arrays of the Hosts not marked as Gateways, as a Gateway's
+/// Host is bound none (ADR-0024 clause 16); an `instance_uid` two such Hosts' arrays hold fails the
+/// migration, naming it and the Hosts, and changes nothing, for the operator to decide. A renewal's
+/// walk down its chain finds an entry's renewals by the index on the predecessor.
+const HOST_BINDINGS: &str = r"
+DO $$
+DECLARE taken record;
+BEGIN
+    SELECT uid, string_agg(host, ', ' ORDER BY host) AS holders INTO taken
+        FROM hosts, unnest(instance_uids) AS uid
+        WHERE NOT gateway
+        GROUP BY uid HAVING count(*) > 1 ORDER BY uid LIMIT 1;
+    IF FOUND THEN
+        RAISE EXCEPTION 'the instance_uid % is bound to the Hosts %; release it from all but one '
+            'before this release starts', taken.uid, taken.holders;
+    END IF;
+END $$;
+CREATE TABLE host_bindings (
+    instance_uid text PRIMARY KEY,
+    host text NOT NULL
+);
+INSERT INTO host_bindings (instance_uid, host)
+    SELECT uid, host FROM hosts, unnest(instance_uids) AS uid WHERE NOT gateway;
+CREATE INDEX certificates_predecessor ON certificates (predecessor_issuer, predecessor_serial);
 ";
 
 /// This Server's version, `MAJOR.MINOR.PATCH`: the base of the version it reports, so a

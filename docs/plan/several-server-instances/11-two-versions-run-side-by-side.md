@@ -7,6 +7,16 @@ releases; migrations run under an advisory lock, so two new instances starting t
 once. An instance refuses a schema older than its version expects or newer than the next one, naming
 both versions.
 
+Ticket 02 left this ticket one such pair: migration 4 moved the bindings of `instance_uid`s into
+`host_bindings`, and the release before it binds through the Hosts' arrays only. The new release
+honours the arrays when it binds, lists each binding in its Host's array in the same transaction,
+and takes a released `instance_uid` out of them. A Host's first binding makes its row in the same
+transaction, so the binding and its array are committed together. What is left: an instance of
+the release before reads only the arrays, and binds through them alone, so a binding it makes is
+seen by the new release only as an array entry, and one the new release makes is seen by it once
+committed. Migration 4 still names 0.6.1 as the oldest release it serves; decide whether it should
+name this release until the contract step drops the arrays.
+
 ## Acceptance criteria
 
 - [ ] Given version N on the database, when two instances of N+1 start at once, then the migration
