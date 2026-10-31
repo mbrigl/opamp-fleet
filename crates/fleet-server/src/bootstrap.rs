@@ -374,6 +374,34 @@ pub trait BootstrapStore: Send + Sync {
         Ok(())
     }
 
+    /// Persists the entry of a certificate just issued with its PKCS#12 file, as
+    /// [`put_with_p12`](Self::put_with_p12) does, unless `max` certificates valid at `now_ms` are on
+    /// record already, and answers whether it did. The count is of what is stored, in the write,
+    /// so the bound holds for every instance on one database
+    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// clause 19). This body counts what it loads, for a store that is its only writer.
+    ///
+    /// # Errors
+    /// Returns an error when the store cannot be read or written; nothing is then kept.
+    fn put_within(
+        &self,
+        entry: &Entry,
+        file: &[u8],
+        max: usize,
+        now_ms: u64,
+    ) -> Result<bool, String> {
+        let valid = self
+            .load()?
+            .iter()
+            .filter(|held| held.not_after_ms > now_ms)
+            .count();
+        if valid >= max {
+            return Ok(false);
+        }
+        self.put_with_p12(entry, file)?;
+        Ok(true)
+    }
+
     /// Keeps the PKCS#12 file of one entry, owner-only.
     ///
     /// # Errors
@@ -524,10 +552,15 @@ impl BootstrapCertificates {
             p12: true,
         };
         // The entry and its file together (ADR-0029 clause 11): no file is
-        // kept that no entry ends.
-        self.store
-            .put_with_p12(&entry, &pair.pkcs12)
-            .map_err(IssueError::Failed)?;
+        // kept that no entry ends. The bound is counted again in what is stored, for every
+        // instance on the database.
+        if !self
+            .store
+            .put_within(&entry, &pair.pkcs12, MAX_VALID, now)
+            .map_err(IssueError::Failed)?
+        {
+            return Err(IssueError::Full);
+        }
         entries.insert(entry.id.clone(), entry);
         Ok(pair)
     }
