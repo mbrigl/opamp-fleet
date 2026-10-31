@@ -426,6 +426,23 @@ async fn main() {
             std::process::exit(1);
         }
     };
+    // On PostgreSQL the instance id is made as soon as the store is known, so that every line
+    // from here on names it, and the first lease is taken under it (clause 1 of
+    // ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it).
+    let instance_id = if config.database.postgres().is_some() {
+        match fleet_server::postgres::lease::new_instance_id() {
+            Ok(id) => {
+                logged.name(id.clone());
+                Some(id)
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        None
+    };
     // Where the records live (ADR-0029): the data directory, its layout created owner-only and
     // checked before any store opens (ADR-0029), and with PostgreSQL the database, its lock taken
     // and its schema applied.
@@ -702,11 +719,18 @@ async fn main() {
     // ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it).
     let lease = match &records {
         fleet_server::Records::Postgres(database) => {
-            match fleet_server::instance::Lease::take(
-                database.clone(),
-                config.database.lease(),
-                &host_name(),
-            ) {
+            let made = instance_id.clone().map_or_else(
+                fleet_server::postgres::lease::new_instance_id,
+                Ok::<String, String>,
+            );
+            match made.and_then(|id| {
+                fleet_server::instance::Lease::take_as(
+                    database.clone(),
+                    config.database.lease(),
+                    &host_name(),
+                    id,
+                )
+            }) {
                 Ok(lease) => {
                     logged.follow(lease.held());
                     fleet_server::instance::follow_revocations(database, revocations.clone());

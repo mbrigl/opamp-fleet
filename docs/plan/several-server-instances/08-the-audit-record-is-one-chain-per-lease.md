@@ -4,7 +4,9 @@
 
 On PostgreSQL each lease opens a chain of its own, written by one writer thread in the order of the
 decisions. An orderly shutdown closes it; the instance that takes over a lapsed lease closes that
-lease's chain. Entries queued under a lease that lapses go into the next chain, marked with the
+lease's chain. A take removes lapsed leases too (`take_lease` in `postgres/lease.rs`, naming
+each in `Taken::taken_over`), the instance's own lapsed one included, and their chains are closed
+there as well. Entries queued under a lease that lapses go into the next chain, marked with the
 lease they were taken under. `server audit-verify --config` walks every chain and lists the open
 ones. A record moved from files by `server migrate-to-postgres` stays linked: the first chain names
 the archive's last entry as its predecessor, and `audit-verify --archive` checks the link. On the

@@ -53,7 +53,22 @@ impl Lease {
     /// Returns an error when the first lease cannot be taken in time: the database does not
     /// answer, or this instance may not share the database with the instances on it.
     pub fn take(database: Arc<Database>, times: LeaseTimes, host: &str) -> Result<Self, String> {
-        let taken = take_in_time(&database, times, host)?;
+        let instance_id = crate::postgres::lease::new_instance_id()?;
+        Self::take_as(database, times, host, instance_id)
+    }
+
+    /// [`take`](Self::take) under `instance_id`, the one the instance made at startup and its log
+    /// names already.
+    ///
+    /// # Errors
+    /// As [`take`](Self::take).
+    pub fn take_as(
+        database: Arc<Database>,
+        times: LeaseTimes,
+        host: &str,
+        instance_id: String,
+    ) -> Result<Self, String> {
+        let taken = take_in_time(&database, times, host, instance_id, None)?;
         info!(instance_id = %taken.instance_id, "took a lease");
         let (held, watched) = watch::channel(Some(taken.instance_id.clone()));
         let (stop, stopped) = tokio::sync::oneshot::channel();
@@ -112,16 +127,32 @@ impl Lease {
     }
 }
 
-/// A lease taken within its own lapse: one the database answered for later than that is lapsed
-/// already, as far as this instance can tell, and is not served on.
-fn take_in_time(database: &Database, times: LeaseTimes, host: &str) -> Result<Taken, String> {
-    let taken = database.take_lease_within(host, times.lapse, times.lapse)?;
-    for gone in &taken.taken_over {
-        info!(
-            instance_id = %taken.instance_id,
-            taken_over = %gone,
-            "took over the lease of an instance that is gone"
-        );
+/// A lease taken under `instance_id` within its own lapse: one the database answered for later
+/// than that is lapsed already, as far as this instance can tell, and is not served on. `own` is
+/// the lease this instance lost, if it lost one: a take that removes it logs it as this instance's
+/// own lapsed lease, and every other lease it removes as one of an instance that is gone.
+pub(crate) fn take_in_time(
+    database: &Database,
+    times: LeaseTimes,
+    host: &str,
+    instance_id: String,
+    own: Option<&str>,
+) -> Result<Taken, String> {
+    let taken = database.take_lease_within(instance_id, host, times.lapse, times.lapse)?;
+    for removed in &taken.taken_over {
+        if own == Some(removed.as_str()) {
+            info!(
+                instance_id = %taken.instance_id,
+                lapsed = %removed,
+                "removed this instance's own lapsed lease"
+            );
+        } else {
+            info!(
+                instance_id = %taken.instance_id,
+                taken_over = %removed,
+                "took over the lease of an instance that is gone"
+            );
+        }
     }
     if Instant::now() >= taken.sent + times.lapse {
         return Err(format!(
@@ -227,10 +258,13 @@ async fn renew(
             if database.lock_lost() {
                 return lock_lost(held, &instance_id);
             }
-            let (db, host) = (database.clone(), host.clone());
-            match tokio::task::spawn_blocking(move || take_in_time(&db, times, &host))
-                .await
-                .unwrap_or_else(|e| Err(e.to_string()))
+            let (db, host, lost) = (database.clone(), host.clone(), instance_id.clone());
+            match tokio::task::spawn_blocking(move || {
+                let fresh = crate::postgres::lease::new_instance_id()?;
+                take_in_time(&db, times, &host, fresh, Some(&lost))
+            })
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()))
             {
                 Ok(taken) => {
                     info!(
@@ -494,10 +528,17 @@ async fn bind_again(
     }
 }
 
-/// The instance id the log names: the one of the lease this instance holds, and none while it
-/// holds none, before its first lease and between a lost one and the next
+/// The instance id the log names
 /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
-/// clause 1). On the filesystem store it is never set, and the log is as it was.
+/// clause 1): the one the instance makes at startup, once its store is known to be PostgreSQL and
+/// before it takes its first lease under it; then the one of each new lease. Between a lost lease
+/// and the next it names the lost one, so every line names an instance. A line logged before the
+/// configuration is read cannot know the store and names none; on the filesystem store it is
+/// never set, and the log is as it was.
+///
+/// It follows the lease through a task, so an ordinary line logged at the moment the lease changes
+/// can still name the id before it; the lines of the lease's own take, loss, release and takeover
+/// name their ids as fields of their own and are exact.
 #[derive(Clone, Default)]
 pub struct LoggedId(Arc<std::sync::RwLock<Option<String>>>);
 
@@ -508,22 +549,37 @@ impl LoggedId {
         self.0.read().ok().and_then(|id| id.clone())
     }
 
-    fn set(&self, id: Option<String>) {
+    /// Names `id` from now on: the instance id made at startup.
+    pub fn name(&self, id: String) {
         if let Ok(mut held) = self.0.write() {
-            *held = id;
+            *held = Some(id);
         }
     }
 
-    /// Names the instance id of the lease `held` sends, from now on and at each change, and none
-    /// once the lease can be held no more.
+    /// Writes `instance_id=<id> ` into `writer` while an id is named, without copying it.
+    fn write_prefix(&self, writer: &mut impl std::fmt::Write) -> std::fmt::Result {
+        match self.0.read() {
+            Ok(id) => match id.as_deref() {
+                Some(id) => write!(writer, "instance_id={id} "),
+                None => Ok(()),
+            },
+            Err(_) => Ok(()),
+        }
+    }
+
+    /// Names the instance id of each lease `held` sends, from now on and at each change. While the
+    /// lease is lost, and once it can be held no more, the last one stays named.
     pub fn follow(&self, mut held: Held) {
-        self.set(held.borrow_and_update().clone());
+        if let Some(id) = held.borrow_and_update().clone() {
+            self.name(id);
+        }
         let logged = self.clone();
         tokio::spawn(async move {
             while held.changed().await.is_ok() {
-                logged.set(held.borrow_and_update().clone());
+                if let Some(id) = held.borrow_and_update().clone() {
+                    logged.name(id);
+                }
             }
-            logged.set(None);
         });
     }
 }
@@ -556,9 +612,7 @@ where
         event: &tracing::Event<'_>,
     ) -> std::fmt::Result {
         if event.metadata().fields().field("instance_id").is_none() {
-            if let Some(id) = self.id.get() {
-                write!(writer, "instance_id={id} ")?;
-            }
+            self.id.write_prefix(&mut writer)?;
         }
         self.inner.format_event(ctx, writer, event)
     }
@@ -623,11 +677,10 @@ mod tests {
         let id = LoggedId::default();
         let (collected, subscriber) = log(&id);
         tracing::subscriber::with_default(subscriber, || {
-            tracing::info!("before the lease");
-            id.set(Some("a1".to_string()));
+            tracing::info!("before the store is known");
+            id.name("a1".to_string());
             tracing::info!(agents = 3, "serving");
             tracing::info!(instance_id = "b2", taken_over = "a1", "took over");
-            id.set(None);
             tracing::warn!("between leases");
         });
         let lines = collected.lines();
@@ -641,58 +694,11 @@ mod tests {
             "{}",
             lines[2]
         );
-        assert!(!lines[3].contains("instance_id"), "{}", lines[3]);
+        assert!(lines[3].starts_with("instance_id=a1 "), "{}", lines[3]);
     }
 
-    /// An instance that takes over a lapsed lease logs its own instance id and the lapsed one
-    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
-    /// clause 1).
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
-    #[tokio::test(flavor = "multi_thread")]
-    async fn a_takeover_names_the_instance_and_the_lapsed_lease() {
-        use crate::postgres::testing::TestDatabase;
-        use crate::postgres::{Database, Exclusive};
-        let Some(test) = TestDatabase::named() else {
-            return;
-        };
-        let open = || {
-            Database::open_in(&test.config(), Exclusive::Shared, Some(&test.schema)).expect("open")
-        };
-        let gone = open()
-            .take_lease("host-a", Duration::from_secs(30))
-            .expect("a lease");
-        test.sql(&format!(
-            "UPDATE leases SET expires_at = now() WHERE instance_id = '{}'",
-            gone.instance_id
-        ));
-        let id = LoggedId::default();
-        let (collected, subscriber) = log(&id);
-        let times = crate::config::LeaseTimes {
-            renew: Duration::from_secs(10),
-            lapse: Duration::from_secs(30),
-        };
-        let lease = tracing::subscriber::with_default(subscriber, || {
-            super::Lease::take(open(), times, "host-b").expect("the lease")
-        });
-        let own = lease.held().borrow().clone().expect("held");
-        lease.release().await;
-        let lines = collected.lines();
-        let takeover = lines
-            .iter()
-            .find(|line| line.contains("took over the lease"))
-            .unwrap_or_else(|| panic!("no takeover logged: {lines:?}"));
-        assert!(
-            takeover.contains(&format!("instance_id={own}")),
-            "{takeover}"
-        );
-        assert!(
-            takeover.contains(&format!("taken_over={}", gone.instance_id)),
-            "{takeover}"
-        );
-    }
-
-    /// The log follows the lease: the id it holds, each new one, and none once the lease can be
-    /// held no more.
+    /// The log follows the lease: the id it holds and each new one, and the last one while the
+    /// lease is lost or can be held no more, so every line names an instance.
     /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
     #[tokio::test]
     async fn the_logged_id_follows_the_lease() {
@@ -700,12 +706,11 @@ mod tests {
         let id = LoggedId::default();
         id.follow(watched);
         assert_eq!(id.get().as_deref(), Some("a1"));
-        held.send_replace(None);
-        let settled = |want: Option<&'static str>| {
+        let settled = |want: &'static str| {
             let id = id.clone();
             async move {
                 for _ in 0..200 {
-                    if id.get().as_deref() == want {
+                    if id.get().as_deref() == Some(want) {
                         return true;
                     }
                     tokio::time::sleep(Duration::from_millis(5)).await;
@@ -713,11 +718,22 @@ mod tests {
                 false
             }
         };
-        assert!(settled(None).await, "a lost lease names none");
+        held.send_replace(None);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(
+            id.get().as_deref(),
+            Some("a1"),
+            "a lost lease names the lost id"
+        );
         held.send_replace(Some("b2".to_string()));
-        assert!(settled(Some("b2")).await, "a new lease names its id");
+        assert!(settled("b2").await, "a new lease names its id");
         drop(held);
-        assert!(settled(None).await, "a lease held no more names none");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(
+            id.get().as_deref(),
+            Some("b2"),
+            "a lease held no more names the last id"
+        );
     }
 
     /// A reader that fails its first `failing` reads and counts every read.
