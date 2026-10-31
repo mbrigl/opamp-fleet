@@ -1,6 +1,6 @@
 # ADR-0006: Work larger than one session is planned in the tree as a feature spec cut into tracer-bullet tickets, files deleted when their work lands, and the design is revised when a spec closes or after a number of changes
 
-- **Status:** 🟢 accepted
+- **Status:** ⚪ superseded by [ADR-draft-feature-layer](draft-feature-layer.md)
 - **Date:** 2026-09-17
 - **Deciders:** NUC maintainer, Markus Brigl
 - **Applies to:** every change larger than one agent session, `docs/plan/`, the spec and ticket templates of the `plan-feature` skill, the pull request template, the `Last design revision` line of `docs/ARCHITECTURE.md`, `scripts/sensor-revision-due.sh`, `scripts/sensor-plan-frontier.sh`, and the claim script `.agents/skills/work-tickets/claim.sh`
