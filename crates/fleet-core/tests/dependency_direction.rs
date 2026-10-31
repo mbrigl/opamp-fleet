@@ -44,6 +44,8 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             ("server", Adapter),
             ("server::listen", Adapter),
             ("server::pace", Adapter),
+            // The system's randomness, with `ring`.
+            ("random", Adapter),
             ("tls", Adapter),
         ],
     ),

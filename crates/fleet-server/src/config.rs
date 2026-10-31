@@ -108,6 +108,17 @@ pub struct ServerConfig {
     /// with the process's file-descriptor limit. `0` is refused at load.
     #[serde(default = "default_agent_max_connections")]
     pub max_connections: usize,
+    /// The new Agent-plane connections taken a second; one past it is answered `503` with a
+    /// spread `Retry-After` (ADR-draft-tls-1-3-two-planes-and-bounded-input clause 4). `0` is
+    /// refused at load.
+    #[serde(default = "default_max_new_connections_per_sec")]
+    pub max_new_connections_per_sec: u32,
+    /// How long an orderly shutdown spreads the closing of the WebSocket sessions over, in seconds,
+    /// from 0 to 300; 0 closes them all at once
+    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// clause 3).
+    #[serde(default = "default_drain_secs")]
+    pub drain_secs: u64,
     /// The bootstrap CA a host enrols with (ADR-0021 clause 17); absent means no host enrols, and
     /// an operator provisions every certificate.
     pub enrolment: Option<EnrolmentConfig>,
@@ -947,6 +958,17 @@ fn default_agent_max_connections() -> usize {
     opamp::server::listen::DEFAULT_MAX_CONNECTIONS
 }
 
+fn default_max_new_connections_per_sec() -> u32 {
+    200
+}
+
+fn default_drain_secs() -> u64 {
+    20
+}
+
+/// The longest drain an orderly shutdown may spread over.
+const MAX_DRAIN_SECS: u64 = 300;
+
 fn default_rest_max_connections() -> usize {
     256
 }
@@ -1023,6 +1045,8 @@ impl Default for ServerConfig {
             stale_after_secs: default_stale_after_secs(),
             max_agents: default_max_agents(),
             max_connections: default_agent_max_connections(),
+            max_new_connections_per_sec: default_max_new_connections_per_sec(),
+            drain_secs: default_drain_secs(),
             enrolment: None,
             admission_throttle: AdmissionThrottleConfig::default(),
             audit: AuditConfig::default(),
@@ -1252,6 +1276,19 @@ impl ServerConfig {
                  plane that holds no connection serves nobody"
                     .to_string(),
             );
+        }
+        if self.max_new_connections_per_sec == 0 {
+            return Err(
+                "max_new_connections_per_sec must be greater than zero — a plane that takes no new \
+                 connection serves nobody"
+                    .to_string(),
+            );
+        }
+        if self.drain_secs > MAX_DRAIN_SECS {
+            return Err(format!(
+                "drain_secs must be from 0 to {MAX_DRAIN_SECS}, not {}",
+                self.drain_secs
+            ));
         }
         self.check_secure()
     }
@@ -2836,6 +2873,40 @@ mod tests {
             err.contains("FLEET_SERVER__BLOBS__S3__ENDPOINT_URL"),
             "{err}"
         );
+    }
+
+    /// The rate of new Agent-plane connections defaults to 200 a second and the drain to 20
+    /// seconds; a rate of zero and a drain past 300 seconds fail startup naming the key.
+    /// Verifies: ADR-draft-tls-1-3-two-planes-and-bounded-input, ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    #[test]
+    fn the_new_connection_rate_and_the_drain_are_bounded() {
+        let load = |keys: &str| {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("server.toml");
+            std::fs::write(&path, format!("{keys}{TLS}")).expect("write");
+            ServerConfig::load(&path)
+        };
+        let config = load("").expect("the defaults");
+        assert_eq!(
+            (config.max_new_connections_per_sec, config.drain_secs),
+            (200, 20)
+        );
+        let config = load("max_new_connections_per_sec = 50\ndrain_secs = 0\n").expect("set");
+        assert_eq!(
+            (config.max_new_connections_per_sec, config.drain_secs),
+            (50, 0)
+        );
+        assert!(load("drain_secs = 300\n").is_ok());
+        for (keys, named) in [
+            (
+                "max_new_connections_per_sec = 0\n",
+                "max_new_connections_per_sec",
+            ),
+            ("drain_secs = 301\n", "drain_secs"),
+        ] {
+            let err = load(keys).expect_err(named);
+            assert!(err.contains(named), "{named}: {err}");
+        }
     }
 
     /// `[database]`: the filesystem by default; `"postgres"` with its database. Any other store, a

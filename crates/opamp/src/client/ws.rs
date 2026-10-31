@@ -57,6 +57,11 @@ pub async fn run<S: Session, X: StopSignal>(
 ) -> Result<Ended, String> {
     let mut backoff = Backoff::new();
     loop {
+        // What to wait before the next attempt: drawn over the first window when a connection
+        // that stood was lost, the next exponential step when an attempt failed, and no less
+        // than a refusal's `Retry-After`.
+        let mut lost = false;
+        let mut retry_after = None;
         match connect(
             &settings.endpoint,
             &settings.headers,
@@ -76,7 +81,10 @@ pub async fn run<S: Session, X: StopSignal>(
                     }
                     Served::Reconnect => return Ok(Ended::Reconnect),
                     Served::End => return Ok(Ended::End),
-                    Served::ConnectionLost => warn!("connection lost; reconnecting"),
+                    Served::ConnectionLost => {
+                        warn!("connection lost; reconnecting");
+                        lost = true;
+                    }
                 }
             }
             Err(Connect::Refused(WsError::Http(response)))
@@ -87,13 +95,31 @@ pub async fn run<S: Session, X: StopSignal>(
                     "admission failed: the server refused this client (HTTP 401)"
                 );
             }
+            // Throttled (ADR-draft-tls-1-3-two-planes-and-bounded-input clause 4): the Server asked
+            // to be given this long, and is given at least that.
+            Err(Connect::Refused(WsError::Http(response)))
+                if response.status() == StatusCode::SERVICE_UNAVAILABLE
+                    || response.status() == StatusCode::TOO_MANY_REQUESTS =>
+            {
+                retry_after = response
+                    .headers()
+                    .get(tokio_tungstenite::tungstenite::http::header::RETRY_AFTER)
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(super::retry_after_seconds);
+                warn!(
+                    endpoint = %settings.endpoint,
+                    status = %response.status(),
+                    retry_after = ?retry_after,
+                    "the server is throttling new connections; waiting"
+                );
+            }
             Err(Connect::Refused(e)) => {
                 warn!(endpoint = %settings.endpoint, error = %e, "cannot connect");
             }
             Err(Connect::InvalidEndpoint(e)) => return Err(e),
         }
 
-        let delay = backoff.advance();
+        let delay = next_delay(&mut backoff, lost, retry_after);
         tokio::select! {
             () = tokio::time::sleep(delay) => {}
             () = stop.requested() => {
@@ -104,6 +130,17 @@ pub async fn run<S: Session, X: StopSignal>(
             }
         }
     }
+}
+
+/// What to wait before the next attempt: the first reconnect after a connection that stood was
+/// lost is drawn over `[0, 30 s)`; an attempt that failed waits the next exponential step, or the
+/// `Retry-After` it was refused with when that is longer.
+fn next_delay(backoff: &mut Backoff, lost: bool, retry_after: Option<Duration>) -> Duration {
+    if lost {
+        return backoff.after_loss();
+    }
+    let step = backoff.advance();
+    retry_after.map_or(step, |after| after.max(step))
 }
 
 /// Why [`connect`] failed.
@@ -328,6 +365,32 @@ impl ReportSink for FrameSink<'_> {
 mod tests {
     use super::*;
     use tokio_tungstenite::accept_async;
+
+    /// A refused upgrade waits its `Retry-After` or the next exponential step, whichever is
+    /// longer, and one without the header waits the step; a connection that stood and was lost
+    /// draws its first reconnect over `[0, 30 s)`.
+    /// Verifies: ADR-draft-tls-1-3-two-planes-and-bounded-input
+    #[test]
+    fn a_refused_upgrade_waits_its_retry_after_or_the_next_step() {
+        let mut backoff = Backoff::new();
+        assert_eq!(
+            next_delay(&mut backoff, false, Some(Duration::from_secs(7))),
+            Duration::from_secs(7),
+            "longer than the first step"
+        );
+        for _ in 0..8 {
+            backoff.advance();
+        }
+        let step = next_delay(&mut backoff, false, Some(Duration::from_secs(2)));
+        assert!(
+            step >= Duration::from_secs(30),
+            "the step is longer: {step:?}"
+        );
+        let without = next_delay(&mut backoff, false, None);
+        assert!(without >= Duration::from_secs(30), "{without:?}");
+        let lost = next_delay(&mut backoff, true, Some(Duration::from_secs(90)));
+        assert!(lost < Backoff::AFTER_LOSS, "{lost:?}");
+    }
 
     /// A session of one Agent that reports an empty message and asks nothing else.
     struct Quiet;

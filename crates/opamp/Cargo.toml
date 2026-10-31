@@ -18,7 +18,7 @@ include = ["build.rs", "src/**", "proto/**", "README.md", "LICENSE", "NOTICE"]
 # wants only the types pulls no web framework (ADR-0008).
 [features]
 client = ["dep:tokio", "dep:tracing", "dep:ring", "dep:tokio-tungstenite", "dep:futures-util", "dep:reqwest", "dep:rustls", "dep:webpki-roots"]
-server = ["dep:tokio", "dep:tracing", "dep:axum", "dep:axum-server", "dep:hyper", "dep:hyper-util", "dep:tokio-tungstenite", "dep:futures-util", "dep:rustls"]
+server = ["dep:tokio", "dep:tracing", "dep:ring", "dep:axum", "dep:axum-server", "dep:hyper", "dep:hyper-util", "dep:tokio-tungstenite", "dep:futures-util", "dep:rustls"]
 
 [dependencies]
 prost.workspace = true
@@ -27,7 +27,8 @@ uuid.workspace = true
 flate2.workspace = true
 tokio = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true }
-# The reconnect jitter's randomness — the `ring` both ends already link (ADR-0012).
+# The reconnect jitter's randomness and the spread of a throttled peer's `Retry-After` — the
+# `ring` both ends already link (ADR-0012).
 ring = { workspace = true, optional = true }
 tokio-tungstenite = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
