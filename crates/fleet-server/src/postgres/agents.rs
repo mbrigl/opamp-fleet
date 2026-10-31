@@ -421,7 +421,7 @@ mod tests {
         assert_eq!(reopened.pinning(Pin::Deployment("stable")), 2);
         assert_eq!(
             reopened.referenced_revisions("base"),
-            BTreeSet::from(["0123abcd".to_string(), revision_hash(&pinned)])
+            BTreeSet::from(["0123abcd".repeat(8), revision_hash(&pinned)])
         );
 
         store.remove(&one).expect("remove");
@@ -487,6 +487,100 @@ mod tests {
                     "UPDATE agents SET package_agent_type = 'otel col', package_version = '1.0.0'",
                 );
             },
+        );
+    }
+
+    /// A stored assignment is held to the rules it was written by, on either store. Each `plant`
+    /// breaks the stored assignment of the record it is handed one way — its Deployment named
+    /// `Stable`, its Configuration named `Base`, its revision `0123abcd` — and the load is refused
+    /// with the core's words, naming the record; the record is removed after each case.
+    fn assignments_are_held_to_the_write_rules(open: Open<'_>, plants: [&dyn Fn(&InstanceUid); 3]) {
+        let hash = "0".repeat(64);
+        let pins = |name: &str, hash: &str| BTreeMap::from([(name.to_string(), hash.to_string())]);
+        let cores = [
+            Assignment::load("Stable".to_string(), None, pins("base", &hash)),
+            Assignment::load("stable".to_string(), None, pins("Base", &hash)),
+            Assignment::load("stable".to_string(), None, pins("base", "0123abcd")),
+        ];
+        for (plant, core) in plants.into_iter().zip(cores) {
+            let core = core.map(|_| ()).expect_err("the core refuses it");
+            let (store, _) = open();
+            let uid = InstanceUid::default();
+            let mut held = record();
+            held.assignment = Some(Assignment {
+                deployment: "stable".to_string(),
+                package: None,
+                configurations: pins("base", &hash),
+            });
+            store.put(&uid, &held).expect("put");
+            plant(&uid);
+            let err = open().0.load().map(|_| ()).expect_err("refused");
+            assert!(err.ends_with(&core), "{err}");
+            assert!(err.contains(&uid.to_string()), "the record is named: {err}");
+            store.remove(&uid).expect("remove");
+        }
+    }
+
+    /// Verifies: ADR-0026, ADR-0029
+    #[test]
+    fn stored_assignments_are_held_to_the_write_rules_on_the_filesystem() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let edit = |uid: &InstanceUid, change: &dyn Fn(&mut serde_json::Value)| {
+            let file = dir.path().join(format!("agents/{uid}.json"));
+            let mut envelope: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&file).expect("read")).expect("json");
+            change(&mut envelope["assignment"]);
+            std::fs::write(&file, envelope.to_string()).expect("write");
+        };
+        let hash = "0".repeat(64);
+        assignments_are_held_to_the_write_rules(
+            &|| {
+                (
+                    Box::new(FsAgentStore::open(dir.path()).expect("open")),
+                    Box::new(FsConfigBackend::open(dir.path()).expect("open")),
+                )
+            },
+            [
+                &|uid| {
+                    edit(uid, &|assignment| {
+                        assignment["deployment"] = "Stable".into()
+                    })
+                },
+                &|uid| {
+                    edit(uid, &|assignment| {
+                        assignment["configurations"] = serde_json::json!({"Base": hash});
+                    });
+                },
+                &|uid| {
+                    edit(uid, &|assignment| {
+                        assignment["configurations"] = serde_json::json!({"base": "0123abcd"});
+                    });
+                },
+            ],
+        );
+    }
+
+    /// Verifies: ADR-0026, ADR-0029
+    #[test]
+    fn stored_assignments_are_held_to_the_write_rules_on_postgres() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        assignments_are_held_to_the_write_rules(
+            &|| {
+                (
+                    Box::new(PgAgentStore::new(database.clone())),
+                    Box::new(super::super::configs::PgConfigBackend::new(
+                        database.clone(),
+                    )),
+                )
+            },
+            [
+                &|_| test.sql("UPDATE agents SET deployment = 'Stable'"),
+                &|_| test.sql("UPDATE agent_assignment_configurations SET configuration = 'Base'"),
+                &|_| test.sql("UPDATE agent_assignment_configurations SET revision = '0123abcd'"),
+            ],
         );
     }
 

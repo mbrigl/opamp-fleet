@@ -229,6 +229,99 @@ mod tests {
         );
     }
 
+    /// A stored Deployment is held to the rules it was written by, on either store: `plant` breaks
+    /// the stored `stable` one way, and the load is refused with `expected` in its words, naming
+    /// the record. The Deployment is removed afterwards, so the next case starts clean.
+    fn refused_on_load(
+        open: &dyn Fn() -> Box<dyn DeploymentBackend>,
+        plant: &dyn Fn(),
+        expected: &str,
+    ) {
+        let store = open();
+        store
+            .put(&deployment("stable", Some("1.2.3")))
+            .expect("put");
+        plant();
+        let err = open().load().map(|_| ()).expect_err("refused");
+        assert!(err.contains(expected), "{err}");
+        assert!(err.contains("stable"), "the record is named: {err}");
+        store.remove("stable").expect("remove");
+    }
+
+    /// The two rules a write holds a Deployment's Packages to, on load: a Package reference with
+    /// a field no write puts there is refused by both stores alike, and so is a second Package of
+    /// an Agent type, in the core's words.
+    fn packages_are_held_to_the_write_rules(
+        open: &dyn Fn() -> Box<dyn DeploymentBackend>,
+        unknown_field: &dyn Fn(),
+        second_of_a_type: &dyn Fn(),
+    ) {
+        refused_on_load(open, unknown_field, "unknown field `extra`");
+        let stable = deployment("stable", None);
+        let core = Deployment::load(
+            "stable".to_string(),
+            stable.selector,
+            [
+                ("otelcol".to_string(), "1.2.3".to_string()),
+                ("otelcol".to_string(), "1.3.0".to_string()),
+            ],
+            stable.configurations,
+        )
+        .map(|_| ())
+        .expect_err("the core refuses it");
+        refused_on_load(open, second_of_a_type, &core);
+    }
+
+    /// Verifies: ADR-0027, ADR-0029
+    #[test]
+    fn stored_packages_are_held_to_the_write_rules_on_the_filesystem() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("deployments/stable.json");
+        let edit = |change: &dyn Fn(&mut serde_json::Value)| {
+            let mut meta: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&file).expect("read")).expect("json");
+            change(&mut meta);
+            std::fs::write(&file, meta.to_string()).expect("write");
+        };
+        packages_are_held_to_the_write_rules(
+            &|| Box::new(FsDeploymentBackend::open(dir.path()).expect("open")),
+            &|| edit(&|meta| meta["packages"][0]["extra"] = 1.into()),
+            &|| {
+                edit(&|meta| {
+                    meta["packages"]
+                        .as_array_mut()
+                        .expect("packages")
+                        .push(serde_json::json!({"agent_type": "otelcol", "version": "1.3.0"}));
+                });
+            },
+        );
+    }
+
+    /// Verifies: ADR-0027, ADR-0029
+    #[test]
+    fn stored_packages_are_held_to_the_write_rules_on_postgres() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        packages_are_held_to_the_write_rules(
+            &|| Box::new(PgDeploymentBackend::new(database.clone())),
+            &|| {
+                test.sql(
+                    r#"UPDATE deployments SET packages =
+                       '[{"agent_type": "otelcol", "version": "1.2.3", "extra": 1}]'"#,
+                );
+            },
+            &|| {
+                test.sql(
+                    r#"UPDATE deployments SET packages =
+                       '[{"agent_type": "otelcol", "version": "1.2.3"},
+                         {"agent_type": "otelcol", "version": "1.3.0"}]'"#,
+                );
+            },
+        );
+    }
+
     /// A put that fails leaves the Deployment as it was, on either store. `refuse` makes the
     /// write of `canary` fail; `mend` takes that away.
     fn fails_part_way(store: &dyn DeploymentBackend, refuse: &dyn Fn(), mend: &dyn Fn()) {

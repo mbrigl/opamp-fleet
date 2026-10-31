@@ -70,8 +70,10 @@ pub struct Deployment {
 impl Deployment {
     /// A Deployment as a store holds it, its fields mapped from a row or a file and decided here,
     /// so every store refuses what a write would (ADR-0029 clause 6): a name or a Configuration
-    /// name outside the ADR-0019 grammar, a Selector [`check_selector`] refuses, and a Package
-    /// identity outside the token rule. Each store names the record before the message.
+    /// name outside the ADR-0019 grammar, a Selector [`check_selector`] refuses, a Package
+    /// identity outside the token rule, and a second Package of an Agent type, in the words of
+    /// [`DeploymentError::TypeTaken`], even one that repeats the first: no store keeps two. Each
+    /// store names the record before the message.
     ///
     /// # Errors
     /// Returns the rule the Deployment breaks.
@@ -86,6 +88,13 @@ impl Deployment {
         let mut held = BTreeMap::new();
         for (agent_type, version) in packages {
             let id = PackageId::load(&agent_type, &version)?;
+            if let Some(held) = held.get(&id.agent_type) {
+                return Err(DeploymentError::TypeTaken {
+                    agent_type: id.agent_type,
+                    held: PackageId::clone(held),
+                }
+                .to_string());
+            }
             held.insert(id.agent_type.clone(), id);
         }
         let mut names = BTreeSet::new();
@@ -447,6 +456,39 @@ impl DeploymentStore {
 pub(crate) mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+
+    /// A stored Deployment holding two Packages of one Agent type is refused on load, by the rule
+    /// a write refuses it with, rather than loaded with the last one kept.
+    /// Verifies: ADR-0027, ADR-0029
+    #[test]
+    fn two_packages_of_one_agent_type_are_refused_on_load() {
+        let selector = BTreeMap::from([("fleet.ring".to_string(), "canary".to_string())]);
+        let err = Deployment::load(
+            "canary".to_string(),
+            selector.clone(),
+            [
+                ("otelcol".to_string(), "1.2.3".to_string()),
+                ("otelcol".to_string(), "1.3.0".to_string()),
+            ],
+            [],
+        )
+        .expect_err("refused");
+        let write = DeploymentError::TypeTaken {
+            agent_type: "otelcol".to_string(),
+            held: PackageId::new("otelcol", "1.2.3").expect("id"),
+        };
+        assert_eq!(err, write.to_string());
+        Deployment::load(
+            "canary".to_string(),
+            selector,
+            [
+                ("otelcol".to_string(), "1.2.3".to_string()),
+                ("fluent-bit".to_string(), "3.1.0".to_string()),
+            ],
+            [],
+        )
+        .expect("one of each type loads");
+    }
 
     /// The backend as memory: what a second store opened on a clone of it reads is what the
     /// first one wrote.
