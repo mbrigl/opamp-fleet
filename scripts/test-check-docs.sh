@@ -314,6 +314,14 @@ d="$(repo identity-license-badge)"
 echo "[![License](https://img.shields.io/github/license/hivevm/nuc)](LICENSE)" >> "$d/README.md"
 expect fail "the template's repository in a shields.io badge after setup" "$d" "README.md: a badge still points at the template"
 
+d="$(repo identity-svg-badge)"
+echo "[![Stars](https://img.shields.io/github/stars/hivevm/nuc.svg)](https://github.com/hivevm/nuc-tools)" >> "$d/README.md"
+expect fail "the template's repository in a legacy .svg badge after setup" "$d" "README.md: a badge still points at the template"
+
+d="$(repo identity-derived-badge)"
+echo "[![Checks](https://github.com/hivevm/nuc-tools/actions/workflows/checks.yml/badge.svg)](https://github.com/hivevm/nuc-tools/actions/workflows/checks.yml)" >> "$d/README.md"
+expect pass "a badge of a derived repository whose name starts with the template's after setup" "$d"
+
 d="$(repo identity-template-link)"
 echo "Created from [NUC](https://github.com/hivevm/nuc)." >> "$d/README.md"
 expect pass "a link to the template's repository outside the badge after setup" "$d"
