@@ -561,3 +561,105 @@ async fn an_instance_without_a_lease_closes_its_listeners_until_it_holds_a_new_o
         "the listeners were not opened again"
     );
 }
+
+/// The store as one instance opens it, in the test's schema: what each instance writes through.
+fn records(schema: &Schema) -> Records {
+    Records::Postgres(
+        Database::open_in(&schema.config, Exclusive::Shared, Some(&schema.name))
+            .expect("open the database"),
+    )
+}
+
+/// Two instances that each revoke a certificate at the same moment keep both revocations: each
+/// adds its own row, and neither writes the list it holds over the other's.
+/// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+#[test]
+fn two_revocations_committed_at_once_on_two_instances_are_both_kept() {
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let clock: Arc<dyn fleet_server::fleet::Clock> = Arc::new(fleet_server::clock::SystemClock);
+    let instances: Vec<Arc<Revocations>> = (0..2)
+        .map(|_| {
+            Arc::new(
+                Revocations::open(
+                    records(&schema).ledger().expect("ledger"),
+                    clock.clone(),
+                    pki.authorities(),
+                )
+                .expect("revocations"),
+            )
+        })
+        .collect();
+    for round in 0..8u32 {
+        let at_once = Arc::new(std::sync::Barrier::new(2));
+        let revoking: Vec<_> = instances
+            .iter()
+            .enumerate()
+            .map(|(n, instance)| {
+                let (instance, at_once) = (instance.clone(), at_once.clone());
+                std::thread::spawn(move || {
+                    at_once.wait();
+                    instance
+                        .revoke_certificate("client", &format!("{}{round:x}", n + 1))
+                        .expect("revoke")
+                })
+            })
+            .collect();
+        for thread in revoking {
+            thread.join().expect("the revoking thread");
+        }
+    }
+    let mut kept = schema.query("SELECT revoked->'certificate'->>'serial' FROM revocations");
+    kept.sort();
+    let mut expected: Vec<String> = (0..8u32)
+        .flat_map(|round| (1..=2).map(move |n| format!("{n}{round:x}")))
+        .collect();
+    expected.sort();
+    assert_eq!(
+        kept, expected,
+        "every revocation of both instances is on the list"
+    );
+}
+
+/// An instance that holds an older floor in memory cannot lower the one another instance stored:
+/// the floor is decided from the stored row, and the answer is the `409` of a lower floor, naming
+/// the stored version, which the instance then holds.
+/// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it, ADR-0028
+#[test]
+fn an_instance_with_an_older_floor_in_memory_cannot_lower_the_stored_one() {
+    use fleet_server::floors::{FloorError, PackageFloors};
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let a = PackageFloors::open(records(&schema).floors()).expect("floors on A");
+    let b = PackageFloors::open(records(&schema).floors()).expect("floors on B");
+    b.put("otelcol", "1.0.0", vec![1; 64])
+        .expect("B sets 1.0.0");
+    a.put("otelcol", "2.0.0", vec![2; 64])
+        .expect("A raises it to 2.0.0");
+    assert_eq!(
+        b.all().get("otelcol").map(|floor| floor.version.clone()),
+        Some("1.0.0".to_string()),
+        "B holds the older floor in memory"
+    );
+    assert_eq!(
+        b.put("otelcol", "1.5.0", vec![3; 64]),
+        Err(FloorError::Lower("2.0.0".to_string()))
+    );
+    assert_eq!(
+        schema.query("SELECT version FROM package_floors WHERE agent_type = 'otelcol'"),
+        ["2.0.0"]
+    );
+    assert_eq!(
+        b.all().get("otelcol").map(|floor| floor.version.clone()),
+        Some("2.0.0".to_string()),
+        "B holds what the refusal found stored"
+    );
+    assert!(a.remove("otelcol").expect("A removes it"));
+    assert!(
+        b.put("otelcol", "1.0.0", vec![4; 64]).is_ok(),
+        "removed on A, it is set anew on B, whatever B held"
+    );
+}

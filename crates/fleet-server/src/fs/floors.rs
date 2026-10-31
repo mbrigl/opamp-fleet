@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::floors::{Floor, FloorStore};
+use crate::floors::{put_into, Floor, FloorStore, Put};
 
 /// `<data_dir>/package-floors.json`: a JSON object that maps an Agent type to its version and
 /// signature, owner-only, replaced in one step and synced before the act that changed it is
@@ -79,17 +79,21 @@ impl FloorStore for FsFloorStore {
             .collect()
     }
 
-    fn put(&self, agent_type: &str, floor: &Floor) -> Result<(), String> {
+    fn put(&self, agent_type: &str, floor: &Floor) -> Result<Put, String> {
         let mut floors = self.load()?;
-        floors.insert(agent_type.to_string(), floor.clone());
-        self.write(&floors)
-    }
-
-    fn remove(&self, agent_type: &str) -> Result<(), String> {
-        let mut floors = self.load()?;
-        if floors.remove(agent_type).is_some() {
+        let put = put_into(&mut floors, agent_type, floor);
+        if put == Put::Stored {
             self.write(&floors)?;
         }
-        Ok(())
+        Ok(put)
+    }
+
+    fn remove(&self, agent_type: &str) -> Result<bool, String> {
+        let mut floors = self.load()?;
+        if floors.remove(agent_type).is_none() {
+            return Ok(false);
+        }
+        self.write(&floors)?;
+        Ok(true)
     }
 }

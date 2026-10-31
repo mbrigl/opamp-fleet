@@ -45,3 +45,39 @@ operator.
 with the human: ADR-0007 clause 5 keeps every part of the system with the human and sets the cap on
 open unattended work at zero. It rewrites the stores that answer security decisions: revocation,
 renewal, enrolment and the floors.
+
+## Where it stands
+
+Worked with the human on `ticket/several-server-instances/02-the-trust-state-is-written-per-row`;
+the session stopped where the rest needs the human's decisions.
+
+Done:
+
+- The revocation list is written per row: the ledger port adds and removes one entry
+  (`add_revocation`, `remove_revocation`), the store decides from what it holds whether the entry
+  is present and whether the list is at its bound, and on PostgreSQL that is one transaction that
+  holds the table against every other adder and carries the notification. The bound of the list
+  is so counted for the fleet. Criterion 1 is decided by
+  `two_revocations_committed_at_once_on_two_instances_are_both_kept` in `tests/instances.rs`.
+- The package floors are decided from the stored row: the floor port answers `Put::Lower` with
+  the floor it found, on PostgreSQL under `FOR UPDATE` in one transaction with the notification,
+  and the instance takes up what it found. Criterion 2 is decided by
+  `an_instance_with_an_older_floor_in_memory_cannot_lower_the_stored_one`.
+- The port contracts of the ledger and the floors run on both stores with the new calls.
+
+Open, each a decision for the human before it is built:
+
+- Criterion 3, the renewal of a revoked predecessor on an instance whose view is stale: the
+  register's write of a renewal becomes a call that walks the predecessor chain and reads the
+  list in its transaction (a recursive query) and refuses; or admission reads the chain and the
+  list from the database at each renewal, uncached; a cache dropped by the notification alone does
+  not hold when the notification is held back.
+- Criterion 4, one `instance_uid` to one Host: the Hosts table keeps the bindings as an array, on
+  which no unique constraint can stand. The bindings move into a table of their own,
+  `instance_uid` its key, migrated from the arrays; which act binds (the approval, or the first
+  report a Host admits) and what the refusal names are to be decided.
+- Criterion 5, the register's bounds across the fleet: which bound (the register's size, the
+  descendants of one root) is counted in the write, and by which lock (the table, or the chain's
+  root).
+- The enrolment queue per row, and its bound across the fleet: the enrolment port's shape.
+- Criteria 6 and 7 follow once the rest is built.

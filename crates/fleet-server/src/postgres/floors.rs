@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tokio_postgres::GenericClient;
 
 use super::{client, sql, Database};
-use crate::floors::{Floor, FloorStore};
+use crate::floors::{below, Floor, FloorStore, Put};
 
 /// The floors in `package_floors`.
 pub struct PgFloorStore {
@@ -30,26 +30,64 @@ impl FloorStore for PgFloorStore {
         })
     }
 
-    fn put(&self, agent_type: &str, floor: &Floor) -> Result<(), String> {
+    /// One transaction on the type's row: a new type's row is created, and a stored one is read
+    /// under a row lock and compared, so two instances cannot both pass the check on what each
+    /// held in memory.
+    fn put(&self, agent_type: &str, floor: &Floor) -> Result<Put, String> {
         let (agent_type, floor) = (agent_type.to_string(), floor.clone());
         self.database.run(move |pool| async move {
-            let client = client(&pool).await?;
-            write(&**client, &agent_type, &floor).await
+            let mut client = client(&pool).await?;
+            let transaction = client.transaction().await.map_err(sql)?;
+            let created = transaction
+                .execute(
+                    "INSERT INTO package_floors (agent_type, version, signature) \
+                     VALUES ($1, $2, $3) ON CONFLICT (agent_type) DO NOTHING",
+                    &[&agent_type, &floor.version, &floor.signature],
+                )
+                .await
+                .map_err(sql)?;
+            if created == 0 {
+                let row = transaction
+                    .query_one(
+                        "SELECT version, signature FROM package_floors WHERE agent_type = $1 \
+                         FOR UPDATE",
+                        &[&agent_type],
+                    )
+                    .await
+                    .map_err(sql)?;
+                let stored = Floor {
+                    version: row.get(0),
+                    signature: row.get(1),
+                };
+                if below(&floor.version, &stored.version) {
+                    return Ok(Put::Lower(stored));
+                }
+                write(&*transaction, &agent_type, &floor).await?;
+            }
+            super::notify::notify(&*transaction, super::notify::FLOOR).await?;
+            transaction.commit().await.map_err(sql)?;
+            Ok(Put::Stored)
         })
     }
 
-    fn remove(&self, agent_type: &str) -> Result<(), String> {
+    fn remove(&self, agent_type: &str) -> Result<bool, String> {
         let agent_type = agent_type.to_string();
         self.database.run(move |pool| async move {
-            let client = client(&pool).await?;
-            client
+            let mut client = client(&pool).await?;
+            let transaction = client.transaction().await.map_err(sql)?;
+            let removed = transaction
                 .execute(
                     "DELETE FROM package_floors WHERE agent_type = $1",
                     &[&agent_type],
                 )
                 .await
                 .map_err(sql)?;
-            Ok(())
+            if removed == 0 {
+                return Ok(false);
+            }
+            super::notify::notify(&*transaction, super::notify::FLOOR).await?;
+            transaction.commit().await.map_err(sql)?;
+            Ok(true)
         })
     }
 }
