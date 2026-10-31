@@ -68,7 +68,10 @@ no test cites.
   own self-test on fixture repositories. A git hook under `.githooks/` needs no more than bash
   3.2, because it runs before any check can say which bash it found. A sensor fails on nothing it
   counts until a decision turns it into a check. `scripts/check-all.sh`, the `checks.yml`
-  workflow, and the README's required checks list the same ones.
+  workflow, and the README's required checks list the same ones, the README a job with a matrix
+  by the check runs it reports. A workflow that publishes rather than checks, such as a release,
+  is no gate: `scripts/check-all.sh` names it as such, its jobs may run commands of their own, and
+  the scripts it runs count in the lists.
 - **The local gate.** The git hooks under `.githooks/` run the checks before a commit, a merge,
   and a push, and refuse what [`AGENTS.md` §6](../../AGENTS.md#6-project-rules) keeps from
   `main`. With `--changed`, `scripts/check-all.sh` runs a self-test only where its `# Inputs:`
@@ -154,7 +157,8 @@ project uses.
 [`checks.yml`](../../.github/workflows/checks.yml), fails on every violation listed in the decision
 above and lists the criteria without a test. It ships with a self-test that cites this ADR.
 Check 9 of [`scripts/check-docs.sh`](../../scripts/check-docs.sh) holds the three lists of checks
-together and fails a workflow job that runs no script, and
+together, fails a workflow job that runs no script outside a workflow named as no gate, and
+fails a job with a matrix named in the README by its bare name; and
 [`scripts/check-shell.sh`](../../scripts/check-shell.sh) lints every script. That a check stays
 free of further dependencies and runs after its self-test is review. That a sensor of the GitHub
 repository runs on instruction only, and its self-test without `gh`, is review.
