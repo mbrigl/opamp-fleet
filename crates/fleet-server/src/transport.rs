@@ -1234,8 +1234,9 @@ impl Fleet {
 
     /// Whether a message is an enrolment request through a Gateway (ADR-0015 clause 25): a CSR
     /// carrying a bootstrap proof over the certificate of a host marked as a Gateway, unless the
-    /// proof names that certificate itself — then it is the Gateway's own CSR, which `renews`
-    /// decides; it names that certificate only when it embeds it byte for byte. Its certificate is
+    /// proof names that certificate itself or the request carries a renewal proof beside it —
+    /// then it is the Gateway's own CSR, which `renews` decides; the proof names that certificate
+    /// only when it embeds it byte for byte. Its certificate is
     /// checked as cheaply as the throttle allows before it keys a bucket (ADR-0015 clause 26): it parses, and
     /// it is one a bootstrap CA of `[enrolment]` issued as the handshake checks one — its issuer,
     /// that CA's signature over it, `CA:FALSE`, its validity, and the `clientAuth` extended key
@@ -1265,6 +1266,8 @@ impl Fleet {
         let der = match crate::ca::bootstrap_proof_certificate(pem) {
             Ok(None) => return None,
             Ok(Some(der)) => der,
+            // Both proofs are the Gateway's own request too, refused by `renews` with its words.
+            Err(why) if why == fleet_core::csr::BOTH_PROOFS => return None,
             Err(_) => return Some(Relayed::Unchecked),
         };
         // The very certificate presented, byte for byte: an issuer and serial alone are anyone's
