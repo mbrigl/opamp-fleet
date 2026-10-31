@@ -210,12 +210,15 @@ impl LedgerStore for FsLedgerStore {
     }
 
     /// Answers from the Hosts as last written, which the next write of the Hosts carries the
-    /// binding into: another Host speaking for `instance_uid` holds it.
+    /// binding into: another Host speaking for `instance_uid` holds it, unless it is marked as a
+    /// Gateway, which binds nothing it carries.
     fn bind(&self, instance_uid: &str, host: &str) -> Result<Bound, String> {
         let written = self.written_hosts.lock().expect("hosts lock");
         Ok(written
             .iter()
-            .find(|(name, entry)| *name != host && entry.instance_uids.contains(instance_uid))
+            .find(|(name, entry)| {
+                *name != host && !entry.gateway && entry.instance_uids.contains(instance_uid)
+            })
             .map_or(Bound::Bound, |(holder, _)| Bound::Taken(holder.clone())))
     }
 
