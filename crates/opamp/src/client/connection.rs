@@ -135,7 +135,8 @@ impl ClientTls {
     }
 
     /// An HTTPS client with this trust and identity, TLS 1.3 only, following no redirect, bounded
-    /// by `timeouts`: the one way a Client builds a client for `https://`.
+    /// by `timeouts`: the way a Client builds every HTTPS client but the OpAMP plane's, which
+    /// starts from the same builder.
     ///
     /// # Errors
     /// Returns an error when the CA or the identity cannot be used, or the client cannot be built.
