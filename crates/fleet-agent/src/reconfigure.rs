@@ -753,46 +753,26 @@ fn reads_back_as(text: &str, blocks: &[SupervisorBlock]) -> Result<(), String> {
 
 /// Replaces `path` with `new_text` in one step, and hands the text back still in its wiped buffer
 /// (ADR-0014).
-fn replace_file(path: &Path, new_text: Zeroizing<String>) -> Result<Zeroizing<String>, String> {
-    let tmp = path.with_extension("toml.tmp");
-    write_replacement(&tmp, path, &new_text)?;
-    // `rename` replaces an existing file on every platform — on Windows it is `MoveFileExW` with
-    // `MOVEFILE_REPLACE_EXISTING` — so there is never a moment without a file.
-    std::fs::rename(&tmp, path).map_err(|e| format!("cannot replace the file: {e}"))?;
-    Ok(new_text)
-}
-
-/// Writes the new configuration to the temporary file the caller then renames over `supervisor.toml`.
 ///
-/// On Unix the temp file inherits the mode of the file it will replace — created with it, never
-/// widened after — so the rename cannot loosen permissions. `supervisor.toml` may hold
-/// `[packages] archive_key` in cleartext and is created `0600` (`config_init::write_new`); writing
-/// the temp file at the default umask (`0644`) and renaming it over the original, as this did
-/// before, left that secret world-readable after every Server-driven reconfigure (ADR-0017). A file that does not
-/// exist yet falls back to `0600`, the same floor `write_new` uses. The operator's own mode, if
-/// they widened or narrowed it deliberately, is preserved.
-fn write_replacement(tmp: &Path, target: &Path, contents: &str) -> Result<(), String> {
-    // Clear any temp left by a crashed earlier write, so the create below is fresh and its mode
-    // actually takes effect (a mode is applied only when a file is created).
-    let _ = std::fs::remove_file(tmp);
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
+/// Through the one replacement of `supervisor.toml` ([`crate::config_file::replace`]), with the
+/// mode of the file it replaces, so the rename cannot loosen it: `supervisor.toml` may hold
+/// `[packages] archive_key` in cleartext and is created `0600`, and an operator's own mode, widened
+/// or narrowed deliberately, is kept (ADR-0017 clause 30). A file that does not exist yet takes
+/// `0600`, the floor `config_init::write_new` uses. The apply runs as the service's own account in
+/// a directory that account owns (ADR-0037 clause 21), so the owner is left as the account makes
+/// it.
+fn replace_file(path: &Path, new_text: Zeroizing<String>) -> Result<Zeroizing<String>, String> {
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
-        let mode = std::fs::metadata(target)
+    let mode = {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::metadata(path)
             .map(|meta| meta.permissions().mode() & 0o777)
-            .unwrap_or(0o600);
-        options.mode(mode);
-    }
+            .unwrap_or(0o600)
+    };
     #[cfg(not(unix))]
-    let _ = target;
-    let mut file = options
-        .open(tmp)
-        .map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
-    use std::io::Write as _;
-    file.write_all(contents.as_bytes())
-        .map_err(|e| format!("cannot write {}: {e}", tmp.display()))
+    let mode = 0o600;
+    crate::config_file::replace(path, new_text.as_bytes(), mode, None)?;
+    Ok(new_text)
 }
 
 #[cfg(test)]
@@ -1707,7 +1687,7 @@ mod tests {
         );
         // No temporary file is left behind carrying the same secret.
         assert!(
-            !path.with_extension("toml.tmp").exists(),
+            !dir.path().join("supervisor.toml~").exists(),
             "no temp left behind"
         );
     }
@@ -1730,6 +1710,46 @@ mod tests {
 
         let mode = std::fs::metadata(&path).expect("stat").permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "a new file is owner-only, got {mode:o}");
+    }
+
+    /// An apply goes through the one replacement of `supervisor.toml`: the operator's own mode is
+    /// kept (ADR-0017 clause 30), and a link at the temporary name is replaced, never written
+    /// through, as an install's rewrite replaces it.
+    /// Verifies: ADR-0017, ADR-0037
+    #[cfg(unix)]
+    #[test]
+    fn an_apply_keeps_the_operators_mode_and_writes_through_no_link() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let outside = tempfile::tempdir().expect("outside");
+        let path = dir.path().join("supervisor.toml");
+        std::fs::write(&path, "endpoint = \"wss://fleet.example:4320/v1/opamp\"\n").expect("write");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).expect("chmod");
+        let victim = outside.path().join("victim");
+        std::fs::write(&victim, "untouched").expect("victim");
+        std::os::unix::fs::symlink(&victim, dir.path().join("supervisor.toml~")).expect("plant");
+
+        let offer = offer_of(&[(
+            "fleet",
+            "[[supervisor]]\ntype = \"command\"\nname = \"new\"\ncommand = \"new\"\n",
+        )]);
+        let (_, tables) = offered_blocks(&offer).expect("parse");
+        write_supervisors(&path, tables).expect("rewrite");
+
+        let mode = std::fs::metadata(&path).expect("stat").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o640, "the operator's mode is kept, got {mode:o}");
+        assert_eq!(std::fs::read_to_string(&victim).expect("read"), "untouched");
+        // The link stood at the temporary name the one replacement uses, and was removed as
+        // itself: an apply that wrote by another way would have left it.
+        assert!(
+            std::fs::symlink_metadata(dir.path().join("supervisor.toml~")).is_err(),
+            "the link at the temporary name is gone"
+        );
+        assert!(!std::fs::symlink_metadata(&path).expect("stat").is_symlink());
+        assert!(std::fs::read_to_string(&path)
+            .expect("read")
+            .contains("name = \"new\""));
     }
 
     /// ADR-0017: the apply is a diff by name. An unchanged block rides through — neither stopped

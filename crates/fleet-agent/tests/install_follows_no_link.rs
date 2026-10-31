@@ -16,6 +16,10 @@ use opamp::proto::ConnectionSettingsOffers;
 
 const UNTOUCHED: &[u8] = b"what the link points at\n";
 
+/// A configuration outside the account's directories, which a link points at.
+#[cfg(unix)]
+const UNTOUCHED_TOML: &str = "name = \"elsewhere\"\n";
+
 fn config(state_dir: &Path) -> ClientConfig {
     ClientConfig {
         state_dir: state_dir.to_path_buf(),
@@ -327,6 +331,40 @@ mod unix {
             "refused"
         );
         assert!(!target.exists(), "nothing is created where the link points");
+    }
+
+    /// A link the account put at `supervisor.toml`'s name carries neither a privileged read nor a
+    /// privileged write: the load `service install` and `service config` read the file with
+    /// refuses it, naming it, and an install that keeps an existing file leaves what it points at
+    /// with its bytes and its mode. The run-time Client, in its own account's directory, still
+    /// reads through a link its operator made (ADR-0037 clause 21).
+    /// Verifies: ADR-0037
+    #[test]
+    fn the_configuration_is_read_through_no_link() {
+        let data = tempfile::tempdir().expect("data root");
+        let outside = tempfile::tempdir().expect("outside");
+        let program = tempfile::tempdir().expect("program dir");
+        let beside = fleet_files(program.path());
+        let victim = outside.path().join("elsewhere.toml");
+        std::fs::write(&victim, UNTOUCHED_TOML).expect("write the victim");
+        std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o640)).expect("mode");
+        let path = data.path().join(config_init::FILE_NAME);
+        std::os::unix::fs::symlink(&victim, &path).expect("plant the link");
+
+        let err = ClientConfig::load_held(&path).expect_err("a privileged load refuses the link");
+        assert!(err.contains("is a link"), "{err}");
+        config_init::run_with_endpoint(&path, ENDPOINT, true, &beside)
+            .expect("an existing file is kept");
+        assert_eq!(
+            std::fs::read(&victim).expect("read"),
+            UNTOUCHED_TOML.as_bytes()
+        );
+        let mode = victim.metadata().expect("metadata").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o640, "the victim keeps its mode");
+        assert!(is_link(&path), "the link is left as it was");
+
+        let loaded = ClientConfig::load(&path).expect("the run-time Client follows the link");
+        assert_eq!(loaded.name, "elsewhere");
     }
 
     /// The state directory an install creates beneath a root is created one held directory at a

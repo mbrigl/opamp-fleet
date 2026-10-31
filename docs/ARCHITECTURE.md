@@ -249,13 +249,16 @@ is not its to decide.
   read from and written to by name, each file written whole and renamed into place, because a
   privileged install works in directories the service's account owns
   ([ADR-0037](adr/0037-the-accounts-the-service-runs-under.md)). The test
-  `privileged_steps_follow_no_link` holds `main.rs`, `config_init`, `service/`, `csr`, `connection`
-  and `tls` to that, with the path-based calls that change a file left to them listed and
-  justified; it does not look at reads. What runs under the Client's or the process account — the
-  self-update's and a Supervisor's program staging through `install`, the rewrite of
-  `supervisor.toml` in `reconfigure`, the Gateway's cached artifacts, and the second service's
-  purge on Windows, which goes by path — works by path in directories that account owns and no
-  other account may write.
+  `privileged_steps_follow_no_link` holds `main.rs`, `config_init`, `config_file`, `service/`,
+  `csr`, `connection` and `tls` to that, with the path-based calls that change or read a file left
+  to them listed and justified; a by-path `metadata` or `exists` check is not among them.
+  `supervisor.toml` is read by a privileged step through `ClientConfig::load_held` and rewritten,
+  by an install and by a Server-driven apply alike, through `config_file::replace`, in the held
+  directory, which on Windows refuses a configuration directory that is a reparse point for the
+  apply too; the run-time Client reads it by path with `load`. What else runs under the Client's
+  or the process account — the self-update's and a Supervisor's program staging through
+  `install`, the Gateway's cached artifacts, and the second service's purge on Windows, which goes
+  by path — works by path in directories that account owns and no other account may write.
 - **Client configuration** — `config` is what `supervisor.toml` may say and the rules it must meet
   ([ADR-0008](adr/0008-five-crates-on-tokio-and-axum.md)); `config_file` reads it from disk, makes
   its

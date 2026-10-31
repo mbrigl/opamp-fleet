@@ -10,12 +10,12 @@
 //! `storage::handle` and `win32::files`.
 //!
 //! This test reads the source text of those modules, every `cfg` branch included, and fails on
-//! each path-based call that changes the file system, unless `ALLOWED` names it with its reason.
+//! each path-based call that changes or reads a file, unless `ALLOWED` names it with its reason.
 //! An entry that no longer matches fails too, so the list stays what the code does. Code under
 //! `#[cfg(test)]` is not checked.
 //!
-//! The run-time Client, the second service and the Gateway are not here: each writes only in
-//! directories its own account owns and no other account may write to (ADR-0037 clause 21).
+//! The run-time Client, the second service and the Gateway are not here: each works only in
+//! directories its own account owns, and clause 11 covers the privileged steps alone.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -30,6 +30,10 @@ const PRIVILEGED: &[(&str, &str)] = &[
     (
         "src/config_init.rs",
         "writes `supervisor.toml` and the CA copy into the data root",
+    ),
+    (
+        "src/config_file.rs",
+        "reads and replaces `supervisor.toml`, for the privileged steps and the run-time Client",
     ),
     (
         "src/service",
@@ -49,7 +53,7 @@ const PRIVILEGED: &[(&str, &str)] = &[
     ),
 ];
 
-/// Calls that change the file system by path. `fs::` stands for `std::fs::`, `tokio::fs::` and
+/// Calls that change or read a file by path. `fs::` stands for `std::fs::`, `tokio::fs::` and
 /// `std::os::unix::fs::` alike.
 const BANNED: &[&str] = &[
     "fs::write(",
@@ -74,11 +78,86 @@ const BANNED: &[&str] = &[
     // A link or junction a subprocess makes is a path-based change all the same.
     "\"mklink\"",
     "set_readonly(",
+    // A read by path follows a link at the name too, and a privileged step that reads what the
+    // account put there acts on the account's word (ADR-0037 clause 11).
+    "fs::read(",
+    "fs::read_to_string(",
+    "File::open(",
 ];
 
 /// The path-based calls a privileged module may make: file, function, call, and why no link the
 /// account placed can carry it.
 const ALLOWED: &[(&str, &str, &str, &str)] = &[
+    (
+        "src/config_file.rs",
+        "load",
+        "fs::read_to_string(",
+        "the run-time Client's read of its own file, in a directory its own account owns, which \
+         ADR-0037 clause 11 does not cover; every privileged step reads through `load_held`",
+    ),
+    (
+        "src/config_init.rs",
+        "in_dir",
+        "fs::read_to_string(",
+        "the verification key the operator put beside the program or in `--fleet-files`: a \
+         directory the operator fills when `service install` runs from a payload or a download, \
+         not one of the account's",
+    ),
+    (
+        "src/config_init.rs",
+        "read_password_file",
+        "File::open(",
+        "the password file an administrator's flag names, read once and at most 4 KiB of it",
+    ),
+    (
+        "src/service/layout.rs",
+        "stage_current_exe",
+        "fs::read(",
+        "the running executable itself, which the administrator started",
+    ),
+    (
+        "src/service/manager.rs",
+        "read_registration",
+        "fs::read_to_string(",
+        "the service's registration, which only root writes (`/etc/systemd/system`, \
+         `/Library/LaunchDaemons`)",
+    ),
+    (
+        "src/service/manager.rs",
+        "read_state_dir",
+        "fs::read_to_string(",
+        "the service's registration, which only root writes",
+    ),
+    (
+        "src/service/manager.rs",
+        "load_removed_job",
+        "fs::read_to_string(",
+        "a launchd job in `/Library/LaunchDaemons`, which only root writes",
+    ),
+    (
+        "src/service/runtime.rs",
+        "recovery_state_dir",
+        "fs::read_to_string(",
+        "the run-time Client, in its own account's directories, which ADR-0037 clause 11 does \
+         not cover",
+    ),
+    (
+        "src/tls.rs",
+        "pkcs12_identity",
+        "File::open(",
+        "the `bootstrap.p12` the operator put beside the program or in `--fleet-files`, not in one \
+         of the account's directories when `service install` runs from a payload or a download; a \
+         regular file only, read at its size",
+    ),
+    (
+        "src/tls.rs",
+        "read",
+        "fs::read(",
+        "the files `[tls]` names, by the path `supervisor.toml` gives; among them the CA copy \
+         `service install` put in the data root, which the account owns, so a link the account \
+         placed there is followed: an open gap, filed as a ticket of its own; what the state \
+         directory holds is read through `state_file`",
+    ),
     (
         "src/config_init.rs",
         "read_certificates",
@@ -96,7 +175,7 @@ const ALLOWED: &[(&str, &str, &str, &str)] = &[
          clause 13)",
     ),
     (
-        "src/config_init.rs",
+        "src/config_file.rs",
         "held_dir",
         "fs::create_dir_all(",
         "the configuration's directory itself, the data root or one `--config` named, held right \
@@ -191,6 +270,16 @@ fn declared_fn(line: &str) -> Option<&str> {
     None
 }
 
+/// Whether `code` makes the call `banned`: `FloorFile::open(` is not `File::open(`.
+fn contains_call(code: &str, banned: &str) -> bool {
+    code.match_indices(banned).any(|(at, _)| {
+        !code[..at]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_')
+    })
+}
+
 /// The banned calls in `text`, outside comments and the test module, by function and call.
 fn calls(text: &str) -> Vec<(String, &'static str, usize)> {
     let lines: Vec<&str> = text.lines().collect();
@@ -213,7 +302,7 @@ fn calls(text: &str) -> Vec<(String, &'static str, usize)> {
             function = name.to_string();
         }
         for banned in BANNED {
-            if code.contains(banned) {
+            if contains_call(code, banned) {
                 found.push((function.clone(), *banned, index + 1));
             }
             // `use std::fs::{remove_file, …}` would let the call go by its bare name.
@@ -288,7 +377,7 @@ fn privileged_modules_change_the_account_s_directories_through_held_directories_
 fn the_scanner_finds_path_based_calls_by_function() {
     let src = r#"
         use std::fs::remove_file;
-        pub(crate) fn a() { std::fs::write(p, b); }
+        pub(crate) fn a() { std::fs::write(p, b); let _ = std::fs::read(p); FloorFile::open(p); }
         // std::fs::rename(a, b) in a comment
         async fn b() {
             tokio::fs::remove_dir_all(p).await;
@@ -305,6 +394,7 @@ fn the_scanner_finds_path_based_calls_by_function() {
         [
             ("(module)".to_string(), "fs::remove_file("),
             ("a".to_string(), "fs::write("),
+            ("a".to_string(), "fs::read("),
             ("b".to_string(), "fs::remove_dir_all("),
         ]
     );
