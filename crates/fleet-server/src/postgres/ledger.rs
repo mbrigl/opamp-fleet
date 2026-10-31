@@ -70,8 +70,8 @@ impl LedgerStore for PgLedgerStore {
     }
 
     /// One transaction that holds the table against every other adder, so the bound is counted
-    /// for every instance together: an entry revoking the same is answered as it stands, and a new
-    /// one goes last.
+    /// for every instance together: an entry of the same id is answered as it stands, or widened
+    /// in place when the new one names more issuers, and a new one goes last.
     fn add_revocation(&self, entry: &Revocation, bound: usize) -> Result<Added, String> {
         let entry = entry.clone();
         let bound = i64::try_from(bound).unwrap_or(i64::MAX);
@@ -82,12 +82,10 @@ impl LedgerStore for PgLedgerStore {
                 .execute("LOCK TABLE revocations IN SHARE ROW EXCLUSIVE MODE", &[])
                 .await
                 .map_err(sql)?;
-            let revoked = serde_json::to_value(&entry.revoked).expect("a revocation serializes");
             if let Some(row) = transaction
                 .query_opt(
-                    "SELECT id, revoked, revoked_ms FROM revocations \
-                     WHERE id = $1 OR revoked::text = $2::json::text",
-                    &[&entry.id, &revoked],
+                    "SELECT id, revoked, revoked_ms FROM revocations WHERE id = $1",
+                    &[&entry.id],
                 )
                 .await
                 .map_err(sql)?
@@ -95,11 +93,26 @@ impl LedgerStore for PgLedgerStore {
                 let id: String = row.get(0);
                 let revoked = serde_json::from_value(row.get(1))
                     .map_err(|e| format!("revocation {id} in the database: {e}"))?;
-                return Ok(Added::Present(Revocation {
+                let held = Revocation {
                     id,
                     revoked,
                     revoked_ms: unsigned(row.get(2)),
-                }));
+                };
+                let Some(wider) = crate::revocation::widened(&held, &entry) else {
+                    return Ok(Added::Present(held));
+                };
+                let revoked =
+                    serde_json::to_value(&wider.revoked).expect("a revocation serializes");
+                transaction
+                    .execute(
+                        "UPDATE revocations SET revoked = $2 WHERE id = $1",
+                        &[&wider.id, &revoked],
+                    )
+                    .await
+                    .map_err(sql)?;
+                super::notify::notify(&*transaction, super::notify::REVOCATION).await?;
+                transaction.commit().await.map_err(sql)?;
+                return Ok(Added::Widened(wider));
             }
             let (count, last): (i64, Option<i32>) = {
                 let row = transaction
@@ -426,8 +439,8 @@ mod tests {
 
     /// The port's contract on either store: register, list and Hosts load back as written, a
     /// removed entry goes, the list keeps the order its entries were added in, an entry revoking
-    /// what one on the list revokes is answered with that one, a list at its bound takes no more,
-    /// and Hosts saved again are exactly the new ones.
+    /// what one on the list revokes is answered with that one, one naming more issuers widens it
+    /// in place, a list at its bound takes no more, and Hosts saved again are exactly the new ones.
     fn contract(open: &dyn Fn() -> Box<dyn LedgerStore>) {
         let store = open();
         assert_eq!(store.load().expect("empty"), Ledger::default());
@@ -456,6 +469,26 @@ mod tests {
             Added::Present(list[0].clone()),
             "the same revocation again is the one on the list, even at the bound"
         );
+        // The serial again under the CA file of a rotation: one more issuer beside the first.
+        let mut both = revocation("r1", "0a");
+        let Revoked::Certificate { issuers, .. } = &mut both.revoked;
+        issuers.push(CertId::new(b"next ca", "0a").issuer);
+        both.revoked_ms = 9;
+        let mut wider = both.clone();
+        wider.revoked_ms = list[0].revoked_ms;
+        assert_eq!(
+            store.add_revocation(&both, 3).expect("add"),
+            Added::Widened(wider.clone()),
+            "a revocation under more issuers widens the entry, even at the bound"
+        );
+        assert_eq!(
+            store
+                .add_revocation(&revocation("r1", "0a"), 3)
+                .expect("add"),
+            Added::Present(wider.clone()),
+            "one under fewer issuers changes nothing"
+        );
+        let list = vec![wider.clone(), list[1].clone(), list[2].clone()];
         let hosts = BTreeMap::from([
             ("a".to_string(), host(&["01", "02"], false)),
             ("gateway/1".to_string(), host(&[], true)),
@@ -480,11 +513,7 @@ mod tests {
                 .expect("add"),
             Added::Added
         );
-        let shorter = vec![
-            revocation("r1", "0a"),
-            revocation("r3", "0d"),
-            revocation("r5", "0f"),
-        ];
+        let shorter = vec![wider, revocation("r3", "0d"), revocation("r5", "0f")];
         let fewer = BTreeMap::from([("a".to_string(), host(&["01"], false))]);
         reopened.save_hosts(&fewer).expect("save");
         let ledger = open().load().expect("load");
@@ -511,6 +540,72 @@ mod tests {
         };
         let database = test.open();
         contract(&|| Box::new(PgLedgerStore::new(database.clone())));
+    }
+
+    /// Two instances adding at once count the bound together: in every round two adders race for
+    /// the one place left, behind a barrier, and exactly one is added while the other finds the
+    /// list full, so the list never grows past its bound and no two entries share a place.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    #[test]
+    fn two_adders_at_the_bound_add_one_entry_between_them() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let stores = [
+            Arc::new(PgLedgerStore::new(database.clone())),
+            Arc::new(PgLedgerStore::new(database.clone())),
+        ];
+        const ROUNDS: usize = 20;
+        for round in 0..ROUNDS {
+            let barrier = Arc::new(std::sync::Barrier::new(2));
+            let answers: Vec<Added> = std::thread::scope(|scope| {
+                let racers: Vec<_> = stores
+                    .iter()
+                    .enumerate()
+                    .map(|(racer, store)| {
+                        let barrier = barrier.clone();
+                        scope.spawn(move || {
+                            let entry = revocation(
+                                &format!("r{round}-{racer}"),
+                                &format!("{round:02x}{racer:02x}"),
+                            );
+                            barrier.wait();
+                            store.add_revocation(&entry, round + 1).expect("add")
+                        })
+                    })
+                    .collect();
+                racers
+                    .into_iter()
+                    .map(|racer| racer.join().expect("racer"))
+                    .collect()
+            });
+            let added = answers
+                .iter()
+                .filter(|answer| **answer == Added::Added)
+                .count();
+            let full = answers
+                .iter()
+                .filter(|answer| **answer == Added::Full)
+                .count();
+            assert_eq!((added, full), (1, 1), "round {round}: {answers:?}");
+        }
+        assert_eq!(stores[0].load().expect("load").revocations.len(), ROUNDS);
+        let positions = database
+            .run(|pool| async move {
+                let client = client(&pool).await?;
+                let row = client
+                    .query_one("SELECT count(DISTINCT position) FROM revocations", &[])
+                    .await
+                    .map_err(sql)?;
+                Ok(row.get::<_, i64>(0))
+            })
+            .expect("positions");
+        assert_eq!(
+            positions,
+            i64::try_from(ROUNDS).expect("rounds"),
+            "one place each"
+        );
     }
 
     /// A save of the Hosts that fails part-way leaves them as they were, and the next save still

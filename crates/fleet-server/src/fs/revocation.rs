@@ -201,7 +201,7 @@ impl LedgerStore for FsLedgerStore {
     fn add_revocation(&self, entry: &Revocation, bound: usize) -> Result<Added, String> {
         let mut list = self.read_revocations()?;
         let added = add_to(&mut list, entry, bound);
-        if added == Added::Added {
+        if matches!(added, Added::Added | Added::Widened(_)) {
             self.write_revocations(&list)?;
         }
         Ok(added)

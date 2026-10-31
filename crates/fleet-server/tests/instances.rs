@@ -572,7 +572,7 @@ fn records(schema: &Schema) -> Records {
 
 /// Two instances that each revoke a certificate at the same moment keep both revocations: each
 /// adds its own row, and neither writes the list it holds over the other's.
-/// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+/// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it, Q-1
 #[test]
 fn two_revocations_committed_at_once_on_two_instances_are_both_kept() {
     let Some(schema) = Schema::named() else {
@@ -626,7 +626,7 @@ fn two_revocations_committed_at_once_on_two_instances_are_both_kept() {
 /// An instance that holds an older floor in memory cannot lower the one another instance stored:
 /// the floor is decided from the stored row, and the answer is the `409` of a lower floor, naming
 /// the stored version, which the instance then holds.
-/// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it, ADR-0028
+/// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it, ADR-0028, Q-6
 #[test]
 fn an_instance_with_an_older_floor_in_memory_cannot_lower_the_stored_one() {
     use fleet_server::floors::{FloorError, PackageFloors};

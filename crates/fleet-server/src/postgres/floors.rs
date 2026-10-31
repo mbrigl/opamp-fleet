@@ -38,23 +38,38 @@ impl FloorStore for PgFloorStore {
         self.database.run(move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
-            let created = transaction
-                .execute(
-                    "INSERT INTO package_floors (agent_type, version, signature) \
-                     VALUES ($1, $2, $3) ON CONFLICT (agent_type) DO NOTHING",
-                    &[&agent_type, &floor.version, &floor.signature],
-                )
-                .await
-                .map_err(sql)?;
-            if created == 0 {
-                let row = transaction
-                    .query_one(
+            // A row another instance removes between the insert and the read is inserted again:
+            // the type then has no floor to compare with.
+            let mut attempts = 0;
+            loop {
+                attempts += 1;
+                let created = transaction
+                    .execute(
+                        "INSERT INTO package_floors (agent_type, version, signature) \
+                         VALUES ($1, $2, $3) ON CONFLICT (agent_type) DO NOTHING",
+                        &[&agent_type, &floor.version, &floor.signature],
+                    )
+                    .await
+                    .map_err(sql)?;
+                if created == 1 {
+                    break;
+                }
+                let Some(row) = transaction
+                    .query_opt(
                         "SELECT version, signature FROM package_floors WHERE agent_type = $1 \
                          FOR UPDATE",
                         &[&agent_type],
                     )
                     .await
-                    .map_err(sql)?;
+                    .map_err(sql)?
+                else {
+                    if attempts < 3 {
+                        continue;
+                    }
+                    return Err(format!(
+                        "the floor of {agent_type} kept changing under the write; try again"
+                    ));
+                };
                 let stored = Floor {
                     version: row.get(0),
                     signature: row.get(1),
@@ -63,6 +78,7 @@ impl FloorStore for PgFloorStore {
                     return Ok(Put::Lower(stored));
                 }
                 write(&*transaction, &agent_type, &floor).await?;
+                break;
             }
             super::notify::notify(&*transaction, super::notify::FLOOR).await?;
             transaction.commit().await.map_err(sql)?;
@@ -146,6 +162,22 @@ mod tests {
     /// by a Server opened anew; one below the stored floor refused and nothing changed; a
     /// `DELETE` gone after a reopen.
     fn contract(open: &dyn Fn() -> Box<dyn FloorStore>) {
+        // The port itself, past any memory: a floor below the stored one is answered with the
+        // stored one, and a type without a floor is not removed.
+        let port = open();
+        let two = Floor {
+            version: "2.0.0".to_string(),
+            signature: vec![7; 64],
+        };
+        assert_eq!(port.put("port", &two), Ok(Put::Stored));
+        let stale = Floor {
+            version: "1.5.0".to_string(),
+            signature: vec![8; 64],
+        };
+        assert_eq!(port.put("port", &stale), Ok(Put::Lower(two.clone())));
+        assert_eq!(port.remove("port"), Ok(true));
+        assert_eq!(port.remove("port"), Ok(false), "gone already");
+
         let floors = PackageFloors::open(open()).expect("open");
         assert!(floors.all().is_empty());
         assert_eq!(

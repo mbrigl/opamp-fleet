@@ -271,8 +271,9 @@ pub trait LedgerStore: Send + Sync {
     /// Returns an error when it cannot be removed.
     fn remove_issued(&self, id: &CertId) -> Result<(), String>;
 
-    /// Adds `entry` to the list, deciding from what is stored: an entry revoking the same is kept
-    /// as it is, and a list already holding `bound` entries takes no more. The bound is counted
+    /// Adds `entry` to the list, deciding from what is stored: an entry of the same id is kept, its
+    /// issuers widened by those `entry` names beside them ([`widened`]), and a list already
+    /// holding `bound` entries takes no more. The bound is counted
     /// in the write itself, so it holds for every instance on one store together
     /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
     /// clause 19).
@@ -301,6 +302,9 @@ pub enum Added {
     Added,
     /// The list held an entry revoking the same: this one, unchanged.
     Present(Revocation),
+    /// The list held an entry of the same id under fewer issuers: this one, now under the issuers
+    /// of both.
+    Widened(Revocation),
     /// The list is at its bound.
     Full,
 }
@@ -308,17 +312,52 @@ pub enum Added {
 /// Adds `entry` to a list a store holds whole, by the rules of
 /// [`LedgerStore::add_revocation`]: what a store that is its only writer decides with.
 pub(crate) fn add_to(list: &mut Vec<Revocation>, entry: &Revocation, bound: usize) -> Added {
-    if let Some(held) = list
-        .iter()
-        .find(|held| held.id == entry.id || held.revoked == entry.revoked)
-    {
-        return Added::Present(held.clone());
+    if let Some(held) = list.iter_mut().find(|held| held.id == entry.id) {
+        return match widened(held, entry) {
+            Some(wider) => {
+                *held = wider.clone();
+                Added::Widened(wider)
+            }
+            None => Added::Present(held.clone()),
+        };
     }
     if list.len() >= bound {
         return Added::Full;
     }
     list.push(entry.clone());
     Added::Added
+}
+
+/// The entry `held` under the issuers of both it and `entry`, when `entry`, of the same id, names
+/// an issuer `held` does not: a serial revoked under one CA of a rotation and again under the CA
+/// file of both is revoked under both (ADR-draft-admission-by-client-certificate-and-revocation
+/// clause 27). `None` when `held` covers `entry` already. It keeps the time `held` was revoked.
+#[must_use]
+pub fn widened(held: &Revocation, entry: &Revocation) -> Option<Revocation> {
+    let Revoked::Certificate {
+        authority,
+        issuers,
+        serial,
+    } = &held.revoked;
+    let Revoked::Certificate { issuers: more, .. } = &entry.revoked;
+    let added: Vec<&String> = more
+        .iter()
+        .filter(|issuer| !issuers.contains(issuer))
+        .collect();
+    if added.is_empty() {
+        return None;
+    }
+    let mut issuers = issuers.clone();
+    issuers.extend(added.into_iter().cloned());
+    Some(Revocation {
+        id: held.id.clone(),
+        revoked: Revoked::Certificate {
+            authority: authority.clone(),
+            issuers,
+            serial: serial.clone(),
+        },
+        revoked_ms: held.revoked_ms,
+    })
 }
 
 /// Removes the entry `id` from a list a store holds whole: whether it held one.
@@ -985,12 +1024,18 @@ impl Revocations {
         {
             Added::Added => entry,
             Added::Present(existing) => existing,
+            Added::Widened(wider) => wider,
             Added::Full => return Err(RevokeError::Full),
         };
-        if state.revocations.iter().any(|held| held.id == entry.id) {
-            return Ok(entry);
+        match state
+            .revocations
+            .iter_mut()
+            .find(|held| held.id == entry.id)
+        {
+            Some(held) if *held == entry => return Ok(entry),
+            Some(held) => *held = entry.clone(),
+            None => state.revocations.push(entry.clone()),
         }
-        state.revocations.push(entry.clone());
         state.revoked = None;
         drop(state);
         self.changes.send_modify(|rev| *rev += 1);
