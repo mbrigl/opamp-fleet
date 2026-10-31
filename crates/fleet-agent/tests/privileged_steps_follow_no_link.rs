@@ -155,8 +155,8 @@ const ALLOWED: &[(&str, &str, &str, &str)] = &[
         "fs::read(",
         "the files `[tls]` names, by the path `supervisor.toml` gives; among them the CA copy \
          `service install` put in the data root, which the account owns, so a link the account \
-         placed there is followed: an open gap, filed as a ticket of its own; what the state \
-         directory holds is read through `state_file`",
+         placed there is followed: an open gap, backlog measure H21 in `docs/HARDENING.md`; \
+         what the state directory holds is read through `state_file`",
     ),
     (
         "src/config_init.rs",

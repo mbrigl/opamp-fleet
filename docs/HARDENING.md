@@ -203,8 +203,10 @@ has:
   a root is created one held directory at a time; and the `current` pointer is switched in the
   held layout root on Windows, while on Unix it is switched by name in the layout root, whose own
   name lies in a directory only root writes, each step acting on the name and following no link.
-  A test holds the modules these steps run in to no path-based write, removal, rename or mode
-  change outside a justified list (`privileged_steps_follow_no_link.rs`).
+  A privileged step reads `supervisor.toml` through the held data root too. A test holds the
+  modules these steps run in to no path-based read, write, removal, rename or mode change outside
+  a justified list (`privileged_steps_follow_no_link.rs`). Not yet: the files `[tls]` names, which
+  the enrolment in `service config` reads by path (H21).
 - **No credential in `server.toml` authenticates on its own** (ADR-0021 clause 21): an operator's
   Basic password is kept as an Argon2id hash of at least the OWASP minimum, and a value in clear is
   refused at startup without being echoed. The Server offers no credential (ADR-0013).
@@ -349,6 +351,27 @@ signature) and [ADR-0029](adr/0029-the-servers-state-and-its-stores.md) (its sto
 aws-lc-rs), and touch [ADR-0018](adr/0018-the-client-updates-itself-from-a-signed-package.md),
 whose self-update rests on the package signature.
 
+## The privileged install
+
+🔴 **H21 — A privileged enrolment reads the `[tls]` files bounded, and trusts no file the account
+could have changed.** `service config` enrols as root or an Administrator and reads the files
+`[tls]` names — `ca_file`, `cert_file`, `key_file` — by path, with no check that each is a regular
+file and no bound on its size. The paths come from `supervisor.toml`, and the CA copy
+`service install` puts beside it lies in the data root; both are in a directory the service's
+account owns. An account that is taken over can so make the privileged step read a device without
+end (`/dev/zero`), read a file only root may read, or follow a link at the CA copy and trust a
+Server of its choosing for the enrolment. Reading the copy without following a link alone does not
+close it: the account owns the copy's bytes and can rewrite the `[tls]` paths and `endpoint` in
+`supervisor.toml`. Two steps are open, and they do not exclude each other: each `[tls]` file is read
+only as a regular file under a size cap, and through the held directory where it lies in the data
+root or the state directory; and a run that copied the CA itself enrols with the certificates it
+copied, rather than reading back what the account may have changed.
+**Cost:** small for the bounded read, which `config_init`'s reading of the CA file already does; a
+change to the enrolment's interface for the copied trust.
+**To work out:** whether a privileged step may take `endpoint` and the `[tls]` paths from a file in
+the account's directory at all, which would be a clause of
+[ADR-0037](adr/0037-the-accounts-the-service-runs-under.md); and the size cap.
+
 ## The channels that put code on the host
 
 Remote configuration and package delivery are the paths by which the Server causes code to run on an
@@ -419,3 +442,6 @@ with the measure when it moves up into [What already holds](#what-already-holds)
   X25519MLKEM768, and one with a peer that offers only X25519 still connects. The signatures: a
   package and a floor signed both ways verify on a Client that knows only Ed25519 and on one that
   knows ML-DSA. The certificates: a peer that verifies only classical chains still connects.
+- **H21** — a `[tls]` path in `supervisor.toml` that names a device or a file over the cap makes
+  `service config` refuse it, naming it, without reading it whole; a link the account placed at the
+  CA copy in the data root is not followed by the enrolment.
