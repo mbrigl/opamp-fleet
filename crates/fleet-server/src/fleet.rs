@@ -151,6 +151,30 @@ pub struct Assignment {
     pub configurations: BTreeMap<String, String>,
 }
 
+impl Assignment {
+    /// An assignment as a store holds it, its Package as the two parts of its identity, decided
+    /// here so every store reads it by the same rule (ADR-0029). Each store names the
+    /// record before the message.
+    ///
+    /// # Errors
+    /// Returns an error when the Package's identity breaks the token rule.
+    pub fn load(
+        deployment: String,
+        package: Option<(&str, &str)>,
+        configurations: BTreeMap<String, String>,
+    ) -> Result<Self, String> {
+        let package = package
+            .map(|(agent_type, version)| PackageId::load(agent_type, version))
+            .transpose()
+            .map_err(|e| format!("invalid package in the assignment: {e}"))?;
+        Ok(Assignment {
+            deployment,
+            package,
+            configurations,
+        })
+    }
+}
+
 /// The configuration map of an Agent nothing was rolled out to.
 static NO_CONFIGURATIONS: BTreeMap<String, String> = BTreeMap::new();
 

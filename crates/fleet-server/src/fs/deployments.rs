@@ -1,14 +1,12 @@
 //! Deployments on the filesystem (ADR-0027): the default adapter behind
 //! [`DeploymentBackend`](crate::deployments::DeploymentBackend).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::configs::validate_name;
-use crate::deployments::{check_selector, Deployment, DeploymentBackend};
-use crate::packages::PackageId;
+use crate::deployments::{Deployment, DeploymentBackend};
 
 /// One JSON file per Deployment under `<data_dir>/deployments/`, owner-only (ADR-0029).
 pub struct FsDeploymentBackend {
@@ -99,26 +97,15 @@ impl DeploymentMeta {
     }
 
     fn into_deployment(self, path: &std::path::Path) -> Result<Deployment, String> {
-        let named = |e: String| format!("invalid deployment in {}: {e}", path.display());
-        validate_name(&self.name).map_err(|e| named(format!("name {:?}: {e}", self.name)))?;
-        check_selector(&self.selector).map_err(named)?;
-        let mut packages = BTreeMap::new();
-        for reference in self.packages {
-            let id = PackageId::load(&reference.agent_type, &reference.version).map_err(named)?;
-            packages.insert(id.agent_type.clone(), id);
-        }
-        let mut configurations = BTreeSet::new();
-        for configuration in self.configurations {
-            validate_name(&configuration)
-                .map_err(|e| named(format!("configuration {configuration:?}: {e}")))?;
-            configurations.insert(configuration);
-        }
-        Ok(Deployment {
-            name: self.name,
-            selector: self.selector,
-            packages,
-            configurations,
-        })
+        Deployment::load(
+            self.name,
+            self.selector,
+            self.packages
+                .into_iter()
+                .map(|reference| (reference.agent_type, reference.version)),
+            self.configurations,
+        )
+        .map_err(|e| format!("invalid deployment in {}: {e}", path.display()))
     }
 }
 

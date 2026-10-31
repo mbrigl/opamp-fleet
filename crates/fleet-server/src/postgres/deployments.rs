@@ -2,16 +2,14 @@
 //! [`DeploymentBackend`](crate::deployments::DeploymentBackend) — one row per Deployment, each
 //! call one transaction.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use tokio_postgres::GenericClient;
 
 use super::{client, sql, Database};
-use crate::configs::validate_name;
-use crate::deployments::{check_selector, Deployment, DeploymentBackend};
-use crate::packages::PackageId;
+use crate::deployments::{Deployment, DeploymentBackend};
 
 /// The Deployments in `deployments`.
 pub struct PgDeploymentBackend {
@@ -80,29 +78,20 @@ pub(crate) async fn read_all(client: &impl GenericClient) -> Result<Vec<Deployme
     {
         let name: String = row.get(0);
         let named = |e: String| format!("deployment {name:?} in the database: {e}");
-        validate_name(&name).map_err(named)?;
         let selector: BTreeMap<String, String> =
             serde_json::from_value(row.get(1)).map_err(|e| named(format!("selector: {e}")))?;
-        check_selector(&selector).map_err(named)?;
         let references: Vec<PackageRef> =
             serde_json::from_value(row.get(2)).map_err(|e| named(format!("packages: {e}")))?;
-        let mut packages = BTreeMap::new();
-        for reference in references {
-            let id = PackageId::load(&reference.agent_type, &reference.version).map_err(named)?;
-            packages.insert(id.agent_type.clone(), id);
-        }
-        let mut configurations = BTreeSet::new();
-        for configuration in row.get::<_, Vec<String>>(3) {
-            validate_name(&configuration)
-                .map_err(|e| named(format!("configuration {configuration:?}: {e}")))?;
-            configurations.insert(configuration);
-        }
-        deployments.push(Deployment {
-            name,
+        let deployment = Deployment::load(
+            name.clone(),
             selector,
-            packages,
-            configurations,
-        });
+            references
+                .into_iter()
+                .map(|reference| (reference.agent_type, reference.version)),
+            row.get::<_, Vec<String>>(3),
+        )
+        .map_err(named)?;
+        deployments.push(deployment);
     }
     Ok(deployments)
 }
@@ -146,7 +135,9 @@ pub(crate) async fn write(
 mod tests {
     use super::*;
     use crate::fs::FsDeploymentBackend;
+    use crate::packages::PackageId;
     use crate::postgres::testing::TestDatabase;
+    use std::collections::BTreeSet;
 
     fn deployment(name: &str, package: Option<&str>) -> Deployment {
         Deployment {
@@ -163,8 +154,9 @@ mod tests {
     }
 
     /// The port's contract on either store: what is written is loaded back, a put replaces, and a
-    /// removal tolerates absence.
-    fn contract(open: &dyn Fn() -> Box<dyn DeploymentBackend>) {
+    /// removal tolerates absence. A stored Deployment the core refuses fails the load with the
+    /// core's words: `rename` gives the one left the name `Stable`, outside the name grammar.
+    fn contract(open: &dyn Fn() -> Box<dyn DeploymentBackend>, rename: &dyn Fn()) {
         let store = open();
         assert!(store.load().expect("empty").is_empty());
         store
@@ -188,13 +180,40 @@ mod tests {
         store.remove("canary").expect("remove");
         store.remove("canary").expect("removing the absent is fine");
         assert_eq!(open().load().expect("load"), [deployment("stable", None)]);
+
+        rename();
+        let stable = deployment("stable", None);
+        let core = Deployment::load(
+            "Stable".to_string(),
+            stable.selector,
+            [],
+            stable.configurations,
+        )
+        .map(|_| ())
+        .expect_err("the core refuses it");
+        let err = open().load().map(|_| ()).expect_err("refused");
+        assert!(err.ends_with(&core), "{err}");
+        let naming = &err[..err.len() - core.len()];
+        assert!(
+            naming.to_lowercase().contains("stable"),
+            "the record is named: {err}"
+        );
     }
 
     /// Verifies: ADR-0029
     #[test]
     fn the_deployment_port_contract_holds_on_the_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
-        contract(&|| Box::new(FsDeploymentBackend::open(dir.path()).expect("open")));
+        let file = dir.path().join("deployments/stable.json");
+        contract(
+            &|| Box::new(FsDeploymentBackend::open(dir.path()).expect("open")),
+            &|| {
+                let mut meta: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&file).expect("read")).expect("json");
+                meta["name"] = "Stable".into();
+                std::fs::write(&file, meta.to_string()).expect("write");
+            },
+        );
     }
 
     /// Verifies: ADR-0029
@@ -204,7 +223,10 @@ mod tests {
             return;
         };
         let database = test.open();
-        contract(&|| Box::new(PgDeploymentBackend::new(database.clone())));
+        contract(
+            &|| Box::new(PgDeploymentBackend::new(database.clone())),
+            &|| test.sql("UPDATE deployments SET name = 'Stable'"),
+        );
     }
 
     /// A put that fails leaves the Deployment as it was, on either store. `refuse` makes the

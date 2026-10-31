@@ -162,7 +162,11 @@ is not its to decide.
   filesystem adapter in `fs::floors`, its PostgreSQL adapter in `postgres::floors`, and the one
   `contract` test there that runs on both stores. A new store copies its shape and its test
   ([ADR-0009](adr/0009-ports-and-adapters.md),
-  [ADR-0029](adr/0029-the-servers-state-and-its-stores.md)).
+  [ADR-0029](adr/0029-the-servers-state-and-its-stores.md)). Where a record carries domain rules,
+  as a package entry, a Deployment and an assignment do, the adapters map a row or a file to
+  fields and load it through the core's constructor (`Entry::load`, `Deployment::load`,
+  `Assignment::load`), so a rule is decided once, and the contract test plants a record the core
+  refuses on each store.
 - **Server listeners** — `tls` reads the `[tls]`, `[rest.tls]` and `[enrolment]` files into the
   material each plane serves with — the Agent plane requiring a client certificate in the
   handshake, the Operator plane asking for none and serving `[rest.tls]`'s certificate when the
