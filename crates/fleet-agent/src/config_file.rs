@@ -6,11 +6,31 @@
 use std::path::{Path, PathBuf};
 
 use crate::config::{ClientConfig, LEGACY_CONFIG_FILE_NAME, SECRET_KEYS};
+use crate::nofollow::HeldDir;
 
 impl ClientConfig {
     /// Loads the file, or the defaults when it does not exist. A file that exists but does not
-    /// parse is an error — never silently ignored.
+    /// parse is an error — never silently ignored. What the run-time Client reads, in a directory
+    /// its own account owns (ADR-0037 clause 21); a privileged step reads through
+    /// [`load_held`](Self::load_held).
     pub fn load(path: &Path) -> Result<Self, String> {
+        Self::load_with(path, |path| std::fs::read_to_string(path))
+    }
+
+    /// [`load`](Self::load) for a step that runs as root or an Administrator: the file is read
+    /// through its held directory and never through a link the service's account could have put
+    /// at its name (ADR-0037 clause 11). A link there is refused, naming it.
+    pub fn load_held(path: &Path) -> Result<Self, String> {
+        Self::load_with(path, |path| {
+            let held = read_held(path).map_err(std::io::Error::other)?;
+            String::from_utf8(held.to_vec()).map_err(std::io::Error::other)
+        })
+    }
+
+    fn load_with(
+        path: &Path,
+        read: impl Fn(&Path) -> std::io::Result<String>,
+    ) -> Result<Self, String> {
         if !path.exists() {
             legacy_name_beside(path)?;
             let default = ClientConfig::default();
@@ -22,7 +42,7 @@ impl ClientConfig {
         }
         // The file may hold `[packages] archive_key`: its text is wiped when it is dropped
         // (ADR-0014).
-        let text = std::fs::read_to_string(path)
+        let text = read(path)
             .map(zeroize::Zeroizing::new)
             .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
         let mut config: ClientConfig =
@@ -299,6 +319,58 @@ fn mask_secrets_in_value(value: &mut toml_edit::Value) {
         toml_edit::Value::Array(array) => array.iter_mut().for_each(mask_secrets_in_value),
         _ => {}
     }
+}
+
+/// The directory `dir` a configuration is written in, created where it is missing and held: the
+/// data root, or the directory the administrator named with `--config`. Its name is the
+/// administrator's and is followed on Unix, while on Windows a reparse point there is refused
+/// ([`HeldDir::open_root`]); every name in it is then reached without following a link.
+pub(crate) fn held_dir(dir: &Path) -> Result<HeldDir, String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    HeldDir::open_root(dir).map_err(|e| format!("cannot open {}: {e}", dir.display()))
+}
+
+/// `path` as its held directory and its file name.
+pub(crate) fn held_file(path: &Path) -> Result<(HeldDir, &str), String> {
+    let name = path
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .ok_or_else(|| format!("{} names no file", path.display()))?;
+    let dir = std::path::absolute(path)
+        .map_err(|e| format!("cannot resolve {}: {e}", path.display()))?
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| format!("{} names no directory", path.display()))?;
+    Ok((held_dir(&dir)?, name))
+}
+
+/// The bytes of the configuration at `path`, read through its held directory and never through a
+/// link at its name, in a buffer wiped when it is dropped: the file may hold `[packages]
+/// archive_key` (ADR-0014).
+pub(crate) fn read_held(path: &Path) -> Result<zeroize::Zeroizing<Vec<u8>>, String> {
+    let (dir, name) = held_file(path)?;
+    dir.read(name)
+        .map(zeroize::Zeroizing::new)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))
+}
+
+/// Replaces the configuration at `path` with `contents`, the one way it is rewritten: by
+/// `service install` and `service config` as root or an Administrator, and by a Server-driven
+/// apply as the service's own account. Written whole to a new temporary name in the held
+/// directory, with `mode` and, on Unix, `owner` set through its descriptor, synced, and renamed
+/// over the name, so a Client starting meanwhile reads the old file or the new one, never half of
+/// either, and a link at either name is replaced and never written through (ADR-0037 clause 11).
+/// The mode is the caller's: owner-only for an install or a `service config` (ADR-0019 clause
+/// 25), the operator's own for an apply (ADR-0017 clause 30).
+pub(crate) fn replace(
+    path: &Path,
+    contents: &[u8],
+    mode: u32,
+    owner: Option<(u32, u32)>,
+) -> Result<(), String> {
+    let (dir, name) = held_file(path)?;
+    dir.write_owned(name, contents, mode, owner)
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
 
 #[cfg(test)]

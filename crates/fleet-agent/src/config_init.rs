@@ -22,7 +22,6 @@ use std::path::{Path, PathBuf};
 use dialoguer::{Input, Password};
 
 use crate::config::ClientConfig;
-use crate::nofollow::HeldDir;
 
 /// The file name written inside the install root when the operator named no `--config` path
 /// (ADR-0019): one rule for systemd, launchd, and the SCM instead of an `/etc` vs `/Library` vs
@@ -324,10 +323,10 @@ pub fn run(
     if existing {
         // The file may hold `[packages] archive_key`: the text read and the text written are wiped
         // when they are dropped; what `toml_edit` keeps while it edits is its own (ADR-0014).
-        let text = std::fs::read_to_string(path)
-            .map(zeroize::Zeroizing::new)
-            .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-        let edited = zeroize::Zeroizing::new(edit(&text, &answers)?);
+        let bytes = crate::config_file::read_held(path)?;
+        let text = std::str::from_utf8(&bytes)
+            .map_err(|_| format!("cannot read {}: not UTF-8 text", path.display()))?;
+        let edited = zeroize::Zeroizing::new(edit(text, &answers)?);
         replace(path, &edited)?;
     } else {
         write_new(path, &render(&answers))?;
@@ -364,7 +363,7 @@ pub fn copy_ca_beside(answers: Answers, config: &Path) -> Result<(Answers, Vec<P
         .parent()
         .map(Path::to_path_buf)
         .ok_or_else(|| format!("{} names no directory", config.display()))?;
-    let held = held_dir(&dir)?;
+    let held = crate::config_file::held_dir(&dir)?;
     let to = dir.join(SERVER_CA_FILE);
     let bytes = read_certificates(ca)?;
     held.write(SERVER_CA_FILE, &bytes, 0o600)
@@ -435,29 +434,6 @@ fn read_certificates(path: &Path) -> Result<Vec<u8>, String> {
         .collect())
 }
 
-/// The directory `dir` a configuration is written in, created where it is missing and held: the
-/// data root, or the directory the administrator named with `--config`. Its name is the
-/// administrator's and is followed on Unix, while on Windows a reparse point there is refused
-/// ([`HeldDir::open_root`]); every name in it is then reached without following a link.
-fn held_dir(dir: &Path) -> Result<HeldDir, String> {
-    std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-    HeldDir::open_root(dir).map_err(|e| format!("cannot open {}: {e}", dir.display()))
-}
-
-/// `path` as its held directory and its file name.
-fn held_file(path: &Path) -> Result<(HeldDir, &str), String> {
-    let name = path
-        .file_name()
-        .and_then(std::ffi::OsStr::to_str)
-        .ok_or_else(|| format!("{} names no file", path.display()))?;
-    let dir = std::path::absolute(path)
-        .map_err(|e| format!("cannot resolve {}: {e}", path.display()))?
-        .parent()
-        .map(Path::to_path_buf)
-        .ok_or_else(|| format!("{} names no directory", path.display()))?;
-    Ok((held_dir(&dir)?, name))
-}
-
 /// Replace the configuration at `path` with `contents`, keeping who owns it.
 ///
 /// Through a temporary name and a rename, so a Client starting meanwhile reads the old file or the
@@ -484,9 +460,7 @@ fn replace(path: &Path, contents: &str) -> Result<(), String> {
     };
     #[cfg(not(unix))]
     let owner = None;
-    let (dir, name) = held_file(path)?;
-    dir.write_owned(name, contents.as_bytes(), 0o600, owner)
-        .map_err(|e| format!("cannot write {}: {e}", path.display()))
+    crate::config_file::replace(path, contents.as_bytes(), 0o600, owner)
 }
 
 /// Edit the answers into an existing configuration's text, changing only the keys the
@@ -935,12 +909,12 @@ fn commented_top_level_keys() -> &'static str {
 /// a check that raced, and a link at the name is something that is there: it is refused, never
 /// followed. The mode is set in the same call for the same reason: the file names where the
 /// private key lies and may hold `[packages] archive_key` (ADR-0019 clause 25), before any later
-/// mode change could narrow it. The directory is held as [`held_dir`] holds it.
+/// mode change could narrow it. The directory is held as [`held_dir`](crate::config_file::held_dir) holds it.
 ///
 /// # Errors
 /// Returns an error if the directory cannot be created or the file already exists.
 pub fn write_new(path: &Path, contents: &str) -> Result<(), String> {
-    let (dir, name) = held_file(path)?;
+    let (dir, name) = crate::config_file::held_file(path)?;
     dir.create_new(name, contents.as_bytes(), 0o600)
         .map_err(|e| format!("cannot create {}: {e}", path.display()))
 }

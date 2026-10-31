@@ -450,7 +450,7 @@ fn install(
     } else {
         // An absent file loads as the defaults; `--endpoint` then writes its endpoint, and an
         // existing file is kept.
-        let mut about_to_run = ClientConfig::load(&config_path)?;
+        let mut about_to_run = ClientConfig::load_held(&config_path)?;
         if let (false, Some(endpoint)) = (config_path.exists(), &args.endpoint) {
             about_to_run.endpoint.clone_from(endpoint);
         }
@@ -488,7 +488,7 @@ fn install(
 
     // Fail on a broken configuration now, not at the service's first start. After the write, so
     // that a file just answered into existence is held to the same rule as any other.
-    let mut config = ClientConfig::load(&config_path)?;
+    let mut config = ClientConfig::load_held(&config_path)?;
     // The state directory the service will run with — where an issued certificate counts. Asked
     // again of the file as it is now, which the service's account may have rewritten meanwhile.
     let state_dir = config.service_state_dir(&roots)?;
@@ -862,7 +862,7 @@ fn configure(
     // The installed copy runs from the layout, where no fleet files lie (ADR-0019, out of scope).
     let written = ask(&config_path, &roots, &config_init::Beside::default(), None)?;
 
-    let mut config = ClientConfig::load(&config_path)?;
+    let mut config = ClientConfig::load_held(&config_path)?;
     let state_dir = config.service_state_dir(&roots)?;
     config.state_dir.clone_from(&state_dir);
     if let Some(bootstrap) = &written.bootstrap {
@@ -905,7 +905,7 @@ fn ask(
     beside: &config_init::Beside,
     password: Option<&str>,
 ) -> Result<config_init::Written, String> {
-    let current = ClientConfig::load(config_path)?;
+    let current = ClientConfig::load_held(config_path)?;
     let mut in_service = current.clone();
     in_service.state_dir = current.service_state_dir(roots)?;
     config_init::run(
