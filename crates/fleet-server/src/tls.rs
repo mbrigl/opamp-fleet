@@ -116,8 +116,8 @@ pub fn enrolling(certificate: &[u8]) -> Peer {
         Ok((_, parsed)) => {
             let (issuer, serial) = fleet_core::x509::read::id(&parsed);
             Peer::Enrolling {
-                subject: crate::ca::name_text(parsed.subject()),
-                carried: Box::new(crate::ca::carried_subject(parsed.subject())),
+                subject: crate::subject::name::name_text(parsed.subject()),
+                carried: Box::new(crate::subject::name::carried_subject(parsed.subject())),
                 fingerprint,
                 id: CertId { issuer, serial },
             }

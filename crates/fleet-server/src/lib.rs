@@ -31,6 +31,7 @@ pub mod pki;
 pub mod postgres;
 pub mod revocation;
 pub mod s3;
+pub mod subject;
 pub mod throttle;
 pub mod tls;
 pub mod transport;

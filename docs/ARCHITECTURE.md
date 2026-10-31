@@ -191,10 +191,15 @@ is not its to decide.
   requests an operator approves through `api`, and `throttle`, the per-address back-off after
   repeated failures, which both planes use
   ([ADR-0021](adr/0021-admission-by-client-certificate-and-revocation.md)). `revocation`
-  holds the register of issued certificates, the revocation list and the Hosts — each with the
-  subject values of its certificate, its Gateway mark and the Agents bound to it — behind the
-  `LedgerStore` port ([ADR-0021](adr/0021-admission-by-client-certificate-and-revocation.md),
-  [ADR-0024](adr/0024-the-fleet-record-of-agents-and-hosts.md)).
+  holds the register of issued certificates and the revocation list, and its submodule
+  `revocation::hosts` the Host register — each Host with the subject values of its certificate,
+  its Gateway mark and the Agents bound to it — both in one state behind the `LedgerStore` port
+  ([ADR-0021](adr/0021-admission-by-client-certificate-and-revocation.md),
+  [ADR-0024](adr/0024-the-fleet-record-of-agents-and-hosts.md)). `subject` holds the attributes
+  a certificate's subject carries, each with its object identifier once, the rules a value meets
+  and the values a Host carries; its adapter `subject::name` reads them from an X.509 name and
+  writes one for `ca` and `tls`
+  ([ADR-0022](adr/0022-bootstrap-certificates-and-enrolment.md)).
   `agent_rate` holds the token buckets that bound how often an admitted host, an Agent behind a
   marked Gateway, and the Gateway as a whole are heard, in the bounded tables of
   `fleet_core::rate`; `transport` takes a token for each
