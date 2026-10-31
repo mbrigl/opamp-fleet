@@ -71,7 +71,8 @@ fi
 for f in "${scripts[@]}"; do
   while IFS=: read -r line text; do
     echo "${f#"$ROOT"/}:$line: GNU sed's in-place flag does not run on macOS;" \
-      "write through a temporary file instead: sed 'SCRIPT' FILE > FILE.tmp && mv FILE.tmp FILE"
+      "write through a temporary file instead, in place so FILE keeps its mode:" \
+      "sed 'SCRIPT' FILE > FILE.tmp && cat FILE.tmp > FILE && rm FILE.tmp"
     echo "    $text"
     failed=1
   done < <(grep -nE "$IN_PLACE" "$f" | grep -vE '^[0-9]+:[[:space:]]*#')

@@ -32,11 +32,13 @@ verifies.
   code may reference a number. No draft reaches `main`. A branch that already carries a numbered
   proposed ADR whose number another branch brought to `main` first gives it the next free number
   before it merges, in every reference its own branch makes to it. Until a normalization, a
-  superseded ADR keeps its file and its body. Its `Status` line flips to `⚪ superseded by
-  ADR-NNNN` in the change that lands the superseding ADR, whose `Supersedes` field names it back.
+  superseded ADR keeps its file and its body. The superseding ADR's `Supersedes` field names it
+  from the proposal on; its `Status` line stays as it is while the successor is proposed, and
+  flips to `⚪ superseded by ADR-NNNN` in the change where a human accepts the successor
+  ([`AGENTS.md` §3](../../AGENTS.md#3-adr-rules), rule 4), its index row moving with it.
 - **Between normalizations, sprawl is curbed by supersession, never by editing.** One ADR may
   supersede several whose decisions have grown into one. Its `Supersedes` field names each, and
-  each flips its status in the same change, so the set an agent reads for a change shrinks
+  each flips its status when the superseding ADR is accepted, so the set an agent reads shrinks
   while every number and every body stays.
 - **A normalization restates the record** ([`AGENTS.md` §3](../../AGENTS.md#3-adr-rules), rule
   5).

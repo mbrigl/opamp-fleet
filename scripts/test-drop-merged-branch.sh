@@ -28,7 +28,7 @@ g() {
 }
 
 # absent <dir> <ref> — the ref does not exist in the fixture.
-# shellcheck disable=SC2317 # run by check
+# shellcheck disable=SC2317,SC2329 # run by check
 absent() { ! g "$1" rev-parse -q --verify "$2" > /dev/null; }
 
 # repo <name> [unmerged] — the fixture: main pushed to origin, feat/work pushed with one commit,
