@@ -11,8 +11,45 @@ use std::sync::Arc;
 use serde_json::Value;
 use tokio_postgres::GenericClient;
 
+use deadpool_postgres::Object;
+
 use super::{client, signed, sql, unsigned, Database};
-use crate::enrolment::{Decision, EnrolmentStore, Persisted, PersistedRequest, Took};
+use crate::enrolment::{
+    Approval, Decision, DecisionError, EnrolmentStore, Persisted, PersistedRequest, Took,
+};
+use crate::revocation::CertId;
+
+/// A connection inside a transaction this adapter began, held across the calls that do the
+/// transaction's work. Dropped before it is let go, it is closed rather than returned to the pool,
+/// so the database rolls the transaction back and no other caller is handed a connection inside
+/// one.
+struct Held(Option<Object>);
+
+impl Held {
+    fn client(&self) -> &Object {
+        self.0.as_ref().expect("held until let go")
+    }
+
+    /// The connection, back to the pool once the transaction has ended.
+    fn let_go(mut self) -> Object {
+        self.0.take().expect("held until let go")
+    }
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        if let Some(object) = self.0.take() {
+            drop(Object::take(object));
+        }
+    }
+}
+
+/// What the held request was found to be.
+enum Found {
+    NotWaiting,
+    Revoked,
+    Waiting(Value),
+}
 
 /// The window in `enrolment_window`, its requests in `enrolment_requests`.
 pub struct PgEnrolmentStore {
@@ -146,6 +183,97 @@ impl EnrolmentStore for PgEnrolmentStore {
                 .map_err(sql)?;
             transaction.commit().await.map_err(sql)?;
             Ok(true)
+        })
+    }
+
+    /// The request's row is held from before it is signed until its decision is written: of two
+    /// instances approving one request, the second waits for the first and then finds it decided,
+    /// signing nothing. The bootstrap certificate is looked up in the list once the row is held;
+    /// the register's write looks again, under its hold of the list.
+    fn approve(
+        &self,
+        id: &str,
+        bootstrap: &CertId,
+        sign: &mut dyn FnMut() -> Result<Decision, DecisionError>,
+    ) -> Result<Approval, String> {
+        let request_id = id.to_string();
+        let bootstrap = bootstrap.clone();
+        let (held, found) = self.database.run(move |pool| async move {
+            let held = Held(Some(client(&pool).await?));
+            held.client().batch_execute("BEGIN").await.map_err(sql)?;
+            let row = held
+                .client()
+                .query_opt(
+                    "SELECT request FROM enrolment_requests WHERE id = $1 FOR UPDATE",
+                    &[&request_id],
+                )
+                .await
+                .map_err(sql)?;
+            let found = match row.map(|row| row.get::<_, Value>(0)) {
+                Some(request) if request.get("decision").is_none_or(Value::is_null) => {
+                    if super::ledger::names(&***held.client(), &bootstrap).await? {
+                        held.client()
+                            .execute(
+                                "DELETE FROM enrolment_requests WHERE id = $1",
+                                &[&request_id],
+                            )
+                            .await
+                            .map_err(sql)?;
+                        Found::Revoked
+                    } else {
+                        Found::Waiting(request)
+                    }
+                }
+                _ => Found::NotWaiting,
+            };
+            Ok((held, found))
+        })?;
+        let (finish, answer) = match found {
+            Found::NotWaiting => ("ROLLBACK", Ok(Approval::NotWaiting)),
+            Found::Revoked => ("COMMIT", Ok(Approval::Revoked)),
+            Found::Waiting(mut request) => match sign() {
+                Err(e) => ("ROLLBACK", Ok(Approval::Refused(e))),
+                Ok(decision) => {
+                    request["decision"] =
+                        serde_json::to_value(&decision).expect("a decision serializes");
+                    let id = id.to_string();
+                    return self.database.run(move |_| async move {
+                        held.client()
+                            .execute(
+                                "UPDATE enrolment_requests SET request = $2 WHERE id = $1",
+                                &[&id, &request],
+                            )
+                            .await
+                            .map_err(sql)?;
+                        held.client().batch_execute("COMMIT").await.map_err(sql)?;
+                        drop(held.let_go());
+                        Ok(Approval::Approved(decision))
+                    });
+                }
+            },
+        };
+        self.database.run(move |_| async move {
+            held.client().batch_execute(finish).await.map_err(sql)?;
+            drop(held.let_go());
+            answer
+        })
+    }
+
+    fn withdraw_bootstrap(&self, issuers: &[String], serial: &str) -> Result<usize, String> {
+        let issuers = issuers.to_vec();
+        let serial = serial.to_string();
+        self.database.run(move |pool| async move {
+            let client = client(&pool).await?;
+            let withdrawn = client
+                .execute(
+                    "DELETE FROM enrolment_requests WHERE request -> 'decision' IS NULL \
+                     AND request -> 'requester' -> 'bootstrap' ->> 'serial' = $2 \
+                     AND request -> 'requester' -> 'bootstrap' ->> 'issuer' = ANY($1)",
+                    &[&issuers, &serial],
+                )
+                .await
+                .map_err(sql)?;
+            Ok(usize::try_from(withdrawn).unwrap_or(usize::MAX))
         })
     }
 
@@ -502,25 +630,360 @@ mod tests {
         let held = stores[0].load().expect("load").expect("saved").requests;
         assert_eq!(held.len(), ROUNDS);
 
-        let barrier = std::sync::Barrier::new(2);
-        let id = held[0].id.clone();
-        let decided: Vec<bool> = std::thread::scope(|scope| {
-            let racers: Vec<_> = stores
-                .iter()
-                .map(|store| {
-                    let (barrier, id) = (&barrier, id.clone());
-                    scope.spawn(move || {
-                        barrier.wait();
-                        store.decide(&id, &Decision::Rejected).expect("decide")
+        for request in &held {
+            let barrier = std::sync::Barrier::new(2);
+            let id = request.id.clone();
+            let decided: Vec<bool> = std::thread::scope(|scope| {
+                let racers: Vec<_> = stores
+                    .iter()
+                    .map(|store| {
+                        let (barrier, id) = (&barrier, id.clone());
+                        scope.spawn(move || {
+                            barrier.wait();
+                            store.decide(&id, &Decision::Rejected).expect("decide")
+                        })
                     })
-                })
-                .collect();
-            racers
-                .into_iter()
-                .map(|r| r.join().expect("racer"))
+                    .collect();
+                racers
+                    .into_iter()
+                    .map(|r| r.join().expect("racer"))
+                    .collect()
+            });
+            assert_eq!(
+                decided.iter().filter(|d| **d).count(),
+                1,
+                "{id}: {decided:?}"
+            );
+        }
+    }
+
+    fn bootstrap(serial: &str) -> CertId {
+        CertId::new(b"bootstrap CA", serial)
+    }
+
+    /// The approvals' contract on either store: a waiting request is signed once and approved
+    /// with what was signed, a request no longer waiting signs nothing, a refused signature leaves
+    /// the request waiting, and withdrawing a bootstrap certificate's requests keeps a decided one.
+    fn approvals(open: &dyn Fn() -> Box<dyn EnrolmentStore>) {
+        let store = open();
+        store.open_window(10_000).expect("open");
+        for (id, serial) in [("a", "1"), ("b", "2"), ("c", "1")] {
+            store.take(&request(id, serial), 1_000, 8, 8).expect("take");
+        }
+        let signed = std::cell::Cell::new(0);
+        let approved = Decision::Approved("-----BEGIN CERTIFICATE-----".to_string());
+        let mut sign = || {
+            signed.set(signed.get() + 1);
+            Ok(approved.clone())
+        };
+        assert_eq!(
+            store.approve("a", &bootstrap("1"), &mut sign),
+            Ok(Approval::Approved(approved.clone()))
+        );
+        assert_eq!(
+            store.approve("a", &bootstrap("1"), &mut sign),
+            Ok(Approval::NotWaiting)
+        );
+        assert_eq!(
+            store.approve("none", &bootstrap("1"), &mut sign),
+            Ok(Approval::NotWaiting)
+        );
+        assert_eq!(signed.get(), 1, "signed once");
+        let mut refuse = || Err(DecisionError::Sign("refused".to_string()));
+        assert_eq!(
+            store.approve("b", &bootstrap("2"), &mut refuse),
+            Ok(Approval::Refused(DecisionError::Sign(
+                "refused".to_string()
+            )))
+        );
+        let decisions = |store: &dyn EnrolmentStore| -> Vec<(String, bool)> {
+            store
+                .load()
+                .expect("load")
+                .expect("saved")
+                .requests
+                .iter()
+                .map(|r| (r.id.clone(), r.decision.is_some()))
                 .collect()
+        };
+        assert_eq!(
+            decisions(&*open()),
+            [("a".into(), true), ("b".into(), false), ("c".into(), false)]
+        );
+        let issuer = bootstrap("1").issuer;
+        assert_eq!(store.withdraw_bootstrap(&[issuer], "1"), Ok(1));
+        assert_eq!(
+            decisions(&*open()),
+            [("a".into(), true), ("b".into(), false)],
+            "the decided request of that bootstrap certificate is kept"
+        );
+    }
+
+    /// Verifies: ADR-0029
+    #[test]
+    fn the_enrolment_approvals_hold_on_the_filesystem() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        approvals(&|| Box::new(FsEnrolmentStore::open(dir.path())));
+    }
+
+    /// Verifies: ADR-0029
+    #[test]
+    fn the_enrolment_approvals_hold_on_postgres() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        approvals(&|| Box::new(PgEnrolmentStore::new(database.clone())));
+    }
+
+    /// Of two instances approving one request, one signs and records it and the other finds it
+    /// decided, signing nothing: the request's row is held from before the signature until the
+    /// decision is written.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    #[test]
+    fn two_approvers_of_one_request_sign_it_once() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let stores = [
+            PgEnrolmentStore::new(database.clone()),
+            PgEnrolmentStore::new(database.clone()),
+        ];
+        stores[0].open_window(u64::MAX / 4).expect("open");
+        for round in 0..20 {
+            let id = format!("p{round}");
+            stores[0]
+                .take(&request(&id, "1"), 1_000, 100, 100)
+                .expect("take");
+            let signed = std::sync::atomic::AtomicUsize::new(0);
+            let barrier = std::sync::Barrier::new(2);
+            let answers: Vec<Approval> = std::thread::scope(|scope| {
+                let racers: Vec<_> = stores
+                    .iter()
+                    .map(|store| {
+                        let (barrier, id, signed) = (&barrier, id.clone(), &signed);
+                        scope.spawn(move || {
+                            barrier.wait();
+                            store
+                                .approve(&id, &bootstrap("1"), &mut || {
+                                    signed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                    std::thread::sleep(std::time::Duration::from_millis(20));
+                                    Ok(Decision::Approved(format!("pem {id}")))
+                                })
+                                .expect("approve")
+                        })
+                    })
+                    .collect();
+                racers
+                    .into_iter()
+                    .map(|r| r.join().expect("racer"))
+                    .collect()
+            });
+            let approved = answers
+                .iter()
+                .filter(|a| matches!(a, Approval::Approved(_)))
+                .count();
+            assert_eq!(approved, 1, "round {round}: {answers:?}");
+            assert!(
+                answers.contains(&Approval::NotWaiting),
+                "round {round}: {answers:?}"
+            );
+            assert_eq!(
+                signed.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "round {round}: signed once"
+            );
+        }
+    }
+
+    /// A request whose bootstrap certificate another instance revoked is withdrawn when it is
+    /// approved, and nothing is signed, whatever the approving instance holds in memory
+    /// (ADR-0021 clause 28).
+    /// Verifies: ADR-0021
+    #[test]
+    fn an_approval_whose_bootstrap_certificate_the_list_names_signs_nothing() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let store = PgEnrolmentStore::new(database.clone());
+        store.open_window(u64::MAX / 4).expect("open");
+        store.take(&request("a", "1"), 1_000, 8, 8).expect("take");
+        store.take(&request("b", "2"), 1_000, 8, 8).expect("take");
+        let ledger = crate::postgres::ledger::PgLedgerStore::new(database.clone());
+        crate::revocation::LedgerStore::add_revocation(
+            &ledger,
+            &crate::revocation::Revocation {
+                id: "r1".to_string(),
+                revoked: crate::revocation::Revoked::Certificate {
+                    authority: "bootstrap".to_string(),
+                    issuers: vec![bootstrap("1").issuer],
+                    serial: "1".to_string(),
+                },
+                revoked_ms: 1,
+            },
+            100,
+        )
+        .expect("revoke");
+        let signed = std::cell::Cell::new(0);
+        let mut sign = || {
+            signed.set(signed.get() + 1);
+            Ok(Decision::Approved("pem".to_string()))
+        };
+        assert_eq!(
+            store.approve("a", &bootstrap("1"), &mut sign),
+            Ok(Approval::Revoked)
+        );
+        assert_eq!(signed.get(), 0, "nothing signed");
+        let held: Vec<String> = store
+            .load()
+            .expect("load")
+            .expect("saved")
+            .requests
+            .iter()
+            .map(|r| r.id.clone())
+            .collect();
+        assert_eq!(held, ["b"], "the request is withdrawn");
+        assert!(matches!(
+            store.approve("b", &bootstrap("2"), &mut sign),
+            Ok(Approval::Approved(_))
+        ));
+    }
+
+    /// Two instances on one database approving one request: one hands it out, the other answers
+    /// that it is not found, and the request is signed and recorded once.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    #[test]
+    fn two_instances_approving_one_request_record_one_certificate() {
+        use crate::enrolment::tests::{request as submitted, requester, Echo, Manual};
+        use crate::enrolment::{Enrolment, Submitted};
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let clock = Arc::new(Manual(std::sync::atomic::AtomicU64::new(1_000_000)));
+        let a = Enrolment::open_on(
+            clock.clone(),
+            Box::new(PgEnrolmentStore::new(database.clone())),
+        )
+        .expect("A");
+        a.open(600).expect("window");
+        let b = Enrolment::open_on(
+            clock.clone(),
+            Box::new(PgEnrolmentStore::new(database.clone())),
+        )
+        .expect("B");
+        for round in 0..10 {
+            let key = format!("k{round}");
+            assert_eq!(a.submit(submitted(&key), requester()), Submitted::Waiting);
+            assert_eq!(b.submit(submitted(&key), requester()), Submitted::Waiting);
+            let recorded = std::sync::atomic::AtomicUsize::new(0);
+            let record = |_: &crate::revocation::Signed, _: &[u8], _: &CertId| {
+                recorded.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                Ok(())
+            };
+            let barrier = std::sync::Barrier::new(2);
+            let answers: Vec<Result<(), DecisionError>> = std::thread::scope(|scope| {
+                let racers: Vec<_> = [&a, &b]
+                    .into_iter()
+                    .map(|enrolment| {
+                        let (barrier, key, record) = (&barrier, key.clone(), &record);
+                        scope.spawn(move || {
+                            barrier.wait();
+                            enrolment.approve(&key, &Echo, "host", record, &|_| false)
+                        })
+                    })
+                    .collect();
+                racers
+                    .into_iter()
+                    .map(|r| r.join().expect("racer"))
+                    .collect()
+            });
+            assert!(answers.contains(&Ok(())), "round {round}: {answers:?}");
+            assert!(
+                answers.contains(&Err(DecisionError::NotFound)),
+                "round {round}: {answers:?}"
+            );
+            assert_eq!(
+                recorded.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "round {round}"
+            );
+        }
+    }
+
+    /// A take that read the window open before another instance closed it does not land in the
+    /// closed window: the window's row is held for share while the request is written.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    #[test]
+    fn a_take_does_not_land_in_a_window_closed_meanwhile() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let store = PgEnrolmentStore::new(database.clone());
+        store.open_window(u64::MAX / 4).expect("open");
+        // Another instance's close, held open after its writes: the window's row and the queue
+        // are written, not yet committed.
+        let closing = database
+            .run(|pool| async move {
+                let held = Held(Some(client(&pool).await?));
+                held.client()
+                    .batch_execute(
+                        "BEGIN; UPDATE enrolment_window SET until_ms = NULL; \
+                         DELETE FROM enrolment_requests",
+                    )
+                    .await
+                    .map_err(sql)?;
+                Ok(held)
+            })
+            .expect("closing");
+        let taken = std::thread::scope(|scope| {
+            let taker = scope.spawn(|| store.take(&request("late", "1"), 1_000, 8, 8));
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            database
+                .run(move |_| async move {
+                    closing
+                        .client()
+                        .batch_execute("COMMIT")
+                        .await
+                        .map_err(sql)?;
+                    drop(closing.let_go());
+                    Ok(())
+                })
+                .expect("commit the close");
+            taker.join().expect("taker")
         });
-        assert_eq!(decided.iter().filter(|d| **d).count(), 1, "{decided:?}");
+        assert_eq!(taken, Ok(Took::Closed));
+        assert_eq!(store.load().expect("load"), Some(Persisted::default()));
+    }
+
+    /// Closing or ending the window is one transaction: a deletion of its requests that fails
+    /// leaves the window open and its requests as they were.
+    /// Verifies: ADR-0029
+    #[test]
+    fn closing_or_ending_the_window_leaves_nothing_of_itself_when_it_fails() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let store = PgEnrolmentStore::new(test.open());
+        store.open_window(10_000).expect("open");
+        store.take(&request("a", "1"), 1_000, 8, 8).expect("take");
+        let before = store.load().expect("load");
+        test.sql(
+            "CREATE OR REPLACE FUNCTION fleet_test_keep() RETURNS trigger \
+             LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'kept by the test'; END $$; \
+             CREATE TRIGGER fleet_test_keep BEFORE DELETE ON enrolment_requests \
+             FOR EACH ROW EXECUTE FUNCTION fleet_test_keep();",
+        );
+        store.close_window().expect_err("the deletion fails");
+        assert_eq!(store.load().expect("load"), before, "close");
+        store.end_window(10_000).expect_err("the deletion fails");
+        assert_eq!(store.load().expect("load"), before, "end");
+        test.sql("DROP TRIGGER fleet_test_keep ON enrolment_requests");
+        assert_eq!(store.end_window(10_000), Ok(true));
     }
 
     /// A take that fails part-way leaves the queue as it was, on either store.

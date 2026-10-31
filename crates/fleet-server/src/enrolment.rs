@@ -79,8 +79,25 @@ pub struct Pending {
     pub requester: Requester,
 }
 
-/// Keeps what was signed, and the `instance_uid` it was asked under, before a host can collect it.
-pub type Record<'a> = dyn Fn(&Signed, &[u8]) -> Result<(), String> + 'a;
+/// Keeps what was signed, the `instance_uid` it was asked under and the bootstrap certificate the
+/// request came with, before a host can collect it. A revoked bootstrap certificate is answered
+/// [`DecisionError::Revoked`].
+pub type Record<'a> = dyn Fn(&Signed, &[u8], &CertId) -> Result<(), DecisionError> + 'a;
+
+/// What an approval comes to in the store.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Approval {
+    /// The request waited, was signed and recorded, and is approved with this decision now.
+    Approved(Decision),
+    /// The store holds the request no longer waiting: another instance decided or withdrew it,
+    /// or its window closed. Nothing was signed.
+    NotWaiting,
+    /// The list names the bootstrap certificate the request came with; the request is withdrawn
+    /// and nothing was signed.
+    Revoked,
+    /// Signing or recording refused it; the request still waits.
+    Refused(DecisionError),
+}
 
 /// What a submitted request comes to.
 #[derive(Debug, PartialEq, Eq)]
@@ -254,6 +271,65 @@ pub trait EnrolmentStore: Send + Sync {
         request.decision = Some(decision.clone());
         self.save(&persisted)?;
         Ok(true)
+    }
+
+    /// Approves the waiting request `id`: `sign` signs and records it while the request is held,
+    /// and its answer is written as the request's decision. A request the store holds no longer
+    /// waiting is answered [`Approval::NotWaiting`] before anything is signed, so of two instances
+    /// approving one request one signs and records it and the other nothing
+    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// clause 19). A store other instances share also refuses a request whose bootstrap
+    /// certificate, `bootstrap`, the list names, and withdraws it; a store that is its only writer
+    /// leaves that to the list in memory.
+    ///
+    /// # Errors
+    /// Returns an error when the store cannot be read or written; nothing is then decided.
+    fn approve(
+        &self,
+        id: &str,
+        bootstrap: &CertId,
+        sign: &mut dyn FnMut() -> Result<Decision, DecisionError>,
+    ) -> Result<Approval, String> {
+        let _ = bootstrap;
+        let mut persisted = self.load()?.unwrap_or_default();
+        let Some(request) = persisted
+            .requests
+            .iter_mut()
+            .find(|r| r.id == id && r.decision.is_none())
+        else {
+            return Ok(Approval::NotWaiting);
+        };
+        let decision = match sign() {
+            Ok(decision) => decision,
+            Err(e) => return Ok(Approval::Refused(e)),
+        };
+        request.decision = Some(decision.clone());
+        self.save(&persisted)?;
+        Ok(Approval::Approved(decision))
+    }
+
+    /// Withdraws every waiting request whose bootstrap certificate is `serial` under one of
+    /// `issuers`, and answers how many: what the revocation of a bootstrap certificate withdraws in
+    /// the queue every instance shares (ADR-0021 clause 28).
+    ///
+    /// # Errors
+    /// Returns an error when the store cannot be read or written.
+    fn withdraw_bootstrap(&self, issuers: &[String], serial: &str) -> Result<usize, String> {
+        let Some(mut persisted) = self.load()? else {
+            return Ok(0);
+        };
+        let before = persisted.requests.len();
+        persisted.requests.retain(|r| {
+            let bootstrap = &r.requester.bootstrap;
+            r.decision.is_some()
+                || bootstrap.serial != serial
+                || !issuers.contains(&bootstrap.issuer)
+        });
+        let withdrawn = before - persisted.requests.len();
+        if withdrawn > 0 {
+            self.save(&persisted)?;
+        }
+        Ok(withdrawn)
     }
 
     /// Withdraws the requests `ids` names while they wait; a decided one is kept.
@@ -436,8 +512,12 @@ impl Enrolment {
         };
         let ended = state
             .window_until_ms
-            .is_some_and(|until| clock.now_ms() >= until);
-        if ended || (state.window_until_ms.is_none() && !state.entries.is_empty()) {
+            .filter(|until| clock.now_ms() >= *until);
+        if let Some(until) = ended {
+            // Only the window that ended: another instance may have opened it again meanwhile.
+            state = State::default();
+            store.end_window(until)?;
+        } else if state.window_until_ms.is_none() && !state.entries.is_empty() {
             state = State::default();
             store.close_window()?;
         }
@@ -639,16 +719,12 @@ impl Enrolment {
         self.expire(&mut state);
         let entry = state
             .entries
-            .get_mut(id)
+            .get(id)
             .filter(|entry| entry.decision.is_none())
             .ok_or(DecisionError::NotFound)?;
-        if revoked(&entry.pending.requester.bootstrap) {
-            state.entries.remove(id);
-            let ids = [id.to_string()];
-            self.on_store_logged(|store| store.withdraw(&ids));
-            drop(state);
-            self.changed();
-            return Err(DecisionError::Revoked);
+        let bootstrap = entry.pending.requester.bootstrap.clone();
+        if revoked(&bootstrap) {
+            return Err(self.withdrawn(state, id));
         }
         // The bootstrap certificate's values, under the rules they were issued by, and never the
         // request's (ADR-0022 clause 11 and ADR-0015 clause 23).
@@ -658,18 +734,56 @@ impl Enrolment {
                      certificate: {e}"
             ))
         })?;
-        let signed = signer
-            .sign(&entry.csr_pem, host, &subject)
-            .map_err(DecisionError::Sign)?;
-        record(&signed, &entry.instance_uid).map_err(DecisionError::Sign)?;
-        let decision = Decision::Approved(signed.pem);
+        let (csr_pem, instance_uid) = (entry.csr_pem.clone(), entry.instance_uid.clone());
+        let mut sign = || -> Result<Decision, DecisionError> {
+            let signed = signer
+                .sign(&csr_pem, host, &subject)
+                .map_err(DecisionError::Sign)?;
+            record(&signed, &instance_uid, &bootstrap)?;
+            Ok(Decision::Approved(signed.pem))
+        };
         // Persisted before it is answered, the certificate included, so a restart before the host
-        // collects it hands it over all the same (ADR-0029 clause 8). The store decides only a
-        // request that still waits there: one another instance decided or withdrew is gone.
-        self.decided(&mut state, id, decision)?;
+        // collects it hands it over all the same (ADR-0029 clause 8). The store signs only a
+        // request that still waits there, and holds it meanwhile: one another instance decided or
+        // withdrew is gone, and nothing is signed for it.
+        let approval = match &self.store {
+            Some(store) => store
+                .approve(id, &bootstrap, &mut sign)
+                .map_err(DecisionError::Store)?,
+            None => match sign() {
+                Ok(decision) => Approval::Approved(decision),
+                Err(e) => Approval::Refused(e),
+            },
+        };
+        match approval {
+            Approval::Approved(decision) => {
+                if let Some(entry) = state.entries.get_mut(id) {
+                    entry.decision = Some(decision);
+                }
+                drop(state);
+                self.changed();
+                Ok(())
+            }
+            Approval::NotWaiting => {
+                state.entries.remove(id);
+                Err(DecisionError::NotFound)
+            }
+            Approval::Revoked | Approval::Refused(DecisionError::Revoked) => {
+                Err(self.withdrawn(state, id))
+            }
+            Approval::Refused(e) => Err(e),
+        }
+    }
+
+    /// Withdraws the waiting request `id`, whose bootstrap certificate is revoked, and answers
+    /// [`DecisionError::Revoked`].
+    fn withdrawn(&self, mut state: std::sync::MutexGuard<'_, State>, id: &str) -> DecisionError {
+        state.entries.remove(id);
+        let ids = [id.to_string()];
+        self.on_store_logged(|store| store.withdraw(&ids));
         drop(state);
         self.changed();
-        Ok(())
+        DecisionError::Revoked
     }
 
     /// Writes `decision` on the waiting request `id`, then holds it in memory. A request the store
@@ -741,6 +855,38 @@ impl Enrolment {
         withdrawn
     }
 
+    /// Withdraws every waiting request whose bootstrap certificate is `serial` under one of
+    /// `issuers`, held here or by another instance in the store, and answers how many: what the
+    /// revocation of a bootstrap certificate does to the queue (ADR-0021 clause 28).
+    pub fn withdraw_revoked(&self, issuers: &[String], serial: &str) -> usize {
+        let named =
+            |bootstrap: &CertId| bootstrap.serial == serial && issuers.contains(&bootstrap.issuer);
+        let mut state = self.state.lock().expect("enrolment lock");
+        let ids: Vec<String> = state
+            .entries
+            .values()
+            .filter(|entry| entry.decision.is_none() && named(&entry.pending.requester.bootstrap))
+            .map(|entry| entry.pending.id.clone())
+            .collect();
+        for id in &ids {
+            state.entries.remove(id);
+        }
+        let withdrawn = match &self.store {
+            Some(store) => store
+                .withdraw_bootstrap(issuers, serial)
+                .unwrap_or_else(|e| {
+                    tracing::warn!(error = %e, "cannot withdraw the requests of a revoked bootstrap certificate");
+                    ids.len()
+                }),
+            None => ids.len(),
+        };
+        drop(state);
+        if withdrawn > 0 || !ids.is_empty() {
+            self.changed();
+        }
+        withdrawn
+    }
+
     /// Whether the request for `key` was rejected — its connection then ends.
     pub fn is_rejected(&self, key: &str) -> bool {
         let state = self.state.lock().expect("enrolment lock");
@@ -773,8 +919,16 @@ impl Enrolment {
             .filter(|entry| entry.decision.is_none())
             .count();
         state.entries.clear();
-        self.on_store_logged(|store| store.end_window(until).map(|_| ()));
-        if let Some(audit) = self.audit.get() {
+        // Another instance may have moved the window's end meanwhile: then it did not run out,
+        // and nothing expired with it.
+        let ended = match &self.store {
+            Some(store) => store.end_window(until).unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "cannot persist the enrolment window and its requests");
+                true
+            }),
+            None => true,
+        };
+        if let Some(audit) = self.audit.get().filter(|_| ended) {
             audit.refusal(
                 crate::audit::Entry::new("enrolment.window", "expired")
                     .with("until_ms", until)
@@ -795,7 +949,7 @@ pub(crate) mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    struct Manual(AtomicU64);
+    pub(crate) struct Manual(pub(crate) AtomicU64);
 
     impl Clock for Manual {
         fn now_ms(&self) -> u64 {
@@ -803,7 +957,7 @@ pub(crate) mod tests {
         }
     }
 
-    struct Echo;
+    pub(crate) struct Echo;
 
     impl CertificateSigner for Echo {
         fn sign(
@@ -850,7 +1004,7 @@ pub(crate) mod tests {
         (Enrolment::new(clock.clone()), clock)
     }
 
-    fn request(key: &str) -> Request {
+    pub(crate) fn request(key: &str) -> Request {
         Request {
             csr_pem: format!("csr-{key}"),
             subject: "CN=edge-01".to_string(),
@@ -867,6 +1021,81 @@ pub(crate) mod tests {
             bootstrap: CertId::new(b"bootstrap CA", "b5"),
             peer: None,
             gateway: None,
+        }
+    }
+
+    /// Two instances on one store answer a request as the store holds it: one the other approved
+    /// is handed out with its certificate, and one the other decided or withdrew is not found,
+    /// however the first held it, and signs nothing.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    #[test]
+    fn two_instances_on_one_store_answer_a_request_as_the_store_holds_it() {
+        let clock = Arc::new(Manual(AtomicU64::new(1_000_000)));
+        let store = Memory::default();
+        let a = Enrolment::open_on(clock.clone(), Box::new(store.clone())).expect("open A");
+        a.open(600).expect("window");
+        let b = Enrolment::open_on(clock.clone(), Box::new(store.clone())).expect("open B");
+        let recorded = std::cell::Cell::new(0);
+        let record = |_: &Signed, _: &[u8], _: &CertId| {
+            recorded.set(recorded.get() + 1);
+            Ok(())
+        };
+
+        assert_eq!(a.submit(request("k1"), requester()), Submitted::Waiting);
+        a.approve("k1", &Echo, "host", &record, &|_| false)
+            .expect("approve on A");
+        assert_eq!(
+            b.submit(request("k1"), requester()),
+            Submitted::Issued("issued for csr-k1".to_string()),
+            "B hands out what A approved"
+        );
+
+        for (key, decide) in [("k2", "reject"), ("k3", "approve"), ("k4", "withdraw")] {
+            assert_eq!(a.submit(request(key), requester()), Submitted::Waiting);
+            assert_eq!(
+                b.submit(request(key), requester()),
+                Submitted::Waiting,
+                "B holds {key} waiting, as the store has it"
+            );
+            match decide {
+                "reject" => a.reject(key).expect("reject on A"),
+                "approve" => a
+                    .approve(key, &Echo, "host", &record, &|_| false)
+                    .expect("approve on A"),
+                _ => {
+                    let bootstrap = requester().bootstrap;
+                    assert_eq!(
+                        a.withdraw_revoked(&[bootstrap.issuer], &bootstrap.serial),
+                        1
+                    );
+                }
+            }
+            let before = recorded.get();
+            assert_eq!(
+                b.reject(key),
+                Err(DecisionError::NotFound),
+                "{key}: {decide}"
+            );
+            assert_eq!(
+                b.submit(request(key), requester()),
+                match decide {
+                    "reject" => Submitted::Rejected,
+                    "approve" => Submitted::Issued(format!("issued for csr-{key}")),
+                    _ => Submitted::Waiting,
+                },
+                "{key}: B answers as the store holds it"
+            );
+            if decide == "approve" {
+                assert_eq!(
+                    b.approve(key, &Echo, "host", &record, &|_| false),
+                    Err(DecisionError::NotFound)
+                );
+            }
+            assert_eq!(
+                recorded.get(),
+                before,
+                "{key}: B signed and recorded nothing"
+            );
         }
     }
 
@@ -900,7 +1129,7 @@ pub(crate) mod tests {
             enrolment.submit(request("b"), requester());
             enrolment.submit(request("c"), requester());
             enrolment
-                .approve("a", &Echo, "host", &|_, _| Ok(()), &|_| false)
+                .approve("a", &Echo, "host", &|_, _, _| Ok(()), &|_| false)
                 .expect("approve");
             enrolment.reject("c").expect("reject");
             until
@@ -925,7 +1154,7 @@ pub(crate) mod tests {
         );
         assert!(restarted.is_rejected("c"));
         restarted
-            .approve("b", &Echo, "host", &|_, _| Ok(()), &|_| false)
+            .approve("b", &Echo, "host", &|_, _, _| Ok(()), &|_| false)
             .expect("the waiting request can still be approved");
     }
 
@@ -942,7 +1171,7 @@ pub(crate) mod tests {
             enrolment.open(60).expect("open the window");
             enrolment.submit(request("a"), requester());
             enrolment
-                .approve("a", &Echo, "host", &|_, _| Ok(()), &|_| false)
+                .approve("a", &Echo, "host", &|_, _, _| Ok(()), &|_| false)
                 .expect("approve");
         }
         clock.0.fetch_add(61_000, Ordering::SeqCst);
@@ -995,7 +1224,7 @@ pub(crate) mod tests {
             "a request that cannot be kept is not taken in"
         );
         assert!(matches!(
-            enrolment.approve("a", &Echo, "host", &|_, _| Ok(()), &|_| false),
+            enrolment.approve("a", &Echo, "host", &|_, _, _| Ok(()), &|_| false),
             Err(DecisionError::Store(_))
         ));
         assert!(matches!(
@@ -1040,7 +1269,7 @@ pub(crate) mod tests {
         );
         assert_eq!(enrolment.pending().len(), 1);
         enrolment
-            .approve("a", &Echo, "host", &|_, _| Ok(()), &|_| false)
+            .approve("a", &Echo, "host", &|_, _, _| Ok(()), &|_| false)
             .expect("approve");
         assert_eq!(
             enrolment.submit(request("a"), requester()),
@@ -1051,7 +1280,7 @@ pub(crate) mod tests {
             "a decided request is no longer pending"
         );
         assert_eq!(
-            enrolment.approve("a", &Echo, "host", &|_, _| Ok(()), &|_| false),
+            enrolment.approve("a", &Echo, "host", &|_, _, _| Ok(()), &|_| false),
             Err(DecisionError::NotFound)
         );
 
@@ -1076,7 +1305,7 @@ pub(crate) mod tests {
         enrolment.submit(request("b"), requester());
         clock.0.fetch_add(61_000, Ordering::SeqCst);
         assert_eq!(
-            enrolment.approve("b", &Echo, "host", &|_, _| Ok(()), &|_| false),
+            enrolment.approve("b", &Echo, "host", &|_, _, _| Ok(()), &|_| false),
             Err(DecisionError::NotFound)
         );
     }
@@ -1201,12 +1430,12 @@ pub(crate) mod tests {
         let bootstrap = requester().bootstrap;
         let revoked = |id: &CertId| *id == bootstrap;
         assert_eq!(
-            enrolment.approve("a", &Never, "host", &|_, _| Ok(()), &revoked),
+            enrolment.approve("a", &Never, "host", &|_, _, _| Ok(()), &revoked),
             Err(DecisionError::Revoked)
         );
         assert!(enrolment.pending().is_empty(), "the request is withdrawn");
         assert_eq!(
-            enrolment.approve("a", &Never, "host", &|_, _| Ok(()), &revoked),
+            enrolment.approve("a", &Never, "host", &|_, _, _| Ok(()), &revoked),
             Err(DecisionError::NotFound),
             "a second approval finds nothing to sign"
         );
@@ -1235,7 +1464,7 @@ pub(crate) mod tests {
                 "good",
                 &Echo,
                 "host",
-                &|issued, _| {
+                &|issued, _, _| {
                     *signed.borrow_mut() = Some(issued.facts.subject_values.clone());
                     Ok(())
                 },
@@ -1249,7 +1478,7 @@ pub(crate) mod tests {
             ..requester()
         };
         enrolment.submit(request("bad"), malformed);
-        let refused = enrolment.approve("bad", &Never, "host", &|_, _| Ok(()), &|_| false);
+        let refused = enrolment.approve("bad", &Never, "host", &|_, _, _| Ok(()), &|_| false);
         assert!(
             matches!(&refused, Err(DecisionError::Subject(e)) if e.contains("organizational_unit")),
             "{refused:?}"
@@ -1270,7 +1499,9 @@ pub(crate) mod tests {
         enrolment.submit(request("revoked-decided"), requester());
         enrolment.submit(request("other"), other);
         enrolment
-            .approve("revoked-decided", &Echo, "host", &|_, _| Ok(()), &|_| false)
+            .approve("revoked-decided", &Echo, "host", &|_, _, _| Ok(()), &|_| {
+                false
+            })
             .expect("approve");
         let bootstrap = requester().bootstrap;
         assert_eq!(enrolment.withdraw(&|id| *id == bootstrap), 1);
