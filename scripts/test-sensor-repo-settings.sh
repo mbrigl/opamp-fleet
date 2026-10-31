@@ -85,6 +85,22 @@ expect() {
 d="$(repo match)"
 expect "settings as the README lists them report nothing" "$d" 0 "nothing to report"
 
+# A job with a matrix, named in the README by its check runs: names with a space compare whole.
+d="$(repo matrix)"
+# shellcheck disable=SC2016  # the backticks are literal Markdown, not a command substitution
+printf '<!-- required-checks begin -->\n%s, `build (ubuntu-latest)`, `build (macos-latest)`\n<!-- required-checks end -->\n' \
+  "$CHECKS" > "$d/README.md"
+answer "$d" repos/owner/name/rules/branches/main \
+  "$RULES"$'\n'"check${T}build (macos-latest)"$'\n'"check${T}build (ubuntu-latest)"
+expect "the check runs of a matrix job, as the README names them, report nothing" "$d" 0 \
+  "nothing to report"
+d="$(repo matrix-missing)"
+# shellcheck disable=SC2016  # the backticks are literal Markdown, not a command substitution
+printf '<!-- required-checks begin -->\n%s, `build (ubuntu-latest)`\n<!-- required-checks end -->\n' \
+  "$CHECKS" > "$d/README.md"
+expect "a check run the README names and the ruleset lacks" "$d" 0 \
+  "main: the required checks lack 'build (ubuntu-latest)', which README names"
+
 d="$(repo no-ruleset)"
 answer "$d" repos/owner/name/rules/branches/main ""
 expect "no ruleset on main" "$d" 0 "main: no ruleset is in effect"

@@ -7,8 +7,9 @@
 # script in it, and asserts the exit code and the files afterwards. The cases cover a swap of two
 # ADRs and of two criteria, a merge of two ADRs into one, the record left untouched, a criterion
 # outside Markdown and outside a marker line, a reference to an ADR with no successor, an ignored
-# file, an invalid map that changes nothing, and a cycle of every ADR and criterion in a copy of
-# this repository after which the other self-tests still pass.
+# file, files without a final newline and a binary one, an invalid map that changes nothing, and
+# a cycle of every ADR and criterion in a copy of this repository after which the other
+# self-tests still pass.
 #
 # The identifiers in the fixtures are assembled at run time: a literal one would be a reference
 # that check-docs.sh and check-traceability.sh hold against this repository.
@@ -122,6 +123,23 @@ printf 'notes.md\n' > "$d/.gitignore"
 printf '%s\n' "$(id 1)" > "$d/notes.md"
 run "$d" "0001-alpha.md 0002-alpha.md"; rc=$?
 check "an ignored file is left alone" "[[ $rc -eq 0 ]] && grep -qxF '$(id 1)' '$d/notes.md'"
+
+# A file the map does not change keeps its bytes, a binary one and one without a final newline
+# among them, and a file it changes keeps a missing final newline.
+d="$(repo bytes)"
+printf '\001\002\377' > "$d/seed.bin"
+printf 'no final newline' > "$d/drawing.txt"
+printf 'see %s' "$(id 1)" > "$d/open.md"
+cp "$d/seed.bin" "$work/seed.bin"
+cp "$d/drawing.txt" "$work/drawing.txt"
+run "$d" "0001-alpha.md 0002-alpha.md"; rc=$?
+check "a map over files without a final newline exits 0" "[[ $rc -eq 0 ]]"
+check "a binary file the map does not change keeps its bytes" "cmp -s '$d/seed.bin' '$work/seed.bin'"
+check "a text file the map does not change keeps its bytes" \
+  "cmp -s '$d/drawing.txt' '$work/drawing.txt'"
+check "only the file the map changes is printed" "[[ \"\$(cat '$work/out')\" == open.md ]]"
+check "a changed file keeps a missing final newline" \
+  "[[ \"\$(od -An -c '$d/open.md' | tr -d ' \n')\" == \"see\$(id 2)\" ]]"
 
 # An invalid map changes nothing.
 d="$(repo invalid)"

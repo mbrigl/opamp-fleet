@@ -9,8 +9,7 @@
 # code and, for a failing case, the message that names the violation. The baseline passes; every
 # other case breaks one thing. The skill pointer check (check 11 of check-docs.sh) is covered in
 # every direction; of the older checks, one case each pins the message a maintainer would meet
-# first — check 9 gets two more for the toolchain job a derived project adds and four for a
-# release workflow named as no gate, checks 12 and 13
+# first — check 9 gets two more for the toolchain job a derived project adds, checks 12 and 13
 # (inherited ADRs decided and the template's identity replaced once the setup file is gone) have
 # a case for each of their conditions, and check 14 (the template release named) one for each
 # form the line may take.
@@ -595,6 +594,68 @@ d="$(repo consolidation-wrapped-half)"
 consolidation "$d" no wrap
 expect fail "a wrapped Supersedes field, the name on the second line not flipped" "$d" "0002-decision.md: 0003-decision.md supersedes it"
 
+# proposed_supersession <dir> <old status> — ADR 2, proposed, supersedes ADR 1, whose status line
+# and index row read as given.
+proposed_supersession() {
+  local dir="$1" old="$2"
+  adr "$dir" 1 "$old"
+  adr "$dir" 2 "🟡 proposed"
+  insert_before "$dir/docs/adr/0002-decision.md" "- **Applies to:**" \
+    "- **Supersedes:** [$(adr_id 1)](0001-decision.md)"
+  {
+    echo "# Architecture Decision Records"
+    echo
+    echo "### Binding"
+    echo
+    echo "| ADR | Title | Applies to | Status |"
+    echo "|-----|-------|------------|--------|"
+    [[ "$old" == ⚪* ]] || index_row 1 "$old"
+    index_row 2 "🟡 proposed"
+    echo
+    echo "### Superseded and rejected"
+    echo
+    echo "| ADR | Title | Applies to | Status |"
+    echo "|-----|-------|------------|--------|"
+    [[ "$old" == ⚪* ]] && index_row 1 "$old"
+  } > "$dir/docs/adr/README.md"
+}
+
+# Verifies: ADR-0001
+d="$(repo supersession-proposed)"
+proposed_supersession "$d" "🟢 accepted"
+expect pass "a proposed supersession, the old ADR still accepted" "$d"
+d="$(repo supersession-flipped-early)"
+proposed_supersession "$d" "⚪ superseded by $(adr_id 2)"
+expect fail "an old ADR flipped while its successor is only proposed" "$d" \
+  "0001-decision.md: superseded by $(adr_id 2), which is not accepted"
+
+# A chain: ADR 1 superseded by ADR 2, which ADR 3, accepted, supersedes in its turn.
+d="$(repo supersession-chain)"
+adr "$d" 1 "⚪ superseded by $(adr_id 2)"
+adr "$d" 2 "⚪ superseded by $(adr_id 3)"
+adr "$d" 3 "🟢 accepted"
+insert_before "$d/docs/adr/0002-decision.md" "- **Applies to:**" \
+  "- **Supersedes:** [$(adr_id 1)](0001-decision.md)"
+insert_before "$d/docs/adr/0003-decision.md" "- **Applies to:**" \
+  "- **Supersedes:** [$(adr_id 2)](0002-decision.md)"
+{
+  echo "# Architecture Decision Records"
+  echo
+  echo "### Binding"
+  echo
+  echo "| ADR | Title | Applies to | Status |"
+  echo "|-----|-------|------------|--------|"
+  index_row 3 "🟢 accepted"
+  echo
+  echo "### Superseded and rejected"
+  echo
+  echo "| ADR | Title | Applies to | Status |"
+  echo "|-----|-------|------------|--------|"
+  index_row 1 "⚪ superseded by $(adr_id 2)"
+  index_row 2 "⚪ superseded by $(adr_id 3)"
+} > "$d/docs/adr/README.md"
+expect pass "a chain of supersessions, the last successor accepted" "$d"
+
 d="$(repo section-ref)"
 echo "Cited in [\`AGENTS.md\` $(sect 9)](AGENTS.md#9-nowhere)." >> "$d/README.md"
 expect fail "a section reference that names no section" "$d" "matches no numbered section"
@@ -685,32 +746,87 @@ d="$(repo build-job-inline)"
 build_job "$d" "make test"
 expect fail "a toolchain job with its commands inline and nothing in the local runner" "$d" "job 'build' runs no script under scripts/"
 
-# publishing <dir> — a workflow that publishes, its commands inline, as a release's are.
-publishing() {
-  printf 'jobs:\n  publish:\n    runs-on: ubuntu-latest\n    steps:\n      - run: cargo build --release\n' \
+# release <dir> [script] — a workflow that publishes, its steps inline, and with a script, a
+# step that runs it.
+release() {
+  printf 'on: [push]\njobs:\n  publish:\n    steps:\n      - run: make dist\n' \
     > "$1/.github/workflows/release.yml"
+  [[ -z "${2:-}" ]] || echo "      - run: bash $2" >> "$1/.github/workflows/release.yml"
 }
 
 d="$(repo not-a-gate)"
-publishing "$d"
-echo "# Not a gate: .github/workflows/release.yml" >> "$d/scripts/check-all.sh"
-expect pass "a workflow named as no gate, its job running commands of its own" "$d"
-
+release "$d"
+echo '# Not a gate: .github/workflows/release.yml' >> "$d/scripts/check-all.sh"
+expect pass "a publishing workflow the local runner names as no gate, its steps inline" "$d"
 d="$(repo not-a-gate-unnamed)"
-publishing "$d"
-expect fail "a publishing workflow nobody names as no gate" "$d" "job 'publish' runs no script under scripts/"
-
-d="$(repo not-a-gate-script-counts)"
-publishing "$d"
-echo "# Not a gate: .github/workflows/release.yml" >> "$d/scripts/check-all.sh"
-echo "echo" > "$d/scripts/pack.sh"
-echo "      - run: bash scripts/pack.sh" >> "$d/.github/workflows/release.yml"
-expect fail "a script a workflow named as no gate runs, which the local runner neither runs nor names" "$d" \
-  "does not run 'scripts/pack.sh', which a workflow runs"
-
+release "$d"
+expect fail "a publishing workflow not named as no gate" "$d" \
+  "release.yml: job 'publish' runs no script under scripts/"
 d="$(repo not-a-gate-missing)"
-echo "# Not a gate: .github/workflows/gone.yml" >> "$d/scripts/check-all.sh"
-expect fail "a '# Not a gate:' line naming no workflow" "$d" "names '.github/workflows/gone.yml' on a '# Not a gate:' line"
+echo '# Not a gate: .github/workflows/gone.yml' >> "$d/scripts/check-all.sh"
+expect fail "a '# Not a gate:' line that names no workflow" "$d" \
+  "'# Not a gate: .github/workflows/gone.yml' names no workflow"
+d="$(repo not-a-gate-other-file)"
+echo '# Not a gate: README.md' >> "$d/scripts/check-all.sh"
+expect fail "a '# Not a gate:' line that names a file outside .github/workflows/" "$d" \
+  "'# Not a gate: README.md' names no workflow"
+d="$(repo not-a-gate-checks)"
+echo '# Not a gate: .github/workflows/checks.yml' >> "$d/scripts/check-all.sh"
+expect fail "a '# Not a gate:' line that names the required checks' workflow" "$d" \
+  "names the workflow of the required checks"
+d="$(repo not-a-gate-script)"
+echo 'echo sign' > "$d/scripts/sign.sh"
+release "$d" scripts/sign.sh
+echo '# Not a gate: .github/workflows/release.yml' >> "$d/scripts/check-all.sh"
+expect fail "a script a workflow that is no gate runs, and the local runner does not" "$d" \
+  "does not run 'scripts/sign.sh', which a workflow runs"
+
+# matrix_job <dir> <required names> — a toolchain job with a matrix in the workflow and the
+# local runner, and the README's required checks extended by the names given.
+# With 'flow', the strategy is written in flow style; with 'outputs', the job computes a matrix
+# as an output and has none of its own.
+matrix_job() {
+  local dir="$1" names="$2" style="${3:-}"
+  {
+    echo "  build:"
+    case "$style" in
+      flow) echo "    strategy: { fail-fast: false, matrix: { os: [ubuntu-latest, macos-latest] } }" ;;
+      outputs) echo "    outputs:"; echo "      matrix: \${{ steps.m.outputs.matrix }}" ;;
+      *) echo "    strategy:"; echo "      matrix:"; echo "        os: [ubuntu-latest, macos-latest]" ;;
+    esac
+    echo "    steps:"
+    echo "      - run: bash scripts/check-build.sh"
+  } >> "$dir/.github/workflows/checks.yml"
+  echo 'echo build' > "$dir/scripts/check-build.sh"
+  echo 'run "Build, test, lint" scripts/check-build.sh' >> "$dir/scripts/check-all.sh"
+  sed_in "$dir/README.md" "s|^\`docs\`\$|\`docs\`, $names|"
+}
+
+# Verifies: ADR-0002
+d="$(repo matrix-runs)"
+# shellcheck disable=SC2016  # the backticks are literal Markdown, not a command substitution
+matrix_job "$d" '`build (ubuntu-latest)`, `build (macos-latest)`'
+expect pass "a job with a matrix named by its check runs" "$d"
+d="$(repo matrix-bare)"
+# shellcheck disable=SC2016  # the backticks are literal Markdown, not a command substitution
+matrix_job "$d" '`build`'
+expect fail "a job with a matrix named by its bare name" "$d" \
+  "required check 'build' is a job with a matrix"
+d="$(repo matrix-flow)"
+# shellcheck disable=SC2016  # the backticks are literal Markdown, not a command substitution
+matrix_job "$d" '`build (ubuntu-latest)`, `build (macos-latest)`' flow
+expect pass "a strategy in flow style named by its check runs" "$d"
+d="$(repo matrix-output)"
+# shellcheck disable=SC2016  # the backticks are literal Markdown, not a command substitution
+matrix_job "$d" '`build`' outputs
+expect pass "a job that computes a matrix as an output, named by its name" "$d"
+d="$(repo matrix-none)"
+build_job "$d" "bash scripts/check-build.sh" local
+# shellcheck disable=SC2016  # the backticks are literal Markdown, not a command substitution
+sed_in "$d/README.md" 's|`build`|`build (ubuntu-latest)`|'
+expect fail "a check run named for a job without a matrix" "$d" \
+  "names a check run of 'build', which has no matrix"
+
 d="$(repo layout-stale)"
 sed_in "$d/README.md" 's|^docs/adr/ |docs/gone/ |'
 expect fail "a Project Layout entry that no longer exists" "$d" "is not a directory of this repository"
@@ -737,11 +853,11 @@ DRAFT="draft"
 # draft_id <slug> — the draft identifier of a slug, assembled for the same reason as adr_id.
 draft_id() { printf 'ADR-%s-%s' "$DRAFT" "$1"; }
 
-# drafted <dir> — ADR 1 superseded by the draft 'next', with both index rows and a link to the
-# draft from the README.
+# drafted <dir> — the draft 'next', proposed to supersede ADR 1, which stays accepted until the
+# draft is, with both index rows and a link to the draft from the README.
 drafted() {
   local dir="$1"
-  adr "$dir" 1 "⚪ superseded by [$(draft_id next)]($DRAFT-next.md)"
+  adr "$dir" 1 "🟢 accepted"
   {
     echo "# $(draft_id next): the next decision"
     echo
@@ -758,13 +874,8 @@ drafted() {
     echo
     echo "| ADR | Title | Applies to | Status |"
     echo "|-----|-------|------------|--------|"
+    index_row 1 "🟢 accepted"
     echo "| [$DRAFT-next]($DRAFT-next.md) | Next | everything | 🟡 proposed |"
-    echo
-    echo "## Superseded and rejected"
-    echo
-    echo "| ADR | Title | Applies to | Status |"
-    echo "|-----|-------|------------|--------|"
-    index_row 1 "⚪ superseded by $(draft_id next)"
   } > "$dir/docs/adr/README.md"
   echo "Decided in [$(draft_id next)](docs/adr/$DRAFT-next.md)." >> "$dir/README.md"
 }

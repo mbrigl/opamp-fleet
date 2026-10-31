@@ -5,7 +5,8 @@
 # AGENTS.md §5 requires these checks to pass before pushing. This script is the local equivalent
 # of .github/workflows/checks.yml; check 9 of check-docs.sh holds the two lists, the required
 # status checks named in README.md, and the scripts under scripts/ together. A script that runs
-# on a human's instruction only is named on an '# On instruction:' line below.
+# on a human's instruction only is named on an '# On instruction:' line below, and a workflow
+# that publishes rather than checks, such as a release, on a '# Not a gate:' line.
 #
 # Every check runs even after an earlier one fails, so a single run reports everything that is
 # wrong instead of the first thing. The exit code is what a pre-push decision is made on.

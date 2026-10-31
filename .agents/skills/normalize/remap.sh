@@ -23,7 +23,9 @@
 # ADR identifier is rewritten under docs/adr/, and no criterion in docs/SPECIFICATION.md.
 #
 # The files are the ones git tracks plus new ones it does not ignore, as check-docs.sh reads
-# them. A reference to an ADR or a criterion mapped to '-' is left in place and listed, for the
+# them. A file is written only when the map changes its text, and then keeps every other byte,
+# a missing final newline included; a file with a NUL byte, which git takes for binary, is
+# skipped. A reference to an ADR or a criterion mapped to '-' is left in place and listed, for the
 # normalization to rewrite by hand.
 #
 # Pure bash, git, and awk. Usage, anywhere in the repository:
@@ -118,8 +120,11 @@ FNR == NR {
     out = out substr(line, 1, at - 1) rep
     line = substr(line, at + len)
   }
-  print out line
+  # A line is printed once the next one is read, so the last one can end as the file did.
+  if (held) print last
+  last = out line; held = 1
 }
+END { if (held) printf "%s%s", last, (open_end ? "" : "\n") }
 AWK
 
 while IFS= read -r f; do
@@ -129,8 +134,12 @@ while IFS= read -r f; do
   [[ "$f" == docs/adr/* ]] && adr_on=0
   [[ "$f" == docs/SPECIFICATION.md ]] && crit_on=0
   [[ "$f" == *.md ]] && all_crit=1
-  awk -v adr_on="$adr_on" -v crit_on="$crit_on" -v all_crit="$all_crit" -v left="$left" \
-    "$program" "$map" "$f" > "$left.new" || exit 1
+  # A file whose last byte is no newline keeps it so, and awk reads bytes, not characters of the
+  # locale, so a byte no character encodes passes through as it was.
+  open_end=0
+  [[ -n "$(tail -c 1 "$f")" ]] && open_end=1
+  LC_ALL=C awk -v adr_on="$adr_on" -v crit_on="$crit_on" -v all_crit="$all_crit" -v left="$left" \
+    -v open_end="$open_end" "$program" "$map" "$f" > "$left.new" || exit 1
   if ! cmp -s "$f" "$left.new"; then
     cat "$left.new" > "$f"
     echo "$f"
