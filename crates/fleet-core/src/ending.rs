@@ -1,7 +1,7 @@
 //! When a certificate counts as ending (ADR-0032 clause 21): one rule, plain date arithmetic on
 //! Unix seconds, so the operator tool's `pki status`, the Server's `pki status` and the running
 //! Server judge alike. [`read`] reads a certificate's end and puts it in the line `pki status`
-//! prints (ADR-0032 clause 6).
+//! prints (ADR-draft-the-operator-program-opamp-fleetctl clause 6).
 
 pub mod read;
 

@@ -1,7 +1,8 @@
-//! A certificate's end read with `x509-parser` and `time` (ADR-0032 clause 6): what the Server's
-//! and the operator tool's `pki status` list, and what the running Server watches, read and put
-//! in words once. Each program reads the file and takes its first certificate through
-//! `opamp::tls`; this module reads the end of that certificate.
+//! A certificate's end read with `x509-parser` and `time`
+//! (ADR-draft-the-operator-program-opamp-fleetctl clause 6): what the Server's and the operator
+//! tool's `pki status` list, and what the running Server watches, read and put in words once.
+//! Each program reads the file and takes its first certificate through `opamp::tls`; this module
+//! reads the end of that certificate.
 
 use std::path::{Path, PathBuf};
 
@@ -72,7 +73,8 @@ impl Ending {
     }
 }
 
-/// The exit code of a `pki status` command over `endings` at `now`, by [`exit_code`](super::exit_code).
+/// The exit code of a `pki status` command over `endings` at `now`, by
+/// [`exit_code`](super::exit_code).
 #[must_use]
 pub fn exit_code(endings: &[Ending], now: OffsetDateTime) -> i32 {
     super::exit_code(endings.iter().map(|ending| ending.standing(now)))
@@ -84,8 +86,7 @@ mod tests {
     use rcgen::{CertificateParams, DnType, KeyPair};
     use time::Duration;
 
-    fn certificate(lived: i64, left: i64) -> Vec<u8> {
-        let now = OffsetDateTime::now_utc();
+    fn certificate(now: OffsetDateTime, lived: i64, left: i64) -> Vec<u8> {
         let mut params = CertificateParams::default();
         params.distinguished_name.push(DnType::CommonName, "fleet");
         params.not_before = now - Duration::days(lived);
@@ -101,7 +102,7 @@ mod tests {
     fn a_certificate_s_end_is_read_and_put_in_one_line() {
         let now = OffsetDateTime::now_utc();
         let file = Path::new("/etc/fleet/ca.pem");
-        let fine = Ending::read(file, &certificate(1, 400)).expect("read");
+        let fine = Ending::read(file, &certificate(now, 1, 400)).expect("read");
         assert_eq!(fine.subject, "CN=fleet");
         assert_eq!(fine.days_left(now), 399);
         let line = fine.line(now);
@@ -112,13 +113,13 @@ mod tests {
         );
         assert!(line.contains(&format!("serial {}", fine.serial)), "{line}");
 
-        let ending = Ending::read(file, &certificate(380, 20)).expect("read");
+        let ending = Ending::read(file, &certificate(now, 380, 20)).expect("read");
         assert!(
             ending.line(now).starts_with("ENDS SOON 19 days  "),
             "{}",
             ending.line(now)
         );
-        let ended = Ending::read(file, &certificate(30, -2)).expect("read");
+        let ended = Ending::read(file, &certificate(now, 30, -2)).expect("read");
         assert!(
             ended.line(now).starts_with("ENDED     -2 days  "),
             "{}",

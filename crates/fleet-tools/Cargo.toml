@@ -41,7 +41,7 @@ hex.workspace = true
 # dependency serving two crates rather than a second prompt library.
 dialoguer.workspace = true
 # ADR-0032: the `pki` commands make the fleet's certificates with rcgen, on the dates `time` speaks,
-# and read a certificate's end back with x509-parser — the crates the Server's client CA uses.
+# and read a CA's subject with x509-parser — the crates the Server's client CA uses.
 rcgen.workspace = true
 time.workspace = true
 x509-parser.workspace = true
