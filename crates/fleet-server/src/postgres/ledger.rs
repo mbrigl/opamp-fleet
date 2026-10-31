@@ -1339,8 +1339,8 @@ mod tests {
     }
 
     /// What one instance binds, releases and moves reaches every other that follows the
-    /// notifications, without a restart: B admits by A's release and A's re-key once it hears of
-    /// them (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// notifications, without a restart: B admits by A's release, A's re-key and A's binding once
+    /// it hears of them (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
     /// clause 19).
     /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
     #[test]
@@ -1385,6 +1385,13 @@ mod tests {
                 &|| b.may_report("h2", b"\x02").is_ok() && b.may_report("h2", b"\x03").is_err()
             ),
             "B hears of the re-key"
+        );
+        assert!(b.may_report("h2", b"\x04").is_ok(), "nobody holds 04 yet");
+        a.check_report("h1", &subject, 1_000, b"\x04")
+            .expect("bind");
+        assert!(
+            eventually(&|| b.may_report("h2", b"\x04").is_err()),
+            "B hears of the binding"
         );
     }
 
