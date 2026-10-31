@@ -386,12 +386,19 @@ fn bind(address: SocketAddr, plane: &str) -> std::net::TcpListener {
 #[tokio::main]
 async fn main() {
     // The log goes to stderr, so that stdout carries only what a command prints as its result.
+    // On PostgreSQL each line names the instance id of the lease the instance holds (clause 1 of
+    // ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it).
+    let logged = fleet_server::instance::LoggedId::default();
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
+        .event_format(fleet_server::instance::NamesInstance::new(
+            tracing_subscriber::fmt::format(),
+            logged.clone(),
+        ))
         .init();
 
     // One TLS provider for the whole process (ADR-0012): ring, never a system library.
@@ -701,6 +708,7 @@ async fn main() {
                 &host_name(),
             ) {
                 Ok(lease) => {
+                    logged.follow(lease.held());
                     fleet_server::instance::follow_revocations(database, revocations.clone());
                     Some(lease)
                 }

@@ -419,6 +419,14 @@ listeners open only while it can prove it. One that cannot renew before its leas
 session, closes both listeners, and takes a new lease under a new instance id once the database
 answers again.
 
+Each line an instance logs while it holds a lease begins with `instance_id=<id>`, the instance id
+of that lease, so the logs of several instances say which one acted; a line logged before its first
+lease, or between a lost lease and the next, names none. The take, the failed renewal, the loss and
+the release of a lease name the instance id as a field of their own, `instance_id`, and so does a
+takeover, beside `taken_over`, the instance id of each lease that had lapsed or whose instance is
+gone; a new lease after a lost one names the lost id as `lost`. On the filesystem store the log
+names no instance.
+
 An instance whose blobs are files (`[blobs] store = "fs"`) or whose CA key is a file (`[client_ca]
 key_file`, `[enrolment] bootstrap_ca_key_file`) must be alone on its database schema: it holds a
 lock on the schema it works in — its role's default — while it runs, and a second instance started

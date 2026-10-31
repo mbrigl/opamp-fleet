@@ -494,13 +494,231 @@ async fn bind_again(
     }
 }
 
+/// The instance id the log names: the one of the lease this instance holds, and none while it
+/// holds none, before its first lease and between a lost one and the next
+/// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+/// clause 1). On the filesystem store it is never set, and the log is as it was.
+#[derive(Clone, Default)]
+pub struct LoggedId(Arc<std::sync::RwLock<Option<String>>>);
+
+impl LoggedId {
+    /// The instance id the log names now.
+    #[must_use]
+    pub fn get(&self) -> Option<String> {
+        self.0.read().ok().and_then(|id| id.clone())
+    }
+
+    fn set(&self, id: Option<String>) {
+        if let Ok(mut held) = self.0.write() {
+            *held = id;
+        }
+    }
+
+    /// Names the instance id of the lease `held` sends, from now on and at each change, and none
+    /// once the lease can be held no more.
+    pub fn follow(&self, mut held: Held) {
+        self.set(held.borrow_and_update().clone());
+        let logged = self.clone();
+        tokio::spawn(async move {
+            while held.changed().await.is_ok() {
+                logged.set(held.borrow_and_update().clone());
+            }
+            logged.set(None);
+        });
+    }
+}
+
+/// A log format that begins each line with `instance_id=<id>` while [`LoggedId`] names one, and
+/// is `inner` otherwise. A line that names an `instance_id` field of its own, as a lease's take,
+/// loss and takeover do, is left as `inner` writes it, so it names each id once.
+pub struct NamesInstance<F> {
+    inner: F,
+    id: LoggedId,
+}
+
+impl<F> NamesInstance<F> {
+    /// `inner`, its lines naming the instance id `id` holds.
+    pub fn new(inner: F, id: LoggedId) -> Self {
+        NamesInstance { inner, id }
+    }
+}
+
+impl<S, N, F> tracing_subscriber::fmt::FormatEvent<S, N> for NamesInstance<F>
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+    N: for<'w> tracing_subscriber::fmt::FormatFields<'w> + 'static,
+    F: tracing_subscriber::fmt::FormatEvent<S, N>,
+{
+    fn format_event(
+        &self,
+        ctx: &tracing_subscriber::fmt::FmtContext<'_, S, N>,
+        mut writer: tracing_subscriber::fmt::format::Writer<'_>,
+        event: &tracing::Event<'_>,
+    ) -> std::fmt::Result {
+        if event.metadata().fields().field("instance_id").is_none() {
+            if let Some(id) = self.id.get() {
+                write!(writer, "instance_id={id} ")?;
+            }
+        }
+        self.inner.format_event(ctx, writer, event)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
 
-    use super::{take_up, Heard};
+    use super::{take_up, Heard, LoggedId, NamesInstance};
+
+    /// What the log writes, collected.
+    #[derive(Clone, Default)]
+    struct Collected(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Collected {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("log").extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Collected {
+        fn lines(&self) -> Vec<String> {
+            String::from_utf8(self.0.lock().expect("log").clone())
+                .expect("utf-8")
+                .lines()
+                .map(str::to_string)
+                .collect()
+        }
+    }
+
+    /// The Server's log format over `id`, writing into what it returns.
+    fn log(id: &LoggedId) -> (Collected, impl tracing::Subscriber + Send + Sync) {
+        let collected = Collected::default();
+        let writer = collected.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_writer(move || writer.clone())
+            .event_format(NamesInstance::new(
+                tracing_subscriber::fmt::format().without_time(),
+                id.clone(),
+            ))
+            .finish();
+        (collected, subscriber)
+    }
+
+    /// Each line names the instance id of the lease the instance holds, and none while it holds
+    /// none; a line that names an instance id of its own names it once, as the lease's take and
+    /// takeover do
+    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// clause 1).
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    #[test]
+    fn each_line_names_the_instance_id_of_the_lease_held() {
+        let id = LoggedId::default();
+        let (collected, subscriber) = log(&id);
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!("before the lease");
+            id.set(Some("a1".to_string()));
+            tracing::info!(agents = 3, "serving");
+            tracing::info!(instance_id = "b2", taken_over = "a1", "took over");
+            id.set(None);
+            tracing::warn!("between leases");
+        });
+        let lines = collected.lines();
+        assert_eq!(lines.len(), 4, "{lines:?}");
+        assert!(!lines[0].contains("instance_id"), "{}", lines[0]);
+        assert!(lines[1].starts_with("instance_id=a1 "), "{}", lines[1]);
+        assert!(lines[1].contains("serving agents=3"), "{}", lines[1]);
+        assert_eq!(lines[2].matches("instance_id").count(), 1, "{}", lines[2]);
+        assert!(
+            lines[2].contains("instance_id=\"b2\" taken_over=\"a1\""),
+            "{}",
+            lines[2]
+        );
+        assert!(!lines[3].contains("instance_id"), "{}", lines[3]);
+    }
+
+    /// An instance that takes over a lapsed lease logs its own instance id and the lapsed one
+    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// clause 1).
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_takeover_names_the_instance_and_the_lapsed_lease() {
+        use crate::postgres::testing::TestDatabase;
+        use crate::postgres::{Database, Exclusive};
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let open = || {
+            Database::open_in(&test.config(), Exclusive::Shared, Some(&test.schema)).expect("open")
+        };
+        let gone = open()
+            .take_lease("host-a", Duration::from_secs(30))
+            .expect("a lease");
+        test.sql(&format!(
+            "UPDATE leases SET expires_at = now() WHERE instance_id = '{}'",
+            gone.instance_id
+        ));
+        let id = LoggedId::default();
+        let (collected, subscriber) = log(&id);
+        let times = crate::config::LeaseTimes {
+            renew: Duration::from_secs(10),
+            lapse: Duration::from_secs(30),
+        };
+        let lease = tracing::subscriber::with_default(subscriber, || {
+            super::Lease::take(open(), times, "host-b").expect("the lease")
+        });
+        let own = lease.held().borrow().clone().expect("held");
+        lease.release().await;
+        let lines = collected.lines();
+        let takeover = lines
+            .iter()
+            .find(|line| line.contains("took over the lease"))
+            .unwrap_or_else(|| panic!("no takeover logged: {lines:?}"));
+        assert!(
+            takeover.contains(&format!("instance_id={own}")),
+            "{takeover}"
+        );
+        assert!(
+            takeover.contains(&format!("taken_over={}", gone.instance_id)),
+            "{takeover}"
+        );
+    }
+
+    /// The log follows the lease: the id it holds, each new one, and none once the lease can be
+    /// held no more.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    #[tokio::test]
+    async fn the_logged_id_follows_the_lease() {
+        let (held, watched) = tokio::sync::watch::channel(Some("a1".to_string()));
+        let id = LoggedId::default();
+        id.follow(watched);
+        assert_eq!(id.get().as_deref(), Some("a1"));
+        held.send_replace(None);
+        let settled = |want: Option<&'static str>| {
+            let id = id.clone();
+            async move {
+                for _ in 0..200 {
+                    if id.get().as_deref() == want {
+                        return true;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                false
+            }
+        };
+        assert!(settled(None).await, "a lost lease names none");
+        held.send_replace(Some("b2".to_string()));
+        assert!(settled(Some("b2")).await, "a new lease names its id");
+        drop(held);
+        assert!(settled(None).await, "a lease held no more names none");
+    }
 
     /// A reader that fails its first `failing` reads and counts every read.
     fn reader(failing: usize) -> (Arc<AtomicUsize>, impl Fn() -> Result<(), String> + Clone) {

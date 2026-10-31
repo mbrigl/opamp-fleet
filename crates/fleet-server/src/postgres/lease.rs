@@ -24,7 +24,8 @@ pub struct Taken {
     /// When the request that took it was sent: the instance measures its lease from here, which is
     /// no later than the database's own time of it.
     pub sent: Instant,
-    /// The leases of instances that were gone, which this one took over.
+    /// The leases of instances that were gone, which this one took over: every lease that had
+    /// lapsed, and the live lease of an instance that had to be alone and whose lock is free.
     pub taken_over: Vec<String>,
 }
 
@@ -54,7 +55,7 @@ impl Database {
     /// live lease of an instance that had to be alone belongs to a process that is gone, and it
     /// takes that over. An instance that shares the database fails while another instance holds it
     /// alone; a live lease of one that had to be alone and whose lock is free it takes over too.
-    /// Lapsed leases are removed.
+    /// A lapsed lease it takes over as well, removing it; [`Taken::taken_over`] names each.
     ///
     /// # Errors
     /// Returns an error naming the database when it cannot be reached, and the refusals above.
@@ -129,13 +130,17 @@ impl Database {
                     }
                 }
             }
-            transaction
-                .execute(
-                    "DELETE FROM leases WHERE expires_at <= now() OR instance_id::text = ANY($1)",
+            let taken_over: Vec<String> = transaction
+                .query(
+                    "DELETE FROM leases WHERE expires_at <= now() OR instance_id::text = ANY($1) \
+                     RETURNING instance_id::text",
                     &[&alone],
                 )
                 .await
-                .map_err(sql)?;
+                .map_err(sql)?
+                .iter()
+                .map(|row| row.get(0))
+                .collect();
             transaction
                 .execute(
                     "INSERT INTO leases \
@@ -152,7 +157,7 @@ impl Database {
                 .await
                 .map_err(sql)?;
             transaction.commit().await.map_err(sql)?;
-            Ok((instance_id, alone))
+            Ok((instance_id, taken_over))
         })?;
         Ok(Taken {
             instance_id: id,
@@ -314,5 +319,25 @@ mod tests {
         }
         let taken = taken.expect("the lock was not released");
         assert_eq!(taken.taken_over, [held.instance_id]);
+    }
+
+    /// A lease that lapsed is taken over by the next instance that takes one, which names it; a
+    /// live lease of an instance that shares the database is not.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    #[test]
+    fn a_lapsed_lease_is_taken_over_and_named() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let (a, b, c) = (shared(&test), shared(&test), shared(&test));
+        let lapsed = a.take_lease("host-a", LAPSE).expect("a's lease");
+        let live = b.take_lease("host-b", LAPSE).expect("b's lease");
+        test.sql(&format!(
+            "UPDATE leases SET expires_at = now() WHERE instance_id = '{}'",
+            lapsed.instance_id
+        ));
+        let taken = c.take_lease("host-c", LAPSE).expect("c's lease");
+        assert_eq!(taken.taken_over, [lapsed.instance_id]);
+        assert!(!taken.taken_over.contains(&live.instance_id));
     }
 }
