@@ -14,6 +14,10 @@ and the claim script takes that branch as its base, or a plan always lands on `m
 hand-made claim was wrong. Either way the claim script, the `work-tickets` skill and the frontier
 sensor follow the ADR in its implementation.
 
+The human decided for the first: a ticket is claimable from the `feat/` branch that carries its
+plan, and the claim script and the frontier sensor take that branch as the base. The ADR is
+proposed for the human to accept.
+
 ## Acceptance criteria
 
 - [ ] Given the proposed ADR, when the human has decided it, then its commits are ADRs only, and the

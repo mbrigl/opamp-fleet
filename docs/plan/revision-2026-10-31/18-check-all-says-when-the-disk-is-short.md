@@ -12,6 +12,9 @@ message that names the free space, the directory and how to reclaim it. The thre
 it fails or only warns, is the human's to set; an environment variable may override it for a smaller
 machine.
 
+The human decided: the check fails below 20 GB free, and `FLEET_MIN_FREE_GB` sets another
+threshold for a smaller machine.
+
 ## Acceptance criteria
 
 - [ ] Given less free space than the threshold, when check-all runs, then the build check fails

@@ -12,7 +12,14 @@ are not checked on load, and on one point the two stores differ:
 - no store checks an assignment's Deployment name, its Configuration names or its revision hashes
   on load.
 
-For each, decide with the human whether the load is made as strict as the write. Where it is, a
+The human decided:
+
+- a Package reference with an unknown field is refused by both stores;
+- a Deployment with two Packages of one Agent type is refused on load;
+- an assignment's Deployment name, Configuration names and the form of its revision hashes are
+  checked on load; whether a revision still exists is not.
+
+The load is made as strict as the write for each. Where it is, a
 record an existing data directory or database holds and the stricter load would refuse is carried
 by `server migrate` or reported by it, so a Server that loaded before does not fail its next start
 without being told why (ADR-0029 clause 26).
