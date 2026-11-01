@@ -149,12 +149,15 @@ every change that concerns a live session by one `NOTIFY`.
    ([ADR-draft-the-servers-state-and-its-stores](draft-the-servers-state-and-its-stores.md)
    clause 3). Each instance keeps in memory the records of the Agents whose connection it holds,
    loaded from the database when their first report arrives, and nothing of the rest. When an
-   instance begins to carry an Agent whose presence names another instance with a live lease, it
-   takes the Agent at once, outside the batch, by one conditional update that names itself as the
-   holder and returns the holder it replaced, and announces it (clause 9). An instance that receives
-   the announcement reads the holder again and stops carrying the Agent, as it would on a closed
-   connection, only when the row no longer names it; two instances that take one Agent at once
-   therefore never both drop it. Duplicate detection and
+   instance begins to carry an Agent, it takes the Agent at once, outside the batch, by one update
+   under the row's lock that names itself as the holder and returns the holder it replaced, and
+   announces the take where it replaced another holder, whether or not that one's lease is live
+   (clause 9). An instance that receives the announcement reads the holder again and stops carrying
+   the Agent, as it would on a closed connection, only when the row no longer names it; two
+   instances that take one Agent at once therefore never both drop it. The newest connection is the
+   one whose take commits last: where the take for an Agent's older connection commits after the
+   take for its newer one, as a slower write may, the older connection's instance holds the row and
+   the other stops carrying the Agent, which then takes it back at the Agent's next report on it. Duplicate detection and
    the rekeying of a newcomer stay within one instance. An Agent whose holder changes more than ten
    times in a minute is logged as a likely duplicate. An Agent's labels stay in its record
    ([ADR-0024](0024-the-fleet-record-of-agents-and-hosts.md) clause 21), and there is no other copy.

@@ -123,8 +123,8 @@ report, its own labels and its Client Agent's labels, in that order of precedenc
      [ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it](draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md)
      clause 8: names `holder`, raises the record's count of takes by one and answers it, answers
      the holder it replaced and whether this change of holder is the eleventh within a minute,
-     counted on the database's clock, and announces the take where it replaced an instance with a
-     live lease;
+     counted on the database's clock, and announces the take where it replaced another instance,
+     whether or not its lease is live; the take that commits last holds the record;
    - `holders(uids)` — the stored holder of each, which an instance that heard of a take reads
      before it stops carrying the Agent;
    - `remove_if_silent(uid, silent_before_ms)` — forget one record of a shared store when its
