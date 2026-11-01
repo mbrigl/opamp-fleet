@@ -358,11 +358,21 @@ first attempt. A store that stops answering fails the act that needs it, as a fa
 
 In the bucket, an upload in progress lives under `<prefix>staging/<lease>/`, `<lease>` being the
 lease of the instance that writes it, or `fs` on the filesystem record store. Those of a lease that
-is no longer live are interrupted uploads: an instance deletes them when it starts and whenever it
-takes over a lapsed lease, and never those of a live one; on the filesystem record store, every
-staging object goes at startup. A lease released at an orderly shutdown is taken over by no
-instance, so what its uploads left stays until an instance next starts; it costs storage only. Any
-other key under `<prefix>` that is not `blobs/<sha256>` fails startup naming it. At startup the
+is no longer live are interrupted uploads. An instance deletes them with every sweep of the
+artifacts no entry names: when it starts, and after an entry is replaced or deleted, a Package
+deleted, or an upload fails. It deletes them also whenever it takes over a lapsed lease, and never
+those of a live one. What a lease released at an orderly shutdown left therefore goes with the next
+sweep on any instance; it costs storage only until then. On the filesystem record store, every
+staging object goes at startup. Any other key under `<prefix>` that is not `blobs/<sha256>` fails
+startup naming it.
+
+On PostgreSQL every sweep and cleanup of the bucket takes an advisory lock, so one instance deletes
+at a time. It decides from the entries the database stores, so it keeps an artifact that an entry
+written through another instance names. An upload holds the same lock shared from its check that
+its artifact is stored until its entry is written, and an upload whose artifact a sweep deleted
+first is refused: upload it again. An upload waits for the lock up to 5 seconds, a sweep up to 60.
+A start whose sweep cannot have the lock fails, naming the lock; a sweep after an act logs it, and
+what it would have deleted stays until the next start. At startup the
 Server lists the bucket for each artifact's size and downloads nothing: unlike the filesystem store,
 it does not hash the artifacts again. An object altered in the bucket is served, and the Client's
 own hash and signature checks refuse it. The bucket, its credentials, policies, retention and
@@ -412,7 +422,9 @@ once, with every instance stopped:
        --config /etc/opamp-fleet/server.toml
    ```
 
-   It refuses while any instance holds a live lease. It uploads every artifact a Package entry
+   It refuses while any instance holds a live lease, and holds the bucket's sweep lock for its whole
+   run: an instance started meanwhile fails its start, naming the lock. It uploads every artifact a
+   Package entry
    names that the bucket lacks, hashed as above, then checks that the bucket holds the artifact of
    every entry, and fails naming an entry whose artifact it does not hold. It only reads the
    directory, and a second run uploads nothing again.
