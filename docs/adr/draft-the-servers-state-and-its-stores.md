@@ -867,7 +867,8 @@ Tests that carry `Verifies: ADR-0029`:
   `a_sweep_keeps_a_blob_an_entry_stored_through_another_writer_names`,
   `an_upload_holds_off_a_sweep_until_its_entry_is_committed`,
   `an_upload_whose_blob_a_sweep_took_first_is_refused`,
-  `an_upload_whose_lock_was_lost_is_refused`, `a_hold_whose_session_ends_is_marked_lost`,
+  `an_upload_whose_session_ends_before_its_commit_writes_no_entry`,
+  `a_hold_whose_session_ends_is_marked_lost`,
   `a_sweep_waits_its_whole_wait_for_the_lock_and_an_upload_five_seconds`,
   `a_startup_sweep_that_cannot_have_the_lock_fails_naming_it`;
   [`fleet.rs`](../../crates/fleet-server/src/fleet.rs)
