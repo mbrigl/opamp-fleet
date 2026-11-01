@@ -621,7 +621,9 @@ server migrate-to-postgres --from /var/lib/opamp-fleet/fleet-data \
   Server writes to again, and the copy records the `seq` and the hash of its last entry: the first
   audit chain in the database names that entry as its `predecessor`, and
   `server audit-verify --config <server.toml> --archive <old data_dir>/audit` checks the link.
-  Keep the archive as long as you keep the record; deleting it is yours.
+  Keep the archive as long as you keep the record; deleting it is yours. An archive whose chain
+  breaks, or that ends in a torn line a crash left, stops the copy, naming the file: cut the torn
+  line from it, keeping a copy, so the record ends on its last whole entry.
 - It copies rather than moves: the old `data_dir` stays as the backup. It prints what it copied,
   and exits non-zero when it could not copy all of it, leaving the database without the Server's
   tables and the new `data_dir` empty.
@@ -1209,14 +1211,15 @@ It walks every chain in `seq` order, lists each open one with its last entry —
 lease that is held, or of one that lapsed and no instance has taken over yet — and names the chain
 and the first entry that fails, exiting non-zero: an entry altered or removed, entries missing
 from the end of a closed chain, or an entry after its close. Without `--archive` it reports the
-predecessor as not checked. Removing a whole chain together with its record is not detected by
+predecessor as not checked; an archive the database records that no chain names fails. Removing a whole chain together with its record is not detected by
 the database itself.
 
 A Server that was on PostgreSQL before this release kept its audit record in files under
 `data_dir/audit/`. At its first start, before the database holds any chain or archive, it records
 the last entry of those files as the archive, as `server migrate-to-postgres` does, and the first
 chain names it as its `predecessor`: check the link with `--archive <data_dir>/audit`. An empty or
-missing `audit/` records nothing, and an instance without a `data_dir` has nothing to link.
+missing `audit/` records nothing, and an instance without a `data_dir` has nothing to link. An
+`audit/` whose chain breaks or that ends in a torn line stops the start, naming the file.
 
 ## Configurations: what the fleet runs
 
