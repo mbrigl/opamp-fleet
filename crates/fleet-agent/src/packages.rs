@@ -671,14 +671,18 @@ mod tests {
             per_wait: std::time::Duration::from_secs(1),
             total: std::time::Duration::from_millis(3_500),
         };
-        let err = send_patiently(
-            &origin,
-            &client,
-            &format!("http://{server}/file"),
-            &[],
-            patience,
+        let err = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            send_patiently(
+                &origin,
+                &client,
+                &format!("http://{server}/file"),
+                &[],
+                patience,
+            ),
         )
         .await
+        .expect("the download kept asking past its 3.5 s bound")
         .expect_err("gave up");
         assert!(err.contains("longer than this Client waits"), "{err}");
         let requests = count.load(Ordering::SeqCst);
@@ -745,14 +749,18 @@ mod tests {
             per_wait: std::time::Duration::from_millis(1),
             total: std::time::Duration::from_millis(2_500),
         };
-        let err = send_patiently(
-            &origin,
-            &client,
-            &format!("http://{server}/file"),
-            &[],
-            patience,
+        let err = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            send_patiently(
+                &origin,
+                &client,
+                &format!("http://{server}/file"),
+                &[],
+                patience,
+            ),
         )
         .await
+        .expect("the download kept asking past its 2.5 s bound")
         .expect_err("gave up");
         assert!(err.contains("longer than this Client waits"), "{err}");
         let requests = count.load(Ordering::SeqCst);
