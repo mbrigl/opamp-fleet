@@ -119,7 +119,8 @@ fn predecessor_named(value: &Value, chain_key: &str) -> Option<Predecessor> {
 
 /// Prunes the record on `database` for the instance whose chain is `own`, recording through
 /// `audit`: its own chain, and, when it gets the prune lock, every closed chain. Entries stored
-/// `retain_days` or more days ago go, the longest such run from each chain's start.
+/// more than `retain_days` days ago go, the longest such run from each chain's start, from every
+/// chain in one transaction.
 ///
 /// # Errors
 /// Returns an error when the database cannot be read or written, or when the `audit.pruned`
@@ -134,7 +135,7 @@ pub fn prune(
     database.run_within(PRUNE_TIMEOUT, move |pool| async move {
         // A connection of its own, taken from the pool, so that the session-level lock ends with
         // it whatever happens to this call.
-        let lock = deadpool_postgres::Object::take(client(&pool).await?);
+        let mut lock = deadpool_postgres::Object::take(client(&pool).await?);
         let locked: bool = lock
             .query_one(&format!("SELECT pg_try_advisory_lock({PRUNE_LOCK})"), &[])
             .await
@@ -167,6 +168,9 @@ pub fn prune(
                 chains.push(row.get(0));
             }
         }
+        // The own chain may have been closed by a takeover between the two reads.
+        let mut seen = BTreeSet::new();
+        chains.retain(|chain| seen.insert(chain.clone()));
         let plan = plan(&*lock, &chains, days).await?;
         let mut pruned = Pruned {
             closed_chains: locked,
@@ -187,7 +191,12 @@ pub fn prune(
                 "the audit.pruned entries could not be written, so nothing was pruned".to_string(),
             );
         }
-        delete(&*lock, &plan.chains).await?;
+        // One transaction for every chain: the old link of a chain pruned further may sit in
+        // another chain pruned here, so a prune that stopped between two deletes would leave a
+        // chain linked by nothing.
+        let transaction = lock.transaction().await.map_err(sql)?;
+        delete(&*transaction, &plan.chains).await?;
+        transaction.commit().await.map_err(sql)?;
         pruned.chains = plan.chains;
         pruned.carried = plan.carried;
         pruned.predecessor = plan.predecessor.is_some();
@@ -203,8 +212,8 @@ struct Plan {
     predecessor: Option<Predecessor>,
 }
 
-/// For each chain of `chains`, the longest run of entries from its start all stored `days` or more
-/// days ago; and the links and the predecessor the entries in those runs record that are still
+/// For each chain of `chains`, the longest run of entries from its start all stored more than
+/// `days` days ago; and the links and the predecessor the entries in those runs record that are still
 /// needed once they are gone.
 async fn plan(client: &impl GenericClient, chains: &[String], days: i32) -> Result<Plan, String> {
     let mut plan = Plan::default();
@@ -214,7 +223,7 @@ async fn plan(client: &impl GenericClient, chains: &[String], days: i32) -> Resu
             .query_opt(
                 "SELECT seq, line FROM audit_entries WHERE chain = $1::text::uuid AND seq = \
                  coalesce((SELECT min(seq) - 1 FROM audit_entries WHERE chain = $1::text::uuid \
-                 AND recorded_at > now() - make_interval(days => $2)), \
+                 AND recorded_at >= now() - make_interval(days => $2)), \
                  (SELECT max(seq) FROM audit_entries WHERE chain = $1::text::uuid))",
                 &[chain, &days],
             )
@@ -283,7 +292,8 @@ async fn plan(client: &impl GenericClient, chains: &[String], days: i32) -> Resu
 }
 
 /// Deletes each chain's entries up to the last one its link names, once that entry is still the
-/// one the link was recorded for. A chain another instance pruned meanwhile is left as it is.
+/// one the link was recorded for, in the transaction `client` holds. A chain another instance
+/// pruned meanwhile is left as it is.
 async fn delete(client: &impl GenericClient, chains: &[Link]) -> Result<(), String> {
     for link in chains {
         let seq = super::signed(link.last_seq);
@@ -525,9 +535,8 @@ mod tests {
         let (aa, ad) = (a.audit.clone(), d.audit.clone());
         let (ca, cd) = (a.chain.clone(), d.chain.clone());
         let other = std::thread::spawn(move || prune(&dd, ad, Some(cd), RETAIN).expect("d"));
-        let one = prune(&da, aa, Some(ca), RETAIN).expect("a");
-        let two = other.join().expect("d");
-        assert!(one.closed_chains || two.closed_chains);
+        prune(&da, aa, Some(ca), RETAIN).expect("a");
+        other.join().expect("d");
 
         let recorded = pruned_entries(&test);
         let mut named: Vec<&Link> = recorded
@@ -681,6 +690,47 @@ mod tests {
             "{:?}",
             verified.lines
         );
+    }
+
+    /// A prune that stops between two chains' deletes deletes nothing: the old link of a chain it
+    /// prunes further sits in its own chain, which it prunes first, so a delete of its own chain
+    /// that stood alone would leave the other chain linked by nothing, and an honest record would
+    /// fail `audit-verify`.
+    /// Verifies: ADR-draft-the-servers-state-and-its-stores
+    #[test]
+    fn a_prune_that_stops_between_two_chains_deletes_nothing() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let closed = writing(&test, "host-x");
+        closed.decide(4);
+        assert!(closed.audit.close(Duration::from_secs(10)), "not closed");
+        let a = writing(&test, "host-a");
+        age(&test, &closed.chain, "1, 2");
+        let first = a.prune();
+        assert_eq!(first.chains.len(), 1, "{first:?}");
+
+        // A year on: A's own chain, which holds the link of the closed chain, and its entry 3 are
+        // old, and the closed chain's delete is refused.
+        age_all(&test, &a.chain);
+        age(&test, &closed.chain, "3");
+        test.sql(&format!(
+            "CREATE FUNCTION fleet_test_refuse_delete() RETURNS trigger LANGUAGE plpgsql AS \
+             $$ BEGIN RAISE EXCEPTION 'refused by the test'; END $$; \
+             CREATE TRIGGER fleet_test_refuse_delete BEFORE DELETE ON audit_entries FOR EACH ROW \
+             WHEN (OLD.chain = '{}') EXECUTE FUNCTION fleet_test_refuse_delete();",
+            closed.chain
+        ));
+        let own = lines(&test, &a.chain);
+        prune(&a.database, a.audit.clone(), Some(a.chain.clone()), RETAIN)
+            .expect_err("the closed chain's delete was refused");
+        held(&a.database);
+        assert_eq!(
+            lines(&test, &a.chain).first(),
+            own.first(),
+            "the own chain was pruned alone"
+        );
+        test.sql("DROP TRIGGER fleet_test_refuse_delete ON audit_entries");
     }
 
     /// When its `audit.pruned` entries cannot be written, the prune deletes nothing.
