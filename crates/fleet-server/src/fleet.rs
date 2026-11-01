@@ -6673,6 +6673,9 @@ mod tests {
             self.batched_gets.fetch_add(1, Ordering::SeqCst);
             self.inner.get_many(uids)
         }
+        fn query(&self) -> Result<Vec<(InstanceUid, crate::agent_store::StoredAgent)>, String> {
+            self.inner.query()
+        }
         fn is_shared(&self) -> bool {
             self.inner.is_shared()
         }

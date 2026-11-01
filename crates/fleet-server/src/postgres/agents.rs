@@ -14,7 +14,7 @@ use tokio_postgres::GenericClient;
 
 use super::notify::{notify, ASSIGNMENT, CONFIGURATION, FORGOTTEN, LABELS, RESTART, TAKEN};
 use super::{client, signed, sql, unsigned, Database};
-use crate::agent_store::{AgentStore, Creation, PersistedAgent, Pin, Presence, Taken};
+use crate::agent_store::{AgentStore, Creation, PersistedAgent, Pin, Presence, StoredAgent, Taken};
 use crate::configs::Pinned;
 use crate::fleet::{Assignment, Transport};
 use crate::packages::PackageId;
@@ -37,6 +37,23 @@ impl PgAgentStore {
             database,
             assignments: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// The adapter on `database`, holding what the stored assignments pin, read alone: what a
+    /// deletion and a collection ask of the pins is answered from them, and no record is loaded
+    /// (ADR-draft-the-servers-state-and-its-stores clause 3).
+    ///
+    /// # Errors
+    /// Returns an error when the assignments cannot be read, or one names a Package that does not
+    /// parse.
+    pub fn open(database: Arc<Database>) -> Result<Self, String> {
+        let store = Self::new(database);
+        let assignments = store.database.run(|pool| async move {
+            let client = client(&pool).await?;
+            read_assignments(&**client).await
+        })?;
+        *store.assignments.lock().expect("assignments lock") = assignments;
+        Ok(store)
     }
 
     /// Notes what the committed records now pin.
@@ -100,6 +117,48 @@ impl AgentStore for PgAgentStore {
             )
         }));
         Ok(found)
+    }
+
+    /// The rows and their presence, then their Configurations, in one snapshot of the database.
+    fn query(&self) -> Result<Vec<(InstanceUid, StoredAgent)>, String> {
+        let (records, connected) = self.database.run(|pool| async move {
+            let mut client = client(&pool).await?;
+            let transaction = client
+                .build_transaction()
+                .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
+                .read_only(true)
+                .start()
+                .await
+                .map_err(sql)?;
+            let records = read(&*transaction, None).await?;
+            let connected: BTreeSet<String> = transaction
+                .query(
+                    "SELECT a.instance_uid FROM agents AS a WHERE a.connected AND EXISTS \
+                     (SELECT 1 FROM leases AS l WHERE l.instance_id = a.holder \
+                     AND l.expires_at > now())",
+                    &[],
+                )
+                .await
+                .map_err(sql)?
+                .into_iter()
+                .map(|row| row.get(0))
+                .collect();
+            transaction.commit().await.map_err(sql)?;
+            Ok((records, connected))
+        })?;
+        *self.assignments.lock().expect("assignments lock") = records
+            .iter()
+            .filter_map(|(uid, record)| Some((*uid, record.assignment.clone()?)))
+            .collect();
+        let mut all: Vec<(InstanceUid, StoredAgent)> = records
+            .into_iter()
+            .map(|(uid, record)| {
+                let connected = connected.contains(&uid.to_string());
+                (uid, StoredAgent { record, connected })
+            })
+            .collect();
+        all.sort_by_key(|(uid, _)| uid.0);
+        Ok(all)
     }
 
     fn is_shared(&self) -> bool {
@@ -686,22 +745,7 @@ async fn read(
         Some(uids) => (" WHERE instance_uid = ANY($1)", vec![uids]),
         None => ("", Vec::new()),
     };
-    let mut released: HashMap<String, BTreeMap<String, String>> = HashMap::new();
-    for row in client
-        .query(
-            &format!(
-                "SELECT instance_uid, configuration, revision FROM agent_assignment_configurations{filter}"
-            ),
-            &params,
-        )
-        .await
-        .map_err(sql)?
-    {
-        released
-            .entry(row.get(0))
-            .or_default()
-            .insert(row.get(1), row.get(2));
-    }
+    let mut released = released_configurations(client, filter, &params).await?;
     let mut records = HashMap::new();
     for row in client
         .query(&format!("SELECT {COLUMNS} FROM agents{filter}"), &params)
@@ -714,28 +758,13 @@ async fn read(
             InstanceUid::parse(&key).ok_or_else(|| named("not an Instance UID".to_string()))?;
         let labels: BTreeMap<String, String> =
             serde_json::from_value(row.get(13)).map_err(|e| named(format!("labels: {e}")))?;
-        let configurations = released.remove(&key).unwrap_or_default();
-        let deployment: Option<String> = row.get(15);
-        let package = match (
-            row.get::<_, Option<String>>(16),
-            row.get::<_, Option<String>>(17),
-        ) {
-            (Some(agent_type), Some(version)) => Some(
-                PackageId::load(&agent_type, &version)
-                    .map_err(|e| named(format!("invalid package in the assignment: {e}")))?,
-            ),
-            (None, None) => None,
-            _ => return Err(named("half a package in the assignment".to_string())),
-        };
-        let assignment = match deployment {
-            Some(deployment) => Some(Assignment {
-                deployment,
-                package,
-                configurations,
-            }),
-            None if package.is_none() && configurations.is_empty() => None,
-            None => return Err(named("an assignment without its Deployment".to_string())),
-        };
+        let assignment = assignment_of(
+            row.get(15),
+            row.get(16),
+            row.get(17),
+            released.remove(&key).unwrap_or_default(),
+        )
+        .map_err(named)?;
         let record = PersistedAgent {
             sequence_num: unsigned(row.get(1)),
             capabilities: unsigned(row.get(2)),
@@ -766,6 +795,95 @@ async fn read(
         ));
     }
     Ok(records)
+}
+
+/// The assignment's Configurations of the rows `filter` selects, by `instance_uid`.
+async fn released_configurations(
+    client: &impl GenericClient,
+    filter: &str,
+    params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
+) -> Result<HashMap<String, BTreeMap<String, String>>, String> {
+    let mut released: HashMap<String, BTreeMap<String, String>> = HashMap::new();
+    for row in client
+        .query(
+            &format!(
+                "SELECT instance_uid, configuration, revision FROM agent_assignment_configurations{filter}"
+            ),
+            params,
+        )
+        .await
+        .map_err(sql)?
+    {
+        released
+            .entry(row.get(0))
+            .or_default()
+            .insert(row.get(1), row.get(2));
+    }
+    Ok(released)
+}
+
+/// The assignment the assignment's columns of one row and its Configurations make.
+fn assignment_of(
+    deployment: Option<String>,
+    agent_type: Option<String>,
+    version: Option<String>,
+    configurations: BTreeMap<String, String>,
+) -> Result<Option<Assignment>, String> {
+    let package = match (agent_type, version) {
+        (Some(agent_type), Some(version)) => Some(
+            PackageId::load(&agent_type, &version)
+                .map_err(|e| format!("invalid package in the assignment: {e}"))?,
+        ),
+        (None, None) => None,
+        _ => return Err("half a package in the assignment".to_string()),
+    };
+    match deployment {
+        Some(deployment) => Ok(Some(Assignment {
+            deployment,
+            package,
+            configurations,
+        })),
+        None if package.is_none() && configurations.is_empty() => Ok(None),
+        None => Err("an assignment without its Deployment".to_string()),
+    }
+}
+
+/// Every stored assignment, read alone: the assignment's columns of each row and their
+/// Configurations, no record.
+async fn read_assignments(
+    client: &impl GenericClient,
+) -> Result<HashMap<InstanceUid, Assignment>, String> {
+    let mut released = released_configurations(client, "", &[]).await?;
+    let mut assignments = HashMap::new();
+    for row in client
+        .query(
+            "SELECT instance_uid, deployment, package_agent_type, package_version FROM agents",
+            &[],
+        )
+        .await
+        .map_err(sql)?
+    {
+        let key: String = row.get(0);
+        let named = |e: String| format!("agent {key} in the database: {e}");
+        let uid =
+            InstanceUid::parse(&key).ok_or_else(|| named("not an Instance UID".to_string()))?;
+        let assignment = assignment_of(
+            row.get(1),
+            row.get(2),
+            row.get(3),
+            released.remove(&key).unwrap_or_default(),
+        )
+        .map_err(named)?;
+        if let Some(assignment) = assignment {
+            assignments.insert(uid, assignment);
+        }
+    }
+    if let Some(key) = released.keys().next() {
+        return Err(format!(
+            "an assignment in the database names agent {key}, which is not there"
+        ));
+    }
+    Ok(assignments)
 }
 
 /// The columns a report decides (ADR-draft-the-fleet-record-of-agents-and-hosts clause 2): every
@@ -1017,13 +1135,17 @@ mod tests {
         }
     }
 
+    /// How the contract reads every record of a store: through `load` where the Server holds the
+    /// fleet in memory, through `query` where it reads it from the database.
+    type ReadAll<'a> = &'a dyn Fn(&dyn AgentStore) -> HashMap<InstanceUid, PersistedAgent>;
+
     /// The port's contract on either store: what is written is loaded back whole, wire types and
     /// all; a record without an assignment stays without one; a re-key moves the record; the
     /// integrity queries follow what is stored; and a rollout's revisions and assignments are
     /// both present.
-    fn contract(open: Open<'_>) {
+    fn contract(open: Open<'_>, all: ReadAll<'_>) {
         let (store, configs) = open();
-        assert!(store.load().expect("empty").is_empty());
+        assert!(all(&*store).is_empty());
         let (one, two, three) = (
             InstanceUid::default(),
             InstanceUid::default(),
@@ -1041,12 +1163,12 @@ mod tests {
         bare.sequence_num = u64::MAX;
         store.put(&one, &full).expect("put");
         store.put(&two, &bare).expect("put");
-        let loaded = open().0.load().expect("load");
+        let loaded = all(&*open().0);
         assert!(loaded[&one] == full, "the record round-trips whole");
         assert!(loaded[&two] == bare, "absent stays absent, u64::MAX stays");
 
         store.rekey(&two, &three, &bare).expect("rekey");
-        let loaded = open().0.load().expect("load");
+        let loaded = all(&*open().0);
         assert!(loaded.contains_key(&three) && !loaded.contains_key(&two));
 
         let pinned = revision("v1\n");
@@ -1066,7 +1188,7 @@ mod tests {
             .release(&[pinned_of(&pinned)], &[(three, released.clone())])
             .expect("release");
         let (reopened, configs) = open();
-        let loaded = reopened.load().expect("load");
+        let loaded = all(&*reopened);
         assert!(loaded[&three] == released);
         assert_eq!(configs.load().expect("revisions"), [base], "both present");
         assert_eq!(reopened.pinning(Pin::Configuration("base")), 2);
@@ -1099,7 +1221,7 @@ mod tests {
         store.remove(&one).expect("remove");
         store.remove(&one).expect("removing the absent is fine");
         assert_eq!(store.pinning(Pin::Configuration("base")), 1);
-        assert_eq!(open().0.load().expect("load").len(), 1);
+        assert_eq!(all(&*open().0).len(), 1);
     }
 
     /// A report's write on PostgreSQL leaves what the acts wrote through another instance: the
@@ -1293,12 +1415,15 @@ mod tests {
     #[test]
     fn the_agent_port_contract_holds_on_the_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
-        contract(&|| {
-            (
-                Box::new(FsAgentStore::open(dir.path()).expect("open")),
-                Box::new(FsConfigBackend::open(dir.path()).expect("open")),
-            )
-        });
+        contract(
+            &|| {
+                (
+                    Box::new(FsAgentStore::open(dir.path()).expect("open")),
+                    Box::new(FsConfigBackend::open(dir.path()).expect("open")),
+                )
+            },
+            &|store| store.load().expect("load"),
+        );
     }
 
     /// Verifies: ADR-0029
@@ -1308,14 +1433,76 @@ mod tests {
             return;
         };
         let database = test.open();
-        contract(&|| {
-            (
-                Box::new(PgAgentStore::new(database.clone())),
-                Box::new(super::super::configs::PgConfigBackend::new(
-                    database.clone(),
-                )),
-            )
-        });
+        contract(
+            &|| {
+                (
+                    Box::new(PgAgentStore::open(database.clone()).expect("open")),
+                    Box::new(super::super::configs::PgConfigBackend::new(
+                        database.clone(),
+                    )),
+                )
+            },
+            &|store| {
+                let all = store.query().expect("query");
+                assert!(
+                    all.windows(2).all(|pair| pair[0].0 .0 < pair[1].0 .0),
+                    "in the order of the instance_uid"
+                );
+                all.into_iter()
+                    .map(|(uid, stored)| (uid, stored.record))
+                    .collect()
+            },
+        );
+    }
+
+    /// The query reads each record with its stored presence: connected only while the instance
+    /// its presence names holds a live lease. Opening the adapter reads the stored assignments
+    /// alone, so what pins what is answered without a record loaded.
+    /// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts, ADR-draft-the-servers-state-and-its-stores
+    #[test]
+    fn the_query_reads_the_stored_presence_and_opening_reads_the_assignments_alone() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let a = database
+            .take_lease("a", std::time::Duration::from_secs(60))
+            .expect("lease")
+            .instance_id;
+        let store = PgAgentStore::new(database.clone());
+        let (held, idle) = (InstanceUid([1; 16]), InstanceUid([2; 16]));
+        store.put(&held, &record()).expect("put");
+        let mut bare = record();
+        bare.assignment = None;
+        store.put(&idle, &bare).expect("put");
+        store
+            .take(&held, &a, 5_000)
+            .expect("take")
+            .expect("a record");
+        let connected = |store: &PgAgentStore| -> Vec<(InstanceUid, bool)> {
+            store
+                .query()
+                .expect("query")
+                .into_iter()
+                .map(|(uid, stored)| (uid, stored.connected))
+                .collect()
+        };
+        assert_eq!(connected(&store), [(held, true), (idle, false)]);
+        test.sql(&format!(
+            "UPDATE leases SET expires_at = now() - interval '1 second' WHERE instance_id = '{a}'"
+        ));
+        assert_eq!(
+            connected(&store),
+            [(held, false), (idle, false)],
+            "a holder without a live lease holds no connection"
+        );
+
+        let opened = PgAgentStore::open(database).expect("open");
+        assert_eq!(opened.pinning(Pin::Deployment("stable")), 1);
+        assert_eq!(
+            opened.referenced_revisions("base"),
+            BTreeSet::from(["0123abcd".to_string()])
+        );
     }
 
     /// A rollout whose last record cannot be written leaves none of its assignments behind, on
