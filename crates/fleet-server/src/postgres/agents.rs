@@ -40,8 +40,38 @@ struct Pins {
     assignments: HashMap<InstanceUid, Assignment>,
     /// Counts the commits of this instance that changed an assignment.
     commits: u64,
-    /// The count at which this instance last committed the assignment of each record.
+    /// The count at which this instance last committed the assignment of each record, kept only
+    /// while a read is in flight, the one thing it decides: it is empty whenever none is, so what
+    /// an Agent's re-keys or many releases add leaves with the read.
     committed: HashMap<InstanceUid, u64>,
+    /// The reads in flight.
+    reading: usize,
+}
+
+impl Pins {
+    /// Notes that this instance committed the assignment of `uid` at `commit`, for the reads in
+    /// flight; with none in flight there is nothing to note it for.
+    fn committed(&mut self, uid: InstanceUid, commit: u64) {
+        if self.reading > 0 {
+            self.committed.insert(uid, commit);
+        }
+    }
+}
+
+/// A read in flight, from where it began until it took up what it read or failed.
+struct Began<'a> {
+    pins: &'a Mutex<Pins>,
+    commit: u64,
+}
+
+impl Drop for Began<'_> {
+    fn drop(&mut self) {
+        let mut pins = self.pins.lock().expect("assignments lock");
+        pins.reading -= 1;
+        if pins.reading == 0 {
+            pins.committed = HashMap::new();
+        }
+    }
 }
 
 /// Which records a read read.
@@ -94,7 +124,7 @@ impl PgAgentStore {
         pins.commits += 1;
         let commit = pins.commits;
         for (uid, assignment) in records {
-            pins.committed.insert(*uid, commit);
+            pins.committed(*uid, commit);
             match assignment {
                 Some(assignment) => pins.assignments.insert(*uid, assignment.clone()),
                 None => pins.assignments.remove(uid),
@@ -103,15 +133,20 @@ impl PgAgentStore {
     }
 
     /// Where a read begins: what it reads is taken over no commit of this instance made since.
-    fn began(&self) -> u64 {
-        self.assignments.lock().expect("assignments lock").commits
+    fn began(&self) -> Began<'_> {
+        let mut pins = self.assignments.lock().expect("assignments lock");
+        pins.reading += 1;
+        Began {
+            pins: &self.assignments,
+            commit: pins.commits,
+        }
     }
 
     /// Takes what a read that began at `began` found into what pins what, for each record it
     /// read that this instance committed nothing of since.
     fn refresh<'a>(
         &self,
-        began: u64,
+        began: Began<'_>,
         read: Read<'_>,
         found: impl Fn(&InstanceUid) -> Option<&'a Assignment>,
         keys: impl Iterator<Item = &'a InstanceUid>,
@@ -135,7 +170,7 @@ impl PgAgentStore {
             if pins
                 .committed
                 .get(&uid)
-                .is_some_and(|commit| *commit > began)
+                .is_some_and(|commit| *commit > began.commit)
             {
                 continue;
             }
@@ -733,8 +768,8 @@ impl AgentStore for PgAgentStore {
             let mut pins = self.assignments.lock().expect("assignments lock");
             pins.commits += 1;
             let commit = pins.commits;
-            pins.committed.insert(old, commit);
-            pins.committed.insert(new, commit);
+            pins.committed(old, commit);
+            pins.committed(new, commit);
             if let Some(assignment) = pins.assignments.remove(&old) {
                 pins.assignments.insert(new, assignment);
             }
@@ -1625,6 +1660,44 @@ mod tests {
             .expect("release elsewhere");
         store.query(None).expect("query");
         assert_eq!(store.pinning(Pin::Deployment("stable")), 0, "taken up");
+    }
+
+    /// What the adapter keeps of its commits for the reads in flight does not grow with an Agent's
+    /// re-keys or releases while no read is in flight, and leaves with the last read in flight.
+    /// Verifies: ADR-draft-the-servers-state-and-its-stores
+    #[test]
+    fn the_commits_kept_for_reads_in_flight_do_not_grow_without_one() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let store = Arc::new(PgAgentStore::open(test.open()).expect("open"));
+        let kept = |store: &PgAgentStore| store.assignments.lock().expect("pins").committed.len();
+        let mut uid = InstanceUid([6; 16]);
+        store.put(&uid, &record()).expect("put");
+        for n in 0..50u8 {
+            let next = InstanceUid([7, n, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+            store.rekey(&uid, &next, &record()).expect("rekey");
+            uid = next;
+        }
+        assert_eq!(kept(&store), 0, "no read in flight, nothing kept");
+
+        let during = store.clone();
+        let seen = Arc::new(Mutex::new(0));
+        let noted = seen.clone();
+        let last = uid;
+        *store.after_read.lock().expect("hook") = Some(Box::new(move || {
+            during
+                .rekey(&last, &InstanceUid([8; 16]), &record())
+                .expect("rekey");
+            *noted.lock().expect("seen") = kept(&during);
+        }));
+        store.query(None).expect("query");
+        assert_eq!(
+            *seen.lock().expect("seen"),
+            2,
+            "kept for the read in flight"
+        );
+        assert_eq!(kept(&store), 0, "and gone with it");
     }
 
     /// The query reads each record with its stored presence: connected only while the instance
