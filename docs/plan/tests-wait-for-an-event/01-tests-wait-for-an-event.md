@@ -26,7 +26,8 @@ it. The cases seen so far:
 
 ## Read first
 
-- `AGENTS.md` §5, which counts a flaky test as a defect
+- [`AGENTS.md` §5](../../../AGENTS.md#5-quality-bar--definition-of-done), which counts a flaky
+  test as a defect
 - `docs/CONVENTIONS.md` on tests
 - Seam: the tests themselves
 
