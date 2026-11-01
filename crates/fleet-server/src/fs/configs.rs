@@ -124,10 +124,6 @@ impl ConfigBackend for FsConfigBackend {
         write(&self.dir, &config)
     }
 
-    fn retain(&self, pinned: &Pinned) -> Result<(), String> {
-        retain(&self.dir, pinned)
-    }
-
     /// The assignments are the Agent store's, which answered `referenced` from what it stores.
     fn collect(
         &self,
@@ -165,7 +161,8 @@ fn names_a_selector(value: &serde_json::Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::configs::tests::{put_assigned, revision, with_role};
+    use crate::agent_store::AgentStore as _;
+    use crate::configs::tests::{put_assigned, put_released, revision, with_role};
     use crate::configs::{ConfigStore, ROLE_SUPPLEMENTARY};
 
     fn open(dir: &std::path::Path) -> Result<ConfigStore, String> {
@@ -178,7 +175,10 @@ mod tests {
     fn the_store_round_trips_through_the_directory() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = open(dir.path()).expect("open");
-        let assignments = put_assigned(&store, "base", revision("receivers: {}\n"));
+        let agents = crate::fs::FsAgentStore::open(dir.path()).expect("agents");
+        let assignments = put_released(&store, "base", revision("receivers: {}\n"), |pinned| {
+            agents.release(pinned, &[])
+        });
         store
             .put_saved("other", revision("exporters: {}\n"))
             .expect("put");

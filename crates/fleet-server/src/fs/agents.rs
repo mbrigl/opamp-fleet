@@ -551,8 +551,8 @@ mod tests {
                 hash: revision_hash(revision),
                 revision: revision.clone(),
             };
-            configs
-                .retain(&pin(&pinned))
+            store
+                .release(&[pin(&pinned)], &[])
                 .expect("the last rollout's revision");
             // The next rollout's revisions reach the disk; its records never do.
             store.release(&[pin(&orphan)], &[]).expect("the revisions");

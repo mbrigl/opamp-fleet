@@ -182,8 +182,9 @@ pub struct Pinned {
 
 /// The Configuration store's port (ADR-0009, ADR-0029 clause 2): where Configurations persist so a
 /// Server restart does not lose what the fleet should run. It speaks in parts: the saved revision
-/// is written on its own, the retained revisions are added and removed by hash, and no call writes
-/// a part it does not name. The filesystem adapter
+/// is written on its own, a retained revision is added by its hash only by the rollout that pins
+/// it ([`AgentStore::release`](crate::agent_store::AgentStore::release)) and removed by its hash
+/// here, and no call writes a part it does not name. The filesystem adapter
 /// ([`FsConfigBackend`](crate::fs::FsConfigBackend)) is what the composition root wires.
 pub trait ConfigBackend: Send + Sync {
     /// Every persisted Configuration, once, when the store opens. One that cannot be read fails
@@ -193,11 +194,6 @@ pub trait ConfigBackend: Send + Sync {
     /// Creates a Configuration or replaces its saved revision, in one step. No retained revision
     /// is written or removed.
     fn save(&self, name: &str, saved: &Revision) -> Result<(), String>;
-
-    /// Adds one retained revision by its hash, outside a rollout; a rollout adds the revisions it
-    /// pins with its assignments ([`AgentStore::release`](crate::agent_store::AgentStore::release)).
-    /// A Configuration the store does not hold is an error.
-    fn retain(&self, pinned: &Pinned) -> Result<(), String>;
 
     /// Removes every retained revision of `name` that `referenced` does not name and no stored
     /// assignment pins, and answers the ones kept (ADR-0026, ADR-0029 clause 2). A database
@@ -283,14 +279,17 @@ impl ConfigStore {
         Ok(config)
     }
 
-    /// Pins the saved revision of one Configuration and persists it through the store's own
-    /// backend — the tests' shorthand for a rollout's half that [`pin`](Self::pin) is.
+    /// Pins the saved revision of one Configuration and hands the pinned revision to `release`,
+    /// which persists it as a rollout would — the tests' shorthand for a rollout's half that
+    /// [`pin`](Self::pin) is.
     #[cfg(test)]
-    pub(crate) fn retain_saved(&self, name: &str) -> Result<String, String> {
+    pub(crate) fn retain_saved(
+        &self,
+        name: &str,
+        release: impl FnOnce(&[Pinned]) -> Result<(), String>,
+    ) -> Result<String, String> {
         self.pin(&BTreeSet::from([name.to_string()]), |hashes, pinned| {
-            for pinned in pinned {
-                self.backend.retain(pinned)?;
-            }
+            release(pinned)?;
             Ok(hashes[name].clone())
         })
     }
@@ -449,6 +448,21 @@ pub(crate) mod tests {
     #[derive(Clone, Default)]
     struct Memory(Arc<Mutex<BTreeMap<String, Configuration>>>);
 
+    impl Memory {
+        /// Adds the revisions a rollout pins, as the Agent store's release does.
+        fn release(&self, pinned: &[Pinned]) -> Result<(), String> {
+            let mut memory = self.0.lock().expect("memory");
+            for pinned in pinned {
+                memory
+                    .get_mut(&pinned.configuration)
+                    .ok_or_else(|| format!("no configuration {:?}", pinned.configuration))?
+                    .retained
+                    .insert(pinned.hash.clone(), pinned.revision.clone());
+            }
+            Ok(())
+        }
+    }
+
     impl ConfigBackend for Memory {
         fn load(&self) -> Result<Vec<Configuration>, String> {
             Ok(self.0.lock().expect("memory").values().cloned().collect())
@@ -465,17 +479,6 @@ pub(crate) mod tests {
                     saved: saved.clone(),
                     retained: BTreeMap::new(),
                 });
-            Ok(())
-        }
-
-        fn retain(&self, pinned: &Pinned) -> Result<(), String> {
-            self.0
-                .lock()
-                .expect("memory")
-                .get_mut(&pinned.configuration)
-                .ok_or_else(|| format!("no configuration {:?}", pinned.configuration))?
-                .retained
-                .insert(pinned.hash.clone(), pinned.revision.clone());
             Ok(())
         }
 
@@ -536,14 +539,25 @@ pub(crate) mod tests {
     }
 
     /// Save and pin in one step — the tests' shorthand for "this is assigned somewhere", plus the
-    /// assignment map an Agent holding exactly this would carry.
+    /// assignment map an Agent holding exactly this would carry. The pinned revision is the
+    /// store's in memory; `put_released` also persists it.
     pub(crate) fn put_assigned(
         store: &ConfigStore,
         name: &str,
         revision: Revision,
     ) -> BTreeMap<String, String> {
+        put_released(store, name, revision, |_| Ok(()))
+    }
+
+    /// [`put_assigned`], the pinned revision persisted by `release` as a rollout's would be.
+    pub(crate) fn put_released(
+        store: &ConfigStore,
+        name: &str,
+        revision: Revision,
+        release: impl FnOnce(&[Pinned]) -> Result<(), String>,
+    ) -> BTreeMap<String, String> {
         store.put_saved(name, revision).expect("put");
-        let hash = store.retain_saved(name).expect("retain");
+        let hash = store.retain_saved(name, release).expect("retain");
         BTreeMap::from([(name.to_string(), hash)])
     }
 
@@ -628,14 +642,14 @@ pub(crate) mod tests {
 
         let assignments = BTreeMap::from([(
             "base".to_string(),
-            store.retain_saved("base").expect("retain"),
+            store.retain_saved("base", |_| Ok(())).expect("retain"),
         )]);
         assert_eq!(
             store.compose(&assignments).expect("offered").entries.len(),
             1
         );
         assert!(
-            store.retain_saved("missing").is_err(),
+            store.retain_saved("missing", |_| Ok(())).is_err(),
             "pinning an unknown name finds nothing"
         );
     }
@@ -679,9 +693,13 @@ pub(crate) mod tests {
     fn retain_only_collects_unreferenced_revisions() {
         let memory = Memory::default();
         let store = ConfigStore::open(Box::new(memory.clone())).expect("open");
-        let first = put_assigned(&store, "base", revision("v1\n"));
+        let first = put_released(&store, "base", revision("v1\n"), |pinned| {
+            memory.release(pinned)
+        });
         store.put_saved("base", revision("v2\n")).expect("edit");
-        let second_hash = store.retain_saved("base").expect("retain");
+        let second_hash = store
+            .retain_saved("base", |pinned| memory.release(pinned))
+            .expect("retain");
         assert_eq!(store.get("base").expect("base").retained.len(), 2);
 
         store
@@ -703,7 +721,9 @@ pub(crate) mod tests {
     fn the_store_round_trips_and_survives_a_reopen() {
         let memory = Memory::default();
         let store = ConfigStore::open(Box::new(memory.clone())).expect("open");
-        let assignments = put_assigned(&store, "base", revision("receivers: {}\n"));
+        let assignments = put_released(&store, "base", revision("receivers: {}\n"), |pinned| {
+            memory.release(pinned)
+        });
         store
             .put_saved("linux-only", revision("exporters: {}\n"))
             .expect("put");

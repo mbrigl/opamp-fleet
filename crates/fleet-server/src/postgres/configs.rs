@@ -45,16 +45,6 @@ impl ConfigBackend for PgConfigBackend {
         })
     }
 
-    fn retain(&self, pinned: &Pinned) -> Result<(), String> {
-        let pinned = pinned.clone();
-        self.database.run(move |pool| async move {
-            let mut client = client(&pool).await?;
-            let transaction = client.transaction().await.map_err(sql)?;
-            retain(&*transaction, std::slice::from_ref(&pinned)).await?;
-            transaction.commit().await.map_err(sql)
-        })
-    }
-
     /// One transaction: the Configuration's row is held `FOR UPDATE`, which waits for every
     /// rollout that holds it to pin one of its revisions and keeps every other out until this one
     /// commits; then the revisions neither `referenced` nor a stored assignment names are deleted,
@@ -202,8 +192,9 @@ async fn save(client: &impl GenericClient, name: &str, saved: &Revision) -> Resu
     Ok(())
 }
 
-/// Adds each pinned revision to its Configuration by its hash, inside the caller's transaction —
-/// the write this store and a rollout's revisions (ADR-0029 clause 21) share — and deletes none.
+/// Adds each pinned revision to its Configuration by its hash, inside a rollout's transaction
+/// (ADR-0029 clause 21), and deletes none; a revision already retained is left as it is, as its
+/// hash names its content.
 /// Each Configuration's row is held `FOR KEY SHARE`, in name order, until the transaction ends:
 /// a collection's `FOR UPDATE` waits for it, so no instance collects a revision this transaction
 /// pins before its assignments are committed, while rollouts and saves of the Configuration go on
@@ -226,9 +217,7 @@ pub(crate) async fn retain(client: &impl GenericClient, pinned: &[Pinned]) -> Re
         client
             .execute(
                 "INSERT INTO configuration_revisions (configuration, hash, body, role, \
-                 service_name) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (configuration, hash) DO \
-                 UPDATE SET body = EXCLUDED.body, role = EXCLUDED.role, \
-                 service_name = EXCLUDED.service_name",
+                 service_name) VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING",
                 &[
                     &pinned.configuration,
                     &pinned.hash,
@@ -282,9 +271,20 @@ pub(crate) async fn write(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent_store::AgentStore;
     use crate::configs::revision_hash;
+    use crate::fs::FsAgentStore;
     use crate::fs::FsConfigBackend;
+    use crate::postgres::agents::PgAgentStore;
     use crate::postgres::testing::TestDatabase;
+
+    /// The Configurations and the Agent store whose rollouts add their revisions, on one store.
+    type Open<'a> = &'a dyn Fn() -> (Box<dyn ConfigBackend>, Box<dyn AgentStore>);
+
+    /// Adds `pinned` as a rollout that writes no record does.
+    fn release(agents: &dyn AgentStore, pinned: &Pinned) -> Result<(), String> {
+        agents.release(std::slice::from_ref(pinned), &[])
+    }
 
     fn revision(body: &str) -> Revision {
         Revision {
@@ -317,30 +317,27 @@ mod tests {
     /// adapter on the same store; a save writes the saved revision and touches no retained one;
     /// revisions are added by hash and collected down to what is referenced, each call naming
     /// the parts it writes; and a removal takes the revisions with it and tolerates absence.
-    fn contract(open: &dyn Fn() -> Box<dyn ConfigBackend>) {
-        let store = open();
+    fn contract(open: Open<'_>) {
+        let (store, agents) = open();
         assert!(store.load().expect("empty").is_empty());
         let mut base = configuration("base", "v2\n", &["v1\n", "v2\n"]);
         base.saved.role = crate::configs::ROLE_SUPPLEMENTARY.to_string();
         store.save("base", &base.saved).expect("save");
-        store.retain(&pinned("base", "v1\n")).expect("retain");
-        store.retain(&pinned("base", "v2\n")).expect("retain");
-        store
-            .retain(&pinned("base", "v2\n"))
-            .expect("retaining twice is fine");
+        release(&*agents, &pinned("base", "v1\n")).expect("release");
+        release(&*agents, &pinned("base", "v2\n")).expect("release");
+        release(&*agents, &pinned("base", "v2\n")).expect("releasing twice is fine");
         store.save("other", &revision("x\n")).expect("save");
         assert_eq!(
-            open().load().expect("load"),
+            open().0.load().expect("load"),
             [base.clone(), configuration("other", "x\n", &[])]
         );
-        store
-            .retain(&pinned("missing", "v1\n"))
+        release(&*agents, &pinned("missing", "v1\n"))
             .expect_err("a revision of a Configuration the store does not hold");
 
         store.save("base", &revision("v3\n")).expect("save again");
         let saved = configuration("base", "v3\n", &["v1\n", "v2\n"]);
         assert_eq!(
-            open().load().expect("load")[0],
+            open().0.load().expect("load")[0],
             saved,
             "a save keeps every retained revision"
         );
@@ -356,7 +353,7 @@ mod tests {
             "what is kept is answered"
         );
         assert_eq!(
-            open().load().expect("load")[0],
+            open().0.load().expect("load")[0],
             configuration("base", "v3\n", &["v2\n"]),
             "the unreferenced revision is gone, the others stay"
         );
@@ -368,7 +365,7 @@ mod tests {
         store.remove("base").expect("remove");
         store.remove("base").expect("removing the absent is fine");
         assert_eq!(
-            open().load().expect("load"),
+            open().0.load().expect("load"),
             [configuration("other", "x\n", &[])]
         );
     }
@@ -377,7 +374,12 @@ mod tests {
     #[test]
     fn the_configuration_port_contract_holds_on_the_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
-        contract(&|| Box::new(FsConfigBackend::open(dir.path()).expect("open")));
+        contract(&|| {
+            (
+                Box::new(FsConfigBackend::open(dir.path()).expect("open")),
+                Box::new(FsAgentStore::open(dir.path()).expect("open")),
+            )
+        });
     }
 
     /// Verifies: ADR-0029, ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
@@ -387,23 +389,31 @@ mod tests {
             return;
         };
         let database = test.open();
-        contract(&|| Box::new(PgConfigBackend::new(database.clone())));
+        contract(&|| {
+            (
+                Box::new(PgConfigBackend::new(database.clone())),
+                Box::new(PgAgentStore::new(database.clone())),
+            )
+        });
     }
 
     /// A save or a retention that fails leaves the Configuration as it was, on either store: one
     /// transaction per call, one file replaced in one step. `refuse` makes every write of the
     /// Configuration fail; `mend` takes that away.
-    fn fails_part_way(store: &dyn ConfigBackend, refuse: &dyn Fn(), mend: &dyn Fn()) {
+    fn fails_part_way(
+        store: &dyn ConfigBackend,
+        agents: &dyn AgentStore,
+        refuse: &dyn Fn(),
+        mend: &dyn Fn(),
+    ) {
         let before = configuration("base", "v1\n", &["v1\n"]);
         store.save("base", &before.saved).expect("save");
-        store.retain(&pinned("base", "v1\n")).expect("retain");
+        release(agents, &pinned("base", "v1\n")).expect("release");
         refuse();
         store
             .save("base", &revision("v2\n"))
             .expect_err("the save is refused");
-        store
-            .retain(&pinned("base", "v2\n"))
-            .expect_err("the retention is refused");
+        release(agents, &pinned("base", "v2\n")).expect_err("the rollout's revision is refused");
         mend();
         assert_eq!(store.load().expect("load"), [before]);
     }
@@ -415,6 +425,7 @@ mod tests {
         let file = dir.path().join("configurations/base.json");
         fails_part_way(
             &FsConfigBackend::open(dir.path()).expect("open"),
+            &FsAgentStore::open(dir.path()).expect("open"),
             &|| crate::fs::testing::refuse(&file),
             &|| crate::fs::testing::mend(&file),
         );
@@ -429,9 +440,10 @@ mod tests {
             return;
         };
         let second = revision_hash(&revision("v2\n"));
-        let store = PgConfigBackend::new(test.open());
+        let database = test.open();
         fails_part_way(
-            &store,
+            &PgConfigBackend::new(database.clone()),
+            &PgAgentStore::new(database),
             &|| {
                 test.refuse("configurations", "NEW.body = 'v2\n'");
                 test.refuse("configuration_revisions", &format!("NEW.hash = '{second}'"));
@@ -452,10 +464,12 @@ mod tests {
         let Some(test) = TestDatabase::named() else {
             return;
         };
-        let store = PgConfigBackend::new(test.open());
+        let database = test.open();
+        let store = PgConfigBackend::new(database.clone());
+        let agents = PgAgentStore::new(database);
         store.save("base", &revision("v2\n")).expect("save");
-        store.retain(&pinned("base", "v1\n")).expect("retain");
-        store.retain(&pinned("base", "v2\n")).expect("retain");
+        release(&agents, &pinned("base", "v1\n")).expect("release");
+        release(&agents, &pinned("base", "v2\n")).expect("release");
         let v1 = revision_hash(&revision("v1\n"));
         test.sql(&format!(
             "INSERT INTO agents (instance_uid, sequence_num, capabilities, transport, \
@@ -482,8 +496,6 @@ mod tests {
     /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
     #[test]
     fn a_collection_keeps_a_stored_revision_a_rollout_pins_meanwhile() {
-        use crate::agent_store::AgentStore as _;
-        use crate::postgres::agents::PgAgentStore;
         use opamp::uid::InstanceUid;
         use std::sync::atomic::{AtomicBool, Ordering};
         let Some(test) = TestDatabase::named() else {
@@ -493,8 +505,7 @@ mod tests {
         let configs = PgConfigBackend::new(database.clone());
         configs.save("base", &revision("v1\n")).expect("save");
         let held = pinned("base", "v1\n");
-        configs
-            .retain(&held)
+        release(&PgAgentStore::new(database.clone()), &held)
             .expect("a revision stored and pinned by nothing");
         test.sql(
             "CREATE TABLE fleet_test_gate (open boolean NOT NULL); \
