@@ -116,7 +116,7 @@ impl AgentStore for PgAgentStore {
             // One another instance created in between the two is written to again, the columns a
             // report decides alone.
             let created = loop {
-                if write_reported(&*transaction, &uid, &record).await? {
+                if write_reported(&*transaction, &uid, &record, None).await? {
                     break false;
                 }
                 if insert(&*transaction, &uid, &record, "DO NOTHING").await? {
@@ -137,7 +137,28 @@ impl AgentStore for PgAgentStore {
         let (uid, record) = (*uid, record.clone());
         self.database.run(move |pool| async move {
             let client = client(&pool).await?;
-            write_reported(&**client, &uid, &record).await
+            write_reported(&**client, &uid, &record, None).await
+        })
+    }
+
+    /// [`write_report`](AgentStore::write_report), of a row whose holder is none or `holder`.
+    fn write_report_unless_held_elsewhere(
+        &self,
+        uid: &InstanceUid,
+        record: &PersistedAgent,
+        holder: Option<&str>,
+    ) -> Result<bool, String> {
+        let (uid, record) = (*uid, record.clone());
+        let holder = Some(holder.map(str::to_string));
+        self.database.run(move |pool| async move {
+            let client = client(&pool).await?;
+            write_reported(
+                &**client,
+                &uid,
+                &record,
+                holder.as_ref().map(Option::as_deref),
+            )
+            .await
         })
     }
 
@@ -648,11 +669,13 @@ const REPORTED: [&str; 12] = [
 ];
 
 /// Writes the columns a report decides of one Agent record, inside the caller's transaction,
-/// `last_seen_ms` only forward. Answers whether there was a record.
+/// `last_seen_ms` only forward. Where `unless_held_elsewhere` is given, only of a row whose holder
+/// is none or the one it names. Answers whether it wrote a record.
 async fn write_reported(
     client: &impl GenericClient,
     uid: &InstanceUid,
     record: &PersistedAgent,
+    unless_held_elsewhere: Option<Option<&str>>,
 ) -> Result<bool, String> {
     let key = uid.to_string();
     // `last_seen_ms` never moves back, as a presence batch writes it.
@@ -665,7 +688,14 @@ async fn write_reported(
         })
         .collect::<Vec<_>>()
         .join(", ");
-    let update = format!("UPDATE agents SET {sets} WHERE instance_uid = $1");
+    let held = match unless_held_elsewhere {
+        Some(_) => format!(
+            " AND (holder IS NULL OR holder = ${}::text::uuid)",
+            REPORTED.len() + 2
+        ),
+        None => String::new(),
+    };
+    let update = format!("UPDATE agents SET {sets} WHERE instance_uid = $1{held}");
     let (sequence_num, capabilities, last_seen_ms) = (
         signed(record.sequence_num),
         signed(record.capabilities),
@@ -683,28 +713,26 @@ async fn write_reported(
     );
     let effective_config = record.effective_config.as_deref().map(str::as_bytes);
     let transport = record.transport.as_str();
-    Ok(client
-        .execute(
-            &update,
-            &[
-                &key,
-                &sequence_num,
-                &capabilities,
-                &transport,
-                &last_seen_ms,
-                &effective_config,
-                &description,
-                &health,
-                &remote_config_status,
-                &connection_settings_status,
-                &package_statuses,
-                &available_components,
-                &record.host,
-            ],
-        )
-        .await
-        .map_err(sql)?
-        > 0)
+    let holder = unless_held_elsewhere.flatten();
+    let mut params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = vec![
+        &key,
+        &sequence_num,
+        &capabilities,
+        &transport,
+        &last_seen_ms,
+        &effective_config,
+        &description,
+        &health,
+        &remote_config_status,
+        &connection_settings_status,
+        &package_statuses,
+        &available_components,
+        &record.host,
+    ];
+    if unless_held_elsewhere.is_some() {
+        params.push(&holder);
+    }
+    Ok(client.execute(&update, &params).await.map_err(sql)? > 0)
 }
 
 /// Writes the assignment of one Agent record alone, its Configurations exactly the assignment's,

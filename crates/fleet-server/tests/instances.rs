@@ -2323,6 +2323,54 @@ fn the_shutdown_flush_writes_only_the_agents_this_instance_heard_from() {
     );
 }
 
+/// The shutdown flush of A leaves an Agent A heard from, and that has moved to B since, as B
+/// wrote it: B holds its connection, so A writes nothing of it.
+/// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts
+#[test]
+fn the_shutdown_flush_leaves_an_agent_that_moved_to_another_instance_as_that_one_wrote_it() {
+    use fleet_server::fleet::{AppState, Transport};
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let uid = InstanceUid([0x83; 16]);
+    let report = |sequence_num: u64, healthy: bool| AgentToServer {
+        instance_uid: uid.as_bytes().to_vec(),
+        sequence_num,
+        capabilities: AgentCapabilities::ReportsStatus as u64
+            | AgentCapabilities::ReportsHealth as u64,
+        health: Some(opamp::proto::ComponentHealth {
+            healthy,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let [a, b] = [
+        "00000000-0000-7000-8000-00000000000a",
+        "00000000-0000-7000-8000-00000000000b",
+    ]
+    .map(|lease| {
+        let state = AppState::on(&records(&schema)).expect("state");
+        state.serve_under(tokio::sync::watch::channel(Some(lease.to_string())).1);
+        state
+    });
+    a.process(report(1, true), Transport::WebSocket, Some(7));
+    // The Agent reconnects to B, which writes that it holds it, and its next report.
+    b.process(report(2, false), Transport::WebSocket, Some(9));
+    let stored = || {
+        schema.query(&format!(
+            "SELECT holder::text || ' ' || sequence_num FROM agents WHERE instance_uid = '{uid}'"
+        ))
+    };
+    assert_eq!(stored(), ["00000000-0000-7000-8000-00000000000b 2"]);
+
+    a.flush_agents();
+    assert_eq!(
+        stored(),
+        ["00000000-0000-7000-8000-00000000000b 2"],
+        "what B wrote stays"
+    );
+}
+
 /// An Agent that has just connected to A is not forgotten through B before A's next presence
 /// batch: the report that connects it writes that A holds it, at once.
 /// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts

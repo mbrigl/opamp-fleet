@@ -2207,18 +2207,25 @@ impl AppState {
     /// `last_seen` is current and whose next compressed report is accepted without a gap. On a
     /// shared store only the records of the Agents this instance heard from are written: of the
     /// others it holds what it loaded, and another instance carries them
-    /// (ADR-draft-the-fleet-record-of-agents-and-hosts clause 2).
+    /// (ADR-draft-the-fleet-record-of-agents-and-hosts clause 2). Of those, only the ones no other
+    /// instance holds the connection of: an Agent heard here that moved to another instance keeps
+    /// what that instance wrote of it.
     pub fn flush_agents(&self) {
         let fleet = self.fleet.lock().expect("fleet lock");
         let mut written = self.written.lock().expect("written lock");
         let shared = self.agent_store.is_shared();
+        let holder = self.lease.get().and_then(|lease| lease.borrow().clone());
         for (uid, record) in fleet.iter().filter(|(_, record)| record.heard || !shared) {
             let persisted = record.to_persisted();
-            match self.agent_store.write_report(uid, &persisted) {
+            match self.agent_store.write_report_unless_held_elsewhere(
+                uid,
+                &persisted,
+                holder.as_deref(),
+            ) {
                 Ok(true) => {
                     written.insert(*uid, persisted.durable_digest());
                 }
-                // Forgotten through another instance: not written again.
+                // Forgotten through another instance, or held by another: not written.
                 Ok(false) => {}
                 Err(e) => warn!(agent = %uid, error = %e, "cannot flush the agent record"),
             }
@@ -6502,6 +6509,15 @@ mod tests {
         }
         fn write_report(&self, uid: &InstanceUid, record: &PersistedAgent) -> Result<bool, String> {
             self.inner.write_report(uid, record)
+        }
+        fn write_report_unless_held_elsewhere(
+            &self,
+            uid: &InstanceUid,
+            record: &PersistedAgent,
+            holder: Option<&str>,
+        ) -> Result<bool, String> {
+            self.inner
+                .write_report_unless_held_elsewhere(uid, record, holder)
         }
         fn create_within(
             &self,

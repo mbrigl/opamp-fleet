@@ -253,6 +253,25 @@ pub trait AgentStore: Send + Sync {
         Ok(true)
     }
 
+    /// [`write_report`](Self::write_report) at the shutdown flush: on a shared store only where
+    /// no other Server holds the Agent's connection, where the stored holder is none or `holder`,
+    /// so an Agent that moved to another Server keeps what that Server wrote of it
+    /// (ADR-draft-the-fleet-record-of-agents-and-hosts clause 2). `holder` is the instance id of
+    /// this Server's lease, `None` without one. Answers whether it wrote the record. A store whose
+    /// one Server is its only writer writes as `write_report` does.
+    ///
+    /// # Errors
+    /// Returns an error when the record cannot be written.
+    fn write_report_unless_held_elsewhere(
+        &self,
+        uid: &InstanceUid,
+        record: &PersistedAgent,
+        holder: Option<&str>,
+    ) -> Result<bool, String> {
+        let _ = holder;
+        self.write_report(uid, record)
+    }
+
     /// Creates the record of an Agent first heard of, unless the store holds `max_records` records
     /// already. A shared store counts them where they are stored, in the step that creates it, so
     /// the bound holds for every Server on it, however many create at once (ADR-0021 clause 12).
