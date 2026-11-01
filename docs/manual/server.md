@@ -650,12 +650,23 @@ server migrate-to-postgres --from /var/lib/opamp-fleet/fleet-data \
 
 - It refuses a database that holds any of the Server's tables, and a `--data-dir` that is not
   empty, and checks the database before it creates anything.
+- With an S3 bucket in [`[blobs]`](#blobs) it takes no `--data-dir`, as a Server on PostgreSQL and
+  S3 keeps nothing on its disk, and refuses one, naming the flag:
+
+  ```sh
+  server migrate-to-postgres --from /var/lib/opamp-fleet/fleet-data \
+      --config /etc/opamp-fleet/server.toml
+  ```
 - It reads every record of the old `data_dir` as a Server's start would, so a record a start would
   refuse stops the copy, naming it, before anything is written into the database. It only reads
   the old `data_dir`: what a start would repair there — a missing directory, a leftover temporary
   file, a mode — it leaves as it is.
-- With the filesystem blob store it copies `blobs/` into the new `data_dir` byte for byte; then it
-  applies the schema and writes every record in one transaction.
+- With the filesystem blob store it copies `blobs/` into the new `data_dir` byte for byte. With S3
+  it uploads into the bucket every artifact of the old `blobs/` that a Package entry names and the
+  bucket lacks, hashed as the switch to `"s3"` hashes it: a file whose content does not match its
+  name stops the copy, naming it, and so does an entry whose artifact neither holds. Then it
+  applies the schema and writes every record in one transaction. What it uploaded stays in the
+  bucket when the copy fails, and a second run finds it there.
 - It copies no audit entry. The old `audit/` stays where it is as the closed archive, which no
   Server writes to again, and the copy records the `seq` and the hash of its last entry: the first
   audit chain in the database names that entry as its `predecessor`, and
@@ -671,10 +682,8 @@ server migrate-to-postgres --from /var/lib/opamp-fleet/fleet-data \
   tables and the new `data_dir` empty.
 
 Then set `data_dir` to the new directory and `[database] store = "postgres"`, and start the
-Server. With an S3 bucket in [`[blobs]`](#blobs), start once with `"s3"` on the old `data_dir`
-before the copy, so the bucket holds every artifact; then remove `data_dir` instead, as a Server
-on PostgreSQL and S3 has none, and the new directory stays empty. Moving records back from
-PostgreSQL to files is not provided.
+Server. With S3, remove `data_dir` from `server.toml` instead, if it names one. Moving records back
+from PostgreSQL to files is not provided.
 
 ## Upgrading to one data directory
 

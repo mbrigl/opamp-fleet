@@ -635,7 +635,7 @@ impl HttpConnector for TlsConnector {
 /// Copies what the bucket lacks from `data_dir/blobs/` (ADR-0029 clause 19): every blob of
 /// `referenced` that `store` does not hold and `dir` does, hashed again on the way — a file whose
 /// content does not match its name fails, naming it — and uploaded as `put` does. Each is logged.
-/// `dir` is only read: removing it is the operator's.
+/// `dir` is only read: removing it is the operator's. Answers how many it uploaded.
 ///
 /// # Errors
 /// Returns an error naming the file when it cannot be read or does not match its name, or when
@@ -644,7 +644,8 @@ pub fn copy_from_filesystem<'a>(
     dir: &Path,
     referenced: impl IntoIterator<Item = &'a str>,
     store: &dyn BlobStore,
-) -> Result<(), String> {
+) -> Result<usize, String> {
+    let mut uploaded = 0;
     for sha256 in referenced {
         let path = dir.join(sha256);
         if !is_hash(sha256) || !path.is_file() || store.exists(sha256)? {
@@ -688,12 +689,13 @@ pub fn copy_from_filesystem<'a>(
             "copied an artifact from {} into the bucket; the file is left in place",
             dir.display()
         );
+        uploaded += 1;
     }
-    Ok(())
+    Ok(uploaded)
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::config::BlobsConfig;
     use crate::fs::FsBlobStore;
@@ -701,7 +703,7 @@ mod tests {
 
     /// The store the S3 tests run against (ADR-0029 clause 20), under a prefix of its own so that
     /// tests running at once never see each other's keys; `None`, said aloud, where none is named.
-    fn named_store() -> Option<S3BlobsConfig> {
+    pub(crate) fn named_store() -> Option<S3BlobsConfig> {
         let variable = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
         let (Some(endpoint), Some(bucket)) = (
             variable("FLEET_TEST_S3_ENDPOINT"),
@@ -730,7 +732,7 @@ mod tests {
     }
 
     /// The same settings again — a second Server start on the same prefix.
-    fn again(config: &S3BlobsConfig) -> S3BlobsConfig {
+    pub(crate) fn again(config: &S3BlobsConfig) -> S3BlobsConfig {
         S3BlobsConfig {
             endpoint: config.endpoint.clone(),
             bucket: config.bucket.clone(),
@@ -754,7 +756,7 @@ mod tests {
     }
 
     /// Every key under the store's prefix, past the port.
-    fn keys(store: &S3BlobStore) -> Vec<String> {
+    pub(crate) fn keys(store: &S3BlobStore) -> Vec<String> {
         let raw = store.store.clone();
         let root = store.root();
         let mut keys: Vec<String> = store
@@ -769,7 +771,7 @@ mod tests {
     }
 
     /// Leaves the bucket as the test found it.
-    fn clear(store: &S3BlobStore) {
+    pub(crate) fn clear(store: &S3BlobStore) {
         for key in keys(store) {
             store.delete_key(Key::from(key)).expect("clear");
         }

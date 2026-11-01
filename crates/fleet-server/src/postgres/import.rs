@@ -5,9 +5,11 @@
 //! before it has been found so. Every record of the old `data_dir` is then read through the
 //! filesystem adapters — from a copy, since they repair what they open — so a record that would
 //! fail a Server's startup fails here before anything is written. With the filesystem blob store,
-//! the blobs are copied byte for byte into the new `data_dir`. The audit record is not copied: the
-//! old `audit/` stays as the closed archive, and the `seq` and the hash of its last entry are
-//! recorded for the first chain the database opens to name as its predecessor. Then the
+//! the blobs are copied byte for byte into the new `data_dir`; with S3 there is no new `data_dir`,
+//! and the blobs the Package entries reference are uploaded into the bucket, the records read
+//! from a copy in a directory of the run's own. The audit record is not copied: the old `audit/`
+//! stays as the closed archive, and the `seq` and the hash of its last entry are recorded for the
+//! first chain the database opens to name as its predecessor. Then the
 //! schema and every record are written in one transaction, so a copy that fails leaves the
 //! database without the Server's tables, and the new `data_dir` as empty as it was. The old
 //! `data_dir` is only read — no directory created, no mode changed, no file removed: it stays as
@@ -22,7 +24,7 @@ use super::{client, schema, sql, Database, IMPORT_TIMEOUT};
 use crate::agent_store::{AgentStore as _, PersistedAgent};
 use crate::blobs::BlobStore as _;
 use crate::bootstrap::{BootstrapStore as _, Entry as BootstrapEntry};
-use crate::config::PostgresConfig;
+use crate::config::{PostgresConfig, S3BlobsConfig};
 use crate::configs::{ConfigBackend as _, Configuration};
 use crate::deployments::{Deployment, DeploymentBackend as _};
 use crate::enrolment::{EnrolmentStore as _, Persisted};
@@ -151,28 +153,33 @@ impl Records {
     }
 }
 
-/// Copies the `data_dir` `from` into the database `config` names and the new, empty `data_dir`
-/// `to` (ADR-0029 clause 27). `filesystem_blobs` copies `blobs/` too, as the filesystem blob store
-/// keeps the artifacts there.
+/// Where the copy puts the blobs (ADR-draft-the-servers-state-and-its-stores clause 27).
+#[derive(Clone, Copy)]
+pub enum Blobs<'a> {
+    /// The filesystem blob store: `blobs/` is copied into this new, empty `data_dir`.
+    Files(&'a Path),
+    /// The bucket: every blob a Package entry references and the bucket lacks is uploaded from the
+    /// old `data_dir/blobs/`. There is no new `data_dir`.
+    Bucket(&'a S3BlobsConfig),
+}
+
+/// Copies the `data_dir` `from` into the database `config` names, and its blobs where `blobs`
+/// says (ADR-draft-the-servers-state-and-its-stores clause 27).
 ///
 /// # Errors
-/// Returns an error naming what could not be read or copied, when `to` is not empty, and when the
-/// database holds any of the Server's tables; the database then holds none of them.
-pub fn run(
-    from: &Path,
-    to: &Path,
-    config: &PostgresConfig,
-    filesystem_blobs: bool,
-) -> Result<Report, String> {
-    run_in(from, to, config, filesystem_blobs, None)
+/// Returns an error naming what could not be read or copied, when the new `data_dir` is not
+/// empty, when the database holds any of the Server's tables, when a blob does not match its
+/// name, and when a Package entry's blob is neither in the old `data_dir` nor in the bucket; the
+/// database then holds none of the Server's tables.
+pub fn run(from: &Path, blobs: Blobs<'_>, config: &PostgresConfig) -> Result<Report, String> {
+    run_in(from, blobs, config, None)
 }
 
 /// [`run`] in the schema `schema` rather than the role's default.
 pub(crate) fn run_in(
     from: &Path,
-    to: &Path,
+    blobs: Blobs<'_>,
     config: &PostgresConfig,
-    filesystem_blobs: bool,
     schema: Option<&str>,
 ) -> Result<Report, String> {
     // Nothing is created or changed before the database has been found without the Server's
@@ -180,6 +187,19 @@ pub(crate) fn run_in(
     if !from.is_dir() {
         return Err(format!("{} is not a data directory", from.display()));
     }
+    let to = match blobs {
+        Blobs::Files(to) => to,
+        Blobs::Bucket(bucket) => {
+            let database = checked(config, schema)?;
+            let store = crate::s3::S3BlobStore::open(bucket)?;
+            // The records are read from a copy, made in a directory of this run's own that
+            // nobody else may enter, and removed whatever the outcome.
+            let work = work_dir()?;
+            let copied = copy(from, &work, &database, Some((&store, bucket)));
+            let _ = std::fs::remove_dir_all(&work);
+            return copied;
+        }
+    };
     let existed = to.exists();
     if existed {
         let empty = std::fs::read_dir(to)
@@ -193,16 +213,8 @@ pub(crate) fn run_in(
             ));
         }
     }
-    let database = Database::connect(config, schema)?;
-    let tables = database.server_tables()?;
-    if !tables.is_empty() {
-        return Err(format!(
-            "the {} already holds the Server's tables ({}) — copy into a database without them",
-            database.name(),
-            tables.join(", ")
-        ));
-    }
-    let copied = copy(from, to, &database, filesystem_blobs);
+    let database = checked(config, schema)?;
+    let copied = copy(from, to, &database, None);
     if copied.is_err() {
         // `to` was empty or absent, so whatever is in it now is this copy's.
         let _ = if existed {
@@ -223,16 +235,51 @@ pub(crate) fn run_in(
     copied
 }
 
+/// The database `config` names, checked to hold none of the Server's tables.
+fn checked(config: &PostgresConfig, schema: Option<&str>) -> Result<Database, String> {
+    let database = Database::connect(config, schema)?;
+    let tables = database.server_tables()?;
+    if !tables.is_empty() {
+        return Err(format!(
+            "the {} already holds the Server's tables ({}) — copy into a database without them",
+            database.name(),
+            tables.join(", ")
+        ));
+    }
+    Ok(database)
+}
+
+/// A new, owner-only directory of this run's own under the system's temporary directory, created
+/// where nothing of that name exists: where the records are read with S3, which has no new
+/// `data_dir`.
+fn work_dir() -> Result<std::path::PathBuf, String> {
+    let mut random = [0u8; 16];
+    ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut random)
+        .map_err(|_| "no randomness for a working directory".to_string())?;
+    let dir = std::env::temp_dir().join(format!("opamp-fleet-migrate-{}", hex::encode(random)));
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        builder.mode(0o700);
+    }
+    builder
+        .create(&dir)
+        .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    Ok(dir)
+}
+
 /// The copy itself, once the database has been checked. The records are read from a copy of the
 /// old `data_dir` made inside `to`: the filesystem adapters create what is missing, remove a
 /// leftover temporary file and rewrite what they drop, as a Server's startup does, and the old
 /// `data_dir` must not change in any way. The copy is removed once read; an error names the old
 /// path, not the copy's.
+/// With `bucket`, `to` is only where the records are read, and the blobs go into the bucket.
 fn copy(
     from: &Path,
     to: &Path,
     database: &Database,
-    filesystem_blobs: bool,
+    bucket: Option<(&crate::s3::S3BlobStore, &S3BlobsConfig)>,
 ) -> Result<Report, String> {
     fs::create_private_dir(to)?;
     let staging = to.join(STAGING);
@@ -263,7 +310,14 @@ fn copy(
         ),
         None => "no audit record to link".to_string(),
     });
-    if filesystem_blobs {
+    if let Some((store, bucket)) = bucket {
+        report.lines.push(upload(
+            &from.join(fs::BLOBS),
+            &records.packages,
+            store,
+            bucket,
+        )?);
+    } else {
         let blobs = from.join(fs::BLOBS);
         let target = to.join(fs::BLOBS);
         fs::create_private_dir(&target)?;
@@ -305,14 +359,63 @@ fn copy(
             }
             transaction.commit().await.map_err(sql)
         })
-        .map_err(|e| {
-            format!(
+        .map_err(|e| match bucket {
+            Some((_, bucket)) => format!(
+                "{e} — nothing was written into the database, and what was uploaded stays in \
+                 bucket {}; run the copy again",
+                bucket.bucket
+            ),
+            None => format!(
                 "{e} — nothing was written into the database or into {}; run the copy again",
                 to.display()
-            )
+            ),
         })?;
     report.lines.extend(lines);
     Ok(report)
+}
+
+/// Uploads into the bucket every blob of `packages` it lacks from the old `blobs/` directory,
+/// each hashed against its name, as a Server's switch to S3 does (clause 19), and checks that the
+/// bucket then holds every one. Answers the report's line.
+fn upload(
+    blobs: &Path,
+    packages: &[Package],
+    store: &crate::s3::S3BlobStore,
+    bucket: &S3BlobsConfig,
+) -> Result<String, String> {
+    let referenced: std::collections::BTreeSet<String> = packages
+        .iter()
+        .flat_map(|package| package.entries.values())
+        .map(|entry| hex::encode(&entry.content_hash))
+        .collect();
+    let uploaded =
+        crate::s3::copy_from_filesystem(blobs, referenced.iter().map(String::as_str), store)?;
+    let held: std::collections::HashSet<String> = store
+        .list()?
+        .into_iter()
+        .map(|(sha256, _)| sha256)
+        .collect();
+    for package in packages {
+        for (platform, entry) in &package.entries {
+            let sha256 = hex::encode(&entry.content_hash);
+            if !held.contains(&sha256) {
+                return Err(format!(
+                    "package {} for {}: its artifact {sha256} is neither in {} nor in bucket {} — \
+                     restore it from a backup, or delete the entry, and copy again",
+                    package.id,
+                    platform.tag(),
+                    blobs.display(),
+                    bucket.bucket
+                ));
+            }
+        }
+    }
+    Ok(format!(
+        "{} blobs in bucket {}, {uploaded} of them uploaded from {}",
+        referenced.len(),
+        bucket.bucket,
+        blobs.display()
+    ))
 }
 
 /// Where inside the new `data_dir` the records of the old one are copied to be read.
@@ -627,13 +730,14 @@ mod tests {
 
         std::fs::create_dir(&new).expect("mkdir");
         std::fs::write(new.join("stray"), "x").expect("write");
-        let err =
-            run_in(&old, &new, &test.config(), true, Some(&test.schema)).expect_err("not empty");
+        let err = run_in(&old, Blobs::Files(&new), &test.config(), Some(&test.schema))
+            .expect_err("not empty");
         assert!(err.contains("not empty"), "{err}");
         std::fs::remove_file(new.join("stray")).expect("rm");
         assert_eq!(snapshot(&old), before, "a refused copy changes nothing");
 
-        let report = run_in(&old, &new, &test.config(), true, Some(&test.schema)).expect("copy");
+        let report =
+            run_in(&old, Blobs::Files(&new), &test.config(), Some(&test.schema)).expect("copy");
         assert!(
             report.lines.iter().any(|line| line == "1 agents"),
             "{report:?}"
@@ -733,8 +837,13 @@ mod tests {
         let again = dir.path().join("again");
         let mut err = String::new();
         for _ in 0..50 {
-            err = run_in(&old, &again, &test.config(), true, Some(&test.schema))
-                .expect_err("the tables are there");
+            err = run_in(
+                &old,
+                Blobs::Files(&again),
+                &test.config(),
+                Some(&test.schema),
+            )
+            .expect_err("the tables are there");
             if !err.contains("one Server per database") {
                 break;
             }
@@ -747,6 +856,109 @@ mod tests {
             "nothing is created before the database is checked"
         );
         assert_eq!(snapshot(&old), before, "the old data_dir is unchanged");
+    }
+
+    /// With S3 the copy has no new `data_dir`: it uploads into the bucket every blob a Package
+    /// entry references and the bucket lacks, and nothing else, leaves no staging object and the old
+    /// `data_dir` unchanged, and a Server on PostgreSQL and S3 then opens every entry's blob. A
+    /// Package entry whose blob neither the old `data_dir` nor the bucket holds fails the copy,
+    /// naming the entry, and leaves the database without the Server's tables
+    /// (ADR-draft-the-servers-state-and-its-stores clause 27).
+    /// Verifies: ADR-draft-the-servers-state-and-its-stores
+    #[test]
+    fn migrate_to_postgres_with_s3_uploads_the_referenced_blobs_and_takes_no_data_dir() {
+        use crate::s3::tests::{again, clear, keys, named_store};
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let Some(bucket) = named_store() else { return };
+        let dir = tempfile::tempdir().expect("tempdir");
+        let old = dir.path().join("old");
+        fixture(&old);
+        let artifact = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(b"the artifact"));
+        let unreferenced =
+            hex::encode(<sha2::Sha256 as sha2::Digest>::digest(b"no entry names it"));
+        std::fs::write(
+            old.join(fs::BLOBS).join(&unreferenced),
+            b"no entry names it",
+        )
+        .expect("unreferenced");
+        let before = snapshot(&old);
+        // The copies of the records this test's runs make: no other test makes one.
+        let copies = || {
+            std::fs::read_dir(std::env::temp_dir())
+                .expect("temp")
+                .flatten()
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with("opamp-fleet-migrate-")
+                })
+                .count()
+        };
+        let entries = copies();
+
+        let report = run_in(
+            &old,
+            Blobs::Bucket(&bucket),
+            &test.config(),
+            Some(&test.schema),
+        )
+        .expect("copy");
+        assert!(
+            report.lines.iter().any(|line| line
+                == &format!(
+                    "1 blobs in bucket {}, 1 of them uploaded from {}",
+                    bucket.bucket,
+                    old.join(fs::BLOBS).display()
+                )),
+            "{report:?}"
+        );
+        let store = crate::s3::S3BlobStore::open(&bucket).expect("open");
+        assert_eq!(
+            keys(&store),
+            vec![format!("{}blobs/{artifact}", bucket.prefix)],
+            "the referenced blob alone, and no staging object"
+        );
+        assert_eq!(snapshot(&old), before, "the old data_dir is unchanged");
+        assert_eq!(copies(), entries, "the copy of the records is removed");
+        let records = crate::Records::Postgres(test.open());
+        let (packages, _) = crate::packages::PackageStore::open_on(
+            &records,
+            None,
+            &crate::config::BlobsConfig {
+                store: "s3".to_string(),
+                s3: Some(again(&bucket)),
+            },
+        )
+        .expect("every entry finds its blob in the bucket");
+        assert!(!packages.is_empty());
+
+        let Some(second) = TestDatabase::named() else {
+            return;
+        };
+        let mut elsewhere = again(&bucket);
+        elsewhere.prefix = format!("{}elsewhere/", bucket.prefix);
+        std::fs::remove_file(old.join(fs::BLOBS).join(&artifact)).expect("lose the blob");
+        let err = run_in(
+            &old,
+            Blobs::Bucket(&elsewhere),
+            &second.config(),
+            Some(&second.schema),
+        )
+        .expect_err("a blob neither holds");
+        assert!(err.contains("otelcol@1.2.3"), "{err}");
+        assert!(err.contains(&artifact), "{err}");
+        assert!(
+            crate::postgres::Database::connect(&second.config(), Some(&second.schema))
+                .expect("connect")
+                .server_tables()
+                .expect("tables")
+                .is_empty(),
+            "the database holds none of the Server's tables"
+        );
+        clear(&store);
     }
 
     /// The database is checked before anything is touched: one that cannot be reached leaves the
@@ -782,7 +994,7 @@ mod tests {
             ca_file: None,
             tls: false,
         };
-        let err = run(&old, &new, &config, true).expect_err("nothing listens");
+        let err = run(&old, Blobs::Files(&new), &config).expect_err("nothing listens");
         assert!(err.contains(&format!("127.0.0.1:{port}")), "{err}");
         assert_eq!(snapshot(&old), before, "the old data_dir is unchanged");
         assert!(!new.exists(), "no new data_dir");
@@ -803,7 +1015,7 @@ mod tests {
         fixture(&old);
         test.sql("CREATE TYPE enrolment_requests AS (id text)");
         let new = dir.path().join("new");
-        let err = run_in(&old, &new, &test.config(), true, Some(&test.schema))
+        let err = run_in(&old, Blobs::Files(&new), &test.config(), Some(&test.schema))
             .expect_err("the last table cannot be created");
         assert!(
             err.contains("nothing was written into the database"),
@@ -828,7 +1040,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let (old, new) = (dir.path().join("old"), dir.path().join("new"));
         fixture(&old);
-        run_in(&old, &new, &test.config(), true, Some(&test.schema)).expect("copy");
+        run_in(&old, Blobs::Files(&new), &test.config(), Some(&test.schema)).expect("copy");
         let archive = old.join(fs::AUDIT);
         let tail = fs::audit_tail(&archive).expect("tail").expect("entries");
 
@@ -956,8 +1168,8 @@ mod tests {
         let mut text = std::fs::read_to_string(&file).expect("read");
         text.push_str("{\"seq\":4,\"pr");
         std::fs::write(&file, text).expect("write");
-        let err =
-            run_in(&old, &new, &test.config(), true, Some(&test.schema)).expect_err("a torn end");
+        let err = run_in(&old, Blobs::Files(&new), &test.config(), Some(&test.schema))
+            .expect_err("a torn end");
         assert!(
             err.contains("torn") && err.contains(&file.display().to_string()),
             "{err}"

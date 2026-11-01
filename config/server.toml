@@ -191,6 +191,8 @@ max_package_size_bytes = 1073741824
 # owner and at most its group; no PG* variable changes the connection. An existing data_dir is copied
 # into the database once, while the Server is stopped, by
 #   server migrate-to-postgres --from <data_dir> --data-dir <new>
+# or, with [blobs] store = "s3", which takes no --data-dir and uploads the artifacts to the bucket,
+#   server migrate-to-postgres --from <data_dir>
 # [database]
 # store = "postgres"
 # lease_renew_secs = 10   # how often an instance renews its lease

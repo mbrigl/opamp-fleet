@@ -22,7 +22,7 @@ fn usage() -> ! {
          server audit-verify --config <server.toml> [--archive <old data_dir>/audit]\n       \
          server pki status [--config <server.toml>]\n       \
          server migrate --config-dir <old> --packages-dir <old> --data-dir <new>\n       \
-         server migrate-to-postgres --from <data_dir> --data-dir <new> [--config <server.toml>]"
+         server migrate-to-postgres --from <data_dir> [--data-dir <new>] [--config <server.toml>]"
     );
     std::process::exit(2);
 }
@@ -212,13 +212,15 @@ fn migrate(mut args: impl Iterator<Item = String>) -> ! {
     }
 }
 
-/// `server migrate-to-postgres --from <data_dir> --data-dir <new> [--config <server.toml>]`
-/// (ADR-0029 clause 27): copies the records of `data_dir` into the database the configuration
-/// names, and its filesystem blobs into a new, empty `data_dir`, leaving the old one as the backup
-/// and its audit record as the archive the first chain links to. It is run while the Server is
-/// stopped; it takes the database's lock, so a Server still running against it stops the copy.
-/// Prints what it copied, and exits non-zero when it could not copy all of it, leaving the
-/// database without the Server's tables.
+/// `server migrate-to-postgres --from <data_dir> [--data-dir <new>] [--config <server.toml>]`
+/// (ADR-draft-the-servers-state-and-its-stores clause 27): copies the records of `data_dir` into
+/// the database the configuration names, leaving the old directory as the backup and its audit
+/// record as the archive the first chain links to. With the filesystem blob store the blobs go into
+/// a new, empty `data_dir`; with S3 there is none, `--data-dir` is refused, and the blobs the
+/// Package entries reference are uploaded into the bucket. It is run while the Server is stopped;
+/// it takes the database's lock, so a Server still running against it stops the copy. Prints what
+/// it copied, and exits non-zero when it could not copy all of it, leaving the database without
+/// the Server's tables.
 fn migrate_to_postgres(mut args: impl Iterator<Item = String>) -> ! {
     let (mut from, mut data_dir, mut config) = (None, None, None);
     while let Some(flag) = args.next() {
@@ -233,9 +235,7 @@ fn migrate_to_postgres(mut args: impl Iterator<Item = String>) -> ! {
             _ => usage(),
         }
     }
-    let (Some(from), Some(data_dir)) = (from, data_dir) else {
-        usage()
-    };
+    let Some(from) = from else { usage() };
     let config = load_config(config).config;
     let Some(database) = config.database.postgres() else {
         eprintln!(
@@ -244,23 +244,45 @@ fn migrate_to_postgres(mut args: impl Iterator<Item = String>) -> ! {
         );
         std::process::exit(1);
     };
-    match fleet_server::postgres::import::run(
-        &from,
-        &data_dir,
-        database,
-        config.blobs.s3().is_none(),
-    ) {
+    let (blobs, done) = match (config.blobs.s3(), &data_dir) {
+        (Some(_), Some(_)) => {
+            eprintln!(
+                "--data-dir: with [blobs] store = \"s3\" the copy takes none, as a Server on \
+                 PostgreSQL and S3 keeps nothing on its disk — the blobs go into the bucket; copy \
+                 again without it"
+            );
+            std::process::exit(1);
+        }
+        (Some(bucket), None) => (
+            fleet_server::postgres::import::Blobs::Bucket(bucket),
+            format!(
+                "copied into the database {} and the bucket {} — remove data_dir from \
+                 server.toml if it names one, keep [database] store = \"postgres\" and [blobs] \
+                 store = \"s3\", and start the Server; {} stays as the backup",
+                database.dbname,
+                bucket.bucket,
+                from.display()
+            ),
+        ),
+        (None, Some(data_dir)) => (
+            fleet_server::postgres::import::Blobs::Files(data_dir),
+            format!(
+                "copied into the database {} and into {} — set data_dir to it in server.toml, \
+                 keep [database] store = \"postgres\", and start the Server; {} stays as the \
+                 backup",
+                database.dbname,
+                data_dir.display(),
+                from.display()
+            ),
+        ),
+        (None, None) => usage(),
+    };
+    match fleet_server::postgres::import::run(&from, blobs, database) {
         Ok(report) => {
             for line in &report.lines {
                 println!("{line}");
             }
-            println!(
-                "copied into the database {} and into {} — set data_dir to it in server.toml, keep [database] \
-                 store = \"postgres\", and start the Server; {} stays as the backup",
-                database.dbname,
-                data_dir.display(),
-                from.display()
-            );
+            println!("{done}");
             std::process::exit(0);
         }
         Err(e) => {
