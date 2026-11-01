@@ -336,7 +336,7 @@ secret_access_key_file = "/run/secrets/s3-secret-access-key"
 | `s3.endpoint` | — | Required with `"s3"`. The store's URL, `https://`. `http://` is accepted to `127.0.0.1` or `::1` alone; any other fails startup naming the key. |
 | `s3.bucket` | — | Required with `"s3"`. The bucket. The Server does not create it: one that does not exist or cannot be listed fails startup, naming it and the error. |
 | `s3.region` | — | Required with `"s3"`. The region the requests are signed for; a store without regions takes any, such as `us-east-1`. |
-| `s3.prefix` | empty | Where in the bucket the Server's keys live: empty, or ending in `/`. Artifacts are kept at `<prefix>blobs/<sha256>`, an upload in progress at `<prefix>staging/<random>`. Letters, digits, space and `- _ . / ! ' ( ) & $ @ = ; : + ,` only: any other character, which the S3 client would percent-encode, fails startup naming the key. |
+| `s3.prefix` | empty | Where in the bucket the Server's keys live: empty, or ending in `/`. Artifacts are kept at `<prefix>blobs/<sha256>`, an upload in progress at `<prefix>staging/<lease>/<random>`. Letters, digits, space and `- _ . / ! ' ( ) & $ @ = ; : + ,` only: any other character, which the S3 client would percent-encode, fails startup naming the key. |
 | `s3.ca_file` | unset | One PEM root for a store whose certificate no public root signs. |
 | `s3.access_key_id` | unset | The key ID of a static key pair. Set together with `secret_access_key_file` or not at all; one without the other fails startup naming both. |
 | `s3.secret_access_key_file` | unset | The file holding that key pair's secret, readable by the Server's account and at most its group (`0600`, or `0640`/`0440` as an orchestrator mounts a secret for a group); one others can read, or its group can write, fails startup naming the key. The secret is never written into `server.toml`. |
@@ -361,11 +361,35 @@ lease of the instance that writes it, or `fs` on the filesystem record store. Th
 is no longer live are interrupted uploads: an instance deletes them when it starts and whenever it
 takes over a lapsed lease, and never those of a live one; on the filesystem record store, every
 staging object goes at startup. A lease released at an orderly shutdown is taken over by no
-instance, so what its uploads left stays until an instance next starts; it costs storage only. Any other key under `<prefix>` that is not `blobs/<sha256>` fails
-startup naming it. At startup the Server lists the bucket for each artifact's size and downloads
-nothing: unlike the filesystem store, it does not hash the artifacts again. An object altered in the
-bucket is served, and the Client's own hash and signature checks refuse it. The bucket, its
-credentials, policies, retention and backups are the operator's.
+instance, so what its uploads left stays until an instance next starts; it costs storage only. Any
+other key under `<prefix>` that is not `blobs/<sha256>` fails startup naming it. At startup the
+Server lists the bucket for each artifact's size and downloads nothing: unlike the filesystem store,
+it does not hash the artifacts again. An object altered in the bucket is served, and the Client's
+own hash and signature checks refuse it. The bucket, its credentials, policies, retention and
+backups are the operator's.
+
+An instance that stops while an upload streams leaves the parts of an unfinished multipart upload,
+which are not objects: the Server neither lists nor deletes them. Expire them with a lifecycle rule
+on the bucket that aborts incomplete multipart uploads under `<prefix>staging/`, for example after a
+day:
+
+```json
+{
+  "Rules": [
+    {
+      "ID": "abort-incomplete-multipart-uploads",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "<prefix>staging/" },
+      "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 1 }
+    }
+  ]
+}
+```
+
+```sh
+aws s3api put-bucket-lifecycle-configuration --bucket <bucket> \
+    --lifecycle-configuration file://lifecycle.json
+```
 
 **Switching to `"s3"`** copies what is missing: at the first start with `"s3"`, every artifact a
 Package entry names that the bucket lacks is read from `data_dir/blobs/`, hashed — a file whose
