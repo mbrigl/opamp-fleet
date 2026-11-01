@@ -380,12 +380,12 @@ and configured in the Server's configuration alone, and move an old layout by an
     Server has no `data_dir` (clause 1), and two commands make the copy instead, never a start:
     - `server migrate-to-postgres` from the old `data_dir`, as the records move (clause 27).
     - `server blobs-to-s3 --data-dir <data_dir>`, for a Server already on PostgreSQL with the
-      filesystem blob store. It runs once, with the `server.toml` that names the database and the
-      bucket, and refuses to run while any instance holds a live lease. It uploads, as above,
-      every blob of `<data_dir>/blobs/` that a Package entry references and the bucket lacks, then
-      checks that the bucket holds the blob of every entry, and fails naming an entry whose blob it
-      does not hold. It only reads `<data_dir>`. The operator then removes `data_dir` from
-      `server.toml`; removing the directory is theirs.
+      filesystem blob store. It runs once, with the `server.toml` the Server will start with,
+      which names the database and the bucket and no `data_dir` (clause 1), and refuses to run
+      while any instance holds a live lease. It uploads, as above, every blob of
+      `<data_dir>/blobs/` that a Package entry references and the bucket lacks, then checks that
+      the bucket holds the blob of every entry, and fails naming an entry whose blob it does not
+      hold. It only reads `<data_dir>`; removing the directory afterwards is the operator's.
 
     The reverse switch copies nothing: a Package entry whose blob the chosen store does not hold
     fails startup, naming the entry.
