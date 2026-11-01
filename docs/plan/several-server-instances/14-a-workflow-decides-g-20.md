@@ -40,6 +40,7 @@ stack is named in its environment, as the service smoke test and the store check
 - docs/plan/several-server-instances/09-an-instance-on-postgresql-and-s3-needs-no-disk.md
 - docs/plan/several-server-instances/18-a-reload-holds-the-state-lock-only-to-swap.md
 - docs/plan/several-server-instances/19-what-an-assignment-pins-is-decided-in-the-transaction.md
+- docs/plan/several-server-instances/21-the-operator-plane-reads-the-fleet-from-the-database.md
 
 ## Mode
 

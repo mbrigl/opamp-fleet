@@ -35,6 +35,7 @@ which is answered `400`.
 ## Blocked by
 
 - docs/plan/several-server-instances/04-the-fleet-record-is-written-per-column.md
+- docs/plan/several-server-instances/21-the-operator-plane-reads-the-fleet-from-the-database.md
 
 ## Mode
 
