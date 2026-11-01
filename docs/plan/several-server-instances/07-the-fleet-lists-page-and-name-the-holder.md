@@ -26,6 +26,8 @@ download reads through it the Agents behind that Gateway rather than the whole f
   the bound, as today
 - [ ] Given an Agent behind a Gateway carried by B and its Client Agent carried by A, when B places
   the Agent, then it inherits the Client Agent's labels
+- [ ] Given a Gateway's host, when it fetches an artifact, then the check reads the Agents that
+  arrived over that Gateway through the host filter, and not the whole fleet
 
 ## Read first
 
