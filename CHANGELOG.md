@@ -96,6 +96,18 @@ once its tag exists.
   **What to do:** with PostgreSQL, set `max_agents` alike on every instance. Set
   `presence_interval_secs` only with PostgreSQL: with the filesystem store it fails startup.
 
+- **With PostgreSQL the newest connection takes an Agent, and an Agent two instances take in turn
+  is logged as a likely duplicate**
+  ([ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it](docs/adr/draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md)).
+  The instance an Agent connects to names itself as the Agent's holder at once, and the instance
+  that held it before stops carrying it; a presence batch of that instance written afterwards no
+  longer names it again. An Agent whose holder changes more than ten times within a minute is
+  logged as a likely duplicate, with the warning `the agent's holder changed more than ten times
+  within a minute; likely a duplicate instance_uid on two connections`. Migration 9 adds a column
+  to the Agents' table.
+  **What to do:** nothing. On that warning, look for two hosts that run an Agent with one
+  `instance_uid`, such as a cloned VM.
+
 - **With PostgreSQL, an Agent's report, its labels, a restart request and a rollout each write
   their own columns of its record**
   ([ADR-draft-the-fleet-record-of-agents-and-hosts](docs/adr/draft-the-fleet-record-of-agents-and-hosts.md)).
