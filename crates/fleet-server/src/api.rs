@@ -457,8 +457,11 @@ fn parse_instance_uid(text: &str) -> Result<InstanceUid, Refusal> {
 /// it was forgotten between the write and the read: the write stands, and the Agent is simply no
 /// longer in the view to return.
 fn agent_response(state: &AppState, uid: &InstanceUid) -> Response {
-    match state
-        .snapshot()
+    let views = match state.fleet_view() {
+        Ok(views) => views,
+        Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    };
+    match views
         .into_iter()
         .find(|a| a.instance_uid == uid.to_string())
     {
@@ -821,10 +824,22 @@ impl From<fleet::PackageStatusView> for PackageStatusResponse {
     get,
     path = "/api/v1/agents",
     tag = "fleet",
-    responses((status = 200, description = "Every known Agent", body = [AgentResponse]))
+    responses(
+        (status = 200, description = "Every known Agent", body = [AgentResponse]),
+        (status = 500, description = "The fleet cannot be read from the store", body = ErrorBody)
+    )
 )]
-async fn agents(State(state): State<Arc<AppState>>) -> Json<Vec<AgentResponse>> {
-    Json(state.snapshot().into_iter().map(Into::into).collect())
+async fn agents(State(state): State<Arc<AppState>>) -> Response {
+    match state.fleet_view() {
+        Ok(views) => Json(
+            views
+                .into_iter()
+                .map(AgentResponse::from)
+                .collect::<Vec<_>>(),
+        )
+        .into_response(),
+        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
 }
 
 /// Queues a restart of the Agent's Managed Process, delivered as the protocol's restart command
@@ -2294,7 +2309,10 @@ type Refusal = (StatusCode, String);
 async fn list_deployments(State(state): State<Arc<AppState>>) -> Response {
     match deployments(&state) {
         Ok(store) => {
-            let reach = state.deployment_reach();
+            let reach = match state.deployment_reach() {
+                Ok(reach) => reach,
+                Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, e),
+            };
             Json(
                 store
                     .list()
@@ -2607,11 +2625,10 @@ async fn rollout_deployment(
 /// One Deployment as the API answers with it, with the reach counts read from the fleet — so every
 /// response says whom this channel reaches as of now, and not as of whenever it was written.
 fn deployment_response(state: &AppState, deployment: Deployment) -> Response {
-    let reach = state
-        .deployment_reach()
-        .get(&deployment.name)
-        .copied()
-        .unwrap_or_default();
+    let reach = match state.deployment_reach() {
+        Ok(reach) => reach.get(&deployment.name).copied().unwrap_or_default(),
+        Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    };
     Json(DeploymentView::of(deployment, reach)).into_response()
 }
 
@@ -3489,7 +3506,10 @@ async fn list_hosts(State(state): State<Arc<AppState>>) -> Response {
     let Some(revocations) = state.revocations() else {
         return revocation_off();
     };
-    let mut carried = state.host_agents();
+    let mut carried = match state.host_agents() {
+        Ok(carried) => carried,
+        Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    };
     let hosts: Vec<HostView> = revocations
         .hosts()
         .into_iter()
