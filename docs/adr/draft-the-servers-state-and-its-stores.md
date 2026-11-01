@@ -334,8 +334,9 @@ and configured in the Server's configuration alone, and move an old layout by an
       object could not be deleted. The cleanup runs with every sweep of clause 13 — at startup, and
       after an entry is replaced or deleted, a Package deleted, or an upload fails — and whenever
       an instance takes over a lapsed lease. It deletes the staging keys of every lease that is not
-      live, and never those of a live one; with the filesystem record store it deletes everything
-      under `<prefix>staging/`. A starting instance therefore never deletes an upload another
+      live, and never those of a live one. With the filesystem record store it deletes everything
+      under `<prefix>staging/`, and at startup alone, as every upload in progress is its one
+      Server's. A starting instance therefore never deletes an upload another
       instance is still writing, and a staging object that a lease released at an orderly
       shutdown left, or that a takeover's cleanup could not delete, goes with the next sweep on
       any instance. There is no periodic cleanup.
@@ -854,6 +855,7 @@ Tests that carry `Verifies: ADR-0029`:
   `the_next_sweep_on_any_instance_deletes_a_released_leases_staging_object_once`;
   [`postgres/packages.rs`](../../crates/fleet-server/src/postgres/packages.rs)
   `a_sweep_keeps_a_blob_an_entry_stored_through_another_writer_names`,
+  `an_upload_holds_off_a_sweep_until_its_entry_is_committed`,
   `an_upload_whose_blob_a_sweep_took_first_is_refused`,
   `a_startup_sweep_that_cannot_have_the_lock_fails_naming_it`;
   [`postgres/import.rs`](../../crates/fleet-server/src/postgres/import.rs)
