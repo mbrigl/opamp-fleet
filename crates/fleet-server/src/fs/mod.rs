@@ -142,6 +142,39 @@ pub fn open_data_dir_beside_database(root: &Path) -> Result<(), String> {
     create_private_dir(&root.join(BLOBS))
 }
 
+thread_local! {
+    /// Set on a thread while it reads a data directory in place ([`reading_only`]).
+    static READ_ONLY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `read` with this thread's filesystem adapters reading in place and changing nothing: a
+/// missing directory is read as empty rather than created, no mode is set, a temporary file a crash
+/// left is passed over rather than removed, and every write fails. What `server
+/// migrate-to-postgres` reads the old `data_dir` with, so that nothing in it changes and no record
+/// is copied elsewhere to be read (ADR-draft-the-servers-state-and-its-stores clause 27).
+pub(crate) fn reading_only<T>(read: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            READ_ONLY.with(|flag| flag.set(self.0));
+        }
+    }
+    let _restore = Restore(READ_ONLY.with(|flag| flag.replace(true)));
+    read()
+}
+
+fn read_only() -> bool {
+    READ_ONLY.with(std::cell::Cell::get)
+}
+
+/// The refusal of a write while a data directory is read in place.
+fn written_while_reading(path: &Path) -> String {
+    format!(
+        "{} would be written while the data directory is only read",
+        path.display()
+    )
+}
+
 /// The refusal for a path the layout does not name (ADR-0028 clause 23). Skipping it would open a
 /// store that merely looks complete.
 pub(crate) fn unknown(path: &Path) -> String {
@@ -160,9 +193,12 @@ pub(crate) fn unknown(path: &Path) -> String {
 /// Returns an error when the directory cannot be read, or an entry has a name that is not UTF-8.
 pub(crate) fn entries(dir: &Path) -> Result<Vec<(String, PathBuf)>, String> {
     let mut found = Vec::new();
-    for entry in
-        std::fs::read_dir(dir).map_err(|e| format!("cannot read {}: {e}", dir.display()))?
-    {
+    let listed = match std::fs::read_dir(dir) {
+        // Read in place, a directory a Server's start would create holds nothing yet.
+        Err(e) if read_only() && e.kind() == std::io::ErrorKind::NotFound => return Ok(found),
+        listed => listed.map_err(|e| format!("cannot read {}: {e}", dir.display()))?,
+    };
+    for entry in listed {
         let path = entry
             .map_err(|e| format!("cannot read {}: {e}", dir.display()))?
             .path();
@@ -174,6 +210,9 @@ pub(crate) fn entries(dir: &Path) -> Result<Vec<(String, PathBuf)>, String> {
             return Err(unknown(&path));
         };
         if name.ends_with(".tmp") && path.is_file() {
+            if read_only() {
+                continue;
+            }
             std::fs::remove_file(&path)
                 .map_err(|e| format!("cannot remove {}: {e}", path.display()))?;
             continue;
@@ -200,6 +239,9 @@ pub(crate) fn json_files(dir: &Path) -> Result<Vec<(String, PathBuf)>, String> {
 
 /// Removes a file, and is content when it is not there.
 pub(crate) fn remove_file(path: &Path) -> Result<(), String> {
+    if read_only() {
+        return Err(written_while_reading(path));
+    }
     match std::fs::remove_file(path) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
             Err(format!("cannot delete {}: {e}", path.display()))
@@ -220,6 +262,10 @@ pub(crate) fn misnamed(path: &Path, holds: &str) -> String {
 /// Creates `dir` if it is missing and, on Unix, restricts it to its owner (`0700`) — whatever it
 /// holds may carry credentials, and other local users on the Server host have no business there.
 pub fn create_private_dir(dir: &Path) -> Result<(), String> {
+    if read_only() {
+        // Read in place: what is missing is read as empty, and no mode is changed.
+        return Ok(());
+    }
     std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     #[cfg(unix)]
     {
@@ -264,6 +310,9 @@ fn write_temp(path: &Path, bytes: &[u8], durable: bool) -> Result<(), String> {
 /// # Errors
 /// Returns an error naming the path when it cannot be created.
 pub(crate) fn create_owner_only(path: &Path) -> Result<std::fs::File, String> {
+    if read_only() {
+        return Err(written_while_reading(path));
+    }
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create(true).truncate(true);
     #[cfg(unix)]
@@ -301,6 +350,9 @@ fn temp_of(path: &Path) -> PathBuf {
 }
 
 fn rename_into_place(temp: &Path, path: &Path) -> Result<(), String> {
+    if read_only() {
+        return Err(written_while_reading(path));
+    }
     std::fs::rename(temp, path).map_err(|e| format!("cannot persist {}: {e}", path.display()))
 }
 
@@ -325,6 +377,35 @@ pub(crate) mod testing {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Read in place, a data directory changes in no way: a missing directory is read as empty
+    /// and not created, a leftover temporary file stays, and a write fails naming its path;
+    /// outside, the same calls repair and write as before
+    /// (ADR-draft-the-servers-state-and-its-stores clause 27).
+    /// Verifies: ADR-draft-the-servers-state-and-its-stores
+    #[test]
+    fn a_data_directory_read_in_place_is_not_written() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("hosts");
+        let leftover = dir.path().join("enrolment.json.tmp");
+        std::fs::write(&leftover, "{").expect("leftover");
+        reading_only(|| {
+            create_private_dir(&missing).expect("nothing to create");
+            assert_eq!(entries(&missing).expect("empty"), Vec::new());
+            assert_eq!(entries(dir.path()).expect("listed"), Vec::new());
+            let target = dir.path().join("revocations.json");
+            let err = replace(&target, b"[]").expect_err("no write");
+            assert!(err.contains("revocations.json"), "{err}");
+            assert!(remove_file(&leftover).is_err());
+        });
+        assert!(!missing.exists(), "not created");
+        assert!(leftover.exists(), "the leftover stays");
+        assert!(!dir.path().join("revocations.json.tmp").exists());
+        entries(dir.path()).expect("listed");
+        assert!(!leftover.exists(), "outside, the leftover is removed");
+        create_private_dir(&missing).expect("created");
+        assert!(missing.is_dir());
+    }
 
     /// A Server on an empty `data_dir` lays out every directory of ADR-0028 clause 23, each
     /// owner-only; a file or directory the layout does not name fails the open naming its path,

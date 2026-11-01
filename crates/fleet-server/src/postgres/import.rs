@@ -2,15 +2,14 @@
 //! PostgreSQL while the Server is stopped.
 //!
 //! The database is checked first: it must hold none of the Server's tables, and nothing is created
-//! before it has been found so. Every record of the old `data_dir` is then read through the
-//! filesystem adapters — from a copy, since they repair what they open — so a record that would
-//! fail a Server's startup fails here before anything is written. With the filesystem blob store,
-//! the blobs are copied byte for byte into the new `data_dir`; with S3 there is no new `data_dir`,
-//! and the blobs the Package entries reference are uploaded into the bucket, the records read
-//! from a copy in a directory of the run's own. The audit record is not copied: the old `audit/`
-//! stays as the closed archive, and the `seq` and the hash of its last entry are recorded for the
-//! first chain the database opens to name as its predecessor. Then the
-//! schema and every record are written in one transaction, so a copy that fails leaves the
+//! before it has been found so. Every record of the old `data_dir` is then read in place through
+//! the filesystem adapters, reading only, so a record that would fail a Server's startup fails here
+//! before anything is written, and no record is copied anywhere to be read. With the filesystem
+//! blob store, the blobs are copied byte for byte into the new `data_dir`; with S3 there is no new
+//! `data_dir`, and the blobs the Package entries reference are uploaded into the bucket. The audit
+//! record is not copied: the old `audit/` stays as the closed archive, and the `seq` and the hash
+//! of its last entry are recorded for the first chain the database opens to name as its
+//! predecessor. Then the schema and every record are written in one transaction, so a copy that fails leaves the
 //! database without the Server's tables, and the new `data_dir` as empty as it was. The old
 //! `data_dir` is only read — no directory created, no mode changed, no file removed: it stays as
 //! the backup. Moving records back from PostgreSQL to files is not provided.
@@ -192,12 +191,7 @@ pub(crate) fn run_in(
         Blobs::Bucket(bucket) => {
             let database = checked(config, schema)?;
             let store = crate::s3::S3BlobStore::open(bucket)?;
-            // The records are read from a copy, made in a directory of this run's own that
-            // nobody else may enter, and removed whatever the outcome.
-            let work = work_dir()?;
-            let copied = copy(from, &work, &database, Some((&store, bucket)));
-            let _ = std::fs::remove_dir_all(&work);
-            return copied;
+            return copy(from, Target::Bucket(&store, bucket), &database);
         }
     };
     let existed = to.exists();
@@ -214,7 +208,7 @@ pub(crate) fn run_in(
         }
     }
     let database = checked(config, schema)?;
-    let copied = copy(from, to, &database, None);
+    let copied = copy(from, Target::Dir(to), &database);
     if copied.is_err() {
         // `to` was empty or absent, so whatever is in it now is this copy's.
         let _ = if existed {
@@ -249,48 +243,19 @@ fn checked(config: &PostgresConfig, schema: Option<&str>) -> Result<Database, St
     Ok(database)
 }
 
-/// A new, owner-only directory of this run's own under the system's temporary directory, created
-/// where nothing of that name exists: where the records are read with S3, which has no new
-/// `data_dir`.
-fn work_dir() -> Result<std::path::PathBuf, String> {
-    let mut random = [0u8; 16];
-    ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut random)
-        .map_err(|_| "no randomness for a working directory".to_string())?;
-    let dir = std::env::temp_dir().join(format!("opamp-fleet-migrate-{}", hex::encode(random)));
-    let mut builder = std::fs::DirBuilder::new();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt as _;
-        builder.mode(0o700);
-    }
-    builder
-        .create(&dir)
-        .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-    Ok(dir)
+/// Where the copy puts the blobs, once the bucket is open.
+enum Target<'a> {
+    /// The new `data_dir`.
+    Dir(&'a Path),
+    Bucket(&'a crate::s3::S3BlobStore, &'a S3BlobsConfig),
 }
 
-/// The copy itself, once the database has been checked. The records are read from a copy of the
-/// old `data_dir` made inside `to`: the filesystem adapters create what is missing, remove a
-/// leftover temporary file and rewrite what they drop, as a Server's startup does, and the old
-/// `data_dir` must not change in any way. The copy is removed once read; an error names the old
-/// path, not the copy's.
-/// With `bucket`, `to` is only where the records are read, and the blobs go into the bucket.
-fn copy(
-    from: &Path,
-    to: &Path,
-    database: &Database,
-    bucket: Option<(&crate::s3::S3BlobStore, &S3BlobsConfig)>,
-) -> Result<Report, String> {
-    fs::create_private_dir(to)?;
-    let staging = to.join(STAGING);
-    let named = |e: String| e.replace(&staging.display().to_string(), &from.display().to_string());
-    copy_records(from, &staging)?;
-    let records = fs::check_layout(&staging)
-        .and_then(|()| Records::read(&staging))
-        .map_err(named);
-    std::fs::remove_dir_all(&staging)
-        .map_err(|e| format!("cannot remove {}: {e}", staging.display()))?;
-    let records = records?;
+/// The copy itself, once the database has been checked. The records are read in place, through
+/// the filesystem adapters reading only ([`fs::reading_only`]): what a Server's start would repair
+/// is left as it is, the old `data_dir` does not change in any way, and no record is copied
+/// anywhere to be read, the private keys of the bootstrap certificates among them.
+fn copy(from: &Path, target: Target<'_>, database: &Database) -> Result<Report, String> {
+    let records = fs::reading_only(|| fs::check_layout(from).and_then(|()| Records::read(from)))?;
 
     let mut report = Report::default();
     // No audit entry is copied: the files stay where they are as the closed archive, and its last
@@ -310,14 +275,16 @@ fn copy(
         ),
         None => "no audit record to link".to_string(),
     });
-    if let Some((store, bucket)) = bucket {
-        report.lines.push(upload(
-            &from.join(fs::BLOBS),
-            &records.packages,
-            store,
-            bucket,
-        )?);
-    } else {
+    let to = match target {
+        Target::Bucket(store, bucket) => {
+            let uploaded = upload(&from.join(fs::BLOBS), &records.packages, store, bucket)?;
+            report.lines.push(uploaded);
+            None
+        }
+        Target::Dir(to) => Some(to),
+    };
+    if let Some(to) = to {
+        fs::create_private_dir(to)?;
         let blobs = from.join(fs::BLOBS);
         let target = to.join(fs::BLOBS);
         fs::create_private_dir(&target)?;
@@ -359,13 +326,12 @@ fn copy(
             }
             transaction.commit().await.map_err(sql)
         })
-        .map_err(|e| match bucket {
-            Some((_, bucket)) => format!(
-                "{e} — nothing was written into the database, and what was uploaded stays in \
-                 bucket {}; run the copy again",
-                bucket.bucket
-            ),
+        .map_err(|e| match to {
             None => format!(
+                "{e} — nothing was written into the database, and what was uploaded stays in \
+                 the bucket; run the copy again"
+            ),
+            Some(to) => format!(
                 "{e} — nothing was written into the database or into {}; run the copy again",
                 to.display()
             ),
@@ -416,41 +382,6 @@ fn upload(
         bucket.bucket,
         blobs.display()
     ))
-}
-
-/// Where inside the new `data_dir` the records of the old one are copied to be read.
-const STAGING: &str = ".records-being-copied";
-
-/// Copies every entry of the data directory `from` into `to`, but for the files of `audit/` and
-/// `blobs/`, which are copied on their own: the layout as it stands, read and nothing else.
-fn copy_records(from: &Path, to: &Path) -> Result<(), String> {
-    fs::create_private_dir(to)?;
-    for (name, path) in read_dir(from)? {
-        let target = to.join(&name);
-        if path.is_dir() {
-            fs::create_private_dir(&target)?;
-            if name != fs::AUDIT && name != fs::BLOBS {
-                copy_tree(&path, &target)?;
-            }
-        } else {
-            copy_file(&path, &target)?;
-        }
-    }
-    Ok(())
-}
-
-/// Copies the directory `from` into the existing directory `to`, every level of it.
-fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
-    for (name, path) in read_dir(from)? {
-        let target = to.join(&name);
-        if path.is_dir() {
-            fs::create_private_dir(&target)?;
-            copy_tree(&path, &target)?;
-        } else {
-            copy_file(&path, &target)?;
-        }
-    }
-    Ok(())
 }
 
 /// The entries of `dir` by name, read and nothing else. A name that is not UTF-8 is refused, as
@@ -883,21 +814,9 @@ mod tests {
             b"no entry names it",
         )
         .expect("unreferenced");
+        // What a Server's start would repair, the copy reads in place and leaves as it is.
+        unrepaired(&old);
         let before = snapshot(&old);
-        // The copies of the records this test's runs make: no other test makes one.
-        let copies = || {
-            std::fs::read_dir(std::env::temp_dir())
-                .expect("temp")
-                .flatten()
-                .filter(|entry| {
-                    entry
-                        .file_name()
-                        .to_string_lossy()
-                        .starts_with("opamp-fleet-migrate-")
-                })
-                .count()
-        };
-        let entries = copies();
 
         let report = run_in(
             &old,
@@ -922,7 +841,6 @@ mod tests {
             "the referenced blob alone, and no staging object"
         );
         assert_eq!(snapshot(&old), before, "the old data_dir is unchanged");
-        assert_eq!(copies(), entries, "the copy of the records is removed");
         let records = crate::Records::Postgres(test.open());
         let (packages, _) = crate::packages::PackageStore::open_on(
             &records,

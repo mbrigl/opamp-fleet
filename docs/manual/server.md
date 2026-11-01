@@ -659,8 +659,9 @@ server migrate-to-postgres --from /var/lib/opamp-fleet/fleet-data \
   ```
 - It reads every record of the old `data_dir` as a Server's start would, so a record a start would
   refuse stops the copy, naming it, before anything is written into the database. It only reads
-  the old `data_dir`: what a start would repair there — a missing directory, a leftover temporary
-  file, a mode — it leaves as it is.
+  the old `data_dir`, in place: what a start would repair there — a missing directory, a leftover
+  temporary file, a mode — it leaves as it is, and it copies no record elsewhere to read it, so the
+  private keys in it are not written a second time.
 - With the filesystem blob store it copies `blobs/` into the new `data_dir` byte for byte. With S3
   it uploads into the bucket every artifact of the old `blobs/` that a Package entry names and the
   bucket lacks, hashed as the switch to `"s3"` hashes it: a file whose content does not match its
