@@ -1220,13 +1220,17 @@ mod tests {
                 }
             }
         });
+        // The schema is applied directly, so the bound under test is the call's alone.
+        Database::connect(&test.config(), Some(&test.schema))
+            .expect("connect directly")
+            .apply_schema(schema::MIGRATIONS)
+            .expect("schema");
         let mut through = test.config();
         through.port = port;
         let bound = Duration::from_secs(1);
         let database = Arc::new(
             Database::connect_within(&through, Some(&test.schema), bound).expect("connect"),
         );
-        database.apply_schema(schema::MIGRATIONS).expect("schema");
         let store = configs::PgConfigBackend::new(database.clone());
         crate::configs::ConfigBackend::load(&store).expect("answers while it answers");
 
