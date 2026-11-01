@@ -12,9 +12,9 @@ use opamp::uid::InstanceUid;
 use prost::Message;
 use tokio_postgres::GenericClient;
 
-use super::notify::{notify, ASSIGNMENT, CONFIGURATION, FORGOTTEN, LABELS, RESTART};
+use super::notify::{notify, ASSIGNMENT, CONFIGURATION, FORGOTTEN, LABELS, RESTART, TAKEN};
 use super::{client, signed, sql, unsigned, Database};
-use crate::agent_store::{AgentStore, Creation, PersistedAgent, Pin, Presence};
+use crate::agent_store::{AgentStore, Creation, PersistedAgent, Pin, Presence, Taken};
 use crate::configs::Pinned;
 use crate::fleet::{Assignment, Transport};
 use crate::packages::PackageId;
@@ -298,8 +298,10 @@ impl AgentStore for PgAgentStore {
     }
 
     /// One transaction: the rows locked in the order of their `instance_uid`, byte by byte as the
-    /// release orders them, then the batch written in one statement. A disconnect older than the
-    /// presence stored is not written: the Agent connected again since, written at that connect.
+    /// release orders them, then the batch written in one statement. A connected Agent whose row
+    /// names another instance with a live lease is not written: that instance took it after this
+    /// one read the batch. A disconnect older than the presence stored is not written: the Agent
+    /// connected again since, written at that connect.
     fn write_presence(
         &self,
         holder: &str,
@@ -349,13 +351,98 @@ impl AgentStore for PgAgentStore {
                          ELSE a.holder END \
                      FROM unnest($1::text[], $2::boolean[], $3::bigint[]) \
                          AS p(instance_uid, connected, last_seen_ms) \
-                     WHERE a.instance_uid = p.instance_uid",
+                     WHERE a.instance_uid = p.instance_uid \
+                         AND (NOT p.connected OR a.holder IS NULL \
+                             OR a.holder = $4::text::uuid \
+                             OR NOT EXISTS (SELECT 1 FROM leases AS l \
+                                 WHERE l.instance_id = a.holder AND l.expires_at > now()))",
                     &[&uids, &connected, &last_seen, &holder],
                 )
                 .await
                 .map_err(sql)?;
             transaction.commit().await.map_err(sql)
         })
+    }
+
+    /// One transaction: the row under its lock, the holder it names and whether that one's lease is
+    /// live read, then the row written and the take announced where it replaced a live one. The
+    /// changes of holder are kept as the database's times of the latest eleven, and those within a
+    /// minute counted, so every instance counts on one clock.
+    fn take(
+        &self,
+        uid: &InstanceUid,
+        holder: &str,
+        last_seen_ms: u64,
+    ) -> Result<Option<Taken>, String> {
+        let (key, holder, last_seen) = (uid.to_string(), holder.to_string(), signed(last_seen_ms));
+        self.database.run(move |pool| async move {
+            let mut client = client(&pool).await?;
+            let transaction = client.transaction().await.map_err(sql)?;
+            let Some(row) = transaction
+                .query_opt(
+                    "SELECT a.holder::text, a.holder IS DISTINCT FROM $2::text::uuid, \
+                         EXISTS (SELECT 1 FROM leases AS l \
+                             WHERE l.instance_id = a.holder AND l.expires_at > now()), \
+                         (SELECT count(*) FROM unnest(a.holder_changes) AS t \
+                             WHERE t > now() - interval '1 minute') \
+                     FROM agents AS a WHERE a.instance_uid = $1 FOR UPDATE OF a",
+                    &[&key, &holder],
+                )
+                .await
+                .map_err(sql)?
+            else {
+                return Ok(None);
+            };
+            let (stored, other, live, recent): (Option<String>, bool, bool, i64) =
+                (row.get(0), row.get(1), row.get(2), row.get(3));
+            let from = stored.filter(|_| other);
+            let changed = from.is_some();
+            transaction
+                .execute(
+                    "UPDATE agents SET connected = true, holder = $2::text::uuid, \
+                         last_seen_ms = GREATEST(last_seen_ms, $3), \
+                         holder_changes = CASE WHEN $4 THEN ARRAY(\
+                             SELECT t FROM unnest(holder_changes) AS t ORDER BY t DESC LIMIT 10) \
+                             || now() ELSE holder_changes END \
+                     WHERE instance_uid = $1",
+                    &[&key, &holder, &last_seen, &changed],
+                )
+                .await
+                .map_err(sql)?;
+            if changed && live {
+                notify(&*transaction, TAKEN, &key).await?;
+            }
+            transaction.commit().await.map_err(sql)?;
+            Ok(Some(Taken {
+                from,
+                likely_duplicate: changed && recent == 10,
+            }))
+        })
+    }
+
+    fn holders(
+        &self,
+        uids: &[InstanceUid],
+    ) -> Result<HashMap<InstanceUid, Option<String>>, String> {
+        let keys: Vec<String> = uids.iter().map(ToString::to_string).collect();
+        let rows = self.database.run(move |pool| async move {
+            let client = client(&pool).await?;
+            client
+                .query(
+                    "SELECT instance_uid, holder::text FROM agents WHERE instance_uid = ANY($1)",
+                    &[&keys],
+                )
+                .await
+                .map_err(sql)
+        })?;
+        rows.into_iter()
+            .map(|row| {
+                let key: String = row.get(0);
+                let uid = InstanceUid::parse(&key)
+                    .ok_or_else(|| format!("agents: {key} is not an instance_uid"))?;
+                Ok((uid, row.get(1)))
+            })
+            .collect()
     }
 
     /// One transaction: the row under its lock, its presence read as live only while its holder's
@@ -1479,6 +1566,118 @@ mod tests {
             "disconnected"
         );
         assert!(store.load().expect("load").is_empty());
+    }
+
+    /// The newest connection takes an Agent: a take names its instance as the holder and answers
+    /// the one it replaced. A presence batch of the instance it was taken from, read before the
+    /// take and written after it, leaves the row as the take wrote it; once the taker's lease has
+    /// lapsed, the batch names its own instance again, as it does over a row that names none.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    #[test]
+    fn a_batch_read_before_another_instance_took_the_agent_does_not_undo_the_take() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let lapse = std::time::Duration::from_secs(60);
+        let a = database.take_lease("a", lapse).expect("lease").instance_id;
+        let b = database.take_lease("b", lapse).expect("lease").instance_id;
+        let store = PgAgentStore::new(database.clone());
+        let (one, two) = (InstanceUid([1; 16]), InstanceUid([2; 16]));
+        for uid in [one, two] {
+            store.put(&uid, &record()).expect("put");
+        }
+        let presence = |uid: InstanceUid| {
+            test.rows(&format!(
+                "SELECT coalesce(holder::text, 'none') || ' ' || connected || ' ' || last_seen_ms \
+                 FROM agents WHERE instance_uid = '{uid}'"
+            ))
+        };
+        let connected = |last_seen_ms: u64| Presence {
+            connected: true,
+            last_seen_ms,
+        };
+        assert_eq!(store.take(&one, &a, 1_000), Ok(Some(Taken::default())));
+        // A's batch, due before B's take, holds the Agent connected.
+        let due = [(one, connected(3_000))];
+        assert_eq!(
+            store.take(&one, &b, 2_000),
+            Ok(Some(Taken {
+                from: Some(a.clone()),
+                likely_duplicate: false
+            }))
+        );
+        store.write_presence(&a, &due).expect("A's batch");
+        assert_eq!(
+            presence(one),
+            [[Some(format!("{b} true 2000"))]],
+            "the take stays"
+        );
+        assert_eq!(
+            store.take(&InstanceUid([9; 16]), &a, 1_000),
+            Ok(None),
+            "no record"
+        );
+
+        store
+            .write_presence(&a, &[(two, connected(3_000))])
+            .expect("a row that names none");
+        assert_eq!(presence(two), [[Some(format!("{a} true 3000"))]]);
+        test.sql(&format!("DELETE FROM leases WHERE instance_id = '{b}'"));
+        store.write_presence(&a, &due).expect("A's batch again");
+        assert_eq!(
+            presence(one),
+            [[Some(format!("{a} true 3000"))]],
+            "a holder without a live lease holds no connection"
+        );
+    }
+
+    /// The take that makes an Agent's holder change for the eleventh time within a minute, and no
+    /// other, says it is likely a duplicate; a change more than a minute old counts no more, and a
+    /// take that keeps the holder, or replaces none, is no change.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    #[test]
+    fn the_eleventh_change_of_holder_within_a_minute_is_a_likely_duplicate() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let (a, b) = (
+            "00000000-0000-7000-8000-00000000000a",
+            "00000000-0000-7000-8000-00000000000b",
+        );
+        let store = PgAgentStore::new(database.clone());
+        let uid = InstanceUid([1; 16]);
+        store.put(&uid, &record()).expect("put");
+        let duplicate = |holder: &str| {
+            store
+                .take(&uid, holder, 1_000)
+                .expect("take")
+                .expect("a record")
+                .likely_duplicate
+        };
+        assert!(!duplicate(a), "replaces none");
+        assert!(!duplicate(a), "keeps the holder");
+        let changes: Vec<bool> = (1..=12)
+            .map(|change| duplicate(if change % 2 == 1 { b } else { a }))
+            .collect();
+        let mut expected = vec![false; 12];
+        expected[10] = true;
+        assert_eq!(changes, expected, "the eleventh change alone");
+
+        test.sql(&format!(
+            "UPDATE agents SET holder_changes = ARRAY(SELECT t - interval '61 seconds' \
+             FROM unnest(holder_changes) AS t ORDER BY t DESC LIMIT 10) \
+             WHERE instance_uid = '{uid}'"
+        ));
+        let changes: Vec<bool> = (1..=11)
+            .map(|change| duplicate(if change % 2 == 1 { b } else { a }))
+            .collect();
+        assert_eq!(
+            changes.iter().position(|likely| *likely),
+            Some(10),
+            "the changes over a minute ago count no more"
+        );
     }
 
     /// Two presence batches over the same two Agents, given them in opposite orders, both commit:

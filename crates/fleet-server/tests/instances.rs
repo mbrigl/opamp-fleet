@@ -2520,3 +2520,170 @@ async fn an_agent_just_connected_is_not_forgotten_through_another_instance() {
         "B sees A holds it"
     );
 }
+
+/// An Agent carried by A whose connection moves to B is held by B: B takes it and announces it, A
+/// reads the holder again and stops carrying it, though its old connection has not closed yet.
+/// When that connection closes and A writes its next batch, the row still names B as the holder,
+/// connected, and B still carries it.
+/// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_agent_whose_connection_moves_is_held_by_the_new_instance_and_no_longer_by_the_old() {
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let a = Instance::start(&pki, &schema, schema.config_on(schema.config.port)).await;
+    let b = Instance::start(&pki, &schema, schema.config_on(schema.config.port)).await;
+    let (a_id, b_id) = (
+        a.instance_id().expect("a lease"),
+        b.instance_id().expect("a lease"),
+    );
+    let (cert, key) = pki.issue("edge-01");
+    let uid = InstanceUid([0x95; 16]);
+    let attributes: Attributes<'_> = (&[("service.name", "otelcol")], &[]);
+    let presence = || {
+        schema.query(&format!(
+            "SELECT holder::text || ' ' || connected FROM agents WHERE instance_uid = '{uid}'"
+        ))
+    };
+    let mut on_a = websocket(&a, &pki, &cert, &key).await;
+    report_as(&mut on_a, uid, 1, 0, attributes, true).await;
+    assert_eq!(presence(), [format!("{a_id} true")]);
+
+    let mut on_b = websocket(&b, &pki, &cert, &key).await;
+    report_as(&mut on_b, uid, 2, 0, attributes, true).await;
+    assert_eq!(presence(), [format!("{b_id} true")], "B took it");
+    assert!(
+        eventually(Duration::from_secs(10), || {
+            view_of(&a, uid).is_some_and(|view| !view.connected)
+        })
+        .await,
+        "A stops carrying it"
+    );
+
+    drop(on_a);
+    let state = a.state.clone();
+    let holder = a_id.clone();
+    tokio::task::spawn_blocking(move || state.write_presence(&holder))
+        .await
+        .expect("batch")
+        .expect("A's batch");
+    assert_eq!(presence(), [format!("{b_id} true")], "A's batch leaves it");
+    assert!(view_of(&b, uid).is_some_and(|view| view.connected));
+    report_as(&mut on_b, uid, 3, 0, attributes, true).await;
+    assert_eq!(presence(), [format!("{b_id} true")]);
+}
+
+/// Of two instances that take one Agent at once, each hearing of the other's take only after its
+/// own, only the one the row no longer names stops carrying it: each reads the holder again
+/// rather than drop the Agent on hearing of a take.
+/// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+#[test]
+fn of_two_instances_that_take_one_agent_at_once_only_the_one_the_row_names_carries_it() {
+    use fleet_server::fleet::{AppState, Transport};
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let uid = InstanceUid([0x96; 16]);
+    let report = |sequence_num: u64| AgentToServer {
+        instance_uid: uid.as_bytes().to_vec(),
+        sequence_num,
+        capabilities: AgentCapabilities::ReportsStatus as u64,
+        ..Default::default()
+    };
+    let (lease_a, lease_b) = (
+        "00000000-0000-7000-8000-00000000000a",
+        "00000000-0000-7000-8000-00000000000b",
+    );
+    let [a, b] = [lease_a, lease_b].map(|lease| {
+        let state = AppState::on(&records(&schema)).expect("state");
+        state.serve_under(tokio::sync::watch::channel(Some(lease.to_string())).1);
+        state
+    });
+    a.process(report(1), Transport::WebSocket, Some(7));
+    b.process(report(2), Transport::WebSocket, Some(9));
+    let named = std::collections::HashSet::from([uid]);
+    a.release_taken(Some(&named)).expect("A hears of B's take");
+    b.release_taken(Some(&named)).expect("B hears of A's take");
+    let carried = |state: &AppState| {
+        state
+            .snapshot()
+            .into_iter()
+            .any(|view| view.instance_uid == uid.to_string() && view.connected)
+    };
+    assert!(!carried(&a), "the row names B");
+    assert!(carried(&b), "B keeps it");
+}
+
+/// An Agent whose holder changes eleven times within a minute, as two connections of one
+/// `instance_uid` on two instances take it in turn, is logged as a likely duplicate once, when
+/// the eleventh change lands, and not before.
+/// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+#[test]
+fn an_agent_whose_holder_changes_eleven_times_in_a_minute_is_logged_once_as_a_likely_duplicate() {
+    use fleet_server::fleet::{AppState, Transport};
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let uid = InstanceUid([0x97; 16]);
+    let report = |sequence_num: u64| AgentToServer {
+        instance_uid: uid.as_bytes().to_vec(),
+        sequence_num,
+        capabilities: AgentCapabilities::ReportsStatus as u64,
+        ..Default::default()
+    };
+    let [a, b] = [
+        "00000000-0000-7000-8000-00000000000a",
+        "00000000-0000-7000-8000-00000000000b",
+    ]
+    .map(|lease| {
+        let state = AppState::on(&records(&schema)).expect("state");
+        state.serve_under(tokio::sync::watch::channel(Some(lease.to_string())).1);
+        state
+    });
+    let lines = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let writer = lines.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(move || Collect(writer.clone()))
+        .finish();
+    let named = std::collections::HashSet::from([uid]);
+    let likely = || {
+        String::from_utf8_lossy(&lines.lock().expect("lines"))
+            .lines()
+            .filter(|line| line.contains("likely a duplicate") && line.contains(&uid.to_string()))
+            .count()
+    };
+    tracing::subscriber::with_default(subscriber, || {
+        a.process(report(1), Transport::WebSocket, Some(7));
+        let mut sequence_num = 1;
+        for change in 1..=11 {
+            // The instance the row no longer names hears of the take, and the duplicate's next
+            // report on the other connection takes it back.
+            let (from, to, conn) = if change % 2 == 1 {
+                (&a, &b, 9)
+            } else {
+                (&b, &a, 7)
+            };
+            sequence_num += 1;
+            to.release_taken(Some(&named)).expect("hears of the take");
+            to.process(report(sequence_num), Transport::WebSocket, Some(conn));
+            from.release_taken(Some(&named)).expect("hears of the take");
+            assert_eq!(likely(), usize::from(change == 11), "after change {change}");
+        }
+    });
+}
+
+/// A log line sink for a test's own subscriber.
+#[derive(Clone)]
+struct Collect(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for Collect {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().expect("lines").extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}

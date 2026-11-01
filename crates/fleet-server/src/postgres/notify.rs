@@ -68,6 +68,12 @@ pub const RESTART: &str = "restart";
 /// The kind an Agent forgotten is announced as, by its `instance_uid`.
 pub const FORGOTTEN: &str = "forgotten";
 
+/// The kind an Agent taken from another instance with a live lease is announced as, by its
+/// `instance_uid`: the instance it was taken from reads its holder again and stops carrying it
+/// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+/// clause 8).
+pub const TAKEN: &str = "taken";
+
 /// How long a listener waits before it connects again after its connection ended.
 const RECONNECT: Duration = Duration::from_secs(1);
 

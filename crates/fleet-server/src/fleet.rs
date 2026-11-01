@@ -2152,11 +2152,15 @@ impl AppState {
         Ok(batch.len())
     }
 
-    /// On a shared store, writes at once that `uid` is connected here, naming this instance as its
+    /// On a shared store, takes `uid` at once as connected here, naming this instance as its
     /// holder, so that no other instance forgets it as not connected while the next batch is due
-    /// (ADR-draft-the-fleet-record-of-agents-and-hosts clause 11): one write per connect, never
-    /// per heartbeat. Without a lease nothing is written. One that fails is logged, and the next
-    /// batch writes it.
+    /// (ADR-draft-the-fleet-record-of-agents-and-hosts clause 11), and so that an instance that
+    /// carried it before stops carrying it
+    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// clause 8): one write per connect, never per heartbeat. A take that makes the Agent's holder
+    /// change more than ten times within a minute is logged as a likely duplicate. Without a lease
+    /// nothing is written. One that fails is logged, and the next batch writes it, where no other
+    /// instance took the Agent meanwhile.
     fn write_connected(&self, uid: &InstanceUid, presence: Presence) {
         if !self.agent_store.is_shared() {
             return;
@@ -2164,12 +2168,26 @@ impl AppState {
         let Some(holder) = self.lease.get().and_then(|lease| lease.borrow().clone()) else {
             return;
         };
-        if let Err(e) = self
-            .agent_store
-            .write_presence(&holder, &[(*uid, presence)])
-        {
-            warn!(agent = %uid, error = %e, "cannot write that the agent is connected here");
-            return;
+        match self.agent_store.take(uid, &holder, presence.last_seen_ms) {
+            Ok(Some(taken)) => {
+                if let Some(from) = &taken.from {
+                    info!(agent = %uid, from = %from, "took the agent from another instance");
+                }
+                if taken.likely_duplicate {
+                    warn!(
+                        agent = %uid,
+                        "the agent's holder changed more than ten times within a minute; \
+                         likely a duplicate instance_uid on two connections"
+                    );
+                }
+            }
+            // Forgotten through another instance: this exchange's write finds no record, and
+            // drops it.
+            Ok(None) => return,
+            Err(e) => {
+                warn!(agent = %uid, error = %e, "cannot write that the agent is connected here");
+                return;
+            }
         }
         let mut written = self.presence_written.lock().expect("presence lock");
         if written.holder.as_deref() != Some(holder.as_str()) {
@@ -2177,6 +2195,66 @@ impl AppState {
             written.agents.clear();
         }
         written.agents.insert(*uid, presence);
+    }
+
+    /// Stops carrying each Agent of `uids`, every one this instance carries where `None`, whose
+    /// stored presence no longer names this instance as its holder: another instance took it
+    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// clause 8). It is held as on a closed connection, and its disconnect is not written, since
+    /// the row is the other instance's. An Agent the row still names is kept, so of two instances
+    /// that take one Agent at once only the one the row does not name stops carrying it. The
+    /// holders are read once without the fleet lock, and those that differ again under it, which
+    /// every take of this instance holds, so a take made here since the first read is seen. On a
+    /// store that keeps no presence, or without a lease, nothing is read.
+    ///
+    /// # Errors
+    /// Returns an error when the holders cannot be read; what is held is then kept.
+    pub fn release_taken(&self, uids: Option<&HashSet<InstanceUid>>) -> Result<(), String> {
+        if !self.agent_store.is_shared() {
+            return Ok(());
+        }
+        let Some(holder) = self.lease.get().and_then(|lease| lease.borrow().clone()) else {
+            return Ok(());
+        };
+        let carried = |fleet: &HashMap<InstanceUid, AgentRecord>| -> Vec<InstanceUid> {
+            fleet
+                .iter()
+                .filter(|(uid, record)| {
+                    record.connected && uids.is_none_or(|uids| uids.contains(uid))
+                })
+                .map(|(uid, _)| *uid)
+                .collect()
+        };
+        let named_elsewhere = |stored: HashMap<InstanceUid, Option<String>>| -> Vec<InstanceUid> {
+            stored
+                .into_iter()
+                .filter(|(_, stored)| stored.as_deref() != Some(holder.as_str()))
+                .map(|(uid, _)| uid)
+                .collect()
+        };
+        let held = carried(&self.fleet.lock().expect("fleet lock"));
+        if held.is_empty() {
+            return Ok(());
+        }
+        let differing = named_elsewhere(self.agent_store.holders(&held)?);
+        if differing.is_empty() {
+            return Ok(());
+        }
+        let mut fleet = self.fleet.lock().expect("fleet lock");
+        let taken = named_elsewhere(self.agent_store.holders(&differing)?);
+        let mut written = self.presence_written.lock().expect("presence lock");
+        for uid in taken {
+            let Some(record) = fleet.get_mut(&uid).filter(|record| record.connected) else {
+                continue;
+            };
+            record.connected = false;
+            record.owner = None;
+            if written.holder.as_deref() == Some(holder.as_str()) {
+                written.agents.insert(uid, record.presence());
+            }
+            info!(agent = %uid, "another instance took the agent; this one no longer carries it");
+        }
+        Ok(())
     }
 
     /// The Agents forgotten while connection `conn` carried them, taken once: its loop ends their
@@ -6571,6 +6649,20 @@ mod tests {
             silent_before_ms: u64,
         ) -> Result<Option<bool>, String> {
             self.inner.remove_if_silent(uid, silent_before_ms)
+        }
+        fn take(
+            &self,
+            uid: &InstanceUid,
+            holder: &str,
+            last_seen_ms: u64,
+        ) -> Result<Option<crate::agent_store::Taken>, String> {
+            self.inner.take(uid, holder, last_seen_ms)
+        }
+        fn holders(
+            &self,
+            uids: &[InstanceUid],
+        ) -> Result<HashMap<InstanceUid, Option<String>>, String> {
+            self.inner.holders(uids)
         }
         fn rekey(
             &self,

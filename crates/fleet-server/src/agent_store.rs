@@ -154,6 +154,19 @@ pub struct Presence {
     pub last_seen_ms: u64,
 }
 
+/// What [`AgentStore::take`] found of the holder it replaced
+/// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+/// clause 8).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Taken {
+    /// The other instance the stored presence named as the holder, by the id of its lease; `None`
+    /// where it named this instance or none.
+    pub from: Option<String>,
+    /// Whether this take is the one that made the holder change more than ten times within a
+    /// minute: the Agent is likely a duplicate whose connections two instances take in turn.
+    pub likely_duplicate: bool,
+}
+
 /// What [`AgentStore::create_within`] did with the record of an Agent first heard of.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Creation {
@@ -323,10 +336,12 @@ pub trait AgentStore: Send + Sync {
     /// Writes the presence of the Agents `holder` carries, one batch, in the order of their
     /// `instance_uid` whatever order they are given in, so two batches over the same Agents never
     /// deadlock (ADR-draft-the-fleet-record-of-agents-and-hosts clause 4). A connected Agent names
-    /// `holder` as the instance that holds its connection; a disconnect is written only of an Agent
-    /// whose stored presence names `holder` or none, so it never undoes another instance's take,
-    /// and is no older than it, so it never undoes a connect written since; `last_seen_ms` never
-    /// moves back. A record no longer stored is written nothing. A store whose
+    /// `holder` as the instance that holds its connection only where the stored presence names
+    /// `holder`, or none, or an instance without a live lease: a batch read before another instance
+    /// took the Agent never undoes that take, and writes nothing of it. A disconnect is written only
+    /// of an Agent whose stored presence names `holder` or none, so it never undoes another
+    /// instance's take, and is no older than it, so it never undoes a connect written since;
+    /// `last_seen_ms` never moves back. A record no longer stored is written nothing. A store whose
     /// one Server holds every presence in memory keeps none, and writes nothing.
     ///
     /// # Errors
@@ -338,6 +353,44 @@ pub trait AgentStore: Send + Sync {
     ) -> Result<(), String> {
         let _ = (holder, presence);
         Ok(())
+    }
+
+    /// Takes an Agent whose connection `holder` now carries, outside the batches: one conditional
+    /// step that names `holder` as the instance that holds its connection, writes it connected and
+    /// last heard from at `last_seen_ms`, which never moves back, and answers the holder it replaced. A shared store announces the take to the other Servers when
+    /// the holder it replaced is another Server with a live lease, so that one stops carrying it,
+    /// and counts each change of holder, so the take that makes it change more than ten times
+    /// within a minute says so
+    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// clause 8). Answers `None` when there is no record. A store whose one Server holds every
+    /// presence in memory keeps none, and writes nothing.
+    ///
+    /// # Errors
+    /// Returns an error when the record cannot be read or written; nothing is then written.
+    fn take(
+        &self,
+        uid: &InstanceUid,
+        holder: &str,
+        last_seen_ms: u64,
+    ) -> Result<Option<Taken>, String> {
+        let _ = (uid, holder, last_seen_ms);
+        Ok(Some(Taken::default()))
+    }
+
+    /// The holder each stored presence of `uids` names, by the id of its lease, `None` where it
+    /// names none; a record not stored is left out. What an instance that heard of a take reads
+    /// to decide whether it still carries the Agent
+    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// clause 8).
+    ///
+    /// # Errors
+    /// Returns an error when the records cannot be read, and on a store that keeps no presence.
+    fn holders(
+        &self,
+        uids: &[InstanceUid],
+    ) -> Result<HashMap<InstanceUid, Option<String>>, String> {
+        let _ = uids;
+        Err("this store keeps no presence; its Server decides from what it holds".to_string())
     }
 
     /// Forgets one record of a shared store when its stored presence lets it go: when no instance
