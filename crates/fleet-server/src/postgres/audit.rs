@@ -403,7 +403,9 @@ pub fn verify_in(
 struct Snapshot {
     chains: Vec<(String, String, Result<crate::audit_log::Walked, String>)>,
     archive: Option<(u64, String)>,
-    named: Option<(String, (u64, String))>,
+    /// Every chain that names a predecessor, by its `audit.chain_opened` or by an `audit.pruned`
+    /// that carries it on, each once.
+    named: Vec<(String, (u64, String))>,
 }
 
 /// Walks every chain on `database`; see [`verify_on`]. The chain records and every entry are read
@@ -422,6 +424,29 @@ pub fn verify(database: &Database, archive: Option<&Path>) -> Result<Verified, S
             .start()
             .await
             .map_err(sql)?;
+        // What every retained `audit.pruned` names: where each chain may begin, and the predecessor
+        // it carries on once the first chain's opening is pruned.
+        let mut links: std::collections::HashMap<String, Vec<(u64, String)>> =
+            std::collections::HashMap::new();
+        let mut named = Vec::new();
+        for row in transaction
+            .query(
+                "SELECT line FROM audit_entries WHERE line LIKE '%\"event\":\"audit.pruned\"%'",
+                &[],
+            )
+            .await
+            .map_err(sql)?
+        {
+            if let Some((link, predecessor)) =
+                super::audit_prune::read_pruned(&row.get::<_, String>(0))
+            {
+                links
+                    .entry(link.chain)
+                    .or_default()
+                    .push((link.last_seq, link.last_hash));
+                named.extend(predecessor.map(|named| (named.chain, (named.seq, named.hash))));
+            }
+        }
         let records: Vec<(String, String, Option<String>)> = transaction
             .query(
                 "SELECT id::text, host, closed_hash FROM audit_chains ORDER BY opened_at, id",
@@ -434,7 +459,8 @@ pub fn verify(database: &Database, archive: Option<&Path>) -> Result<Verified, S
             .collect();
         let mut chains = Vec::new();
         for (chain, host, closed_hash) in records {
-            let walked = walk(&*transaction, &chain)
+            let pruned = links.remove(&chain).unwrap_or_default();
+            let walked = walk(&*transaction, &chain, pruned)
                 .await?
                 .and_then(|walk| walk.finish(closed_hash.as_deref()));
             chains.push((chain, host, walked));
@@ -451,7 +477,6 @@ pub fn verify(database: &Database, archive: Option<&Path>) -> Result<Verified, S
             });
         // Read from the first entries themselves, so a chain whose walk fails still says what it
         // names.
-        let mut named = None;
         for row in transaction
             .query(
                 "SELECT chain::text, line FROM audit_entries WHERE seq = 1 \
@@ -471,10 +496,12 @@ pub fn verify(database: &Database, archive: Option<&Path>) -> Result<Verified, S
                     .get("predecessor_hash")
                     .and_then(serde_json::Value::as_str),
             ) {
-                named = Some((row.get::<_, String>(0), (seq, hash.to_string())));
+                named.push((row.get::<_, String>(0), (seq, hash.to_string())));
             }
         }
         transaction.commit().await.map_err(sql)?;
+        named.sort();
+        named.dedup();
         Ok(Snapshot {
             chains,
             archive,
@@ -482,6 +509,15 @@ pub fn verify(database: &Database, archive: Option<&Path>) -> Result<Verified, S
         })
     })?;
     let mut verified = Verified::default();
+    // Two names of a predecessor that differ cannot both be the archive's end.
+    if let [first, second, ..] = snapshot.named.as_slice() {
+        verified.failed = true;
+        verified.lines.push(format!(
+            "chain {} names entry {} as its predecessor, and chain {} names entry {}",
+            first.0, first.1 .0, second.0, second.1 .0
+        ));
+    }
+    let named = snapshot.named.into_iter().next();
     let mut open = 0;
     for (chain, host, walked) in &snapshot.chains {
         match walked {
@@ -502,7 +538,7 @@ pub fn verify(database: &Database, archive: Option<&Path>) -> Result<Verified, S
             }
         }
     }
-    match (&snapshot.named, &snapshot.archive) {
+    match (&named, &snapshot.archive) {
         (None, Some((seq, _))) => {
             verified.failed = true;
             verified.lines.push(format!(
@@ -527,7 +563,7 @@ pub fn verify(database: &Database, archive: Option<&Path>) -> Result<Verified, S
         }
         _ => {}
     }
-    match (snapshot.named, archive) {
+    match (named, archive) {
         (None, Some(dir)) => {
             verified.failed = true;
             verified.lines.push(format!(
@@ -589,8 +625,9 @@ pub fn verify(database: &Database, archive: Option<&Path>) -> Result<Verified, S
 async fn walk(
     transaction: &impl GenericClient,
     chain: &str,
+    pruned: Vec<(u64, String)>,
 ) -> Result<Result<ChainWalk, String>, String> {
-    let mut walk = ChainWalk::new(chain);
+    let mut walk = ChainWalk::new(chain).pruned_after(pruned);
     let mut after = 0i64;
     loop {
         let page = transaction
