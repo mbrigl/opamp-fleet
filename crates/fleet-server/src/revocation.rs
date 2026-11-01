@@ -1513,17 +1513,20 @@ impl Revocations {
             revoked,
             revoked_ms: self.clock.now_ms(),
         };
-        let entry = match self
+        let (entry, written) = match self
             .store
             .add_revocation(&entry, MAX_REVOCATIONS)
             .map_err(RevokeError::Store)?
         {
-            Added::Added => entry,
-            Added::Present(existing) => existing,
-            Added::Widened(wider) => wider,
+            Added::Added => (entry, true),
+            Added::Present(existing) => (existing, false),
+            Added::Widened(wider) => (wider, true),
             Added::Full => return Err(RevokeError::Full),
         };
-        state.took_up_own_write(self.store.list_version());
+        // Only a write moves the version: one held already wrote nothing.
+        if written {
+            state.took_up_own_write(self.store.list_version());
+        }
         match state
             .revocations
             .iter_mut()
@@ -1559,7 +1562,9 @@ impl Revocations {
         state.acted();
         // The store decides: another instance may have added the entry, or lifted it.
         let lifted = self.store.remove_revocation(id)?;
-        state.took_up_own_write(self.store.list_version());
+        if lifted {
+            state.took_up_own_write(self.store.list_version());
+        }
         let before = state.revocations.len();
         state.revocations.retain(|entry| entry.id != id);
         if state.revocations.len() != before {
@@ -1850,8 +1855,9 @@ impl Revocations {
             .map(|entry| entry.id.clone())
             .collect();
         for id in &dropped {
-            self.store.remove_revocation(id)?;
-            state.took_up_own_write(self.store.list_version());
+            if self.store.remove_revocation(id)? {
+                state.took_up_own_write(self.store.list_version());
+            }
             state.revocations.retain(|entry| &entry.id != id);
             state.revoked = None;
         }

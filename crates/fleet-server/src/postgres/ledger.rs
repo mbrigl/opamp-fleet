@@ -47,7 +47,11 @@ impl PgLedgerStore {
 }
 
 /// Moves the list's version on, inside the caller's transaction, and answers the new one
-/// (ADR-draft-the-servers-state-and-its-stores clause 10).
+/// (ADR-draft-the-servers-state-and-its-stores clause 10). A revocation added or widened and a lift
+/// move it, the prune's removal of a revocation among them. A register entry the prune removes does
+/// not: it only takes expired certificates out of what the list resolves, and a Gateway that keeps
+/// refusing an expired certificate loses nothing. A register entry another instance adds is covered
+/// by the body's hash in the Gateways' `ETag`, not by the version.
 async fn bump_list_version(client: &impl GenericClient) -> Result<u64, String> {
     let row = client
         .query_one(
@@ -70,9 +74,19 @@ pub(crate) async fn read_list_version(client: &impl GenericClient) -> Result<u64
 
 impl LedgerStore for PgLedgerStore {
     fn load(&self) -> Result<Ledger, String> {
+        // One snapshot, so the version read names exactly the list read with it.
         let ledger = self.database.run(|pool| async move {
-            let client = client(&pool).await?;
-            read_all(&**client).await
+            let mut client = client(&pool).await?;
+            let transaction = client
+                .build_transaction()
+                .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
+                .read_only(true)
+                .start()
+                .await
+                .map_err(sql)?;
+            let ledger = read_all(&*transaction).await?;
+            transaction.commit().await.map_err(sql)?;
+            Ok(ledger)
         })?;
         ledger
             .hosts
@@ -658,8 +672,7 @@ pub(crate) async fn write_bindings(
 
 /// The whole ledger. A row that does not decode fails, naming it.
 pub(crate) async fn read_all(client: &impl GenericClient) -> Result<Ledger, String> {
-    // Read before the list, so a revocation committed between the two reads leaves the version
-    // older than the list it came with, never newer: the next renewal then reads the list again.
+    // The version names the list only when both are read in one snapshot, as `load` reads them.
     let version = read_list_version(client).await?;
     let mut issued = Vec::new();
     for row in client
@@ -1836,7 +1849,11 @@ mod tests {
         a.revoke_certificate("client", "0a").expect("revoke");
         assert_eq!((a.list_version(), stored()), (Some(1), 1));
         a.revoke_certificate("client", "0a").expect("revoke again");
-        assert_eq!(stored(), 1, "a revocation held already moves nothing");
+        assert_eq!(
+            (a.list_version(), stored()),
+            (Some(1), 1),
+            "a revocation held already moves nothing, and keeps the version held"
+        );
         a.record(issued("0c", None).facts, b"\x01", None)
             .expect("a register entry");
         assert_eq!(stored(), 1, "a register entry moves nothing");
@@ -1861,7 +1878,77 @@ mod tests {
         assert!(b.lift(&lifted).expect("lift"));
         assert_eq!((b.list_version(), stored()), (Some(3), 3));
         assert!(!b.lift(&lifted).expect("lift again"));
-        assert_eq!(stored(), 3, "a lift of nothing moves nothing");
+        assert_eq!(
+            (b.list_version(), stored()),
+            (Some(3), 3),
+            "a lift of nothing moves nothing, and keeps the version held"
+        );
+    }
+
+    /// One version never names two Gateway bodies: when B registers a renewal and A revokes its
+    /// predecessor before A has taken up B's register entry, A's write moves the version by one,
+    /// but the list A resolves lacks the renewal. A's `ETag` before it reads the ledger again and
+    /// after differ, so a Gateway that fetched the first is answered in full by either instance
+    /// once both hold the renewal
+    /// (ADR-draft-admission-by-client-certificate-and-revocation clauses 28 and 34).
+    /// Verifies: ADR-draft-admission-by-client-certificate-and-revocation, ADR-draft-the-servers-state-and-its-stores
+    #[test]
+    fn one_list_version_never_names_two_gateway_bodies() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        struct Now;
+        impl crate::fleet::Clock for Now {
+            fn now_ms(&self) -> u64 {
+                1
+            }
+        }
+        let instance = || {
+            crate::revocation::Revocations::open(
+                Box::new(PgLedgerStore::new(database.clone())),
+                Arc::new(Now),
+                vec![crate::revocation::Authority {
+                    role: "client".into(),
+                    subject: CertId::new(b"ca", "00").issuer,
+                    name: "CN=ca".into(),
+                }],
+            )
+            .expect("open")
+        };
+        let a = instance();
+        a.record(issued("0a", None).facts, b"\x01", None)
+            .expect("enrol X");
+        let b = instance();
+        let mut renewal = issued("0b", Some("0a")).facts;
+        renewal.host = None;
+        b.record(renewal, b"\x01", Some(CertId::new(b"ca", "0a")))
+            .expect("B registers X', a renewal of X");
+
+        a.revoke_certificate("client", "0a")
+            .expect("A revokes X, not holding X'");
+        let (before, fetched) = crate::transport::gateway_list_of(&a);
+        assert!(
+            !before.contains(r#""serial":"b""#),
+            "A does not resolve X' yet: {before}"
+        );
+        a.reload_ledger().expect("A takes up X'");
+        let (after, etag) = crate::transport::gateway_list_of(&a);
+        assert!(
+            after.contains(r#""serial":"b""#),
+            "A resolves X' now: {after}"
+        );
+        assert_eq!(a.list_version(), Some(1), "one version, before and after");
+        assert_ne!(
+            fetched, etag,
+            "a Gateway holding the ETag of the list without X' is not answered 304"
+        );
+        b.reload_ledger().expect("B takes up the revocation");
+        assert_eq!(
+            crate::transport::gateway_list_of(&b).1,
+            etag,
+            "B answers the ETag A gives once both hold the same list"
+        );
     }
 
     /// Instance B, on a database handle of its own, so it hears what the instances on `database`
