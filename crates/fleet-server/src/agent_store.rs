@@ -199,7 +199,9 @@ pub trait AgentStore: Send + Sync {
     /// The record of `uid` as stored now, `None` when none is: what an instance reads again when
     /// another instance announced a change to it
     /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
-    /// clause 9). A store that is its only writer answers it from what it loads.
+    /// clause 9). The default reads every record through [`load`](Self::load), as a store that
+    /// is its only writer may; a shared store, and a wrapper of one, overrides it, or each read
+    /// reads the whole fleet.
     ///
     /// # Errors
     /// Returns an error when the record cannot be read.
@@ -209,7 +211,9 @@ pub trait AgentStore: Send + Sync {
 
     /// The records of `uids` as stored now, in one read, none for a uid with no record: what an
     /// instance reads again under its fleet lock, where one read per record would hold the lock
-    /// for as many round trips. A store that is its only writer answers it from what it loads.
+    /// for as many round trips. The default reads every record through [`load`](Self::load), as a
+    /// store that is its only writer may; a shared store, and a wrapper of one, overrides it, or
+    /// the read under the fleet lock reads the whole fleet.
     ///
     /// # Errors
     /// Returns an error when the records cannot be read.
