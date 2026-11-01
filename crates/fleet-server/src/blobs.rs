@@ -62,19 +62,38 @@ pub trait BlobStore: Send + Sync {
 /// A hold on the blob store's lock
 /// (ADR-draft-the-servers-state-and-its-stores clause 14), released when it is dropped. A store
 /// that is its one Server's alone holds nothing.
-pub struct BlobHold(#[allow(dead_code)] Option<Box<dyn Send>>);
+pub struct BlobHold {
+    #[allow(dead_code)]
+    held: Option<Box<dyn Send>>,
+    /// Set once the lock is gone while the hold lives, as when its session ended.
+    lost: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+}
 
 impl BlobHold {
     /// A hold on nothing: what a store with no other writer answers.
     #[must_use]
     pub fn none() -> Self {
-        BlobHold(None)
+        BlobHold {
+            held: None,
+            lost: None,
+        }
     }
 
-    /// A hold that `held` keeps until it is dropped.
+    /// A hold that `held` keeps until it is dropped, `lost` set once the lock is gone before.
     #[must_use]
-    pub fn of(held: Box<dyn Send>) -> Self {
-        BlobHold(Some(held))
+    pub fn of(held: Box<dyn Send>, lost: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Self {
+        BlobHold {
+            held: Some(held),
+            lost: Some(lost),
+        }
+    }
+
+    /// Whether the lock is gone while the hold lives.
+    #[must_use]
+    pub fn lost(&self) -> bool {
+        self.lost
+            .as_ref()
+            .is_some_and(|lost| lost.load(std::sync::atomic::Ordering::SeqCst))
     }
 }
 

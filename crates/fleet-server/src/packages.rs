@@ -469,6 +469,21 @@ pub enum Signed {
     Changed(Option<Entry>),
 }
 
+/// What an entry write did ([`PackageStore::put_entry_record`]).
+enum Recorded {
+    /// The Package held no entry for the platform.
+    Added,
+    /// It replaced one, and this is the blob the replaced entry named that no other entry
+    /// names, if any.
+    Replaced(Option<String>),
+}
+
+/// The sweep an act on the Packages left, to run once its caller holds no lock
+/// ([`PackageStore::remove_set`]). Not running it leaves the blobs it chose to the next startup's
+/// sweep, and marked as being deleted until then, so it is to be run.
+#[must_use]
+pub struct Sweep(Vec<String>);
+
 /// What happens to blobs outside the lock on the Packages. A request to the blob store may take as
 /// long as its store answers — an S3 bucket over the network — so none runs under that lock, which
 /// every offer and every listing waits for. Two rules keep an entry from naming a deleted blob:
@@ -728,6 +743,11 @@ impl PackageStore {
                         // Asked outside the lock on the Packages: no deletion of this blob
                         // starts here while the upload holds it.
                         let recorded = match self.blobs.exists(&sha256) {
+                            // The lock went with its session: a sweep may have run since.
+                            Ok(true) if hold.lost() => Err(format!(
+                                "the blob store's lock was lost while the upload held it — \
+                                 {REMOVED_WHILE_UPLOADED}"
+                            )),
                             Ok(true) => self.put_entry_record(
                                 id,
                                 Entry {
@@ -759,11 +779,11 @@ impl PackageStore {
         });
         match result {
             // A replaced entry's blob goes, once the shared hold is let go.
-            Ok(Some(doomed)) => {
+            Ok(Recorded::Replaced(doomed)) => {
                 self.sweep(doomed);
                 Ok(())
             }
-            Ok(None) => Ok(()),
+            Ok(Recorded::Added) => Ok(()),
             Err(e) => {
                 let doomed = if keep {
                     None
@@ -859,14 +879,10 @@ impl PackageStore {
     /// Writes one entry into the Package's map and its metadata — the single path every entry
     /// write converges on. Replacing the entry for a Platform the Package already holds is what
     /// "no duplicate entries" means in a map: the combination stays unique by construction. The
-    /// caller holds the blob it names as an upload, and has found it stored. Answers, when an
-    /// entry was replaced, the blob it named that no other entry names, which the caller sweeps
-    /// once it holds no lock.
-    fn put_entry_record(
-        &self,
-        id: &PackageId,
-        entry: Entry,
-    ) -> Result<Option<Option<String>>, String> {
+    /// caller holds the blob it names as an upload, and has found it stored. Answers whether an
+    /// entry was replaced, with the blob it named that no other entry names, which the caller
+    /// sweeps once it holds no lock.
+    fn put_entry_record(&self, id: &PackageId, entry: Entry) -> Result<Recorded, String> {
         let mut sets = self.sets.write().expect("sets lock");
         let set = sets
             .get_mut(id)
@@ -876,7 +892,12 @@ impl PackageStore {
         // (ADR-0029 clause 24); the blob store is not asked here.
         self.backend.put_entry(id, &entry)?;
         let previous = set.entries.insert(entry.platform.clone(), entry);
-        Ok(previous.map(|previous| self.doom(&sets, &hex::encode(previous.content_hash))))
+        Ok(match previous {
+            None => Recorded::Added,
+            Some(previous) => {
+                Recorded::Replaced(self.doom(&sets, &hex::encode(previous.content_hash)))
+            }
+        })
     }
 
     /// Deletes one entry; `Ok(false)` when the Package or the entry does not exist. The fleet
@@ -905,20 +926,42 @@ impl PackageStore {
     /// referenced it, which withdraws the offer; Agents that installed it keep running it
     /// (ADR-0027).
     pub fn delete_set(&self, id: &PackageId) -> Result<bool, String> {
+        Ok(match self.remove_set(id)? {
+            Some(sweep) => {
+                self.sweep_after(sweep);
+                true
+            }
+            None => false,
+        })
+    }
+
+    /// [`delete_set`](Self::delete_set) without its sweep, which it answers instead, `None` when
+    /// no Package of that identity exists: for a caller that holds a lock of its own, which the
+    /// sweep must not wait under, as it may wait for the blob store's lock
+    /// (ADR-draft-the-servers-state-and-its-stores clause 14). The caller hands the sweep to
+    /// [`sweep_after`](Self::sweep_after) once it has let its lock go.
+    ///
+    /// # Errors
+    /// Returns an error when the Package cannot be deleted.
+    pub fn remove_set(&self, id: &PackageId) -> Result<Option<Sweep>, String> {
         let mut sets = self.sets.write().expect("sets lock");
         if !sets.contains_key(id) {
-            return Ok(false);
+            return Ok(None);
         }
         self.backend.remove(id)?;
         let removed = sets.remove(id).expect("checked above");
-        let doomed: Vec<String> = removed
-            .entries
-            .values()
-            .filter_map(|entry| self.doom(&sets, &hex::encode(&entry.content_hash)))
-            .collect();
-        drop(sets);
-        self.sweep(doomed);
-        Ok(true)
+        Ok(Some(Sweep(
+            removed
+                .entries
+                .values()
+                .filter_map(|entry| self.doom(&sets, &hex::encode(&entry.content_hash)))
+                .collect(),
+        )))
+    }
+
+    /// Runs the sweep an act left ([`remove_set`](Self::remove_set)).
+    pub fn sweep_after(&self, sweep: Sweep) {
+        self.sweep(sweep.0);
     }
 
     /// Marks an upload as holding `sha256`: no deletion of it starts until

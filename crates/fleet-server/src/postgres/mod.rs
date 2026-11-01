@@ -136,6 +136,8 @@ pub struct Database {
     bound: Duration,
     /// How long a sweep waits for the blob store's lock, in milliseconds ([`SWEEP_WAIT`]).
     sweep_wait: std::sync::atomic::AtomicU64,
+    /// How many holds on the blob store's lock lost it with their session.
+    holds_lost: Arc<std::sync::atomic::AtomicUsize>,
     /// Dropped last: the connections' tasks run on it.
     bridge: Bridge,
 }
@@ -313,6 +315,7 @@ impl Database {
             origin,
             archive: std::sync::Mutex::new(None),
             bound,
+            holds_lost: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             sweep_wait: std::sync::atomic::AtomicU64::new(
                 u64::try_from(SWEEP_WAIT.as_millis()).unwrap_or(u64::MAX),
             ),
@@ -473,6 +476,12 @@ impl Database {
         self.hold_blobs_within(alone, wait)
     }
 
+    /// How many holds on the blob store's lock lost it with their session: what a test waits for.
+    #[cfg(test)]
+    pub(crate) fn holds_lost(&self) -> usize {
+        self.holds_lost.load(Ordering::SeqCst)
+    }
+
     /// Has every sweep wait `wait` for the blob store's lock rather than [`SWEEP_WAIT`]: what the
     /// tests of a lock held elsewhere wait for.
     #[cfg(test)]
@@ -491,13 +500,14 @@ impl Database {
         wait: Duration,
     ) -> Result<crate::blobs::BlobHold, String> {
         let (pg, tls) = (self.pg.clone(), self.tls.clone());
+        let (released, lost) = (
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let session = (released.clone(), lost.clone(), self.holds_lost.clone());
         let client = self.run_within(self.bound.saturating_add(wait), move |_pool| async move {
-            let client = connect(&pg, &tls).await?;
+            let client = lock_session(&pg, &tls, alone, wait, session).await?;
             let taking = if alone {
-                client
-                    .batch_execute(&format!("SET lock_timeout = {}", wait.as_millis()))
-                    .await
-                    .map_err(sql)?;
                 format!("SELECT pg_advisory_lock({BLOB_LOCK})")
             } else {
                 format!("SELECT pg_advisory_lock_shared({BLOB_LOCK})")
@@ -511,8 +521,106 @@ impl Database {
             })?;
             Ok(client)
         })?;
-        Ok(crate::blobs::BlobHold::of(Box::new(client)))
+        Ok(crate::blobs::BlobHold::of(
+            Box::new(LockHold { released, client }),
+            lost,
+        ))
     }
+
+    /// The `statement_timeout` and `lock_timeout` a hold's session on the blob store's lock runs
+    /// with: what the tests check the wait against.
+    #[cfg(test)]
+    pub(crate) fn blob_lock_session(&self, alone: bool, wait: Duration) -> (String, String) {
+        let (pg, tls) = (self.pg.clone(), self.tls.clone());
+        self.run(move |_pool| async move {
+            let session = (
+                Arc::new(AtomicBool::new(true)),
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            );
+            let client = lock_session(&pg, &tls, alone, wait, session).await?;
+            let show = |name: &'static str| {
+                let client = &client;
+                async move {
+                    client
+                        .query_one(&format!("SHOW {name}"), &[])
+                        .await
+                        .map(|row| row.get::<_, String>(0))
+                        .map_err(sql)
+                }
+            };
+            Ok((
+                show("statement_timeout").await?,
+                show("lock_timeout").await?,
+            ))
+        })
+        .expect("the lock's session")
+    }
+}
+
+/// A hold on the blob store's lock: its session, and whether it was let go on purpose.
+struct LockHold {
+    released: Arc<AtomicBool>,
+    #[allow(dead_code)]
+    client: tokio_postgres::Client,
+}
+
+impl Drop for LockHold {
+    fn drop(&mut self) {
+        self.released.store(true, Ordering::SeqCst);
+    }
+}
+
+/// The session a hold on the blob store's lock is taken on, outside the pool. A sweep's waits the
+/// whole of `wait` for the lock: its `lock_timeout` is `wait`, and its `statement_timeout`, which
+/// would end the wait at the pool's 10 seconds first, a little more. An upload's keeps the pool's,
+/// its `lock_timeout` of 5 seconds. A session that ends while its lock is held, not let go
+/// (`released`), is logged and marked `lost`: the lock is gone with it.
+async fn lock_session(
+    pg: &tokio_postgres::Config,
+    tls: &Tls,
+    alone: bool,
+    wait: Duration,
+    (released, lost, counted): (
+        Arc<AtomicBool>,
+        Arc<AtomicBool>,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ),
+) -> Result<tokio_postgres::Client, String> {
+    let watch = move |ended: Result<(), tokio_postgres::Error>| {
+        if !released.load(Ordering::SeqCst) {
+            lost.store(true, Ordering::SeqCst);
+            counted.fetch_add(1, Ordering::SeqCst);
+            tracing::warn!(
+                error = ?ended.err().map(sql),
+                "the session that held {BLOB_LOCK_NAME} ended while it was held: the lock is gone, \
+                 and a sweep of another instance may run beside what this one does"
+            );
+        }
+    };
+    let client = match tls {
+        Tls::Rustls(tls) => {
+            let (client, connection) = pg.connect(tls.clone()).await.map_err(sql)?;
+            tokio::spawn(async move { watch(connection.await) });
+            client
+        }
+        Tls::Plain => {
+            let (client, connection) = pg.connect(NoTls).await.map_err(sql)?;
+            tokio::spawn(async move { watch(connection.await) });
+            client
+        }
+    };
+    if alone {
+        let millis = wait.as_millis();
+        client
+            .batch_execute(&format!(
+                "SET lock_timeout = {millis}; SET statement_timeout = {}",
+                millis.saturating_add(5_000)
+            ))
+            .await
+            .map_err(sql)?;
+    }
+    Ok(client)
 }
 
 impl Drop for Database {
@@ -677,8 +785,9 @@ fn ca_roots(path: &Path) -> Result<rustls::RootCertStore, String> {
     Ok(roots)
 }
 
-/// One connection outside the pool, its task on the current runtime: what a hold on the blob
-/// store's lock is held on, and what the tests reach the database with past every adapter.
+/// One connection outside the pool, its task on the current runtime: what the tests reach the
+/// database with past every adapter.
+#[cfg(test)]
 async fn connect(pg: &tokio_postgres::Config, tls: &Tls) -> Result<tokio_postgres::Client, String> {
     match tls {
         Tls::Rustls(tls) => {
@@ -733,6 +842,7 @@ async fn connect_watched(
 }
 
 /// Drives one connection until it ends, saying why when it ends in an error.
+#[cfg(test)]
 async fn drive<C>(connection: C)
 where
     C: Future<Output = Result<(), tokio_postgres::Error>>,

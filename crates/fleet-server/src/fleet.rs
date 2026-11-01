@@ -3344,17 +3344,30 @@ impl AppState {
         if pinning > 0 {
             return Err(crate::packages::pinned(id, pinning));
         }
-        let deleted = self.package_store()?.delete_set(id)?;
-        if deleted {
-            if let Some(store) = self.deployment_store() {
-                let left = store.drop_package(id).map_err(|e| e.to_string())?;
-                if !left.is_empty() {
-                    info!(set = %id, deployments = ?left, "package left the deployments that held it");
-                }
+        let packages = self.package_store()?;
+        let sweep = packages.remove_set(id)?;
+        let deleted = sweep.is_some();
+        let dropped = if deleted {
+            self.deployment_store()
+                .map(|store| store.drop_package(id).map_err(|e| e.to_string()))
+                .transpose()
+        } else {
+            Ok(None)
+        };
+        drop(fleet);
+        // The sweep may wait for the blob store's lock, which another instance holds as long as it
+        // sweeps: not under the fleet lock, which every act of this Server waits for.
+        if let Some(sweep) = sweep {
+            packages.sweep_after(sweep);
+        }
+        if let Some(left) = dropped? {
+            if !left.is_empty() {
+                info!(set = %id, deployments = ?left, "package left the deployments that held it");
             }
+        }
+        if deleted {
             info!(set = %id, "package set deleted");
         }
-        drop(fleet);
         Ok(deleted)
     }
 
@@ -5936,6 +5949,107 @@ mod tests {
             Err(RolloutError::NotApplicable(_))
         ));
         assert!(state.snapshot()[0].assigned_deployment.is_empty());
+    }
+
+    /// A Package backend on files whose sweeps, once armed, wait at a gate for the blob store's
+    /// lock, as a sweep on PostgreSQL waits for another instance's.
+    struct HeldSweeps {
+        inner: crate::fs::FsPackageBackend,
+        armed: Arc<std::sync::atomic::AtomicBool>,
+        reached: Mutex<Option<std::sync::mpsc::Sender<()>>>,
+        go: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl crate::packages::PackageBackend for HeldSweeps {
+        fn load(&self) -> Result<Vec<crate::packages::Package>, String> {
+            self.inner.load()
+        }
+        fn create(&self, id: &PackageId) -> Result<(), String> {
+            self.inner.create(id)
+        }
+        fn put_entry(&self, id: &PackageId, entry: &crate::packages::Entry) -> Result<(), String> {
+            self.inner.put_entry(id, entry)
+        }
+        fn sign(
+            &self,
+            id: &PackageId,
+            platform: &Platform,
+            content_hash: &[u8],
+            signature: Option<&[u8]>,
+        ) -> Result<crate::packages::Signed, String> {
+            self.inner.sign(id, platform, content_hash, signature)
+        }
+        fn remove_entry(&self, id: &PackageId, platform: &Platform) -> Result<(), String> {
+            self.inner.remove_entry(id, platform)
+        }
+        fn remove(&self, id: &PackageId) -> Result<(), String> {
+            self.inner.remove(id)
+        }
+        fn hold_blobs(&self, alone: bool) -> Result<crate::blobs::BlobHold, String> {
+            if alone && self.armed.load(std::sync::atomic::Ordering::SeqCst) {
+                if let Some(reached) = self.reached.lock().expect("reached").take() {
+                    reached.send(()).expect("reached");
+                    self.go.lock().expect("go").recv().expect("go");
+                }
+            }
+            Ok(crate::blobs::BlobHold::none())
+        }
+    }
+
+    /// The deletion of a Package sweeps its blobs once it has let the fleet lock go: while the
+    /// sweep waits for the blob store's lock, every other act of the fleet goes on.
+    /// Verifies: ADR-draft-the-servers-state-and-its-stores
+    #[test]
+    fn a_package_deletion_sweeps_once_it_lets_the_fleet_lock_go() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let packages = dir.path().join("packages");
+        let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (reached, reaches) = std::sync::mpsc::channel();
+        let (go, goes) = std::sync::mpsc::channel();
+        let store = PackageStore::with_backend(
+            Box::new(HeldSweeps {
+                inner: crate::fs::FsPackageBackend::open(&packages).expect("backend"),
+                armed: armed.clone(),
+                reached: Mutex::new(Some(reached)),
+                go: Mutex::new(goes),
+            }),
+            Box::new(crate::fs::FsBlobStore::open(&packages).expect("blobs")),
+        )
+        .expect("store");
+        let id = PackageId::new("otelcol", "1.0.0").expect("id");
+        store.create(&id).expect("create");
+        store
+            .put_entry(&id, &linux(), b"v1".to_vec())
+            .expect("entry");
+        let state = Arc::new(
+            AppState::new(dir.path().join("configs"))
+                .expect("state")
+                .with_packages(Some(
+                    PackageOffering::new(&packages, store).expect("offering"),
+                )),
+        );
+        armed.store(true, std::sync::atomic::Ordering::SeqCst);
+        let deleting = std::thread::spawn({
+            let (state, id) = (state.clone(), id.clone());
+            move || state.delete_package_set(&id)
+        });
+        reaches
+            .recv()
+            .expect("the deletion's sweep waits for the lock");
+        let (acted, acts) = std::sync::mpsc::channel();
+        std::thread::spawn({
+            let state = state.clone();
+            move || {
+                let _ = acted.send(state.delete_configuration("none").map_err(|_| ()));
+            }
+        });
+        assert_eq!(
+            acts.recv_timeout(std::time::Duration::from_secs(30)),
+            Ok(Ok(false)),
+            "an act under the fleet lock goes on while the sweep waits"
+        );
+        go.send(()).expect("go on");
+        assert_eq!(deleting.join().expect("the deletion"), Ok(true));
     }
 
     /// Nothing an assignment pins can be deleted — a Configuration, a Package, a Deployment — and

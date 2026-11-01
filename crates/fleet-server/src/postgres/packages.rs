@@ -865,6 +865,95 @@ mod tests {
         );
     }
 
+    /// A sweep waits the whole of its wait for the blob store's lock, 60 seconds, which the
+    /// pool's `statement_timeout` of 10 seconds would otherwise cut short; an upload waits the
+    /// pool's `lock_timeout` of 5 seconds.
+    /// Verifies: ADR-draft-the-servers-state-and-its-stores
+    #[test]
+    fn a_sweep_waits_its_whole_wait_for_the_lock_and_an_upload_five_seconds() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        assert_eq!(
+            database.blob_lock_session(true, crate::postgres::SWEEP_WAIT),
+            ("65s".to_string(), "1min".to_string()),
+            "a sweep's statement_timeout and lock_timeout"
+        );
+        assert_eq!(
+            database.blob_lock_session(false, crate::postgres::SWEEP_WAIT),
+            ("10s".to_string(), "5s".to_string()),
+            "an upload's"
+        );
+    }
+
+    /// A hold on the blob store's lock whose session the database ends is marked lost, and
+    /// logged: the lock is gone with the session.
+    /// Verifies: ADR-draft-the-servers-state-and-its-stores
+    #[test]
+    fn a_hold_whose_session_ends_is_marked_lost() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let hold = database.hold_blobs(true).expect("held");
+        assert!(!hold.lost(), "held");
+        let key = format!("(SELECT {} AS key)", crate::postgres::BLOB_LOCK);
+        test.rows(&format!(
+            "SELECT pg_terminate_backend(pid) FROM pg_locks, {key} k \
+             WHERE locktype = 'advisory' AND granted \
+             AND classid = ((k.key >> 32) & 4294967295)::oid \
+             AND objid = (k.key & 4294967295)::oid"
+        ));
+        until("the hold is marked lost", &|| hold.lost());
+        drop(hold);
+        drop(database.hold_blobs(true).expect("the lock is free again"));
+    }
+
+    /// An upload whose hold on the blob store's lock was lost before its entry was written, its
+    /// session ended by the database, is refused and writes no entry: a sweep may have run since.
+    /// Verifies: ADR-draft-the-servers-state-and-its-stores
+    #[test]
+    fn an_upload_whose_lock_was_lost_is_refused() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let id = PackageId::new("otelcol", "1.0.0").expect("id");
+        let linux = Platform::new("linux", "amd64").expect("platform");
+        let (pausing, reaches, go) = Pausing::at(dir.path(), "exists");
+        let a = Arc::new(
+            crate::packages::PackageStore::with_backend(
+                Box::new(PgPackageBackend::new(database.clone())),
+                Box::new(pausing),
+            )
+            .expect("open A"),
+        );
+        a.create(&id).expect("create");
+        let uploading = std::thread::spawn({
+            let (a, id, linux) = (a.clone(), id.clone(), linux.clone());
+            move || a.put_entry(&id, &linux, b"an artifact".to_vec())
+        });
+        reaches
+            .recv()
+            .expect("A checks its blob, holding the lock shared");
+        let key = format!("(SELECT {} AS key)", crate::postgres::BLOB_LOCK);
+        test.rows(&format!(
+            "SELECT pg_terminate_backend(pid) FROM pg_locks, {key} k \
+             WHERE locktype = 'advisory' AND granted \
+             AND classid = ((k.key >> 32) & 4294967295)::oid \
+             AND objid = (k.key & 4294967295)::oid"
+        ));
+        until("the upload's hold is marked lost", &|| {
+            database.holds_lost() == 1
+        });
+        go.send(()).expect("go on");
+        let refused = uploading.join().expect("A").expect_err("refused");
+        assert!(refused.contains("upload it again"), "{refused}");
+        assert!(test.rows("SELECT 1 FROM package_entries").is_empty());
+    }
+
     /// A sweep at startup that cannot have the blob store's lock fails the start, naming the lock.
     /// Verifies: ADR-draft-the-servers-state-and-its-stores
     #[test]
