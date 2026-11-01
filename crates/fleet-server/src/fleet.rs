@@ -2171,7 +2171,19 @@ impl AppState {
         // (ADR-0024 clause 21). On a shared store the instance that carries the Agent may be
         // another, so what decides is the presence stored, read and removed in one step
         // (ADR-draft-the-fleet-record-of-agents-and-hosts clause 11).
+        // On a shared store an Agent this instance does not hold has its assignment read first, so
+        // the revisions only it pinned are collected once it is gone.
+        let mut unheld_configurations = Vec::new();
         if self.agent_store.is_shared() {
+            if !fleet.contains_key(uid) {
+                unheld_configurations = self
+                    .agent_store
+                    .get(uid)
+                    .map_err(ForgetError::Storage)?
+                    .and_then(|stored| stored.assignment)
+                    .map(|assignment| assignment.configurations.into_keys().collect())
+                    .unwrap_or_default();
+            }
             let silent_before = now_ms.saturating_sub(budget.as_millis() as u64);
             match self
                 .agent_store
@@ -2211,6 +2223,8 @@ impl AppState {
             self.unplace(&mut fleet, uid, record.placement.group.clone());
             // A pinned revision only this Agent referenced is unreferenced now (ADR-0026).
             self.collect_revisions(record.assigned_configurations().keys().cloned());
+        } else {
+            self.collect_revisions(unheld_configurations);
         }
         drop(fleet);
         self.push.send_modify(|rev| *rev += 1);
@@ -7183,6 +7197,63 @@ mod tests {
             2,
             "both are in the fleet"
         );
+    }
+
+    /// Forgetting an Agent this instance on PostgreSQL does not hold collects the revision only its
+    /// assignment pinned, as forgetting one it holds does.
+    /// Verifies: ADR-0026, ADR-draft-the-servers-state-and-its-stores
+    #[test]
+    fn forgetting_an_agent_held_nowhere_collects_the_revision_only_it_pinned() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let body = |text: &str| crate::configs::Revision {
+            body: text.to_string(),
+            role: String::new(),
+            service_name: "otelcol".to_string(),
+        };
+        let (pinned, saved) = (body("v1\n"), body("v2\n"));
+        let hash = crate::configs::revision_hash(&pinned);
+        let configs = crate::postgres::configs::PgConfigBackend::new(database.clone());
+        configs.save("base", &pinned).expect("save");
+        let uid = InstanceUid([0x83; 16]);
+        let mut stored = crate::agent_store::tests::record();
+        stored.assignment = Some(Assignment {
+            deployment: "stable".to_string(),
+            package: None,
+            configurations: BTreeMap::from([("base".to_string(), hash.clone())]),
+        });
+        let agents = crate::postgres::agents::PgAgentStore::new(database.clone());
+        agents.put(&uid, &stored).expect("put");
+        agents
+            .release(
+                &[crate::configs::Pinned {
+                    configuration: "base".to_string(),
+                    hash: hash.clone(),
+                    revision: pinned,
+                }],
+                &[(uid, stored)],
+            )
+            .expect("release");
+        configs.save("base", &saved).expect("save again");
+
+        let state = on_postgres(
+            &database,
+            Box::new(crate::postgres::agents::PgAgentStore::open(database.clone()).expect("open")),
+        );
+        let retained = |state: &AppState| {
+            state
+                .configurations()
+                .get("base")
+                .expect("base")
+                .retained
+                .contains_key(&hash)
+        };
+        assert!(retained(&state), "pinned while the Agent is stored");
+        assert!(state.snapshot().is_empty(), "held nowhere");
+        assert!(state.forget_agent(&uid).is_ok(), "silent, so forgotten");
+        assert!(!retained(&state), "collected with it");
     }
 
     /// A certificate of `host`.
