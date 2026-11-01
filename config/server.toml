@@ -285,10 +285,13 @@ client_ca_file = "client-ca.pem"
 # enrolment, issuance, revocation, operator acts, package outcomes — in
 # <data_dir>/audit/, each line carrying the SHA-256 of the one before. Check it with
 #   server audit-verify <data_dir>/audit
-# A Server that cannot write it admits no one until it can. Bounded by size, never switched off.
+# A Server that cannot write it admits no one until it can. Never switched off: in files it is
+# bounded by size, on PostgreSQL by age. Each key applies to its own store alone; one set for the
+# other store stops the Server at startup, naming it.
 # [audit]
-# max_file_bytes = 67108864   # a file this large is closed and the next one started
-# keep_files = 16             # the oldest past this is deleted, its last hash recorded first
+# max_file_bytes = 67108864   # files: a file this large is closed and the next one started
+# keep_files = 16             # files: the oldest past this is deleted, its last hash recorded first
+# retain_days = 365           # PostgreSQL: entries older than this are pruned, at least 1
 
 # Optional connection settings offered to the fleet: every Agent declaring
 # AcceptsOpAMPConnectionSettings is offered these, verifies them by actually connecting, and

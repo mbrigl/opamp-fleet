@@ -1263,7 +1263,9 @@ can. A certificate request in that time is answered `Unavailable` with a time to
 Agent asks again. Refusals past ten a second from one address are counted into one line, not
 dropped.
 `[audit] max_file_bytes` (64 MiB) and `keep_files` (16) bound the space it takes on the filesystem
-store.
+store, and `[audit] retain_days` (365, at least 1) how far back it goes on PostgreSQL. Each key
+applies to its own store alone: one set for the other store stops the Server at startup, naming
+the key.
 
 ### The audit record on PostgreSQL
 

@@ -199,33 +199,73 @@ const AGENTS_PER_HOST: u64 = 256;
 /// The heartbeat the Baseline uses when none is offered.
 const BASELINE_HEARTBEAT_SECS: u64 = 30;
 
-/// The `[audit]` section (ADR-0029 clause 12).
-#[derive(Debug, Deserialize)]
+/// The `[audit]` section (ADR-draft-the-servers-state-and-its-stores clause 12): the bound of the
+/// record on the store it is kept in. Each key applies to one store; [`check`](Self::check) refuses
+/// one set for the other.
+#[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct AuditConfig {
-    /// A file reaching this size is closed and a new one started.
-    pub max_file_bytes: u64,
-    /// How many files are kept; the oldest past this is deleted.
-    pub keep_files: usize,
+    /// On the filesystem store, a file reaching this size is closed and a new one started.
+    pub max_file_bytes: Option<u64>,
+    /// On the filesystem store, how many files are kept; the oldest past this is deleted.
+    pub keep_files: Option<usize>,
+    /// On PostgreSQL, how many days an entry is kept before it is pruned.
+    pub retain_days: Option<u64>,
 }
 
-impl Default for AuditConfig {
-    fn default() -> Self {
-        let limits = crate::audit_log::Limits::default();
-        AuditConfig {
-            max_file_bytes: limits.max_file_bytes,
-            keep_files: limits.keep_files,
-        }
-    }
-}
+/// How many days an entry is kept on PostgreSQL where `[audit] retain_days` is not set.
+pub const DEFAULT_RETAIN_DAYS: u64 = 365;
 
 impl AuditConfig {
+    /// The filesystem store's bounds, the defaults where a key is not set.
     #[must_use]
     pub fn limits(&self) -> crate::audit_log::Limits {
+        let defaults = crate::audit_log::Limits::default();
         crate::audit_log::Limits {
-            max_file_bytes: self.max_file_bytes,
-            keep_files: self.keep_files,
+            max_file_bytes: self.max_file_bytes.unwrap_or(defaults.max_file_bytes),
+            keep_files: self.keep_files.unwrap_or(defaults.keep_files),
         }
+    }
+
+    /// How many days an entry is kept on PostgreSQL, the default where the key is not set.
+    #[must_use]
+    pub fn retain_days(&self) -> u64 {
+        self.retain_days.unwrap_or(DEFAULT_RETAIN_DAYS)
+    }
+
+    /// Each key against the store `store` names: one set for the other store fails naming it, and
+    /// none bounds the record to nothing — the record is never switched off.
+    fn check(&self, store: &str) -> Result<(), String> {
+        let postgres = store == "postgres";
+        let (wrong, right) = if postgres {
+            ("\"postgres\"", "retain_days")
+        } else {
+            ("\"fs\"", "max_file_bytes and keep_files")
+        };
+        for (key, set, applies) in [
+            ("max_file_bytes", self.max_file_bytes.is_some(), !postgres),
+            ("keep_files", self.keep_files.is_some(), !postgres),
+            ("retain_days", self.retain_days.is_some(), postgres),
+        ] {
+            if set && !applies {
+                return Err(format!(
+                    "[audit] {key} is set but [database] store is {wrong} — on this store the \
+                     record is bounded by {right}; remove {key}"
+                ));
+            }
+        }
+        for (key, zero) in [
+            ("max_file_bytes", self.max_file_bytes == Some(0)),
+            ("keep_files", self.keep_files == Some(0)),
+            ("retain_days", self.retain_days == Some(0)),
+        ] {
+            if zero {
+                return Err(format!(
+                    "[audit] {key} must be greater than 0 — the record is never switched off"
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1487,13 +1527,7 @@ impl ServerConfig {
                 ));
             }
         }
-        if self.audit.max_file_bytes == 0 || self.audit.keep_files == 0 {
-            return Err(
-                "[audit] max_file_bytes and keep_files must be greater than 0 — the record is \
-                 never switched off"
-                    .to_string(),
-            );
-        }
+        self.audit.check(&self.database.store)?;
         let throttle = &self.admission_throttle;
         if throttle.max_failures == 0 || throttle.window_secs == 0 || throttle.backoff_secs == 0 {
             return Err(
@@ -3170,6 +3204,56 @@ mod tests {
         ] {
             let err = load(&database).expect_err(named);
             assert!(err.contains(named), "{named}: {err}");
+        }
+    }
+
+    /// The `[audit]` keys apply to one store each: `max_file_bytes` and `keep_files` to the files,
+    /// `retain_days` (default 365, at least 1) to PostgreSQL. A key set for the other store fails
+    /// startup naming it (ADR-draft-the-servers-state-and-its-stores clause 12).
+    /// Verifies: ADR-draft-the-servers-state-and-its-stores, ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance
+    #[test]
+    fn each_audit_key_applies_to_its_own_store_alone() {
+        let load = |text: &str| {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("server.toml");
+            std::fs::write(&path, format!("{TLS}{text}")).expect("write");
+            ServerConfig::load(&path)
+        };
+        let postgres = "[database]\nstore = \"postgres\"\n[database.postgres]\n\
+                        host = \"db.example\"\ndbname = \"fleet\"\nuser = \"fleet\"\n\
+                        password_file = \"/run/secrets/db\"\n";
+        let files = "[database]\nstore = \"fs\"\n";
+        let on = |store: &str, audit: &str| format!("{store}[audit]\n{audit}");
+
+        assert_eq!(load(postgres).expect("defaults").audit.retain_days(), 365);
+        assert_eq!(
+            load(&on(postgres, "retain_days = 1\n"))
+                .expect("set")
+                .audit
+                .retain_days(),
+            1
+        );
+        let limits = load(&on(files, "max_file_bytes = 1000\nkeep_files = 3\n"))
+            .expect("set")
+            .audit
+            .limits();
+        assert_eq!((limits.max_file_bytes, limits.keep_files), (1000, 3));
+        assert_eq!(
+            load(files).expect("defaults").audit.limits(),
+            crate::audit_log::Limits::default()
+        );
+
+        for (text, named) in [
+            (on(files, "retain_days = 30\n"), "retain_days"),
+            (on("", "retain_days = 30\n"), "retain_days"),
+            (on(postgres, "keep_files = 16\n"), "keep_files"),
+            (on(postgres, "max_file_bytes = 67108864\n"), "max_file_bytes"),
+            (on(postgres, "retain_days = 0\n"), "retain_days"),
+            (on(files, "keep_files = 0\n"), "keep_files"),
+            (on(files, "max_file_bytes = 0\n"), "max_file_bytes"),
+        ] {
+            let err = load(&text).expect_err(named);
+            assert!(err.contains(&format!("[audit] {named}")), "{named}: {err}");
         }
     }
 
