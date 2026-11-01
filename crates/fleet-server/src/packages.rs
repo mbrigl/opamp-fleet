@@ -399,17 +399,37 @@ impl PackageSummary {
 
 /// The package store's port (ADR-0009, ADR-0029): where Packages persist — each one's identity
 /// and entries, every entry naming its artifact by the hash of its bytes. The bytes are the
-/// [`BlobStore`]'s. The filesystem adapter ([`FsPackageBackend`](crate::fs::FsPackageBackend)) is
-/// what the composition root wires.
+/// [`BlobStore`]'s. It speaks in parts (ADR-0029 clause 2): a Package's entries are written and
+/// removed by platform, and no call writes an entry it does not name. The filesystem adapter
+/// ([`FsPackageBackend`](crate::fs::FsPackageBackend)) is what the composition root wires.
 pub trait PackageBackend: Send + Sync {
     /// Every persisted Package, once, when the store opens. Anything unreadable, unparsable, or in
     /// a layout this Server does not write fails the open and names where it is (ADR-0027).
     fn load(&self) -> Result<Vec<Package>, String>;
 
-    /// Creates or replaces one Package's metadata.
-    fn put(&self, package: &Package) -> Result<(), String>;
+    /// Creates a Package without entries; one that is stored already is left as it is.
+    fn create(&self, id: &PackageId) -> Result<(), String>;
 
-    /// Deletes one Package's metadata; its blobs are the store's to collect.
+    /// Creates or replaces the entry of one platform, in one step. A Package the store does not
+    /// hold is an error.
+    fn put_entry(&self, id: &PackageId, entry: &Entry) -> Result<(), String>;
+
+    /// Writes or, with `None`, clears the signature of the entry for `platform` — only while the
+    /// stored entry still names the bytes `content_hash`, since a signature covers that hash
+    /// (ADR-0027). Answers whether such an entry was stored; another instance may have replaced
+    /// or removed it since this one read it.
+    fn sign(
+        &self,
+        id: &PackageId,
+        platform: &Platform,
+        content_hash: &[u8],
+        signature: Option<&[u8]>,
+    ) -> Result<bool, String>;
+
+    /// Removes the entry of one platform; removing what is absent is not an error.
+    fn remove_entry(&self, id: &PackageId, platform: &Platform) -> Result<(), String>;
+
+    /// Deletes one Package's metadata, its entries with it; its blobs are the store's to collect.
     fn remove(&self, id: &PackageId) -> Result<(), String>;
 }
 
@@ -594,12 +614,14 @@ impl PackageStore {
         if sets.contains_key(id) {
             return Ok(());
         }
-        let set = Package {
-            id: id.clone(),
-            entries: BTreeMap::new(),
-        };
-        self.persist(&set)?;
-        sets.insert(id.clone(), set);
+        self.backend.create(id)?;
+        sets.insert(
+            id.clone(),
+            Package {
+                id: id.clone(),
+                entries: BTreeMap::new(),
+            },
+        );
         Ok(())
     }
 
@@ -712,16 +734,14 @@ impl PackageStore {
             .entries
             .get_mut(platform)
             .ok_or_else(|| no_entry(id, platform))?;
-        let previous = entry.signature.replace(signature);
-        let state = signature_state(self.key.as_deref(), id, entry);
-        if let Err(e) = self.backend.put(set) {
-            // What did not reach the disk did not happen.
-            if let Some(entry) = set.entries.get_mut(platform) {
-                entry.signature = previous;
-            }
-            return Err(e);
+        if !self
+            .backend
+            .sign(id, platform, &entry.content_hash, Some(&signature))?
+        {
+            return Err(changed_entry(id, platform));
         }
-        Ok(state)
+        entry.signature = Some(signature);
+        Ok(signature_state(self.key.as_deref(), id, entry))
     }
 
     /// Takes one entry's signature away (ADR-0027); `Ok(false)` when the entry carries none.
@@ -737,15 +757,13 @@ impl PackageStore {
             .entries
             .get_mut(platform)
             .ok_or_else(|| no_entry(id, platform))?;
-        let Some(previous) = entry.signature.take() else {
+        if entry.signature.is_none() {
             return Ok(false);
-        };
-        if let Err(e) = self.backend.put(set) {
-            if let Some(entry) = set.entries.get_mut(platform) {
-                entry.signature = Some(previous);
-            }
-            return Err(e);
         }
+        if !self.backend.sign(id, platform, &entry.content_hash, None)? {
+            return Err(changed_entry(id, platform));
+        }
+        entry.signature = None;
         Ok(true)
     }
 
@@ -759,18 +777,11 @@ impl PackageStore {
         let set = sets
             .get_mut(id)
             .ok_or_else(|| format!("no package set {id}"))?;
-        let platform = entry.platform.clone();
-        let previous = set.entries.insert(platform.clone(), entry);
-        // The metadata is written under the lock, as every write of a Package is: the store must
+        // The entry is written under the lock, as every write of a Package is: the store must
         // hold what memory holds, in the order it changed. A PostgreSQL call is bounded
         // (ADR-0029 clause 24); the blob store is not asked here.
-        if let Err(e) = self.backend.put(set) {
-            match previous {
-                Some(previous) => set.entries.insert(platform, previous),
-                None => set.entries.remove(&platform),
-            };
-            return Err(e);
-        }
+        self.backend.put_entry(id, &entry)?;
+        let previous = set.entries.insert(entry.platform.clone(), entry);
         let doomed =
             previous.and_then(|previous| self.doom(&sets, &hex::encode(previous.content_hash)));
         drop(sets);
@@ -788,13 +799,11 @@ impl PackageStore {
         let Some(set) = sets.get_mut(id) else {
             return Ok(false);
         };
-        let Some(removed) = set.entries.remove(platform) else {
+        if !set.entries.contains_key(platform) {
             return Ok(false);
-        };
-        if let Err(e) = self.backend.put(set) {
-            set.entries.insert(platform.clone(), removed);
-            return Err(e);
         }
+        self.backend.remove_entry(id, platform)?;
+        let removed = set.entries.remove(platform).expect("checked above");
         let doomed = self.doom(&sets, &hex::encode(removed.content_hash));
         drop(sets);
         self.sweep(doomed);
@@ -1052,10 +1061,6 @@ impl PackageStore {
         }
         Ok(())
     }
-
-    fn persist(&self, set: &Package) -> Result<(), String> {
-        self.backend.put(set)
-    }
 }
 
 /// The entry one Agent is offered, with the signature it travels with — the one test of "offered"
@@ -1105,6 +1110,17 @@ fn referenced(sets: &BTreeMap<PackageId, Package>, sha256: &str) -> bool {
 /// The refusal for an entry a Package does not hold.
 fn no_entry(id: &PackageId, platform: &Platform) -> String {
     format!("no entry {}-{} in set {id}", platform.os, platform.arch)
+}
+
+/// The refusal of a signature write whose entry the store no longer holds with the bytes this
+/// Server read: another instance replaced or removed it. A signature covers the bytes, so it is
+/// never written onto others.
+fn changed_entry(id: &PackageId, platform: &Platform) -> String {
+    format!(
+        "the entry {}-{} in set {id} has changed since this Server read it — read the Package \
+         again and sign what it holds",
+        platform.os, platform.arch
+    )
 }
 
 /// A signed artifact this Server holds, as [`PackageStore::offerable`] found it: what the download

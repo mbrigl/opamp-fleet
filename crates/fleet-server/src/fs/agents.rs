@@ -11,7 +11,7 @@ use prost::Message;
 use serde::{Deserialize, Serialize};
 
 use crate::agent_store::{AgentStore, PersistedAgent, Pin};
-use crate::configs::Configuration;
+use crate::configs::Pinned;
 use crate::fleet::{Assignment, Transport};
 use crate::packages::PackageId;
 
@@ -269,11 +269,11 @@ impl AgentStore for FsAgentStore {
     /// store answers about it.
     fn release(
         &self,
-        revisions: &[Configuration],
+        revisions: &[Pinned],
         agents: &[(InstanceUid, PersistedAgent)],
     ) -> Result<(), String> {
-        for configuration in revisions {
-            super::configs::write(&self.configurations, configuration)?;
+        for pinned in revisions {
+            super::configs::retain(&self.configurations, pinned)?;
         }
         let mut written: Vec<(InstanceUid, Option<Vec<u8>>, Option<Assignment>)> = Vec::new();
         for (uid, record) in agents {
@@ -524,7 +524,7 @@ mod tests {
     /// Verifies: ADR-0029
     #[test]
     fn a_rollout_cut_short_after_its_revisions_leaves_a_state_the_next_load_accepts() {
-        use crate::configs::{revision_hash, ConfigBackend as _, Revision};
+        use crate::configs::{revision_hash, ConfigBackend as _, Configuration, Revision};
         let dir = tempfile::tempdir().expect("tempdir");
         let revision = |body: &str| Revision {
             body: body.to_string(),
@@ -544,16 +544,18 @@ mod tests {
             store
                 .put(&uid, &agent)
                 .expect("the Agent as the last rollout left it");
-            // The next rollout's revisions reach the disk; its records never do.
-            let base = Configuration {
-                name: "base".to_string(),
-                saved: orphan.clone(),
-                retained: BTreeMap::from([
-                    (revision_hash(&pinned), pinned.clone()),
-                    (revision_hash(&orphan), orphan.clone()),
-                ]),
+            let configs = super::super::FsConfigBackend::open(dir.path()).expect("open");
+            configs.save("base", &orphan).expect("save");
+            let pin = |revision: &Revision| Pinned {
+                configuration: "base".to_string(),
+                hash: revision_hash(revision),
+                revision: revision.clone(),
             };
-            store.release(&[base], &[]).expect("the revisions");
+            configs
+                .retain(&pin(&pinned))
+                .expect("the last rollout's revision");
+            // The next rollout's revisions reach the disk; its records never do.
+            store.release(&[pin(&orphan)], &[]).expect("the revisions");
         }
 
         let state = crate::fleet::AppState::new(dir.path().to_path_buf())

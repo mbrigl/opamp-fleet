@@ -170,18 +170,48 @@ pub fn fits(revision: &Revision, description: Option<&AgentDescription>) -> bool
     reported == Some(revision.service_name.as_str())
 }
 
-/// The Configuration store's port (ADR-0009): where Configurations persist so a Server restart
-/// does not lose what the fleet should run. The filesystem adapter
+/// One revision a rollout pins (ADR-0026 clause 6): the Configuration it is of, the hash an
+/// assignment pins it by, and the revision. A rollout adds it by its hash and touches no other
+/// revision of the Configuration.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Pinned {
+    pub configuration: String,
+    pub hash: String,
+    pub revision: Revision,
+}
+
+/// The Configuration store's port (ADR-0009, ADR-0029 clause 2): where Configurations persist so a
+/// Server restart does not lose what the fleet should run. It speaks in parts: the saved revision
+/// is written on its own, the retained revisions are added and removed by hash, and no call writes
+/// a part it does not name. The filesystem adapter
 /// ([`FsConfigBackend`](crate::fs::FsConfigBackend)) is what the composition root wires.
 pub trait ConfigBackend: Send + Sync {
     /// Every persisted Configuration, once, when the store opens. One that cannot be read fails
     /// loudly and names where it is — never silently ignored (ADR-0008's principle).
     fn load(&self) -> Result<Vec<Configuration>, String>;
 
-    /// Creates or replaces one Configuration, in one step.
-    fn put(&self, config: &Configuration) -> Result<(), String>;
+    /// Creates a Configuration or replaces its saved revision, in one step. No retained revision
+    /// is written or removed.
+    fn save(&self, name: &str, saved: &Revision) -> Result<(), String>;
 
-    /// Deletes one Configuration.
+    /// Adds one retained revision by its hash, outside a rollout; a rollout adds the revisions it
+    /// pins with its assignments ([`AgentStore::release`](crate::agent_store::AgentStore::release)).
+    /// A Configuration the store does not hold is an error.
+    fn retain(&self, pinned: &Pinned) -> Result<(), String>;
+
+    /// Removes every retained revision of `name` that `referenced` does not name and no stored
+    /// assignment pins, and answers the ones kept (ADR-0026, ADR-0029 clause 2). A database
+    /// adapter reckons it in one transaction from the revisions and the assignments it stores,
+    /// holding the Configuration's row against every rollout that pins one of its revisions; the
+    /// filesystem adapter, its only writer, from `referenced`, which the Agent store answered. A
+    /// Configuration the store does not hold keeps nothing.
+    fn collect(
+        &self,
+        name: &str,
+        referenced: &BTreeSet<String>,
+    ) -> Result<BTreeMap<String, Revision>, String>;
+
+    /// Deletes one Configuration, its retained revisions with it.
     fn remove(&self, name: &str) -> Result<(), String>;
 }
 
@@ -228,8 +258,8 @@ impl ConfigStore {
     }
 
     /// Creates a Configuration or replaces its **saved** revision (ADR-0026): validated,
-    /// persisted atomically (temp file + rename) — and distributed to nobody. Every retained
-    /// revision keeps being offered untouched to the Agents assigned it.
+    /// persisted in one step — and distributed to nobody. Every retained revision keeps being
+    /// offered untouched to the Agents assigned it, and none is written.
     pub fn put_saved(&self, name: &str, revision: Revision) -> Result<Configuration, String> {
         validate_name(name).map_err(|e| format!("invalid name {name:?}: {e}"))?;
         if revision.body.trim().is_empty() {
@@ -237,6 +267,7 @@ impl ConfigStore {
         }
         check_type(&revision)?;
         let mut configs = self.configs.write().expect("configs lock");
+        self.backend.save(name, &revision)?;
         let config = match configs.get(name) {
             Some(existing) => Configuration {
                 saved: revision,
@@ -248,7 +279,6 @@ impl ConfigStore {
                 retained: BTreeMap::new(),
             },
         };
-        self.persist(&config)?;
         configs.insert(config.name.clone(), config.clone());
         Ok(config)
     }
@@ -257,18 +287,20 @@ impl ConfigStore {
     /// backend — the tests' shorthand for a rollout's half that [`pin`](Self::pin) is.
     #[cfg(test)]
     pub(crate) fn retain_saved(&self, name: &str) -> Result<String, String> {
-        self.pin(&BTreeSet::from([name.to_string()]), |hashes, changed| {
-            for config in changed {
-                self.backend.put(config)?;
+        self.pin(&BTreeSet::from([name.to_string()]), |hashes, pinned| {
+            for pinned in pinned {
+                self.backend.retain(pinned)?;
             }
             Ok(hashes[name].clone())
         })
     }
 
     /// Pins the saved revision of each of `names` for a rollout (ADR-0026 clause 6, ADR-0029
-    /// clause 2): hands `write` each one's hash and the Configurations whose retained revisions
-    /// that changes, under the store's lock, and makes them the store's — `write` persists them
-    /// together with the assignments that pin them. What `write` answers is answered.
+    /// clause 2): hands `write` each one's hash and every revision it pins, under the store's
+    /// lock, and makes them the store's — `write` persists them together with the assignments
+    /// that pin them. Each pinned revision is handed on, held already or not: another instance
+    /// may have collected it from the store since this one read it. What `write` answers is
+    /// answered.
     ///
     /// The revisions are the store's even when `write` fails: it may have failed after writing
     /// them, and with a record it could not put back that pins one. A revision is never dropped
@@ -280,56 +312,49 @@ impl ConfigStore {
     pub fn pin<T>(
         &self,
         names: &BTreeSet<String>,
-        write: impl FnOnce(&BTreeMap<String, String>, &[Configuration]) -> Result<T, String>,
+        write: impl FnOnce(&BTreeMap<String, String>, &[Pinned]) -> Result<T, String>,
     ) -> Result<T, String> {
         let mut configs = self.configs.write().expect("configs lock");
         let mut hashes = BTreeMap::new();
-        let mut changed = Vec::new();
+        let mut pinned = Vec::new();
         for name in names {
             let existing = configs
                 .get(name)
                 .ok_or_else(|| format!("no configuration {name:?}"))?;
             let hash = revision_hash(&existing.saved);
-            if !existing.retained.contains_key(&hash) {
-                let mut config = existing.clone();
-                config.retained.insert(hash.clone(), config.saved.clone());
-                changed.push(config);
-            }
+            pinned.push(Pinned {
+                configuration: name.clone(),
+                hash: hash.clone(),
+                revision: existing.saved.clone(),
+            });
             hashes.insert(name.clone(), hash);
         }
-        let written = write(&hashes, &changed);
-        for config in changed {
-            configs.insert(config.name.clone(), config);
+        let written = write(&hashes, &pinned);
+        for pinned in pinned {
+            if let Some(config) = configs.get_mut(&pinned.configuration) {
+                config.retained.insert(pinned.hash, pinned.revision);
+            }
         }
         written
     }
 
-    /// Drops every retained revision of `name` that `referenced` does not name — the collection
-    /// half of ADR-0026's "the store retains every revision an assignment still references". The
-    /// caller asks the Agent store which revisions its assignments reference (ADR-0029 clause 2);
-    /// a revision left behind by a failed write is harmless and collected on the next act, or when
-    /// the Server next starts.
+    /// Drops every retained revision of `name` that `referenced` does not name and no stored
+    /// assignment pins — the collection half of ADR-0026's "the store retains every revision an
+    /// assignment still references" — and holds what the store kept. The caller asks the Agent
+    /// store which revisions its assignments reference (ADR-0029 clause 2); a database store
+    /// reckons the rest in its own transaction from the assignments it stores, so a revision
+    /// another instance pinned is kept. A revision left behind by a failed write is harmless and
+    /// collected on the next act, or when the Server next starts.
     pub fn retain_only(&self, name: &str, referenced: &BTreeSet<String>) -> Result<(), String> {
         let mut configs = self.configs.write().expect("configs lock");
-        let Some(existing) = configs.get(name) else {
-            return Ok(());
-        };
-        if existing
-            .retained
-            .keys()
-            .all(|hash| referenced.contains(hash))
-        {
+        if !configs.contains_key(name) {
             return Ok(());
         }
-        let mut config = existing.clone();
-        config.retained.retain(|hash, _| referenced.contains(hash));
-        self.persist(&config)?;
-        configs.insert(config.name.clone(), config);
+        let kept = self.backend.collect(name, referenced)?;
+        if let Some(config) = configs.get_mut(name) {
+            config.retained = kept;
+        }
         Ok(())
-    }
-
-    fn persist(&self, config: &Configuration) -> Result<(), String> {
-        self.backend.put(config)
     }
 
     /// Deletes a Configuration — the saved revision and every retained one; `Ok(false)` when none
@@ -429,12 +454,42 @@ pub(crate) mod tests {
             Ok(self.0.lock().expect("memory").values().cloned().collect())
         }
 
-        fn put(&self, config: &Configuration) -> Result<(), String> {
+        fn save(&self, name: &str, saved: &Revision) -> Result<(), String> {
             self.0
                 .lock()
                 .expect("memory")
-                .insert(config.name.clone(), config.clone());
+                .entry(name.to_string())
+                .and_modify(|config| config.saved = saved.clone())
+                .or_insert_with(|| Configuration {
+                    name: name.to_string(),
+                    saved: saved.clone(),
+                    retained: BTreeMap::new(),
+                });
             Ok(())
+        }
+
+        fn retain(&self, pinned: &Pinned) -> Result<(), String> {
+            self.0
+                .lock()
+                .expect("memory")
+                .get_mut(&pinned.configuration)
+                .ok_or_else(|| format!("no configuration {:?}", pinned.configuration))?
+                .retained
+                .insert(pinned.hash.clone(), pinned.revision.clone());
+            Ok(())
+        }
+
+        fn collect(
+            &self,
+            name: &str,
+            referenced: &BTreeSet<String>,
+        ) -> Result<BTreeMap<String, Revision>, String> {
+            let mut memory = self.0.lock().expect("memory");
+            let Some(config) = memory.get_mut(name) else {
+                return Ok(BTreeMap::new());
+            };
+            config.retained.retain(|hash, _| referenced.contains(hash));
+            Ok(config.retained.clone())
         }
 
         fn remove(&self, name: &str) -> Result<(), String> {

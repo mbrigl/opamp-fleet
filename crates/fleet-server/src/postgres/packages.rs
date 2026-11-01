@@ -1,6 +1,8 @@
 //! Package records in PostgreSQL (ADR-0029 clause 6): the PostgreSQL adapter behind
 //! [`PackageBackend`](crate::packages::PackageBackend) — one row per Package and one per entry,
-//! each entry naming its artifact by hash. The bytes are the blob store's, with either.
+//! each entry naming its artifact by hash, and each call one transaction on the rows it names
+//! (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+//! clause 19). The bytes are the blob store's, with either.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -31,13 +33,108 @@ impl PackageBackend for PgPackageBackend {
         })
     }
 
-    fn put(&self, package: &Package) -> Result<(), String> {
-        let package = package.clone();
+    fn create(&self, id: &PackageId) -> Result<(), String> {
+        let id = id.clone();
+        self.database.run(move |pool| async move {
+            let client = client(&pool).await?;
+            client
+                .execute(
+                    "INSERT INTO packages (agent_type, version) VALUES ($1, $2) \
+                     ON CONFLICT DO NOTHING",
+                    &[&id.agent_type, &id.version],
+                )
+                .await
+                .map_err(sql)?;
+            Ok(())
+        })
+    }
+
+    /// The entry's row alone, inserted or replaced; the Package's row is held `FOR KEY SHARE`
+    /// by the reference, so a deletion of the Package waits for it or is waited for.
+    fn put_entry(&self, id: &PackageId, entry: &Entry) -> Result<(), String> {
+        let (id, entry) = (id.clone(), entry.clone());
         self.database.run(move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
-            write(&*transaction, &package).await?;
+            if transaction
+                .query_opt(
+                    "SELECT 1 FROM packages WHERE agent_type = $1 AND version = $2 \
+                     FOR KEY SHARE",
+                    &[&id.agent_type, &id.version],
+                )
+                .await
+                .map_err(sql)?
+                .is_none()
+            {
+                return Err(format!("no package set {id}"));
+            }
+            transaction
+                .execute(
+                    "INSERT INTO package_entries (agent_type, version, os, arch, sha256, size, \
+                     signature) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (agent_type, \
+                     version, os, arch) DO UPDATE SET sha256 = EXCLUDED.sha256, \
+                     size = EXCLUDED.size, signature = EXCLUDED.signature",
+                    &[
+                        &id.agent_type,
+                        &id.version,
+                        &entry.platform.os,
+                        &entry.platform.arch,
+                        &hex::encode(&entry.content_hash),
+                        &signed(entry.size),
+                        &entry.signature,
+                    ],
+                )
+                .await
+                .map_err(sql)?;
             transaction.commit().await.map_err(sql)
+        })
+    }
+
+    /// One statement on the entry's row, conditioned on the bytes it names: the row is locked
+    /// by the update, so it is decided from what is stored.
+    fn sign(
+        &self,
+        id: &PackageId,
+        platform: &Platform,
+        content_hash: &[u8],
+        signature: Option<&[u8]>,
+    ) -> Result<bool, String> {
+        let (id, platform) = (id.clone(), platform.clone());
+        let (sha256, signature) = (hex::encode(content_hash), signature.map(<[u8]>::to_vec));
+        self.database.run(move |pool| async move {
+            let client = client(&pool).await?;
+            let updated = client
+                .execute(
+                    "UPDATE package_entries SET signature = $6 WHERE agent_type = $1 \
+                     AND version = $2 AND os = $3 AND arch = $4 AND sha256 = $5",
+                    &[
+                        &id.agent_type,
+                        &id.version,
+                        &platform.os,
+                        &platform.arch,
+                        &sha256,
+                        &signature,
+                    ],
+                )
+                .await
+                .map_err(sql)?;
+            Ok(updated == 1)
+        })
+    }
+
+    fn remove_entry(&self, id: &PackageId, platform: &Platform) -> Result<(), String> {
+        let (id, platform) = (id.clone(), platform.clone());
+        self.database.run(move |pool| async move {
+            let client = client(&pool).await?;
+            client
+                .execute(
+                    "DELETE FROM package_entries WHERE agent_type = $1 AND version = $2 \
+                     AND os = $3 AND arch = $4",
+                    &[&id.agent_type, &id.version, &platform.os, &platform.arch],
+                )
+                .await
+                .map_err(sql)?;
+            Ok(())
         })
     }
 
@@ -123,7 +220,7 @@ pub(crate) async fn read_all(client: &impl GenericClient) -> Result<Vec<Package>
 }
 
 /// Creates or replaces one Package, its entries exactly `package`'s, inside the caller's
-/// transaction.
+/// transaction — the write of an import into a database no instance serves.
 pub(crate) async fn write(client: &impl GenericClient, package: &Package) -> Result<(), String> {
     let id = &package.id;
     client
@@ -218,22 +315,85 @@ mod tests {
         packages
     }
 
-    /// The port's contract on either store: what is written is loaded back, a put replaces the
-    /// entries whole, and a removal tolerates absence.
+    /// Writes `package` through the port, one entry at a time.
+    fn put(store: &dyn PackageBackend, package: &Package) {
+        store.create(&package.id).expect("create");
+        for entry in package.entries.values() {
+            store.put_entry(&package.id, entry).expect("put entry");
+        }
+    }
+
+    /// The port's contract on either store: what is written is loaded back; an entry is written,
+    /// signed and removed by its platform and no other entry is touched; a signature is written
+    /// only onto the bytes it names; and a removal tolerates absence.
     fn contract(open: &dyn Fn() -> Box<dyn PackageBackend>) {
         let store = open();
         assert!(store.load().expect("empty").is_empty());
         let one = package("1.2.3", &[("linux", "amd64", 1), ("windows", "amd64", 2)]);
         let two = package("2.0.0", &[("darwin", "arm64", 4)]);
-        store.put(&one).expect("put");
-        store.put(&two).expect("put");
+        put(&*store, &one);
+        put(&*store, &two);
+        store
+            .create(&two.id)
+            .expect("creating what is stored keeps it");
         assert_eq!(loaded(&*open()), [shown(&one), shown(&two)]);
-        let narrowed = package("1.2.3", &[("linux", "arm64", 6)]);
-        store.put(&narrowed).expect("replace");
-        assert_eq!(loaded(&*open()), [shown(&narrowed), shown(&two)]);
+        store
+            .put_entry(
+                &PackageId::new("otelcol", "9.9.9").expect("id"),
+                &one.entries.values().next().expect("an entry").clone(),
+            )
+            .expect_err("an entry of a Package the store does not hold");
+
+        let replaced = package("1.2.3", &[("linux", "amd64", 3), ("windows", "amd64", 2)]);
+        let linux = Platform::new("linux", "amd64").expect("platform");
+        store
+            .put_entry(&one.id, &replaced.entries[&linux])
+            .expect("replace one entry");
+        assert_eq!(loaded(&*open()), [shown(&replaced), shown(&two)]);
+
+        let windows = Platform::new("windows", "amd64").expect("platform");
+        assert!(
+            !store
+                .sign(
+                    &one.id,
+                    &windows,
+                    &[9; 32],
+                    Some(&[7; ED25519_SIGNATURE_LEN])
+                )
+                .expect("sign"),
+            "a signature is not written onto other bytes than it names"
+        );
+        assert!(store
+            .sign(
+                &one.id,
+                &windows,
+                &[2; 32],
+                Some(&[7; ED25519_SIGNATURE_LEN])
+            )
+            .expect("sign"));
+        let mut signed = replaced.clone();
+        signed.entries.get_mut(&windows).expect("windows").signature =
+            Some(vec![7; ED25519_SIGNATURE_LEN]);
+        assert_eq!(loaded(&*open()), [shown(&signed), shown(&two)]);
+        assert!(store
+            .sign(&one.id, &windows, &[2; 32], None)
+            .expect("clear"));
+        signed.entries.get_mut(&windows).expect("windows").signature = None;
+        assert_eq!(loaded(&*open()), [shown(&signed), shown(&two)]);
+        assert!(!store
+            .sign(&two.id, &windows, &[2; 32], None)
+            .expect("no such entry"));
+
+        store.remove_entry(&one.id, &linux).expect("remove entry");
+        store
+            .remove_entry(&one.id, &linux)
+            .expect("removing the absent is fine");
+        signed.entries.remove(&linux);
+        assert_eq!(loaded(&*open()), [shown(&signed), shown(&two)]);
+
         store.remove(&two.id).expect("remove");
         store.remove(&two.id).expect("removing the absent is fine");
-        assert_eq!(loaded(&*open()), [shown(&narrowed)]);
+        assert_eq!(loaded(&*open()), [shown(&signed)]);
     }
 
     /// Verifies: G-19, ADR-0029
@@ -253,15 +413,26 @@ mod tests {
         contract(&|| Box::new(PgPackageBackend::new(database.clone())));
     }
 
-    /// A put that fails part-way — on the second entry, after the first was written — leaves the
-    /// Package as it was, on either store. `refuse` makes the write of the Windows entry fail;
-    /// `mend` takes that away.
+    /// An entry write that fails leaves the Package as it was, on either store: one transaction
+    /// per call, one file replaced in one step. `refuse` makes the write of every entry of the
+    /// Windows platform fail; `mend` takes that away.
     fn fails_part_way(store: &dyn PackageBackend, refuse: &dyn Fn(), mend: &dyn Fn()) {
-        let before = package("1.2.3", &[("linux", "amd64", 1)]);
-        store.put(&before).expect("put");
+        let before = package("1.2.3", &[("linux", "amd64", 1), ("windows", "amd64", 2)]);
+        put(store, &before);
         refuse();
-        let broken = package("1.2.3", &[("linux", "amd64", 3), ("windows", "amd64", 2)]);
-        store.put(&broken).expect_err("the second entry fails");
+        let windows = Platform::new("windows", "amd64").expect("platform");
+        let broken = package("1.2.3", &[("windows", "amd64", 3)]);
+        store
+            .put_entry(&before.id, &broken.entries[&windows])
+            .expect_err("the entry is refused");
+        store
+            .sign(
+                &before.id,
+                &windows,
+                &[2; 32],
+                Some(&[5; ED25519_SIGNATURE_LEN]),
+            )
+            .expect_err("the signature is refused");
         mend();
         assert_eq!(loaded(store), [shown(&before)]);
     }

@@ -1393,7 +1393,11 @@ fn package_error(e: String) -> Response {
     if e.contains("not configured") || e.starts_with("no package set") || e.starts_with("no entry")
     {
         error(StatusCode::NOT_FOUND, e)
-    } else if e.contains("immutable") || e.contains("holds no entries") || e.contains("is pinned") {
+    } else if e.contains("immutable")
+        || e.contains("holds no entries")
+        || e.contains("is pinned")
+        || e.contains("has changed since")
+    {
         error(StatusCode::CONFLICT, e)
     } else if e.starts_with("invalid") || e.starts_with("the ") || e.contains("empty") {
         error(StatusCode::BAD_REQUEST, e)

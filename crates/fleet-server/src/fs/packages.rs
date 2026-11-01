@@ -29,6 +29,90 @@ impl FsPackageBackend {
     }
 }
 
+impl FsPackageBackend {
+    /// Creates or replaces one Package's file whole — the write of `server migrate`, which moves a
+    /// data directory no Server is running on.
+    pub(crate) fn put(&self, package: &Package) -> Result<(), String> {
+        let meta =
+            serde_json::to_vec_pretty(&PackageMeta::of(package)).expect("package serializes");
+        super::replace_owner_only(&self.path(&package.id), &meta)
+    }
+
+    /// The Package `id` as its file holds it; `None` when there is no file.
+    fn read(&self, id: &PackageId) -> Result<Option<Package>, String> {
+        let path = self.path(id);
+        match std::fs::read_to_string(&path) {
+            Ok(text) => parse(&id.to_string(), &path, &text).map(Some),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(format!("cannot read {}: {e}", path.display())),
+        }
+    }
+
+    /// Reads the Package `id`, lets `change` edit it, and writes it back when `change` answers
+    /// that it changed: the file is the record, and this Server its only writer. No file is an
+    /// error naming the Package.
+    fn amend<T>(
+        &self,
+        id: &PackageId,
+        change: impl FnOnce(&mut Package) -> (bool, T),
+    ) -> Result<T, String> {
+        let mut package = self
+            .read(id)?
+            .ok_or_else(|| format!("no package set {id}"))?;
+        let (changed, answer) = change(&mut package);
+        if changed {
+            self.put(&package)?;
+        }
+        Ok(answer)
+    }
+}
+
+/// One stored Package from the text of its file `path`, whose stem is `stem`.
+fn parse(stem: &str, path: &Path, text: &str) -> Result<Package, String> {
+    let meta: PackageMeta =
+        serde_json::from_str(text).map_err(|e| format!("cannot parse {}: {e}", path.display()))?;
+    let id = PackageId::load(&meta.agent_type, &meta.version)
+        .map_err(|e| format!("invalid identity in {}: {e}", path.display()))?;
+    if id.to_string() != stem {
+        return Err(super::misnamed(path, "identity"));
+    }
+    let mut entries = BTreeMap::new();
+    for entry in meta.entries {
+        let platform = Platform::new(&entry.os, &entry.arch)
+            .map_err(|e| format!("invalid platform in {}: {e}", path.display()))?;
+        let content_hash = hex::decode(&entry.sha256)
+            .ok()
+            .filter(|_| crate::blobs::is_hash(&entry.sha256))
+            .ok_or_else(|| format!("invalid sha256 in {}", path.display()))?;
+        let signature = entry
+            .signature_hex
+            .map(hex::decode)
+            .transpose()
+            .map_err(|e| format!("invalid signature in {}: {e}", path.display()))?;
+        // Held to the length a write is held to (ADR-0027 clause 18).
+        if let Some(signature) = &signature {
+            if signature.len() != crate::packages::ED25519_SIGNATURE_LEN {
+                return Err(format!(
+                    "invalid signature in {}: {} bytes, not {}",
+                    path.display(),
+                    signature.len(),
+                    crate::packages::ED25519_SIGNATURE_LEN
+                ));
+            }
+        }
+        entries.insert(
+            platform.clone(),
+            Entry {
+                platform,
+                content_hash,
+                size: entry.size,
+                signature,
+            },
+        );
+    }
+    Ok(Package { id, entries })
+}
+
 impl PackageBackend for FsPackageBackend {
     /// A file that cannot be read, does not parse, or whose name disagrees with the identity it
     /// holds fails the open naming it; so does anything else in the directory (ADR-0029 clause 6).
@@ -37,56 +121,56 @@ impl PackageBackend for FsPackageBackend {
         for (stem, path) in super::json_files(&self.dir)? {
             let text = std::fs::read_to_string(&path)
                 .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-            let meta: PackageMeta = serde_json::from_str(&text)
-                .map_err(|e| format!("cannot parse {}: {e}", path.display()))?;
-            let id = PackageId::load(&meta.agent_type, &meta.version)
-                .map_err(|e| format!("invalid identity in {}: {e}", path.display()))?;
-            if id.to_string() != stem {
-                return Err(super::misnamed(&path, "identity"));
-            }
-            let mut entries = BTreeMap::new();
-            for entry in meta.entries {
-                let platform = Platform::new(&entry.os, &entry.arch)
-                    .map_err(|e| format!("invalid platform in {}: {e}", path.display()))?;
-                let content_hash = hex::decode(&entry.sha256)
-                    .ok()
-                    .filter(|_| crate::blobs::is_hash(&entry.sha256))
-                    .ok_or_else(|| format!("invalid sha256 in {}", path.display()))?;
-                let signature = entry
-                    .signature_hex
-                    .map(hex::decode)
-                    .transpose()
-                    .map_err(|e| format!("invalid signature in {}: {e}", path.display()))?;
-                // Held to the length a write is held to (ADR-0027 clause 18).
-                if let Some(signature) = &signature {
-                    if signature.len() != crate::packages::ED25519_SIGNATURE_LEN {
-                        return Err(format!(
-                            "invalid signature in {}: {} bytes, not {}",
-                            path.display(),
-                            signature.len(),
-                            crate::packages::ED25519_SIGNATURE_LEN
-                        ));
-                    }
-                }
-                entries.insert(
-                    platform.clone(),
-                    Entry {
-                        platform,
-                        content_hash,
-                        size: entry.size,
-                        signature,
-                    },
-                );
-            }
-            packages.push(Package { id, entries });
+            packages.push(parse(&stem, &path, &text)?);
         }
         Ok(packages)
     }
 
-    fn put(&self, package: &Package) -> Result<(), String> {
-        let meta =
-            serde_json::to_vec_pretty(&PackageMeta::of(package)).expect("package serializes");
-        super::replace_owner_only(&self.path(&package.id), &meta)
+    fn create(&self, id: &PackageId) -> Result<(), String> {
+        if self.read(id)?.is_some() {
+            return Ok(());
+        }
+        self.put(&Package {
+            id: id.clone(),
+            entries: BTreeMap::new(),
+        })
+    }
+
+    fn put_entry(&self, id: &PackageId, entry: &Entry) -> Result<(), String> {
+        self.amend(id, |package| {
+            package
+                .entries
+                .insert(entry.platform.clone(), entry.clone());
+            (true, ())
+        })
+    }
+
+    fn sign(
+        &self,
+        id: &PackageId,
+        platform: &Platform,
+        content_hash: &[u8],
+        signature: Option<&[u8]>,
+    ) -> Result<bool, String> {
+        if self.read(id)?.is_none() {
+            return Ok(false);
+        }
+        self.amend(id, |package| match package.entries.get_mut(platform) {
+            Some(entry) if entry.content_hash == content_hash => {
+                entry.signature = signature.map(<[u8]>::to_vec);
+                (true, true)
+            }
+            _ => (false, false),
+        })
+    }
+
+    fn remove_entry(&self, id: &PackageId, platform: &Platform) -> Result<(), String> {
+        if self.read(id)?.is_none() {
+            return Ok(());
+        }
+        self.amend(id, |package| {
+            (package.entries.remove(platform).is_some(), ())
+        })
     }
 
     fn remove(&self, id: &PackageId) -> Result<(), String> {
