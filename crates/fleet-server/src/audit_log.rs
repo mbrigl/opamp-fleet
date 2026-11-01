@@ -680,8 +680,21 @@ mod tests {
         Arc::new(Manual(AtomicU64::new(1_790_000_000_000)))
     }
 
-    async fn settle() {
-        tokio::time::sleep(Duration::from_millis(50)).await;
+    /// Waits until every entry queued so far is written; only a defect takes ten seconds.
+    fn written(audit: &AuditLog) {
+        assert!(
+            audit.drain(Duration::from_secs(10)),
+            "the queued entries were not written"
+        );
+    }
+
+    /// Waits until `done` holds, for ten seconds at most; only a defect takes that long.
+    fn until(what: &str, mut done: impl FnMut() -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !done() {
+            assert!(std::time::Instant::now() < deadline, "{what}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     fn chain_of(memory: &Memory) -> Result<u64, String> {
@@ -866,14 +879,7 @@ mod tests {
             "a line of the failed batch was kept"
         );
         memory.1.store(false, Ordering::SeqCst);
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        while memory.lines().len() < 2 {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the writer never retried"
-            );
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        until("the writer never retried", || memory.lines().len() >= 2);
         let lines = memory.lines();
         assert!(lines[1].contains("audit.resumed"), "{lines:#?}");
         assert!(lines[1].contains("\"seq\":2"), "{}", lines[1]);
@@ -882,8 +888,8 @@ mod tests {
     }
 
     /// Verifies: ADR-0023
-    #[tokio::test]
-    async fn each_entry_carries_the_hash_of_the_one_before() {
+    #[test]
+    fn each_entry_carries_the_hash_of_the_one_before() {
         let memory = Memory::default();
         let audit =
             AuditLog::start(Box::new(memory.clone()), Limits::default(), clock()).expect("start");
@@ -892,7 +898,7 @@ mod tests {
                 .record(Entry::new("admission.admitted", "admitted").with("n", n))
                 .expect("record");
         }
-        settle().await;
+        written(&audit);
         let lines = memory.lines();
         assert_eq!(lines.len(), 3);
         assert!(
@@ -913,8 +919,8 @@ mod tests {
     }
 
     /// Verifies: ADR-0023
-    #[tokio::test]
-    async fn the_chain_survives_a_restart_and_a_rotation() {
+    #[test]
+    fn the_chain_survives_a_restart_and_a_rotation() {
         let memory = Memory::default();
         let limits = Limits {
             max_file_bytes: 300,
@@ -927,7 +933,7 @@ mod tests {
                     .record(Entry::new("issuance.signed", "issued").with("n", n))
                     .expect("record");
             }
-            settle().await;
+            written(&audit);
         }
         let audit = AuditLog::start(Box::new(memory.clone()), limits, clock()).expect("restart");
         for n in 4..8 {
@@ -935,7 +941,7 @@ mod tests {
                 .record(Entry::new("issuance.signed", "issued").with("n", n))
                 .expect("record");
         }
-        settle().await;
+        written(&audit);
         let lines = memory.lines();
         assert!(
             lines.iter().any(|l| l.contains("audit.rotated")),
@@ -955,8 +961,8 @@ mod tests {
     }
 
     /// Verifies: ADR-0023
-    #[tokio::test]
-    async fn a_truncated_file_is_recorded_as_a_broken_chain() {
+    #[test]
+    fn a_truncated_file_is_recorded_as_a_broken_chain() {
         let memory = Memory::default();
         memory.0.lock().expect("lock").push((
             "audit-1.jsonl".into(),
@@ -970,7 +976,7 @@ mod tests {
         audit
             .record(Entry::new("admission.admitted", "admitted"))
             .expect("record");
-        settle().await;
+        written(&audit);
         let lines = memory.lines();
         assert!(lines[2].contains("audit.chain_broken"), "{lines:#?}");
         assert!(
@@ -985,8 +991,8 @@ mod tests {
     }
 
     /// Verifies: ADR-0023
-    #[tokio::test]
-    async fn refusals_beyond_ten_a_second_are_aggregated_with_their_count() {
+    #[test]
+    fn refusals_beyond_ten_a_second_are_aggregated_with_their_count() {
         let memory = Memory::default();
         let clock = clock();
         let audit = AuditLog::start(Box::new(memory.clone()), Limits::default(), clock.clone())
@@ -997,9 +1003,24 @@ mod tests {
                     .peer(Some("192.0.2.1".parse().expect("ip"))),
             );
         }
-        settle().await;
+        let refused = |memory: &Memory| {
+            memory
+                .lines()
+                .iter()
+                .filter(|l| l.contains("\"admission.refused\""))
+                .count()
+        };
+        until("the refusals queued were not written", || {
+            refused(&memory) >= 10
+        });
+        // The aggregate is written once its second has passed, by the writer's own tick.
         clock.0.fetch_add(1_000, Ordering::SeqCst);
-        tokio::time::sleep(Duration::from_millis(1_100)).await;
+        until("no aggregate", || {
+            memory
+                .lines()
+                .iter()
+                .any(|l| l.contains("admission.refused.aggregated"))
+        });
         let lines = memory.lines();
         let written = lines
             .iter()
@@ -1037,14 +1058,7 @@ mod tests {
                 .with("bucket", "host"),
         );
         drop(held);
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        while memory.lines().len() < queued {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the writer fell behind"
-            );
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        until("the writer fell behind", || memory.lines().len() >= queued);
         let lines = memory.lines();
         assert!(
             !lines.iter().any(|l| l.contains("agent_rate.throttled")),
@@ -1135,8 +1149,8 @@ mod tests {
     }
 
     /// Verifies: ADR-0023
-    #[tokio::test]
-    async fn a_write_that_fails_refuses_until_one_succeeds() {
+    #[test]
+    fn a_write_that_fails_refuses_until_one_succeeds() {
         let memory = Memory::default();
         let audit =
             AuditLog::start(Box::new(memory.clone()), Limits::default(), clock()).expect("start");
@@ -1144,17 +1158,23 @@ mod tests {
         audit
             .record(Entry::new("admission.admitted", "admitted"))
             .expect("queued");
-        settle().await;
+        assert!(
+            !audit.drain(Duration::from_secs(10)),
+            "the failed write went unnoticed"
+        );
         assert_eq!(
             audit.record(Entry::new("admission.admitted", "admitted")),
             Err(Unavailable)
         );
         memory.1.store(false, Ordering::SeqCst);
-        tokio::time::sleep(Duration::from_millis(1_100)).await;
+        // The writer tries again on its own tick, and its first line that lands resumes the record.
+        until("the writer never retried", || {
+            memory.lines().iter().any(|l| l.contains("audit.resumed"))
+        });
         audit
             .record(Entry::new("admission.admitted", "admitted"))
             .expect("recording works again once the store does");
-        settle().await;
+        written(&audit);
         let resumed = memory
             .lines()
             .into_iter()
