@@ -32,6 +32,10 @@ const PRUNE_TIMEOUT: Duration = Duration::from_secs(300);
 /// How long the prune waits for its `audit.pruned` entries to be written.
 const WRITTEN_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// The entries one statement of a prune deletes at most: a few milliseconds' work by the primary
+/// key, far inside the statement timeout every connection of the Server holds.
+const DELETE_BATCH: i64 = 5000;
+
 /// The event an entry recording a prune carries.
 pub const PRUNED: &str = "audit.pruned";
 
@@ -131,7 +135,8 @@ pub fn prune(
     own: Option<String>,
     retain_days: u64,
 ) -> Result<Pruned, String> {
-    let days = i32::try_from(retain_days).unwrap_or(i32::MAX);
+    // At most 36 500 (`[audit] retain_days`), so the bits carry over unchanged.
+    let days = super::signed(retain_days);
     database.run_within(PRUNE_TIMEOUT, move |pool| async move {
         // A connection of its own, taken from the pool, so that the session-level lock ends with
         // it whatever happens to this call.
@@ -215,7 +220,7 @@ struct Plan {
 /// For each chain of `chains`, the longest run of entries from its start all stored more than
 /// `days` days ago; and the links and the predecessor the entries in those runs record that are still
 /// needed once they are gone.
-async fn plan(client: &impl GenericClient, chains: &[String], days: i32) -> Result<Plan, String> {
+async fn plan(client: &impl GenericClient, chains: &[String], days: i64) -> Result<Plan, String> {
     let mut plan = Plan::default();
     let mut removed: Vec<Link> = Vec::new();
     for chain in chains {
@@ -223,7 +228,7 @@ async fn plan(client: &impl GenericClient, chains: &[String], days: i32) -> Resu
             .query_opt(
                 "SELECT seq, line FROM audit_entries WHERE chain = $1::text::uuid AND seq = \
                  coalesce((SELECT min(seq) - 1 FROM audit_entries WHERE chain = $1::text::uuid \
-                 AND recorded_at >= now() - make_interval(days => $2)), \
+                 AND recorded_at >= now() - $2::bigint * interval '24 hours'), \
                  (SELECT max(seq) FROM audit_entries WHERE chain = $1::text::uuid))",
                 &[chain, &days],
             )
@@ -316,13 +321,29 @@ async fn delete(client: &impl GenericClient, chains: &[Link]) -> Result<(), Stri
             }
             Some(_) => {}
         }
-        client
-            .execute(
-                "DELETE FROM audit_entries WHERE chain = $1::text::uuid AND seq <= $2",
-                &[&link.chain, &seq],
+        // In batches, so that no statement outgrows the connection's statement timeout however
+        // long the run; the transaction around them keeps the prune whole.
+        let first: i64 = client
+            .query_one(
+                "SELECT coalesce(min(seq), 1) FROM audit_entries WHERE chain = $1::text::uuid",
+                &[&link.chain],
             )
             .await
-            .map_err(sql)?;
+            .map_err(sql)?
+            .get(0);
+        let mut from = first;
+        while from <= seq {
+            let to = seq.min(from.saturating_add(DELETE_BATCH - 1));
+            client
+                .execute(
+                    "DELETE FROM audit_entries WHERE chain = $1::text::uuid \
+                     AND seq BETWEEN $2 AND $3",
+                    &[&link.chain, &from, &to],
+                )
+                .await
+                .map_err(sql)?;
+            from = to.saturating_add(1);
+        }
     }
     Ok(())
 }
@@ -831,6 +852,54 @@ mod tests {
             "the own chain was pruned alone"
         );
         test.sql("DROP TRIGGER fleet_test_refuse_delete ON audit_entries");
+    }
+
+    /// A run too long for one statement within the statement timeout every connection holds is
+    /// deleted in batches inside the one transaction: the prune ends, and the chain still verifies.
+    /// The database slows each deleted row of the long chain by half a millisecond, so one
+    /// statement over all of them would outlast the ten-second timeout and roll the prune back.
+    /// Verifies: ADR-draft-the-servers-state-and-its-stores
+    #[test]
+    fn a_run_too_long_for_one_statement_is_deleted_in_batches() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        const OLD: u64 = 24_000;
+        let chain = "00000000-0000-4000-8000-000000000024";
+        let closing = crate::audit_log::render(
+            OLD + 1,
+            0,
+            &Entry::new("audit.chain_closed", "recorded")
+                .with("chain", chain)
+                .with("reason", "shutdown"),
+            &line_hash(&format!("old {OLD}")),
+        );
+        let a = writing(&test, "host-a");
+        test.sql(&format!(
+            "INSERT INTO audit_chains (id, host, opened_at, closed_at, closed_hash) \
+             VALUES ('{chain}', 'host-x', now(), now(), '{}'); \
+             INSERT INTO audit_entries (chain, seq, line, recorded_at) \
+             SELECT '{chain}', n, 'old ' || n, now() - interval '400 days' \
+             FROM generate_series(1, {OLD}) AS n; \
+             INSERT INTO audit_entries (chain, seq, line) VALUES ('{chain}', {}, '{}'); \
+             CREATE FUNCTION fleet_test_slow_delete() RETURNS trigger LANGUAGE plpgsql AS \
+             $$ BEGIN PERFORM pg_sleep(0.0005); RETURN OLD; END $$; \
+             CREATE TRIGGER fleet_test_slow_delete BEFORE DELETE ON audit_entries FOR EACH ROW \
+             WHEN (OLD.chain = '{chain}') EXECUTE FUNCTION fleet_test_slow_delete();",
+            line_hash(&closing),
+            OLD + 1,
+            closing.replace('\'', "''"),
+        ));
+        let pruned = a.prune();
+        assert!(
+            pruned
+                .chains
+                .iter()
+                .any(|link| link.chain == chain && link.last_seq == OLD),
+            "{pruned:?}"
+        );
+        assert_eq!(lines(&test, chain).len(), 1, "the old run is gone");
+        held(&a.database);
     }
 
     /// When its `audit.pruned` entries cannot be written, the prune deletes nothing.
