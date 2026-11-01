@@ -7,6 +7,8 @@ in `server.toml`. The token signs; the Server builds and audits every signature.
 planned token and serves one host, so several hosts need a network HSM. An existing fleet moves to
 new CA keys at its ordinary renewal. Instances that share keys name the same token labels; an
 instance whose audit key label differs from a live lease's fails startup.
+The manual's pages on the token and the network HSM, and on moving instances that hold a CA from a
+standby to side by side, land with it.
 
 ## Acceptance criteria
 

@@ -4,15 +4,15 @@
 
 The operator manual says how to run several instances: the balancer with TLS passthrough that keeps
 the peer address, the probes, `drain_secs` and the grace period of an orchestrator, a database with
-synchronous replication, the token and the network HSM, the rolling update, and the order of moving
+synchronous replication, the rolling update, and the order of moving
 one Server on files to several instances. It says that backing up and restoring the database and the
 bucket is the operator's, and that after a restore the operator sets again the revocations the audit
-record holds since the backup.
+record holds since the backup. The token and the network HSM are ticket 12's pages.
 
 ## Acceptance criteria
 
 - [ ] Given the manual, when an operator follows it from one Server on files, then they reach three
-  instances on PostgreSQL, S3 and a token in the order it gives
+  instances on PostgreSQL and S3 in the order it gives
 - [ ] Given the manual check, when it runs, then it passes
 
 ## Read first
@@ -26,7 +26,6 @@ record holds since the backup.
 
 - docs/plan/several-server-instances/09-an-instance-on-postgresql-and-s3-needs-no-disk.md
 - docs/plan/several-server-instances/11-two-versions-run-side-by-side.md
-- docs/plan/several-server-instances/12-the-ca-keys-live-on-a-pkcs11-token.md
 - docs/plan/several-server-instances/14-a-workflow-decides-g-20.md
 
 ## Mode

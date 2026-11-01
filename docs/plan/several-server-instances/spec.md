@@ -164,6 +164,25 @@ first chain names it; nothing is moved online.
 - **Open question:** whether an Agent should download a Package directly from the bucket rather than
   through the instance. No draft decides it; it needs an ADR before anyone builds it.
 
+## Stages
+
+The plan lands on `main` in three stages, each a release of its own; the tickets of a later stage
+go on on this branch.
+
+1. **Failover on PostgreSQL and S3.** Tickets 01 to 06, 08, 09, 10, 13, 18, 19, 20 and 21, and 22,
+   which states the stage's bounds. Several instances share one database and bucket, every change
+   is decided in its transaction and reaches every instance, the newest connection takes an
+   Agent, the audit record is one chain per lease, and an instance needs no disk. Its bounds:
+   instances are upgraded together, since two versions side by side are stage 2's; no load is
+   proven; and with a CA key as a file on the Server an instance runs alone, so failover is a
+   standby that takes over once the lease has lapsed. The ADR drafts are split for it: the clauses
+   it implements are numbered and accepted, the rest stay drafts on this branch.
+2. **G-20: the fleet at scale, and an upgrade without a stop.** Tickets 07, 11, 14 and 15. The
+   lists page, two versions run side by side, and the load test decides G-20, which lands with it.
+3. **The keys on a token.** Tickets 12, 16 and 17. The CA keys live on a PKCS#11 token, so
+   instances holding a CA run side by side, the heads of the audit chains are signed, and the
+   record may be exported.
+
 ## ADR impact
 
 - Binding ADRs in force: 0002 (tests cite decisions), 0006 (this plan), 0007 (the harness: nothing
