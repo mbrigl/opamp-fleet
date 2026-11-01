@@ -578,7 +578,7 @@ fn all<'i>(instructions: &'i [(String, String)], keyword: &str) -> Vec<&'i str> 
 
 const BASE: &str = "gcr.io/distroless/cc-debian13:nonroot";
 
-// Verifies: ADR-0034
+// Verifies: ADR-0034, ADR-draft-releases-attestations-and-the-server-image
 #[test]
 fn the_containerfile_copies_the_release_binary_onto_a_pinned_distroless_base_and_runs_nothing() {
     let text = containerfile();
@@ -637,7 +637,9 @@ fn the_containerfile_copies_the_release_binary_onto_a_pinned_distroless_base_and
     assert_eq!(all(&instructions, "VOLUME"), ["/var/lib/opamp-fleet"]);
     assert_eq!(all(&instructions, "EXPOSE"), ["4320 4321"]);
 
-    // It sets nothing but the data directory and the two listen addresses, and no secret.
+    // It sets nothing but the two listen addresses: no data directory, which a Server on
+    // PostgreSQL and S3 refuses, and no secret
+    // (ADR-draft-releases-attestations-and-the-server-image clause 16).
     let env: Vec<&str> = all(&instructions, "ENV")
         .iter()
         .flat_map(|args| args.split_whitespace())
@@ -645,7 +647,6 @@ fn the_containerfile_copies_the_release_binary_onto_a_pinned_distroless_base_and
     assert_eq!(
         env,
         [
-            "FLEET_SERVER__DATA_DIR=/var/lib/opamp-fleet",
             "FLEET_SERVER__LISTEN=0.0.0.0:4320",
             "FLEET_SERVER__REST__LISTEN=0.0.0.0:4321"
         ]
@@ -655,7 +656,7 @@ fn the_containerfile_copies_the_release_binary_onto_a_pinned_distroless_base_and
         .filter(|line| !line.trim_start().starts_with('#'))
         .map(|line| line.matches("FLEET_SERVER__").count())
         .sum::<usize>();
-    assert_eq!(set, 3, "a FLEET_SERVER__ variable beyond the three");
+    assert_eq!(set, 2, "a FLEET_SERVER__ variable beyond the two");
 
     // Clause 6: what a local build can say of itself. The base is named by the FROM line alone;
     // the release derives its annotations from it, so a new digest is written in one place.

@@ -141,10 +141,10 @@ not in it and are named by the `org.opencontainers.image.base.digest` annotation
 |---|---|
 | Entrypoint | `/usr/local/bin/server`; arguments after the image name are the Server's, such as `--config` |
 | User | UID and GID `65532`, numeric; no capability is needed, both ports are above 1024 |
-| Data directory | `/var/lib/opamp-fleet`, a volume owned by `65532` |
+| Data directory | none is set; `/var/lib/opamp-fleet` is a volume owned by `65532`, for a Server that keeps state on its disk to be given as `data_dir` |
 | Working directory | `/`, which `65532` cannot write, so the `server.toml` read without `--config` is never one on the volume |
 | Ports | `4320` (Agent plane) and `4321` (Operator plane) |
-| Environment it sets | `FLEET_SERVER__DATA_DIR=/var/lib/opamp-fleet`, `FLEET_SERVER__LISTEN=0.0.0.0:4320`, `FLEET_SERVER__REST__LISTEN=0.0.0.0:4321`, and nothing else |
+| Environment it sets | `FLEET_SERVER__LISTEN=0.0.0.0:4320`, `FLEET_SERVER__REST__LISTEN=0.0.0.0:4321`, and nothing else |
 | Configuration, certificates, keys, secrets | none; you mount them as files |
 
 Because both planes listen off the loopback inside the container, the Server requires `[tls]` and
@@ -154,9 +154,17 @@ certificates, the keys and every password or credential file read-only, and name
 configuration. The image works with a read-only root filesystem; the Server
 writes under its data directory alone.
 
+A Server on PostgreSQL and S3 keeps nothing on its disk: give it no `data_dir` and no volume, and
+any instance can take another's place. A Server that keeps state on its disk — on the filesystem
+record store, or with the filesystem blob store — needs `data_dir = "/var/lib/opamp-fleet"`, in
+`server.toml` or as `FLEET_SERVER__DATA_DIR`, and the volume there. Given none, it falls back to
+`fleet-data` under `/`, which `65532` cannot write, and stops naming `data_dir`; it never writes
+outside the volume.
+
 ```console
 $ docker run -d --name opamp-fleet-server --read-only --stop-timeout 30 \
     -p 4320:4320 -p 4321:4321 \
+    -e FLEET_SERVER__DATA_DIR=/var/lib/opamp-fleet \
     -v opamp-fleet-data:/var/lib/opamp-fleet \
     -v /etc/opamp-fleet:/etc/opamp-fleet:ro \
     ghcr.io/mbrigl/opamp-fleet-server@sha256:<digest> \
@@ -348,8 +356,11 @@ included, or between two pieces of a download, which therefore runs as long as b
 A request that failed is tried again at most twice, and not once a minute has passed since the
 first attempt. A store that stops answering fails the act that needs it, as a failed write does.
 
-In the bucket, a key under `<prefix>staging/` is an interrupted upload and is deleted at startup;
-any other key under `<prefix>` that is not `blobs/<sha256>` fails startup naming it. At startup the
+In the bucket, an upload in progress lives under `<prefix>staging/<lease>/`, `<lease>` being the
+lease of the instance that writes it, or `fs` on the filesystem record store. Those of a lease that
+is no longer live are interrupted uploads: an instance deletes them when it starts and whenever it
+takes over a lapsed lease, and never those of a live one; on the filesystem record store, every
+staging object goes at startup. Any other key under `<prefix>` that is not `blobs/<sha256>` fails startup naming it. At startup the
 Server lists the bucket for each artifact's size and downloads nothing: unlike the filesystem
 store, it does not hash the artifacts again. An object altered in the bucket is served, and the
 Client's own hash and signature checks refuse it. The bucket, its credentials, policies, retention
@@ -441,9 +452,11 @@ an error naming the database, ends every session, refuses every write from then 
 Restart it once the database answers. With the blobs in S3 and no CA key in a file, any number of
 instances share one database.
 
-With `"postgres"`, `data_dir` holds, with the filesystem blob store, the artifacts (`blobs/`),
-and an `audit/` a Server wrote there before as the archive, and nothing else; the audit record is
-in the database. A record of the filesystem store found there —
+With `"postgres"` and the filesystem blob store, `data_dir` holds the artifacts (`blobs/`), and an
+`audit/` a Server wrote there before as the archive, and nothing else; the audit record is in the
+database. With `"postgres"` and [`[blobs] store = "s3"`](#blobs) the Server keeps nothing on its
+disk: it creates no data directory, and a `data_dir` in the file or the environment stops the start,
+naming the key. A record of the filesystem store found there —
 `agents/`, `configurations/`, `revocations.json` and the rest — stops the start, naming it and
 `server migrate-to-postgres`. A backup takes the database and `data_dir` together.
 
@@ -634,7 +647,8 @@ server migrate-to-postgres --from /var/lib/opamp-fleet/fleet-data \
 
 Then set `data_dir` to the new directory and `[database] store = "postgres"`, and start the
 Server. With an S3 bucket in [`[blobs]`](#blobs), start once with `"s3"` on the old `data_dir`
-before the copy, so the bucket holds every artifact. Moving records back from PostgreSQL to files
+before the copy, so the bucket holds every artifact; then remove `data_dir` instead, as a Server
+on PostgreSQL and S3 has none, and the new directory stays empty. Moving records back from PostgreSQL to files
 is not provided.
 
 ## Upgrading to one data directory
