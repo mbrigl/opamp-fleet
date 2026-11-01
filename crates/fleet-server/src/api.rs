@@ -906,7 +906,7 @@ struct LabelsBody {
         (status = 400, description = "Malformed Instance UID, an unusable label, or a key starting `fleet.`", body = ErrorBody),
         (status = 404, description = "No such Agent", body = ErrorBody),
         (status = 409, description = "A label restates an attribute the Agent reports", body = ErrorBody),
-        (status = 500, description = "The Agent's record could not be written", body = ErrorBody)
+        (status = 500, description = "The labels could not be written, or they were written and the Agent's view cannot be read from the store; the answer says which", body = ErrorBody)
     )
 )]
 async fn set_agent_labels(
@@ -966,7 +966,7 @@ struct AgentRolloutSpec {
         (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
         (status = 404, description = "No such Agent", body = ErrorBody),
         (status = 409, description = "The Agent is in no Deployment, in a conflict, or in another one than named; or the Deployment holds nothing, or a Package with an unsigned entry", body = ErrorBody),
-        (status = 500, description = "The fleet cannot be read from the store; a change the request made stands", body = ErrorBody)
+        (status = 500, description = "Nothing was released, as the Agent or the fleet could not be read or the release could not be written; or the release was written and the Agent's view cannot be read, which the answer says", body = ErrorBody)
     )
 )]
 async fn rollout_to_agent(
@@ -2303,7 +2303,7 @@ type Refusal = (StatusCode, String);
     responses(
         (status = 200, description = "Every Deployment, in name order", body = [DeploymentView]),
         (status = 404, description = "Package delivery is not configured", body = ErrorBody),
-        (status = 500, description = "The fleet cannot be read from the store; a change the request made stands", body = ErrorBody)
+        (status = 500, description = "The fleet cannot be read from the store", body = ErrorBody)
     )
 )]
 async fn list_deployments(State(state): State<Arc<AppState>>) -> Response {
@@ -2338,7 +2338,7 @@ async fn list_deployments(State(state): State<Arc<AppState>>) -> Response {
     responses(
         (status = 200, description = "The Deployment", body = DeploymentView),
         (status = 404, description = "No such Deployment, or package delivery is not configured", body = ErrorBody),
-        (status = 500, description = "The fleet cannot be read from the store; a change the request made stands", body = ErrorBody)
+        (status = 500, description = "The fleet cannot be read from the store", body = ErrorBody)
     )
 )]
 async fn get_deployment(State(state): State<Arc<AppState>>, Path(name): Path<String>) -> Response {
@@ -2372,7 +2372,7 @@ async fn get_deployment(State(state): State<Arc<AppState>>, Path(name): Path<Str
         (status = 200, description = "The stored Deployment — distributed to nobody until rolled out", body = DeploymentView),
         (status = 400, description = "Invalid name, or a Selector that names no pair", body = ErrorBody),
         (status = 404, description = "Package delivery is not configured", body = ErrorBody),
-        (status = 500, description = "The fleet cannot be read from the store; a change the request made stands", body = ErrorBody)
+        (status = 500, description = "The change could not be written, or it was written and whom the Deployment reaches cannot be read from the store; the answer says which", body = ErrorBody)
     )
 )]
 async fn put_deployment(
@@ -2468,7 +2468,7 @@ async fn put_deployment_selector(
         (status = 400, description = "Invalid Agent type or version", body = ErrorBody),
         (status = 404, description = "No such Deployment or Package, or package delivery is not configured", body = ErrorBody),
         (status = 409, description = "The Deployment already holds a Package for this Agent type", body = ErrorBody),
-        (status = 500, description = "The fleet cannot be read from the store; a change the request made stands", body = ErrorBody)
+        (status = 500, description = "The change could not be written, or it was written and whom the Deployment reaches cannot be read from the store; the answer says which", body = ErrorBody)
     )
 )]
 async fn put_deployment_package(
@@ -2512,7 +2512,7 @@ async fn put_deployment_package(
         (status = 200, description = "The Deployment, without the Package", body = DeploymentView),
         (status = 400, description = "Invalid Agent type or version", body = ErrorBody),
         (status = 404, description = "No such Deployment or Package in it, or package delivery is not configured", body = ErrorBody),
-        (status = 500, description = "The fleet cannot be read from the store; a change the request made stands", body = ErrorBody)
+        (status = 500, description = "The change could not be written, or it was written and whom the Deployment reaches cannot be read from the store; the answer says which", body = ErrorBody)
     )
 )]
 async fn delete_deployment_package(
@@ -2544,7 +2544,7 @@ async fn delete_deployment_package(
     responses(
         (status = 200, description = "The Deployment, with the Configuration", body = DeploymentView),
         (status = 404, description = "No such Deployment or Configuration, or package delivery is not configured", body = ErrorBody),
-        (status = 500, description = "The fleet cannot be read from the store; a change the request made stands", body = ErrorBody)
+        (status = 500, description = "The change could not be written, or it was written and whom the Deployment reaches cannot be read from the store; the answer says which", body = ErrorBody)
     )
 )]
 async fn put_deployment_configuration(
@@ -2571,7 +2571,7 @@ async fn put_deployment_configuration(
     responses(
         (status = 200, description = "The Deployment, without the Configuration", body = DeploymentView),
         (status = 404, description = "No such Deployment, or it does not hold the Configuration, or package delivery is not configured", body = ErrorBody),
-        (status = 500, description = "The fleet cannot be read from the store; a change the request made stands", body = ErrorBody)
+        (status = 500, description = "The change could not be written, or it was written and whom the Deployment reaches cannot be read from the store; the answer says which", body = ErrorBody)
     )
 )]
 async fn delete_deployment_configuration(
@@ -3515,7 +3515,7 @@ async fn list_certificates(State(state): State<Arc<AppState>>) -> Response {
     responses(
         (status = 200, description = "Every Host, by host id, with its subject values and the Agents that arrived over it (ADR-0024)", body = Vec<HostView>),
         (status = 404, description = "Revocation is not configured", body = ErrorBody),
-        (status = 500, description = "The fleet cannot be read from the store; a change the request made stands", body = ErrorBody)
+        (status = 500, description = "The fleet cannot be read from the store", body = ErrorBody)
     )
 )]
 async fn list_hosts(State(state): State<Arc<AppState>>) -> Response {
