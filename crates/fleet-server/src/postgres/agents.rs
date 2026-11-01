@@ -14,7 +14,7 @@ use tokio_postgres::GenericClient;
 
 use super::notify::{notify, ASSIGNMENT, CONFIGURATION, FORGOTTEN, LABELS, RESTART};
 use super::{client, signed, sql, unsigned, Database};
-use crate::agent_store::{AgentStore, PersistedAgent, Pin, Presence};
+use crate::agent_store::{AgentStore, Creation, PersistedAgent, Pin, Presence};
 use crate::configs::Pinned;
 use crate::fleet::{Assignment, Transport};
 use crate::packages::PackageId;
@@ -118,10 +118,11 @@ impl AgentStore for PgAgentStore {
         uid: &InstanceUid,
         record: &PersistedAgent,
         max_records: usize,
-    ) -> Result<bool, String> {
+    ) -> Result<Creation, String> {
         let (uid, record) = (*uid, record.clone());
+        let assignment = record.assignment.clone();
         let max = i64::try_from(max_records).unwrap_or(i64::MAX);
-        self.database.run(move |pool| async move {
+        let creation = self.database.run(move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
             transaction
@@ -138,15 +139,25 @@ impl AgentStore for PgAgentStore {
                 .map_err(sql)?;
             let (count, there): (i64, i64) = (stored.get(0), stored.get(1));
             if there > 0 {
-                return Ok(true);
+                let found = read(&*transaction, Some(&key))
+                    .await?
+                    .remove(&uid)
+                    .ok_or_else(|| format!("agent {key} was counted, and is not there"))?;
+                return Ok(Creation::Found(Box::new(found)));
             }
             if count >= max {
-                return Ok(false);
+                return Ok(Creation::Full);
             }
             insert(&*transaction, &uid, &record, "DO NOTHING").await?;
             transaction.commit().await.map_err(sql)?;
-            Ok(true)
-        })
+            Ok(Creation::Created)
+        })?;
+        match &creation {
+            Creation::Created => self.stored([(&uid, assignment.as_ref())]),
+            Creation::Found(found) => self.stored([(&uid, found.assignment.as_ref())]),
+            Creation::Full => {}
+        }
+        Ok(creation)
     }
 
     fn set_labels(
@@ -1316,25 +1327,32 @@ mod tests {
             InstanceUid([2; 16]),
             InstanceUid([3; 16]),
         );
-        assert_eq!(a.create_within(&one, &record(), 2), Ok(true));
-        assert_eq!(b.create_within(&two, &record(), 2), Ok(true));
+        assert_eq!(a.create_within(&one, &record(), 2), Ok(Creation::Created));
+        assert_eq!(b.create_within(&two, &record(), 2), Ok(Creation::Created));
         assert_eq!(
             a.create_within(&three, &record(), 2),
-            Ok(false),
+            Ok(Creation::Full),
             "past the ceiling"
         );
         assert_eq!(
             b.create_within(&three, &record(), 2),
-            Ok(false),
+            Ok(Creation::Full),
             "on either instance"
         );
+        // Stored already, and labelled through A since: B is answered what is stored, and
+        // writes nothing of what it was given.
+        let labels = BTreeMap::from([("tier".to_string(), "edge".to_string())]);
+        assert!(a.set_labels(&one, &labels).expect("labels"));
+        let stored = PersistedAgent { labels, ..record() };
+        let mut given = record();
+        given.health = None;
         assert_eq!(
-            b.create_within(&one, &record(), 2),
-            Ok(true),
+            b.create_within(&one, &given, 2),
+            Ok(Creation::Found(Box::new(stored.clone()))),
             "stored already"
         );
         assert_eq!(a.load().expect("load").len(), 2);
-        assert!(a.get(&one).expect("get") == Some(record()), "created whole");
+        assert!(a.get(&one).expect("get") == Some(stored), "created whole");
     }
 
     /// A row that does not decode fails startup naming its `instance_uid` (ADR-0029 clause 4).

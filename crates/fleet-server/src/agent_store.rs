@@ -153,6 +153,17 @@ pub struct Presence {
     pub last_seen_ms: u64,
 }
 
+/// What [`AgentStore::create_within`] did with the record of an Agent first heard of.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Creation {
+    /// It created the record.
+    Created,
+    /// A record was stored already, another Server's: this one, as it is stored.
+    Found(Box<PersistedAgent>),
+    /// The store holds the most records it may, and created none.
+    Full,
+}
+
 /// What an assignment can pin (ADR-0026 clause 12): what a deletion asks about before it goes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Pin<'a> {
@@ -213,20 +224,20 @@ pub trait AgentStore: Send + Sync {
     /// Creates the record of an Agent first heard of, unless the store holds `max_records` records
     /// already. A shared store counts them where they are stored, in the step that creates it, so
     /// the bound holds for every Server on it, however many create at once (ADR-0021 clause 12).
-    /// Answers whether the record is stored: created, or there already, which passes no bound. A
-    /// store whose one Server holds every record bounds them in memory, and creates it.
+    /// A record stored already is answered as it is stored, written nothing, and passes no bound.
+    /// A store whose one Server holds every record bounds them in memory, and creates it.
     ///
     /// # Errors
-    /// Returns an error when the records cannot be counted or the record written.
+    /// Returns an error when the records cannot be counted, or the record read or written.
     fn create_within(
         &self,
         uid: &InstanceUid,
         record: &PersistedAgent,
         max_records: usize,
-    ) -> Result<bool, String> {
+    ) -> Result<Creation, String> {
         let _ = max_records;
         self.put(uid, record)?;
-        Ok(true)
+        Ok(Creation::Created)
     }
 
     /// Sets the labels of one record and nothing else, and announces it to the other Servers on the

@@ -23,7 +23,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
-use crate::agent_store::{AgentStore, PersistedAgent, Pin, Presence};
+use crate::agent_store::{AgentStore, Creation, PersistedAgent, Pin, Presence};
 use crate::audit::{Audit, Entry};
 use crate::configs::{ConfigBackend, ConfigStore, Configuration, DesiredConfig, Revision};
 use crate::deployments::{self, deployment_for, Deployment, DeploymentError, DeploymentStore};
@@ -2148,7 +2148,7 @@ impl AppState {
         // routes by it — a reply addressed to the new identity reaches no one, and the Agent goes
         // on reporting under the old one. The new identity travels in agent_identification alone.
         let reported = uid;
-        let loaded = self.hold_from_store(&uid);
+        let mut loaded = self.hold_from_store(&uid);
 
         let mut fleet = self.fleet.lock().expect("fleet lock");
         let mut reply_flags = 0u64;
@@ -2235,26 +2235,41 @@ impl AppState {
             }
         }
 
-        let known = fleet.contains_key(&uid);
+        let mut known = fleet.contains_key(&uid);
         // Admitting a genuinely new Agent past the ceiling would let a peer cycling self-asserted
         // UIDs (ADR-0021) grow the in-memory map and its per-Agent disk mirror without bound. Known
         // Agents keep reporting; only a *new* UID at capacity is refused, `Unavailable` so a Client
         // that legitimately raced in retries rather than gives up. The real gate is admission
         // (ADR-0021); this bounds the damage while the endpoint is open. On a shared store the
         // ceiling bounds the records stored, counted by the store as it creates this one, so it
-        // holds for the fleet and not for one instance; a record stored already passes none.
+        // holds for the fleet and not for one instance. A record stored already passes none: it
+        // is another instance's, which the read before the lock missed, and this report goes on
+        // from it as from one read then.
         let created = if known || !self.agent_store.is_shared() {
             Ok(false)
         } else {
             let record = self.new_record(msg.sequence_num, transport, conn);
-            self.agent_store
+            match self
+                .agent_store
                 .create_within(&uid, &record.to_persisted(), self.max_agents)
-                .inspect(|&stored| {
-                    if stored {
-                        info!(agent = %uid, transport = transport.as_str(), "new agent");
-                        fleet.insert(uid, record);
-                    }
-                })
+            {
+                Ok(Creation::Created) => {
+                    info!(agent = %uid, transport = transport.as_str(), "new agent");
+                    fleet.insert(uid, record);
+                    Ok(true)
+                }
+                Ok(Creation::Found(stored)) => {
+                    self.written
+                        .lock()
+                        .expect("written lock")
+                        .insert(uid, stored.durable_digest());
+                    fleet.insert(uid, AgentRecord::from_persisted(*stored));
+                    (known, loaded) = (true, true);
+                    Ok(false)
+                }
+                Ok(Creation::Full) => Ok(false),
+                Err(e) => Err(e),
+            }
         };
         let created = match created {
             Ok(created) => created,
@@ -2302,7 +2317,8 @@ impl AppState {
                 if let Err(e) =
                     revocations.check_report(host, &subject, not_after_ms, bound.as_bytes())
                 {
-                    // A record created for this report goes with it.
+                    // A record this report created goes with it; one another instance created
+                    // stays.
                     if created {
                         fleet.remove(&uid);
                         self.unpersist(&uid);
@@ -6247,5 +6263,204 @@ mod tests {
             Ok(1000),
             "a new holder writes them all"
         );
+    }
+
+    /// A store passing every call to `inner`, whose next reads of one record can be made to fail,
+    /// and which can run an act once right after a read of one record: what lets a test place
+    /// another instance's write between the read and what is done with it.
+    struct Hooked {
+        inner: Box<dyn AgentStore>,
+        failing_gets: Arc<AtomicU64>,
+        after_get: Arc<Mutex<Option<Act>>>,
+    }
+
+    /// What [`Hooked`] runs once after a read.
+    type Act = Box<dyn FnOnce() + Send>;
+
+    impl Hooked {
+        fn new(inner: Box<dyn AgentStore>) -> Self {
+            Hooked {
+                inner,
+                failing_gets: Arc::new(AtomicU64::new(0)),
+                after_get: Arc::new(Mutex::new(None)),
+            }
+        }
+    }
+
+    impl AgentStore for Hooked {
+        fn load(&self) -> Result<HashMap<InstanceUid, PersistedAgent>, String> {
+            self.inner.load()
+        }
+        fn get(&self, uid: &InstanceUid) -> Result<Option<PersistedAgent>, String> {
+            let failing = self
+                .failing_gets
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .is_ok();
+            if failing {
+                return Err("the read is held back".to_string());
+            }
+            let got = self.inner.get(uid);
+            let after = self.after_get.lock().expect("hook lock").take();
+            if let Some(after) = after {
+                after();
+            }
+            got
+        }
+        fn is_shared(&self) -> bool {
+            self.inner.is_shared()
+        }
+        fn put(&self, uid: &InstanceUid, record: &PersistedAgent) -> Result<(), String> {
+            self.inner.put(uid, record)
+        }
+        fn create_within(
+            &self,
+            uid: &InstanceUid,
+            record: &PersistedAgent,
+            max_records: usize,
+        ) -> Result<Creation, String> {
+            self.inner.create_within(uid, record, max_records)
+        }
+        fn set_labels(
+            &self,
+            uid: &InstanceUid,
+            labels: &BTreeMap<String, String>,
+        ) -> Result<bool, String> {
+            self.inner.set_labels(uid, labels)
+        }
+        fn set_restart_pending(
+            &self,
+            uid: &InstanceUid,
+            pending: bool,
+        ) -> Result<Option<bool>, String> {
+            self.inner.set_restart_pending(uid, pending)
+        }
+        fn remove(&self, uid: &InstanceUid) -> Result<(), String> {
+            self.inner.remove(uid)
+        }
+        fn write_presence(
+            &self,
+            holder: &str,
+            presence: &[(InstanceUid, Presence)],
+        ) -> Result<(), String> {
+            self.inner.write_presence(holder, presence)
+        }
+        fn remove_if_silent(
+            &self,
+            uid: &InstanceUid,
+            silent_before_ms: u64,
+        ) -> Result<Option<bool>, String> {
+            self.inner.remove_if_silent(uid, silent_before_ms)
+        }
+        fn rekey(
+            &self,
+            old: &InstanceUid,
+            new: &InstanceUid,
+            record: &PersistedAgent,
+        ) -> Result<(), String> {
+            self.inner.rekey(old, new, record)
+        }
+        fn release(
+            &self,
+            revisions: &[crate::configs::Pinned],
+            agents: &[(InstanceUid, PersistedAgent)],
+        ) -> Result<(), String> {
+            self.inner.release(revisions, agents)
+        }
+        fn pinning(&self, pin: Pin<'_>) -> usize {
+            self.inner.pinning(pin)
+        }
+        fn referenced_revisions(&self, name: &str) -> BTreeSet<String> {
+            self.inner.referenced_revisions(name)
+        }
+    }
+
+    /// An instance on `database`, its Agent records in `agents`, and the host register on the
+    /// database read at once: what another instance binds after this is not known to it.
+    fn on_postgres(
+        database: &Arc<crate::postgres::Database>,
+        agents: Box<dyn AgentStore>,
+    ) -> AppState {
+        let revocations = Revocations::open(
+            Box::new(crate::postgres::ledger::PgLedgerStore::new(
+                database.clone(),
+            )),
+            Arc::new(crate::clock::SystemClock),
+            Vec::new(),
+        )
+        .expect("revocations");
+        AppState::with_stores(
+            agents,
+            Box::new(crate::postgres::configs::PgConfigBackend::new(
+                database.clone(),
+            )),
+            Box::new(crate::clock::SystemClock),
+        )
+        .expect("state")
+        .with_revocations(Some(Arc::new(revocations)))
+    }
+
+    /// A certificate of `host`.
+    fn of_host(host: &str) -> Presented {
+        Presented {
+            id: CertId::new(b"CA", host),
+            host: Some(host.to_string()),
+            subject_values: crate::revocation::SubjectValues::default(),
+            not_after_ms: u64::MAX,
+        }
+    }
+
+    /// On PostgreSQL a first report here whose read of the stored record failed goes on from the
+    /// record another instance created, as it is stored: its labels are held, and a report the
+    /// binding then refuses leaves it stored and its Agent carried where it is.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    #[test]
+    fn a_record_another_instance_created_is_taken_as_stored_and_never_removed() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let hooked = Hooked::new(Box::new(crate::postgres::agents::PgAgentStore::new(
+            database.clone(),
+        )));
+        let failing = hooked.failing_gets.clone();
+        let a = on_postgres(&database, Box::new(hooked));
+        let b = on_postgres(
+            &database,
+            Box::new(crate::postgres::agents::PgAgentStore::new(database.clone())),
+        );
+        let (bound, labelled) = (InstanceUid([0x61; 16]), InstanceUid([0x62; 16]));
+        for uid in [bound, labelled] {
+            b.process_presented(report(&uid, 1), Transport::Http, None, Some(&of_host("h1")));
+        }
+        label(&b, &labelled, &[("tier", "edge")]);
+
+        failing.store(1, Ordering::SeqCst);
+        let refused = a.process_presented(
+            report(&bound, 2),
+            Transport::Http,
+            None,
+            Some(&of_host("h2")),
+        );
+        assert!(
+            refused.reply.error_response.is_some(),
+            "the binding refuses it"
+        );
+        assert_eq!(
+            test.rows(&format!(
+                "SELECT instance_uid FROM agents WHERE instance_uid = '{bound}'"
+            ))
+            .len(),
+            1,
+            "the record B created stays"
+        );
+
+        failing.store(1, Ordering::SeqCst);
+        a.process_presented(
+            report(&labelled, 2),
+            Transport::Http,
+            None,
+            Some(&of_host("h1")),
+        );
+        assert_eq!(view(&a, &labelled).labels["tier"], "edge", "held as stored");
     }
 }
