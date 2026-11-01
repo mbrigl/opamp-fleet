@@ -2331,7 +2331,7 @@ impl AppState {
                     self.agent_store
                         .rekey(&uid, &new_uid, &fleet[&new_uid].to_persisted())
                 {
-                    warn!(old = %uid, new = %new_uid, error = %e, "cannot move the stored agent record");
+                    warn!(old = %uid, new = %new_uid, error = %e, "cannot move the agent record");
                 }
                 self.written.lock().expect("written lock").remove(&uid);
             }

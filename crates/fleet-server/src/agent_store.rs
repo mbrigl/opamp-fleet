@@ -6,10 +6,11 @@
 //! assignments that pin them together (ADR-0029 clause 2). A report, a label change, a restart
 //! request and a rollout each write their own part of a record, so on a store other Servers share
 //! the write of one never undoes another's
-//! (ADR-draft-the-fleet-record-of-agents-and-hosts clause 2). The integrity questions a deletion asks — is this pinned, which revisions
-//! are referenced — are queries of the port too, so an adapter over a database answers them from
-//! its rows rather than the caller from a scan. The port speaks the *typed* record: what bytes or
-//! rows a backend turns it into is the adapter's own business.
+//! (ADR-draft-the-fleet-record-of-agents-and-hosts clause 2). The integrity questions a deletion
+//! asks — is this pinned, which revisions are referenced — are queries of the port too, so an
+//! adapter over a database answers them from its rows rather than the caller from a scan. The
+//! port speaks the *typed* record: what bytes or rows a backend turns it into is the adapter's
+//! own business.
 //!
 //! The write discipline (no write on a heartbeat, flush on graceful shutdown) deliberately lives
 //! in the caller ([`crate::fleet::AppState`]), so no backend can get it wrong.
