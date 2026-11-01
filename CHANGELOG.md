@@ -43,9 +43,9 @@ once its tag exists.
 - **With PostgreSQL, the revocation list has one version, and it is the Gateways' `ETag`**
   ([ADR-draft-the-servers-state-and-its-stores](docs/adr/draft-the-servers-state-and-its-stores.md)).
   Every revocation and every lift moves a counter in the database, in its own transaction, and
-  `GET /v1/gateway/revocations` answers it as the `ETag`. Every Server instance on one database
-  therefore answers the same `ETag` for the same list, and each renewal of an instance's lease
-  compares it with the one the instance holds. At its first start the Server adds the table
+  `GET /v1/gateway/revocations` answers `ETag: "list-<version>-<SHA-256 of the body>"`. Every
+  Server instance on one database therefore answers the same `ETag` for the same list, and each
+  renewal of an instance's lease compares the version with the one the instance holds. At its first start the Server adds the table
   `revocation_list_version` (migration 6); the release before runs on that schema. With the
   filesystem store the `ETag` is still the SHA-256 of the list.
   **What to do:** nothing. A Gateway fetches the list once in full after the upgrade, because
