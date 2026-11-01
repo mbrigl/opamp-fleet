@@ -385,10 +385,11 @@ impl AgentStore for PgAgentStore {
             .collect()
     }
 
-    /// One transaction: the row under its lock, the holder it names and whether that one's lease is
-    /// live read, then the row written, its count of takes raised by one, and the take announced
-    /// where it replaced a live one. The changes of holder are kept as the database's times of the latest eleven, and those within a
-    /// minute counted, so every instance counts on one clock.
+    /// One transaction: the row under its lock and the holder it names read, then the row written,
+    /// its count of takes raised by one, and the take announced where it replaced another holder,
+    /// whether or not that one's lease is live: an instance that serves under a new lease still
+    /// hears of it. The changes of holder are kept as the database's times of the latest eleven,
+    /// and those within a minute counted, so every instance counts on one clock.
     fn take(
         &self,
         uid: &InstanceUid,
@@ -402,8 +403,6 @@ impl AgentStore for PgAgentStore {
             let Some(row) = transaction
                 .query_opt(
                     "SELECT a.holder::text, a.holder IS DISTINCT FROM $2::text::uuid, \
-                         EXISTS (SELECT 1 FROM leases AS l \
-                             WHERE l.instance_id = a.holder AND l.expires_at > now()), \
                          (SELECT count(*) FROM unnest(a.holder_changes) AS t \
                              WHERE t > now() - interval '1 minute') \
                      FROM agents AS a WHERE a.instance_uid = $1 FOR UPDATE OF a",
@@ -414,8 +413,8 @@ impl AgentStore for PgAgentStore {
             else {
                 return Ok(None);
             };
-            let (stored, other, live, recent): (Option<String>, bool, bool, i64) =
-                (row.get(0), row.get(1), row.get(2), row.get(3));
+            let (stored, other, recent): (Option<String>, bool, i64) =
+                (row.get(0), row.get(1), row.get(2));
             let from = stored.filter(|_| other);
             let changed = from.is_some();
             let take: i64 = transaction
@@ -431,7 +430,7 @@ impl AgentStore for PgAgentStore {
                 .await
                 .map_err(sql)?
                 .get(0);
-            if changed && live {
+            if changed {
                 notify(&*transaction, TAKEN, &key).await?;
             }
             transaction.commit().await.map_err(sql)?;
@@ -1763,6 +1762,54 @@ mod tests {
             .write_presence(&a, &[(one, disconnected(7_000), Some(back + 1))])
             .expect("A's disconnect");
         assert_eq!(presence(one), [[Some(format!("none false {}", back + 1))]]);
+    }
+
+    /// A take that replaces another holder is announced, whether or not that holder's lease is
+    /// live, and one that replaces none is not.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    #[test]
+    fn a_take_that_replaces_another_holder_is_announced_whatever_its_lease() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let open = || {
+            Database::open_in(
+                &test.config(),
+                super::super::Exclusive::Shared,
+                Some(&test.schema),
+            )
+            .expect("open")
+        };
+        let (database, listener) = (open(), open());
+        let (heard, hearing) = std::sync::mpsc::channel();
+        listener.listen(move |what| {
+            let _ = heard.send(what);
+        });
+        let within = std::time::Duration::from_secs(10);
+        assert_eq!(
+            hearing.recv_timeout(within),
+            Ok(super::super::notify::Heard::Listening)
+        );
+        // Neither holder has a lease.
+        let (a, b) = (
+            "00000000-0000-7000-8000-00000000000a",
+            "00000000-0000-7000-8000-00000000000b",
+        );
+        let store = PgAgentStore::new(database.clone());
+        let (one, two) = (InstanceUid([1; 16]), InstanceUid([2; 16]));
+        for uid in [one, two] {
+            store.put(&uid, &record()).expect("put");
+        }
+        store.take(&one, a, 1_000).expect("take").expect("a record");
+        store.take(&two, a, 1_000).expect("take").expect("a record");
+        store.take(&two, b, 2_000).expect("take").expect("a record");
+        assert_eq!(
+            hearing.recv_timeout(within),
+            Ok(super::super::notify::Heard::Notified(
+                super::super::notify::Notice::new(TAKEN, &two.to_string())
+            )),
+            "the take from A, and before it nothing"
+        );
     }
 
     /// The take that makes an Agent's holder change for the eleventh time within a minute, and no

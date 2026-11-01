@@ -368,7 +368,7 @@ pub trait AgentStore: Send + Sync {
     /// step that names `holder` as the instance that holds its connection, writes it connected and
     /// last heard from at `last_seen_ms`, which never moves back, counts the take, and answers the
     /// count and the holder it replaced. A shared store announces the take to the other Servers when
-    /// the holder it replaced is another Server with a live lease, so that one stops carrying it,
+    /// the holder it replaced is another Server, live lease or not, so that one stops carrying it,
     /// and counts each change of holder, so the take that makes it change more than ten times
     /// within a minute says so
     /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
