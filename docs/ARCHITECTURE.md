@@ -390,9 +390,10 @@ inside), `hosts/`,
 its queue), `package-floors.json` (the floor of each Agent type) and `audit/`
 ([ADR-0029](adr/0029-the-servers-state-and-its-stores.md)).
 With `[database] store = "postgres"` the records are rows of one PostgreSQL database instead, and
-`data_dir` keeps `audit/` and, with the filesystem blob store, `blobs/`
-([ADR-0029](adr/0029-the-servers-state-and-its-stores.md)); the Server still loads
-every record at startup and answers from memory.
+`data_dir` keeps, with the filesystem blob store, `blobs/` and an archived `audit/`; with the blobs
+in S3 too there is no `data_dir`, and an instance keeps nothing on its disk
+([ADR-draft-the-servers-state-and-its-stores](adr/draft-the-servers-state-and-its-stores.md));
+the Server still loads every record at startup and answers from memory.
 A restart restores the fleet from them and shows each Agent disconnected until it reports; an
 installation an older Server wrote is moved there once by `server migrate`. The Client keeps its
 state

@@ -706,10 +706,11 @@ mod tests {
             shown(&packages)[0].1[0].4.is_some(),
             "the fixture's entry carries a signature"
         );
-        let state_packages = crate::packages::PackageStore::open_on(
+        let (state_packages, _) = crate::packages::PackageStore::open_on(
             &records,
-            &new,
+            Some(&new),
             &crate::config::BlobsConfig::default(),
+            None,
         )
         .expect("every entry finds its blob in the new data_dir");
         assert!(!state_packages.is_empty());

@@ -7,7 +7,7 @@
 //! are — the upload and the download stream run on blocking threads, the rest on whatever thread
 //! calls.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::io::Read;
 use std::path::Path;
 use std::sync::Arc;
@@ -82,14 +82,34 @@ const LIMITS: Limits = Limits {
     retry_for: Duration::from_secs(60),
 };
 
+/// Whose uploads a store's staging keys are
+/// (ADR-draft-the-servers-state-and-its-stores clause 16): `<prefix>staging/<lease>/<random>`.
+#[derive(Clone)]
+pub enum Uploader {
+    /// The one Server on the filesystem record store, which holds no lease: `<lease>` is `fs`.
+    Alone,
+    /// An instance on PostgreSQL: `<lease>` is the lease it holds when the upload starts. While it
+    /// holds none it takes no upload, as its planes are closed then.
+    Lease(crate::instance::Held),
+}
+
+/// The leases that are live, as the database answers at the moment of the call.
+pub type LiveLeases = Arc<dyn Fn() -> Result<HashSet<String>, String> + Send + Sync>;
+
 /// One object per blob at `<prefix>blobs/<sha256>`, an upload in progress at
-/// `<prefix>staging/<random>`, and no key outside `<prefix>` (ADR-0029 clause 16).
+/// `<prefix>staging/<lease>/<random>`, and no key outside `<prefix>` (ADR-0029 clause 16).
+#[derive(Clone)]
 pub struct S3BlobStore {
     store: Arc<AmazonS3>,
     bucket: String,
     /// Empty, or ending in `/` ([`S3BlobsConfig`] checks it).
     prefix: String,
     bridge: Arc<Bridge>,
+    uploader: Uploader,
+    /// Called once an upload is staged and before it is copied to its blob's key: where a test
+    /// holds an upload in progress.
+    #[cfg(test)]
+    staged: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl S3BlobStore {
@@ -115,6 +135,9 @@ impl S3BlobStore {
             bucket: config.bucket.clone(),
             prefix: config.prefix.clone(),
             bridge: Arc::new(Bridge::new("blobs-s3")?),
+            uploader: Uploader::Alone,
+            #[cfg(test)]
+            staged: None,
         };
         let root = s3.root();
         let store = s3.store.clone();
@@ -135,6 +158,62 @@ impl S3BlobStore {
         Ok(s3)
     }
 
+    /// The store, its uploads staged under `uploader`'s lease.
+    #[must_use]
+    pub fn staged_by(mut self, uploader: Uploader) -> Self {
+        self.uploader = uploader;
+        self
+    }
+
+    /// Deletes the staging objects of every lease that is not live, and never those of a live one
+    /// (ADR-draft-the-servers-state-and-its-stores clause 16): what a starting instance does, and
+    /// one that takes over a lapsed lease. Answers how many it deleted.
+    ///
+    /// The keys are listed before `live` is asked. A key is written only under a lease its writer
+    /// holds, so every key listed belongs to a lease that existed before the listing; one that is
+    /// not live after it has lapsed or been released, and an instance id is never taken again. An
+    /// instance starting meanwhile writes under a lease the listing did not see. Asking first would
+    /// delete the upload of an instance that took its lease between the question and the listing.
+    ///
+    /// # Errors
+    /// Returns an error when the staging keys cannot be listed or deleted, or `live` fails.
+    pub fn clean_staging(
+        &self,
+        live: &dyn Fn() -> Result<HashSet<String>, String>,
+    ) -> Result<usize, String> {
+        let store = self.store.clone();
+        let staging = Key::from(format!("{}staging", self.prefix).as_str());
+        let staged = self
+            .bridge
+            .run(async move { store.list(Some(&staging)).try_collect::<Vec<_>>().await })
+            .map_err(|e| format!("cannot list bucket {}: {e}", self.bucket))?;
+        if staged.is_empty() {
+            return Ok(0);
+        }
+        let live = live()?;
+        let mut deleted = 0;
+        for object in staged {
+            let key = object.location.to_string();
+            let lease = key
+                .strip_prefix(&format!("{}staging/", self.prefix))
+                .and_then(|rest| rest.split_once('/'))
+                .map(|(lease, _)| lease);
+            if lease.is_some_and(|lease| live.contains(lease)) {
+                continue;
+            }
+            self.delete_key(object.location)?;
+            deleted += 1;
+        }
+        if deleted > 0 {
+            tracing::info!(
+                bucket = %self.bucket,
+                deleted,
+                "deleted the staging objects of uploads whose lease is no longer live"
+            );
+        }
+        Ok(deleted)
+    }
+
     /// `<prefix>` as a key, `None` for the whole bucket.
     fn root(&self) -> Option<Key> {
         let prefix = self.prefix.trim_end_matches('/');
@@ -149,11 +228,22 @@ impl S3BlobStore {
     }
 
     fn staging_key(&self) -> Result<Key, String> {
+        let lease = match &self.uploader {
+            Uploader::Alone => "fs".to_string(),
+            Uploader::Lease(held) => held.borrow().clone().ok_or_else(|| {
+                "this instance holds no lease, so it takes no upload until it holds one again"
+                    .to_string()
+            })?,
+        };
         let mut random = [0u8; 16];
         ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut random)
             .map_err(|_| "no randomness for a staging key".to_string())?;
-        Key::parse(format!("{}staging/{}", self.prefix, hex::encode(random)))
-            .map_err(|e| e.to_string())
+        Key::parse(format!(
+            "{}staging/{lease}/{}",
+            self.prefix,
+            hex::encode(random)
+        ))
+        .map_err(|e| e.to_string())
     }
 
     /// What a key under `<prefix>` is: a blob, a staging object, or neither.
@@ -237,6 +327,31 @@ impl S3BlobStore {
     }
 }
 
+/// The cleanup of the staging objects of leases that are no longer live, kept for an instance to
+/// run again whenever it takes over a lapsed lease
+/// (ADR-draft-the-servers-state-and-its-stores clause 16).
+#[derive(Clone)]
+pub struct StagingCleanup {
+    store: S3BlobStore,
+    live: LiveLeases,
+}
+
+impl StagingCleanup {
+    /// The cleanup of `store`'s staging objects, `live` naming the leases that are live.
+    #[must_use]
+    pub fn new(store: S3BlobStore, live: LiveLeases) -> Self {
+        StagingCleanup { store, live }
+    }
+
+    /// Runs it once; answers how many staging objects it deleted.
+    ///
+    /// # Errors
+    /// As [`S3BlobStore::clean_staging`].
+    pub fn run(&self) -> Result<usize, String> {
+        self.store.clean_staging(&*self.live)
+    }
+}
+
 /// A key under `<prefix>`, as [`S3BlobStore::classify`] reads it.
 enum Kind {
     Blob(String),
@@ -251,6 +366,10 @@ impl BlobStore for S3BlobStore {
     fn put(&self, bytes: &mut dyn Read) -> Result<(String, u64), String> {
         let staging = self.staging_key()?;
         let (sha256, size) = self.stage(&staging, bytes)?;
+        #[cfg(test)]
+        if let Some(staged) = &self.staged {
+            staged();
+        }
         let copied = self.blob_key(&sha256).and_then(|blob| {
             if self.exists(&sha256)? {
                 // The same bytes are stored already: once is enough.
@@ -265,7 +384,7 @@ impl BlobStore for S3BlobStore {
         let removed = self.delete_key(staging);
         copied?;
         if let Err(e) = removed {
-            // The blob is stored; the next startup deletes what is left under staging/.
+            // The blob is stored; a cleanup once this lease is no longer live deletes what is left.
             tracing::warn!(error = %e, "cannot delete an upload's staging object");
         }
         Ok((sha256, size))
@@ -305,8 +424,9 @@ impl BlobStore for S3BlobStore {
     }
 
     /// Every blob with its size, from the listing alone: nothing is downloaded (ADR-0029 clause 16).
-    /// A staging object an interrupted upload left is deleted; any other key under `<prefix>`
-    /// fails, naming it.
+    /// A staging object is passed over, as it may be an upload another instance is still writing
+    /// ([`clean_staging`](S3BlobStore::clean_staging) deletes those of leases that are not live);
+    /// any other key under `<prefix>` fails, naming it.
     fn list(&self) -> Result<Vec<(String, u64)>, String> {
         let store = self.store.clone();
         let root = self.root();
@@ -321,7 +441,7 @@ impl BlobStore for S3BlobStore {
                 Kind::Blob(sha256) => {
                     blobs.insert(sha256, object.size);
                 }
-                Kind::Staging => self.delete_key(object.location)?,
+                Kind::Staging => {}
                 Kind::Unknown => {
                     return Err(format!(
                         "{key} in bucket {} is not part of the store's layout — the Server keeps \
@@ -736,10 +856,10 @@ mod tests {
         clear(&store);
     }
 
-    /// A failed upload leaves nothing under `blobs/`, and a staging object an interrupted upload
-    /// left is deleted at the next startup; any other key under the prefix fails it, naming the
-    /// key (ADR-0029 clause 16).
-    /// Verifies: ADR-0029
+    /// A failed upload leaves nothing under `blobs/`; the listing passes a staging object over, and
+    /// with the filesystem record store, which holds no lease, the cleanup at startup deletes every
+    /// one; any other key under the prefix fails startup, naming the key (ADR-0029 clause 16).
+    /// Verifies: ADR-0029, ADR-draft-the-servers-state-and-its-stores
     #[test]
     fn leftover_staging_objects_go_and_unknown_keys_fail_startup_on_s3() {
         let Some(config) = named_store() else { return };
@@ -753,12 +873,16 @@ mod tests {
 
         let (sha256, _) = store.put(&mut &b"artifact"[..]).expect("put");
         plant(&store, "staging/0123456789abcdef");
+        plant(&store, "staging/fs/0123456789abcdef");
         let reopened = S3BlobStore::open(&again(&config)).expect("reopen");
         assert_eq!(reopened.list().expect("list"), vec![(sha256.clone(), 8)]);
+        assert_eq!(keys(&store).len(), 3, "the listing deletes nothing");
+        let none = || Ok(HashSet::new());
+        assert_eq!(reopened.clean_staging(&none).expect("clean"), 2);
         assert_eq!(
             keys(&store),
             vec![format!("{}blobs/{sha256}", config.prefix)],
-            "the staging object is gone"
+            "the staging objects are gone"
         );
 
         for stray in ["otelcol.bin", "blobs/not-a-hash", "blobs/nested/key"] {
@@ -770,6 +894,80 @@ mod tests {
                 .expect("remove");
         }
         clear(&store);
+    }
+
+    /// A lease as an instance holds it.
+    fn lease(id: &str) -> Uploader {
+        Uploader::Lease(tokio::sync::watch::channel(Some(id.to_string())).1)
+    }
+
+    /// An upload in progress on instance A, staged under A's lease, survives B's start, whose
+    /// cleanup deletes the staging objects of a lease that lapsed and keeps those of every live
+    /// one; A's upload then completes. An instance that holds no lease takes no upload
+    /// (ADR-draft-the-servers-state-and-its-stores clause 16).
+    /// Verifies: ADR-draft-the-servers-state-and-its-stores
+    #[test]
+    fn the_cleanup_leaves_the_staging_objects_of_a_live_lease_and_deletes_a_lapsed_ones() {
+        let Some(config) = named_store() else { return };
+        let (staged, held_at) = std::sync::mpsc::channel();
+        let (go, released) = std::sync::mpsc::channel::<()>();
+        let released = std::sync::Mutex::new(released);
+        let mut a = S3BlobStore::open(&config)
+            .expect("open A")
+            .staged_by(lease("lease-a"));
+        a.staged = Some(Arc::new(move || {
+            staged.send(()).expect("staged");
+            released.lock().expect("lock").recv().expect("released");
+        }));
+        let uploading = std::thread::spawn({
+            let a = a.clone();
+            move || a.put(&mut &b"an artifact A uploads"[..])
+        });
+        held_at.recv().expect("A's upload is staged");
+        let a_staged = keys(&a);
+        assert_eq!(a_staged.len(), 1, "{a_staged:?}");
+        assert!(
+            a_staged[0].starts_with(&format!("{}staging/lease-a/", config.prefix)),
+            "staged under A's lease: {a_staged:?}"
+        );
+        plant(&a, "staging/lease-lapsed/0123456789abcdef");
+
+        let b = S3BlobStore::open(&again(&config))
+            .expect("B starts")
+            .staged_by(lease("lease-b"));
+        let live = || {
+            Ok(HashSet::from([
+                "lease-a".to_string(),
+                "lease-b".to_string(),
+            ]))
+        };
+        assert_eq!(b.clean_staging(&live).expect("B's cleanup"), 1);
+        assert_eq!(
+            keys(&b),
+            a_staged,
+            "A's staging object survives, the lapsed one goes"
+        );
+
+        go.send(()).expect("go on");
+        let (sha256, _) = uploading
+            .join()
+            .expect("A's upload")
+            .expect("A's upload completes");
+        assert_eq!(sha256, super::tests::sha256(b"an artifact A uploads"));
+        assert_eq!(
+            keys(&b),
+            vec![format!("{}blobs/{sha256}", config.prefix)],
+            "the blob is stored and its staging object gone"
+        );
+
+        let without = S3BlobStore::open(&again(&config))
+            .expect("open")
+            .staged_by(Uploader::Lease(tokio::sync::watch::channel(None).1));
+        let err = without
+            .put(&mut &b"x"[..])
+            .expect_err("no lease, no upload");
+        assert!(err.contains("holds no lease"), "{err}");
+        clear(&b);
     }
 
     /// The Server does not create its bucket: one that does not exist fails startup naming it

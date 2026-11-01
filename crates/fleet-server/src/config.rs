@@ -34,10 +34,12 @@ pub struct ServerConfig {
     /// (ADR-0012). Absent means the default, which is loopback.
     #[serde(default)]
     pub rest: RestConfig,
-    /// Where the Server keeps all of its state, one subdirectory per domain (ADR-0029): created
-    /// owner-only when missing, and holding nothing but its fixed layout.
-    #[serde(default = "default_data_dir")]
-    pub data_dir: PathBuf,
+    /// Where the Server keeps what it keeps on its own disk, one subdirectory per domain
+    /// (ADR-0029): created owner-only when missing, and holding nothing but its fixed layout.
+    /// `fleet-data` where it is not named, read through [`data_dir`](Self::data_dir); refused with
+    /// PostgreSQL and S3, which keep nothing on the disk
+    /// (ADR-draft-the-servers-state-and-its-stores clause 1).
+    pub data_dir: Option<PathBuf>,
     /// Refused at startup: the state lives under `data_dir` (ADR-0029), and `server migrate` moves
     /// an older installation there. Read only so that a leftover key can be named.
     pub config_dir: Option<IgnoredAny>,
@@ -1092,9 +1094,8 @@ fn default_rest_listen() -> SocketAddr {
         .expect("default REST listen address")
 }
 
-fn default_data_dir() -> PathBuf {
-    PathBuf::from("fleet-data")
-}
+/// The data directory where `data_dir` is not named, relative to the working directory.
+const DEFAULT_DATA_DIR: &str = "fleet-data";
 
 fn default_max_message_size() -> usize {
     opamp::frame::DEFAULT_MAX_MESSAGE_SIZE
@@ -1136,7 +1137,7 @@ impl Default for ServerConfig {
         ServerConfig {
             listen: default_listen(),
             rest: RestConfig::default(),
-            data_dir: default_data_dir(),
+            data_dir: None,
             config_dir: None,
             tls: None,
             auth: None,
@@ -1172,6 +1173,26 @@ fn listeners_collide(a: SocketAddr, b: SocketAddr) -> bool {
 }
 
 impl ServerConfig {
+    /// Where the Server keeps what it keeps on its own disk: `data_dir`, `fleet-data` where it is
+    /// not named, and `None` with PostgreSQL and S3, which keep nothing there
+    /// (ADR-draft-the-servers-state-and-its-stores clause 1).
+    #[must_use]
+    pub fn data_dir(&self) -> Option<&Path> {
+        if self.keeps_nothing_on_disk() {
+            return None;
+        }
+        Some(
+            self.data_dir
+                .as_deref()
+                .unwrap_or(Path::new(DEFAULT_DATA_DIR)),
+        )
+    }
+
+    /// Whether the records are in PostgreSQL and the blobs in S3.
+    fn keeps_nothing_on_disk(&self) -> bool {
+        self.database.postgres().is_some() && self.blobs.s3().is_some()
+    }
+
     /// Loads `path` alone, with no environment: [`load_layered`](Self::load_layered) with the file
     /// and no variables.
     pub fn load(path: &Path) -> Result<Self, String> {
@@ -1329,6 +1350,14 @@ impl ServerConfig {
         self.packages.verification_key()?;
         self.blobs.check()?;
         self.database.check()?;
+        if self.data_dir.is_some() && self.keeps_nothing_on_disk() {
+            return Err(
+                "data_dir is named, and with [database] store = \"postgres\" and [blobs] store = \
+                 \"s3\" the Server keeps nothing on its disk and has no data directory — remove \
+                 data_dir"
+                    .to_string(),
+            );
+        }
         // The two planes are two listeners (ADR-0012). Addresses that collide would surface as the
         // second bind failing with "address already in use" — a message about sockets for what is
         // really a configuration mistake, so it is refused here, by name.
@@ -1962,7 +1991,7 @@ mod tests {
     #[test]
     fn a_leftover_config_dir_or_packages_dir_fails_startup_naming_server_migrate() {
         let cfg: ServerConfig = toml::from_str("").expect("parse");
-        assert_eq!(cfg.data_dir, PathBuf::from("fleet-data"));
+        assert_eq!(cfg.data_dir(), Some(Path::new("fleet-data")));
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("server.toml");
         for key in ["config_dir", "packages_dir"] {
@@ -2500,7 +2529,7 @@ mod tests {
         )
         .expect("loads");
         let config = layered.config;
-        assert_eq!(config.data_dir, PathBuf::from("/var/lib/fleet"));
+        assert_eq!(config.data_dir(), Some(Path::new("/var/lib/fleet")));
         let rest_tls = config.rest.tls.expect("[rest.tls]");
         assert_eq!(rest_tls.cert_file, PathBuf::from("/run/secrets/ui.pem"));
         assert_eq!(rest_tls.key_file, PathBuf::from("file-ui-key.pem"));
@@ -2677,7 +2706,7 @@ mod tests {
         let config = ServerConfig::load_layered(None, variables(&pairs))
             .expect("a quoted number is a string")
             .config;
-        assert_eq!(config.data_dir, PathBuf::from("1234"));
+        assert_eq!(config.data_dir(), Some(Path::new("1234")));
     }
 
     /// Credentials never come from the environment: `basic_users` set from it, by key or inside a
@@ -3142,6 +3171,81 @@ mod tests {
             let err = load(&database).expect_err(named);
             assert!(err.contains(named), "{named}: {err}");
         }
+    }
+
+    /// With PostgreSQL and S3 the Server keeps nothing on its disk: it has no data directory, and a
+    /// `data_dir` named in the file or in the environment fails startup naming the key. With either
+    /// store on the disk, `data_dir` is `fleet-data` where it is not named
+    /// (ADR-draft-the-servers-state-and-its-stores clause 1).
+    /// Verifies: ADR-draft-the-servers-state-and-its-stores
+    #[test]
+    fn with_postgresql_and_s3_a_named_data_dir_fails_startup_naming_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("server.toml");
+        let database = "[database]\nstore = \"postgres\"\n[database.postgres]\n\
+                        host = \"db.example\"\ndbname = \"fleet\"\nuser = \"fleet\"\n\
+                        password_file = \"/run/secrets/db\"\n";
+        let bucket = "[blobs]\nstore = \"s3\"\n[blobs.s3]\nendpoint = \"https://s3.example\"\n\
+                      bucket = \"fleet\"\nregion = \"eu-central-1\"\n";
+        let load = |text: String, variables: Vec<(String, String)>| {
+            std::fs::write(&path, format!("{text}{TLS}")).expect("write");
+            ServerConfig::load_layered(Some(&path), variables).map(|layered| layered.config)
+        };
+
+        let stateless = load(format!("{database}{bucket}"), Vec::new()).expect("pg and s3");
+        assert_eq!(stateless.data_dir(), None, "no data directory");
+        for (text, variables) in [
+            (
+                format!("data_dir = \"/var/lib/opamp-fleet\"\n{database}{bucket}"),
+                Vec::new(),
+            ),
+            (
+                format!("{database}{bucket}"),
+                vec![(
+                    "FLEET_SERVER__DATA_DIR".to_string(),
+                    "/var/lib/opamp-fleet".to_string(),
+                )],
+            ),
+        ] {
+            let err = load(text, variables).expect_err("data_dir is named");
+            assert!(err.contains("data_dir is named"), "{err}");
+        }
+
+        for (text, store) in [
+            (String::new(), "files"),
+            (database.to_string(), "postgres and blobs as files"),
+            (bucket.to_string(), "files and s3"),
+        ] {
+            let config = load(text, Vec::new()).expect(store);
+            assert_eq!(config.data_dir(), Some(Path::new("fleet-data")), "{store}");
+        }
+    }
+
+    /// A Server on files given no data directory it can write — the image's, which names none, run
+    /// from `/` — fails startup naming `data_dir` and the directory, and writes nothing elsewhere
+    /// (ADR-draft-releases-attestations-and-the-server-image clause 16).
+    /// Verifies: ADR-draft-releases-attestations-and-the-server-image
+    #[cfg(unix)]
+    #[test]
+    fn a_data_dir_the_account_cannot_write_fails_startup_naming_it() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("root");
+        std::fs::create_dir(&root).expect("mkdir");
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o555)).expect("chmod");
+        let config = ServerConfig {
+            data_dir: Some(root.join("fleet-data")),
+            ..ServerConfig::default()
+        };
+        let err = crate::Records::open(&config)
+            .err()
+            .expect("the directory cannot be written");
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        assert!(err.starts_with("data_dir: "), "{err}");
+        assert!(
+            err.contains(&root.join("fleet-data").display().to_string()),
+            "{err}"
+        );
     }
 
     /// `[database]`: the filesystem by default; `"postgres"` with its database. Any other store, a

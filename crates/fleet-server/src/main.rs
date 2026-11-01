@@ -576,36 +576,6 @@ async fn main() {
         // ADR-0016.
         info!("offering the fleet somewhere to send its own telemetry");
     }
-    let packages = config
-        .packages
-        .verification_key()
-        .and_then(|key| {
-            if key.is_some() {
-                // ADR-0027.
-                info!("checking package signatures against [packages] verification_key");
-            }
-            fleet_server::packages::PackageStore::open_on(&records, &config.data_dir, &config.blobs)
-                .map(|store| {
-                    store.with_verifier(key.map(|key| {
-                        Box::new(fleet_server::config::Ed25519Verifier::new(key))
-                            as Box<dyn fleet_server::packages::SignatureVerifier>
-                    }))
-                })
-        })
-        .and_then(|store| {
-            if !store.is_empty() {
-                // ADR-0027.
-                info!("offering software packages to the fleet");
-            }
-            fleet_server::fleet::PackageOffering::on(&records, store)
-        });
-    let packages = match packages {
-        Ok(offering) => Some(offering),
-        Err(e) => {
-            eprintln!("{e}");
-            std::process::exit(1);
-        }
-    };
     // What the client CA signed and what is revoked (ADR-0021), kept beside the fleet's records.
     let revocations = match records.ledger().and_then(|store| {
         fleet_server::revocation::Revocations::open(store, clock.clone(), planes.3.clone())
@@ -642,10 +612,14 @@ async fn main() {
             // database stay as the archive, which the first chain names (clause 6 of
             // ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance).
             // Only while the database holds no chain: a later start never reads them.
-            let archive = config.data_dir.join(fleet_server::fs::AUDIT);
-            if let Err(e) = fleet_server::postgres::audit::offer_archive_in(database, &archive) {
-                eprintln!("{e}");
-                std::process::exit(1);
+            // With S3 too there is no data directory, and no archive to offer.
+            if let Some(data_dir) = config.data_dir() {
+                let archive = data_dir.join(fleet_server::fs::AUDIT);
+                if let Err(e) = fleet_server::postgres::audit::offer_archive_in(database, &archive)
+                {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                }
             }
             let made = instance_id.clone().map_or_else(
                 fleet_server::postgres::lease::new_instance_id,
@@ -671,6 +645,54 @@ async fn main() {
         }
         fleet_server::Records::Files(_) => None,
     };
+    // The package store after the lease: on S3 an upload is staged under it, and the startup
+    // cleanup keeps the staging objects of every live lease, this one's among them.
+    let packages = config
+        .packages
+        .verification_key()
+        .and_then(|key| {
+            if key.is_some() {
+                // ADR-0027.
+                info!("checking package signatures against [packages] verification_key");
+            }
+            fleet_server::packages::PackageStore::open_on(
+                &records,
+                config.data_dir(),
+                &config.blobs,
+                lease.as_ref().map(fleet_server::instance::Lease::held),
+            )
+            .map(|(store, staging)| {
+                (
+                    store.with_verifier(key.map(|key| {
+                        Box::new(fleet_server::config::Ed25519Verifier::new(key))
+                            as Box<dyn fleet_server::packages::SignatureVerifier>
+                    })),
+                    staging,
+                )
+            })
+        })
+        .and_then(|(store, staging)| {
+            if !store.is_empty() {
+                // ADR-0027.
+                info!("offering software packages to the fleet");
+            }
+            fleet_server::fleet::PackageOffering::on(&records, store)
+                .map(|offering| (offering, staging))
+        });
+    let packages = match packages {
+        Ok((offering, staging)) => {
+            // Whenever this instance takes over a lapsed lease, the uploads that lease left in
+            // the bucket go (ADR-draft-the-servers-state-and-its-stores clause 16).
+            if let (Some(staging), Some(lease)) = (staging, &lease) {
+                clean_staging_on_takeover(staging, lease.takeovers());
+            }
+            Some(offering)
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
     // The audit record (ADR-0023), opened before anything is decided: one chain in files, or on
     // PostgreSQL the chain of each lease
     // (ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance).
@@ -686,13 +708,17 @@ async fn main() {
                 lease.held(),
             )
         }
-        _ => fleet_server::fs::FsAuditStore::open(&config.data_dir).and_then(|store| {
-            fleet_server::audit_log::AuditLog::start(
-                Box::new(store),
-                config.audit.limits(),
-                clock.clone(),
-            )
-        }),
+        _ => config
+            .data_dir()
+            .ok_or_else(|| "the audit record in files needs data_dir".to_string())
+            .and_then(fleet_server::fs::FsAuditStore::open)
+            .and_then(|store| {
+                fleet_server::audit_log::AuditLog::start(
+                    Box::new(store),
+                    config.audit.limits(),
+                    clock.clone(),
+                )
+            }),
     };
     let audit_log = match started {
         Ok(audit) => Arc::new(audit),
@@ -886,6 +912,28 @@ async fn main() {
     if served.is_err() {
         std::process::exit(1);
     }
+}
+
+/// Runs `staging` again each time `takeovers` changes, off the async threads, as its calls to the
+/// bucket block. A cleanup that fails is logged; the next takeover, or the next start, tries again.
+fn clean_staging_on_takeover(
+    staging: fleet_server::s3::StagingCleanup,
+    mut takeovers: tokio::sync::watch::Receiver<u64>,
+) {
+    tokio::spawn(async move {
+        while takeovers.changed().await.is_ok() {
+            let staging = staging.clone();
+            match tokio::task::spawn_blocking(move || staging.run()).await {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => {
+                    warn!(error = %e, "could not delete the staging objects of a lapsed lease")
+                }
+                Err(e) => {
+                    warn!(error = %e, "could not delete the staging objects of a lapsed lease")
+                }
+            }
+        }
+    });
 }
 
 /// The name of the host the Server runs on, which its lease records: the kernel's on Linux, where

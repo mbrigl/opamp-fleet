@@ -114,16 +114,16 @@ pub fn check_layout(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Opens the data directory of a Server whose records live in PostgreSQL (ADR-0028 clause 23): it
-/// holds `audit/` and, with the filesystem blob store, `blobs/`, and nothing else. A path of the
-/// filesystem layout fails naming it and `server migrate-to-postgres` — those records would
-/// otherwise be silently left behind. `blobs/` is accepted beside a bucket too, as the place the
-/// artifacts are copied from into it (ADR-0029 clause 19).
+/// Opens the data directory of a Server whose records live in PostgreSQL and whose blobs are files
+/// (ADR-draft-the-servers-state-and-its-stores clause 1): it holds `blobs/`, and nothing else
+/// but `audit/`, the record of files kept before the record moved into the database, which stays
+/// as its archive and is not created. A path of the filesystem layout fails naming it and
+/// `server migrate-to-postgres` — those records would otherwise be silently left behind.
 ///
 /// # Errors
 /// Returns an error naming the path when a directory cannot be created, or when the data
 /// directory holds a record of the filesystem store or anything else.
-pub fn open_data_dir_beside_database(root: &Path, filesystem_blobs: bool) -> Result<(), String> {
+pub fn open_data_dir_beside_database(root: &Path) -> Result<(), String> {
     create_private_dir(root)?;
     for (name, path) in entries(root)? {
         if (name == AUDIT || name == BLOBS) && path.is_dir() {
@@ -139,11 +139,7 @@ pub fn open_data_dir_beside_database(root: &Path, filesystem_blobs: bool) -> Res
         }
         return Err(unknown(&path));
     }
-    create_private_dir(&root.join(AUDIT))?;
-    if filesystem_blobs {
-        create_private_dir(&root.join(BLOBS))?;
-    }
-    Ok(())
+    create_private_dir(&root.join(BLOBS))
 }
 
 /// The refusal for a path the layout does not name (ADR-0028 clause 23). Skipping it would open a
@@ -399,30 +395,34 @@ mod tests {
         open_data_dir(&root, true).expect("the floors' file is named by the layout");
     }
 
-    /// With the records in PostgreSQL, `data_dir` holds `audit/` and, with the filesystem blob
-    /// store, `blobs/`, and nothing else; a record of the filesystem store found there fails the
-    /// open naming it and `server migrate-to-postgres`, and anything else fails as a stray entry.
-    /// Verifies: ADR-0029, ADR-0028
+    /// With the records in PostgreSQL and the blobs as files, `data_dir` holds `blobs/`, and
+    /// `audit/` only where an older Server left it as the archive; a record of the filesystem
+    /// store found there fails the open naming it and `server migrate-to-postgres`, and anything
+    /// else fails as a stray entry.
+    /// Verifies: ADR-draft-the-servers-state-and-its-stores, ADR-0028
     #[test]
-    fn a_data_dir_beside_the_database_holds_the_audit_and_the_blobs_alone() {
+    fn a_data_dir_beside_the_database_holds_the_blobs_alone() {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path().join("fleet-data");
-        open_data_dir_beside_database(&root, true).expect("an empty data directory");
-        let mut made: Vec<String> = std::fs::read_dir(&root)
-            .expect("read")
-            .map(|entry| {
-                entry
-                    .expect("entry")
-                    .file_name()
-                    .into_string()
-                    .expect("utf-8")
-            })
-            .collect();
-        made.sort();
-        assert_eq!(made, [AUDIT, BLOBS]);
-        let bucket = dir.path().join("with-a-bucket");
-        open_data_dir_beside_database(&bucket, false).expect("open");
-        assert!(!bucket.join(BLOBS).exists(), "no blobs/ beside a bucket");
+        open_data_dir_beside_database(&root).expect("an empty data directory");
+        let made = || {
+            let mut made: Vec<String> = std::fs::read_dir(&root)
+                .expect("read")
+                .map(|entry| {
+                    entry
+                        .expect("entry")
+                        .file_name()
+                        .into_string()
+                        .expect("utf-8")
+                })
+                .collect();
+            made.sort();
+            made
+        };
+        assert_eq!(made(), [BLOBS], "no audit/ beside the database");
+        std::fs::create_dir(root.join(AUDIT)).expect("an archive");
+        open_data_dir_beside_database(&root).expect("the archive is kept");
+        assert_eq!(made(), [AUDIT, BLOBS]);
 
         for record in [
             AGENTS,
@@ -438,7 +438,7 @@ mod tests {
             } else {
                 std::fs::create_dir(&path).expect("mkdir");
             }
-            let error = open_data_dir_beside_database(&root, true).expect_err("a record in files");
+            let error = open_data_dir_beside_database(&root).expect_err("a record in files");
             assert!(error.contains(record), "{error}");
             assert!(error.contains("server migrate-to-postgres"), "{error}");
             if path.is_dir() {
@@ -448,7 +448,7 @@ mod tests {
             }
         }
         std::fs::write(root.join("notes.txt"), "x").expect("write");
-        let error = open_data_dir_beside_database(&root, true).expect_err("a stray file");
+        let error = open_data_dir_beside_database(&root).expect_err("a stray file");
         assert!(error.contains("notes.txt"), "{error}");
     }
 

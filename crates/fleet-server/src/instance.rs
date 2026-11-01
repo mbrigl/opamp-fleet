@@ -51,6 +51,8 @@ pub struct Lease {
     held: watch::Receiver<Option<String>>,
     /// The revocation list's version each renewal read, `None` before the first.
     list_versions: watch::Receiver<Option<u64>>,
+    /// How many times a renewal, or a new lease, removed a lease that had lapsed.
+    takeovers: watch::Receiver<u64>,
     stop: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
@@ -80,6 +82,7 @@ impl Lease {
         info!(instance_id = %taken.instance_id, "took a lease");
         let (held, watched) = watch::channel(Some(taken.instance_id.clone()));
         let (versions, list_versions) = watch::channel(None);
+        let (taking, takeovers) = watch::channel(0);
         let (stop, stopped) = tokio::sync::oneshot::channel();
         let renewing = database.clone();
         let host = host.to_string();
@@ -92,7 +95,7 @@ impl Lease {
                 {
                     Ok(runtime) => runtime.block_on(async move {
                         tokio::select! {
-                            () = renew(renewing, times, host, &held, &versions, taken) => {}
+                            () = renew(renewing, times, host, &held, &versions, &taking, taken) => {}
                             _ = stopped => {}
                         }
                     }),
@@ -104,6 +107,7 @@ impl Lease {
             database,
             held: watched,
             list_versions,
+            takeovers,
             stop: Some(stop),
         })
     }
@@ -121,6 +125,14 @@ impl Lease {
     #[must_use]
     pub fn list_versions(&self) -> watch::Receiver<Option<u64>> {
         self.list_versions.clone()
+    }
+
+    /// Changes each time this instance removes a lease that lapsed, its own lost one included,
+    /// after it took its first: when the staging objects of that lease's uploads are deleted
+    /// (ADR-draft-the-servers-state-and-its-stores clause 16).
+    #[must_use]
+    pub fn takeovers(&self) -> watch::Receiver<u64> {
+        self.takeovers.clone()
     }
 
     /// Stops renewing and releases the lease, at an orderly shutdown.
@@ -218,6 +230,7 @@ async fn renew(
     host: String,
     held: &watch::Sender<Option<String>>,
     versions: &watch::Sender<Option<u64>>,
+    takeovers: &watch::Sender<u64>,
     taken: Taken,
 ) {
     let (mut instance_id, mut sent) = (taken.instance_id, taken.sent);
@@ -265,10 +278,10 @@ async fn renew(
                 Some(renewal) => {
                     sent = renewal.sent;
                     versions.send_replace(Some(renewal.list_version));
-                    if let Waited::LockLost =
-                        take_over_lapsed(&database, times, &instance_id, sent).await
-                    {
-                        return lock_lost(held, &instance_id);
+                    match take_over_lapsed(&database, times, &instance_id, sent).await {
+                        Waited::LockLost => return lock_lost(held, &instance_id),
+                        Waited::Done(true) => takeovers.send_modify(|count| *count += 1),
+                        Waited::Done(false) | Waited::Lapsed => {}
                     }
                 }
                 None => break,
@@ -302,6 +315,9 @@ async fn renew(
                     instance_id = taken.instance_id;
                     sent = taken.sent;
                     held.send_replace(Some(instance_id.clone()));
+                    if !taken.taken_over.is_empty() {
+                        takeovers.send_modify(|count| *count += 1);
+                    }
                     break;
                 }
                 Err(e) => {
@@ -316,26 +332,28 @@ async fn renew(
 /// Takes over the leases that lapsed, after a renewal sent at `sent`
 /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
 /// clause 18), closing their audit chains; bounded by half a renewal interval, so a database that
-/// does not answer delays the next renewal by no more than that, well inside the lease.
+/// does not answer delays the next renewal by no more than that, well inside the lease. Answers
+/// whether it took over any.
 async fn take_over_lapsed(
     database: &Arc<Database>,
     times: LeaseTimes,
     instance_id: &str,
     sent: Instant,
-) -> Waited<()> {
+) -> Waited<bool> {
     let deadline = sent + times.lapse;
     let bound = times.renew / 2;
     let (db, id) = (database.clone(), instance_id.to_string());
     let taking = tokio::task::spawn_blocking(move || db.take_over_lapsed(&id, bound));
     match until_deadline(database, deadline, taking).await {
         Waited::Done(Ok(Ok(taken_over))) => {
-            for lapsed in taken_over {
+            for lapsed in &taken_over {
                 info!(
                     instance_id = %instance_id,
                     taken_over = %lapsed,
                     "took over the lease of an instance that is gone"
                 );
             }
+            return Waited::Done(!taken_over.is_empty());
         }
         Waited::Done(Ok(Err(e))) => {
             warn!(instance_id = %instance_id, error = %e, "could not take over the lapsed leases");
@@ -346,7 +364,7 @@ async fn take_over_lapsed(
         Waited::LockLost => return Waited::LockLost,
         Waited::Lapsed => {}
     }
-    Waited::Done(())
+    Waited::Done(false)
 }
 
 /// The end of an instance whose exclusive lock is gone: no lease from now on, and the planes end.
