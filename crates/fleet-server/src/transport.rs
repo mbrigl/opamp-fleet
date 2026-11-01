@@ -403,11 +403,8 @@ pub fn router(state: Arc<AppState>, admission: Admission) -> Router {
 
 /// The revoked certificates of the client CA, chains resolved, for a host marked as a Gateway
 /// (ADR-0021 clause 34). Admitted as `/v1/opamp` is, by the layer around both; what is checked
-/// here is that the member is a Gateway. The `ETag` is the SHA-256 of the body, so it changes with
-/// the list and survives a restart.
+/// here is that the member is a Gateway. The `ETag` is [`gateway_list`]'s.
 async fn gateway_revocations(State(state): State<Arc<AppState>>, request: Request) -> Response {
-    use sha2::Digest as _;
-
     let forbidden = || {
         (
             StatusCode::FORBIDDEN,
@@ -417,8 +414,8 @@ async fn gateway_revocations(State(state): State<Arc<AppState>>, request: Reques
     };
     // Without a register nothing is revoked, so the empty list reveals nothing to anyone. With one,
     // the list is a member's whose host is marked as a Gateway, and nobody else's.
-    let certificates: Vec<serde_json::Value> = match state.revocations() {
-        None => Vec::new(),
+    let (body, etag) = match state.revocations() {
+        None => gateway_list(&[], None),
         Some(revocations) => {
             let host = match request.extensions().get::<Peer>() {
                 Some(Peer::Member) => request
@@ -442,15 +439,9 @@ async fn gateway_revocations(State(state): State<Arc<AppState>>, request: Reques
                 );
                 return forbidden();
             }
-            revocations
-                .revoked_certificates("client")
-                .into_iter()
-                .map(|id| serde_json::json!({ "issuer": id.issuer, "serial": id.serial }))
-                .collect()
+            gateway_list_of(revocations)
         }
     };
-    let body = serde_json::json!({ "certificates": certificates }).to_string();
-    let etag = format!("\"{}\"", hex::encode(sha2::Sha256::digest(body.as_bytes())));
     if request
         .headers()
         .get(header::IF_NONE_MATCH)
@@ -466,6 +457,35 @@ async fn gateway_revocations(State(state): State<Arc<AppState>>, request: Reques
         body,
     )
         .into_response()
+}
+
+/// The Gateways' list as its body and its `ETag`. The `ETag` is the SHA-256 of the body, and where
+/// the store keeps the list's one version, as PostgreSQL does, `list-<version>-` before it
+/// (ADR-draft-the-servers-state-and-its-stores clause 10). Every instance that holds the same list
+/// at the same version answers the same `ETag`; the hash keeps one version from naming two bodies,
+/// as it would when the instance that revoked had not yet taken up a renewal another instance
+/// registered. Either way it changes with the list and survives a restart.
+#[must_use]
+pub fn gateway_list(certificates: &[serde_json::Value], version: Option<u64>) -> (String, String) {
+    use sha2::Digest as _;
+    let body = serde_json::json!({ "certificates": certificates }).to_string();
+    let hash = hex::encode(sha2::Sha256::digest(body.as_bytes()));
+    let etag = match version {
+        Some(version) => format!("\"list-{version}-{hash}\""),
+        None => format!("\"{hash}\""),
+    };
+    (body, etag)
+}
+
+/// The Gateways' list of `revocations`, as [`gateway_list`] answers it.
+#[must_use]
+pub fn gateway_list_of(revocations: &Revocations) -> (String, String) {
+    let (revoked, version) = revocations.revoked_certificates_at("client");
+    let certificates: Vec<serde_json::Value> = revoked
+        .into_iter()
+        .map(|id| serde_json::json!({ "issuer": id.issuer, "serial": id.serial }))
+        .collect();
+    gateway_list(&certificates, version)
 }
 
 /// Every floor the Server stores, for every admitted member (ADR-0028 clause 15): a JSON object

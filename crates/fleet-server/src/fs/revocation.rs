@@ -170,6 +170,7 @@ impl LedgerStore for FsLedgerStore {
             issued,
             revocations,
             hosts,
+            version: None,
         })
     }
 

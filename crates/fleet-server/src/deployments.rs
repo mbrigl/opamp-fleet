@@ -330,6 +330,25 @@ impl DeploymentStore {
             .cloned()
     }
 
+    /// Reads every Deployment again from the backend, as another instance wrote one or changed its
+    /// members
+    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// clause 12): what is held is dropped and what is stored taken in its place. It reads under
+    /// the lock, so no write of this instance's own lands between the read and the swap.
+    ///
+    /// # Errors
+    /// Returns an error when the backend cannot be read; what is held is then kept.
+    pub fn reload(&self) -> Result<(), String> {
+        let mut deployments = self.deployments.write().expect("deployments lock");
+        *deployments = self
+            .backend
+            .load()?
+            .into_iter()
+            .map(|deployment| (deployment.name.clone(), deployment))
+            .collect();
+        Ok(())
+    }
+
     /// A snapshot of the whole store, for one resolution pass.
     pub fn snapshot(&self) -> BTreeMap<String, Deployment> {
         self.deployments.read().expect("deployments lock").clone()

@@ -235,6 +235,25 @@ impl ConfigStore {
         })
     }
 
+    /// Reads every Configuration again from the backend, as another instance saved, pinned,
+    /// collected or deleted one
+    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// clause 12): what is held is dropped and what is stored taken in its place. It reads under
+    /// the lock, so no write of this instance's own lands between the read and the swap.
+    ///
+    /// # Errors
+    /// Returns an error when the backend cannot be read; what is held is then kept.
+    pub fn reload(&self) -> Result<(), String> {
+        let mut configs = self.configs.write().expect("configs lock");
+        *configs = self
+            .backend
+            .load()?
+            .into_iter()
+            .map(|config| (config.name.clone(), config))
+            .collect();
+        Ok(())
+    }
+
     /// All Configurations, in name order.
     pub fn list(&self) -> Vec<Configuration> {
         self.configs

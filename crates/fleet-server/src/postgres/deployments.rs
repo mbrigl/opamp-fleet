@@ -54,6 +54,7 @@ impl DeploymentBackend for PgDeploymentBackend {
                 .await
                 .map_err(sql)?;
             let deployment = one(&*transaction, &name).await?;
+            super::notify::notify(&*transaction, super::notify::DEPLOYMENT, &name).await?;
             transaction.commit().await.map_err(sql)?;
             Ok(deployment)
         })
@@ -72,7 +73,10 @@ impl DeploymentBackend for PgDeploymentBackend {
                 mirror(&*transaction, &name).await?;
             }
             let decided = match decided {
-                Ok(()) => Ok(one(&*transaction, &name).await?),
+                Ok(()) => {
+                    super::notify::notify(&*transaction, super::notify::DEPLOYMENT, &name).await?;
+                    Ok(one(&*transaction, &name).await?)
+                }
                 Err(refused) => Err(refused),
             };
             transaction.commit().await.map_err(sql)?;
@@ -124,6 +128,7 @@ impl DeploymentBackend for PgDeploymentBackend {
                 };
                 if change_rows(&*transaction, name, &removed).await?.is_ok() {
                     mirror(&*transaction, name).await?;
+                    super::notify::notify(&*transaction, super::notify::DEPLOYMENT, name).await?;
                     changed.push(one(&*transaction, name).await?);
                 }
             }
@@ -142,6 +147,7 @@ impl DeploymentBackend for PgDeploymentBackend {
                 .execute("DELETE FROM deployments WHERE name = $1", &[&name])
                 .await
                 .map_err(sql)?;
+            super::notify::notify(&*transaction, super::notify::DEPLOYMENT, &name).await?;
             transaction.commit().await.map_err(sql)
         })
     }

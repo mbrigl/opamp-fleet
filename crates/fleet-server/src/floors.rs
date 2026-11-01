@@ -147,6 +147,19 @@ impl PackageFloors {
             .collect()
     }
 
+    /// Reads the floors again from the store, as another instance set or removed one
+    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// clauses 9 and 12), so what this instance serves is what is stored. It reads under the lock,
+    /// so no write of this instance's own lands between the read and the swap.
+    ///
+    /// # Errors
+    /// Returns an error when the store cannot be read; what is held is then kept.
+    pub fn reload(&self) -> Result<(), String> {
+        let mut floors = self.floors.lock().expect("floors lock");
+        *floors = self.store.load()?;
+        Ok(())
+    }
+
     /// Every floor, by Agent type — what the Agent plane serves.
     pub fn all(&self) -> BTreeMap<String, Floor> {
         self.floors.lock().expect("floors lock").clone()

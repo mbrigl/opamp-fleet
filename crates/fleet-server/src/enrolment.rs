@@ -899,6 +899,33 @@ impl Enrolment {
         )
     }
 
+    /// Reads the window and its queue again from the store, as another instance changed them
+    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// clauses 9 and 10), and wakes every connection waiting on them, so a request another instance
+    /// approved is handed to the connection that asked. It reads under the lock, so no act of this
+    /// instance's own lands between the read and the swap; the queue is bounded, so the read is
+    /// short. Without a store there is nothing to read.
+    ///
+    /// # Errors
+    /// Returns an error when the store cannot be read; what is held is then kept.
+    pub fn reload(&self) -> Result<(), String> {
+        let Some(store) = &self.store else {
+            return Ok(());
+        };
+        let mut state = self.state.lock().expect("enrolment lock");
+        let mut fresh = match store.load()? {
+            Some(persisted) => State::restored(persisted)?,
+            None => State::default(),
+        };
+        if fresh.window_until_ms == state.window_until_ms {
+            fresh.over_share = std::mem::take(&mut state.over_share);
+        }
+        *state = fresh;
+        drop(state);
+        self.changed();
+        Ok(())
+    }
+
     /// Fires whenever the window or a request changes, for the connections waiting on them.
     pub fn subscribe(&self) -> watch::Receiver<u64> {
         self.changes.subscribe()
