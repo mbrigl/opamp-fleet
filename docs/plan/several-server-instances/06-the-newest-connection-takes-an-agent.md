@@ -8,9 +8,10 @@ instance drops an Agent only when the row no longer names it. An Agent whose hol
 than ten times in a minute is logged as a likely duplicate. A Gateway keeps each downstream Agent on
 one pool connection while it lives; when the instance behind a pool connection is lost, its Agents
 re-home once each at their next report, spread over one heartbeat interval, and the Gateway's cached
-revocation list and floors are served on. A presence batch writes its holder unconditionally for
-every connected Agent it carries, so a batch that was due while another instance took the Agent can
-undo that take; the conditional take settles this, and a test holds it.
+revocation list and floors are served on. A presence batch, and the write at a connecting report,
+name their holder unconditionally for every connected Agent they carry, so a batch that was due
+while another instance took the Agent can undo that take; the batch becomes conditional too, naming
+itself only where the row names it or no instance with a live lease, and a test holds it.
 
 ## Acceptance criteria
 
