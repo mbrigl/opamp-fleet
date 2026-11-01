@@ -10,10 +10,11 @@ use std::sync::Arc;
 use tokio_postgres::GenericClient;
 
 use super::notify::{notify, PACKAGE};
+use super::{blob_lock_refused, BLOB_LOCK};
 use super::{client, signed, sql, unsigned, Database};
 use crate::packages::{
-    assigned, pinned, Entry, Package, PackageBackend, PackageId, Platform, Signed,
-    ED25519_SIGNATURE_LEN,
+    assigned, pinned, Entry, Package, PackageBackend, PackageId, Platform, Signed, Stored,
+    ED25519_SIGNATURE_LEN, REMOVED_WHILE_UPLOADED,
 };
 
 /// The Packages in `packages` and `package_entries`.
@@ -58,14 +59,32 @@ impl PackageBackend for PgPackageBackend {
     }
 
     /// The entry's row alone, inserted or replaced, while no stored assignment pins the Package
-    /// ([`hold_unassigned`]).
-    fn put_entry(&self, id: &PackageId, entry: &Entry) -> Result<(), String> {
+    /// ([`hold_unassigned`]). The transaction takes the blob store's lock shared first, and asks
+    /// `stored` under it: a sweep holds the lock alone, so none runs between the answer and the
+    /// commit, and none deletes the blob the entry names
+    /// (ADR-draft-the-servers-state-and-its-stores clause 14). The lock goes with the
+    /// transaction, its session's end included, which writes no entry.
+    fn put_entry(&self, id: &PackageId, entry: &Entry, stored: Stored) -> Result<(), String> {
         let (id, entry) = (id.clone(), entry.clone());
         self.database.run(move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
+            transaction
+                .execute(
+                    &format!("SELECT pg_advisory_xact_lock_shared({BLOB_LOCK})"),
+                    &[],
+                )
+                .await
+                .map_err(|e| format!("{} — upload the artifact again", blob_lock_refused(e)))?;
             if !hold_unassigned(&*transaction, &id, |id, _| assigned(id)).await? {
                 return Err(format!("no package set {id}"));
+            }
+            // The blob store is asked off the database's runtime, as its calls block.
+            if !tokio::task::spawn_blocking(move || stored())
+                .await
+                .map_err(|e| format!("the check for the artifact ended: {e}"))??
+            {
+                return Err(REMOVED_WHILE_UPLOADED.to_string());
             }
             transaction
                 .execute(
@@ -186,8 +205,8 @@ impl PackageBackend for PgPackageBackend {
     }
 
     /// On a connection of its own (ADR-draft-the-servers-state-and-its-stores clause 14).
-    fn hold_blobs(&self, alone: bool) -> Result<crate::blobs::BlobHold, String> {
-        self.hold(alone)
+    fn hold_blobs(&self) -> Result<crate::blobs::BlobHold, String> {
+        self.hold()
     }
 
     /// From the stored entries, read under the caller's hold.
@@ -211,8 +230,8 @@ impl PackageBackend for PgPackageBackend {
 
 impl PgPackageBackend {
     /// [`PackageBackend::hold_blobs`] on the database.
-    fn hold(&self, alone: bool) -> Result<crate::blobs::BlobHold, String> {
-        self.database.hold_blobs(alone)
+    fn hold(&self) -> Result<crate::blobs::BlobHold, String> {
+        self.database.hold_blobs()
     }
 }
 
@@ -372,6 +391,12 @@ mod tests {
     use crate::fs::FsPackageBackend;
     use crate::postgres::testing::TestDatabase;
 
+    /// The blob of every entry found stored: the port's tests write entries whose bytes are not
+    /// the point.
+    fn present() -> Stored {
+        Arc::new(|| Ok(true))
+    }
+
     fn package(version: &str, platforms: &[(&str, &str, u8)]) -> Package {
         let id = PackageId::new("otelcol", version).expect("id");
         Package {
@@ -438,7 +463,9 @@ mod tests {
     fn put(store: &dyn PackageBackend, package: &Package) {
         store.create(&package.id).expect("create");
         for entry in package.entries.values() {
-            store.put_entry(&package.id, entry).expect("put entry");
+            store
+                .put_entry(&package.id, entry, present())
+                .expect("put entry");
         }
     }
 
@@ -460,13 +487,14 @@ mod tests {
             .put_entry(
                 &PackageId::new("otelcol", "9.9.9").expect("id"),
                 &one.entries.values().next().expect("an entry").clone(),
+                present(),
             )
             .expect_err("an entry of a Package the store does not hold");
 
         let replaced = package("1.2.3", &[("linux", "amd64", 3), ("windows", "amd64", 2)]);
         let linux = Platform::new("linux", "amd64").expect("platform");
         store
-            .put_entry(&one.id, &replaced.entries[&linux])
+            .put_entry(&one.id, &replaced.entries[&linux], present())
             .expect("replace one entry");
         assert_eq!(loaded(&*open()), [shown(&replaced), shown(&two)]);
 
@@ -556,7 +584,7 @@ mod tests {
         let windows = Platform::new("windows", "amd64").expect("platform");
         let broken = package("1.2.3", &[("windows", "amd64", 3)]);
         store
-            .put_entry(&before.id, &broken.entries[&windows])
+            .put_entry(&before.id, &broken.entries[&windows], present())
             .expect_err("the entry is refused");
         store
             .sign(
@@ -875,16 +903,27 @@ mod tests {
             return;
         };
         let database = test.open();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = instance(&database, dir.path());
+        let id = PackageId::new("otelcol", "1.0.0").expect("id");
+        store.create(&id).expect("create");
+        let hold = database.hold_blobs().expect("a sweep holds the lock");
         assert_eq!(
-            database.blob_lock_session(true, crate::postgres::SWEEP_WAIT),
-            ("65s".to_string(), "1min".to_string()),
-            "a sweep's statement_timeout and lock_timeout"
+            hold.settings,
+            Some(("65s".to_string(), "1min".to_string())),
+            "a sweep's session waits 60 s: its statement_timeout and lock_timeout"
         );
-        assert_eq!(
-            database.blob_lock_session(false, crate::postgres::SWEEP_WAIT),
-            ("10s".to_string(), "5s".to_string()),
-            "an upload's"
-        );
+        // While it holds, an upload's transaction waits its session's lock_timeout and is refused.
+        let refused = store
+            .put_entry(
+                &id,
+                &Platform::new("linux", "amd64").expect("platform"),
+                b"an artifact".to_vec(),
+            )
+            .expect_err("refused while a sweep holds the lock");
+        assert!(refused.contains("blob store's lock"), "{refused}");
+        assert!(refused.contains("lock timeout"), "{refused}");
+        drop(hold);
     }
 
     /// A hold on the blob store's lock whose session the database ends is marked lost, and
@@ -896,7 +935,7 @@ mod tests {
             return;
         };
         let database = test.open();
-        let hold = database.hold_blobs(true).expect("held");
+        let hold = database.hold_blobs().expect("held");
         assert!(!hold.lost(), "held");
         let key = format!("(SELECT {} AS key)", crate::postgres::BLOB_LOCK);
         test.rows(&format!(
@@ -907,14 +946,15 @@ mod tests {
         ));
         until("the hold is marked lost", &|| hold.lost());
         drop(hold);
-        drop(database.hold_blobs(true).expect("the lock is free again"));
+        drop(database.hold_blobs().expect("the lock is free again"));
     }
 
-    /// An upload whose hold on the blob store's lock was lost before its entry was written, its
-    /// session ended by the database, is refused and writes no entry: a sweep may have run since.
+    /// An upload whose transaction loses its session after the check that its blob is stored, and
+    /// with it the blob store's lock, writes no entry: a sweep may run once the lock is gone, and
+    /// the entry would name what it deleted.
     /// Verifies: ADR-draft-the-servers-state-and-its-stores
     #[test]
-    fn an_upload_whose_lock_was_lost_is_refused() {
+    fn an_upload_whose_session_ends_before_its_commit_writes_no_entry() {
         let Some(test) = TestDatabase::named() else {
             return;
         };
@@ -939,19 +979,32 @@ mod tests {
             .recv()
             .expect("A checks its blob, holding the lock shared");
         let key = format!("(SELECT {} AS key)", crate::postgres::BLOB_LOCK);
-        test.rows(&format!(
-            "SELECT pg_terminate_backend(pid) FROM pg_locks, {key} k \
-             WHERE locktype = 'advisory' AND granted \
-             AND classid = ((k.key >> 32) & 4294967295)::oid \
-             AND objid = (k.key & 4294967295)::oid"
+        // The session that holds the lock shared in a transaction: the upload's.
+        let pid = test.once(&format!(
+            "SELECT l.pid::text FROM pg_locks l, {key} k \
+             WHERE l.locktype = 'advisory' AND l.granted AND l.mode = 'ShareLock' \
+             AND l.classid = ((k.key >> 32) & 4294967295)::oid \
+             AND l.objid = (k.key & 4294967295)::oid \
+             AND l.pid IN (SELECT pid FROM pg_stat_activity WHERE xact_start IS NOT NULL)"
         ));
-        until("the upload's hold is marked lost", &|| {
-            database.holds_lost() == 1
+        test.rows(&format!("SELECT pg_terminate_backend({pid})"));
+        until("the upload's session is gone", &|| {
+            test.rows(&format!("SELECT 1 FROM pg_stat_activity WHERE pid = {pid}"))
+                .is_empty()
         });
         go.send(()).expect("go on");
-        let refused = uploading.join().expect("A").expect_err("refused");
-        assert!(refused.contains("upload it again"), "{refused}");
-        assert!(test.rows("SELECT 1 FROM package_entries").is_empty());
+        let failed = uploading
+            .join()
+            .expect("A")
+            .expect_err("its transaction does not commit");
+        assert!(
+            !failed.contains("no answer within"),
+            "it failed with its session, not its bound: {failed}"
+        );
+        assert!(
+            test.rows("SELECT 1 FROM package_entries").is_empty(),
+            "no entry is written"
+        );
     }
 
     /// A sweep at startup that cannot have the blob store's lock fails the start, naming the lock.
@@ -963,7 +1016,7 @@ mod tests {
         };
         // The hold is a session of its own, as another instance's would be.
         let database = test.open();
-        let hold = database.hold_blobs(true).expect("another instance sweeps");
+        let hold = database.hold_blobs().expect("another instance sweeps");
         database.wait_for_sweeps(std::time::Duration::from_millis(200));
         let dir = tempfile::tempdir().expect("tempdir");
         let err = crate::packages::PackageStore::with_backend(
@@ -973,6 +1026,9 @@ mod tests {
         .map(drop)
         .expect_err("the lock is held");
         assert!(err.contains("blob store's lock"), "{err}");
+        // The refused session ends, and is no hold lost: it never had the lock.
+        until("the refused session ends", &|| database.holds_lost().1 >= 1);
+        assert_eq!(database.holds_lost().0, 0, "a refused hold loses nothing");
         drop(hold);
         drop(instance(&database, dir.path()));
     }

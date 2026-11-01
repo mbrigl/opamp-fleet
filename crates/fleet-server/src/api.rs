@@ -1533,7 +1533,15 @@ async fn delete_package_set(
         Ok(id) => id,
         Err(e) => return error(StatusCode::BAD_REQUEST, e),
     };
-    match state.delete_package_set(&id) {
+    // Off the async threads: the deletion's sweep may wait up to a minute for the blob store's lock
+    // (ADR-draft-the-servers-state-and-its-stores clause 14).
+    let deleted = tokio::task::spawn_blocking({
+        let id = id.clone();
+        move || state.delete_package_set(&id)
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("the deletion ended: {e}")));
+    match deleted {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => error(StatusCode::NOT_FOUND, format!("no package set {id}")),
         Err(e) => package_error(e),
@@ -1674,7 +1682,15 @@ async fn delete_package_entry(
         Ok(pair) => pair,
         Err((status, why)) => return error(status, why),
     };
-    match state.delete_package_entry(&id, &platform) {
+    // Off the async threads: the deletion's sweep may wait up to a minute for the blob store's lock
+    // (ADR-draft-the-servers-state-and-its-stores clause 14).
+    let deleted = tokio::task::spawn_blocking({
+        let (id, platform) = (id.clone(), platform.clone());
+        move || state.delete_package_entry(&id, &platform)
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("the deletion ended: {e}")));
+    match deleted {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => error(
             StatusCode::NOT_FOUND,

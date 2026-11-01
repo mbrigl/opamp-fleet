@@ -405,7 +405,7 @@ pub(crate) fn blobs_to_s3_in(
     // The blob store's lock, alone, for the whole run: an instance that starts meanwhile waits at
     // its startup sweep rather than deleting this command's staging objects
     // (ADR-draft-the-servers-state-and-its-stores clause 19).
-    let hold = database.hold_blobs_within(true, sweep_wait)?;
+    let hold = database.hold_blobs_within(sweep_wait)?;
     let packages = crate::Records::Postgres(database.clone())
         .packages()?
         .load()?;
@@ -1112,9 +1112,7 @@ mod tests {
         )
         .expect("an instance's database");
 
-        let held = instance
-            .hold_blobs_within(true, short)
-            .expect("a sweep runs");
+        let held = instance.hold_blobs_within(short).expect("a sweep runs");
         let err = blobs_to_s3_in(
             &data_dir,
             &test.config(),
@@ -1157,7 +1155,7 @@ mod tests {
         });
         at.recv().expect("blobs-to-s3 uploads");
         let err = instance
-            .hold_blobs_within(true, short)
+            .hold_blobs_within(short)
             .map(drop)
             .expect_err("no sweep while it uploads");
         assert!(err.contains("blob store's lock"), "{err}");
@@ -1165,7 +1163,7 @@ mod tests {
         running.join().expect("blobs-to-s3").expect("it uploads");
         drop(
             instance
-                .hold_blobs_within(true, short)
+                .hold_blobs_within(short)
                 .expect("the lock is let go once it ends"),
         );
         clear(&crate::s3::S3BlobStore::open(&bucket).expect("open"));

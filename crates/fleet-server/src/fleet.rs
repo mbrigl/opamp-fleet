@@ -5967,8 +5967,13 @@ mod tests {
         fn create(&self, id: &PackageId) -> Result<(), String> {
             self.inner.create(id)
         }
-        fn put_entry(&self, id: &PackageId, entry: &crate::packages::Entry) -> Result<(), String> {
-            self.inner.put_entry(id, entry)
+        fn put_entry(
+            &self,
+            id: &PackageId,
+            entry: &crate::packages::Entry,
+            stored: crate::packages::Stored,
+        ) -> Result<(), String> {
+            self.inner.put_entry(id, entry, stored)
         }
         fn sign(
             &self,
@@ -5985,8 +5990,8 @@ mod tests {
         fn remove(&self, id: &PackageId) -> Result<(), String> {
             self.inner.remove(id)
         }
-        fn hold_blobs(&self, alone: bool) -> Result<crate::blobs::BlobHold, String> {
-            if alone && self.armed.load(std::sync::atomic::Ordering::SeqCst) {
+        fn hold_blobs(&self) -> Result<crate::blobs::BlobHold, String> {
+            if self.armed.load(std::sync::atomic::Ordering::SeqCst) {
                 if let Some(reached) = self.reached.lock().expect("reached").take() {
                     reached.send(()).expect("reached");
                     self.go.lock().expect("go").recv().expect("go");

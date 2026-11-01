@@ -136,8 +136,10 @@ pub struct Database {
     bound: Duration,
     /// How long a sweep waits for the blob store's lock, in milliseconds ([`SWEEP_WAIT`]).
     sweep_wait: std::sync::atomic::AtomicU64,
-    /// How many holds on the blob store's lock lost it with their session.
+    /// How many holds on the blob store's lock lost it with their session, and how many of their
+    /// sessions ended at all.
     holds_lost: Arc<std::sync::atomic::AtomicUsize>,
+    holds_ended: Arc<std::sync::atomic::AtomicUsize>,
     /// Dropped last: the connections' tasks run on it.
     bridge: Bridge,
 }
@@ -316,6 +318,7 @@ impl Database {
             archive: std::sync::Mutex::new(None),
             bound,
             holds_lost: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            holds_ended: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             sweep_wait: std::sync::atomic::AtomicU64::new(
                 u64::try_from(SWEEP_WAIT.as_millis()).unwrap_or(u64::MAX),
             ),
@@ -462,24 +465,28 @@ impl Database {
 }
 
 impl Database {
-    /// Holds [`BLOB_LOCK`] on a connection of its own until the hold is dropped, which closes the
-    /// connection: `alone` for a sweep, a staging cleanup or `server blobs-to-s3`, which waits up
-    /// to [`SWEEP_WAIT`], and shared for an upload, which waits the session's `lock_timeout`. The
-    /// hold's connection runs on this database's runtime, so the lock is let go, too, once the
-    /// database is dropped: the caller keeps it for as long as it holds.
+    /// Holds [`BLOB_LOCK`] alone on a connection of its own until the hold is dropped, which
+    /// closes the connection: what a sweep, a staging cleanup and `server blobs-to-s3` hold,
+    /// waiting up to [`SWEEP_WAIT`] for it. An upload takes it shared in its entry's transaction
+    /// instead. The hold's connection runs on this database's runtime, so the lock is let go,
+    /// too, once the database is dropped: the caller keeps it for as long as it holds.
     ///
     /// # Errors
     /// Returns an error naming the lock when it is not had within the wait, and naming the
     /// database when it cannot be reached.
-    pub fn hold_blobs(&self, alone: bool) -> Result<crate::blobs::BlobHold, String> {
+    pub fn hold_blobs(&self) -> Result<crate::blobs::BlobHold, String> {
         let wait = Duration::from_millis(self.sweep_wait.load(Ordering::SeqCst));
-        self.hold_blobs_within(alone, wait)
+        self.hold_blobs_within(wait)
     }
 
-    /// How many holds on the blob store's lock lost it with their session: what a test waits for.
+    /// How many holds on the blob store's lock lost it with their session, and how many sessions
+    /// of a hold ended at all: what a test waits for.
     #[cfg(test)]
-    pub(crate) fn holds_lost(&self) -> usize {
-        self.holds_lost.load(Ordering::SeqCst)
+    pub(crate) fn holds_lost(&self) -> (usize, usize) {
+        (
+            self.holds_lost.load(Ordering::SeqCst),
+            self.holds_ended.load(Ordering::SeqCst),
+        )
     }
 
     /// Has every sweep wait `wait` for the blob store's lock rather than [`SWEEP_WAIT`]: what the
@@ -492,134 +499,143 @@ impl Database {
         );
     }
 
-    /// [`hold_blobs`](Self::hold_blobs), a sweep waiting `wait`: what the tests of a lock held
-    /// elsewhere wait for.
+    /// [`hold_blobs`](Self::hold_blobs), waiting `wait`.
     pub(crate) fn hold_blobs_within(
         &self,
-        alone: bool,
         wait: Duration,
     ) -> Result<crate::blobs::BlobHold, String> {
         let (pg, tls) = (self.pg.clone(), self.tls.clone());
-        let (released, lost) = (
-            Arc::new(AtomicBool::new(false)),
-            Arc::new(AtomicBool::new(false)),
-        );
-        let session = (released.clone(), lost.clone(), self.holds_lost.clone());
-        let client = self.run_within(self.bound.saturating_add(wait), move |_pool| async move {
-            let client = lock_session(&pg, &tls, alone, wait, session).await?;
-            let taking = if alone {
-                format!("SELECT pg_advisory_lock({BLOB_LOCK})")
-            } else {
-                format!("SELECT pg_advisory_lock_shared({BLOB_LOCK})")
-            };
-            client.execute(&taking, &[]).await.map_err(|e| {
-                format!(
-                    "{BLOB_LOCK_NAME} is not to be had — another instance sweeps the blobs or \
-                     records an upload, or `server blobs-to-s3` runs: {}",
-                    sql(e)
+        let watch = Watch {
+            holding: Arc::new(AtomicBool::new(false)),
+            lost: Arc::new(AtomicBool::new(false)),
+            counted: self.holds_lost.clone(),
+            ended: self.holds_ended.clone(),
+        };
+        let (holding, lost) = (watch.holding.clone(), watch.lost.clone());
+        let held = self.run_within(self.bound.saturating_add(wait), move |_pool| async move {
+            let client = lock_session(&pg, &tls, wait, watch).await?;
+            client
+                .execute(&format!("SELECT pg_advisory_lock({BLOB_LOCK})"), &[])
+                .await
+                .map_err(blob_lock_refused)?;
+            // Held from here on: a session that ends now loses the lock, and is logged.
+            holding.store(true, Ordering::SeqCst);
+            #[cfg(test)]
+            let settings = {
+                let show = |name: &'static str| {
+                    let client = &client;
+                    async move {
+                        client
+                            .query_one(&format!("SHOW {name}"), &[])
+                            .await
+                            .map(|row| row.get::<_, String>(0))
+                            .map_err(sql)
+                    }
+                };
+                (
+                    show("statement_timeout").await?,
+                    show("lock_timeout").await?,
                 )
-            })?;
-            Ok(client)
-        })?;
-        Ok(crate::blobs::BlobHold::of(
-            Box::new(LockHold { released, client }),
-            lost,
-        ))
-    }
-
-    /// The `statement_timeout` and `lock_timeout` a hold's session on the blob store's lock runs
-    /// with: what the tests check the wait against.
-    #[cfg(test)]
-    pub(crate) fn blob_lock_session(&self, alone: bool, wait: Duration) -> (String, String) {
-        let (pg, tls) = (self.pg.clone(), self.tls.clone());
-        self.run(move |_pool| async move {
-            let session = (
-                Arc::new(AtomicBool::new(true)),
-                Arc::new(AtomicBool::new(false)),
-                Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            );
-            let client = lock_session(&pg, &tls, alone, wait, session).await?;
-            let show = |name: &'static str| {
-                let client = &client;
-                async move {
-                    client
-                        .query_one(&format!("SHOW {name}"), &[])
-                        .await
-                        .map(|row| row.get::<_, String>(0))
-                        .map_err(sql)
-                }
             };
-            Ok((
-                show("statement_timeout").await?,
-                show("lock_timeout").await?,
-            ))
-        })
-        .expect("the lock's session")
+            Ok(LockHold {
+                holding,
+                client,
+                #[cfg(test)]
+                settings,
+            })
+        })?;
+        #[cfg(test)]
+        let settings = held.settings.clone();
+        let hold = crate::blobs::BlobHold::of(Box::new(held), lost);
+        #[cfg(test)]
+        let hold = hold.with_settings(settings);
+        Ok(hold)
     }
 }
 
-/// A hold on the blob store's lock: its session, and whether it was let go on purpose.
+/// Why the blob store's lock was not had, naming it.
+pub(crate) fn blob_lock_refused(error: tokio_postgres::Error) -> String {
+    format!(
+        "{BLOB_LOCK_NAME} is not to be had — another instance sweeps the blobs or records an \
+         upload, or `server blobs-to-s3` runs: {}",
+        sql(error)
+    )
+}
+
+/// A hold on the blob store's lock: its session, and whether it still holds the lock.
 struct LockHold {
-    released: Arc<AtomicBool>,
+    holding: Arc<AtomicBool>,
     #[allow(dead_code)]
     client: tokio_postgres::Client,
+    /// The session's `statement_timeout` and `lock_timeout` once it had the lock.
+    #[cfg(test)]
+    settings: (String, String),
 }
 
 impl Drop for LockHold {
     fn drop(&mut self) {
-        self.released.store(true, Ordering::SeqCst);
+        // Let go on purpose: the session's end that follows loses nothing.
+        self.holding.store(false, Ordering::SeqCst);
     }
 }
 
-/// The session a hold on the blob store's lock is taken on, outside the pool. A sweep's waits the
-/// whole of `wait` for the lock: its `lock_timeout` is `wait`, and its `statement_timeout`, which
-/// would end the wait at the pool's 10 seconds first, a little more. An upload's keeps the pool's,
-/// its `lock_timeout` of 5 seconds. A session that ends while its lock is held, not let go
-/// (`released`), is logged and marked `lost`: the lock is gone with it.
-async fn lock_session(
-    pg: &tokio_postgres::Config,
-    tls: &Tls,
-    alone: bool,
-    wait: Duration,
-    (released, lost, counted): (
-        Arc<AtomicBool>,
-        Arc<AtomicBool>,
-        Arc<std::sync::atomic::AtomicUsize>,
-    ),
-) -> Result<tokio_postgres::Client, String> {
-    let watch = move |ended: Result<(), tokio_postgres::Error>| {
-        if !released.load(Ordering::SeqCst) {
-            lost.store(true, Ordering::SeqCst);
-            counted.fetch_add(1, Ordering::SeqCst);
+/// What watches the session of a hold on the blob store's lock.
+struct Watch {
+    /// Set once the session has the lock, and cleared when the hold lets it go.
+    holding: Arc<AtomicBool>,
+    /// Set when the session ends while it holds the lock.
+    lost: Arc<AtomicBool>,
+    /// The database's counts of holds lost and of sessions ended.
+    counted: Arc<std::sync::atomic::AtomicUsize>,
+    ended: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Watch {
+    /// The session has ended: a loss when it held the lock, which is logged; nothing when it never
+    /// had it or let it go.
+    fn ended(&self, result: Result<(), tokio_postgres::Error>) {
+        if self.holding.load(Ordering::SeqCst) {
+            self.lost.store(true, Ordering::SeqCst);
+            self.counted.fetch_add(1, Ordering::SeqCst);
             tracing::warn!(
-                error = ?ended.err().map(sql),
+                error = ?result.err().map(sql),
                 "the session that held {BLOB_LOCK_NAME} ended while it was held: the lock is gone, \
                  and a sweep of another instance may run beside what this one does"
             );
         }
-    };
+        self.ended.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// The session a sweep's hold on the blob store's lock is taken on, outside the pool. It waits the
+/// whole of `wait` for the lock: its `lock_timeout` is `wait`, and its `statement_timeout`, which
+/// would end the wait at the pool's 10 seconds first, a little more. `watch` learns when it ends.
+async fn lock_session(
+    pg: &tokio_postgres::Config,
+    tls: &Tls,
+    wait: Duration,
+    watch: Watch,
+) -> Result<tokio_postgres::Client, String> {
     let client = match tls {
         Tls::Rustls(tls) => {
             let (client, connection) = pg.connect(tls.clone()).await.map_err(sql)?;
-            tokio::spawn(async move { watch(connection.await) });
+            tokio::spawn(async move { watch.ended(connection.await) });
             client
         }
         Tls::Plain => {
             let (client, connection) = pg.connect(NoTls).await.map_err(sql)?;
-            tokio::spawn(async move { watch(connection.await) });
+            tokio::spawn(async move { watch.ended(connection.await) });
             client
         }
     };
-    if alone {
-        let millis = wait.as_millis();
-        client
-            .batch_execute(&format!(
-                "SET lock_timeout = {millis}; SET statement_timeout = {}",
-                millis.saturating_add(5_000)
-            ))
-            .await
-            .map_err(sql)?;
-    }
+    let millis = wait.as_millis();
+    client
+        .batch_execute(&format!(
+            "SET lock_timeout = {millis}; SET statement_timeout = {}",
+            millis.saturating_add(5_000)
+        ))
+        .await
+        .map_err(sql)?;
     Ok(client)
 }
 
@@ -635,9 +651,9 @@ pub(crate) const EXCLUSIVE_LOCK: &str =
     "hashtextextended('opamp-fleet-server:' || coalesce(current_schema(), ''), 0)";
 
 /// The lock of the blob store (ADR-draft-the-servers-state-and-its-stores clause 14), by the key
-/// its schema gives it: a sweep or a staging cleanup holds it alone, an upload shared from its
-/// check that its blob is stored until its entry is committed, and `server blobs-to-s3` alone for
-/// its run.
+/// its schema gives it: a sweep or a staging cleanup holds it alone, an upload shared in the
+/// transaction that checks its blob and writes its entry, and `server blobs-to-s3` alone for its
+/// run.
 pub(crate) const BLOB_LOCK: &str =
     "hashtextextended('opamp-fleet-server-blobs:' || coalesce(current_schema(), ''), 0)";
 

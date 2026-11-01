@@ -18,7 +18,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
-use std::sync::{Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use crate::blobs::{BlobHold, BlobStore};
 use crate::deployments::Deployment;
@@ -411,9 +411,13 @@ pub trait PackageBackend: Send + Sync {
     /// Creates a Package without entries; one that is stored already is left as it is.
     fn create(&self, id: &PackageId) -> Result<(), String>;
 
-    /// Creates or replaces the entry of one platform, in one step. A Package the store does not
-    /// hold is an error.
-    fn put_entry(&self, id: &PackageId, entry: &Entry) -> Result<(), String>;
+    /// Creates or replaces the entry of one platform, in one step, once `stored` has found the
+    /// blob it names stored: an upload's entry, never one naming a blob a sweep deleted. A
+    /// backend that other Servers write too asks `stored` inside the entry's transaction, holding
+    /// the blob store's lock shared, so no sweep runs between the answer and the commit
+    /// (ADR-draft-the-servers-state-and-its-stores clause 14). A Package the store does not hold
+    /// is an error, and so is a blob `stored` does not find: removed while it was uploaded.
+    fn put_entry(&self, id: &PackageId, entry: &Entry, stored: Stored) -> Result<(), String>;
 
     /// Writes or, with `None`, clears the signature of the entry for `platform` — only while the
     /// stored entry still names the bytes `content_hash`, since a signature covers that hash
@@ -433,16 +437,14 @@ pub trait PackageBackend: Send + Sync {
     /// Deletes one Package's metadata, its entries with it; its blobs are the store's to collect.
     fn remove(&self, id: &PackageId) -> Result<(), String>;
 
-    /// Holds the blob store's lock (ADR-draft-the-servers-state-and-its-stores clause 14) until
-    /// the hold is dropped: `alone` for a sweep, shared for an upload from its check that its blob
-    /// is stored until its entry is committed. A backend that other Servers write too holds it in
-    /// the database; one whose one Server is its only writer holds nothing, which the default
-    /// does.
+    /// Holds the blob store's lock alone (ADR-draft-the-servers-state-and-its-stores clause 14)
+    /// until the hold is dropped: what a sweep holds. A backend that other Servers write too
+    /// holds it in the database; one whose one Server is its only writer holds nothing, which the
+    /// default does.
     ///
     /// # Errors
     /// Returns an error naming the lock when it is not had in time.
-    fn hold_blobs(&self, alone: bool) -> Result<BlobHold, String> {
-        let _ = alone;
+    fn hold_blobs(&self) -> Result<BlobHold, String> {
         Ok(BlobHold::none())
     }
 
@@ -458,6 +460,10 @@ pub trait PackageBackend: Send + Sync {
         Ok(HashSet::new())
     }
 }
+
+/// Whether the blob an upload's entry names is stored, as the blob store answers at the moment of
+/// the call ([`PackageBackend::put_entry`]).
+pub type Stored = Arc<dyn Fn() -> Result<bool, String> + Send + Sync>;
 
 /// What a signature write found ([`PackageBackend::sign`]).
 #[derive(Clone, Debug)]
@@ -503,8 +509,13 @@ struct Life {
 /// [`BlobStore`].
 pub struct PackageStore {
     backend: Box<dyn PackageBackend>,
-    blobs: Box<dyn BlobStore>,
+    blobs: Arc<dyn BlobStore>,
     sets: RwLock<BTreeMap<PackageId, Package>>,
+    /// Held by every write of a Package, from its write through the backend until memory holds
+    /// it, so the store holds what memory holds in the order it changed. Readers wait only for
+    /// `sets`, which an entry's write takes once the backend has answered: the write may ask the
+    /// blob store, and no round trip to it runs under `sets`.
+    writes: Mutex<()>,
     /// The blobs an upload or a deletion is working on while no lock on `sets` is held, so that
     /// no round trip to the blob store runs under it and the two never cross ([`Life`]).
     life: Mutex<Life>,
@@ -528,7 +539,7 @@ impl PackageStore {
         backend: Box<dyn PackageBackend>,
         blobs: Box<dyn BlobStore>,
     ) -> Result<Self, String> {
-        let hold = backend.hold_blobs(true)?;
+        let hold = backend.hold_blobs()?;
         let stored: BTreeMap<String, u64> = blobs.list()?.into_iter().collect();
         let mut sets = BTreeMap::new();
         for package in backend.load()? {
@@ -567,8 +578,9 @@ impl PackageStore {
         }
         let store = PackageStore {
             backend,
-            blobs,
+            blobs: Arc::from(blobs),
             sets: RwLock::new(BTreeMap::new()),
+            writes: Mutex::new(()),
             life: Mutex::new(Life::default()),
             key: None,
         };
@@ -672,6 +684,7 @@ impl PackageStore {
     /// # Errors
     /// Returns an error when the backend cannot be read; what is held is then kept.
     pub fn reload(&self) -> Result<(), String> {
+        let _writes = self.writes.lock().expect("writes lock");
         let mut sets = self.sets.write().expect("sets lock");
         *sets = self
             .backend
@@ -686,6 +699,7 @@ impl PackageStore {
     /// a Package is its identity and its entries, so creating one that exists is the same request
     /// arriving twice.
     pub fn create(&self, id: &PackageId) -> Result<(), String> {
+        let _writes = self.writes.lock().expect("writes lock");
         let mut sets = self.sets.write().expect("sets lock");
         if sets.contains_key(id) {
             return Ok(());
@@ -734,51 +748,45 @@ impl PackageStore {
             let recorded = if size == 0 {
                 Err("the package artifact is empty; refusing to distribute it".to_string())
             } else {
-                // The blob store's lock, shared, from the check until the entry is committed: no
-                // sweep of another Server deletes the blob between them (clause 14 of
-                // ADR-draft-the-servers-state-and-its-stores). One that ran before has answered.
-                match self.backend.hold_blobs(false) {
-                    Err(e) => Err(format!("{e} — upload the artifact again")),
-                    Ok(hold) => {
-                        // Asked outside the lock on the Packages: no deletion of this blob
-                        // starts here while the upload holds it.
-                        let recorded = match self.blobs.exists(&sha256) {
-                            // The lock went with its session: a sweep may have run since.
-                            Ok(true) if hold.lost() => Err(format!(
-                                "the blob store's lock was lost while the upload held it — \
-                                 {REMOVED_WHILE_UPLOADED}"
-                            )),
-                            Ok(true) => self.put_entry_record(
-                                id,
-                                Entry {
-                                    platform: platform.clone(),
-                                    content_hash: hex::decode(&sha256)
-                                        .expect("a blob's hash is hex"),
-                                    size,
-                                    // New bytes take the old signature with them: it covered
-                                    // the old hash (ADR-0027).
-                                    signature: None,
-                                },
-                            ),
-                            Ok(false) => Err(REMOVED_WHILE_UPLOADED.to_string()),
-                            Err(e) => {
-                                keep = true;
-                                Err(format!(
-                                    "{e} — the store could not say whether it holds the \
-                                     artifact; upload it again once the store answers"
-                                ))
-                            }
-                        };
-                        drop(hold);
-                        recorded
-                    }
-                }
+                // The backend asks whether the blob is stored as it writes the entry: on a store
+                // other Servers write too, in the entry's transaction under the blob store's lock,
+                // so no sweep of another Server deletes the blob between the answer and the commit
+                // (clause 14 of ADR-draft-the-servers-state-and-its-stores). No deletion of this
+                // blob starts here while the upload holds it, and one that ran before has answered.
+                let unanswered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let stored: Stored = {
+                    let (blobs, sha256, unanswered) =
+                        (self.blobs.clone(), sha256.clone(), unanswered.clone());
+                    Arc::new(move || {
+                        blobs.exists(&sha256).map_err(|e| {
+                            unanswered.store(true, std::sync::atomic::Ordering::SeqCst);
+                            format!(
+                                "{e} — the store could not say whether it holds the artifact; \
+                                 upload it again once the store answers"
+                            )
+                        })
+                    })
+                };
+                let recorded = self.put_entry_record(
+                    id,
+                    Entry {
+                        platform: platform.clone(),
+                        content_hash: hex::decode(&sha256).expect("a blob's hash is hex"),
+                        size,
+                        // New bytes take the old signature with them: it covered the old hash
+                        // (ADR-0027).
+                        signature: None,
+                    },
+                    stored,
+                );
+                keep = unanswered.load(std::sync::atomic::Ordering::SeqCst);
+                recorded
             };
             self.end_upload(&sha256);
             recorded
         });
         match result {
-            // A replaced entry's blob goes, once the shared hold is let go.
+            // A replaced entry's blob goes, once no lock is held.
             Ok(Recorded::Replaced(doomed)) => {
                 self.sweep(doomed);
                 Ok(())
@@ -831,6 +839,7 @@ impl PackageStore {
                 signature.len()
             ));
         }
+        let _writes = self.writes.lock().expect("writes lock");
         let mut sets = self.sets.write().expect("sets lock");
         let set = sets
             .get_mut(id)
@@ -856,6 +865,7 @@ impl PackageStore {
     /// # Errors
     /// `no package set …` or `no entry …` when the entry does not exist (a `404`).
     pub fn remove_signature(&self, id: &PackageId, platform: &Platform) -> Result<bool, String> {
+        let _writes = self.writes.lock().expect("writes lock");
         let mut sets = self.sets.write().expect("sets lock");
         let set = sets
             .get_mut(id)
@@ -879,18 +889,28 @@ impl PackageStore {
     /// Writes one entry into the Package's map and its metadata — the single path every entry
     /// write converges on. Replacing the entry for a Platform the Package already holds is what
     /// "no duplicate entries" means in a map: the combination stays unique by construction. The
-    /// caller holds the blob it names as an upload, and has found it stored. Answers whether an
-    /// entry was replaced, with the blob it named that no other entry names, which the caller
-    /// sweeps once it holds no lock.
-    fn put_entry_record(&self, id: &PackageId, entry: Entry) -> Result<Recorded, String> {
+    /// caller holds the blob it names as an upload, and the backend writes the entry once
+    /// `stored` finds it. Answers whether an entry was replaced, with the blob it named that no
+    /// other entry names, which the caller sweeps once it holds no lock.
+    fn put_entry_record(
+        &self,
+        id: &PackageId,
+        entry: Entry,
+        stored: Stored,
+    ) -> Result<Recorded, String> {
+        // Under the lock of the writes, as every write of a Package is: the store must hold what
+        // memory holds, in the order it changed. Not under `sets`: the backend asks the blob
+        // store, which may take as long as the store answers. A PostgreSQL call is bounded
+        // (ADR-0029 clause 24).
+        let _writes = self.writes.lock().expect("writes lock");
+        if !self.sets.read().expect("sets lock").contains_key(id) {
+            return Err(format!("no package set {id}"));
+        }
+        self.backend.put_entry(id, &entry, stored)?;
         let mut sets = self.sets.write().expect("sets lock");
         let set = sets
             .get_mut(id)
             .ok_or_else(|| format!("no package set {id}"))?;
-        // The entry is written under the lock, as every write of a Package is: the store must
-        // hold what memory holds, in the order it changed. A PostgreSQL call is bounded
-        // (ADR-0029 clause 24); the blob store is not asked here.
-        self.backend.put_entry(id, &entry)?;
         let previous = set.entries.insert(entry.platform.clone(), entry);
         Ok(match previous {
             None => Recorded::Added,
@@ -906,6 +926,7 @@ impl PackageStore {
     /// normal state, and deleting the Package is its own act. Its blob goes with the last entry
     /// that names it (ADR-0029 clause 13).
     pub fn delete_entry(&self, id: &PackageId, platform: &Platform) -> Result<bool, String> {
+        let _writes = self.writes.lock().expect("writes lock");
         let mut sets = self.sets.write().expect("sets lock");
         let Some(set) = sets.get_mut(id) else {
             return Ok(false);
@@ -944,6 +965,7 @@ impl PackageStore {
     /// # Errors
     /// Returns an error when the Package cannot be deleted.
     pub fn remove_set(&self, id: &PackageId) -> Result<Option<Sweep>, String> {
+        let _writes = self.writes.lock().expect("writes lock");
         let mut sets = self.sets.write().expect("sets lock");
         if !sets.contains_key(id) {
             return Ok(None);
@@ -1009,7 +1031,7 @@ impl PackageStore {
     /// A failure is logged and left to the next startup, which deletes every blob no entry names.
     fn sweep(&self, doomed: impl IntoIterator<Item = String>) {
         let doomed: Vec<String> = doomed.into_iter().collect();
-        let swept = self.backend.hold_blobs(true).and_then(|_hold| {
+        let swept = self.backend.hold_blobs().and_then(|_hold| {
             let named = if doomed.is_empty() {
                 HashSet::new()
             } else {
@@ -1248,7 +1270,7 @@ fn fits(description: Option<&AgentDescription>, id: &PackageId, platform: &Platf
 }
 
 /// The refusal of an upload whose blob a deletion took, or is taking.
-const REMOVED_WHILE_UPLOADED: &str =
+pub(crate) const REMOVED_WHILE_UPLOADED: &str =
     "the artifact was removed while it was uploaded; upload it again";
 
 /// Whether any entry of `sets` names the blob `sha256`.

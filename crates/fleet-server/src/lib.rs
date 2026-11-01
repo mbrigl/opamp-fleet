@@ -315,7 +315,7 @@ impl packages::PackageStore {
                         .awaiting_a_lease()
                         .with_live(live.clone()),
                     live,
-                    Arc::new(move || hold.hold_blobs(true)),
+                    Arc::new(move || hold.hold_blobs()),
                 )
             }
         };

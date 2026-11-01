@@ -1106,7 +1106,7 @@ pub(crate) mod tests {
             }),
             Arc::new({
                 let database = a_database.clone();
-                move || database.hold_blobs(true)
+                move || database.hold_blobs()
             }),
         );
         let b = StagingCleanup::new(
@@ -1115,7 +1115,7 @@ pub(crate) mod tests {
                 let database = b_database.clone();
                 move || database.live_leases()
             }),
-            Arc::new(move || b_database.hold_blobs(true)),
+            Arc::new(move || b_database.hold_blobs()),
         );
         let first = std::thread::spawn(move || a.run());
         lists.recv().expect("A has listed, holding the lock");

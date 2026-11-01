@@ -67,6 +67,9 @@ pub struct BlobHold {
     held: Option<Box<dyn Send>>,
     /// Set once the lock is gone while the hold lives, as when its session ended.
     lost: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// The `statement_timeout` and `lock_timeout` of the hold's session, where it has one.
+    #[cfg(test)]
+    pub(crate) settings: Option<(String, String)>,
 }
 
 impl BlobHold {
@@ -76,6 +79,8 @@ impl BlobHold {
         BlobHold {
             held: None,
             lost: None,
+            #[cfg(test)]
+            settings: None,
         }
     }
 
@@ -85,7 +90,17 @@ impl BlobHold {
         BlobHold {
             held: Some(held),
             lost: Some(lost),
+            #[cfg(test)]
+            settings: None,
         }
+    }
+
+    /// The hold, its session's settings noted: what the tests read the wait from.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn with_settings(mut self, settings: (String, String)) -> Self {
+        self.settings = Some(settings);
+        self
     }
 
     /// Whether the lock is gone while the hold lives.
