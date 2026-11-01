@@ -19,6 +19,7 @@ fn usage() -> ! {
         "Usage: server [--config <server.toml>] [--version]\n       \
          server hash-credential --basic   (reads the password from standard input)\n       \
          server audit-verify <data_dir>/audit\n       \
+         server audit-verify --config <server.toml> [--archive <old data_dir>/audit]\n       \
          server pki status [--config <server.toml>]\n       \
          server migrate --config-dir <old> --packages-dir <old> --data-dir <new>\n       \
          server migrate-to-postgres --from <data_dir> --data-dir <new> [--config <server.toml>]"
@@ -27,10 +28,55 @@ fn usage() -> ! {
 }
 
 /// `server audit-verify <dir>` (ADR-0023 clause 3): walks the audit record's files in order and
-/// names the first entry whose `prev` does not match the entry before it.
-fn audit_verify(dir: Option<String>) -> ! {
-    let Some(dir) = dir else { usage() };
-    let files = match fleet_server::fs::audit_files(std::path::Path::new(&dir)) {
+/// names the first entry whose `prev` does not match the entry before it. `server audit-verify
+/// --config <server.toml> [--archive <dir>]` walks every chain of the record in the database
+/// instead, lists the open ones, and checks the archive a move from files left
+/// (ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance clauses 5 and 6).
+fn audit_verify(mut args: impl Iterator<Item = String>) -> ! {
+    let Some(first) = args.next() else { usage() };
+    if first != "--config" && first != "--archive" {
+        audit_verify_files(&first);
+    }
+    let (mut config, mut archive) = (None, None);
+    let mut flag = Some(first);
+    while let Some(name) = flag {
+        let slot = match name.as_str() {
+            "--config" => &mut config,
+            "--archive" => &mut archive,
+            _ => usage(),
+        };
+        match args.next() {
+            Some(path) if slot.is_none() => *slot = Some(PathBuf::from(path)),
+            _ => usage(),
+        }
+        flag = args.next();
+    }
+    let Some(config) = config else { usage() };
+    let config = load_config(Some(config)).config;
+    let Some(database) = config.database.postgres() else {
+        eprintln!(
+            "the configuration names no database — with [database] store = \"fs\" verify the \
+             files: server audit-verify <data_dir>/audit"
+        );
+        std::process::exit(1);
+    };
+    match fleet_server::postgres::audit::verify_on(database, archive.as_deref()) {
+        Ok(verified) => {
+            for line in &verified.lines {
+                println!("{line}");
+            }
+            std::process::exit(i32::from(verified.failed));
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// `server audit-verify <dir>`: the files of the filesystem store, or an archive.
+fn audit_verify_files(dir: &str) -> ! {
+    let files = match fleet_server::fs::audit_files(std::path::Path::new(dir)) {
         Ok(files) => files,
         Err(e) => {
             eprintln!("{e}");
@@ -183,8 +229,8 @@ fn migrate(mut args: impl Iterator<Item = String>) -> ! {
 
 /// `server migrate-to-postgres --from <data_dir> --data-dir <new> [--config <server.toml>]`
 /// (ADR-0029 clause 27): copies the records of `data_dir` into the database the configuration
-/// names, and its audit record and filesystem blobs into a new, empty `data_dir`, leaving the old
-/// one as the backup. It is run while the Server is stopped; it takes the database's lock, so a
+/// names, and its filesystem blobs into a new, empty `data_dir`, leaving the old one as the backup
+/// and its audit record as the archive the first chain links to. It is run while the Server is stopped; it takes the database's lock, so a
 /// Server still running against it stops the copy. Prints what it copied, and exits non-zero when
 /// it could not copy all of it, leaving the database without the Server's tables.
 fn migrate_to_postgres(mut args: impl Iterator<Item = String>) -> ! {
@@ -346,7 +392,7 @@ fn parse_args() -> Option<PathBuf> {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "hash-credential" => hash_credential(args.next()),
-            "audit-verify" => audit_verify(args.next()),
+            "audit-verify" => audit_verify(args),
             "pki" => pki(args),
             "migrate" => migrate(args),
             "migrate-to-postgres" => migrate_to_postgres(args),
@@ -600,14 +646,71 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    // The audit record (ADR-0023), opened before anything is decided.
-    let audit_log = match fleet_server::fs::FsAuditStore::open(&config.data_dir).and_then(|store| {
-        fleet_server::audit_log::AuditLog::start(
-            Box::new(store),
-            config.audit.limits(),
-            clock.clone(),
-        )
-    }) {
+    // With PostgreSQL, a lease before anything is decided and before either listener opens
+    // (clauses 1 to 3 of
+    // ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it):
+    // the audit chain is the lease's.
+    let lease = match &records {
+        fleet_server::Records::Postgres(database) => {
+            // The audit files a Server on PostgreSQL kept before its record moved into the
+            // database stay as the archive, which the first chain names (clause 6 of
+            // ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance).
+            let archive = config.data_dir.join(fleet_server::fs::AUDIT);
+            match fleet_server::postgres::audit::archive_tail(&archive) {
+                Ok(end) => database.offer_archive(end),
+                Err(e) => {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                }
+            }
+            let made = instance_id.clone().map_or_else(
+                fleet_server::postgres::lease::new_instance_id,
+                Ok::<String, String>,
+            );
+            match made.and_then(|id| {
+                fleet_server::instance::Lease::take_as(
+                    database.clone(),
+                    config.database.lease(),
+                    &host_name(),
+                    id,
+                )
+            }) {
+                Ok(lease) => {
+                    logged.follow(lease.held());
+                    Some(lease)
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        fleet_server::Records::Files(_) => None,
+    };
+    // The audit record (ADR-0023), opened before anything is decided: one chain in files, or on
+    // PostgreSQL the chain of each lease
+    // (ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance).
+    let started = match (&records, &lease) {
+        (fleet_server::Records::Postgres(database), Some(lease)) => {
+            fleet_server::audit_log::AuditLog::start_under(
+                Box::new(fleet_server::postgres::audit::PgAuditStore::new(
+                    database.clone(),
+                    lease.held(),
+                )),
+                config.audit.limits(),
+                clock.clone(),
+                lease.held(),
+            )
+        }
+        _ => fleet_server::fs::FsAuditStore::open(&config.data_dir).and_then(|store| {
+            fleet_server::audit_log::AuditLog::start(
+                Box::new(store),
+                config.audit.limits(),
+                clock.clone(),
+            )
+        }),
+    };
+    let audit_log = match started {
         Ok(audit) => Arc::new(audit),
         Err(e) => {
             eprintln!("{e}");
@@ -714,40 +817,11 @@ async fn main() {
     }
     let operators = fleet_server::operator_app(state.clone(), operator_auth);
 
-    // With PostgreSQL, a lease before either listener opens, and the revocations of the other
-    // instances followed (clauses 1 to 3 and 11 of
-    // ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it).
-    let lease = match &records {
-        fleet_server::Records::Postgres(database) => {
-            let made = instance_id.clone().map_or_else(
-                fleet_server::postgres::lease::new_instance_id,
-                Ok::<String, String>,
-            );
-            match made.and_then(|id| {
-                fleet_server::instance::Lease::take_as(
-                    database.clone(),
-                    config.database.lease(),
-                    &host_name(),
-                    id,
-                )
-            }) {
-                Ok(lease) => {
-                    logged.follow(lease.held());
-                    fleet_server::instance::follow(
-                        database,
-                        state.clone(),
-                        Some(lease.list_versions()),
-                    );
-                    Some(lease)
-                }
-                Err(e) => {
-                    eprintln!("{e}");
-                    std::process::exit(1);
-                }
-            }
-        }
-        fleet_server::Records::Files(_) => None,
-    };
+    // The revocations, and every other change, of the other instances followed (clauses 9 to 11
+    // of ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it).
+    if let (Some(lease), fleet_server::Records::Postgres(database)) = (&lease, &records) {
+        fleet_server::instance::follow(database, state.clone(), Some(lease.list_versions()));
+    }
     // The handlers are installed before either plane is bound and logged as served, so a stop
     // sent as soon as the log says so drains the planes rather than ending the process.
     let shutdown = shutdown_signal();
@@ -780,14 +854,24 @@ async fn main() {
     // number, so the ordinary restart restores a fleet without gaps or false silence.
     state.flush_agents();
     // What is still queued for the audit record is written before the process, and the writer
-    // thread with it, ends (ADR-0023).
-    if !audit_log.drain(std::time::Duration::from_secs(5)) {
+    // thread with it, ends (ADR-0023); on PostgreSQL the chain is closed then, and the lease
+    // released only once it is, so that a chain left open is closed by the instance that takes
+    // over the lapsed lease (clause 3 of
+    // ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance).
+    let closed = audit_log.close(std::time::Duration::from_secs(5));
+    if let Some(lease) = lease {
+        if closed {
+            lease.release().await;
+        } else {
+            error!(
+                "the audit chain could not be written out and closed before shutdown; the lease \
+                 is left to lapse, so the instance that takes it over closes the chain"
+            );
+        }
+    } else if !closed {
         error!(
             "the audit record could not be written out before shutdown; its last entries are lost"
         );
-    }
-    if let Some(lease) = lease {
-        lease.release().await;
     }
     // A plane that could not be served is a failure a service manager restarts on.
     if served.is_err() {

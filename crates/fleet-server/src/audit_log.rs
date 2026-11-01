@@ -12,7 +12,15 @@
 //! reach the channel, where they may take no more than [`REFUSAL_SHARE`] of it: a flood of refusals
 //! from however many peers cannot leave an admission or an operator act without room for its
 //! record. The store behind the writer is a port; the filesystem adapter is
-//! [`crate::fs::FsAuditStore`].
+//! [`crate::fs::FsAuditStore`], one chain in files that rotate by size.
+//!
+//! On PostgreSQL the record is one chain per lease
+//! (ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance), the adapter
+//! [`crate::postgres::audit::PgAuditStore`]. Each entry is marked with the lease it was decided
+//! under. The writer writes into the chain of the lease held now: entries decided under a lease
+//! that lapsed before they were written go into the next chain, marked `taken_under` the old one,
+//! and a write that fails keeps its lines for the next attempt instead of counting them lost. An
+//! orderly shutdown closes the chain with `audit.chain_closed` ([`AuditLog::close`]).
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -53,8 +61,38 @@ pub struct Tail {
     pub torn: bool,
 }
 
+/// Which chain a store writes the next lines into.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Chain {
+    /// The store's one chain: the filesystem's, which rotates and is never closed.
+    One,
+    /// The chain of the lease held now, by its identifier: one chain per lease.
+    Lease(String),
+    /// No lease is held, so there is no chain to write into until one is.
+    Unleased,
+}
+
 /// The record's port (ADR-0009): where the lines go.
 pub trait AuditStore: Send {
+    /// The chain the next lines go into, as of now; [`tail`](Self::tail), [`append`](Self::append)
+    /// and [`close`](Self::close) act on it until this is asked again. A store of one chain
+    /// answers [`Chain::One`].
+    fn chain(&mut self) -> Chain {
+        Chain::One
+    }
+
+    /// Appends `lines` as [`append`](Self::append) does, the last of them the chain's closing
+    /// entry, and records the chain as closed on that entry's hash, in one write. Only a store of
+    /// one chain per lease closes one.
+    ///
+    /// # Errors
+    /// Returns an error when the lines cannot be written or the chain cannot be closed; then none
+    /// of them is in the store.
+    fn close(&mut self, seq: u64, lines: &[&str]) -> Result<(), String> {
+        let _ = (seq, lines);
+        Err("this record is one chain, which is never closed".to_string())
+    }
+
     /// Where the record left off, if it holds anything.
     ///
     /// # Errors
@@ -98,10 +136,15 @@ impl Default for Limits {
 
 /// What the writer is sent: an entry, or a request to write out everything before it.
 enum Message {
-    Entry(Entry),
+    /// An entry, with the chain of the lease it was decided under, where the store keeps one
+    /// chain per lease and one was held.
+    Entry(Entry, Option<String>),
     /// Answered once every entry queued before it was taken, its second's aggregates included:
     /// `true` when all of them were written, `false` when the record was failing.
     Drain(std::sync::mpsc::SyncSender<bool>),
+    /// [`Drain`](Self::Drain), and then the chain closed, where the store keeps one per lease:
+    /// `true` once it is.
+    Close(std::sync::mpsc::SyncSender<bool>),
 }
 
 /// The handle every decision is recorded through.
@@ -114,6 +157,8 @@ pub struct AuditLog {
     refusals: Arc<Mutex<Refusals>>,
     /// Refusals in the channel right now, bounded by [`REFUSAL_SHARE`].
     queued_refusals: Arc<AtomicUsize>,
+    /// The lease each decision is taken under, where the store keeps one chain per lease.
+    held: Option<crate::instance::Held>,
 }
 
 /// Which refusals are aggregated together: the event and the peer, an IPv6 peer by its /64.
@@ -221,10 +266,36 @@ impl AuditLog {
     /// # Errors
     /// Returns an error when the store cannot be read.
     pub fn start(
-        mut store: Box<dyn AuditStore>,
+        store: Box<dyn AuditStore>,
         limits: Limits,
         clock: Arc<dyn Clock>,
     ) -> Result<Self, String> {
+        Self::start_with(store, limits, clock, None)
+    }
+
+    /// [`start`](Self::start) for a store of one chain per lease: each decision is marked with
+    /// the lease `held` names when it is recorded, and the writer writes into the chain of the
+    /// lease held when it writes.
+    ///
+    /// # Errors
+    /// Returns an error when the store cannot be read.
+    pub fn start_under(
+        store: Box<dyn AuditStore>,
+        limits: Limits,
+        clock: Arc<dyn Clock>,
+        held: crate::instance::Held,
+    ) -> Result<Self, String> {
+        Self::start_with(store, limits, clock, Some(held))
+    }
+
+    fn start_with(
+        mut store: Box<dyn AuditStore>,
+        limits: Limits,
+        clock: Arc<dyn Clock>,
+        held: Option<crate::instance::Held>,
+    ) -> Result<Self, String> {
+        let chain = store.chain();
+        let per_lease = chain != Chain::One;
         let (seq, prev, torn) = match store.tail()? {
             None => (0, GENESIS.to_string(), false),
             Some(tail) => (tail.last_seq, line_hash(&tail.last_line), tail.torn),
@@ -247,9 +318,14 @@ impl AuditLog {
             batch: Vec::new(),
             batch_bytes: 0,
             batch_start_prev: String::new(),
+            per_lease,
+            chain: match chain {
+                Chain::Lease(id) => Some(id),
+                Chain::One | Chain::Unleased => None,
+            },
         };
         if torn {
-            writer.write(Entry::new("audit.chain_broken", "recorded"));
+            writer.write(Entry::new("audit.chain_broken", "recorded"), None);
             writer.commit();
         }
         // A thread of its own: the writes are blocking file I/O, and must not hold a runtime
@@ -265,6 +341,7 @@ impl AuditLog {
             clock,
             refusals,
             queued_refusals,
+            held,
         })
     }
 
@@ -273,9 +350,29 @@ impl AuditLog {
     /// is still queued would otherwise be lost without a trace (ADR-0023).
     #[must_use]
     pub fn drain(&self, timeout: Duration) -> bool {
+        self.ask(timeout, Message::Drain)
+    }
+
+    /// [`drain`](Self::drain) at an orderly shutdown, and then, where the store keeps one chain
+    /// per lease, the chain closed with `audit.chain_closed` and `reason` `shutdown`
+    /// (ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance clause 3).
+    /// `false` when something queued was not written or the chain could not be closed: its lease
+    /// is then left to lapse, so the instance that takes it over closes the chain.
+    #[must_use]
+    pub fn close(&self, timeout: Duration) -> bool {
+        self.ask(timeout, Message::Close)
+    }
+
+    /// Sends the writer the request `message` makes of an answer channel, and waits for its answer
+    /// for at most `timeout`.
+    fn ask(
+        &self,
+        timeout: Duration,
+        message: fn(std::sync::mpsc::SyncSender<bool>) -> Message,
+    ) -> bool {
         let deadline = std::time::Instant::now() + timeout;
         let (done, written) = std::sync::mpsc::sync_channel(1);
-        let mut message = Message::Drain(done);
+        let mut message = message(done);
         loop {
             match self.tx.try_send(message) {
                 Ok(()) => break,
@@ -310,10 +407,11 @@ impl Audit for AuditLog {
         if self.failing.load(Ordering::SeqCst) {
             return Err(self.unrecorded());
         }
+        let under = self.held.as_ref().and_then(|held| held.borrow().clone());
         if !entry.is_refusal() {
             return self
                 .tx
-                .try_send(Message::Entry(entry))
+                .try_send(Message::Entry(entry, under))
                 .map_err(|_| self.unrecorded());
         }
         let second = self.clock.now_ms() / 1000;
@@ -331,7 +429,7 @@ impl Audit for AuditLog {
             self.queued_refusals.fetch_sub(1, Ordering::SeqCst);
             return Err(self.unrecorded());
         }
-        self.tx.try_send(Message::Entry(entry)).map_err(|_| {
+        self.tx.try_send(Message::Entry(entry, under)).map_err(|_| {
             self.queued_refusals.fetch_sub(1, Ordering::SeqCst);
             self.unrecorded()
         })
@@ -342,6 +440,33 @@ impl Audit for AuditLog {
 #[must_use]
 pub fn line_hash(line: &str) -> String {
     hex::encode(Sha256::digest(line.as_bytes()))
+}
+
+/// An entry as the line it is written as: `seq`, `time` (RFC 3339, UTC, from `time_ms`), `event`,
+/// `outcome`, its fields, and `prev`, one JSON object.
+#[must_use]
+pub fn render(seq: u64, time_ms: u64, entry: &Entry, prev: &str) -> String {
+    let mut line = Map::new();
+    line.insert("seq".into(), seq.into());
+    line.insert("time".into(), rfc3339(time_ms).into());
+    line.insert("event".into(), entry.event.clone().into());
+    line.insert("outcome".into(), entry.outcome.clone().into());
+    for (key, value) in &entry.fields {
+        let value = match value {
+            Field::Text(text) => Value::from(text.clone()),
+            Field::Unsigned(n) => Value::from(*n),
+            Field::Signed(n) => Value::from(*n),
+        };
+        line.insert(key.clone(), value);
+    }
+    line.insert("prev".into(), prev.into());
+    Value::Object(line).to_string()
+}
+
+/// Emits a line written to the record as the `tracing` event every entry is also (ADR-0023
+/// clause 6).
+pub(crate) fn emit(seq: u64, event: &str, outcome: &str, text: &str) {
+    info!(target: "audit", seq, event = %event, outcome = %outcome, "{}", text);
 }
 
 /// The writer task's state.
@@ -362,14 +487,25 @@ struct Writer {
     batch_bytes: u64,
     /// The hash of the line before the batch, which the chain goes back to when the batch fails.
     batch_start_prev: String,
+    /// Whether the store keeps one chain per lease: then a batch that fails is kept, not lost, and
+    /// written into the chain of the next lease where its own lapsed.
+    per_lease: bool,
+    /// The chain the batch's lines are given their place in, where the store keeps one per lease.
+    chain: Option<String>,
 }
 
 /// One line of the batch.
 struct Line {
     seq: u64,
     text: String,
-    event: String,
-    outcome: String,
+    /// The decision, as it was queued.
+    entry: Entry,
+    /// When the line was first given its place.
+    time_ms: u64,
+    /// The decisions that went unrecorded before it, which it tells.
+    unrecorded: u64,
+    /// The chain of the lease the decision was taken under, if a lease was held.
+    decided_under: Option<String>,
     /// What goes unrecorded when the line is lost: its decision and the count it carries.
     lost: u64,
 }
@@ -418,30 +554,71 @@ impl Writer {
         self.flush_window(second);
         self.commit();
         // While writing fails nothing is let through, so the writer itself tries again; the first
-        // entry that lands says how much went unrecorded.
+        // entry that lands says how much went unrecorded. A store of one chain per lease kept the
+        // batch that failed, which is tried again first.
         if self.failing.load(Ordering::SeqCst) {
-            self.append(Entry::new("audit.resumed", "recorded"));
+            if !self.per_lease || self.batch.is_empty() {
+                self.append(Entry::new("audit.resumed", "recorded"), None);
+            }
             self.commit();
+            if self.per_lease
+                && !self.failing.load(Ordering::SeqCst)
+                && self.unrecorded.load(Ordering::SeqCst) > 0
+            {
+                self.append(Entry::new("audit.resumed", "recorded"), None);
+                self.commit();
+            }
         }
     }
 
     fn handle(&mut self, message: Message) {
         match message {
-            Message::Entry(entry) => self.take(entry),
+            Message::Entry(entry, under) => self.take(entry, under),
             Message::Drain(done) => {
                 self.flush_window(u64::MAX);
                 self.commit();
                 let _ = done.send(!self.failing.load(Ordering::SeqCst));
             }
+            Message::Close(done) => {
+                self.flush_window(u64::MAX);
+                self.commit();
+                let written = !self.failing.load(Ordering::SeqCst);
+                let _ = done.send(written && (!self.per_lease || self.close_chain()));
+            }
         }
     }
 
+    /// Writes `audit.chain_closed` with `reason` `shutdown` into the chain and closes it; `true`
+    /// once it is. A closing entry that could not be written is taken back, so the chain stays
+    /// open for the instance that takes over the lease to close.
+    fn close_chain(&mut self) -> bool {
+        let (seq, prev) = (self.seq, self.prev.clone());
+        self.append(
+            Entry::new("audit.chain_closed", "recorded").with("reason", "shutdown"),
+            None,
+        );
+        self.commit_as(true);
+        if self.failing.load(Ordering::SeqCst) {
+            if self
+                .batch
+                .last()
+                .is_some_and(|line| line.entry.event == "audit.chain_closed")
+            {
+                self.batch.pop();
+                self.seq = seq;
+                self.prev = prev;
+            }
+            return false;
+        }
+        true
+    }
+
     /// Writes an entry that came through the channel.
-    fn take(&mut self, entry: Entry) {
+    fn take(&mut self, entry: Entry, under: Option<String>) {
         if entry.is_refusal() {
             self.queued_refusals.fetch_sub(1, Ordering::SeqCst);
         }
-        self.write(entry);
+        self.write(entry, under);
     }
 
     /// Writes one aggregate per event and peer whose second has passed.
@@ -461,12 +638,17 @@ impl Writer {
             Entry::new(&format!("{event}.aggregated"), "refused")
                 .with("peer", peer.clone())
                 .with("count", count),
+            None,
         );
     }
 
     /// Gives the entry its place in the chain and adds it to the batch; rotates first when the file
-    /// is full.
-    fn write(&mut self, entry: Entry) {
+    /// is full. A store of one chain per lease does not rotate.
+    fn write(&mut self, entry: Entry, under: Option<String>) {
+        if self.per_lease {
+            self.append(entry, under);
+            return;
+        }
         if self.store.current_bytes() + self.batch_bytes >= self.limits.max_file_bytes {
             // The batch goes into the file it was counted against; whether that file is full is
             // then up to what landed.
@@ -480,77 +662,141 @@ impl Writer {
                             Entry::new("audit.rotated", "recorded")
                                 .with("deleted", file)
                                 .with("deleted_last_hash", line_hash(&last)),
+                            None,
                         );
                     }
                 }
                 Err(e) => error!(error = %e, "cannot rotate the audit record"),
             }
         }
-        self.append(entry);
+        self.append(entry, under);
     }
 
-    fn append(&mut self, entry: Entry) {
-        let seq = self.seq + 1;
-        let mut line = Map::new();
-        line.insert("seq".into(), seq.into());
-        line.insert("time".into(), rfc3339(self.clock.now_ms()).into());
-        line.insert("event".into(), entry.event.clone().into());
-        line.insert("outcome".into(), entry.outcome.clone().into());
-        for (key, value) in &entry.fields {
-            let value = match value {
-                Field::Text(text) => Value::from(text.clone()),
-                Field::Unsigned(n) => Value::from(*n),
-                Field::Signed(n) => Value::from(*n),
-            };
-            line.insert(key.clone(), value);
-        }
+    fn append(&mut self, entry: Entry, under: Option<String>) {
         let unrecorded = self.unrecorded.swap(0, Ordering::SeqCst);
-        if unrecorded > 0 {
-            line.insert("unrecorded_before".into(), unrecorded.into());
-        }
-        line.insert("prev".into(), self.prev.clone().into());
-        let text = Value::Object(line).to_string();
-        let prev = std::mem::replace(&mut self.prev, line_hash(&text));
-        if self.batch.is_empty() {
-            self.batch_start_prev = prev;
-        }
-        self.seq = seq;
-        self.batch_bytes += text.len() as u64 + 1;
-        self.batch.push(Line {
-            seq,
-            text,
+        let mut line = Line {
+            seq: 0,
+            text: String::new(),
             // A retry that fails was no decision; the entries it carried the count of were.
             lost: u64::from(entry.event != "audit.resumed") + unrecorded,
-            event: entry.event,
-            outcome: entry.outcome,
-        });
-        if self.batch.len() >= WRITE_BATCH {
+            entry,
+            time_ms: self.clock.now_ms(),
+            unrecorded,
+            decided_under: under,
+        };
+        if self.batch.is_empty() {
+            self.batch_start_prev = self.prev.clone();
+        }
+        self.place(&mut line);
+        self.batch_bytes += line.text.len() as u64 + 1;
+        self.batch.push(line);
+        // While writing fails, a store of one chain per lease keeps the batch for the writer's
+        // own retry rather than trying again with every line.
+        if self.batch.len() >= WRITE_BATCH
+            && !(self.per_lease && self.failing.load(Ordering::SeqCst))
+        {
             self.commit();
         }
     }
 
-    /// Hands the batch to the store in one append. A line counts as written only once the store
-    /// has synced it; when the append fails, every line of the batch is lost as a single one is,
-    /// and the chain goes on from the line before the batch.
-    fn commit(&mut self) {
-        let batch = std::mem::take(&mut self.batch);
-        self.batch_bytes = 0;
-        let Some(first) = batch.first() else {
-            return;
+    /// Gives `line` the next place in the chain: its `seq`, and its text chained to the line
+    /// before. In a chain of a lease the line names the chain, and, when its decision was taken
+    /// under another lease, that lease's chain as `taken_under`.
+    fn place(&mut self, line: &mut Line) {
+        let mut entry = line.entry.clone();
+        if line.unrecorded > 0 {
+            entry
+                .fields
+                .insert("unrecorded_before".into(), Field::Unsigned(line.unrecorded));
+        }
+        if let Some(chain) = &self.chain {
+            entry
+                .fields
+                .insert("chain".into(), Field::Text(chain.clone()));
+            if let Some(under) = line.decided_under.as_ref().filter(|under| *under != chain) {
+                entry
+                    .fields
+                    .insert("taken_under".into(), Field::Text(under.clone()));
+            }
+        }
+        line.seq = self.seq + 1;
+        line.text = render(line.seq, line.time_ms, &entry, &self.prev);
+        self.prev = line_hash(&line.text);
+        self.seq = line.seq;
+    }
+
+    /// Takes up the chain `chain` where the store says it ends, and gives every line of the batch
+    /// its place in it again.
+    fn switch_to(&mut self, chain: String) -> Result<(), String> {
+        let (seq, prev) = match self.store.tail()? {
+            None => (0, GENESIS.to_string()),
+            Some(tail) => (tail.last_seq, line_hash(&tail.last_line)),
         };
-        let lines: Vec<&str> = batch.iter().map(|line| line.text.as_str()).collect();
-        match self.store.append(first.seq, &lines) {
+        self.chain = Some(chain);
+        (self.seq, self.prev) = (seq, prev);
+        self.batch_start_prev = self.prev.clone();
+        let mut batch = std::mem::take(&mut self.batch);
+        self.batch_bytes = 0;
+        for line in &mut batch {
+            self.place(line);
+            self.batch_bytes += line.text.len() as u64 + 1;
+        }
+        self.batch = batch;
+        Ok(())
+    }
+
+    fn commit(&mut self) {
+        self.commit_as(false);
+    }
+
+    /// Hands the batch to the store in one append, or, with `closing`, closes the chain on its
+    /// last line. A line counts as written only once the store has synced it. When the append
+    /// fails, every line of the batch is lost as a single one is, and the chain goes on from the
+    /// line before the batch; a store of one chain per lease keeps the batch for the next attempt
+    /// instead, in the chain of the lease held then.
+    fn commit_as(&mut self, closing: bool) {
+        if self.batch.is_empty() {
+            return;
+        }
+        let ready = if self.per_lease {
+            match self.store.chain() {
+                Chain::Unleased => {
+                    Err("no lease is held, so there is no chain to write into".into())
+                }
+                Chain::Lease(chain) if self.chain.as_ref() != Some(&chain) => self.switch_to(chain),
+                Chain::Lease(_) | Chain::One => Ok(()),
+            }
+        } else {
+            Ok(())
+        };
+        let batch = std::mem::take(&mut self.batch);
+        let first = batch.first().map_or(0, |line| line.seq);
+        let written = ready.and_then(|()| {
+            let lines: Vec<&str> = batch.iter().map(|line| line.text.as_str()).collect();
+            if closing {
+                self.store.close(first, &lines)
+            } else {
+                self.store.append(first, &lines)
+            }
+        });
+        match written {
             Ok(()) => {
+                self.batch_bytes = 0;
                 self.failing.store(false, Ordering::SeqCst);
                 for line in &batch {
-                    info!(target: "audit", seq = line.seq, event = %line.event, outcome = %line.outcome, "{}", line.text);
+                    emit(line.seq, &line.entry.event, &line.entry.outcome, &line.text);
                 }
             }
             Err(e) => {
-                self.seq = first.seq - 1;
-                self.prev = std::mem::take(&mut self.batch_start_prev);
-                let lost: u64 = batch.iter().map(|line| line.lost).sum();
-                self.unrecorded.fetch_add(lost, Ordering::SeqCst);
+                if self.per_lease {
+                    self.batch = batch;
+                } else {
+                    self.batch_bytes = 0;
+                    self.seq = first - 1;
+                    self.prev = std::mem::take(&mut self.batch_start_prev);
+                    let lost: u64 = batch.iter().map(|line| line.lost).sum();
+                    self.unrecorded.fetch_add(lost, Ordering::SeqCst);
+                }
                 if !self.failing.swap(true, Ordering::SeqCst) {
                     error!(error = %e, "cannot write the audit record — refusing what needs one");
                 }
@@ -596,6 +842,152 @@ pub fn verify<'a>(lines: impl IntoIterator<Item = (String, &'a str)>) -> Result<
         count += 1;
     }
     Ok(count)
+}
+
+/// A chain of a lease as [`ChainWalk`] found it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Walked {
+    /// How many entries it holds.
+    pub entries: u64,
+    /// Its last entry: `seq`, `event` and `time`.
+    pub last_seq: u64,
+    pub last_event: String,
+    pub last_time: String,
+    /// Whether it is closed: it ends with `audit.chain_closed` on the hash its record holds.
+    pub closed: bool,
+    /// The `seq` and the hash of the archive's last entry, where its `audit.chain_opened` names
+    /// them as its predecessor
+    /// (ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance clause 6).
+    pub predecessor: Option<(u64, String)>,
+}
+
+/// Walks one chain of a lease in `seq` order
+/// (ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance clauses 3 and 5):
+/// it starts with `audit.chain_opened` and 64 zeros as `prev`, every entry names the chain, carries
+/// the `seq` after the one before and the hash of the one before as its `prev`, and nothing follows
+/// an `audit.chain_closed`. Every error names the chain and the first entry that fails.
+pub struct ChainWalk {
+    chain: String,
+    entries: u64,
+    last: Option<(u64, String, String, String)>,
+    closed_at: Option<u64>,
+    predecessor: Option<(u64, String)>,
+}
+
+impl ChainWalk {
+    #[must_use]
+    pub fn new(chain: &str) -> Self {
+        ChainWalk {
+            chain: chain.to_string(),
+            entries: 0,
+            last: None,
+            closed_at: None,
+            predecessor: None,
+        }
+    }
+
+    /// Takes the entry the store keeps as `seq`, the next in order.
+    ///
+    /// # Errors
+    /// Names the chain and the entry when it does not follow the one before.
+    pub fn step(&mut self, seq: u64, line: &str) -> Result<(), String> {
+        let chain = self.chain.clone();
+        let fail = |what: String| format!("chain {chain}, entry {seq}: {what}");
+        let value: Value =
+            serde_json::from_str(line).map_err(|e| fail(format!("not an audit entry: {e}")))?;
+        let text = |key: &str| value.get(key).and_then(Value::as_str);
+        if value.get("seq").and_then(Value::as_u64) != Some(seq) {
+            return Err(fail(
+                "its seq is not the one it is stored under".to_string(),
+            ));
+        }
+        if text("chain") != Some(chain.as_str()) {
+            return Err(fail("it does not name this chain".to_string()));
+        }
+        if let Some(closed) = self.closed_at {
+            return Err(fail(format!(
+                "it follows the audit.chain_closed of entry {closed}"
+            )));
+        }
+        let event = text("event").unwrap_or_default().to_string();
+        let prev = text("prev").ok_or_else(|| fail("no prev".to_string()))?;
+        match &self.last {
+            None => {
+                if seq != 1 || event != "audit.chain_opened" {
+                    return Err(fail(
+                        "the chain does not begin with its audit.chain_opened — entries before \
+                         this one are missing"
+                            .to_string(),
+                    ));
+                }
+                if prev != GENESIS {
+                    return Err(fail("its prev is not 64 zeros".to_string()));
+                }
+                if let (Some(seq), Some(hash)) = (
+                    value.get("predecessor_seq").and_then(Value::as_u64),
+                    text("predecessor_hash"),
+                ) {
+                    self.predecessor = Some((seq, hash.to_string()));
+                }
+            }
+            Some((last_seq, last_hash, _, _)) => {
+                if seq != last_seq + 1 {
+                    return Err(fail(format!(
+                        "it follows entry {last_seq} — the entries between are missing"
+                    )));
+                }
+                if prev != last_hash {
+                    return Err(fail(format!(
+                        "its prev {prev} does not match the entry before it ({last_hash})"
+                    )));
+                }
+            }
+        }
+        if event == "audit.chain_closed" {
+            self.closed_at = Some(seq);
+        }
+        let time = text("time").unwrap_or_default().to_string();
+        self.last = Some((seq, line_hash(line), event, time));
+        self.entries += 1;
+        Ok(())
+    }
+
+    /// The chain, once every entry was taken; `closed_hash` is the hash its record holds as its
+    /// closing entry's, if it was closed.
+    ///
+    /// # Errors
+    /// Names the chain when it holds no entry, when entries are missing from the end of a closed
+    /// chain or its last entry is not the recorded one, and when an entry closes a chain whose
+    /// record is not closed.
+    pub fn finish(self, closed_hash: Option<&str>) -> Result<Walked, String> {
+        let Some((last_seq, last_hash, last_event, last_time)) = self.last else {
+            return Err(format!("chain {}: it holds no entry", self.chain));
+        };
+        match (closed_hash, self.closed_at) {
+            (Some(recorded), _) if recorded != last_hash || last_event != "audit.chain_closed" => {
+                return Err(format!(
+                    "chain {}, entry {last_seq}: the chain was closed on {recorded}, and its last \
+                     entry is not that one — entries are missing from its end",
+                    self.chain
+                ));
+            }
+            (None, Some(closing)) => {
+                return Err(format!(
+                    "chain {}, entry {closing}: it closes the chain, whose record is not closed",
+                    self.chain
+                ));
+            }
+            _ => {}
+        }
+        Ok(Walked {
+            entries: self.entries,
+            last_seq,
+            last_event,
+            last_time,
+            closed: closed_hash.is_some(),
+            predecessor: self.predecessor,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -1184,5 +1576,99 @@ mod tests {
             .find(|l| l.contains("audit.resumed"))
             .expect("a resumption entry");
         assert!(resumed.contains("\"unrecorded_before\":2"), "{resumed}");
+    }
+
+    /// A chain of a lease as its writer and a closing instance write it: `audit.chain_opened`,
+    /// `entries` decisions and, with `closed`, `audit.chain_closed`.
+    fn lease_chain(entries: u64, closed: bool) -> Vec<String> {
+        let mut prev = GENESIS.to_string();
+        let mut lines = Vec::new();
+        let mut push = |entry: Entry| {
+            let line = render(
+                lines.len() as u64 + 1,
+                0,
+                &entry.with("chain", "c-1"),
+                &prev,
+            );
+            prev = line_hash(&line);
+            lines.push(line);
+        };
+        push(Entry::new("audit.chain_opened", "recorded"));
+        for n in 0..entries {
+            push(Entry::new("admission.admitted", "admitted").with("n", n));
+        }
+        if closed {
+            push(Entry::new("audit.chain_closed", "recorded").with("reason", "shutdown"));
+        }
+        lines
+    }
+
+    fn walked(lines: &[String], closed_hash: Option<&str>) -> Result<Walked, String> {
+        let mut walk = ChainWalk::new("c-1");
+        for line in lines {
+            let seq = serde_json::from_str::<Value>(line).expect("json")["seq"]
+                .as_u64()
+                .expect("seq");
+            walk.step(seq, line)?;
+        }
+        walk.finish(closed_hash)
+    }
+
+    /// A chain of a lease holds when it begins with its `audit.chain_opened` and every entry
+    /// follows the one before; an altered entry, one removed from the end of a closed chain, an
+    /// entry after its `audit.chain_closed`, and a closing the record does not hold each fail,
+    /// naming the chain and the entry; an open chain is reported open with its last entry.
+    /// Verifies: ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance
+    #[test]
+    fn a_chain_of_a_lease_fails_where_it_was_cut_or_changed() {
+        let open = lease_chain(3, false);
+        let walked_open = walked(&open, None).expect("an open chain holds");
+        assert!(!walked_open.closed);
+        assert_eq!((walked_open.entries, walked_open.last_seq), (4, 4));
+        assert_eq!(walked_open.last_event, "admission.admitted");
+
+        let closed = lease_chain(3, true);
+        let hash = line_hash(closed.last().expect("closing"));
+        assert!(walked(&closed, Some(&hash)).expect("holds").closed);
+
+        let mut altered = closed.clone();
+        altered[2] = altered[2].replace("\"n\":1", "\"n\":7");
+        let err = walked(&altered, Some(&hash)).expect_err("altered");
+        assert!(err.starts_with("chain c-1, entry 4:"), "{err}");
+
+        let cut = &closed[..closed.len() - 1];
+        let err = walked(cut, Some(&hash)).expect_err("cut at the end");
+        assert!(
+            err.contains("chain c-1, entry 4:") && err.contains("missing"),
+            "{err}"
+        );
+
+        let mut after = closed.clone();
+        after.push(render(
+            6,
+            0,
+            &Entry::new("admission.admitted", "admitted").with("chain", "c-1"),
+            &hash,
+        ));
+        let err = walked(&after, Some(&hash)).expect_err("after the close");
+        assert!(
+            err.contains("entry 6:") && err.contains("chain_closed"),
+            "{err}"
+        );
+
+        let err = walked(&closed, None).expect_err("a closing the record does not hold");
+        assert!(err.contains("entry 5:"), "{err}");
+
+        let err = walked(&open[1..], None).expect_err("its beginning removed");
+        assert!(
+            err.contains("entry 2:") && err.contains("chain_opened"),
+            "{err}"
+        );
+
+        let mut other = open.clone();
+        other[1] = other[1].replace("c-1", "c-2");
+        assert!(walked(&other, None)
+            .expect_err("another chain's")
+            .contains("entry 2:"));
     }
 }

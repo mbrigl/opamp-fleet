@@ -1713,3 +1713,57 @@ async fn a_revocation_whose_notification_is_missed_is_caught_at_the_next_renewal
         "B did not catch the missed revocation at a renewal"
     );
 }
+
+/// An instance killed without a shutdown leaves its lease and its audit chain behind; a running
+/// instance takes the lease over at one of its renewals once it lapsed, and the dead chain ends
+/// with `audit.chain_closed`, `reason` `lease_lapsed`, `closed_by` the running instance's chain
+/// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+/// clause 18).
+/// Verifies: ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance, ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_running_instance_closes_the_chain_of_one_killed_at_its_renewal() {
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let running = Instance::start(&pki, &schema, schema.config_on(schema.config.port)).await;
+    let closer = running.instance_id().expect("a lease");
+    // Killed: a lease and its chain, and nothing renews or closes them.
+    let (config, name) = (schema.config_on(schema.config.port), schema.name.clone());
+    let dead = tokio::task::spawn_blocking(move || {
+        let database = Database::open_in(&config, Exclusive::Shared, Some(&name)).expect("open");
+        database
+            .take_lease("killed-host", TIMES.lapse)
+            .expect("lease")
+            .instance_id
+    })
+    .await
+    .expect("take");
+    schema.sql(&format!(
+        "UPDATE leases SET expires_at = now() WHERE instance_id = '{dead}'"
+    ));
+    let last = || {
+        schema
+            .query(&format!(
+                "SELECT line FROM audit_entries WHERE chain = '{dead}' ORDER BY seq DESC LIMIT 1"
+            ))
+            .pop()
+            .unwrap_or_default()
+    };
+    assert!(
+        eventually(TIMES.renew * 5, || last().contains("audit.chain_closed")).await,
+        "no renewal closed the dead chain: {}",
+        last()
+    );
+    let closing = last();
+    assert!(closing.contains("\"reason\":\"lease_lapsed\""), "{closing}");
+    assert!(
+        closing.contains(&format!("\"closed_by\":\"{closer}\"")),
+        "{closing}"
+    );
+    assert!(schema
+        .query(&format!(
+            "SELECT 1 FROM leases WHERE instance_id = '{dead}'"
+        ))
+        .is_empty());
+}

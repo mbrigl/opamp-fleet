@@ -163,31 +163,40 @@ fn first_seq_of(path: &Path) -> u64 {
         .unwrap_or(0)
 }
 
+/// Where the record in `dir` left off, read and nothing else: the end of the newest file that
+/// holds a line.
+///
+/// # Errors
+/// Returns an error when the files cannot be read.
+pub fn tail_in(dir: &Path) -> Result<Option<Tail>, String> {
+    // The newest file that holds a line: a rotation that failed its first write leaves an
+    // empty one behind, and the chain goes on from the file before it.
+    for file in files_in(dir)?.iter().rev() {
+        let lines = tail_lines(file)?;
+        let Some(last_line) = lines.last().cloned() else {
+            continue;
+        };
+        // The highest seq near the end; a torn last line carries none, and the entries before
+        // it still say where the count stands. A file whose tail holds no whole entry counts
+        // on from its name.
+        let last_seq = lines
+            .iter()
+            .filter_map(|line| seq_of(line))
+            .max()
+            .unwrap_or_else(|| first_seq_of(file).saturating_sub(1) + lines.len() as u64);
+        let torn = seq_of(&last_line).is_none() || !ends_with_newline(file)?;
+        return Ok(Some(Tail {
+            last_line,
+            last_seq,
+            torn,
+        }));
+    }
+    Ok(None)
+}
+
 impl AuditStore for FsAuditStore {
     fn tail(&mut self) -> Result<Option<Tail>, String> {
-        // The newest file that holds a line: a rotation that failed its first write leaves an
-        // empty one behind, and the chain goes on from the file before it.
-        for file in self.files()?.iter().rev() {
-            let lines = tail_lines(file)?;
-            let Some(last_line) = lines.last().cloned() else {
-                continue;
-            };
-            // The highest seq near the end; a torn last line carries none, and the entries before
-            // it still say where the count stands. A file whose tail holds no whole entry counts
-            // on from its name.
-            let last_seq = lines
-                .iter()
-                .filter_map(|line| seq_of(line))
-                .max()
-                .unwrap_or_else(|| first_seq_of(file).saturating_sub(1) + lines.len() as u64);
-            let torn = seq_of(&last_line).is_none() || !ends_with_newline(file)?;
-            return Ok(Some(Tail {
-                last_line,
-                last_seq,
-                torn,
-            }));
-        }
-        Ok(None)
+        tail_in(&self.dir)
     }
 
     fn append(&mut self, seq: u64, lines: &[&str]) -> Result<(), String> {

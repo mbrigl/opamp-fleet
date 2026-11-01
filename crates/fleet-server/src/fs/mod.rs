@@ -18,7 +18,7 @@ mod packages;
 mod revocation;
 
 pub use agents::FsAgentStore;
-pub use audit::{files_in as audit_files, FsAuditStore};
+pub use audit::{files_in as audit_files, tail_in as audit_tail, FsAuditStore};
 pub use blobs::FsBlobStore;
 pub use bootstrap::FsBootstrapStore;
 pub use configs::FsConfigBackend;
