@@ -114,7 +114,10 @@ once its tag exists.
   last whole entry before the torn line, and `audit-verify` fails a repair whose `last_whole`
   does not match it, so the entries before a repair can no longer be replaced unseen. A repair
   written before this release names no `last_whole`: `audit-verify` holds it and names it as a
-  repair without a link, since the entries before it are not bound by those after it.
+  repair without a link, since the entries before it are not bound by those after it. A crash
+  during the repair itself, which left two torn lines that `audit-verify` refused for good, is
+  now closed by one linked `audit.chain_broken` at the next start, and holds. A line with bytes
+  that are not UTF-8 anywhere but in a character cut short at its end fails, naming the line.
   **What to do:** nothing. Where `audit-verify` names a repair without a link, compare the entries
   before it against a copy taken earlier.
 

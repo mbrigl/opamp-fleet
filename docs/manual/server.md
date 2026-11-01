@@ -1176,15 +1176,17 @@ $ server audit-verify /var/lib/opamp-fleet-server/audit
 
 Each line carries the SHA-256 of the line before it, so a line edited or removed afterwards breaks
 the chain where it happened; `audit-verify` names the first entry that does not follow. A crash
-mid-write leaves a torn last line; the next start keeps it, and its first entry,
-`audit.chain_broken`, chains on from it and names as `last_whole` the hash of the last whole entry
-before it. `audit-verify` takes that repair as holding when `last_whole` matches. A torn line
-still at the end, one no `audit.chain_broken` follows, or a `last_whole` that names another entry
-fails. A repair that names no `last_whole` holds, and `audit-verify` names it as a repair
-without a link: the entries before it are not bound by those after it, so check them against a
-copy taken earlier. Against an intruder on the Server host the chain only helps with a copy taken
-before, so ship the directory off the host. The record also goes to the Server's log under the
-target `audit`.
+mid-write leaves a torn last line; the next start keeps it and first writes `audit.chain_broken`,
+which chains on from it and names as `last_whole` the hash of the last whole entry before it. A
+crash during that repair leaves a second torn line, and the start after it writes one
+`audit.chain_broken` for both, linked to the last whole entry before them. `audit-verify` takes such
+a repair as holding when `last_whole` matches. A torn line still at the end, one no
+`audit.chain_broken` follows, a `last_whole` that names another entry, and a line with bytes that
+are not UTF-8 anywhere but in a character cut short at its end fail. A repair of one torn line that
+names no `last_whole` holds, and `audit-verify` names it as a repair without a link: the entries
+before it are not bound by those after it, so check them against a copy taken earlier. Against an
+intruder on the Server host the chain only helps with a copy taken before, so ship the directory off
+the host. The record also goes to the Server's log under the target `audit`.
 
 The Server never takes a decision it cannot record: when the record cannot be written — a full
 disk, a failed device — it admits no Agent and runs no operator act, answering `503`, until it

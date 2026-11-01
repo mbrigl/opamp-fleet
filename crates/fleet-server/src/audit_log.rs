@@ -897,30 +897,48 @@ impl Held {
 }
 
 /// Walks lines in order and names the first whose `prev` does not match the line before it
-/// (ADR-0023 clause 3); [`Held`] when the whole chain holds. A line that is not an entry holds
-/// when the file store repaired it: the torn piece a crash left, followed by `audit.chain_broken`
-/// chained on its hash and naming as `last_whole` the hash of the entry before the torn line. A
-/// torn line nothing follows does not hold; a repair that names no `last_whole` holds and is
-/// named in [`Held::unlinked`].
+/// (ADR-0023 clause 3); [`Held`] when the whole chain holds. Lines that are not entries hold when
+/// the file store repaired them: the torn pieces crashes left, the repair's own among them,
+/// followed by one `audit.chain_broken` chained on the last of them and naming as `last_whole` the
+/// hash of the entry before the first. Torn lines nothing follows do not hold. A repair of one
+/// torn line that names no `last_whole` holds and is named in [`Held::unlinked`]; a repair of more
+/// than one must name it.
 ///
 /// # Errors
 /// Returns the position of the first break.
 pub fn verify<'a>(lines: impl IntoIterator<Item = (String, &'a str)>) -> Result<Held, String> {
+    /// A run of lines that are not entries, which the next entry must record as broken.
+    struct Torn {
+        /// Where the run starts.
+        place: String,
+        /// Why its first line is not an entry.
+        why: String,
+        /// The hash of its last line, which the repair chains on.
+        hash: String,
+        /// How many lines it holds.
+        lines: usize,
+    }
     let mut prev: Option<String> = None;
-    // The torn line the next entry must record as broken: its place, its hash and why it is not
-    // an entry.
-    let mut torn: Option<(String, String, String)> = None;
+    let mut torn: Option<Torn> = None;
     let mut held = Held::default();
     for (place, line) in lines {
         let value: Value = match serde_json::from_str(line) {
             Ok(value) => value,
             Err(e) => {
-                if let Some((place, _, e)) = torn {
-                    return Err(format!(
-                        "{place}: not an audit entry: {e}, and no audit.chain_broken follows it"
-                    ));
+                match &mut torn {
+                    Some(run) => {
+                        run.hash = line_hash(line);
+                        run.lines += 1;
+                    }
+                    None => {
+                        torn = Some(Torn {
+                            place,
+                            why: e.to_string(),
+                            hash: line_hash(line),
+                            lines: 1,
+                        });
+                    }
                 }
-                torn = Some((place, line_hash(line), e.to_string()));
                 continue;
             }
         };
@@ -928,16 +946,25 @@ pub fn verify<'a>(lines: impl IntoIterator<Item = (String, &'a str)>) -> Result<
             .get("prev")
             .and_then(Value::as_str)
             .ok_or_else(|| format!("{place}: no prev"))?;
-        if let Some((torn_place, hash, e)) = torn.take() {
+        if let Some(run) = torn.take() {
+            let torn_place = &run.place;
             if value.get("event").and_then(Value::as_str) != Some("audit.chain_broken")
-                || stated != hash
+                || stated != run.hash
             {
                 return Err(format!(
-                    "{torn_place}: not an audit entry: {e}, and the entry after it does not \
-                     record it as audit.chain_broken"
+                    "{torn_place}: not an audit entry: {}, and the entry after it does not \
+                     record it as audit.chain_broken",
+                    run.why
                 ));
             }
             match (value.get("last_whole").and_then(Value::as_str), &prev) {
+                (None, _) if run.lines > 1 => {
+                    return Err(format!(
+                        "{torn_place}: {} torn lines in a row, and the repair after them, {place}, \
+                         names no last_whole",
+                        run.lines
+                    ));
+                }
                 (None, _) => held.unlinked.push(place.clone()),
                 (Some(last_whole), Some(prev)) if last_whole != prev => {
                     return Err(format!(
@@ -959,9 +986,11 @@ pub fn verify<'a>(lines: impl IntoIterator<Item = (String, &'a str)>) -> Result<
         prev = Some(line_hash(line));
         held.entries += 1;
     }
-    if let Some((place, _, e)) = torn {
+    if let Some(run) = torn {
         return Err(format!(
-            "{place}: not an audit entry: {e} — a torn last line a crash left"
+            "{}: not an audit entry: {} — a torn last line a crash left, and no \
+             audit.chain_broken follows it",
+            run.place, run.why
         ));
     }
     Ok(held)
@@ -1561,14 +1590,50 @@ mod tests {
         let elsewhere = broken("audit.chain_broken", &line_hash(&first), &line_hash(&first));
         let err = check(&[first.clone(), fragment.clone(), elsewhere]).expect_err("other prev");
         assert!(err.starts_with("1:"), "{err}");
+        // A crash during the repair: a run of torn lines closed by one linked repair holds; one
+        // closed by a repair without a link, or by nothing, does not.
+        let torn_repair = "{\"seq\":2,\"last_wh".to_string();
+        let closing = broken(
+            "audit.chain_broken",
+            &line_hash(&torn_repair),
+            &line_hash(&first),
+        );
+        assert_eq!(
+            check(&[
+                first.clone(),
+                fragment.clone(),
+                torn_repair.clone(),
+                closing
+            ])
+            .map(|held| held.entries),
+            Ok(2)
+        );
+        let unlinked = format!(
+            "{{\"seq\":2,\"prev\":\"{}\",\"event\":\"audit.chain_broken\"}}",
+            line_hash(&torn_repair)
+        );
         let err = check(&[
             first.clone(),
             fragment.clone(),
-            fragment.clone(),
-            repaired.clone(),
+            torn_repair.clone(),
+            unlinked,
         ])
-        .expect_err("two torn");
-        assert!(err.starts_with("1:"), "{err}");
+        .expect_err("a run without a link");
+        assert!(
+            err.starts_with("1:") && err.contains("2 torn lines"),
+            "{err}"
+        );
+        let err = check(&[first.clone(), fragment.clone(), torn_repair.clone()])
+            .expect_err("a run at the end");
+        assert!(err.starts_with("1:") && err.contains("torn"), "{err}");
+        let elsewhere = broken(
+            "audit.chain_broken",
+            &line_hash(&torn_repair),
+            &line_hash(&fragment),
+        );
+        let err = check(&[first.clone(), fragment.clone(), torn_repair, elsewhere])
+            .expect_err("linked into the run");
+        assert!(err.starts_with("3:") && err.contains("last_whole"), "{err}");
 
         // A chain of its own from 64 zeros in place of the entries before the torn line: the
         // repair still chains on the torn line, but its link names an entry that is gone.
