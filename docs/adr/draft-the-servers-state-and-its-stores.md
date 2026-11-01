@@ -302,17 +302,22 @@ and configured in the Server's configuration alone, and move an old layout by an
 14. **One blob store, chosen in `server.toml`.** `[blobs] store` is `"fs"`, the default, or
     `"s3"`. Any other value fails startup naming the key. Both are supported in production. The
     filesystem blob store is read and written by one Server instance alone. With `"s3"` every
-    instance on one database uses the same bucket and prefix, and every sweep of unreferenced
-    blobs (clause 13) and every cleanup of `<prefix>staging/` (clause 16) run under an advisory
-    lock, so one instance does them at a time
+    instance on one database uses the same bucket and prefix. On PostgreSQL every sweep of
+    unreferenced blobs (clause 13) and every cleanup of `<prefix>staging/` (clause 16) run under an
+    advisory lock, so one instance does them at a time
     ([ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it](draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md)
-    clause 2).
+    clause 2). The lock is taken whatever the blob store: with `"fs"` the instance is alone and
+    the lock decides nothing, but the PostgreSQL record store does not ask which blob store it
+    serves, and one rule for every PostgreSQL Server costs one session per upload and per sweep.
     - An upload holds the same lock shared, from its check that its blob is stored until its
       entry is committed, and a sweep holds it alone. A sweep therefore never deletes a blob that
       an upload is about to name, and an upload whose blob a sweep deleted first is refused, to be
       uploaded again.
-    - The lock is a session-level advisory lock, held on a connection of its own. An upload waits
-      for it as long as the database's `lock_timeout` of 5 seconds, and a sweep 60 seconds.
+    - The lock is a session-level advisory lock, held on a connection of its own, outside the
+      pool: one session more for each upload and sweep in progress, which the database's
+      `max_connections` must allow for. An upload waits for it as long as the database's
+      `lock_timeout` of 5 seconds, and a sweep 60 seconds, its session's `statement_timeout` raised
+      to let it. A session that ends while it holds the lock is logged: the lock is gone with it.
     - A startup sweep that cannot have the lock fails startup, naming the lock. A sweep after an
       act logs it, and the blobs it would have deleted stay until the next startup.
 

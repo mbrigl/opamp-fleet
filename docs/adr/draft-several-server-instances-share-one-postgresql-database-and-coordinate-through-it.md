@@ -283,6 +283,11 @@ every change that concerns a live session by one `NOTIFY`.
       from the rows and from the assignments that pin them
       ([ADR-draft-the-servers-state-and-its-stores](draft-the-servers-state-and-its-stores.md)
       clauses 2 and 21).
+    - A rollout holds the row of every Configuration, Package and Deployment its assignments pin
+      `FOR KEY SHARE` until it commits, and fails when one is not stored, so it never writes a pin
+      on what another instance deleted. The deletion of a Configuration, a Package or a Deployment,
+      and every write to a Package's entries, holds its row `FOR UPDATE` and counts the stored
+      assignments that pin it, so it waits for such a rollout and is refused once it committed.
 
 20. **A fleet that loses an instance comes back spread out.** The Agents of a lost instance —
     its connections cut, closed as it drains, or ended by a lapsed lease — reconnect as
