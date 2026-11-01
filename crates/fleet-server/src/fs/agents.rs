@@ -492,6 +492,25 @@ mod tests {
         store.remove(&uid).expect("removing the absent is fine");
     }
 
+    /// A release that fails part-way puts back what it wrote, a record that had no file before
+    /// among them: that file is removed again, and what the store answers about pins with it.
+    /// Verifies: ADR-0029
+    #[test]
+    fn a_failed_release_removes_a_record_it_created() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = FsAgentStore::open(dir.path()).expect("open");
+        let (absent, refused) = (InstanceUid::default(), InstanceUid::default());
+        store.put(&refused, &record()).expect("put");
+        let path = |uid: &InstanceUid| dir.path().join(format!("agents/{uid}.json"));
+        crate::fs::testing::refuse(&path(&refused));
+        store
+            .release(&[], &[(absent, record()), (refused, record())])
+            .expect_err("the second record cannot be written");
+        crate::fs::testing::mend(&path(&refused));
+        assert!(!path(&absent).exists(), "no file, as before");
+        assert_eq!(store.pinning(Pin::Deployment("stable")), 1);
+    }
+
     /// The identity reassignment: the record follows the Agent, the old key leaves the store.
     #[test]
     fn rekey_moves_the_record() {

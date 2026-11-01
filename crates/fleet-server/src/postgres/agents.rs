@@ -953,6 +953,46 @@ mod tests {
         assert_eq!(a.get(&uid), Ok(None), "nothing created");
     }
 
+    /// A release on PostgreSQL writes the assignment of each record alone: the labels, the queued
+    /// restart and what a report decided stay as they are stored, whatever the released record
+    /// carries of them.
+    /// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts
+    #[test]
+    fn a_release_on_postgres_writes_the_assignment_alone() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let store = PgAgentStore::new(test.open());
+        let uid = InstanceUid::default();
+        let stored = record();
+        store.put(&uid, &stored).expect("put");
+        let assignment = Assignment {
+            deployment: "canary".to_string(),
+            package: None,
+            configurations: BTreeMap::from([("edge".to_string(), "4567cdef".to_string())]),
+        };
+        let stale = PersistedAgent {
+            sequence_num: 1,
+            health: None,
+            effective_config: Some("stale: true".to_string()),
+            host: None,
+            restart_pending: false,
+            labels: BTreeMap::new(),
+            assignment: Some(assignment.clone()),
+            ..record()
+        };
+        assert_eq!(store.release(&[], &[(uid, stale)]), Ok(vec![uid]));
+        let released = store.get(&uid).expect("get");
+        assert!(
+            released
+                == Some(PersistedAgent {
+                    assignment: Some(assignment),
+                    ..stored
+                }),
+            "{released:?}"
+        );
+    }
+
     /// Verifies: ADR-0029
     #[test]
     fn the_agent_port_contract_holds_on_the_filesystem() {
