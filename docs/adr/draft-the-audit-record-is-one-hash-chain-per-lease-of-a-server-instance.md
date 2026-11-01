@@ -81,10 +81,12 @@ store the record stays one chain, and `server audit-verify` walks every chain th
    files of the filesystem store. `server audit-verify --config <server.toml>` reads the
    PostgreSQL store with the Server's own credentials and walks each chain in `seq` order: every
    `prev` matches the entry before; the first retained entry is `audit.chain_opened`, or its `prev`
-   is the hash an `audit.pruned` entry recorded as the last it removed from that chain; a closed
-   chain ends on its recorded hash, and one with no entries left has as its closing hash the last
-   removed hash an `audit.pruned` entry names for it. It names the chain and the first entry that
-   fails, lists every open chain, and exits non-zero on any failure.
+   is the `last_hash`, and its `seq` the one after the `last_seq`, of a retained `audit.pruned`
+   that names that chain as its `pruned_chain`; a closed chain ends on its recorded hash, and one
+   with no entries left has as its closing hash the `last_hash` a retained `audit.pruned` names
+   for it. The predecessor is read from the first chain's `audit.chain_opened` or, once that is
+   pruned, from the retained `audit.pruned` that carries it on. It names the chain and the first
+   entry that fails, lists every open chain, and exits non-zero on any failure.
 
 6. **A record moved from files to the database stays linked.** The files under `data_dir/audit/`
    that a Server wrote on the filesystem store stay where they are as a closed archive. The Server
@@ -171,10 +173,13 @@ ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance`:
 - Entries older than `retain_days` are removed, `audit.pruned` records the last removed hash, and
   `audit-verify` still passes.
 - With two instances, entries older than `retain_days` of a chain closed at a shutdown and of one
-  closed for a lapsed lease are removed by one instance at a time, its `audit.pruned` names both
-  chains, and a closed chain with no entries left keeps its record.
-- `retain_days` with `store = "fs"`, or `keep_files` with `store = "postgres"`, fails startup
-  naming the key.
+  closed for a lapsed lease are removed by one instance at a time, its `audit.pruned` entries name
+  both chains, and a closed chain with no entries left keeps its record.
+- When the `audit.pruned` entries themselves and the first chain's `audit.chain_opened` are
+  pruned, the links still needed and the predecessor are recorded again, and `audit-verify` still
+  passes.
+- `retain_days` with `store = "fs"`, or `keep_files` or `max_file_bytes` with
+  `store = "postgres"`, fails startup naming the key.
 - With the database held back past an instance's lease, the decisions it queued under that lease
   are written into its next chain with `taken_under` naming the old one, and `audit-verify` passes
   over both chains.
