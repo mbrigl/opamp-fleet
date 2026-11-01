@@ -206,6 +206,7 @@ impl Pki {
 
 /// One running instance, as the binary composes it.
 struct Instance {
+    state: Arc<fleet_server::fleet::AppState>,
     agent: SocketAddr,
     operator: SocketAddr,
     revocations: Arc<Revocations>,
@@ -242,9 +243,19 @@ impl Instance {
         let floors = Arc::new(PackageFloors::open(records.floors()).expect("floors"));
         let enrolment =
             Arc::new(Enrolment::open_on(clock.clone(), records.enrolment()).expect("enrolment"));
+        let packages = fleet_server::packages::PackageStore::open_on(
+            &records,
+            dir.path(),
+            &toml::from_str::<fleet_server::config::BlobsConfig>("").expect("blobs"),
+        )
+        .expect("packages");
         let state = Arc::new(
             fleet_server::fleet::AppState::on(&records)
                 .expect("state")
+                .with_packages(Some(
+                    fleet_server::fleet::PackageOffering::on(&records, packages)
+                        .expect("deployments"),
+                ))
                 .with_revocations(Some(revocations.clone()))
                 .with_floors(Some(floors.clone()))
                 .with_enrolment(Some(enrolment.clone())),
@@ -277,6 +288,7 @@ impl Instance {
             fleet_server::instance::Lease::take(database, TIMES, "test-host").expect("lease")
         };
         let following = fleet_server::instance::follow(&database, state.clone());
+        let state_kept = state.clone();
         let agent_listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let operator_listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let agent = agent_listener.local_addr().expect("addr");
@@ -306,6 +318,7 @@ impl Instance {
             lease.release().await;
         });
         Instance {
+            state: state_kept,
             agent,
             operator,
             revocations,
@@ -1469,4 +1482,117 @@ async fn an_instance_reads_nothing_again_for_its_own_notifications() {
         before + 1,
         "A read the ledger again for its own notifications"
     );
+}
+
+/// The next message `session` is sent within `within`, or `None` if none is.
+async fn next_message(
+    session: &mut Socket,
+    within: Duration,
+) -> Option<opamp::proto::ServerToAgent> {
+    use futures_util::StreamExt;
+    use tokio_tungstenite::tungstenite::Message as Ws;
+    let deadline = tokio::time::Instant::now() + within;
+    loop {
+        match tokio::time::timeout_at(deadline, session.next()).await {
+            Err(_) => return None,
+            Ok(Some(Ok(Ws::Binary(bytes)))) => {
+                return Some(opamp::frame::decode(&bytes, usize::MAX).expect("decode"));
+            }
+            Ok(Some(Ok(_))) => continue,
+            other => panic!("the session ended: {other:?}"),
+        }
+    }
+}
+
+/// A rollout committed on A reaches an Agent B carries: B takes up the Configuration A saved and
+/// the assignment A released, and offers the Agent the new configuration within one second.
+/// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it, ADR-0026
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_rollout_on_one_instance_is_offered_by_the_instance_that_carries_the_agent() {
+    use futures_util::SinkExt;
+    use opamp::proto::{AgentDescription, AnyValue, KeyValue};
+    use tokio_tungstenite::tungstenite::Message as Ws;
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let b = Instance::start(&pki, &schema, schema.config_on(schema.config.port)).await;
+    let (cert, key) = pki.issue("edge-01");
+    let mut session = websocket(&b, &pki, &cert, &key).await;
+    let uid = InstanceUid([7; 16]);
+    let report = AgentToServer {
+        instance_uid: uid.as_bytes().to_vec(),
+        sequence_num: 1,
+        capabilities: (AgentCapabilities::ReportsStatus as u64)
+            | (AgentCapabilities::AcceptsRemoteConfig as u64)
+            | (AgentCapabilities::ReportsRemoteConfig as u64),
+        agent_description: Some(AgentDescription {
+            identifying_attributes: vec![KeyValue {
+                key: "service.name".to_string(),
+                value: Some(AnyValue {
+                    value: Some(opamp::proto::any_value::Value::StringValue(
+                        "otelcol".to_string(),
+                    )),
+                }),
+            }],
+            non_identifying_attributes: Vec::new(),
+        }),
+        ..Default::default()
+    };
+    let framed = opamp::frame::encode_within(&report, usize::MAX).expect("frame");
+    session.send(Ws::Binary(framed.into())).await.expect("send");
+    next_message(&mut session, Duration::from_secs(5))
+        .await
+        .expect("B answers the report");
+    assert!(
+        eventually(Duration::from_secs(10), || schema
+            .query("SELECT instance_uid FROM agents")
+            .len()
+            == 1)
+        .await,
+        "B never wrote the Agent's record"
+    );
+
+    // A knows the Agent from the database it loads at startup, as every instance does until it
+    // keeps only the Agents it carries.
+    let a = Instance::start(&pki, &schema, schema.config_on(schema.config.port)).await;
+    let on_a = a.state.clone();
+    let assigned = tokio::task::spawn_blocking(move || {
+        on_a.save_configuration(
+            "collector",
+            fleet_server::configs::Revision {
+                body: "receivers: {}".to_string(),
+                role: String::new(),
+                service_name: "otelcol".to_string(),
+            },
+        )?;
+        on_a.deployment_store()
+            .expect("deployments")
+            .put(
+                "stable",
+                std::collections::BTreeMap::from([(
+                    "service.name".to_string(),
+                    "otelcol".to_string(),
+                )]),
+            )
+            .map_err(|e| format!("{e:?}"))?;
+        on_a.put_deployment_configuration("stable", "collector")
+            .map_err(|e| format!("{e:?}"))?;
+        on_a.rollout_deployment("stable")
+            .map_err(|e| format!("{e:?}"))
+    })
+    .await
+    .expect("roll out")
+    .expect("roll out on A");
+    assert_eq!(assigned, 1, "A released to the Agent B carries");
+
+    let offer = next_message(&mut session, Duration::from_secs(1))
+        .await
+        .expect("B offered nothing within one second");
+    let body = offer
+        .remote_config
+        .and_then(|config| config.config)
+        .and_then(|map| map.config_map.into_values().next())
+        .map(|file| String::from_utf8(file.body).expect("utf-8"));
+    assert_eq!(body.as_deref(), Some("receivers: {}"));
 }

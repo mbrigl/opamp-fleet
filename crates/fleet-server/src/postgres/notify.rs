@@ -45,6 +45,16 @@ pub const ENROLMENT: &str = "enrolment";
 /// The kind the enrolment window opened, moved, closed or ended is announced as.
 pub const WINDOW: &str = "window";
 
+/// The kind a Configuration saved, collected or deleted is announced as, by its name.
+pub const CONFIGURATION: &str = "configuration";
+
+/// The kind a Deployment written or deleted, or a member of it added or removed, is announced as,
+/// by its name.
+pub const DEPLOYMENT: &str = "deployment";
+
+/// The kind an Agent's assignment changed by a rollout is announced as, by its `instance_uid`.
+pub const ASSIGNMENT: &str = "assignment";
+
 /// How long a listener waits before it connects again after its connection ended.
 const RECONNECT: Duration = Duration::from_secs(1);
 

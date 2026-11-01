@@ -11,6 +11,7 @@
 //! new lease under a new instance id and binds the same addresses again. On the filesystem store
 //! there is one Server, no lease, and the planes are served until the Server stops.
 
+use std::collections::HashSet;
 use std::future::Future;
 use std::net::{SocketAddr, TcpListener};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -19,6 +20,7 @@ use std::time::{Duration, Instant};
 
 use axum::Router;
 use opamp::server::listen::Handle;
+use opamp::uid::InstanceUid;
 use rustls::ServerConfig;
 use tokio::sync::watch;
 use tracing::{error, info, warn};
@@ -26,7 +28,10 @@ use tracing::{error, info, warn};
 use crate::config::LeaseTimes;
 use crate::fleet::AppState;
 use crate::postgres::lease::Taken;
-use crate::postgres::notify::{Heard, CERTIFICATE, ENROLMENT, FLOOR, HOST, REVOCATION, WINDOW};
+use crate::postgres::notify::{
+    Heard, ASSIGNMENT, CERTIFICATE, CONFIGURATION, DEPLOYMENT, ENROLMENT, FLOOR, HOST, REVOCATION,
+    WINDOW,
+};
 use crate::postgres::Database;
 
 /// How long an instance waits before it tries again to take a lease, or to bind a listener, after
@@ -303,7 +308,9 @@ fn lock_lost(held: &watch::Sender<Option<String>>, instance_id: &str) {
 /// Host or a register entry has the ledger read again, and the sessions check themselves against it
 /// (ADR-draft-admission-by-client-certificate-and-revocation clause 32); a floor has the floors read
 /// again; an enrolment request or the window has the window and its queue read again, and the
-/// connections waiting on them answered. Every time the listening connection is made, since what
+/// connections waiting on them answered; a Configuration or a Deployment has its store read again
+/// (clause 12); an Agent's assignment has its record read again, and its connection offered what
+/// it was released. Every time the listening connection is made, since what
 /// was committed before it was not heard, and for a kind this instance does not know, everything is
 /// read again. What this instance announced itself is never heard: it holds what it committed.
 /// What is heard while a read runs is taken up by one read after it, and a read that fails is tried
@@ -332,6 +339,14 @@ pub fn follow(database: &Database, state: Arc<AppState>) -> Following {
                 enrolment.reload()?;
             }
         }
+        // The Configurations before the assignments, so an Agent released a revision another
+        // instance saved is offered it from what this one holds.
+        state.reload_catalogue(due.configurations, due.deployments)?;
+        match &due.agents {
+            Agents::Named(uids) if uids.is_empty() => {}
+            Agents::Named(uids) => state.take_up_assignments(Some(uids))?,
+            Agents::All => state.take_up_assignments(None)?,
+        }
         Ok(())
     };
     tokio::spawn(take_up(hearing, read, RELOAD_RETRY_FIRST, RELOAD_RETRY_MAX));
@@ -352,12 +367,28 @@ impl Following {
     }
 }
 
+/// The Agents whose records are read again.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Agents {
+    Named(HashSet<InstanceUid>),
+    All,
+}
+
+impl Default for Agents {
+    fn default() -> Self {
+        Agents::Named(HashSet::new())
+    }
+}
+
 /// What is read again for what was heard.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Due {
     ledger: bool,
     floors: bool,
     enrolment: bool,
+    configurations: bool,
+    deployments: bool,
+    agents: Agents,
 }
 
 impl Due {
@@ -366,6 +397,9 @@ impl Due {
         ledger: true,
         floors: true,
         enrolment: true,
+        configurations: true,
+        deployments: true,
+        agents: Agents::All,
     };
 
     /// What `what` calls for.
@@ -386,6 +420,21 @@ impl Due {
                 enrolment: true,
                 ..Due::default()
             },
+            CONFIGURATION => Due {
+                configurations: true,
+                ..Due::default()
+            },
+            DEPLOYMENT => Due {
+                deployments: true,
+                ..Due::default()
+            },
+            ASSIGNMENT => Due {
+                agents: match InstanceUid::parse(&notice.id) {
+                    Some(uid) => Agents::Named(HashSet::from([uid])),
+                    None => Agents::All,
+                },
+                ..Due::default()
+            },
             _ => Due::EVERYTHING,
         }
     }
@@ -395,6 +444,15 @@ impl Due {
             ledger: self.ledger || other.ledger,
             floors: self.floors || other.floors,
             enrolment: self.enrolment || other.enrolment,
+            configurations: self.configurations || other.configurations,
+            deployments: self.deployments || other.deployments,
+            agents: match (self.agents, other.agents) {
+                (Agents::Named(mut uids), Agents::Named(more)) => {
+                    uids.extend(more);
+                    Agents::Named(uids)
+                }
+                _ => Agents::All,
+            },
         }
     }
 }
@@ -418,8 +476,8 @@ async fn take_up<R>(
         }
         let mut wait = first;
         loop {
-            let read = read.clone();
-            let done = tokio::task::spawn_blocking(move || read(due))
+            let (read, reading) = (read.clone(), due.clone());
+            let done = tokio::task::spawn_blocking(move || read(reading))
                 .await
                 .unwrap_or_else(|e| Err(e.to_string()));
             let Err(e) = done else { break };
@@ -699,7 +757,11 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    use super::{take_up, Due, Heard, LoggedId, NamesInstance};
+    use std::collections::HashSet;
+
+    use opamp::uid::InstanceUid;
+
+    use super::{take_up, Agents, Due, Heard, LoggedId, NamesInstance};
     use crate::postgres::notify::Notice;
 
     /// What the log writes, collected.
@@ -888,6 +950,35 @@ mod tests {
                 enrolment: true,
                 ..Due::default()
             }]
+        );
+        let (one, two) = (InstanceUid([1; 16]), InstanceUid([2; 16]));
+        assert_eq!(
+            reads_for(vec![
+                Heard::Notified(Notice::new("configuration", "collector")),
+                Heard::Notified(Notice::new("assignment", &one.to_string())),
+                Heard::Notified(Notice::new("assignment", &two.to_string())),
+                Heard::Notified(Notice::new("deployment", "stable")),
+            ])
+            .await,
+            vec![Due {
+                configurations: true,
+                deployments: true,
+                agents: Agents::Named(HashSet::from([one, two])),
+                ..Due::default()
+            }],
+            "an assignment has the record of the Agent it names read again"
+        );
+        assert_eq!(
+            reads_for(vec![
+                Heard::Notified(Notice::new("assignment", &one.to_string())),
+                Heard::Notified(Notice::new("assignment", "not an instance_uid")),
+            ])
+            .await,
+            vec![Due {
+                agents: Agents::All,
+                ..Due::default()
+            }],
+            "an assignment that names no Agent has every record read again"
         );
         assert_eq!(
             reads_for(vec![notified("floor"), notified("revocation")]).await,

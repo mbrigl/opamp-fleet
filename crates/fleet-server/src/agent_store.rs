@@ -172,6 +172,17 @@ pub trait AgentStore: Send + Sync {
     /// fleet that silently lost members is worse than one that refuses to start (ADR-0008).
     fn load(&self) -> Result<HashMap<InstanceUid, PersistedAgent>, String>;
 
+    /// The record of `uid` as stored now, `None` when none is: what an instance reads again when
+    /// another instance announced a change to it
+    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// clause 9). A store that is its only writer answers it from what it loads.
+    ///
+    /// # Errors
+    /// Returns an error when the record cannot be read.
+    fn get(&self, uid: &InstanceUid) -> Result<Option<PersistedAgent>, String> {
+        Ok(self.load()?.remove(uid))
+    }
+
     /// Creates or replaces one record.
     fn put(&self, uid: &InstanceUid, record: &PersistedAgent) -> Result<(), String>;
 
