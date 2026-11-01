@@ -718,7 +718,7 @@ async fn main() {
     // With PostgreSQL, a lease before either listener opens, and the revocations of the other
     // instances followed (clauses 1 to 3 and 11 of
     // ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it).
-    let lease = match &records {
+    let (lease, presence) = match &records {
         fleet_server::Records::Postgres(database) => {
             let made = instance_id.clone().map_or_else(
                 fleet_server::postgres::lease::new_instance_id,
@@ -735,19 +735,19 @@ async fn main() {
                 Ok(lease) => {
                     logged.follow(lease.held());
                     state.serve_under(lease.held());
-                    if let Some(interval) = config.database.presence_interval() {
+                    let presence = config.database.presence_interval().map(|interval| {
                         fleet_server::instance::write_presence(
                             state.clone(),
                             lease.held(),
                             interval,
-                        );
-                    }
+                        )
+                    });
                     fleet_server::instance::follow(
                         database,
                         state.clone(),
                         Some(lease.list_versions()),
                     );
-                    Some(lease)
+                    (Some(lease), presence)
                 }
                 Err(e) => {
                     eprintln!("{e}");
@@ -755,7 +755,7 @@ async fn main() {
                 }
             }
         }
-        fleet_server::Records::Files(_) => None,
+        fleet_server::Records::Files(_) => (None, None),
     };
     // The handlers are installed before either plane is bound and logged as served, so a stop
     // sent as soon as the log says so drains the planes rather than ending the process.
@@ -790,7 +790,10 @@ async fn main() {
     state.flush_agents();
     // And the presence of every Agent, its sessions ended by the drain, before the lease goes
     // (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
-    // clause 3).
+    // clause 3): once the periodic batches stopped, so none commits after it.
+    if let Some(presence) = presence {
+        presence.stop().await;
+    }
     if let Some(holder) = lease
         .as_ref()
         .and_then(|lease| lease.held().borrow().clone())

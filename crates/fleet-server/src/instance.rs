@@ -407,15 +407,19 @@ pub fn follow(
 /// Writes the presence of the Agents this instance carries every `interval`, in one batch under the
 /// instance id of the lease it holds, and nothing while it holds none
 /// (ADR-draft-the-fleet-record-of-agents-and-hosts clause 4). A batch that fails is logged, and what
-/// it held is written with the next one.
-pub fn write_presence(state: Arc<AppState>, held: Held, interval: Duration) {
-    tokio::spawn(async move {
+/// it held is written with the next one. The batches run until they are stopped.
+pub fn write_presence(state: Arc<AppState>, held: Held, interval: Duration) -> PresenceBatches {
+    let (stop, mut stopped) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async move {
         let mut tick = tokio::time::interval(interval);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         // The first tick is at once, and nothing has reported yet.
         tick.tick().await;
         loop {
-            tick.tick().await;
+            tokio::select! {
+                _ = tick.tick() => {}
+                _ = &mut stopped => break,
+            }
             let Some(holder) = held.borrow().clone() else {
                 continue;
             };
@@ -429,6 +433,24 @@ pub fn write_presence(state: Arc<AppState>, held: Held, interval: Duration) {
             }
         }
     });
+    PresenceBatches { stop, task }
+}
+
+/// The presence batches [`write_presence`] runs.
+pub struct PresenceBatches {
+    stop: tokio::sync::oneshot::Sender<()>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl PresenceBatches {
+    /// Stops the batches, and returns once the one being written, if any, is: the last batch at
+    /// shutdown is then written after every other, and no older one commits after it.
+    pub async fn stop(self) {
+        let _ = self.stop.send(());
+        if let Err(e) = self.task.await {
+            warn!(error = %e, "the presence batches ended abnormally");
+        }
+    }
 }
 
 /// What [`follow`] has read again so far, for a test to tell what it took up.
@@ -849,6 +871,120 @@ mod tests {
 
     use super::{take_up, Agents, Due, Heard, LoggedId, NamesInstance};
     use crate::postgres::notify::Notice;
+
+    /// A filesystem store whose presence batch waits at a gate: it says when one has begun, and
+    /// ends it once the gate opens.
+    struct Gated {
+        inner: crate::fs::FsAgentStore,
+        begun: tokio::sync::mpsc::UnboundedSender<()>,
+        gate: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl crate::agent_store::AgentStore for Gated {
+        fn load(
+            &self,
+        ) -> Result<
+            std::collections::HashMap<InstanceUid, crate::agent_store::PersistedAgent>,
+            String,
+        > {
+            self.inner.load()
+        }
+        fn put(
+            &self,
+            uid: &InstanceUid,
+            record: &crate::agent_store::PersistedAgent,
+        ) -> Result<(), String> {
+            self.inner.put(uid, record)
+        }
+        fn set_labels(
+            &self,
+            uid: &InstanceUid,
+            labels: &std::collections::BTreeMap<String, String>,
+        ) -> Result<bool, String> {
+            self.inner.set_labels(uid, labels)
+        }
+        fn set_restart_pending(
+            &self,
+            uid: &InstanceUid,
+            pending: bool,
+        ) -> Result<Option<bool>, String> {
+            self.inner.set_restart_pending(uid, pending)
+        }
+        fn remove(&self, uid: &InstanceUid) -> Result<(), String> {
+            self.inner.remove(uid)
+        }
+        fn write_presence(
+            &self,
+            _holder: &str,
+            _presence: &[(InstanceUid, crate::agent_store::Presence)],
+        ) -> Result<(), String> {
+            let _ = self.begun.send(());
+            self.gate
+                .lock()
+                .expect("gate lock")
+                .recv()
+                .map_err(|e| e.to_string())
+        }
+        fn release(
+            &self,
+            revisions: &[crate::configs::Pinned],
+            agents: &[(InstanceUid, crate::agent_store::PersistedAgent)],
+        ) -> Result<Vec<InstanceUid>, String> {
+            self.inner.release(revisions, agents)
+        }
+        fn pinning(&self, pin: crate::agent_store::Pin<'_>) -> usize {
+            self.inner.pinning(pin)
+        }
+        fn referenced_revisions(&self, name: &str) -> std::collections::BTreeSet<String> {
+            self.inner.referenced_revisions(name)
+        }
+    }
+
+    /// Stopping the presence batches waits for the one being written, so the last batch at
+    /// shutdown commits after it, never before.
+    /// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stopping_the_presence_batches_waits_for_the_one_being_written() {
+        use std::future::Future as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (begun, mut begins) = tokio::sync::mpsc::unbounded_channel();
+        let (open, gate) = std::sync::mpsc::channel();
+        let state = Arc::new(
+            crate::fleet::AppState::with_stores(
+                Box::new(Gated {
+                    inner: crate::fs::FsAgentStore::open(dir.path()).expect("agents"),
+                    begun,
+                    gate: Mutex::new(gate),
+                }),
+                Box::new(crate::fs::FsConfigBackend::open(dir.path()).expect("configs")),
+                Box::new(crate::clock::SystemClock),
+            )
+            .expect("state"),
+        );
+        state.process(
+            opamp::proto::AgentToServer {
+                instance_uid: InstanceUid::default().as_bytes().to_vec(),
+                sequence_num: 1,
+                ..Default::default()
+            },
+            crate::fleet::Transport::WebSocket,
+            Some(1),
+        );
+        let (_lease, held) = tokio::sync::watch::channel(Some("holder".to_string()));
+        let batches = super::write_presence(state, held, Duration::from_millis(10));
+        begins.recv().await.expect("a batch begins");
+
+        let mut stopping = Box::pin(batches.stop());
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(
+            stopping.as_mut().poll(&mut cx).is_pending(),
+            "stopped while a batch is being written"
+        );
+        open.send(()).expect("open the gate");
+        tokio::time::timeout(Duration::from_secs(5), stopping)
+            .await
+            .expect("stopped once the batch is written");
+    }
 
     /// What the log writes, collected.
     #[derive(Clone, Default)]
