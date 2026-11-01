@@ -970,6 +970,37 @@ mod tests {
         clear(&b);
     }
 
+    /// The cleanup lists the staging keys before it asks which leases are live, so an upload staged
+    /// in between survives whether or not the answer names its lease: one under a lease the
+    /// answer names live, and one under a lease taken after the question, which it cannot name.
+    /// Asked first, the cleanup would list that second key and delete it
+    /// (ADR-draft-the-servers-state-and-its-stores clause 16).
+    /// Verifies: ADR-draft-the-servers-state-and-its-stores
+    #[test]
+    fn the_cleanup_lists_the_staging_keys_before_it_asks_which_leases_are_live() {
+        let Some(config) = named_store() else { return };
+        let store = S3BlobStore::open(&config).expect("open");
+        plant(&store, "staging/lease-lapsed/0123456789abcdef");
+        let live = || {
+            plant(&store, "staging/lease-live/0123456789abcdef");
+            plant(&store, "staging/lease-taken-after/0123456789abcdef");
+            Ok(HashSet::from(["lease-live".to_string()]))
+        };
+        assert_eq!(store.clean_staging(&live).expect("cleanup"), 1);
+        assert_eq!(
+            keys(&store),
+            vec![
+                format!("{}staging/lease-live/0123456789abcdef", config.prefix),
+                format!(
+                    "{}staging/lease-taken-after/0123456789abcdef",
+                    config.prefix
+                ),
+            ],
+            "the lapsed lease's key goes, and both keys staged while the cleanup ran stay"
+        );
+        clear(&store);
+    }
+
     /// The Server does not create its bucket: one that does not exist fails startup naming it
     /// (ADR-0029 clause 16).
     /// Verifies: ADR-0029
