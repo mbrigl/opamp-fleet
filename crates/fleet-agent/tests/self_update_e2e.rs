@@ -624,7 +624,7 @@ async fn managed_processes_stop_cleanly_on_the_self_update_restart() {
             .expect("make the stub executable");
         "stub-agent"
     };
-    let marker = dir.path().join("managed.pid");
+    let pids = dir.path().join("managed.pids");
     std::fs::write(
         &config,
         format!(
@@ -639,13 +639,13 @@ async fn managed_processes_stop_cleanly_on_the_self_update_restart() {
                 "type = \"command\"\n",
                 "name = \"managed\"\n",
                 "command = {stub:?}\n",
-                "args = [\"--touch\", {marker:?}]\n",
+                "args = [\"--log-pid\", {pids:?}]\n",
             ),
             addr = addr,
             state = state_dir.to_string_lossy(),
             key = signing_key().1,
             stub = stub,
-            marker = marker.to_string_lossy(),
+            pids = pids.to_string_lossy(),
         ) + &common::client_identity(dir.path()),
     )
     .expect("write config");
@@ -664,22 +664,8 @@ async fn managed_processes_stop_cleanly_on_the_self_update_restart() {
     })
     .await;
 
-    let read_managed_pid = |path: &Path| -> Option<u32> {
-        let text = std::fs::read_to_string(path).ok()?;
-        text.lines()
-            .find_map(|line| line.strip_prefix("pid="))
-            .and_then(|n| n.trim().parse().ok())
-    };
-    // Every distinct managed pid seen while the update runs, in order — the last is the one running
-    // once it has settled; all before it were superseded by a restart and must have been stopped.
-    let mut seen: Vec<u32> = Vec::new();
     wait_until("the self-update to be reported Installed", || {
         service.tend();
-        if let Some(pid) = read_managed_pid(&marker) {
-            if seen.last() != Some(&pid) {
-                seen.push(pid);
-            }
-        }
         let snapshot = state.snapshot();
         let agent = view(&snapshot, "self-updating-client")?;
         let package = agent.packages.iter().find(|p| p.name == "supervisor")?;
@@ -687,10 +673,23 @@ async fn managed_processes_stop_cleanly_on_the_self_update_restart() {
     })
     .await;
 
-    assert!(
-        seen.len() >= 2,
-        "the update restarted the Client, so the managed process was (re)started too: pids {seen:?}"
-    );
+    // Every managed pid, in the order the runs began, each run appending its own: the last is the
+    // one running once the update has settled, and all before it were superseded by a restart and
+    // must have been stopped. The Client that came up after the restart starts its program on its
+    // own time, which may follow its report.
+    let seen = wait_until(
+        "the update to restart the Client, and the managed process with it",
+        || {
+            service.tend();
+            let text = std::fs::read_to_string(&pids).ok()?;
+            let seen: Vec<u32> = text
+                .lines()
+                .filter_map(|line| line.strip_prefix("pid=")?.trim().parse().ok())
+                .collect();
+            (seen.len() >= 2).then_some(seen)
+        },
+    )
+    .await;
     let alive = |pid: u32| Path::new(&format!("/proc/{pid}")).exists();
     for pid in &seen[..seen.len() - 1] {
         assert!(
