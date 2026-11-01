@@ -2303,9 +2303,11 @@ async fn entries(dir: &std::path::Path, until: &str, count: usize) -> Vec<serde_
             .expect("files")
             .iter()
             .flat_map(|file| {
+                // A line the writer has not finished yet has no newline, and is read next time.
                 std::fs::read_to_string(file)
                     .expect("read")
-                    .lines()
+                    .split_inclusive('\n')
+                    .filter(|line| line.ends_with('\n'))
                     .map(|line| serde_json::from_str(line).expect("json"))
                     .collect::<Vec<serde_json::Value>>()
             })
