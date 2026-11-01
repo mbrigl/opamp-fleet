@@ -733,7 +733,11 @@ async fn main() {
             }) {
                 Ok(lease) => {
                     logged.follow(lease.held());
-                    fleet_server::instance::follow(database, state.clone());
+                    fleet_server::instance::follow(
+                        database,
+                        state.clone(),
+                        Some(lease.list_versions()),
+                    );
                     Some(lease)
                 }
                 Err(e) => {

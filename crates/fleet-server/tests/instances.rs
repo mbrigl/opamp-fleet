@@ -287,7 +287,8 @@ impl Instance {
             let database = database.clone();
             fleet_server::instance::Lease::take(database, TIMES, "test-host").expect("lease")
         };
-        let following = fleet_server::instance::follow(&database, state.clone());
+        let following =
+            fleet_server::instance::follow(&database, state.clone(), Some(lease.list_versions()));
         let state_kept = state.clone();
         let agent_listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let operator_listener = TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -1204,6 +1205,12 @@ async fn an_etag_one_instance_answered_is_answered_304_by_another() {
         let (status, etag) = fetch(revoking, None).await;
         assert_eq!(status, reqwest::StatusCode::OK);
         let etag = etag.expect("an ETag");
+        let version = schema.query("SELECT version FROM revocation_list_version");
+        assert_eq!(
+            etag,
+            format!("\"list-{}\"", version[0]),
+            "the ETag is the list's version in the database"
+        );
         assert_ne!(Some(&etag), moved.as_ref(), "a revocation moves the ETag");
         assert_eq!(
             fetch(other, Some(etag.clone())).await.0,
@@ -1640,5 +1647,40 @@ async fn a_package_published_on_one_instance_is_listed_by_the_other() {
     assert!(
         eventually(Duration::from_secs(10), || !listed_by_b(&id)).await,
         "B still lists the Package A deleted"
+    );
+}
+
+/// A revocation whose notification never arrives, while the listening connection stays up, is
+/// caught by the next lease renewal: it finds the list's version moved, and the instance reads the
+/// ledger again and ends the session it concerns.
+/// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_revocation_whose_notification_is_missed_is_caught_at_the_next_renewal() {
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let b = Instance::start(&pki, &schema, schema.config_on(schema.config.port)).await;
+    assert!(b.has_read(1).await, "B never listened");
+    let (cert, key) = pki.issue("edge-01");
+    let mut session = websocket(&b, &pki, &cert, &key).await;
+    exchange(&mut session).await;
+
+    let id = cert_id(&cert);
+    let revoked = serde_json::json!({ "certificate": {
+        "authority": "client",
+        "issuers": [id.issuer],
+        "serial": id.serial,
+    }});
+    // Committed as an instance commits it, its notification lost on the way.
+    schema.sql(&format!(
+        "INSERT INTO revocations (id, position, revoked, revoked_ms) VALUES ('missed', 0, '{revoked}', 1); \
+         UPDATE revocation_list_version SET version = version + 1"
+    ));
+
+    assert_eq!(
+        closed_within(&mut session, TIMES.renew * 3).await,
+        Some((1008, "revoked".to_string())),
+        "B did not catch the missed revocation at a renewal"
     );
 }

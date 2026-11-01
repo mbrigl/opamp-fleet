@@ -28,7 +28,7 @@ pub const SCHEMA_TABLE: &str = "fleet_schema";
 
 /// Every table the migrations create, so that a database holding any of them is recognised as one
 /// the Server already wrote ([`super::Database::server_tables`]).
-pub const TABLES: [&str; 19] = [
+pub const TABLES: [&str; 20] = [
     "configurations",
     "configuration_revisions",
     "deployments",
@@ -47,6 +47,7 @@ pub const TABLES: [&str; 19] = [
     "host_bindings",
     "deployment_packages",
     "deployment_configurations",
+    "revocation_list_version",
     // Not tables of the records, but the Server's all the same.
     SCHEMA_TABLE,
 ];
@@ -85,6 +86,15 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 5,
         oldest_server: "0.6.1",
         sql: DEPLOYMENT_MEMBERS,
+    },
+    // A table only added; the release before it never reads it, and its revocations and lifts
+    // leave the version where it was, so a Gateway's `ETag` from an instance of this release may
+    // be answered `304` over a list the release before changed. What two releases side by side
+    // leave open is ticket 11's.
+    Migration {
+        version: 6,
+        oldest_server: "0.6.1",
+        sql: REVOCATION_LIST_VERSION,
     },
 ];
 
@@ -291,6 +301,18 @@ INSERT INTO deployment_packages (deployment, agent_type, version)
         FROM deployments, json_array_elements(packages) AS package;
 INSERT INTO deployment_configurations (deployment, configuration)
     SELECT DISTINCT name, configuration FROM deployments, unnest(configurations) AS configuration;
+";
+
+/// The revocation list's one version
+/// (ADR-draft-the-servers-state-and-its-stores clause 10): a counter in one row that the
+/// transaction of every revocation added or widened and every lift increments. It is the `ETag`
+/// of the Gateways' list on every instance, and what each lease renewal compares.
+const REVOCATION_LIST_VERSION: &str = r"
+CREATE TABLE revocation_list_version (
+    singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
+    version bigint NOT NULL
+);
+INSERT INTO revocation_list_version (singleton, version) VALUES (true, 0);
 ";
 
 /// This Server's version, `MAJOR.MINOR.PATCH`: the base of the version it reports, so a

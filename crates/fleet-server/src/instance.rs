@@ -23,14 +23,14 @@ use opamp::server::listen::Handle;
 use opamp::uid::InstanceUid;
 use rustls::ServerConfig;
 use tokio::sync::watch;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::config::LeaseTimes;
 use crate::fleet::AppState;
 use crate::postgres::lease::Taken;
 use crate::postgres::notify::{
-    Heard, ASSIGNMENT, CERTIFICATE, CONFIGURATION, DEPLOYMENT, ENROLMENT, FLOOR, HOST, PACKAGE,
-    REVOCATION, WINDOW,
+    Heard, Notice, ASSIGNMENT, CERTIFICATE, CONFIGURATION, DEPLOYMENT, ENROLMENT, FLOOR, HOST,
+    PACKAGE, REVOCATION, WINDOW,
 };
 use crate::postgres::Database;
 
@@ -49,6 +49,8 @@ pub type Held = watch::Receiver<Option<String>>;
 pub struct Lease {
     database: Arc<Database>,
     held: watch::Receiver<Option<String>>,
+    /// The revocation list's version each renewal read, `None` before the first.
+    list_versions: watch::Receiver<Option<u64>>,
     stop: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
@@ -77,6 +79,7 @@ impl Lease {
         let taken = take_in_time(&database, times, host, instance_id, None)?;
         info!(instance_id = %taken.instance_id, "took a lease");
         let (held, watched) = watch::channel(Some(taken.instance_id.clone()));
+        let (versions, list_versions) = watch::channel(None);
         let (stop, stopped) = tokio::sync::oneshot::channel();
         let renewing = database.clone();
         let host = host.to_string();
@@ -89,7 +92,7 @@ impl Lease {
                 {
                     Ok(runtime) => runtime.block_on(async move {
                         tokio::select! {
-                            () = renew(renewing, times, host, &held, taken) => {}
+                            () = renew(renewing, times, host, &held, &versions, taken) => {}
                             _ = stopped => {}
                         }
                     }),
@@ -100,6 +103,7 @@ impl Lease {
         Ok(Lease {
             database,
             held: watched,
+            list_versions,
             stop: Some(stop),
         })
     }
@@ -109,6 +113,14 @@ impl Lease {
     #[must_use]
     pub fn held(&self) -> Held {
         self.held.clone()
+    }
+
+    /// The revocation list's version as each renewal reads it
+    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// clause 10), for [`follow`] to compare with the one the instance holds.
+    #[must_use]
+    pub fn list_versions(&self) -> watch::Receiver<Option<u64>> {
+        self.list_versions.clone()
     }
 
     /// Stops renewing and releases the lease, at an orderly shutdown.
@@ -205,6 +217,7 @@ async fn renew(
     times: LeaseTimes,
     host: String,
     held: &watch::Sender<Option<String>>,
+    versions: &watch::Sender<Option<u64>>,
     taken: Taken,
 ) {
     let (mut instance_id, mut sent) = (taken.instance_id, taken.sent);
@@ -249,7 +262,10 @@ async fn renew(
                 }
             };
             match attempt {
-                Some(renewal) => sent = renewal,
+                Some(renewal) => {
+                    sent = renewal.sent;
+                    versions.send_replace(Some(renewal.list_version));
+                }
                 None => break,
             }
         }
@@ -315,9 +331,38 @@ fn lock_lost(held: &watch::Sender<Option<String>>, instance_id: &str) {
 /// was committed before it was not heard, and for a kind this instance does not know, everything is
 /// read again. What this instance announced itself is never heard: it holds what it committed.
 /// What is heard while a read runs is taken up by one read after it, and a read that fails is tried
-/// again until one holds.
-pub fn follow(database: &Database, state: Arc<AppState>) -> Following {
+/// again until one holds. With `renewals`, the revocation list's version each lease renewal reads
+/// is compared with the one held, and the ledger read again when it has moved, so a notification
+/// that was missed without the connection ending is caught within one renewal.
+pub fn follow(
+    database: &Database,
+    state: Arc<AppState>,
+    renewals: Option<watch::Receiver<Option<u64>>>,
+) -> Following {
     let (heard, hearing) = tokio::sync::mpsc::unbounded_channel();
+    if let (Some(mut renewals), Some(revocations)) = (renewals, state.revocations().cloned()) {
+        let heard = heard.clone();
+        tokio::spawn(async move {
+            while renewals.changed().await.is_ok() {
+                let Some(stored) = *renewals.borrow_and_update() else {
+                    continue;
+                };
+                if revocations.list_version().is_none_or(|held| held < stored) {
+                    debug!(
+                        stored,
+                        "the revocation list's version moved without a notification heard; \
+                         reading the ledger again"
+                    );
+                    if heard
+                        .send(Heard::Notified(Notice::new(REVOCATION, "")))
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            }
+        });
+    }
     database.listen(move |what| {
         let _ = heard.send(what);
     });
@@ -328,7 +373,6 @@ pub fn follow(database: &Database, state: Arc<AppState>) -> Following {
             if let Some(revocations) = state.revocations() {
                 revocations.reload_ledger()?;
             }
-            counted.ledger.fetch_add(1, Ordering::SeqCst);
         }
         if due.floors {
             if let Some(floors) = state.floors() {
@@ -348,6 +392,11 @@ pub fn follow(database: &Database, state: Arc<AppState>) -> Following {
             Agents::Named(uids) => state.take_up_assignments(Some(uids))?,
             Agents::All => state.take_up_assignments(None)?,
         }
+        // Counted once the whole read is done, so a read counted has taken up everything it was
+        // due.
+        if due.ledger {
+            counted.ledger.fetch_add(1, Ordering::SeqCst);
+        }
         Ok(())
     };
     tokio::spawn(take_up(hearing, read, RELOAD_RETRY_FIRST, RELOAD_RETRY_MAX));
@@ -361,7 +410,8 @@ pub struct Following {
 }
 
 impl Following {
-    /// How many times the ledger was read again for what was heard.
+    /// How many reads that read the ledger again for what was heard have finished, everything else
+    /// they were due included.
     #[must_use]
     pub fn ledger_reads(&self) -> u64 {
         self.ledger.load(Ordering::SeqCst)

@@ -403,8 +403,10 @@ pub fn router(state: Arc<AppState>, admission: Admission) -> Router {
 
 /// The revoked certificates of the client CA, chains resolved, for a host marked as a Gateway
 /// (ADR-0021 clause 34). Admitted as `/v1/opamp` is, by the layer around both; what is checked
-/// here is that the member is a Gateway. The `ETag` is the SHA-256 of the body, so it changes with
-/// the list and survives a restart.
+/// here is that the member is a Gateway. The `ETag` is the list's one version where the store keeps
+/// one, as PostgreSQL does, so every instance on the database answers an `ETag` another gave
+/// (ADR-draft-the-servers-state-and-its-stores clause 10); elsewhere it is the SHA-256 of the body.
+/// Either way it changes with the list and survives a restart.
 async fn gateway_revocations(State(state): State<Arc<AppState>>, request: Request) -> Response {
     use sha2::Digest as _;
 
@@ -417,8 +419,8 @@ async fn gateway_revocations(State(state): State<Arc<AppState>>, request: Reques
     };
     // Without a register nothing is revoked, so the empty list reveals nothing to anyone. With one,
     // the list is a member's whose host is marked as a Gateway, and nobody else's.
-    let certificates: Vec<serde_json::Value> = match state.revocations() {
-        None => Vec::new(),
+    let (certificates, version): (Vec<serde_json::Value>, Option<u64>) = match state.revocations() {
+        None => (Vec::new(), None),
         Some(revocations) => {
             let host = match request.extensions().get::<Peer>() {
                 Some(Peer::Member) => request
@@ -442,15 +444,19 @@ async fn gateway_revocations(State(state): State<Arc<AppState>>, request: Reques
                 );
                 return forbidden();
             }
-            revocations
-                .revoked_certificates("client")
+            let (revoked, version) = revocations.revoked_certificates_at("client");
+            let certificates = revoked
                 .into_iter()
                 .map(|id| serde_json::json!({ "issuer": id.issuer, "serial": id.serial }))
-                .collect()
+                .collect();
+            (certificates, version)
         }
     };
     let body = serde_json::json!({ "certificates": certificates }).to_string();
-    let etag = format!("\"{}\"", hex::encode(sha2::Sha256::digest(body.as_bytes())));
+    let etag = match version {
+        Some(version) => format!("\"list-{version}\""),
+        None => format!("\"{}\"", hex::encode(sha2::Sha256::digest(body.as_bytes()))),
+    };
     if request
         .headers()
         .get(header::IF_NONE_MATCH)

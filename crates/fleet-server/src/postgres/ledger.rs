@@ -22,6 +22,8 @@ pub struct PgLedgerStore {
     database: Arc<Database>,
     /// The Hosts as last committed.
     written_hosts: Mutex<BTreeMap<String, Host>>,
+    /// The list's version as this adapter's last write of the list left it.
+    list_version: Mutex<Option<u64>>,
 }
 
 impl PgLedgerStore {
@@ -31,8 +33,39 @@ impl PgLedgerStore {
         PgLedgerStore {
             database,
             written_hosts: Mutex::new(BTreeMap::new()),
+            list_version: Mutex::new(None),
         }
     }
+}
+
+impl PgLedgerStore {
+    /// Keeps the version a write of the list left, if it left one; never an older over a newer.
+    fn wrote_list(&self, version: Option<u64>) {
+        let mut held = self.list_version.lock().expect("list version lock");
+        *held = (*held).max(version);
+    }
+}
+
+/// Moves the list's version on, inside the caller's transaction, and answers the new one
+/// (ADR-draft-the-servers-state-and-its-stores clause 10).
+async fn bump_list_version(client: &impl GenericClient) -> Result<u64, String> {
+    let row = client
+        .query_one(
+            "UPDATE revocation_list_version SET version = version + 1 RETURNING version",
+            &[],
+        )
+        .await
+        .map_err(sql)?;
+    Ok(unsigned(row.get(0)))
+}
+
+/// The list's version as the database holds it now.
+pub(crate) async fn read_list_version(client: &impl GenericClient) -> Result<u64, String> {
+    let row = client
+        .query_one("SELECT version FROM revocation_list_version", &[])
+        .await
+        .map_err(sql)?;
+    Ok(unsigned(row.get(0)))
 }
 
 impl LedgerStore for PgLedgerStore {
@@ -155,7 +188,7 @@ impl LedgerStore for PgLedgerStore {
     fn add_revocation(&self, entry: &Revocation, bound: usize) -> Result<Added, String> {
         let entry = entry.clone();
         let bound = i64::try_from(bound).unwrap_or(i64::MAX);
-        self.database.run(move |pool| async move {
+        let (added, version) = self.database.run(move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
             transaction
@@ -179,7 +212,7 @@ impl LedgerStore for PgLedgerStore {
                     revoked_ms: unsigned(row.get(2)),
                 };
                 let Some(wider) = crate::revocation::widened(&held, &entry) else {
-                    return Ok(Added::Present(held));
+                    return Ok((Added::Present(held), None));
                 };
                 let revoked =
                     serde_json::to_value(&wider.revoked).expect("a revocation serializes");
@@ -191,8 +224,9 @@ impl LedgerStore for PgLedgerStore {
                     .await
                     .map_err(sql)?;
                 super::notify::notify(&*transaction, super::notify::REVOCATION, &wider.id).await?;
+                let version = bump_list_version(&*transaction).await?;
                 transaction.commit().await.map_err(sql)?;
-                return Ok(Added::Widened(wider));
+                return Ok((Added::Widened(wider), Some(version)));
             }
             let (count, last): (i64, Option<i32>) = {
                 let row = transaction
@@ -202,20 +236,23 @@ impl LedgerStore for PgLedgerStore {
                 (row.get(0), row.get(1))
             };
             if count >= bound {
-                return Ok(Added::Full);
+                return Ok((Added::Full, None));
             }
             let position = last.map_or(0, |last| last + 1);
             let id = entry.id.clone();
             write_revocations(&*transaction, &[(position, entry)]).await?;
             super::notify::notify(&*transaction, super::notify::REVOCATION, &id).await?;
+            let version = bump_list_version(&*transaction).await?;
             transaction.commit().await.map_err(sql)?;
-            Ok(Added::Added)
-        })
+            Ok((Added::Added, Some(version)))
+        })?;
+        self.wrote_list(version);
+        Ok(added)
     }
 
     fn remove_revocation(&self, id: &str) -> Result<bool, String> {
         let id = id.to_string();
-        self.database.run(move |pool| async move {
+        let version = self.database.run(move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
             let removed = transaction
@@ -223,12 +260,19 @@ impl LedgerStore for PgLedgerStore {
                 .await
                 .map_err(sql)?;
             if removed == 0 {
-                return Ok(false);
+                return Ok(None);
             }
             super::notify::notify(&*transaction, super::notify::REVOCATION, &id).await?;
+            let version = bump_list_version(&*transaction).await?;
             transaction.commit().await.map_err(sql)?;
-            Ok(true)
-        })
+            Ok(Some(version))
+        })?;
+        self.wrote_list(version);
+        Ok(version.is_some())
+    }
+
+    fn list_version(&self) -> Option<u64> {
+        *self.list_version.lock().expect("list version lock")
     }
 
     fn bind(&self, instance_uid: &str, host: &str) -> Result<Bound, String> {
@@ -614,6 +658,9 @@ pub(crate) async fn write_bindings(
 
 /// The whole ledger. A row that does not decode fails, naming it.
 pub(crate) async fn read_all(client: &impl GenericClient) -> Result<Ledger, String> {
+    // Read before the list, so a revocation committed between the two reads leaves the version
+    // older than the list it came with, never newer: the next renewal then reads the list again.
+    let version = read_list_version(client).await?;
     let mut issued = Vec::new();
     for row in client
         .query(
@@ -733,6 +780,7 @@ pub(crate) async fn read_all(client: &impl GenericClient) -> Result<Ledger, Stri
         issued,
         revocations,
         hosts,
+        version: Some(version),
     })
 }
 
@@ -1737,6 +1785,77 @@ mod tests {
         }
     }
 
+    /// The list's one version moves with every revocation added or widened and every lift, in
+    /// their transactions, and with nothing else; an instance holds the version its own write left
+    /// only when no other instance wrote between, and none until it reads the list again
+    /// otherwise, so the version it serves never names a list it does not hold
+    /// (ADR-draft-the-servers-state-and-its-stores clause 10).
+    /// Verifies: ADR-draft-the-servers-state-and-its-stores
+    #[test]
+    fn the_list_version_moves_with_each_revocation_and_lift_and_names_only_the_list_held() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        struct Now;
+        impl crate::fleet::Clock for Now {
+            fn now_ms(&self) -> u64 {
+                1
+            }
+        }
+        let instance = || {
+            crate::revocation::Revocations::open(
+                Box::new(PgLedgerStore::new(database.clone())),
+                Arc::new(Now),
+                vec![crate::revocation::Authority {
+                    role: "client".into(),
+                    subject: CertId::new(b"ca", "00").issuer,
+                    name: "CN=ca".into(),
+                }],
+            )
+            .expect("open")
+        };
+        let stored = || -> u64 {
+            test.rows("SELECT version FROM revocation_list_version")[0][0]
+                .as_deref()
+                .expect("a version")
+                .parse()
+                .expect("a number")
+        };
+        let (a, b) = (instance(), instance());
+        assert_eq!((a.list_version(), stored()), (Some(0), 0));
+
+        a.revoke_certificate("client", "0a").expect("revoke");
+        assert_eq!((a.list_version(), stored()), (Some(1), 1));
+        a.revoke_certificate("client", "0a").expect("revoke again");
+        assert_eq!(stored(), 1, "a revocation held already moves nothing");
+        a.record(issued("0c", None).facts, b"\x01", None)
+            .expect("a register entry");
+        assert_eq!(stored(), 1, "a register entry moves nothing");
+
+        b.revoke_certificate("client", "0b")
+            .expect("B revokes, holding version 0");
+        assert_eq!(stored(), 2);
+        assert_eq!(
+            b.list_version(),
+            None,
+            "B's list misses A's revocation, so it holds no version"
+        );
+        assert_eq!(
+            b.revoked_certificates_at("client").1,
+            None,
+            "and serves none with its list"
+        );
+        b.reload_ledger().expect("reload");
+        assert_eq!(b.list_version(), Some(2));
+
+        let lifted = b.list()[0].id.clone();
+        assert!(b.lift(&lifted).expect("lift"));
+        assert_eq!((b.list_version(), stored()), (Some(3), 3));
+        assert!(!b.lift(&lifted).expect("lift again"));
+        assert_eq!(stored(), 3, "a lift of nothing moves nothing");
+    }
+
     /// Instance B, on a database handle of its own, so it hears what the instances on `database`
     /// announce, following the notifications on the runtime it answers.
     fn follower(
@@ -1751,7 +1870,7 @@ mod tests {
             let state = crate::fleet::AppState::on(&crate::Records::Postgres(database.clone()))
                 .expect("B's state")
                 .with_revocations(Some(b.clone()));
-            crate::instance::follow(&database, Arc::new(state));
+            crate::instance::follow(&database, Arc::new(state), None);
         }
         (b, runtime)
     }
