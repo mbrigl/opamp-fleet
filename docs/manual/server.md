@@ -373,14 +373,15 @@ retention and backups are the operator's.
 
 On PostgreSQL every sweep and cleanup of the artifacts takes an advisory lock, so one instance
 deletes at a time. It decides from the entries the database stores, so it keeps an artifact that an
-entry written through another instance names. An upload holds the same lock shared from its check
-that its artifact is stored until its entry is written, and an upload whose artifact a sweep
-deleted first is refused: upload it again. An upload waits for the lock up to 5 seconds, a sweep up
-to 60. Each upload and sweep in progress holds the lock on a database session of its own, beside
-the pool's eight, which the database's `max_connections` must allow for. The lock is taken on
-PostgreSQL with the filesystem blob store too, where the instance is alone and it decides nothing.
-A start whose sweep cannot have the lock fails, naming the lock; a sweep after an act logs it, and
-what it would have deleted stays until the next start.
+entry written through another instance names. An upload takes the same lock shared in the
+transaction that writes its entry, and checks there that its artifact is stored, so no sweep runs
+between the check and the commit; an upload whose artifact a sweep deleted first is refused:
+upload it again. An upload waits for the lock up to 5 seconds, a sweep up to 60. Each sweep in
+progress holds the lock on a database session of its own, beside the pool's eight, which the
+database's `max_connections` must allow for. The lock is taken on PostgreSQL with the filesystem
+blob store too, where the instance is alone and it decides nothing. A start whose sweep cannot have
+the lock fails, naming the lock; a sweep after an act logs it, and what it would have deleted stays
+until the next start.
 
 An instance that stops while an upload streams leaves the parts of an unfinished multipart upload,
 which are not objects: the Server neither lists nor deletes them. Expire them with a lifecycle rule
