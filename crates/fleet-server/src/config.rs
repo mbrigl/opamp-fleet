@@ -3247,7 +3247,10 @@ mod tests {
             (on(files, "retain_days = 30\n"), "retain_days"),
             (on("", "retain_days = 30\n"), "retain_days"),
             (on(postgres, "keep_files = 16\n"), "keep_files"),
-            (on(postgres, "max_file_bytes = 67108864\n"), "max_file_bytes"),
+            (
+                on(postgres, "max_file_bytes = 67108864\n"),
+                "max_file_bytes",
+            ),
             (on(postgres, "retain_days = 0\n"), "retain_days"),
             (on(files, "keep_files = 0\n"), "keep_files"),
             (on(files, "max_file_bytes = 0\n"), "max_file_bytes"),
