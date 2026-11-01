@@ -16,9 +16,9 @@ its groups again.
 
 ## Acceptance criteria
 
-- [ ] Given an Agent carried by A, when its labels are set through B and A writes a report before
+- [x] Given an Agent carried by A, when its labels are set through B and A writes a report before
   the notification arrives, then the labels stay as B set them
-- [ ] Given a restart requested through B, when A writes the Agent's next report, then the request
+- [x] Given a restart requested through B, when A writes the Agent's next report, then the request
   stays until it is carried out, and is cleared only if no later request set it again
 - [ ] Given an Agent carried by A, when its labels are set, a restart is requested or it is
   forgotten through B, then A acts on it within one second: it places the Agent in its groups
@@ -41,6 +41,43 @@ its groups again.
 - Glossary: Agent, Client Agent, Host; the holder term lands here
 - Golden path: the agent port contract tests and the rollout's whole-or-nothing tests
 - Seam: the port contract, plus two instances with a notification held back
+
+## Status
+
+The first session wrote the record per column, and stopped there; the reading per Agent is open.
+
+Done, with tests that fail without their mechanism:
+
+- On PostgreSQL `put` writes a new record whole and of one that exists only the columns a report
+  decides; `set_labels` and `set_restart_pending` write their own column and announce `labels` and
+  `restart`; `remove` announces `forgotten`; `release` writes only the assignment, in the order of
+  the `instance_uid`, and nothing of a record no longer stored. The filesystem adapter writes the
+  whole file for each, as clause 2 allows.
+- A restart is cleared in the store before it is sent, and sent only when it was still queued.
+- The operator acts on labels and restarts read the Agent from the database on PostgreSQL, so an
+  instance acts on an Agent it never held; an Agent an instance does not hold is loaded from the
+  database at its first report there.
+- `take_up_agents` (was `take_up_assignments`) takes the assignment, the labels and the queued
+  restart from the store, places the group again, and drops an Agent the store no longer holds.
+- Criteria 1 and 2 and the labels and restart parts of criterion 3 are decided by
+  `labels_set_through_one_instance_stay_and_reach_the_instance_that_carries_the_agent` and
+  `a_restart_requested_through_one_instance_stays_until_the_carrying_instance_sends_it`; the
+  deadlock by `two_releases_over_the_same_agents_in_opposite_orders_both_commit`.
+
+Open:
+
+- Presence (`connected`, `last_seen_ms`, the holder) in batches every `presence_interval_secs`:
+  a migration adding the columns, the config key, the batch in `instance_uid` order, and the
+  budget of clause 8 (criterion 4).
+- Forgetting through B decides from the stored presence, which needs the batch; then A ends the
+  Agent's session (the rest of criterion 3). Today A drops the Agent from memory on `forgotten`,
+  and B still forgets only an Agent it holds in memory.
+- An instance on PostgreSQL holds only the Agents it carries, and the Operator plane reads the
+  rest through `get` and `query` (criteria 5 and 6). Today every instance still loads the fleet at
+  startup.
+- Decisions this leaves to the human, in the hand-off: when an Agent over plain HTTP stops being
+  carried; what `max_agents` bounds on PostgreSQL; whether forgetting ends a live session on the
+  filesystem store too; and how much of `query` lands here rather than in ticket 07.
 
 ## Blocked by
 
