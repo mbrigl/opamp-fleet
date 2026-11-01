@@ -1228,20 +1228,28 @@ impl AppState {
         self.next_conn.fetch_add(1, Ordering::Relaxed)
     }
 
-    /// Reads the Configurations and, where package delivery is armed, the Deployments again from
-    /// their stores, as another instance changed them
+    /// Reads the Configurations and, where package delivery is armed, the Deployments and the
+    /// Packages again from their stores, as another instance changed them
     /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
     /// clause 12). Each one whose flag is set is dropped and read again whole.
     ///
     /// # Errors
     /// Returns an error when a store cannot be read; what it held is then kept.
-    pub fn reload_catalogue(&self, configurations: bool, deployments: bool) -> Result<(), String> {
+    pub fn reload_catalogue(
+        &self,
+        configurations: bool,
+        deployments: bool,
+        packages: bool,
+    ) -> Result<(), String> {
         if configurations {
             self.configs.reload()?;
         }
-        if deployments {
-            if let Some(store) = self.deployment_store() {
-                store.reload()?;
+        if let Some(offering) = &self.packages {
+            if deployments {
+                offering.deployments().reload()?;
+            }
+            if packages {
+                offering.store().reload()?;
             }
         }
         Ok(())

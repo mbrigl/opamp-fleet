@@ -52,6 +52,10 @@ pub const CONFIGURATION: &str = "configuration";
 /// by its name.
 pub const DEPLOYMENT: &str = "deployment";
 
+/// The kind a Package created or deleted, or an entry or a signature of it written or removed,
+/// is announced as, by its `<agent type>@<version>`.
+pub const PACKAGE: &str = "package";
+
 /// The kind an Agent's assignment changed by a rollout is announced as, by its `instance_uid`.
 pub const ASSIGNMENT: &str = "assignment";
 

@@ -29,8 +29,8 @@ use crate::config::LeaseTimes;
 use crate::fleet::AppState;
 use crate::postgres::lease::Taken;
 use crate::postgres::notify::{
-    Heard, ASSIGNMENT, CERTIFICATE, CONFIGURATION, DEPLOYMENT, ENROLMENT, FLOOR, HOST, REVOCATION,
-    WINDOW,
+    Heard, ASSIGNMENT, CERTIFICATE, CONFIGURATION, DEPLOYMENT, ENROLMENT, FLOOR, HOST, PACKAGE,
+    REVOCATION, WINDOW,
 };
 use crate::postgres::Database;
 
@@ -308,7 +308,8 @@ fn lock_lost(held: &watch::Sender<Option<String>>, instance_id: &str) {
 /// Host or a register entry has the ledger read again, and the sessions check themselves against it
 /// (ADR-draft-admission-by-client-certificate-and-revocation clause 32); a floor has the floors read
 /// again; an enrolment request or the window has the window and its queue read again, and the
-/// connections waiting on them answered; a Configuration or a Deployment has its store read again
+/// connections waiting on them answered; a Configuration, a Deployment or a Package has its store
+/// read again
 /// (clause 12); an Agent's assignment has its record read again, and its connection offered what
 /// it was released. Every time the listening connection is made, since what
 /// was committed before it was not heard, and for a kind this instance does not know, everything is
@@ -341,7 +342,7 @@ pub fn follow(database: &Database, state: Arc<AppState>) -> Following {
         }
         // The Configurations before the assignments, so an Agent released a revision another
         // instance saved is offered it from what this one holds.
-        state.reload_catalogue(due.configurations, due.deployments)?;
+        state.reload_catalogue(due.configurations, due.deployments, due.packages)?;
         match &due.agents {
             Agents::Named(uids) if uids.is_empty() => {}
             Agents::Named(uids) => state.take_up_assignments(Some(uids))?,
@@ -388,6 +389,7 @@ struct Due {
     enrolment: bool,
     configurations: bool,
     deployments: bool,
+    packages: bool,
     agents: Agents,
 }
 
@@ -399,6 +401,7 @@ impl Due {
         enrolment: true,
         configurations: true,
         deployments: true,
+        packages: true,
         agents: Agents::All,
     };
 
@@ -428,6 +431,10 @@ impl Due {
                 deployments: true,
                 ..Due::default()
             },
+            PACKAGE => Due {
+                packages: true,
+                ..Due::default()
+            },
             ASSIGNMENT => Due {
                 agents: match InstanceUid::parse(&notice.id) {
                     Some(uid) => Agents::Named(HashSet::from([uid])),
@@ -446,6 +453,7 @@ impl Due {
             enrolment: self.enrolment || other.enrolment,
             configurations: self.configurations || other.configurations,
             deployments: self.deployments || other.deployments,
+            packages: self.packages || other.packages,
             agents: match (self.agents, other.agents) {
                 (Agents::Named(mut uids), Agents::Named(more)) => {
                     uids.extend(more);

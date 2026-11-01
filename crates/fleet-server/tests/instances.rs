@@ -1596,3 +1596,49 @@ async fn a_rollout_on_one_instance_is_offered_by_the_instance_that_carries_the_a
         .map(|file| String::from_utf8(file.body).expect("utf-8"));
     assert_eq!(body.as_deref(), Some("receivers: {}"));
 }
+
+/// A Package created on A, and one deleted there, is what B lists next: B drops the Packages it
+/// holds for each notification and reads them again.
+/// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_package_published_on_one_instance_is_listed_by_the_other() {
+    use fleet_server::packages::PackageId;
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let a = Instance::start(&pki, &schema, schema.config_on(schema.config.port)).await;
+    let b = Instance::start(&pki, &schema, schema.config_on(schema.config.port)).await;
+    assert!(b.has_read(1).await, "B never listened");
+    let id = PackageId::new("otelcol", "1.0.0").expect("id");
+    let listed_by_b = |id: &PackageId| {
+        b.state
+            .packages()
+            .expect("packages")
+            .list()
+            .iter()
+            .any(|package| package.id == *id)
+    };
+    let on_a = a.state.clone();
+    let created = id.clone();
+    tokio::task::spawn_blocking(move || on_a.create_package_set(&created))
+        .await
+        .expect("create")
+        .expect("A creates the Package");
+    assert!(
+        eventually(Duration::from_secs(10), || listed_by_b(&id)).await,
+        "B never listed the Package A created"
+    );
+    let on_a = a.state.clone();
+    let deleted = id.clone();
+    assert!(
+        tokio::task::spawn_blocking(move || on_a.delete_package_set(&deleted))
+            .await
+            .expect("delete")
+            .expect("A deletes the Package")
+    );
+    assert!(
+        eventually(Duration::from_secs(10), || !listed_by_b(&id)).await,
+        "B still lists the Package A deleted"
+    );
+}
