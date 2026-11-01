@@ -2708,6 +2708,61 @@ fn the_goodbye_of_an_agent_forgotten_through_another_instance_is_written_where_i
     assert_eq!(stored(), ["none false 2"], "the goodbye is written");
 }
 
+/// The take that commits last holds the Agent, and the instance it displaced takes it back at
+/// the Agent's next report: A's take for the Agent's old connection commits after B's for its
+/// new one, B stops carrying it on hearing of the take, A writes the disconnect when the old
+/// connection closes, and the Agent's next report on B makes B its holder again.
+/// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+#[test]
+fn an_instance_displaced_by_a_take_that_commits_later_takes_the_agent_back_at_its_next_report() {
+    use fleet_server::fleet::{AppState, Transport};
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let uid = InstanceUid([0x88; 16]);
+    let report = |sequence_num: u64| AgentToServer {
+        instance_uid: uid.as_bytes().to_vec(),
+        sequence_num,
+        capabilities: AgentCapabilities::ReportsStatus as u64,
+        ..Default::default()
+    };
+    let (lease_a, lease_b) = (
+        "00000000-0000-7000-8000-00000000000a",
+        "00000000-0000-7000-8000-00000000000b",
+    );
+    let [a, b] = [lease_a, lease_b].map(|lease| {
+        let state = AppState::on(&records(&schema)).expect("state");
+        state.serve_under(tokio::sync::watch::channel(Some(lease.to_string())).1);
+        state
+    });
+    let stored = || {
+        schema.query(&format!(
+            "SELECT coalesce(holder::text, 'none') || ' ' || connected FROM agents \
+             WHERE instance_uid = '{uid}'"
+        ))
+    };
+    let carried = |state: &AppState| {
+        state
+            .snapshot()
+            .into_iter()
+            .find(|view| view.instance_uid == uid.to_string())
+            .is_some_and(|view| view.connected)
+    };
+    // B takes the Agent on its new connection; A's take for the old one commits after it.
+    b.process(report(2), Transport::WebSocket, Some(9));
+    a.process(report(1), Transport::WebSocket, Some(7));
+    assert_eq!(stored(), [format!("{lease_a} true")]);
+    b.release_taken(None).expect("B hears of the take");
+    assert!(!carried(&b), "B stops carrying it");
+    a.mark_disconnected(&[uid], 7);
+    a.write_presence(lease_a).expect("A's batch");
+    assert_eq!(stored(), ["none false"]);
+
+    b.process(report(3), Transport::WebSocket, Some(9));
+    assert_eq!(stored(), [format!("{lease_b} true")], "B holds it again");
+    assert!(carried(&b), "and carries it");
+}
+
 /// An Agent that has just connected to A is not forgotten through B before A's next presence
 /// batch: the report that connects it writes that A holds it, at once.
 /// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts
