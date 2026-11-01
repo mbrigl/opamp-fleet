@@ -207,6 +207,23 @@ pub trait AgentStore: Send + Sync {
         Ok(self.load()?.remove(uid))
     }
 
+    /// The records of `uids` as stored now, in one read, none for a uid with no record: what an
+    /// instance reads again under its fleet lock, where one read per record would hold the lock
+    /// for as many round trips. A store that is its only writer answers it from what it loads.
+    ///
+    /// # Errors
+    /// Returns an error when the records cannot be read.
+    fn get_many(
+        &self,
+        uids: &[InstanceUid],
+    ) -> Result<HashMap<InstanceUid, PersistedAgent>, String> {
+        let mut all = self.load()?;
+        Ok(uids
+            .iter()
+            .filter_map(|uid| all.remove_entry(uid))
+            .collect())
+    }
+
     /// Whether other Servers write this store too, so the fleet reads an Agent it does not hold
     /// from it rather than from what it loaded, and decides an act on an Agent from what it stores
     /// (ADR-draft-the-servers-state-and-its-stores clause 3). A store that is its one Server's alone

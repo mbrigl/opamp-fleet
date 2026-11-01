@@ -80,14 +80,26 @@ impl AgentStore for PgAgentStore {
     }
 
     fn get(&self, uid: &InstanceUid) -> Result<Option<PersistedAgent>, String> {
-        let key = uid.to_string();
-        let mut found = self.database.run(move |pool| async move {
+        Ok(self.get_many(std::slice::from_ref(uid))?.remove(uid))
+    }
+
+    /// One query for the rows, one for their Configurations, however many records it reads.
+    fn get_many(
+        &self,
+        uids: &[InstanceUid],
+    ) -> Result<HashMap<InstanceUid, PersistedAgent>, String> {
+        let keys: Vec<String> = uids.iter().map(ToString::to_string).collect();
+        let found = self.database.run(move |pool| async move {
             let client = client(&pool).await?;
-            read(&**client, Some(&key)).await
+            read(&**client, Some(&keys)).await
         })?;
-        let record = found.remove(uid);
-        self.stored([(uid, record.as_ref().and_then(|r| r.assignment.as_ref()))]);
-        Ok(record)
+        self.stored(uids.iter().map(|uid| {
+            (
+                uid,
+                found.get(uid).and_then(|record| record.assignment.as_ref()),
+            )
+        }));
+        Ok(found)
     }
 
     fn is_shared(&self) -> bool {
@@ -157,7 +169,7 @@ impl AgentStore for PgAgentStore {
                 .map_err(sql)?;
             let (count, there): (i64, i64) = (stored.get(0), stored.get(1));
             if there > 0 {
-                let found = read(&*transaction, Some(&key))
+                let found = read(&*transaction, Some(std::slice::from_ref(&key)))
                     .await?
                     .remove(&uid)
                     .ok_or_else(|| format!("agent {key} was counted, and is not there"))?;
@@ -527,13 +539,13 @@ pub(crate) async fn read_all(
     read(client, None).await
 }
 
-/// The record of `only`, or of every Agent where it names none.
+/// The records of the keys `only` names, or of every Agent where it names none.
 async fn read(
     client: &impl GenericClient,
-    only: Option<&str>,
+    only: Option<&[String]>,
 ) -> Result<HashMap<InstanceUid, PersistedAgent>, String> {
     let (filter, params): (&str, Vec<&(dyn tokio_postgres::types::ToSql + Sync)>) = match &only {
-        Some(uid) => (" WHERE instance_uid = $1", vec![uid]),
+        Some(uids) => (" WHERE instance_uid = ANY($1)", vec![uids]),
         None => ("", Vec::new()),
     };
     let mut released: HashMap<String, BTreeMap<String, String>> = HashMap::new();

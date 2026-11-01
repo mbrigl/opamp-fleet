@@ -1329,7 +1329,9 @@ impl AppState {
     /// restart requested, at once. The records are read before the fleet lock is taken, so no
     /// report waits for the read; one that differs from what is held is read again under the lock
     /// and taken up from that read, since an act of this instance made after the first read, which
-    /// it never hears announced, wrote the store and what is held together under that lock.
+    /// it never hears announced, wrote the store and what is held together under that lock. That
+    /// second read is one read of every record that differs, so the lock is held for one round
+    /// trip however many differ.
     ///
     /// # Errors
     /// Returns an error when the store cannot be read; what is held is then kept.
@@ -1358,31 +1360,29 @@ impl AppState {
                 .collect::<Result<_, String>>()?,
         };
         let mut fleet = self.fleet.lock().expect("fleet lock");
+        let differing: Vec<InstanceUid> = stored
+            .into_iter()
+            .filter(|(uid, persisted)| {
+                fleet.get(uid).is_some_and(|record| {
+                    persisted.as_ref().is_none_or(|persisted| {
+                        record.assignment != persisted.assignment
+                            || record.restart_pending != persisted.restart_pending
+                            || record.labels != persisted.labels
+                    })
+                })
+            })
+            .map(|(uid, _)| uid)
+            .collect();
+        if differing.is_empty() {
+            return Ok(());
+        }
+        let mut again = self.agent_store.get_many(&differing)?;
         let mut moved = 0usize;
-        let mut failed = None;
-        for (uid, persisted) in stored {
-            let Some(record) = fleet.get(&uid) else {
-                continue;
-            };
-            let differs = persisted.is_none_or(|persisted| {
-                record.assignment != persisted.assignment
-                    || record.restart_pending != persisted.restart_pending
-                    || record.labels != persisted.labels
-            });
-            if !differs {
-                continue;
-            }
-            let persisted = match self.agent_store.get(&uid) {
-                Ok(persisted) => persisted,
-                Err(e) => {
-                    failed = Some(e);
-                    break;
-                }
-            };
+        for uid in differing {
             let Some(record) = fleet.get_mut(&uid) else {
                 continue;
             };
-            let Some(persisted) = persisted else {
+            let Some(persisted) = again.remove(&uid) else {
                 self.drop_forgotten(&mut fleet, &uid);
                 moved += 1;
                 continue;
@@ -1413,7 +1413,7 @@ impl AppState {
                 "took up what another instance wrote to the agents' records"
             );
         }
-        failed.map_or(Ok(()), Err)
+        Ok(())
     }
 
     /// A receiver that fires whenever any Configuration changes; WebSocket loops use it to push
@@ -6442,11 +6442,14 @@ mod tests {
 
     /// A store passing every call to `inner`, whose next reads of one record can be made to fail,
     /// and which can run an act once right after a read of one record: what lets a test place
-    /// another instance's write between the read and what is done with it.
+    /// another instance's write between the read and what is done with it. It counts the reads of
+    /// one record and the reads of several.
     struct Hooked {
         inner: Box<dyn AgentStore>,
         failing_gets: Arc<AtomicU64>,
         after_get: Arc<Mutex<Option<Act>>>,
+        gets: Arc<AtomicU64>,
+        batched_gets: Arc<AtomicU64>,
     }
 
     /// What [`Hooked`] runs once after a read.
@@ -6458,6 +6461,8 @@ mod tests {
                 inner,
                 failing_gets: Arc::new(AtomicU64::new(0)),
                 after_get: Arc::new(Mutex::new(None)),
+                gets: Arc::new(AtomicU64::new(0)),
+                batched_gets: Arc::new(AtomicU64::new(0)),
             }
         }
     }
@@ -6474,12 +6479,20 @@ mod tests {
             if failing {
                 return Err("the read is held back".to_string());
             }
+            self.gets.fetch_add(1, Ordering::SeqCst);
             let got = self.inner.get(uid);
             let after = self.after_get.lock().expect("hook lock").take();
             if let Some(after) = after {
                 after();
             }
             got
+        }
+        fn get_many(
+            &self,
+            uids: &[InstanceUid],
+        ) -> Result<HashMap<InstanceUid, PersistedAgent>, String> {
+            self.batched_gets.fetch_add(1, Ordering::SeqCst);
+            self.inner.get_many(uids)
         }
         fn is_shared(&self) -> bool {
             self.inner.is_shared()
@@ -6673,5 +6686,50 @@ mod tests {
         a.take_up_agents(Some(&HashSet::from([uid])))
             .expect("take up");
         assert_eq!(view(&a, &uid).labels["tier"], "core", "A's own act stays");
+    }
+
+    /// What differs is read again under the fleet lock in one read, however many records differ:
+    /// the lock is held for one round trip, not one per record.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    #[test]
+    fn a_take_up_reads_again_what_differs_in_one_read() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let hooked = Hooked::new(Box::new(crate::postgres::agents::PgAgentStore::new(
+            database.clone(),
+        )));
+        let (gets, batched_gets) = (hooked.gets.clone(), hooked.batched_gets.clone());
+        let a = on_postgres(&database, Box::new(hooked));
+        let b = on_postgres(
+            &database,
+            Box::new(crate::postgres::agents::PgAgentStore::new(database.clone())),
+        );
+        let uids = [0x64, 0x65, 0x66].map(|byte| InstanceUid([byte; 16]));
+        for uid in &uids {
+            a.process(report(uid, 1), Transport::Http, None);
+            label(&b, uid, &[("tier", "edge")]);
+        }
+        let (gets_before, batched_before) = (
+            gets.load(Ordering::SeqCst),
+            batched_gets.load(Ordering::SeqCst),
+        );
+
+        a.take_up_agents(Some(&HashSet::from(uids)))
+            .expect("take up");
+        for uid in &uids {
+            assert_eq!(view(&a, uid).labels["tier"], "edge", "{uid} taken up");
+        }
+        assert_eq!(
+            gets.load(Ordering::SeqCst) - gets_before,
+            3,
+            "one read of each before the lock"
+        );
+        assert_eq!(
+            batched_gets.load(Ordering::SeqCst) - batched_before,
+            1,
+            "and one read of all three under it"
+        );
     }
 }
