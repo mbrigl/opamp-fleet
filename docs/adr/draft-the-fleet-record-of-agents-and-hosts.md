@@ -112,8 +112,17 @@ report, its own labels and its Client Agent's labels, in that order of precedenc
      moved to another instance keeps what that instance wrote of it, also once it disconnected
      there;
    - `write_presence(holder, presences)` — one batch of the presence of the Agents `holder`
-     carries (clauses 3 and 4), in the order of their `instance_uid`; a disconnect is written only
-     of a record whose stored holder is `holder` or none;
+     carries (clauses 3 and 4), in the order of their `instance_uid`; a connected Agent names
+     `holder` only where the stored holder is `holder`, none, or an instance without a live lease,
+     so a batch never undoes another instance's take; a disconnect is written only of a record
+     whose stored holder is `holder` or none;
+   - `take(uid, holder, last_seen_ms)` — the take at a connecting report of
+     [ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it](draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md)
+     clause 8: names `holder`, answers the holder it replaced and whether this change of holder is
+     the eleventh within a minute, counted on the database's clock, and announces the take where
+     it replaced an instance with a live lease;
+   - `holders(uids)` — the stored holder of each, which an instance that heard of a take reads
+     before it stops carrying the Agent;
    - `remove_if_silent(uid, silent_before_ms)` — forget one record of a shared store when its
      stored presence lets it go, read and removed in one step (clause 11);
    - `set_labels(uid, labels)` and `set_restart_pending(uid, pending)` — the acts that decide them,
