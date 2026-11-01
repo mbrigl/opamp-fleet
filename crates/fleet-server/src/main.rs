@@ -753,7 +753,8 @@ async fn main() {
                 .with_max_package_size(config.max_package_size_bytes)
                 .with_max_total_package_bytes(config.max_total_package_bytes)
                 .with_stale_after(std::time::Duration::from_secs(config.stale_after_secs))
-                .with_max_agents(config.max_agents),
+                .with_max_agents(config.max_agents)
+                .with_presence_interval(config.database.presence_interval().unwrap_or_default()),
         ),
         Err(e) => {
             eprintln!("{e}");
@@ -802,10 +803,20 @@ async fn main() {
     let operators = fleet_server::operator_app(state.clone(), operator_auth);
 
     // The revocations, and every other change, of the other instances followed (clauses 9 to 11
-    // of ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it).
-    if let (Some(lease), fleet_server::Records::Postgres(database)) = (&lease, &records) {
-        fleet_server::instance::follow(database, state.clone(), Some(lease.list_versions()));
-    }
+    // of ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it),
+    // and the presence of the Agents this instance carries written in batches under its lease
+    // (ADR-draft-the-fleet-record-of-agents-and-hosts clause 4).
+    let presence = match (&lease, &records) {
+        (Some(lease), fleet_server::Records::Postgres(database)) => {
+            state.serve_under(lease.held());
+            let presence = config.database.presence_interval().map(|interval| {
+                fleet_server::instance::write_presence(state.clone(), lease.held(), interval)
+            });
+            fleet_server::instance::follow(database, state.clone(), Some(lease.list_versions()));
+            presence
+        }
+        _ => None,
+    };
     // The handlers are installed before either plane is bound and logged as served, so a stop
     // sent as soon as the log says so drains the planes rather than ending the process.
     let shutdown = shutdown_signal();
@@ -837,6 +848,20 @@ async fn main() {
     // The graceful-shutdown flush (ADR-0024): every record's current timestamp and sequence
     // number, so the ordinary restart restores a fleet without gaps or false silence.
     state.flush_agents();
+    // And the presence of every Agent, its sessions ended by the drain, before the lease goes
+    // (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    // clause 3): once the periodic batches stopped, so none commits after it.
+    if let Some(presence) = presence {
+        presence.stop().await;
+    }
+    if let Some(holder) = lease
+        .as_ref()
+        .and_then(|lease| lease.held().borrow().clone())
+    {
+        if let Err(e) = state.write_presence(&holder) {
+            warn!(error = %e, "could not write the presence of the agents before the lease goes");
+        }
+    }
     // What is still queued for the audit record is written before the process, and the writer
     // thread with it, ends (ADR-0023); on PostgreSQL the chain is closed then, and the lease
     // released only once it is, so that a chain left open is closed by the instance that takes

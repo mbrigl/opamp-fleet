@@ -289,7 +289,7 @@ mod tests {
 
     /// Adds `pinned` as a rollout that writes no record does.
     fn release(agents: &dyn AgentStore, pinned: &Pinned) -> Result<(), String> {
-        agents.release(std::slice::from_ref(pinned), &[])
+        agents.release(std::slice::from_ref(pinned), &[]).map(drop)
     }
 
     fn revision(body: &str) -> Revision {
@@ -513,6 +513,14 @@ mod tests {
         let held = pinned("base", "v1\n");
         release(&PgAgentStore::new(database.clone()), &held)
             .expect("a revision stored and pinned by nothing");
+        // The Agent the rollout releases to, its record stored before: a release writes the
+        // assignment of a record that is there.
+        let agent = InstanceUid::default();
+        let mut record = crate::agent_store::tests::record();
+        record.assignment = None;
+        PgAgentStore::new(database.clone())
+            .put(&agent, &record)
+            .expect("the Agent's record");
         test.sql(
             "CREATE TABLE fleet_test_gate (open boolean NOT NULL); \
              INSERT INTO fleet_test_gate VALUES (false); \
@@ -545,12 +553,12 @@ mod tests {
             let (database, held) = (database.clone(), held.clone());
             std::thread::spawn(move || {
                 PgAgentStore::new(database)
-                    .release(&[held], &[(InstanceUid::default(), record)])
+                    .release(&[held], &[(agent, record)])
                     .expect("the rollout")
             })
         };
         until("the rollout reaches the gate", &|| {
-            waiting("wait_event = 'PgSleep' AND query LIKE 'INSERT INTO agents%'")
+            waiting("wait_event = 'PgSleep' AND query LIKE 'UPDATE agents%'")
         });
         let collected = Arc::new(AtomicBool::new(false));
         let collection = {

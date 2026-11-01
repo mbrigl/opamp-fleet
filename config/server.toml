@@ -195,6 +195,7 @@ max_package_size_bytes = 1073741824
 # store = "postgres"
 # lease_renew_secs = 10   # how often an instance renews its lease
 # lease_secs = 30         # how long after its last renewal the lease lapses: three renewals at least
+# presence_interval_secs = 30   # how often an instance writes where its Agents are connected: 10 to 60
 #
 # [database.postgres]
 # host = "db.example.org"

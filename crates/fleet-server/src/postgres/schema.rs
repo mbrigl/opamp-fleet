@@ -106,6 +106,13 @@ pub const MIGRATIONS: &[Migration] = &[
         oldest_server: "0.6.1",
         sql: AUDIT_CHAINS,
     },
+    // Two columns only added, with defaults; the release before it neither reads nor writes them,
+    // so its Agents read as disconnected on the instances of this release.
+    Migration {
+        version: 8,
+        oldest_server: "0.6.1",
+        sql: AGENT_PRESENCE,
+    },
 ];
 
 /// The first schema: one table per kind of record, the parts of a record that are many in tables of
@@ -349,6 +356,16 @@ CREATE TABLE audit_archive (
     seq bigint NOT NULL,
     hash text NOT NULL
 );
+";
+
+/// Where each Agent is connected (ADR-draft-the-fleet-record-of-agents-and-hosts clause 3): whether
+/// a connection carries it, and the instance that holds that connection, by the id of its lease.
+/// Each instance writes them for the Agents it carries in batches
+/// (ADR-draft-the-fleet-record-of-agents-and-hosts clause 4); a holder without a live lease reads as
+/// disconnected, whatever `connected` says (clause 6).
+const AGENT_PRESENCE: &str = r"
+ALTER TABLE agents ADD COLUMN connected boolean NOT NULL DEFAULT false;
+ALTER TABLE agents ADD COLUMN holder uuid;
 ";
 
 /// This Server's version, `MAJOR.MINOR.PATCH`: the base of the version it reports, so a

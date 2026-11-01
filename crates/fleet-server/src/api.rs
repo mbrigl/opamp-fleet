@@ -858,6 +858,7 @@ async fn restart_agent(
             StatusCode::CONFLICT,
             format!("agent {uid} does not declare AcceptsRestartCommand"),
         ),
+        Err(RestartError::Storage(e)) => error(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
 }
 
@@ -990,7 +991,8 @@ async fn rollout_to_agent(
                    Client still configured for this Server therefore comes back on its next \
                    report. Refused while the \
                    Agent is still reporting, since forgetting it would have its configuration \
-                   offered again and a managed process restarted with it.",
+                   offered again and a managed process restarted with it. A session that still \
+                   carries an Agent that went quiet is ended, on whichever instance carries it.",
     responses(
         (status = 204, description = "The Agent is forgotten"),
         (status = 400, description = "Malformed Instance UID", body = ErrorBody),
@@ -1013,6 +1015,7 @@ async fn forget_agent(
             StatusCode::CONFLICT,
             format!("agent {uid} is still reporting; stop it or wait for it to go stale"),
         ),
+        Err(ForgetError::Storage(e)) => error(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
 }
 

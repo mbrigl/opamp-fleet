@@ -790,7 +790,13 @@ enum Pushes {
 struct Session {
     pushes: Pushes,
     guard: Option<Guard>,
+    /// Why the session was ended, once something ended it: what the connection's own loop decided
+    /// as well as what its [`Guard`] did.
+    ended: Arc<Mutex<Option<&'static str>>>,
 }
+
+/// Why a session is ended whose every Agent was forgotten (ADR-0024 clause 10).
+const FORGOTTEN: &str = "forgotten";
 
 struct Guard {
     revocations: Arc<Revocations>,
@@ -863,7 +869,14 @@ impl Outbound for Session {
     type Item = Push;
 
     async fn next(&mut self) -> Option<Push> {
-        let Session { pushes, guard } = self;
+        let Session {
+            pushes,
+            guard,
+            ended,
+        } = self;
+        if ended.lock().expect("ended lock").is_some() {
+            return None;
+        }
         let Some(guard) = guard else {
             return pushes.next().await;
         };
@@ -938,6 +951,7 @@ impl Handler for Fleet {
         let ended = Arc::new(Mutex::new(None));
         let session = |pushes: Pushes| Session {
             pushes,
+            ended: ended.clone(),
             guard: self.0.revocations().map(|revocations| {
                 Guard::new(
                     revocations.clone(),
@@ -1094,6 +1108,19 @@ impl Handler for Fleet {
                 _ => Vec::new(),
             };
         }
+        // An Agent forgotten while this socket carried it has its session ended: the socket's, when
+        // it carried no other.
+        if let Some(conn) = carrier.conn {
+            let forgotten = self.0.take_forgotten(conn);
+            if !forgotten.is_empty() {
+                carrier.seen.retain(|uid| !forgotten.contains(uid));
+                if carrier.seen.is_empty() {
+                    info!(agents = ?forgotten, "ending the session of a forgotten agent");
+                    *carrier.ended.lock().expect("ended lock") = Some(FORGOTTEN);
+                    return Vec::new();
+                }
+            }
+        }
         let mut messages = Vec::new();
         for uid in &carrier.seen {
             // A queued restart goes first, as its own message — the Baseline's command message is
@@ -1123,6 +1150,13 @@ impl Handler for Fleet {
 
     fn closing(&self, carrier: &Carrier) -> Option<Closing> {
         let reason = (*carrier.ended.lock().expect("ended lock"))?;
+        if reason == FORGOTTEN {
+            // Nothing the peer did: it may connect again, and comes back as a stranger.
+            return Some(Closing {
+                code: 1000,
+                reason: reason.to_string(),
+            });
+        }
         Some(Closing::policy(reason))
     }
 

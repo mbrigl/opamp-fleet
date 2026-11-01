@@ -86,6 +86,9 @@ report, its own labels and its Client Agent's labels, in that order of precedenc
    fleet logic knows about persistence, and its surface is the access pattern:
    - `load()` — every record, once, at startup, for a Server that holds the fleet in memory;
    - `get(uid)` — one record, for an instance that holds only the Agents it carries;
+   - `get_many(uids)` — the records of several Agents in one read, for an instance that reads
+     again under its fleet lock what another instance changed, so the lock waits for one round
+     trip however many records changed;
    - `query(filters, sort, cursor, limit)` — one page of records and the number that match, for
      the Operator plane's list where the fleet is not in memory, by the filters, the order and the
      cursor of
@@ -93,7 +96,26 @@ report, its own labels and its Client Agent's labels, in that order of precedenc
      clauses 5 and 6;
    - `put(uid, &PersistedAgent)` — create one record, or replace the part of it a report decides
      (clause 3: what the Agent reported, the transport, `last_seen_ms` and the Host it arrived
-     over), leaving the labels, the assignments and `restart_pending` as they are;
+     over), leaving the labels, the assignments and `restart_pending` as they are: what setup and
+     an import write; the fleet writes through `create_within` and `write_report`;
+   - `create_within(uid, &PersistedAgent, max_records)` — create the record of an Agent first
+     heard of unless the store holds `max_records` already, counted where the records are stored
+     in the step that creates it, so the bound of ADR-0021 clause 12 holds for every instance; a
+     record stored already is answered as it is stored, and passes no bound;
+   - `write_report(uid, &PersistedAgent)` — write the part of a stored record a report decides, as
+     `put` does, and create none; it answers whether there was a record, and on a shared store
+     none means the Agent was forgotten through another instance, which the fleet then drops
+     rather than create it again (ADR-0024 clause 14);
+   - `write_report_unless_held_elsewhere(uid, &PersistedAgent, holder)` — `write_report` at the
+     graceful-shutdown flush: on a shared store only of a record whose stored holder is `holder`,
+     or is none and whose stored `last_seen_ms` is no newer than the copy's, so an Agent that
+     moved to another instance keeps what that instance wrote of it, also once it disconnected
+     there;
+   - `write_presence(holder, presences)` — one batch of the presence of the Agents `holder`
+     carries (clauses 3 and 4), in the order of their `instance_uid`; a disconnect is written only
+     of a record whose stored holder is `holder` or none;
+   - `remove_if_silent(uid, silent_before_ms)` — forget one record of a shared store when its
+     stored presence lets it go, read and removed in one step (clause 11);
    - `set_labels(uid, labels)` and `set_restart_pending(uid, pending)` — the acts that decide them,
      each writing what it names alone; the assignments are written by the rollout operation of
      [ADR-draft-the-servers-state-and-its-stores](draft-the-servers-state-and-its-stores.md)
@@ -123,19 +145,22 @@ report, its own labels and its Client Agent's labels, in that order of precedenc
    connection. Not persisted: the owning connection, and on the filesystem `connected`.
 
 4. **The write discipline lives above the port, so no backend can get it wrong.** The fleet keeps a
-   digest of each record's durable content as last written and calls `put` only when it changed.
-   `last_seen_ms` and `sequence_num` are outside the digest. On the filesystem they ride along with
-   whatever write happens, so a heartbeat, which changes nothing else, reaches no adapter, and
-   after a crash a record's last-seen dates from its last durable change. On PostgreSQL each
-   instance writes the presence of the Agents it carries — `connected`, `last_seen_ms`, the
-   holding instance — in one batch every `[database] presence_interval_secs` (default 30, from 10
-   to 60), so
+   digest of each record's durable content as last written and calls `write_report` only when it
+   changed. `last_seen_ms` and `sequence_num` are outside the digest. On the filesystem they ride
+   along with whatever write happens, so a heartbeat, which changes nothing else, reaches no
+   adapter, and after a crash a record's last-seen dates from its last durable change. On
+   PostgreSQL each instance writes the presence of the Agents it carries — `connected`,
+   `last_seen_ms`, the holding instance — in one batch every `[database] presence_interval_secs`
+   (default 30, from 10 to 60), so
    a heartbeat reaches the database at most once per interval and Agent. A change of the holding
    instance and a disconnect are written in the next batch, except as
    [ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it](draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md)
    clause 8 says. On graceful shutdown every record and every presence is flushed, so an ordinary
-   restart restores current values. A failed write is logged, never fatal; on PostgreSQL a presence
-   batch that fails is retried with the next one.
+   restart restores current values; on PostgreSQL the flush writes only the records of the Agents
+   this instance heard report, and of those only the ones whose stored holder is this instance, or
+   is none and whose stored `last_seen_ms` is no newer than this instance's, and the presence in a
+   last batch. A failed write is logged, never fatal; on PostgreSQL a
+   presence batch that fails is retried with the next one.
 
 5. **Stored records are secret-bearing, whatever the backend.** A reported effective
    configuration carries whatever the Managed Process runs, credentials included, and package
