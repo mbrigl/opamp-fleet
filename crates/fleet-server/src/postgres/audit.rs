@@ -113,7 +113,10 @@ impl PgAuditStore {
                     if stored.as_deref() != lines.get(index).map(String::as_str) {
                         return Err(format!(
                             "the audit chain {chain} ends at entry {last} on a line this \
-                             instance did not write there"
+                             instance did not write there, so the database was restored or \
+                             changed behind it: run server audit-verify --config to see where \
+                             the chain breaks, and restart this instance so that it writes into \
+                             a chain of a new lease"
                         ));
                     }
                 }
@@ -817,8 +820,8 @@ mod tests {
 
     /// An instance killed without a shutdown leaves its chain open; the instance that takes over
     /// its lapsed lease, at a take or at a renewal, closes it with `audit.chain_closed`, `reason`
-    /// `lease_lapsed` and `closed_by` its own chain, and from then on the store refuses the dead chain an entry.
-    /// Two instances that try at once take it over once.
+    /// `lease_lapsed` and `closed_by` its own chain, and from then on the store refuses the dead
+    /// chain an entry. Two instances that try at once take it over once.
     /// Verifies: ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance, ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
     #[test]
     fn the_instance_that_takes_over_a_lapsed_lease_closes_its_chain() {
@@ -1373,6 +1376,35 @@ mod tests {
         assert!(lines(&test, &first.instance_id)[0].contains(&end.1));
         let verified = verify(&database, Some(&archive)).expect("verify");
         assert!(!verified.failed, "{:?}", verified.lines);
+    }
+
+    /// A batch whose first lines are stored, but stored differently than this instance wrote
+    /// them, is refused, and the refusal says what to do: check the record, and restart onto a
+    /// new lease.
+    /// Verifies: ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance
+    #[test]
+    fn a_line_stored_where_this_instance_wrote_another_is_refused_naming_the_next_step() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = shared(&test);
+        let chain = database
+            .take_lease("host-a", LAPSE)
+            .expect("lease")
+            .instance_id;
+        let (_held, watched) = watch::channel(Some(chain.clone()));
+        let mut store = PgAuditStore::new(database, watched);
+        store.chain();
+        let line = render(1, 0, &admitted(1).with("chain", chain.as_str()), GENESIS);
+        let err = store
+            .append(1, &[&line])
+            .expect_err("entry 1 is chain_opened");
+        assert!(
+            err.contains("did not write there")
+                && err.contains("server audit-verify --config")
+                && err.contains("restart this instance"),
+            "{err}"
+        );
     }
 
     /// The archive is read and offered only while the database holds no chain: a later start

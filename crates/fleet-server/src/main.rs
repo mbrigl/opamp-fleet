@@ -231,8 +231,9 @@ fn migrate(mut args: impl Iterator<Item = String>) -> ! {
 /// (ADR-0029 clause 27): copies the records of `data_dir` into the database the configuration
 /// names, and its filesystem blobs into a new, empty `data_dir`, leaving the old one as the backup
 /// and its audit record as the archive the first chain links to. It is run while the Server is
-/// stopped; it takes the database's lock, so a Server still running against it stops the copy. Prints what it copied, and exits non-zero when
-/// it could not copy all of it, leaving the database without the Server's tables.
+/// stopped; it takes the database's lock, so a Server still running against it stops the copy.
+/// Prints what it copied, and exits non-zero when it could not copy all of it, leaving the
+/// database without the Server's tables.
 fn migrate_to_postgres(mut args: impl Iterator<Item = String>) -> ! {
     let (mut from, mut data_dir, mut config) = (None, None, None);
     while let Some(flag) = args.next() {
