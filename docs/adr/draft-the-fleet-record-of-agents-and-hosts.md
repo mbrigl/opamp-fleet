@@ -107,8 +107,10 @@ report, its own labels and its Client Agent's labels, in that order of precedenc
      none means the Agent was forgotten through another instance, which the fleet then drops
      rather than create it again (ADR-0024 clause 14);
    - `write_report_unless_held_elsewhere(uid, &PersistedAgent, holder)` — `write_report` at the
-     graceful-shutdown flush: on a shared store only of a record whose stored holder is `holder`
-     or none, so an Agent that moved to another instance keeps what that instance wrote of it;
+     graceful-shutdown flush: on a shared store only of a record whose stored holder is `holder`,
+     or is none and whose stored `last_seen_ms` is no newer than the copy's, so an Agent that
+     moved to another instance keeps what that instance wrote of it, also once it disconnected
+     there;
    - `write_presence(holder, presences)` — one batch of the presence of the Agents `holder`
      carries (clauses 3 and 4), in the order of their `instance_uid`; a disconnect is written only
      of a record whose stored holder is `holder` or none;
@@ -155,8 +157,9 @@ report, its own labels and its Client Agent's labels, in that order of precedenc
    [ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it](draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md)
    clause 8 says. On graceful shutdown every record and every presence is flushed, so an ordinary
    restart restores current values; on PostgreSQL the flush writes only the records of the Agents
-   this instance heard report, and of those only the ones whose stored holder is this instance or
-   none, and the presence in a last batch. A failed write is logged, never fatal; on PostgreSQL a
+   this instance heard report, and of those only the ones whose stored holder is this instance, or
+   is none and whose stored `last_seen_ms` is no newer than this instance's, and the presence in a
+   last batch. A failed write is logged, never fatal; on PostgreSQL a
    presence batch that fails is retried with the next one.
 
 5. **Stored records are secret-bearing, whatever the backend.** A reported effective
