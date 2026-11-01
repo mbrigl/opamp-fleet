@@ -40,19 +40,17 @@ fn resolve_version() -> Result<String, String> {
         std::env::var("CARGO_MANIFEST_DIR").map_err(|e| format!("CARGO_MANIFEST_DIR: {e}"))?;
     let repo = Repository::discover(&manifest_dir).ok();
     if let Some(repo) = &repo {
-        // The version changes with the checked-out commit and with tag edits.
-        println!(
-            "cargo:rerun-if-changed={}",
-            repo.path().join("HEAD").display()
-        );
-        println!(
-            "cargo:rerun-if-changed={}",
-            repo.path().join("refs").display()
-        );
-        println!(
-            "cargo:rerun-if-changed={}",
-            repo.path().join("packed-refs").display()
-        );
+        // The version changes with the checked-out commit and with tag edits. A linked worktree
+        // keeps its HEAD in its own gitdir and the tags in the common one; a path that does not
+        // exist would rerun this script on every build and relink the binaries a test is running.
+        let watched = [
+            repo.path().join("HEAD"),
+            repo.commondir().join("refs"),
+            repo.commondir().join("packed-refs"),
+        ];
+        for path in watched.iter().filter(|path| path.exists()) {
+            println!("cargo:rerun-if-changed={}", path.display());
+        }
     }
 
     // The number itself, from the file that decides it (ADR-0033) or from the override.
