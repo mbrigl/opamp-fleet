@@ -317,9 +317,13 @@ and configured in the Server's configuration alone, and move an old layout by an
       pool: one session more for each upload and sweep in progress, which the database's
       `max_connections` must allow for. An upload waits for it as long as the database's
       `lock_timeout` of 5 seconds, and a sweep 60 seconds, its session's `statement_timeout` raised
-      to let it. A session that ends while it holds the lock is logged: the lock is gone with it.
+      to let it. A session that ends while it holds the lock is logged: the lock is gone with it,
+      and an upload whose hold was lost so before its entry is written is refused, to be uploaded
+      again.
     - A startup sweep that cannot have the lock fails startup, naming the lock. A sweep after an
-      act logs it, and the blobs it would have deleted stay until the next startup.
+      act logs it, and the blobs it would have deleted stay until the next startup. A sweep after
+      an act runs once the act has let go of every lock of its Server's own, such as the fleet's,
+      so no other act waits behind its wait for the lock.
 
 15. **The filesystem blob store** keeps one file per blob in `data_dir/blobs/`. It streams an
     upload to a staging file inside `blobs/`, hashes it on the way, and renames it to its hash. At
@@ -862,7 +866,11 @@ Tests that carry `Verifies: ADR-0029`:
   `a_sweep_keeps_a_blob_an_entry_stored_through_another_writer_names`,
   `an_upload_holds_off_a_sweep_until_its_entry_is_committed`,
   `an_upload_whose_blob_a_sweep_took_first_is_refused`,
+  `an_upload_whose_lock_was_lost_is_refused`, `a_hold_whose_session_ends_is_marked_lost`,
+  `a_sweep_waits_its_whole_wait_for_the_lock_and_an_upload_five_seconds`,
   `a_startup_sweep_that_cannot_have_the_lock_fails_naming_it`;
+  [`fleet.rs`](../../crates/fleet-server/src/fleet.rs)
+  `a_package_deletion_sweeps_once_it_lets_the_fleet_lock_go`;
   [`postgres/import.rs`](../../crates/fleet-server/src/postgres/import.rs)
   `migrate_to_postgres_leaves_the_audit_as_an_archive_and_records_its_last_entry`,
   `migrate_to_postgres_with_s3_uploads_the_referenced_blobs_and_takes_no_data_dir`,
