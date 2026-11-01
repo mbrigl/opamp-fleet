@@ -104,12 +104,19 @@ once its tag exists.
   **What to do:** nothing. A Configuration that sets `reports_available_components: false` under
   `extensions.opamp.capabilities` to work around this can drop the setting.
 
-- **`server audit-verify <dir>` holds a record the Server repaired after a crash.** A crash
-  mid-write leaves a torn last line, and the next start follows it with `audit.chain_broken`
-  chained on its hash ([ADR-0023](docs/adr/0023-an-append-only-audit-record.md)). `audit-verify`
-  failed on that torn line as not an entry; it now takes it as holding when `audit.chain_broken`
-  follows it, and still fails a torn line nothing follows.
-  **What to do:** nothing.
+- **`server audit-verify <dir>` holds a record the Server repaired after a crash, and binds the
+  repair to the entries before it.** A crash mid-write leaves a torn last line, and the next start
+  follows it with `audit.chain_broken` chained on its hash
+  ([ADR-draft-an-append-only-audit-record](docs/adr/draft-an-append-only-audit-record.md)).
+  `audit-verify` failed on that torn line as not an entry, and on a torn line cut inside a
+  character could not read the file at all. It now takes the repair as holding, and still fails a
+  torn line nothing follows. `audit.chain_broken` now also names as `last_whole` the hash of the
+  last whole entry before the torn line, and `audit-verify` fails a repair whose `last_whole`
+  does not match it, so the entries before a repair can no longer be replaced unseen. A repair
+  written before this release names no `last_whole`: `audit-verify` holds it and names it as a
+  repair without a link, since the entries before it are not bound by those after it.
+  **What to do:** nothing. Where `audit-verify` names a repair without a link, compare the entries
+  before it against a copy taken earlier.
 
 - **A stop right after the Client starts ends it cleanly.** Its `SIGTERM` and `SIGINT` handlers
   were installed only once the task waiting for them first ran; a stop before that ended the Client

@@ -242,23 +242,17 @@ fn carry_audit(config_dir: &Path, data_dir: &Path, report: &mut Report) -> Resul
             Err(e) => report.failed(format!("the audit file {}: {e}", path.display())),
         }
     }
-    let mut texts = Vec::new();
-    for file in fs::audit_files(&new)? {
-        let text = std::fs::read_to_string(&file)
-            .map_err(|e| format!("cannot read {}: {e}", file.display()))?;
-        texts.push((file.display().to_string(), text));
-    }
-    let lines = texts.iter().flat_map(|(name, text)| {
-        text.lines()
-            .enumerate()
-            .filter(|(_, line)| !line.trim().is_empty())
-            .map(move |(index, line)| (format!("{name}:{}", index + 1), line))
-    });
-    match crate::audit_log::verify(lines) {
-        Ok(count) => report.line(format!(
-            "carried: {} audit file(s), {count} entries, the chain holds",
-            copied.len()
-        )),
+    match fs::verify_audit(&new)?.1 {
+        Ok(held) => {
+            report.line(format!(
+                "carried: {} audit file(s), {} entries, the chain holds",
+                copied.len(),
+                held.entries
+            ));
+            for line in held.unlinked_lines() {
+                report.line(line);
+            }
+        }
         // Copied as they were: a break the old files hold is reported, not repaired.
         Err(e) => report.line(format!(
             "carried: {} audit file(s) as they were — the chain breaks at {e}",

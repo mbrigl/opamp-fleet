@@ -176,6 +176,7 @@ impl AuditStore for PgAuditStore {
             last_line,
             last_seq: super::unsigned(seq),
             torn: false,
+            last_whole: None,
         }))
     }
 
@@ -539,8 +540,12 @@ pub fn verify(database: &Database, archive: Option<&Path>) -> Result<Verified, S
             "the predecessor chain {chain} names, entry {seq} of the archive, was not checked — \
              name the archive with --archive <dir>"
         )),
-        (Some((chain, (seq, hash))), Some(dir)) => match archive_end(dir) {
-            Ok(Some((end_seq, end_hash))) if end_seq == seq && end_hash == hash => {
+        (Some((chain, (seq, hash))), Some(dir)) => match archive_checked(dir) {
+            Ok(Some(Archive {
+                end: (end_seq, end_hash),
+                unlinked,
+            })) if end_seq == seq && end_hash == hash => {
+                verified.lines.extend(unlinked);
                 verified.lines.push(format!(
                     "the archive {} holds, and ends on entry {seq}, the predecessor chain {chain} \
                      names",
@@ -548,6 +553,7 @@ pub fn verify(database: &Database, archive: Option<&Path>) -> Result<Verified, S
                 ));
             }
             Ok(end) => {
+                let end = end.map(|archive| archive.end);
                 verified.failed = true;
                 verified.lines.push(format!(
                     "the predecessor chain {chain} names, entry {seq} with hash {hash}, is not \
@@ -631,23 +637,41 @@ pub fn offer_archive_in(database: &Database, dir: &Path) -> Result<(), String> {
 
 /// The `seq` and the hash of the last entry of the file record in `dir`, once its whole chain
 /// holds: what a move from files records as the archive's end, and what `audit-verify --archive`
-/// checks the predecessor against. `None` when `dir` does not exist or holds no entry.
+/// checks the predecessor against. `None` when `dir` does not exist or holds no entry. Each repair
+/// without a link the archive holds is logged at `warn`; [`archive_checked`] returns them.
+///
+/// # Errors
+/// As [`archive_checked`].
+pub fn archive_end(dir: &Path) -> Result<Option<(u64, String)>, String> {
+    Ok(archive_checked(dir)?.map(|Archive { end, unlinked }| {
+        for line in unlinked {
+            tracing::warn!(archive = %dir.display(), "{line}");
+        }
+        end
+    }))
+}
+
+/// The archive in a directory as [`archive_checked`] found it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Archive {
+    /// The `seq` and the hash of its last entry.
+    pub end: (u64, String),
+    /// A line for each repair without a link it holds.
+    pub unlinked: Vec<String>,
+}
+
+/// [`archive_end`], with a line for each repair without a link the archive holds.
 ///
 /// # Errors
 /// Returns an error when the files cannot be read, when the chain breaks, and when the record ends
 /// in a torn line — a crash mid-write — naming the file: an end recorded there could never be
 /// verified.
-pub fn archive_end(dir: &Path) -> Result<Option<(u64, String)>, String> {
+pub fn archive_checked(dir: &Path) -> Result<Option<Archive>, String> {
     if !dir.is_dir() {
         return Ok(None);
     }
     let files = crate::fs::audit_files(dir)?;
-    let mut texts = Vec::new();
-    for file in &files {
-        let text = std::fs::read_to_string(file)
-            .map_err(|e| format!("cannot read {}: {e}", file.display()))?;
-        texts.push((file.display().to_string(), text));
-    }
+    let lines = crate::fs::audit_lines(&files)?;
     let Some(tail) = crate::fs::audit_tail(dir)? else {
         return Ok(None);
     };
@@ -667,14 +691,16 @@ pub fn archive_end(dir: &Path) -> Result<Option<(u64, String)>, String> {
             dir.display()
         ));
     }
-    crate::audit_log::verify(texts.iter().flat_map(|(name, text)| {
-        text.lines()
-            .enumerate()
-            .filter(|(_, line)| !line.trim().is_empty())
-            .map(move |(index, line)| (format!("{name}:{}", index + 1), line))
-    }))
+    let held = crate::audit_log::verify(
+        lines
+            .iter()
+            .map(|(place, line)| (place.clone(), line.as_str())),
+    )
     .map_err(|e| format!("the archive's chain breaks at {e}"))?;
-    Ok(Some((tail.last_seq, line_hash(&tail.last_line))))
+    Ok(Some(Archive {
+        end: (tail.last_seq, line_hash(&tail.last_line)),
+        unlinked: held.unlinked_lines(),
+    }))
 }
 
 #[cfg(test)]
@@ -1368,7 +1394,10 @@ mod tests {
         // The file store's next start repairs it.
         file_record(dir.path(), 1);
         let repaired = std::fs::read_to_string(&file).expect("read");
-        assert!(repaired.contains("audit.chain_broken"), "{repaired}");
+        assert!(
+            repaired.contains("audit.chain_broken") && repaired.contains("\"last_whole\""),
+            "{repaired}"
+        );
         let end = archive_end(&archive)
             .expect("a repaired archive")
             .expect("entries");
@@ -1383,6 +1412,120 @@ mod tests {
         assert!(lines(&test, &first.instance_id)[0].contains(&end.1));
         let verified = verify(&database, Some(&archive)).expect("verify");
         assert!(!verified.failed, "{:?}", verified.lines);
+    }
+
+    /// An archive the file store repaired after a crash: three entries, the last torn, then a
+    /// start that repairs it and one entry more.
+    fn repaired_archive(root: &Path) -> std::path::PathBuf {
+        file_record(root, 3);
+        let file = crate::fs::audit_files(&root.join(crate::fs::AUDIT))
+            .expect("files")
+            .pop()
+            .expect("a file");
+        let text = std::fs::read_to_string(&file).expect("read");
+        std::fs::write(&file, &text[..text.len() - 20]).expect("tear");
+        file_record(root, 1);
+        file
+    }
+
+    /// The archive's lines, one per line of `file`.
+    fn archive_lines(file: &Path) -> Vec<String> {
+        std::fs::read_to_string(file)
+            .expect("read")
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// Lines before a genuine repair replaced by a chain of their own from 64 zeros: the repair
+    /// still chains on the torn line and the archive still ends where the predecessor names, but
+    /// the repair's `last_whole` names an entry that is gone, so `audit-verify --archive` fails.
+    /// Verifies: ADR-draft-an-append-only-audit-record
+    #[test]
+    fn an_archive_whose_entries_before_a_repair_were_replaced_fails_audit_verify() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = repaired_archive(dir.path());
+        let archive = dir.path().join(crate::fs::AUDIT);
+        let end = archive_end(&archive).expect("genuine").expect("entries");
+        let kept = archive_lines(&file);
+        assert!(kept[3].contains("audit.chain_broken"), "{kept:#?}");
+        let first = render(1, 0, &admitted(7), GENESIS);
+        let second = render(2, 0, &admitted(8), &line_hash(&first));
+        let forged = [first, second]
+            .into_iter()
+            .chain(kept[2..].iter().cloned())
+            .map(|line| line + "\n")
+            .collect::<String>();
+        std::fs::write(&file, forged).expect("forge");
+        let err = archive_end(&archive).expect_err("forged");
+        assert!(err.contains("last_whole"), "{err}");
+
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = shared(&test);
+        database.offer_archive(Some(end.clone()));
+        let first = database.take_lease("host-a", LAPSE).expect("lease");
+        assert!(lines(&test, &first.instance_id)[0].contains(&end.1));
+        let verified = verify(&database, Some(&archive)).expect("verify");
+        assert!(verified.failed, "{:?}", verified.lines);
+        assert!(
+            verified
+                .lines
+                .iter()
+                .any(|line| line.contains("last_whole")),
+            "{:?}",
+            verified.lines
+        );
+    }
+
+    /// An archive whose repair names no `last_whole` holds, and `audit-verify --archive` names it
+    /// as a repair without a link.
+    /// Verifies: ADR-draft-an-append-only-audit-record
+    #[test]
+    fn an_archive_with_a_repair_without_a_link_holds_and_names_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = repaired_archive(dir.path());
+        let archive = dir.path().join(crate::fs::AUDIT);
+        let mut lines = archive_lines(&file);
+        let mut broken: serde_json::Value = serde_json::from_str(&lines[3]).expect("json");
+        broken
+            .as_object_mut()
+            .expect("object")
+            .remove("last_whole")
+            .expect("a link");
+        lines[3] = broken.to_string();
+        let mut after: serde_json::Value = serde_json::from_str(&lines[4]).expect("json");
+        after["prev"] = line_hash(&lines[3]).into();
+        lines[4] = after.to_string();
+        std::fs::write(&file, lines.join("\n") + "\n").expect("write");
+        let Some(archive_end) = archive_checked(&archive).expect("held") else {
+            panic!("entries");
+        };
+        assert!(
+            archive_end.unlinked.len() == 1
+                && archive_end.unlinked[0].contains(&format!("{}:4", file.display()))
+                && archive_end.unlinked[0].contains("a repair without a link"),
+            "{:?}",
+            archive_end.unlinked
+        );
+
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = shared(&test);
+        database.offer_archive(Some(archive_end.end));
+        database.take_lease("host-a", LAPSE).expect("lease");
+        let verified = verify(&database, Some(&archive)).expect("verify");
+        assert!(!verified.failed, "{:?}", verified.lines);
+        assert!(
+            verified
+                .lines
+                .iter()
+                .any(|line| line.contains("a repair without a link")),
+            "{:?}",
+            verified.lines
+        );
     }
 
     /// A batch whose first lines are stored, but stored differently than this instance wrote

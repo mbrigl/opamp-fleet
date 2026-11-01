@@ -250,8 +250,11 @@ fn copy(
     // entry is recorded for the first chain to name as its predecessor
     // (ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance clause 6).
     let audit = from.join(fs::AUDIT);
-    let archive_end =
-        super::audit::archive_end(&audit)?.map(|(seq, hash)| (super::signed(seq), hash));
+    let archive = super::audit::archive_checked(&audit)?;
+    let archive_end = archive.map(|archive| {
+        report.lines.extend(archive.unlinked);
+        (super::signed(archive.end.0), archive.end.1)
+    });
     report.lines.push(match &archive_end {
         Some((seq, _)) => format!(
             "the audit record stays in {} as the archive; its last entry, {seq}, is the \
@@ -592,19 +595,7 @@ mod tests {
 
     /// How many entries the chain in `dir` holds, verified.
     fn verified(dir: &Path) -> Result<u64, String> {
-        let mut texts = Vec::new();
-        for file in fs::audit_files(dir)? {
-            texts.push((
-                file.display().to_string(),
-                std::fs::read_to_string(&file).expect("read"),
-            ));
-        }
-        crate::audit_log::verify(texts.iter().flat_map(|(name, text)| {
-            text.lines()
-                .filter(|line| !line.trim().is_empty())
-                .enumerate()
-                .map(move |(index, line)| (format!("{name}:{index}"), line))
-        }))
+        fs::verify_audit(dir)?.1.map(|held| held.entries)
     }
 
     /// What a ledger holds, without the version only a database keeps.

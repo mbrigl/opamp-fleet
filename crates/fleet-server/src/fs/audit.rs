@@ -4,7 +4,7 @@
 use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
 
-use crate::audit_log::{AuditStore, Tail};
+use crate::audit_log::{line_hash, AuditStore, Held, Tail};
 
 /// `audit-<first seq>.jsonl` files in a directory only the Server's account can enter, each
 /// owner-only, appended to whole lines at a time.
@@ -185,13 +185,79 @@ pub fn tail_in(dir: &Path) -> Result<Option<Tail>, String> {
             .max()
             .unwrap_or_else(|| first_seq_of(file).saturating_sub(1) + lines.len() as u64);
         let torn = seq_of(&last_line).is_none() || !ends_with_newline(file)?;
+        let last_whole = if torn {
+            last_whole_in(dir, file, &lines)?
+        } else {
+            None
+        };
         return Ok(Some(Tail {
             last_line,
             last_seq,
             torn,
+            last_whole,
         }));
     }
     Ok(None)
+}
+
+/// The hash of the last whole entry of the record up to the end of `file`, whose tail is `lines`:
+/// in `file`, or else the last line of the newest file before it that holds one.
+fn last_whole_in(dir: &Path, file: &Path, lines: &[String]) -> Result<Option<String>, String> {
+    if let Some(line) = lines.iter().rev().find(|line| seq_of(line).is_some()) {
+        return Ok(Some(line_hash(line)));
+    }
+    for earlier in files_in(dir)?
+        .iter()
+        .rev()
+        .skip_while(|earlier| *earlier != file)
+        .skip(1)
+    {
+        if let Some(line) = last_line(earlier)? {
+            return Ok(seq_of(&line).is_some().then(|| line_hash(&line)));
+        }
+    }
+    Ok(None)
+}
+
+/// The non-empty lines of `files` in order, each with its place (`<file>:<line number>`), read as
+/// bytes: a line that is valid UTF-8 as it is, and one that is not, which only a torn piece cut
+/// inside a character can be, decoded the lossy way the store reads its tail and hashes it.
+///
+/// # Errors
+/// Returns an error when a file cannot be read, naming it.
+pub fn read_lines(files: &[PathBuf]) -> Result<Vec<(String, String)>, String> {
+    let mut placed = Vec::new();
+    for file in files {
+        let bytes =
+            std::fs::read(file).map_err(|e| format!("cannot read {}: {e}", file.display()))?;
+        let name = file.display().to_string();
+        for (index, line) in bytes.split(|byte| *byte == b'\n').enumerate() {
+            let line = line.strip_suffix(b"\r").unwrap_or(line);
+            let line = String::from_utf8_lossy(line).into_owned();
+            if !line.trim().is_empty() {
+                placed.push((format!("{name}:{}", index + 1), line));
+            }
+        }
+    }
+    Ok(placed)
+}
+
+/// The audit record in `dir` as [`verify`](crate::audit_log::verify) finds it: how many files it
+/// read, and the chain's [`Held`] or its first break.
+///
+/// # Errors
+/// Returns an error when the files cannot be read.
+pub fn verify_in(dir: &Path) -> Result<(usize, Result<Held, String>), String> {
+    let files = files_in(dir)?;
+    let lines = read_lines(&files)?;
+    Ok((
+        files.len(),
+        crate::audit_log::verify(
+            lines
+                .iter()
+                .map(|(place, line)| (place.clone(), line.as_str())),
+        ),
+    ))
 }
 
 impl AuditStore for FsAuditStore {
@@ -269,7 +335,8 @@ mod tests {
             Some(Tail {
                 last_line: "{\"seq\":2}".to_string(),
                 last_seq: 2,
-                torn: false
+                torn: false,
+                last_whole: None,
             })
         );
         store.append(3, &["{\"seq\":3}"]).expect("append");
@@ -335,5 +402,50 @@ mod tests {
         store.append(2, &["{\"seq\":2}"]).expect("append");
         let text = std::fs::read_to_string(other.join("audit/audit-1.jsonl")).expect("read");
         assert_eq!(text, "{\"seq\":1}\n{\"seq\":2,\"pr\n{\"seq\":2}\n");
+    }
+
+    /// A crash that cuts a line inside a two-byte character leaves bytes that are not UTF-8. The
+    /// record still verifies: the torn line is read the lossy way the store hashed it when it
+    /// repaired the record, and the entries after the repair hold.
+    /// Verifies: ADR-0023, ADR-draft-an-append-only-audit-record
+    #[test]
+    fn a_line_torn_inside_a_character_verifies_as_the_store_hashed_it() {
+        use crate::audit::{Audit as _, Entry};
+        use crate::audit_log::{AuditLog, Limits};
+
+        let record = |root: &Path, user: &str| {
+            let audit = AuditLog::start(
+                Box::new(FsAuditStore::open(root).expect("open")),
+                Limits::default(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            )
+            .expect("audit");
+            audit
+                .record(Entry::new("operator.act", "ok").with("user", user.to_string()))
+                .expect("record");
+            assert!(audit.drain(std::time::Duration::from_secs(10)));
+        };
+        let dir = tempfile::tempdir().expect("tempdir");
+        record(dir.path(), "a");
+        record(dir.path(), "jürgen");
+        let file = files_in(&dir.path().join("audit"))
+            .expect("files")
+            .pop()
+            .expect("a file");
+        let bytes = std::fs::read(&file).expect("read");
+        // Cut after the first byte of "ü".
+        let cut = bytes
+            .windows(2)
+            .position(|pair| pair == "ü".as_bytes())
+            .expect("the character")
+            + 1;
+        std::fs::write(&file, &bytes[..cut]).expect("tear");
+        assert!(std::str::from_utf8(&std::fs::read(&file).expect("read")).is_err());
+        record(dir.path(), "b");
+        let (files, held) = verify_in(&dir.path().join("audit")).expect("read");
+        assert_eq!(files, 1);
+        let held = held.expect("the chain holds");
+        assert_eq!(held.entries, 3, "a, the broken mark and b");
+        assert!(held.unlinked.is_empty(), "{:?}", held.unlinked);
     }
 }

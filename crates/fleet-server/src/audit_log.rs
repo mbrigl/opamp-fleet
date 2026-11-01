@@ -59,6 +59,9 @@ pub struct Tail {
     pub last_seq: u64,
     /// Whether the record ends in a line that is not a whole entry — a crash mid-write.
     pub torn: bool,
+    /// With a torn last line, the hash of the last whole entry before it, which the repair names
+    /// as `last_whole`; `None` when the record holds no whole entry before it, or is not torn.
+    pub last_whole: Option<String>,
 }
 
 /// Which chain a store writes the next lines into.
@@ -308,8 +311,13 @@ impl AuditLog {
         let chain = store.chain();
         let per_lease = chain != Chain::One;
         let (seq, prev, torn) = match store.tail()? {
-            None => (0, GENESIS.to_string(), false),
-            Some(tail) => (tail.last_seq, line_hash(&tail.last_line), tail.torn),
+            None => (0, GENESIS.to_string(), None),
+            Some(tail) => (
+                tail.last_seq,
+                line_hash(&tail.last_line),
+                tail.torn
+                    .then(|| tail.last_whole.unwrap_or_else(|| GENESIS.to_string())),
+            ),
         };
         let (tx, rx) = std::sync::mpsc::sync_channel(CHANNEL_CAPACITY);
         let failing = Arc::new(AtomicBool::new(false));
@@ -335,8 +343,13 @@ impl AuditLog {
                 Chain::One | Chain::Unleased => None,
             },
         };
-        if torn {
-            writer.write(Entry::new("audit.chain_broken", "recorded"), None);
+        if let Some(last_whole) = torn {
+            // The torn piece holds no `prev` of its own; `last_whole` binds what follows to the
+            // entries before it.
+            writer.write(
+                Entry::new("audit.chain_broken", "recorded").with("last_whole", last_whole),
+                None,
+            );
             writer.commit();
         }
         // A thread of its own: the writes are blocking file I/O, and must not hold a runtime
@@ -857,19 +870,47 @@ fn rfc3339(ms: u64) -> String {
         .unwrap_or_default()
 }
 
+/// A chain [`verify`] found to hold.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Held {
+    /// How many entries it holds.
+    pub entries: u64,
+    /// Where each repair without a link is: an `audit.chain_broken` after a torn line that names
+    /// no `last_whole`, so the entries before it are not bound by those after it.
+    pub unlinked: Vec<String>,
+}
+
+impl Held {
+    /// One line per repair without a link, for a report.
+    #[must_use]
+    pub fn unlinked_lines(&self) -> Vec<String> {
+        self.unlinked
+            .iter()
+            .map(|place| {
+                format!(
+                    "{place}: a repair without a link — the audit.chain_broken after a torn line \
+                     names no last_whole, so the entries before it are not bound by those after it"
+                )
+            })
+            .collect()
+    }
+}
+
 /// Walks lines in order and names the first whose `prev` does not match the line before it
-/// (ADR-0023 clause 3); `Ok(count)` when the whole chain holds. A line that is not an entry holds
+/// (ADR-0023 clause 3); [`Held`] when the whole chain holds. A line that is not an entry holds
 /// when the file store repaired it: the torn piece a crash left, followed by `audit.chain_broken`
-/// chained on its hash. A torn line nothing follows does not hold.
+/// chained on its hash and naming as `last_whole` the hash of the entry before the torn line. A
+/// torn line nothing follows does not hold; a repair that names no `last_whole` holds and is
+/// named in [`Held::unlinked`].
 ///
 /// # Errors
 /// Returns the position of the first break.
-pub fn verify<'a>(lines: impl IntoIterator<Item = (String, &'a str)>) -> Result<u64, String> {
+pub fn verify<'a>(lines: impl IntoIterator<Item = (String, &'a str)>) -> Result<Held, String> {
     let mut prev: Option<String> = None;
     // The torn line the next entry must record as broken: its place, its hash and why it is not
     // an entry.
     let mut torn: Option<(String, String, String)> = None;
-    let mut count = 0;
+    let mut held = Held::default();
     for (place, line) in lines {
         let value: Value = match serde_json::from_str(line) {
             Ok(value) => value,
@@ -896,6 +937,18 @@ pub fn verify<'a>(lines: impl IntoIterator<Item = (String, &'a str)>) -> Result<
                      record it as audit.chain_broken"
                 ));
             }
+            match (value.get("last_whole").and_then(Value::as_str), &prev) {
+                (None, _) => held.unlinked.push(place.clone()),
+                (Some(last_whole), Some(prev)) if last_whole != prev => {
+                    return Err(format!(
+                        "{place}: the repair of the torn line {torn_place} names last_whole \
+                         {last_whole}, not the entry before the torn line ({prev})"
+                    ));
+                }
+                // Nothing before the torn line is held, as the first line's `prev` is not
+                // checked either.
+                (Some(_), _) => {}
+            }
         } else if let Some(prev) = &prev {
             if stated != prev {
                 return Err(format!(
@@ -904,14 +957,14 @@ pub fn verify<'a>(lines: impl IntoIterator<Item = (String, &'a str)>) -> Result<
             }
         }
         prev = Some(line_hash(line));
-        count += 1;
+        held.entries += 1;
     }
     if let Some((place, _, e)) = torn {
         return Err(format!(
             "{place}: not an audit entry: {e} — a torn last line a crash left"
         ));
     }
-    Ok(count)
+    Ok(held)
 }
 
 /// A chain of a lease as [`ChainWalk`] found it.
@@ -1089,9 +1142,16 @@ mod tests {
                         .ok()
                         .and_then(|value| value["seq"].as_u64())
                 };
+                let torn = seq(&last_line).is_none();
                 Some(Tail {
                     last_seq: lines.iter().filter_map(seq).max().unwrap_or(0),
-                    torn: seq(&last_line).is_none(),
+                    last_whole: lines
+                        .iter()
+                        .rev()
+                        .find(|line| seq(line).is_some())
+                        .filter(|_| torn)
+                        .map(|line| line_hash(line)),
+                    torn,
                     last_line,
                 })
             }))
@@ -1167,6 +1227,7 @@ mod tests {
                 .enumerate()
                 .map(|(i, l)| (i.to_string(), l.as_str())),
         )
+        .map(|held| held.entries)
     }
 
     /// A store that takes its time over every line, as a disk under load does.
@@ -1442,8 +1503,13 @@ mod tests {
         let lines = memory.lines();
         assert!(lines[2].contains("audit.chain_broken"), "{lines:#?}");
         assert!(
-            lines[2].contains(&line_hash(&lines[1])),
+            lines[2].contains(&format!("\"prev\":\"{}\"", line_hash(&lines[1]))),
             "it chains on from the torn line"
+        );
+        assert!(
+            lines[2].contains(&format!("\"last_whole\":\"{}\"", line_hash(&lines[0]))),
+            "it names the last whole entry before the torn line: {}",
+            lines[2]
         );
         assert!(
             lines[2].contains("\"seq\":8"),
@@ -1453,46 +1519,94 @@ mod tests {
     }
 
     /// `audit-verify` holds the file store's repair (a torn line, then `audit.chain_broken` chained
-    /// on its hash), and refuses a torn line nothing records as broken, in the middle or at the
-    /// end.
-    /// Verifies: ADR-0023
+    /// on its hash and naming the entry before it as `last_whole`), and refuses a torn line nothing
+    /// records as broken, in the middle or at the end, and a repair whose `last_whole` is not the
+    /// entry before the torn line.
+    /// Verifies: ADR-0023, ADR-draft-an-append-only-audit-record
     #[test]
     fn a_torn_line_holds_only_when_the_next_entry_records_it_as_broken() {
-        let place = |lines: &[String]| -> Vec<(String, String)> {
-            lines
-                .iter()
-                .enumerate()
-                .map(|(i, l)| (i.to_string(), l.clone()))
-                .collect()
-        };
-        let check = |lines: &[String]| {
-            let placed = place(lines);
-            verify(placed.iter().map(|(p, l)| (p.clone(), l.as_str())))
-        };
         let first = format!("{{\"seq\":1,\"prev\":\"{GENESIS}\",\"event\":\"a\"}}");
         let fragment = "{\"seq\":2,\"pr".to_string();
-        let broken = |event: &str, prev: &str| {
-            format!("{{\"seq\":2,\"prev\":\"{prev}\",\"event\":\"{event}\"}}")
+        let broken = |event: &str, prev: &str, last_whole: &str| {
+            format!(
+                "{{\"seq\":2,\"last_whole\":\"{last_whole}\",\"prev\":\"{prev}\",\
+                 \"event\":\"{event}\"}}"
+            )
         };
-        let repaired = broken("audit.chain_broken", &line_hash(&fragment));
+        let repaired = broken(
+            "audit.chain_broken",
+            &line_hash(&fragment),
+            &line_hash(&first),
+        );
         let after = format!(
             "{{\"seq\":3,\"prev\":\"{}\",\"event\":\"a\"}}",
             line_hash(&repaired)
         );
         assert_eq!(
             check(&[first.clone(), fragment.clone(), repaired.clone(), after]),
-            Ok(3)
+            Ok(Held {
+                entries: 3,
+                unlinked: Vec::new()
+            })
         );
         let err = check(&[first.clone(), fragment.clone()]).expect_err("torn at the end");
         assert!(err.starts_with("1:") && err.contains("torn"), "{err}");
-        let other = broken("admission.admitted", &line_hash(&fragment));
+        let other = broken(
+            "admission.admitted",
+            &line_hash(&fragment),
+            &line_hash(&first),
+        );
         let err = check(&[first.clone(), fragment.clone(), other]).expect_err("not broken");
         assert!(err.starts_with("1:"), "{err}");
-        let elsewhere = broken("audit.chain_broken", &line_hash(&first));
+        let elsewhere = broken("audit.chain_broken", &line_hash(&first), &line_hash(&first));
         let err = check(&[first.clone(), fragment.clone(), elsewhere]).expect_err("other prev");
         assert!(err.starts_with("1:"), "{err}");
-        let err = check(&[first, fragment.clone(), fragment, repaired]).expect_err("two torn");
+        let err = check(&[
+            first.clone(),
+            fragment.clone(),
+            fragment.clone(),
+            repaired.clone(),
+        ])
+        .expect_err("two torn");
         assert!(err.starts_with("1:"), "{err}");
+
+        // A chain of its own from 64 zeros in place of the entries before the torn line: the
+        // repair still chains on the torn line, but its link names an entry that is gone.
+        let forged = format!("{{\"seq\":1,\"prev\":\"{GENESIS}\",\"event\":\"forged\"}}");
+        let err = check(&[forged, fragment.clone(), repaired.clone()]).expect_err("forged");
+        assert!(err.starts_with("2:") && err.contains("last_whole"), "{err}");
+        // Nothing held before the torn line, as after a rotation: the link has nothing to name.
+        assert_eq!(check(&[fragment, repaired]).map(|held| held.entries), Ok(1));
+    }
+
+    /// A repair that names no `last_whole` holds and is named by its place, as a repair without a
+    /// link.
+    /// Verifies: ADR-draft-an-append-only-audit-record
+    #[test]
+    fn a_repair_without_a_link_holds_and_is_named() {
+        let first = format!("{{\"seq\":1,\"prev\":\"{GENESIS}\",\"event\":\"a\"}}");
+        let fragment = "{\"seq\":2,\"pr".to_string();
+        let repaired = format!(
+            "{{\"seq\":2,\"prev\":\"{}\",\"event\":\"audit.chain_broken\"}}",
+            line_hash(&fragment)
+        );
+        let held = check(&[first, fragment, repaired]).expect("held");
+        assert_eq!(held.entries, 2);
+        assert_eq!(held.unlinked, vec!["2".to_string()]);
+        let lines = held.unlinked_lines();
+        assert!(
+            lines.len() == 1 && lines[0].starts_with("2: a repair without a link"),
+            "{lines:?}"
+        );
+    }
+
+    fn check(lines: &[String]) -> Result<Held, String> {
+        verify(
+            lines
+                .iter()
+                .enumerate()
+                .map(|(i, l)| (i.to_string(), l.as_str())),
+        )
     }
 
     /// Verifies: ADR-0023

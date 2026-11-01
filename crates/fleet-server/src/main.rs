@@ -74,38 +74,23 @@ fn audit_verify(mut args: impl Iterator<Item = String>) -> ! {
     }
 }
 
-/// `server audit-verify <dir>`: the files of the filesystem store, or an archive.
+/// `server audit-verify <dir>`: the files of the filesystem store, or an archive. A repair without
+/// a link is named, and the chain still holds.
 fn audit_verify_files(dir: &str) -> ! {
-    let files = match fleet_server::fs::audit_files(std::path::Path::new(dir)) {
-        Ok(files) => files,
-        Err(e) => {
-            eprintln!("{e}");
-            std::process::exit(1);
-        }
-    };
-    let mut texts = Vec::new();
-    for file in &files {
-        match std::fs::read_to_string(file) {
-            Ok(text) => texts.push((file.display().to_string(), text)),
-            Err(e) => {
-                eprintln!("cannot read {}: {e}", file.display());
-                std::process::exit(1);
+    match fleet_server::fs::verify_audit(std::path::Path::new(dir)) {
+        Ok((files, Ok(held))) => {
+            for line in held.unlinked_lines() {
+                println!("{line}");
             }
-        }
-    }
-    let lines = texts.iter().flat_map(|(name, text)| {
-        text.lines()
-            .enumerate()
-            .filter(|(_, line)| !line.trim().is_empty())
-            .map(move |(index, line)| (format!("{name}:{}", index + 1), line))
-    });
-    match fleet_server::audit_log::verify(lines) {
-        Ok(count) => {
-            println!("{count} entries in {} files, the chain holds", files.len());
+            println!("{} entries in {files} files, the chain holds", held.entries);
             std::process::exit(0);
         }
-        Err(e) => {
+        Ok((_, Err(e))) => {
             eprintln!("the chain breaks at {e}");
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("{e}");
             std::process::exit(1);
         }
     }
