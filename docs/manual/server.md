@@ -360,11 +360,11 @@ In the bucket, an upload in progress lives under `<prefix>staging/<lease>/`, `<l
 lease of the instance that writes it, or `fs` on the filesystem record store. Those of a lease that
 is no longer live are interrupted uploads: an instance deletes them when it starts and whenever it
 takes over a lapsed lease, and never those of a live one; on the filesystem record store, every
-staging object goes at startup. Any other key under `<prefix>` that is not `blobs/<sha256>` fails startup naming it. At startup the
-Server lists the bucket for each artifact's size and downloads nothing: unlike the filesystem
-store, it does not hash the artifacts again. An object altered in the bucket is served, and the
-Client's own hash and signature checks refuse it. The bucket, its credentials, policies, retention
-and backups are the operator's.
+staging object goes at startup. Any other key under `<prefix>` that is not `blobs/<sha256>` fails
+startup naming it. At startup the Server lists the bucket for each artifact's size and downloads
+nothing: unlike the filesystem store, it does not hash the artifacts again. An object altered in the
+bucket is served, and the Client's own hash and signature checks refuse it. The bucket, its
+credentials, policies, retention and backups are the operator's.
 
 **Switching to `"s3"`** copies what is missing: at the first start with `"s3"`, every artifact a
 Package entry names that the bucket lacks is read from `data_dir/blobs/`, hashed — a file whose
@@ -648,8 +648,8 @@ server migrate-to-postgres --from /var/lib/opamp-fleet/fleet-data \
 Then set `data_dir` to the new directory and `[database] store = "postgres"`, and start the
 Server. With an S3 bucket in [`[blobs]`](#blobs), start once with `"s3"` on the old `data_dir`
 before the copy, so the bucket holds every artifact; then remove `data_dir` instead, as a Server
-on PostgreSQL and S3 has none, and the new directory stays empty. Moving records back from PostgreSQL to files
-is not provided.
+on PostgreSQL and S3 has none, and the new directory stays empty. Moving records back from
+PostgreSQL to files is not provided.
 
 ## Upgrading to one data directory
 
