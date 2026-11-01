@@ -2612,6 +2612,102 @@ fn a_batch_that_names_its_instance_anew_counts_as_a_take() {
     assert_eq!(stored(), ["none false 4"], "A's flush writes it");
 }
 
+/// An Agent forgotten after A took it several times, which connects to A again before A's next
+/// batch and says goodbye, is written disconnected: the record created again counts its takes from
+/// the start, and A keeps the count that take answered, not the greater one from before.
+/// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts
+#[test]
+fn the_goodbye_of_an_agent_forgotten_and_connected_again_is_written() {
+    use fleet_server::fleet::{AppState, Transport};
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let uid = InstanceUid([0x87; 16]);
+    let report = |sequence_num: u64, goodbye: bool| AgentToServer {
+        instance_uid: uid.as_bytes().to_vec(),
+        sequence_num,
+        capabilities: AgentCapabilities::ReportsStatus as u64,
+        agent_disconnect: goodbye.then(opamp::proto::AgentDisconnect::default),
+        ..Default::default()
+    };
+    let lease = "00000000-0000-7000-8000-00000000000a";
+    let a = AppState::on(&records(&schema)).expect("state");
+    a.serve_under(tokio::sync::watch::channel(Some(lease.to_string())).1);
+    let stored = || {
+        schema.query(&format!(
+            "SELECT coalesce(holder::text, 'none') || ' ' || connected || ' ' || takes \
+             FROM agents WHERE instance_uid = '{uid}'"
+        ))
+    };
+    a.process(report(1, false), Transport::WebSocket, Some(7));
+    a.mark_disconnected(&[uid], 7);
+    a.process(report(2, false), Transport::WebSocket, Some(8));
+    a.process(report(3, true), Transport::WebSocket, Some(8));
+    a.write_presence(lease).expect("A's batch");
+    assert_eq!(stored(), ["none false 2"]);
+    assert!(a.forget_agent(&uid).is_ok(), "forgotten");
+    assert!(stored().is_empty());
+
+    a.process(report(1, false), Transport::WebSocket, Some(9));
+    a.process(report(2, true), Transport::WebSocket, Some(9));
+    a.write_presence(lease).expect("A's batch");
+    assert_eq!(stored(), ["none false 1"], "the goodbye is written");
+}
+
+/// An Agent forgotten through B while A still holds it, created again through B and then
+/// connected to A, has its goodbye written by A: A keeps the count its take answered, though it
+/// counted more takes of the record before it was forgotten.
+/// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts
+#[test]
+fn the_goodbye_of_an_agent_forgotten_through_another_instance_is_written_where_it_connects_again() {
+    use fleet_server::fleet::{AppState, Transport};
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let uid = InstanceUid([0x89; 16]);
+    let report = |sequence_num: u64, goodbye: bool| AgentToServer {
+        instance_uid: uid.as_bytes().to_vec(),
+        sequence_num,
+        capabilities: AgentCapabilities::ReportsStatus as u64,
+        agent_disconnect: goodbye.then(opamp::proto::AgentDisconnect::default),
+        ..Default::default()
+    };
+    let (lease_a, lease_b) = (
+        "00000000-0000-7000-8000-00000000000a",
+        "00000000-0000-7000-8000-00000000000b",
+    );
+    let [a, b] = [lease_a, lease_b].map(|lease| {
+        let state = AppState::on(&records(&schema)).expect("state");
+        state.serve_under(tokio::sync::watch::channel(Some(lease.to_string())).1);
+        state
+    });
+    let stored = || {
+        schema.query(&format!(
+            "SELECT coalesce(holder::text, 'none') || ' ' || connected || ' ' || takes \
+             FROM agents WHERE instance_uid = '{uid}'"
+        ))
+    };
+    // A takes the Agent three times, and writes its goodbye.
+    for (conn, sequence_num) in [(7, 1), (8, 2), (9, 3)] {
+        a.process(
+            report(sequence_num, false),
+            Transport::WebSocket,
+            Some(conn),
+        );
+        a.mark_disconnected(&[uid], conn);
+    }
+    a.write_presence(lease_a).expect("A's batch");
+    assert_eq!(stored(), ["none false 3"]);
+    // B forgets it; A has not heard. The Agent comes back through B, then moves to A.
+    assert!(b.forget_agent(&uid).is_ok(), "forgotten through B");
+    b.process(report(1, false), Transport::WebSocket, Some(5));
+    a.process(report(2, false), Transport::WebSocket, Some(10));
+    assert_eq!(stored(), [format!("{lease_a} true 2")]);
+    a.process(report(3, true), Transport::WebSocket, Some(10));
+    a.write_presence(lease_a).expect("A's batch");
+    assert_eq!(stored(), ["none false 2"], "the goodbye is written");
+}
+
 /// An Agent that has just connected to A is not forgotten through B before A's next presence
 /// batch: the report that connects it writes that A holds it, at once.
 /// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts

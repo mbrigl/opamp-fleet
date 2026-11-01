@@ -633,11 +633,24 @@ impl PresenceWritten {
         }
     }
 
-    /// Keeps `take` as the count of takes of `uid` the store answered, unless a greater one was
-    /// kept: an answer that arrives late never replaces a later take's.
+    /// Keeps `take` as the count of takes of `uid` a batch answered, unless a greater one was
+    /// kept: a batch's answer that arrives after a later take's never replaces it.
     fn answered(&mut self, uid: InstanceUid, take: u64) {
         let kept = self.takes.entry(uid).or_insert(take);
         *kept = (*kept).max(take);
+    }
+
+    /// Keeps `take` as the count of takes of `uid` a take answered, whatever was kept: the take
+    /// holds the fleet lock, so its answer is the latest, also where the record was forgotten and
+    /// created again with a count that starts over.
+    fn taken(&mut self, uid: InstanceUid, take: u64) {
+        self.takes.insert(uid, take);
+    }
+
+    /// Forgets what was written of `uid`, which left what this instance holds.
+    fn remove(&mut self, uid: &InstanceUid) {
+        self.agents.remove(uid);
+        self.takes.remove(uid);
     }
 }
 
@@ -1929,6 +1942,10 @@ impl AppState {
             self.unpersist(uid);
         }
         let removed = fleet.remove(uid);
+        self.presence_written
+            .lock()
+            .expect("presence lock")
+            .remove(uid);
         // Its `instance_uid` leaves the Host it was bound to: whichever host reports it next binds
         // it (ADR-0024 clause 10).
         if let Some(revocations) = &self.revocations {
@@ -2116,6 +2133,10 @@ impl AppState {
         };
         self.end_session(uid, &record);
         self.written.lock().expect("written lock").remove(uid);
+        self.presence_written
+            .lock()
+            .expect("presence lock")
+            .remove(uid);
         self.unplace(fleet, uid, record.placement.group.clone());
         info!(agent = %uid, "dropped an agent forgotten through another instance");
     }
@@ -2216,7 +2237,7 @@ impl AppState {
         let mut written = self.presence_written.lock().expect("presence lock");
         written.under(&holder);
         written.agents.insert(*uid, presence);
-        written.answered(*uid, take);
+        written.taken(*uid, take);
     }
 
     /// Stops carrying each Agent of `uids`, every one this instance carries where `None`, whose
@@ -2455,6 +2476,10 @@ impl AppState {
                         fleet.insert(new_uid, record);
                         self.unplace(&mut fleet, &uid, group);
                         self.written.lock().expect("written lock").remove(&uid);
+                        self.presence_written
+                            .lock()
+                            .expect("presence lock")
+                            .remove(&uid);
                     }
                     info!(old = %uid, new = %new_uid, "assigned a server-generated instance_uid");
                     identification = Some(AgentIdentification {
@@ -6537,8 +6562,10 @@ mod tests {
         );
     }
 
-    /// The count of takes kept for an Agent only grows: a batch's answer that arrives after a later
-    /// take's keeps the take's, and a new holder starts over.
+    /// The count of takes a batch answers for an Agent never lowers the one kept, so a batch's
+    /// answer that arrives after a later take's keeps the take's; a take's answer replaces it, also
+    /// a lower one, as a record forgotten and created again counts from the start; a new holder
+    /// starts over.
     /// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts
     #[test]
     fn the_count_of_takes_kept_for_an_agent_never_moves_back() {
@@ -6550,6 +6577,8 @@ mod tests {
         assert_eq!(written.takes.get(&uid), Some(&3), "the later take's");
         written.answered(uid, 4);
         assert_eq!(written.takes.get(&uid), Some(&4));
+        written.taken(uid, 1);
+        assert_eq!(written.takes.get(&uid), Some(&1), "a take's answer");
         written.under("b");
         assert!(written.takes.is_empty(), "a new holder starts over");
     }
@@ -6773,6 +6802,70 @@ mod tests {
             subject_values: crate::revocation::SubjectValues::default(),
             not_after_ms: u64::MAX,
         }
+    }
+
+    /// What an instance wrote of an Agent's presence, the count of takes among it, leaves with the
+    /// Agent wherever it leaves what the instance holds: when it is forgotten here, when it was
+    /// forgotten through another instance, and under its old identity when it is re-keyed.
+    /// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts
+    #[test]
+    fn what_was_written_of_an_agents_presence_leaves_with_it() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let on = |lease: &str| {
+            let state = on_postgres(
+                &database,
+                Box::new(crate::postgres::agents::PgAgentStore::new(database.clone())),
+            );
+            state.serve_under(tokio::sync::watch::channel(Some(lease.to_string())).1);
+            state
+        };
+        let (a, b) = (
+            on("00000000-0000-7000-8000-00000000000a"),
+            on("00000000-0000-7000-8000-00000000000b"),
+        );
+        let kept = |state: &AppState, uid: &InstanceUid| {
+            let written = state.presence_written.lock().expect("presence lock");
+            (
+                written.agents.contains_key(uid),
+                written.takes.contains_key(uid),
+            )
+        };
+        let (forgotten, elsewhere, rekeyed) = (
+            InstanceUid([0x71; 16]),
+            InstanceUid([0x72; 16]),
+            InstanceUid([0x73; 16]),
+        );
+        for (conn, uid) in (1..).zip([forgotten, elsewhere, rekeyed]) {
+            a.process(report(&uid, 1), Transport::WebSocket, Some(conn));
+            assert_eq!(kept(&a, &uid), (true, true), "taken");
+        }
+
+        a.mark_disconnected(&[forgotten], 1);
+        a.mark_disconnected(&[elsewhere], 2);
+        assert!(a.forget_agent(&forgotten).is_ok(), "forget here");
+        assert_eq!(kept(&a, &forgotten), (false, false), "forgotten here");
+
+        assert!(b.forget_agent(&elsewhere).is_ok(), "forget through B");
+        // A report that changes the record finds it gone.
+        let mut changed = report(&elsewhere, 3);
+        changed.health = Some(opamp::proto::ComponentHealth {
+            healthy: true,
+            ..Default::default()
+        });
+        a.process(changed, Transport::WebSocket, Some(2));
+        assert_eq!(
+            kept(&a, &elsewhere),
+            (false, false),
+            "forgotten through another instance"
+        );
+
+        let mut rekey = report(&rekeyed, 2);
+        rekey.flags = AgentToServerFlags::RequestInstanceUid as u64;
+        a.process(rekey, Transport::WebSocket, Some(3));
+        assert_eq!(kept(&a, &rekeyed), (false, false), "re-keyed");
     }
 
     /// On PostgreSQL a first report here whose read of the stored record failed goes on from the
