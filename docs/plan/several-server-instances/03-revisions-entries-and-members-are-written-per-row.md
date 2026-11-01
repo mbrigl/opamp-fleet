@@ -39,8 +39,9 @@ open unattended work at zero. It changes the schema and the stores the rollout r
 
 ## Where it stands
 
-Worked with the human on `ticket/several-server-instances/03-revisions-entries-and-members-are-written-per-row`;
-the session stopped where the rest needs the human's decisions.
+Worked with the human on
+`ticket/several-server-instances/03-revisions-entries-and-members-are-written-per-row`; the session
+stopped where the rest needs the human's decisions.
 
 Done:
 
