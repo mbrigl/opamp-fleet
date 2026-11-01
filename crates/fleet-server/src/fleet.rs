@@ -2295,7 +2295,7 @@ impl AppState {
             if written.holder.as_deref() == Some(holder.as_str()) {
                 written.agents.insert(uid, record.presence());
             }
-            info!(agent = %uid, "another instance took the agent; this one no longer carries it");
+            debug!(agent = %uid, "another instance took the agent; this one no longer carries it");
         }
         Ok(())
     }
