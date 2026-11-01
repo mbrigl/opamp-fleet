@@ -73,6 +73,14 @@ store the record stays one chain, and `server audit-verify` walks every chain th
      Checkpoints of every chain's head, signed with a key the store does not hold, detect it
      ([ADR-draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token](draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token.md),
      signed chain heads); this draft lands without them.
+   - Pruning leaves two more cuts that the store itself does not detect. Whoever can write to the
+     database can append one `audit.pruned` with a correct hash at the end of any open chain,
+     naming any chain and any of its entries as the last removed, and then delete that chain's
+     entries up to it, younger ones included: `server audit-verify` accepts the link, because it
+     cannot tell the age of what is gone. And it takes the links of every retained
+     `audit.pruned`, also of one in a chain whose own walk fails. The signed chain heads detect
+     both; until then a record that holds shows that what is left is linked, not that no entry
+     younger than `retain_days` was removed.
 
 4. **[ADR-draft-the-servers-state-and-its-stores](draft-the-servers-state-and-its-stores.md) clause
    12 decides it: How long the record goes back.**
@@ -154,6 +162,9 @@ shell access on a Server host.
   `time`, which no chain guarantees across hosts.
 - Negative / trade-offs: without the signed chain heads, whoever can write to the database can
   remove a whole chain and its record without the verification noticing.
+- Negative / trade-offs: without the signed chain heads, whoever can write to the database can
+  also cut the head of any chain with one `audit.pruned` appended to an open chain, young entries
+  included, and the verification holds.
 - Negative / trade-offs: an open chain does not say whether its instance still runs; until its
   lease lapses and another instance closes it, a dead instance's chain reads as a running one's.
 - Follow-ups: an export of the record to a system the Server cannot rewrite.

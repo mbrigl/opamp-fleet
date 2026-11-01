@@ -272,24 +272,27 @@ and configured in the Server's configuration alone, and move an old layout by an
       (default 64 MiB) is closed and a new one opened. The Server keeps `[audit] keep_files` files
       (default 16) and deletes the oldest. Before it does, it records `audit.rotated` with the
       deleted file's last hash.
-    - On the PostgreSQL store entries older than `[audit] retain_days` (default 365, at least 1) are
-      deleted once a day. An entry's age is the database's time when it was stored. From each
-      chain the longest run of entries from its start that are all older is removed, so no entry
-      younger than `retain_days` goes. Each instance prunes its own chain. Closed chains, those
-      closed at a shutdown and those closed for a lapsed lease, are pruned by the same
-      `retain_days` by one instance at a time, the one that holds a session-level advisory lock
-      for it; an instance that finds the lock held leaves them to the next day. A chain that is
-      open and whose lease no instance holds is pruned once it is closed. Before it deletes, an
-      instance records in its own chain one `audit.pruned` for each chain it prunes, naming it as
-      `pruned_chain` with the last removed `seq` as `last_seq` and that entry's hash as
-      `last_hash`, and deletes only once they are written.
+    - On the PostgreSQL store entries stored more than `[audit] retain_days` days ago (default 365,
+      at least 1, at most 36 500) are deleted, at each instance's start and once a day after. An
+      entry's age is the database's time when it was stored. From each chain the longest run of
+      entries from its start that are all that old is removed, so no younger entry goes. Each
+      instance prunes its own chain. Closed chains, those closed at a shutdown and those closed for
+      a lapsed lease, are pruned by the same `retain_days` by one instance at a time, the one that
+      holds a session-level advisory lock for it; an instance that finds the lock held leaves them
+      to the next day. A chain that is open and whose lease no instance holds is pruned once it is
+      closed. Before it deletes, an instance records in its own chain one `audit.pruned` for each
+      chain it prunes, naming it as `pruned_chain` with the last removed `seq` as `last_seq` and
+      that entry's hash as `last_hash`, and deletes only once they are written. It deletes from
+      every chain of one prune in one transaction, so a prune that stops part-way deletes nothing.
     - An `audit.pruned` is an entry like any other and is pruned in its turn. Where an entry an
-      instance removes is an `audit.pruned` whose link is still needed — the chain it names still
-      begins after that entry, or is closed with no entries left on that hash — the instance
-      records that link again in a new `audit.pruned`. Where an entry it removes names the
-      archive as its `predecessor`, the `audit.chain_opened` of the first chain or an
-      `audit.pruned` that carried it, a new `audit.pruned` carries the predecessor on as
-      `predecessor_chain`, `predecessor_seq` and `predecessor_hash`. A closed chain with no entries
+      instance removes is an `audit.pruned` whose link is still needed, the instance records that
+      link again in a new `audit.pruned`. A link is still needed when the chain it names begins
+      right after the entry it records as last removed, or is closed with no entries left on that
+      entry's hash, and the same prune does not prune that chain further; a chain the same prune
+      prunes further is linked by the `audit.pruned` recorded for it in that prune. Where an entry
+      it removes names the archive as its `predecessor`, the `audit.chain_opened` of the first
+      chain or an `audit.pruned` that carried it, a new `audit.pruned` carries the predecessor on
+      as `predecessor_chain`, `predecessor_seq` and `predecessor_hash`. A closed chain with no entries
       left keeps its record. The filesystem store holds one chain, which is never closed, and its
       rotation bounds it.
     - `max_file_bytes` and `keep_files` apply to the filesystem store alone and `retain_days` to the
