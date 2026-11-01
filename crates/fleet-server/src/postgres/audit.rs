@@ -597,6 +597,28 @@ async fn walk(
     }
 }
 
+/// Offers the file record in `dir`, a Server's `data_dir/audit/` from before its record moved into
+/// the database, as the archive the first chain names
+/// (ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance clause 6), while
+/// the database holds no chain; once it holds one, the offer would be moot, and `dir` is not read.
+///
+/// # Errors
+/// As [`archive_end`], and when the database cannot be asked whether it holds a chain.
+pub fn offer_archive_in(database: &Database, dir: &Path) -> Result<(), String> {
+    let first = database.run(|pool| async move {
+        let client = client(&pool).await?;
+        let row = client
+            .query_one("SELECT NOT EXISTS (SELECT 1 FROM audit_chains)", &[])
+            .await
+            .map_err(sql)?;
+        Ok(row.get::<_, bool>(0))
+    })?;
+    if first {
+        database.offer_archive(archive_end(dir)?);
+    }
+    Ok(())
+}
+
 /// The `seq` and the hash of the last entry of the file record in `dir`, once its whole chain
 /// holds: what a move from files records as the archive's end, and what `audit-verify --archive`
 /// checks the predecessor against. `None` when `dir` does not exist or holds no entry.
@@ -1351,6 +1373,38 @@ mod tests {
         assert!(lines(&test, &first.instance_id)[0].contains(&end.1));
         let verified = verify(&database, Some(&archive)).expect("verify");
         assert!(!verified.failed, "{:?}", verified.lines);
+    }
+
+    /// The archive is read and offered only while the database holds no chain: a later start
+    /// neither reads `data_dir/audit/` nor stops on it, and the first chain names nothing new.
+    /// Verifies: ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance
+    #[test]
+    fn the_archive_is_offered_only_before_the_first_chain() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let dir = tempfile::tempdir().expect("tempdir");
+        file_record(dir.path(), 3);
+        let archive = dir.path().join(crate::fs::AUDIT);
+        let file = crate::fs::audit_files(&archive)
+            .expect("files")
+            .pop()
+            .expect("a file");
+        let whole = std::fs::read_to_string(&file).expect("read");
+        std::fs::write(&file, format!("{whole}{{\"seq\":4,\"pr")).expect("tear");
+        let database = shared(&test);
+        let err = offer_archive_in(&database, &archive).expect_err("no chain yet: it is read");
+        assert!(err.contains("torn"), "{err}");
+
+        std::fs::write(&file, &whole).expect("mend");
+        offer_archive_in(&database, &archive).expect("offer");
+        assert!(database.archive_offered().is_some());
+        database.take_lease("host-a", LAPSE).expect("lease");
+
+        std::fs::write(&file, format!("{whole}{{\"seq\":4,\"pr")).expect("tear");
+        database.offer_archive(None);
+        offer_archive_in(&database, &archive).expect("a chain exists: it is not read");
+        assert_eq!(database.archive_offered(), None);
     }
 
     /// An archive the database records that no chain names as its predecessor fails

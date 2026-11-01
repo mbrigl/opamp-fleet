@@ -53,7 +53,9 @@ once its tag exists.
   A Server already on PostgreSQL kept its record in `data_dir/audit/`: its first start records the
   last entry there as the archive, which the first chain names the same way.
   **What to do:** on PostgreSQL, verify with `server audit-verify --config` from now on, and keep
-  the files under `data_dir/audit/` as the archive of the record before the upgrade.
+  the files under `data_dir/audit/` as the archive of the record before the upgrade. Start the
+  Server that holds that `data_dir` first, and alone: only the start that opens the first chain
+  links the archive.
 
 - **With PostgreSQL, the revocation list has one version, and it is the Gateways' `ETag`**
   ([ADR-draft-the-servers-state-and-its-stores](docs/adr/draft-the-servers-state-and-its-stores.md)).

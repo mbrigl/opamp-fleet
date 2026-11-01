@@ -655,13 +655,11 @@ async fn main() {
             // The audit files a Server on PostgreSQL kept before its record moved into the
             // database stay as the archive, which the first chain names (clause 6 of
             // ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance).
+            // Only while the database holds no chain: a later start never reads them.
             let archive = config.data_dir.join(fleet_server::fs::AUDIT);
-            match fleet_server::postgres::audit::archive_end(&archive) {
-                Ok(end) => database.offer_archive(end),
-                Err(e) => {
-                    eprintln!("{e}");
-                    std::process::exit(1);
-                }
+            if let Err(e) = fleet_server::postgres::audit::offer_archive_in(database, &archive) {
+                eprintln!("{e}");
+                std::process::exit(1);
             }
             let made = instance_id.clone().map_or_else(
                 fleet_server::postgres::lease::new_instance_id,

@@ -1224,7 +1224,13 @@ A Server that was on PostgreSQL before this release kept its audit record in fil
 the last entry of those files as the archive, as `server migrate-to-postgres` does, and the first
 chain names it as its `predecessor`: check the link with `--archive <data_dir>/audit`. An empty or
 missing `audit/` records nothing, and an instance without a `data_dir` has nothing to link. An
-`audit/` whose chain breaks or that ends in a torn line stops the start, naming the file.
+`audit/` whose chain breaks or that ends in a torn line stops the start, naming the file. Once the
+database holds a chain, no start reads `audit/` again.
+
+So when you upgrade, start the Server that holds the old `data_dir` first, and alone, and only
+then the other instances. Whichever instance takes the first lease links its own `audit/`: one on
+a new host, or one without a `data_dir`, links nothing, and the old record is then never named; a
+copied or restored `data_dir` links the copy.
 
 ## Configurations: what the fleet runs
 
