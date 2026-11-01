@@ -1087,7 +1087,7 @@ impl AppState {
     fn stored_fleet(&self) -> Result<HashMap<InstanceUid, AgentRecord>, String> {
         let records = self
             .agent_store
-            .query()?
+            .query(None)?
             .into_iter()
             .map(|(uid, stored)| {
                 let mut record = AgentRecord::from_persisted(stored.record);
@@ -7007,8 +7007,11 @@ mod tests {
             self.batched_gets.fetch_add(1, Ordering::SeqCst);
             self.inner.get_many(uids)
         }
-        fn query(&self) -> Result<Vec<(InstanceUid, crate::agent_store::StoredAgent)>, String> {
-            self.inner.query()
+        fn query(
+            &self,
+            only: Option<&[InstanceUid]>,
+        ) -> Result<Vec<(InstanceUid, crate::agent_store::StoredAgent)>, String> {
+            self.inner.query(only)
         }
         fn is_shared(&self) -> bool {
             self.inner.is_shared()

@@ -254,18 +254,22 @@ pub trait AgentStore: Send + Sync {
             .collect())
     }
 
-    /// Every stored record with its presence, in the order of its `instance_uid`: what the
-    /// Operator plane reads where the fleet is not in memory
+    /// Every stored record with its presence, or those of `only` where it names some, in the order
+    /// of their `instance_uid`: what the Operator plane reads where the fleet is not in memory
     /// (ADR-draft-the-servers-state-and-its-stores clause 3). The default reads every record
     /// through [`load`](Self::load), each disconnected, as a store that keeps no presence may; a
     /// shared store, and a wrapper of one, overrides it.
     ///
     /// # Errors
     /// Returns an error when the records cannot be read.
-    fn query(&self) -> Result<Vec<(InstanceUid, StoredAgent)>, String> {
+    fn query(
+        &self,
+        only: Option<&[InstanceUid]>,
+    ) -> Result<Vec<(InstanceUid, StoredAgent)>, String> {
         let mut all: Vec<(InstanceUid, StoredAgent)> = self
             .load()?
             .into_iter()
+            .filter(|(uid, _)| only.is_none_or(|only| only.contains(uid)))
             .map(|(uid, record)| {
                 (
                     uid,

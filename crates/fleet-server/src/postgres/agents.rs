@@ -26,7 +26,30 @@ use crate::packages::PackageId;
 pub struct PgAgentStore {
     database: Arc<Database>,
     /// Every stored record's assignment, as committed.
-    assignments: Mutex<HashMap<InstanceUid, Assignment>>,
+    assignments: Mutex<Pins>,
+    /// Run between a read's rows and its taking them into [`Pins`], in tests.
+    #[cfg(test)]
+    after_read: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+}
+
+/// The assignments the adapter holds, and when this instance last committed each one, so a read
+/// that began before a commit of this instance never takes the older assignment over it: a fleet
+/// read never shrinks what pins what below what this instance itself committed.
+#[derive(Default)]
+struct Pins {
+    assignments: HashMap<InstanceUid, Assignment>,
+    /// Counts the commits of this instance that changed an assignment.
+    commits: u64,
+    /// The count at which this instance last committed the assignment of each record.
+    committed: HashMap<InstanceUid, u64>,
+}
+
+/// Which records a read read.
+enum Read<'a> {
+    /// Every record: one not found is not stored.
+    All,
+    /// These: one not found is not stored.
+    Only(&'a [InstanceUid]),
 }
 
 impl PgAgentStore {
@@ -35,7 +58,9 @@ impl PgAgentStore {
     pub fn new(database: Arc<Database>) -> Self {
         PgAgentStore {
             database,
-            assignments: Mutex::new(HashMap::new()),
+            assignments: Mutex::new(Pins::default()),
+            #[cfg(test)]
+            after_read: Mutex::new(None),
         }
     }
 
@@ -52,20 +77,71 @@ impl PgAgentStore {
             let client = client(&pool).await?;
             read_assignments(&**client).await
         })?;
-        *store.assignments.lock().expect("assignments lock") = assignments;
+        store
+            .assignments
+            .lock()
+            .expect("assignments lock")
+            .assignments = assignments;
         Ok(store)
     }
 
-    /// Notes what the committed records now pin.
+    /// Notes what the records this instance committed now pin.
     fn stored<'a>(
         &self,
         records: impl IntoIterator<Item = (&'a InstanceUid, Option<&'a Assignment>)>,
     ) {
-        let mut assignments = self.assignments.lock().expect("assignments lock");
+        let mut pins = self.assignments.lock().expect("assignments lock");
+        pins.commits += 1;
+        let commit = pins.commits;
         for (uid, assignment) in records {
+            pins.committed.insert(*uid, commit);
             match assignment {
-                Some(assignment) => assignments.insert(*uid, assignment.clone()),
-                None => assignments.remove(uid),
+                Some(assignment) => pins.assignments.insert(*uid, assignment.clone()),
+                None => pins.assignments.remove(uid),
+            };
+        }
+    }
+
+    /// Where a read begins: what it reads is taken over no commit of this instance made since.
+    fn began(&self) -> u64 {
+        self.assignments.lock().expect("assignments lock").commits
+    }
+
+    /// Takes what a read that began at `began` found into what pins what, for each record it
+    /// read that this instance committed nothing of since.
+    fn refresh<'a>(
+        &self,
+        began: u64,
+        read: Read<'_>,
+        found: impl Fn(&InstanceUid) -> Option<&'a Assignment>,
+        keys: impl Iterator<Item = &'a InstanceUid>,
+    ) {
+        #[cfg(test)]
+        {
+            let after = self.after_read.lock().expect("hook lock").take();
+            if let Some(after) = after {
+                after();
+            }
+        }
+        let mut pins = self.assignments.lock().expect("assignments lock");
+        let uids: std::collections::HashSet<InstanceUid> = match read {
+            Read::All => keys
+                .copied()
+                .chain(pins.assignments.keys().copied())
+                .collect(),
+            Read::Only(uids) => uids.iter().copied().collect(),
+        };
+        for uid in uids {
+            if pins
+                .committed
+                .get(&uid)
+                .is_some_and(|commit| *commit > began)
+            {
+                continue;
+            }
+            match found(&uid) {
+                Some(assignment) => pins.assignments.insert(uid, assignment.clone()),
+                None => pins.assignments.remove(&uid),
             };
         }
     }
@@ -85,14 +161,21 @@ impl PgAgentStore {
 
 impl AgentStore for PgAgentStore {
     fn load(&self) -> Result<HashMap<InstanceUid, PersistedAgent>, String> {
+        let began = self.began();
         let records = self.database.run(|pool| async move {
             let client = client(&pool).await?;
             read_all(&**client).await
         })?;
-        *self.assignments.lock().expect("assignments lock") = records
-            .iter()
-            .filter_map(|(uid, record)| Some((*uid, record.assignment.clone()?)))
-            .collect();
+        self.refresh(
+            began,
+            Read::All,
+            |uid| {
+                records
+                    .get(uid)
+                    .and_then(|record| record.assignment.as_ref())
+            },
+            records.keys(),
+        );
         Ok(records)
     }
 
@@ -105,23 +188,30 @@ impl AgentStore for PgAgentStore {
         &self,
         uids: &[InstanceUid],
     ) -> Result<HashMap<InstanceUid, PersistedAgent>, String> {
+        let began = self.began();
         let keys: Vec<String> = uids.iter().map(ToString::to_string).collect();
         let found = self.database.run(move |pool| async move {
             let client = client(&pool).await?;
             read(&**client, Some(&keys)).await
         })?;
-        self.stored(uids.iter().map(|uid| {
-            (
-                uid,
-                found.get(uid).and_then(|record| record.assignment.as_ref()),
-            )
-        }));
+        self.refresh(
+            began,
+            Read::Only(uids),
+            |uid| found.get(uid).and_then(|record| record.assignment.as_ref()),
+            found.keys(),
+        );
         Ok(found)
     }
 
     /// The rows and their presence, then their Configurations, in one snapshot of the database.
-    fn query(&self) -> Result<Vec<(InstanceUid, StoredAgent)>, String> {
-        let (records, connected) = self.database.run(|pool| async move {
+    fn query(
+        &self,
+        only: Option<&[InstanceUid]>,
+    ) -> Result<Vec<(InstanceUid, StoredAgent)>, String> {
+        let began = self.began();
+        let keys: Option<Vec<String>> =
+            only.map(|uids| uids.iter().map(ToString::to_string).collect());
+        let (records, connected) = self.database.run(move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client
                 .build_transaction()
@@ -130,13 +220,20 @@ impl AgentStore for PgAgentStore {
                 .start()
                 .await
                 .map_err(sql)?;
-            let records = read(&*transaction, None).await?;
+            let records = read(&*transaction, keys.as_deref()).await?;
+            let (filter, params): (&str, Vec<&(dyn tokio_postgres::types::ToSql + Sync)>) =
+                match &keys {
+                    Some(keys) => (" AND a.instance_uid = ANY($1)", vec![keys]),
+                    None => ("", Vec::new()),
+                };
             let connected: BTreeSet<String> = transaction
                 .query(
-                    "SELECT a.instance_uid FROM agents AS a WHERE a.connected AND EXISTS \
-                     (SELECT 1 FROM leases AS l WHERE l.instance_id = a.holder \
-                     AND l.expires_at > now())",
-                    &[],
+                    &format!(
+                        "SELECT a.instance_uid FROM agents AS a WHERE a.connected AND EXISTS \
+                         (SELECT 1 FROM leases AS l WHERE l.instance_id = a.holder \
+                         AND l.expires_at > now()){filter}"
+                    ),
+                    &params,
                 )
                 .await
                 .map_err(sql)?
@@ -146,10 +243,16 @@ impl AgentStore for PgAgentStore {
             transaction.commit().await.map_err(sql)?;
             Ok((records, connected))
         })?;
-        *self.assignments.lock().expect("assignments lock") = records
-            .iter()
-            .filter_map(|(uid, record)| Some((*uid, record.assignment.clone()?)))
-            .collect();
+        self.refresh(
+            began,
+            only.map_or(Read::All, Read::Only),
+            |uid| {
+                records
+                    .get(uid)
+                    .and_then(|record| record.assignment.as_ref())
+            },
+            records.keys(),
+        );
         let mut all: Vec<(InstanceUid, StoredAgent)> = records
             .into_iter()
             .map(|(uid, record)| {
@@ -627,9 +730,13 @@ impl AgentStore for PgAgentStore {
             Ok(moved)
         })?;
         if moved {
-            let mut assignments = self.assignments.lock().expect("assignments lock");
-            if let Some(assignment) = assignments.remove(&old) {
-                assignments.insert(new, assignment);
+            let mut pins = self.assignments.lock().expect("assignments lock");
+            pins.commits += 1;
+            let commit = pins.commits;
+            pins.committed.insert(old, commit);
+            pins.committed.insert(new, commit);
+            if let Some(assignment) = pins.assignments.remove(&old) {
+                pins.assignments.insert(new, assignment);
             }
         }
         Ok(())
@@ -689,6 +796,7 @@ impl AgentStore for PgAgentStore {
         self.assignments
             .lock()
             .expect("assignments lock")
+            .assignments
             .values()
             .filter(|assignment| pin.pinned_by(assignment))
             .count()
@@ -698,6 +806,7 @@ impl AgentStore for PgAgentStore {
         self.assignments
             .lock()
             .expect("assignments lock")
+            .assignments
             .values()
             .filter_map(|assignment| assignment.configurations.get(name).cloned())
             .collect()
@@ -1443,7 +1552,7 @@ mod tests {
                 )
             },
             &|store| {
-                let all = store.query().expect("query");
+                let all = store.query(None).expect("query");
                 assert!(
                     all.windows(2).all(|pair| pair[0].0 .0 < pair[1].0 .0),
                     "in the order of the instance_uid"
@@ -1453,6 +1562,69 @@ mod tests {
                     .collect()
             },
         );
+    }
+
+    /// A read that began before this instance committed a release never takes the older
+    /// assignment over it: the release pins what it pins after the query and the read of the
+    /// records that began before it, so a deletion it pins stays refused. A read that began after
+    /// it takes up what another instance committed.
+    /// Verifies: ADR-0026, ADR-draft-the-servers-state-and-its-stores
+    #[test]
+    fn a_read_that_began_before_a_release_does_not_undo_what_it_pins() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let store = Arc::new(PgAgentStore::open(database.clone()).expect("open"));
+        let uid = InstanceUid([5; 16]);
+        let mut bare = record();
+        bare.assignment = None;
+        store.put(&uid, &bare).expect("put");
+        let released = PersistedAgent {
+            assignment: Some(Assignment {
+                deployment: "stable".to_string(),
+                package: None,
+                configurations: BTreeMap::new(),
+            }),
+            ..bare.clone()
+        };
+        let release_in_between = |store: &Arc<PgAgentStore>, record: PersistedAgent| {
+            let releasing = store.clone();
+            *store.after_read.lock().expect("hook") = Some(Box::new(move || {
+                assert_eq!(releasing.release(&[], &[(uid, record)]), Ok(vec![uid]));
+            }));
+        };
+
+        release_in_between(&store, released.clone());
+        store.query(None).expect("query");
+        assert_eq!(
+            store.pinning(Pin::Deployment("stable")),
+            1,
+            "after the query"
+        );
+
+        release_in_between(&store, bare.clone());
+        store.get_many(&[uid]).expect("get_many");
+        assert_eq!(
+            store.pinning(Pin::Deployment("stable")),
+            0,
+            "after the read"
+        );
+
+        release_in_between(&store, released);
+        store.query(Some(&[uid])).expect("query");
+        assert_eq!(
+            store.pinning(Pin::Deployment("stable")),
+            1,
+            "after the query of one"
+        );
+
+        // Another instance's release is taken up by a read that begins after it.
+        PgAgentStore::new(database)
+            .release(&[], &[(uid, bare)])
+            .expect("release elsewhere");
+        store.query(None).expect("query");
+        assert_eq!(store.pinning(Pin::Deployment("stable")), 0, "taken up");
     }
 
     /// The query reads each record with its stored presence: connected only while the instance
@@ -1481,7 +1653,7 @@ mod tests {
             .expect("a record");
         let connected = |store: &PgAgentStore| -> Vec<(InstanceUid, bool)> {
             store
-                .query()
+                .query(None)
                 .expect("query")
                 .into_iter()
                 .map(|(uid, stored)| (uid, stored.connected))
