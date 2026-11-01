@@ -204,6 +204,22 @@ impl FsAgentStore {
         self.dir.join(format!("{uid}.json"))
     }
 
+    /// The record of `uid` as on disk, `None` when there is no file.
+    fn read(&self, uid: &InstanceUid) -> Result<Option<PersistedAgent>, String> {
+        let path = self.path(uid);
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
+        };
+        let envelope: Envelope = serde_json::from_str(&text)
+            .map_err(|e| format!("cannot parse {}: {e}", path.display()))?;
+        envelope
+            .into_record()
+            .map(Some)
+            .map_err(|e| format!("cannot restore {}: {e}", path.display()))
+    }
+
     /// Puts the records a failed release wrote back as they were — the bytes, or no file — last
     /// first. One that cannot be put back stays as written, and so does what the store answers
     /// about it.
@@ -248,12 +264,45 @@ impl AgentStore for FsAgentStore {
         Ok(records)
     }
 
+    fn get(&self, uid: &InstanceUid) -> Result<Option<PersistedAgent>, String> {
+        self.read(uid)
+    }
+
+    /// The whole file: this store's one Server is its only writer, and holds the whole record.
     fn put(&self, uid: &InstanceUid, record: &PersistedAgent) -> Result<(), String> {
         let json =
             serde_json::to_vec_pretty(&Envelope::from_record(record)).expect("agent serialize");
         super::replace(&self.path(uid), &json)?;
         self.stored(uid, record.assignment.as_ref());
         Ok(())
+    }
+
+    fn set_labels(
+        &self,
+        uid: &InstanceUid,
+        labels: &BTreeMap<String, String>,
+    ) -> Result<bool, String> {
+        let Some(mut record) = self.read(uid)? else {
+            return Ok(false);
+        };
+        record.labels.clone_from(labels);
+        self.put(uid, &record)?;
+        Ok(true)
+    }
+
+    fn set_restart_pending(
+        &self,
+        uid: &InstanceUid,
+        pending: bool,
+    ) -> Result<Option<bool>, String> {
+        let Some(mut record) = self.read(uid)? else {
+            return Ok(None);
+        };
+        let was = std::mem::replace(&mut record.restart_pending, pending);
+        if was != pending {
+            self.put(uid, &record)?;
+        }
+        Ok(Some(was))
     }
 
     fn remove(&self, uid: &InstanceUid) -> Result<(), String> {

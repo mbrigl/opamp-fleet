@@ -213,6 +213,7 @@ struct Instance {
     floors: Arc<PackageFloors>,
     enrolment: Arc<Enrolment>,
     following: fleet_server::instance::Following,
+    database: Arc<Database>,
     held: fleet_server::instance::Held,
     stop: Option<tokio::sync::oneshot::Sender<()>>,
     _dir: tempfile::TempDir,
@@ -224,6 +225,17 @@ impl Instance {
         Self::start_following(pki, schema, config, true).await
     }
 
+    /// [`start`](Self::start), taking up nothing another instance commits until
+    /// [`follow`](Self::follow) is called: what it hears is held back until then.
+    async fn start_deaf(pki: &Pki, schema: &Schema, config: PostgresConfig) -> Self {
+        Self::start_with(pki, schema, config, true, false).await
+    }
+
+    /// Starts taking up what other instances commit, for an instance started deaf.
+    fn follow(&mut self) {
+        self.following = fleet_server::instance::follow(&self.database, self.state.clone(), None);
+    }
+
     /// [`start`](Self::start), its lease renewals compared with the list's version only where
     /// `renewals` says so: a test of what a notification, or the connection made again, does
     /// alone turns the comparison off.
@@ -232,6 +244,18 @@ impl Instance {
         schema: &Schema,
         config: PostgresConfig,
         renewals: bool,
+    ) -> Self {
+        Self::start_with(pki, schema, config, renewals, true).await
+    }
+
+    /// [`start_following`](Self::start_following), following other instances where `follows`
+    /// says so.
+    async fn start_with(
+        pki: &Pki,
+        schema: &Schema,
+        config: PostgresConfig,
+        renewals: bool,
+        follows: bool,
     ) -> Self {
         opamp::tls::install_ring_provider();
         let dir = tempfile::tempdir().expect("tempdir");
@@ -299,11 +323,15 @@ impl Instance {
             let database = database.clone();
             fleet_server::instance::Lease::take(database, TIMES, "test-host").expect("lease")
         };
-        let following = fleet_server::instance::follow(
-            &database,
-            state.clone(),
-            renewals.then(|| lease.list_versions()),
-        );
+        let following = if follows {
+            fleet_server::instance::follow(
+                &database,
+                state.clone(),
+                renewals.then(|| lease.list_versions()),
+            )
+        } else {
+            fleet_server::instance::Following::default()
+        };
         let state_kept = state.clone();
         let agent_listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let operator_listener = TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -341,6 +369,7 @@ impl Instance {
             floors,
             enrolment,
             following,
+            database,
             held,
             stop: Some(stop),
             _dir: dir,
@@ -778,9 +807,16 @@ fn two_revisions_rolled_out_at_once_on_two_instances_are_both_kept() {
                     at_once.wait();
                     configs.put_saved("base", revision(&body)).expect("save");
                     let names = std::collections::BTreeSet::from(["base".to_string()]);
+                    // The Agent reported before it is released to: a release writes the
+                    // assignment of a record that is stored.
+                    let uid = InstanceUid::default();
+                    let reported = fleet_server::agent_store::PersistedAgent {
+                        assignment: None,
+                        ..released("base", "")
+                    };
+                    agents.put(&uid, &reported).expect("report");
                     configs
                         .pin(&names, |hashes, pinned| {
-                            let uid = InstanceUid::default();
                             agents.release(pinned, &[(uid, released("base", &hashes["base"]))])
                         })
                         .expect("roll out");
@@ -1701,4 +1737,199 @@ async fn a_revocation_whose_notification_is_missed_is_caught_at_the_next_renewal
         Some((1008, "revoked".to_string())),
         "B did not catch the missed revocation at a renewal"
     );
+}
+
+/// The attributes an Agent describes itself by: the identifying ones, then the others.
+type Attributes<'a> = (&'a [(&'a str, &'a str)], &'a [(&'a str, &'a str)]);
+
+/// One report of `uid` on `session`, its reply awaited: its capabilities, the attributes it
+/// describes itself by, the second set non-identifying, and whether it is healthy.
+async fn report_as(
+    session: &mut Socket,
+    uid: InstanceUid,
+    sequence_num: u64,
+    capabilities: u64,
+    attributes: Attributes<'_>,
+    healthy: bool,
+) -> opamp::proto::ServerToAgent {
+    use futures_util::SinkExt;
+    use opamp::proto::{AgentDescription, AnyValue, ComponentHealth, KeyValue};
+    use tokio_tungstenite::tungstenite::Message as Ws;
+    let pairs = |pairs: &[(&str, &str)]| {
+        pairs
+            .iter()
+            .map(|(key, value)| KeyValue {
+                key: (*key).to_string(),
+                value: Some(AnyValue {
+                    value: Some(opamp::proto::any_value::Value::StringValue(
+                        (*value).to_string(),
+                    )),
+                }),
+            })
+            .collect()
+    };
+    let report = AgentToServer {
+        instance_uid: uid.as_bytes().to_vec(),
+        sequence_num,
+        capabilities: AgentCapabilities::ReportsStatus as u64
+            | AgentCapabilities::ReportsHealth as u64
+            | capabilities,
+        agent_description: Some(AgentDescription {
+            identifying_attributes: pairs(attributes.0),
+            non_identifying_attributes: pairs(attributes.1),
+        }),
+        health: Some(ComponentHealth {
+            healthy,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let framed = opamp::frame::encode_within(&report, usize::MAX).expect("frame");
+    session.send(Ws::Binary(framed.into())).await.expect("send");
+    next_message(session, Duration::from_secs(5))
+        .await
+        .expect("an answer to the report")
+}
+
+/// The view `instance` holds of `uid`.
+fn view_of(instance: &Instance, uid: InstanceUid) -> Option<fleet_server::fleet::AgentView> {
+    instance
+        .state
+        .snapshot()
+        .into_iter()
+        .find(|view| view.instance_uid == uid.to_string())
+}
+
+/// Labels set through B on a Client Agent A carries stay as B set them when A writes the Agent's
+/// next report before it heard of them, since A's write is of what a report decides alone; A then
+/// takes them up, and a later change through B reaches A's view within one second.
+/// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts, ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn labels_set_through_one_instance_stay_and_reach_the_instance_that_carries_the_agent() {
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    // B starts before the Agent first reports, so it knows it from the database alone.
+    let b = Instance::start(&pki, &schema, schema.config_on(schema.config.port)).await;
+    let mut a = Instance::start_deaf(&pki, &schema, schema.config_on(schema.config.port)).await;
+    let (cert, key) = pki.issue("edge-01");
+    let client = InstanceUid([0x11; 16]);
+    let client_attributes: Attributes<'_> = (
+        &[("service.name", "fleet-agent")],
+        &[("supervisor.kind.otelcol", "true")],
+    );
+    let mut client_session = websocket(&a, &pki, &cert, &key).await;
+    report_as(&mut client_session, client, 1, 0, client_attributes, true).await;
+    let labels = |uid: InstanceUid| {
+        schema.query(&format!(
+            "SELECT labels::text FROM agents WHERE instance_uid = '{uid}'"
+        ))
+    };
+
+    let on_b = b.state.clone();
+    let set = move |tier: &'static str| {
+        let on_b = on_b.clone();
+        async move {
+            tokio::task::spawn_blocking(move || {
+                on_b.set_labels(
+                    &client,
+                    std::collections::BTreeMap::from([("tier".to_string(), tier.to_string())]),
+                )
+            })
+            .await
+            .expect("set labels")
+        }
+    };
+    assert!(
+        set("edge").await.is_ok(),
+        "B sets the labels of an Agent it never held"
+    );
+    // A has not heard of them, and writes the Client Agent's next report, which changes its health.
+    report_as(&mut client_session, client, 2, 0, client_attributes, false).await;
+    assert_eq!(
+        labels(client),
+        [r#"{"tier":"edge"}"#],
+        "the labels stay as B set them"
+    );
+    assert!(
+        view_of(&a, client).is_some_and(|view| view.labels.is_empty()),
+        "A had not heard of them"
+    );
+
+    a.follow();
+    let holds = |tier: &str| {
+        view_of(&a, client)
+            .is_some_and(|view| view.labels.get("tier").map(String::as_str) == Some(tier))
+    };
+    assert!(
+        eventually(Duration::from_secs(10), || holds("edge")).await,
+        "A took the labels up once it followed"
+    );
+    assert!(set("core").await.is_ok());
+    assert!(
+        eventually(Duration::from_secs(1), || holds("core")).await,
+        "A took the change up within one second"
+    );
+}
+
+/// A restart requested through B for an Agent A carries stays queued when A writes the Agent's
+/// next report before it heard of it; A then takes it up and sends the restart, which clears it,
+/// and a request made after that is queued again and sent within one second.
+/// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts, ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restart_requested_through_one_instance_stays_until_the_carrying_instance_sends_it() {
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let b = Instance::start(&pki, &schema, schema.config_on(schema.config.port)).await;
+    let mut a = Instance::start_deaf(&pki, &schema, schema.config_on(schema.config.port)).await;
+    let (cert, key) = pki.issue("edge-01");
+    let uid = InstanceUid([0x21; 16]);
+    let restartable = AgentCapabilities::AcceptsRestartCommand as u64;
+    let attributes: Attributes<'_> = (&[("service.name", "otelcol")], &[]);
+    let mut session = websocket(&a, &pki, &cert, &key).await;
+    report_as(&mut session, uid, 1, restartable, attributes, true).await;
+    let queued = || {
+        schema.query(&format!(
+            "SELECT restart_pending::text FROM agents WHERE instance_uid = '{uid}'"
+        ))
+    };
+    let request = || {
+        let on_b = b.state.clone();
+        async move {
+            tokio::task::spawn_blocking(move || on_b.request_restart(&uid).is_ok())
+                .await
+                .expect("request")
+        }
+    };
+    let is_restart = |message: &opamp::proto::ServerToAgent| {
+        message
+            .command
+            .as_ref()
+            .is_some_and(|command| command.r#type == opamp::proto::CommandType::Restart as i32)
+    };
+
+    assert!(
+        request().await,
+        "B queues the restart of an Agent it never held"
+    );
+    let answer = report_as(&mut session, uid, 2, restartable, attributes, false).await;
+    assert!(!is_restart(&answer), "A had not heard of it");
+    assert_eq!(queued(), ["true"], "the request stays queued");
+
+    a.follow();
+    let sent = next_message(&mut session, Duration::from_secs(10))
+        .await
+        .expect("A sends the restart once it follows");
+    assert!(is_restart(&sent), "{sent:?}");
+    assert_eq!(queued(), ["false"], "sending it cleared it");
+
+    assert!(request().await, "a later request");
+    let sent = next_message(&mut session, Duration::from_secs(1))
+        .await
+        .expect("A sends the later restart within one second");
+    assert!(is_restart(&sent), "{sent:?}");
+    assert_eq!(queued(), ["false"]);
 }

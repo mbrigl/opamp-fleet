@@ -858,6 +858,7 @@ async fn restart_agent(
             StatusCode::CONFLICT,
             format!("agent {uid} does not declare AcceptsRestartCommand"),
         ),
+        Err(RestartError::Storage(e)) => error(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
 }
 

@@ -287,6 +287,8 @@ pub enum RestartError {
     /// The Agent does not declare `AcceptsRestartCommand` — capability negotiation is binding,
     /// so the Server refuses rather than sending a command the Agent would ignore.
     NoCapability,
+    /// The request could not be written.
+    Storage(String),
 }
 
 /// Why forgetting an Agent was refused (`DELETE /api/v1/agents/{uid}`, ADR-0024).
@@ -1255,52 +1257,81 @@ impl AppState {
         Ok(())
     }
 
-    /// Takes up the assignments another instance's rollout wrote
+    /// Takes up what another instance wrote to the records of Agents this one holds
     /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
     /// clauses 8 and 9): the record of each Agent of `uids` this instance holds, or of every one
-    /// it holds where `uids` is `None`, is read again from the store, its assignment taken into
-    /// what is held, and the WebSocket loops woken, so a connected Agent is offered what it was
-    /// released at once. The records are read before the fleet lock is taken, so no report waits
-    /// for the read.
+    /// it holds where `uids` is `None`, is read again from the store. Its assignment, its labels and
+    /// its queued restart are taken into what is held, its group is placed again for its labels,
+    /// and one the store no longer holds, forgotten through another instance, is dropped. The
+    /// WebSocket loops are woken, so a connected Agent is offered what it was released, or sent the
+    /// restart requested, at once. The records are read before the fleet lock is taken, so no
+    /// report waits for the read.
     ///
     /// # Errors
     /// Returns an error when the store cannot be read; what is held is then kept.
-    pub fn take_up_assignments(&self, uids: Option<&HashSet<InstanceUid>>) -> Result<(), String> {
-        let stored: HashMap<InstanceUid, PersistedAgent> = match uids {
-            None => self.agent_store.load()?,
-            Some(uids) => {
-                let held: Vec<InstanceUid> = {
-                    let fleet = self.fleet.lock().expect("fleet lock");
-                    uids.iter()
-                        .filter(|uid| fleet.contains_key(uid))
-                        .copied()
-                        .collect()
-                };
-                let mut stored = HashMap::new();
-                for uid in held {
-                    if let Some(record) = self.agent_store.get(&uid)? {
-                        stored.insert(uid, record);
-                    }
-                }
-                stored
+    pub fn take_up_agents(&self, uids: Option<&HashSet<InstanceUid>>) -> Result<(), String> {
+        let held: Vec<InstanceUid> = {
+            let fleet = self.fleet.lock().expect("fleet lock");
+            match uids {
+                None => fleet.keys().copied().collect(),
+                Some(uids) => uids
+                    .iter()
+                    .filter(|uid| fleet.contains_key(uid))
+                    .copied()
+                    .collect(),
             }
+        };
+        let stored: Vec<(InstanceUid, Option<PersistedAgent>)> = match uids {
+            None => {
+                let mut all = self.agent_store.load()?;
+                held.into_iter()
+                    .map(|uid| (uid, all.remove(&uid)))
+                    .collect()
+            }
+            Some(_) => held
+                .into_iter()
+                .map(|uid| Ok((uid, self.agent_store.get(&uid)?)))
+                .collect::<Result<_, String>>()?,
         };
         let mut fleet = self.fleet.lock().expect("fleet lock");
         let mut moved = 0usize;
         for (uid, persisted) in stored {
-            if let Some(record) = fleet.get_mut(&uid) {
-                if record.assignment != persisted.assignment {
-                    record.assignment = persisted.assignment;
-                    moved += 1;
-                }
+            let Some(record) = fleet.get_mut(&uid) else {
+                continue;
+            };
+            let Some(persisted) = persisted else {
+                let group = record.placement.group.clone();
+                fleet.remove(&uid);
+                self.written.lock().expect("written lock").remove(&uid);
+                self.unplace(&mut fleet, &uid, group);
+                info!(agent = %uid, "dropped an agent forgotten through another instance");
+                moved += 1;
+                continue;
+            };
+            let mut changed = false;
+            if record.assignment != persisted.assignment {
+                record.assignment = persisted.assignment;
+                changed = true;
             }
+            if record.restart_pending != persisted.restart_pending {
+                record.restart_pending = persisted.restart_pending;
+                changed = true;
+            }
+            if changed {
+                self.written.lock().expect("written lock").remove(&uid);
+            }
+            if record.labels != persisted.labels {
+                self.take_labels(&mut fleet, &uid, persisted.labels);
+                changed = true;
+            }
+            moved += usize::from(changed);
         }
         drop(fleet);
         if moved > 0 {
             self.push.send_modify(|rev| *rev += 1);
             debug!(
                 agents = moved,
-                "took up the assignments another instance released"
+                "took up what another instance wrote to the agents' records"
             );
         }
         Ok(())
@@ -1543,16 +1574,36 @@ impl AppState {
 
     /// Queues a restart for one Agent (`AcceptsRestartCommand`) and wakes the WebSocket loops so
     /// a connected Agent hears it now; a polling one picks it up on its next exchange.
+    ///
+    /// The request is written to its own column of the record before this answers, and on a shared
+    /// store announced to the instance that carries the Agent, which decides from what is stored
+    /// (ADR-draft-the-fleet-record-of-agents-and-hosts clause 2).
     pub fn request_restart(&self, uid: &InstanceUid) -> Result<(), RestartError> {
         let mut fleet = self.fleet.lock().expect("fleet lock");
-        let record = fleet.get_mut(uid).ok_or(RestartError::UnknownAgent)?;
-        if record.capabilities & opamp::proto::AgentCapabilities::AcceptsRestartCommand as u64 == 0
-        {
+        let capabilities = if self.agent_store.is_shared() {
+            self.agent_store
+                .get(uid)
+                .map_err(RestartError::Storage)?
+                .ok_or(RestartError::UnknownAgent)?
+                .capabilities
+        } else {
+            fleet
+                .get(uid)
+                .ok_or(RestartError::UnknownAgent)?
+                .capabilities
+        };
+        if capabilities & opamp::proto::AgentCapabilities::AcceptsRestartCommand as u64 == 0 {
             return Err(RestartError::NoCapability);
         }
-        record.restart_pending = true;
         // Operator intent survives a Server restart like any other durable state (ADR-0024).
-        self.persist_if_dirty(uid, record);
+        self.agent_store
+            .set_restart_pending(uid, true)
+            .map_err(RestartError::Storage)?
+            .ok_or(RestartError::UnknownAgent)?;
+        if let Some(record) = fleet.get_mut(uid) {
+            record.restart_pending = true;
+            self.written.lock().expect("written lock").remove(uid);
+        }
         drop(fleet);
         self.push.send_modify(|rev| *rev += 1);
         info!(agent = %uid, "restart requested");
@@ -1569,9 +1620,10 @@ impl AppState {
     /// A label move changes only what the fleet view **proposes** (ADR-0026): the Agent's
     /// candidates follow its new channel, and nothing is distributed until a rollout act says so.
     ///
-    /// The labels are part of the Agent's record (ADR-0024 clause 21) and are written with it
-    /// before this answers. A Client Agent's labels hold for its Client's other Agents
-    /// (ADR-0024 clause 19), so its group is placed again.
+    /// The labels are part of the Agent's record (ADR-0024 clause 21) and are written to their own
+    /// column of it before this answers; on a shared store the Agent is read from the store, and
+    /// the change announced to the instance that carries it. A Client Agent's labels hold for its
+    /// Client's other Agents (ADR-0024 clause 19), so its group is placed again.
     pub fn set_labels(
         &self,
         uid: &InstanceUid,
@@ -1579,23 +1631,53 @@ impl AppState {
     ) -> Result<(), LabelError> {
         crate::labels::check_pairs(&set).map_err(LabelError::Invalid)?;
         let mut fleet = self.fleet.lock().expect("fleet lock");
-        let record = fleet.get_mut(uid).ok_or(LabelError::UnknownAgent)?;
-        let reported = crate::labels::reported_keys(record.description.as_ref());
+        let description = if self.agent_store.is_shared() {
+            self.agent_store
+                .get(uid)
+                .map_err(LabelError::Storage)?
+                .ok_or(LabelError::UnknownAgent)?
+                .description
+        } else {
+            fleet
+                .get(uid)
+                .ok_or(LabelError::UnknownAgent)?
+                .description
+                .clone()
+        };
+        let reported = crate::labels::reported_keys(description.as_ref());
         if let Some(clash) = set.keys().find(|key| reported.iter().any(|r| r == *key)) {
             return Err(LabelError::RestatesReported(clash.clone()));
         }
-        let previous = std::mem::replace(&mut record.labels, set);
-        if let Err(e) = self.persist(uid, record) {
-            record.labels = previous;
-            return Err(LabelError::Storage(e));
+        if !self
+            .agent_store
+            .set_labels(uid, &set)
+            .map_err(LabelError::Storage)?
+        {
+            return Err(LabelError::UnknownAgent);
         }
-        if let Some(group) = record.placement.group.clone() {
-            let groups = self.groups.lock().expect("groups lock");
-            inherit(&mut fleet, &groups, &group);
-        }
+        self.take_labels(&mut fleet, uid, set);
         drop(fleet);
         info!(agent = %uid, "labels set — candidates follow, nothing is distributed");
         Ok(())
+    }
+
+    /// Takes `labels` into the record of `uid` this Server holds, if it holds one, and places its
+    /// group again. What the store holds of it is no longer what was last written whole.
+    fn take_labels(
+        &self,
+        fleet: &mut HashMap<InstanceUid, AgentRecord>,
+        uid: &InstanceUid,
+        labels: BTreeMap<String, String>,
+    ) {
+        let Some(record) = fleet.get_mut(uid) else {
+            return;
+        };
+        record.labels = labels;
+        self.written.lock().expect("written lock").remove(uid);
+        if let Some(group) = record.placement.group.clone() {
+            let groups = self.groups.lock().expect("groups lock");
+            inherit(fleet, &groups, &group);
+        }
     }
 
     /// Which Deployments hold each Package, keyed by `<agent type>@<version>` — how a Package
@@ -1739,9 +1821,27 @@ impl AppState {
         if !record.restart_pending || !record.connected {
             return None;
         }
-        record.restart_pending = false;
-        self.persist_if_dirty(uid, record);
-        Some(restart_command(uid, self.capabilities()))
+        self.take_restart(uid, record)
+            .then(|| restart_command(uid, self.capabilities()))
+    }
+
+    /// Clears the queued restart of `record` in the store first, and answers whether it was still
+    /// queued there, so it is delivered: one another instance delivered already is not delivered
+    /// twice, and a request made after the clear stays queued
+    /// (ADR-draft-the-fleet-record-of-agents-and-hosts clause 2). One that cannot be cleared is
+    /// kept for the next exchange.
+    fn take_restart(&self, uid: &InstanceUid, record: &mut AgentRecord) -> bool {
+        match self.agent_store.set_restart_pending(uid, false) {
+            Ok(was) => {
+                record.restart_pending = false;
+                self.written.lock().expect("written lock").remove(uid);
+                was == Some(true)
+            }
+            Err(e) => {
+                warn!(agent = %uid, error = %e, "cannot clear the queued restart; it waits");
+                false
+            }
+        }
     }
 
     /// Deletes a Configuration (ADR-0026 clause 12); `false` when none of that name exists.
@@ -1911,6 +2011,7 @@ impl AppState {
         // routes by it — a reply addressed to the new identity reaches no one, and the Agent goes
         // on reporting under the old one. The new identity travels in agent_identification alone.
         let reported = uid;
+        let loaded = self.hold_from_store(&uid);
 
         let mut fleet = self.fleet.lock().expect("fleet lock");
         let mut reply_flags = 0u64;
@@ -2185,7 +2286,7 @@ impl AppState {
         // What places it in its Client and under its Host may have changed (ADR-0024): a new
         // record, a new Host, a new description, or a new identity — a re-key took the old one
         // out of its group, and a compressed message carries no description to place it by.
-        if !known || moved || described || rekeyed.is_some() {
+        if !known || moved || described || rekeyed.is_some() || loaded {
             self.place(&mut fleet, &uid);
         }
         let record = fleet.get_mut(&uid).expect("the record was just written");
@@ -2307,8 +2408,8 @@ impl AppState {
             && reply_flags == 0
             && record.capabilities & opamp::proto::AgentCapabilities::AcceptsRestartCommand as u64
                 != 0
+            && self.take_restart(&uid, record)
         {
-            record.restart_pending = false;
             self.persist_if_dirty(&uid, record);
             return Processed {
                 reply: restart_command(&uid, self.capabilities()),
@@ -2362,6 +2463,38 @@ impl AppState {
             uid: Some(uid),
             disconnected,
         }
+    }
+
+    /// On a shared store, loads the record of `uid` from it when this Server does not hold one, as
+    /// at an Agent's first report here: another instance may have written it, and its labels, its
+    /// assignment and its queued restart are what this report goes on from
+    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// clause 8). Read before the fleet lock is taken, so no other report waits for it. Answers
+    /// whether it loaded one; one that cannot be read is logged, and the report goes on as an
+    /// Agent's first.
+    fn hold_from_store(&self, uid: &InstanceUid) -> bool {
+        if !self.agent_store.is_shared() || self.fleet.lock().expect("fleet lock").contains_key(uid)
+        {
+            return false;
+        }
+        let stored = match self.agent_store.get(uid) {
+            Ok(Some(stored)) => stored,
+            Ok(None) => return false,
+            Err(e) => {
+                warn!(agent = %uid, error = %e, "cannot read the agent's stored record");
+                return false;
+            }
+        };
+        let mut fleet = self.fleet.lock().expect("fleet lock");
+        if fleet.contains_key(uid) {
+            return false;
+        }
+        self.written
+            .lock()
+            .expect("written lock")
+            .insert(*uid, stored.durable_digest());
+        fleet.insert(*uid, AgentRecord::from_persisted(stored));
+        true
     }
 
     /// The package offer for one Agent, composed from its **assignments** (ADR-0026), or `None`
@@ -4283,6 +4416,39 @@ mod tests {
         assert!(fleet[&uid].restart_pending, "the intent was restored");
     }
 
+    /// A restart is delivered only while the store still holds it queued: one another Server
+    /// delivered and cleared already is not sent twice, and one requested after a delivery is sent
+    /// again.
+    /// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts
+    #[test]
+    fn a_restart_is_sent_only_while_the_store_holds_it_queued() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let uid = InstanceUid::default();
+        let state = AppState::new(dir.path().to_path_buf()).expect("state");
+        let mut msg = report(&uid, 1);
+        msg.capabilities |= opamp::proto::AgentCapabilities::AcceptsRestartCommand as u64;
+        state.process(msg, Transport::WebSocket, Some(1));
+        let other = crate::fs::FsAgentStore::open(dir.path()).expect("open");
+
+        assert!(state.request_restart(&uid).is_ok(), "queued");
+        assert_eq!(
+            other.set_restart_pending(&uid, false),
+            Ok(Some(true)),
+            "delivered elsewhere"
+        );
+        assert!(state.restart_command_for(&uid).is_none(), "not sent twice");
+        assert!(!state.fleet.lock().expect("fleet")[&uid].restart_pending);
+
+        assert!(state.request_restart(&uid).is_ok(), "queued again");
+        assert!(state.restart_command_for(&uid).is_some(), "sent");
+        assert_eq!(
+            other.set_restart_pending(&uid, false),
+            Ok(Some(false)),
+            "and cleared"
+        );
+        assert!(state.restart_command_for(&uid).is_none(), "once");
+    }
+
     /// ADR-0033: the fleet table shows the release, and the build stays reachable beside it. A
     /// Foreign Agent that numbers itself in its own way is shown as it reported.
     #[test]
@@ -5541,6 +5707,48 @@ mod tests {
         // The Client Agent's labels cleared, nothing is inherited any more.
         label(&state, &client, &[]);
         assert!(!selects(&state, &supervisor, &[("site", "wien")]));
+    }
+
+    /// What another Server wrote to a held record is taken up from the store: a Client Agent's
+    /// labels place its Client's other Agent again, so it inherits them, a queued restart is held,
+    /// and a record the store no longer holds is dropped.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    #[test]
+    fn what_another_server_wrote_is_taken_up_and_places_the_group_again() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (client, supervisor) = (InstanceUid::default(), InstanceUid::default());
+        let state = hosted_fleet(dir.path());
+        report_over(
+            &state,
+            "h1",
+            organization("Kunde GmbH"),
+            client,
+            &[("supervisor.kind.collector", "true")],
+        );
+        report_over(&state, "h1", organization("Kunde GmbH"), supervisor, &[]);
+        let other = crate::fs::FsAgentStore::open(&dir.path().join("configs")).expect("open");
+        let labels = BTreeMap::from([("site".to_string(), "wien".to_string())]);
+        assert!(other.set_labels(&client, &labels).expect("labels"));
+        assert_eq!(
+            other.set_restart_pending(&supervisor, true),
+            Ok(Some(false))
+        );
+        assert!(view(&state, &supervisor).inherited_labels.is_empty());
+
+        state
+            .take_up_agents(Some(&HashSet::from([client, supervisor])))
+            .expect("take up");
+        assert_eq!(view(&state, &client).labels, labels);
+        assert_eq!(view(&state, &supervisor).inherited_labels, labels);
+        assert!(state.fleet.lock().expect("fleet")[&supervisor].restart_pending);
+
+        other.remove(&client).expect("forget");
+        state.take_up_agents(None).expect("take up");
+        assert!(!state.fleet.lock().expect("fleet").contains_key(&client));
+        assert!(
+            view(&state, &supervisor).inherited_labels.is_empty(),
+            "a forgotten Client Agent's labels are inherited no more"
+        );
     }
 
     /// Behind a Gateway an Agent carries no `fleet.host.*`; the Agents sharing a `host.id` inherit

@@ -1,9 +1,12 @@
 //! The Agent-record storage port (ADR-0024).
 //!
 //! The fleet is loaded whole at startup and held in memory; at runtime the store receives writes
-//! and deletions for single Agents — `load`, `put`, `remove`, `rekey` — and one operation for a
-//! rollout, which writes the revisions it pins and the assignments that pin them together
-//! (ADR-0029 clause 2). The integrity questions a deletion asks — is this pinned, which revisions
+//! and deletions for single Agents — `load`, `get`, `put`, `set_labels`, `set_restart_pending`,
+//! `remove`, `rekey` — and one operation for a rollout, which writes the revisions it pins and the
+//! assignments that pin them together (ADR-0029 clause 2). A report, a label change, a restart
+//! request and a rollout each write their own part of a record, so on a store other Servers share
+//! the write of one never undoes another's
+//! (ADR-draft-the-fleet-record-of-agents-and-hosts clause 2). The integrity questions a deletion asks — is this pinned, which revisions
 //! are referenced — are queries of the port too, so an adapter over a database answers them from
 //! its rows rather than the caller from a scan. The port speaks the *typed* record: what bytes or
 //! rows a backend turns it into is the adapter's own business.
@@ -183,8 +186,42 @@ pub trait AgentStore: Send + Sync {
         Ok(self.load()?.remove(uid))
     }
 
-    /// Creates or replaces one record.
+    /// Whether other Servers write this store too, so the fleet reads an Agent it does not hold
+    /// from it rather than from what it loaded, and decides an act on an Agent from what it stores
+    /// (ADR-draft-the-servers-state-and-its-stores clause 3). A store that is its one Server's alone
+    /// says no.
+    fn is_shared(&self) -> bool {
+        false
+    }
+
+    /// Creates one record, or replaces the part of it a report decides: what the Agent reported,
+    /// the transport, `last_seen_ms` and the Host it arrived over. The labels, the assignment and
+    /// `restart_pending` of a record that exists stay as they are stored, since the acts that
+    /// decide them write them (ADR-draft-the-fleet-record-of-agents-and-hosts clause 2). A store
+    /// whose one Server is its only writer may write the whole record, which that Server holds.
     fn put(&self, uid: &InstanceUid, record: &PersistedAgent) -> Result<(), String>;
+
+    /// Sets the labels of one record and nothing else, and announces it to the other Servers on the
+    /// store. Answers whether there was a record to set them on.
+    ///
+    /// # Errors
+    /// Returns an error when the record cannot be written.
+    fn set_labels(
+        &self,
+        uid: &InstanceUid,
+        labels: &BTreeMap<String, String>,
+    ) -> Result<bool, String>;
+
+    /// Sets or clears the queued restart of one record and nothing else, and announces a request
+    /// to the other Servers on the store. Answers what it was before, `None` when there is no
+    /// record: the Server that delivers a restart clears it first and delivers it only when it was
+    /// still queued, so a request another Server set after that clear stays queued, and one another
+    /// Server delivered already is not delivered twice.
+    ///
+    /// # Errors
+    /// Returns an error when the record cannot be written.
+    fn set_restart_pending(&self, uid: &InstanceUid, pending: bool)
+        -> Result<Option<bool>, String>;
 
     /// Forgets one record (ADR-0024); removing what is already absent is not an error.
     fn remove(&self, uid: &InstanceUid) -> Result<(), String>;
@@ -212,7 +249,11 @@ pub trait AgentStore: Send + Sync {
     /// pinning a revision that was not written. A record that cannot be written leaves the records
     /// as they were: an adapter that writes them one by one puts back the ones it already wrote,
     /// and what [`pinning`](Self::pinning) and
-    /// [`referenced_revisions`](Self::referenced_revisions) answer follows what it stores.
+    /// [`referenced_revisions`](Self::referenced_revisions) answer follows what it stores. Of each
+    /// record a shared store writes the assignment alone, and of a record it no longer holds
+    /// nothing; it writes them in the order of their `instance_uid` whatever order they are given
+    /// in, so two releases over the same Agents on two Servers wait for each other and never
+    /// deadlock.
     ///
     /// # Errors
     /// Returns an error when the revisions or a record cannot be written.

@@ -29,8 +29,8 @@ use crate::config::LeaseTimes;
 use crate::fleet::AppState;
 use crate::postgres::lease::Taken;
 use crate::postgres::notify::{
-    Heard, Notice, ASSIGNMENT, CERTIFICATE, CONFIGURATION, DEPLOYMENT, ENROLMENT, FLOOR, HOST,
-    PACKAGE, REVOCATION, WINDOW,
+    Heard, Notice, ASSIGNMENT, CERTIFICATE, CONFIGURATION, DEPLOYMENT, ENROLMENT, FLOOR, FORGOTTEN,
+    HOST, LABELS, PACKAGE, RESTART, REVOCATION, WINDOW,
 };
 use crate::postgres::Database;
 
@@ -326,8 +326,9 @@ fn lock_lost(held: &watch::Sender<Option<String>>, instance_id: &str) {
 /// again; an enrolment request or the window has the window and its queue read again, and the
 /// connections waiting on them answered; a Configuration, a Deployment or a Package has its store
 /// read again
-/// (clause 12); an Agent's assignment has its record read again, and its connection offered what
-/// it was released. Every time the listening connection is made, since what
+/// (clause 12); an Agent's assignment, labels, restart request or forgetting has its record read
+/// again, its connection offered what it was released or sent the restart, its group placed again,
+/// or the Agent dropped. Every time the listening connection is made, since what
 /// was committed before it was not heard, and for a kind this instance does not know, everything is
 /// read again. What this instance announced itself is never heard: it holds what it committed.
 /// What is heard while a read runs is taken up by one read after it, and a read that fails is tried
@@ -389,8 +390,8 @@ pub fn follow(
         state.reload_catalogue(due.configurations, due.deployments, due.packages)?;
         match &due.agents {
             Agents::Named(uids) if uids.is_empty() => {}
-            Agents::Named(uids) => state.take_up_assignments(Some(uids))?,
-            Agents::All => state.take_up_assignments(None)?,
+            Agents::Named(uids) => state.take_up_agents(Some(uids))?,
+            Agents::All => state.take_up_agents(None)?,
         }
         // Counted once the whole read is done, so a read counted has taken up everything it was
         // due.
@@ -485,7 +486,7 @@ impl Due {
                 packages: true,
                 ..Due::default()
             },
-            ASSIGNMENT => Due {
+            ASSIGNMENT | LABELS | RESTART | FORGOTTEN => Due {
                 agents: match InstanceUid::parse(&notice.id) {
                     Some(uid) => Agents::Named(HashSet::from([uid])),
                     None => Agents::All,

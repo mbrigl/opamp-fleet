@@ -1,7 +1,9 @@
 //! Agent records in PostgreSQL (ADR-0029 clauses 4 and 21): the PostgreSQL adapter behind
 //! [`AgentStore`](crate::agent_store::AgentStore) — one row per Agent, its scalars as columns, the
 //! wire-typed fields as their protobuf bytes, its labels, and its assignment's Configurations in
-//! rows of their own. A rollout's revisions and assignments commit together or not at all.
+//! rows of their own. A rollout's revisions and assignments commit together or not at all. Each
+//! call writes the columns it names and no other, and announces in its transaction what another
+//! instance carrying the Agent takes up: a label change, a restart request, a release, a forget.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
@@ -10,7 +12,7 @@ use opamp::uid::InstanceUid;
 use prost::Message;
 use tokio_postgres::GenericClient;
 
-use super::notify::{notify, ASSIGNMENT, CONFIGURATION};
+use super::notify::{notify, ASSIGNMENT, CONFIGURATION, FORGOTTEN, LABELS, RESTART};
 use super::{client, signed, sql, unsigned, Database};
 use crate::agent_store::{AgentStore, PersistedAgent, Pin};
 use crate::configs::Pinned;
@@ -88,29 +90,106 @@ impl AgentStore for PgAgentStore {
         Ok(record)
     }
 
+    fn is_shared(&self) -> bool {
+        true
+    }
+
+    /// A new record whole; of one that exists, the columns a report decides alone, so a label
+    /// change, a restart request or a release committed through another instance stays.
     fn put(&self, uid: &InstanceUid, record: &PersistedAgent) -> Result<(), String> {
         let (uid, record) = (*uid, record.clone());
-        let assignment = record.assignment.clone();
-        self.transaction(move |mut client| async move {
+        let created = self.database.run(move |pool| async move {
+            let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
-            write(&*transaction, &uid, &record).await?;
-            transaction.commit().await.map_err(sql)
+            let created = write_reported(&*transaction, &uid, &record).await?;
+            transaction.commit().await.map_err(sql)?;
+            Ok(created.then_some(record.assignment))
         })?;
-        self.stored([(&uid, assignment.as_ref())]);
+        if let Some(assignment) = created {
+            self.stored([(&uid, assignment.as_ref())]);
+        }
         Ok(())
+    }
+
+    fn set_labels(
+        &self,
+        uid: &InstanceUid,
+        labels: &BTreeMap<String, String>,
+    ) -> Result<bool, String> {
+        let key = uid.to_string();
+        let labels = serde_json::to_value(labels).expect("labels serialize");
+        self.database.run(move |pool| async move {
+            let mut client = client(&pool).await?;
+            let transaction = client.transaction().await.map_err(sql)?;
+            let set = transaction
+                .execute(
+                    "UPDATE agents SET labels = $2 WHERE instance_uid = $1",
+                    &[&key, &labels],
+                )
+                .await
+                .map_err(sql)?
+                > 0;
+            if set {
+                notify(&*transaction, LABELS, &key).await?;
+            }
+            transaction.commit().await.map_err(sql)?;
+            Ok(set)
+        })
+    }
+
+    /// Reads what is queued under the row's lock and writes it only when it changes; a request is
+    /// announced, a clear is not, since no other instance acts on it.
+    fn set_restart_pending(
+        &self,
+        uid: &InstanceUid,
+        pending: bool,
+    ) -> Result<Option<bool>, String> {
+        let key = uid.to_string();
+        self.database.run(move |pool| async move {
+            let mut client = client(&pool).await?;
+            let transaction = client.transaction().await.map_err(sql)?;
+            let Some(row) = transaction
+                .query_opt(
+                    "SELECT restart_pending FROM agents WHERE instance_uid = $1 FOR UPDATE",
+                    &[&key],
+                )
+                .await
+                .map_err(sql)?
+            else {
+                return Ok(None);
+            };
+            let was: bool = row.get(0);
+            if was != pending {
+                transaction
+                    .execute(
+                        "UPDATE agents SET restart_pending = $2 WHERE instance_uid = $1",
+                        &[&key, &pending],
+                    )
+                    .await
+                    .map_err(sql)?;
+            }
+            if pending {
+                notify(&*transaction, RESTART, &key).await?;
+            }
+            transaction.commit().await.map_err(sql)?;
+            Ok(Some(was))
+        })
     }
 
     fn remove(&self, uid: &InstanceUid) -> Result<(), String> {
         let uid = *uid;
         self.transaction(move |mut client| async move {
             let transaction = client.transaction().await.map_err(sql)?;
-            transaction
+            let removed = transaction
                 .execute(
                     "DELETE FROM agents WHERE instance_uid = $1",
                     &[&uid.to_string()],
                 )
                 .await
                 .map_err(sql)?;
+            if removed > 0 {
+                notify(&*transaction, FORGOTTEN, &uid.to_string()).await?;
+            }
             transaction.commit().await.map_err(sql)
         })?;
         self.stored([(&uid, None)]);
@@ -142,14 +221,21 @@ impl AgentStore for PgAgentStore {
         Ok(())
     }
 
-    /// One transaction: the revisions and the records that pin them commit together or not at all
-    /// (ADR-0029 clause 21).
+    /// One transaction: the revisions and the assignments that pin them commit together or not at
+    /// all (ADR-0029 clause 21). Each record's assignment is written alone, in the order of the
+    /// `instance_uid`, so two releases over the same Agents lock their rows in one order; a record
+    /// forgotten meanwhile is written nothing.
     fn release(
         &self,
         revisions: &[Pinned],
         agents: &[(InstanceUid, PersistedAgent)],
     ) -> Result<(), String> {
-        let (revisions, records) = (revisions.to_vec(), agents.to_vec());
+        let revisions = revisions.to_vec();
+        let mut records: Vec<(String, Option<Assignment>)> = agents
+            .iter()
+            .map(|(uid, record)| (uid.to_string(), record.assignment.clone()))
+            .collect();
+        records.sort_by(|(a, _), (b, _)| a.cmp(b));
         let written = revisions.len() + records.len();
         self.database.run_writing(written, move |pool| async move {
             let mut client = client(&pool).await?;
@@ -162,9 +248,10 @@ impl AgentStore for PgAgentStore {
             for configuration in pinned {
                 notify(&*transaction, CONFIGURATION, configuration).await?;
             }
-            for (uid, record) in &records {
-                write(&*transaction, uid, record).await?;
-                notify(&*transaction, ASSIGNMENT, &uid.to_string()).await?;
+            for (key, assignment) in &records {
+                if write_assignment(&*transaction, key, assignment.as_ref()).await? {
+                    notify(&*transaction, ASSIGNMENT, key).await?;
+                }
             }
             transaction.commit().await.map_err(sql)
         })?;
@@ -314,29 +401,180 @@ async fn read(
     Ok(records)
 }
 
-/// Creates or replaces one Agent record, its assignment's Configurations exactly the record's,
-/// inside the caller's transaction.
+/// The columns a report decides (ADR-draft-the-fleet-record-of-agents-and-hosts clause 2): every
+/// column but the key, the labels, `restart_pending` and the assignment's.
+const REPORTED: [&str; 12] = [
+    "sequence_num",
+    "capabilities",
+    "transport",
+    "last_seen_ms",
+    "effective_config",
+    "description",
+    "health",
+    "remote_config_status",
+    "connection_settings_status",
+    "package_statuses",
+    "available_components",
+    "host",
+];
+
+/// Creates one Agent record whole, or writes the columns a report decides of one that exists,
+/// inside the caller's transaction. Answers whether it created it.
+async fn write_reported(
+    client: &impl GenericClient,
+    uid: &InstanceUid,
+    record: &PersistedAgent,
+) -> Result<bool, String> {
+    let key = uid.to_string();
+    let sets = REPORTED
+        .iter()
+        .enumerate()
+        .map(|(i, column)| format!("{column} = ${}", i + 2))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let update = format!("UPDATE agents SET {sets} WHERE instance_uid = $1");
+    let (sequence_num, capabilities, last_seen_ms) = (
+        signed(record.sequence_num),
+        signed(record.capabilities),
+        signed(record.last_seen_ms),
+    );
+    let (description, health, remote_config_status) = (
+        encode(record.description.as_ref()),
+        encode(record.health.as_ref()),
+        encode(record.remote_config_status.as_ref()),
+    );
+    let (connection_settings_status, package_statuses, available_components) = (
+        encode(record.connection_settings_status.as_ref()),
+        encode(record.package_statuses.as_ref()),
+        encode(record.available_components.as_ref()),
+    );
+    let effective_config = record.effective_config.as_deref().map(str::as_bytes);
+    let transport = record.transport.as_str();
+    // No row: the record is new, or was forgotten, and is written whole. One another instance
+    // created in between the two is written to again, the columns a report decides alone.
+    loop {
+        let updated = client
+            .execute(
+                &update,
+                &[
+                    &key,
+                    &sequence_num,
+                    &capabilities,
+                    &transport,
+                    &last_seen_ms,
+                    &effective_config,
+                    &description,
+                    &health,
+                    &remote_config_status,
+                    &connection_settings_status,
+                    &package_statuses,
+                    &available_components,
+                    &record.host,
+                ],
+            )
+            .await
+            .map_err(sql)?;
+        if updated > 0 {
+            return Ok(false);
+        }
+        if insert(client, uid, record, "DO NOTHING").await? {
+            return Ok(true);
+        }
+    }
+}
+
+/// Writes the assignment of one Agent record alone, its Configurations exactly the assignment's,
+/// inside the caller's transaction. Answers whether there was a record.
+async fn write_assignment(
+    client: &impl GenericClient,
+    key: &str,
+    assignment: Option<&Assignment>,
+) -> Result<bool, String> {
+    let package = assignment.and_then(|assignment| assignment.package.as_ref());
+    let updated = client
+        .execute(
+            "UPDATE agents SET deployment = $2, package_agent_type = $3, package_version = $4 \
+             WHERE instance_uid = $1",
+            &[
+                &key,
+                &assignment.map(|assignment| assignment.deployment.as_str()),
+                &package.map(|id| id.agent_type.as_str()),
+                &package.map(|id| id.version.as_str()),
+            ],
+        )
+        .await
+        .map_err(sql)?;
+    if updated == 0 {
+        return Ok(false);
+    }
+    write_configurations(client, key, assignment).await?;
+    Ok(true)
+}
+
+/// Replaces the assignment's Configurations of one Agent record with `assignment`'s.
+async fn write_configurations(
+    client: &impl GenericClient,
+    key: &str,
+    assignment: Option<&Assignment>,
+) -> Result<(), String> {
+    client
+        .execute(
+            "DELETE FROM agent_assignment_configurations WHERE instance_uid = $1",
+            &[&key],
+        )
+        .await
+        .map_err(sql)?;
+    for (name, revision) in assignment
+        .map(|assignment| &assignment.configurations)
+        .into_iter()
+        .flatten()
+    {
+        client
+            .execute(
+                "INSERT INTO agent_assignment_configurations (instance_uid, configuration, \
+                 revision) VALUES ($1, $2, $3)",
+                &[&key, name, revision],
+            )
+            .await
+            .map_err(sql)?;
+    }
+    Ok(())
+}
+
+/// Creates or replaces one Agent record whole, its assignment's Configurations exactly the
+/// record's, inside the caller's transaction: what an import and a re-key write.
 pub(crate) async fn write(
     client: &impl GenericClient,
     uid: &InstanceUid,
     record: &PersistedAgent,
 ) -> Result<(), String> {
-    let key = uid.to_string();
-    let labels = serde_json::to_value(&record.labels).expect("labels serialize");
-    let assignment = record.assignment.as_ref();
-    let package = assignment.and_then(|assignment| assignment.package.as_ref());
     let updates = COLUMNS
         .split(", ")
         .skip(1)
         .map(|column| format!("{column} = EXCLUDED.{column}"))
         .collect::<Vec<_>>()
         .join(", ");
-    client
+    insert(client, uid, record, &format!("DO UPDATE SET {updates}")).await?;
+    Ok(())
+}
+
+/// Inserts one Agent record whole, `on_conflict` saying what a row of its key already there does,
+/// and its assignment's Configurations where the row was written. Answers whether it was.
+async fn insert(
+    client: &impl GenericClient,
+    uid: &InstanceUid,
+    record: &PersistedAgent,
+    on_conflict: &str,
+) -> Result<bool, String> {
+    let key = uid.to_string();
+    let labels = serde_json::to_value(&record.labels).expect("labels serialize");
+    let assignment = record.assignment.as_ref();
+    let package = assignment.and_then(|assignment| assignment.package.as_ref());
+    let written = client
         .execute(
             &format!(
                 "INSERT INTO agents ({COLUMNS}) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, \
-                 $11, $12, $13, $14, $15, $16, $17, $18) ON CONFLICT (instance_uid) DO UPDATE \
-                 SET {updates}"
+                 $11, $12, $13, $14, $15, $16, $17, $18) ON CONFLICT (instance_uid) {on_conflict}"
             ),
             &[
                 &key,
@@ -360,29 +598,12 @@ pub(crate) async fn write(
             ],
         )
         .await
-        .map_err(sql)?;
-    client
-        .execute(
-            "DELETE FROM agent_assignment_configurations WHERE instance_uid = $1",
-            &[&key],
-        )
-        .await
-        .map_err(sql)?;
-    for (name, revision) in assignment
-        .map(|assignment| &assignment.configurations)
-        .into_iter()
-        .flatten()
-    {
-        client
-            .execute(
-                "INSERT INTO agent_assignment_configurations (instance_uid, configuration, \
-                 revision) VALUES ($1, $2, $3)",
-                &[&key, name, revision],
-            )
-            .await
-            .map_err(sql)?;
+        .map_err(sql)?
+        > 0;
+    if written {
+        write_configurations(client, &key, assignment).await?;
     }
-    Ok(())
+    Ok(written)
 }
 
 #[cfg(test)]
@@ -451,7 +672,6 @@ mod tests {
             retained: BTreeMap::from([(revision_hash(&pinned), pinned.clone())]),
         };
         let mut released = bare.clone();
-        released.effective_config = full.effective_config.clone();
         released.assignment = Some(Assignment {
             deployment: "stable".to_string(),
             package: None,
@@ -472,10 +692,82 @@ mod tests {
             BTreeSet::from(["0123abcd".to_string(), revision_hash(&pinned)])
         );
 
+        // The acts that decide the labels and a queued restart write them, and one Agent is read
+        // as it is stored.
+        let labels = BTreeMap::from([("rollout".to_string(), "canary".to_string())]);
+        assert!(store.set_labels(&three, &labels).expect("labels"));
+        assert_eq!(store.set_restart_pending(&three, false), Ok(Some(true)));
+        assert_eq!(store.set_restart_pending(&three, false), Ok(Some(false)));
+        assert_eq!(store.set_restart_pending(&three, true), Ok(Some(false)));
+        let got = open().0.get(&three).expect("get").expect("stored");
+        assert_eq!(got.labels, labels);
+        assert!(got.restart_pending);
+        assert_eq!(got.assignment, released.assignment);
+        let absent = InstanceUid::default();
+        assert_eq!(open().0.get(&absent), Ok(None));
+        assert_eq!(store.set_labels(&absent, &labels), Ok(false));
+        assert_eq!(store.set_restart_pending(&absent, true), Ok(None));
+        assert!(
+            open().0.get(&absent).expect("get").is_none(),
+            "nothing created"
+        );
+
         store.remove(&one).expect("remove");
         store.remove(&one).expect("removing the absent is fine");
         assert_eq!(store.pinning(Pin::Configuration("base")), 1);
         assert_eq!(open().0.load().expect("load").len(), 1);
+    }
+
+    /// A report's write on PostgreSQL leaves what the acts wrote through another instance: the
+    /// labels, a queued restart and the assignment stay as they are stored, while what the report
+    /// decides is written; a record that is not there is written whole.
+    /// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts, ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    #[test]
+    fn a_report_written_on_postgres_keeps_what_the_acts_wrote() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let (a, b) = (
+            PgAgentStore::new(database.clone()),
+            PgAgentStore::new(database),
+        );
+        let uid = InstanceUid::default();
+        let held = record();
+        a.put(&uid, &held).expect("created whole");
+        assert!(
+            a.get(&uid).expect("get") == Some(held.clone()),
+            "written whole"
+        );
+
+        let labels = BTreeMap::from([("tier".to_string(), "edge".to_string())]);
+        assert!(b.set_labels(&uid, &labels).expect("labels"));
+        assert_eq!(b.set_restart_pending(&uid, false), Ok(Some(true)));
+        assert_eq!(b.set_restart_pending(&uid, true), Ok(Some(false)));
+        b.release(
+            &[],
+            &[(
+                uid,
+                PersistedAgent {
+                    assignment: None,
+                    ..held.clone()
+                },
+            )],
+        )
+        .expect("release");
+
+        // A still holds the record as it was, and writes a report from it.
+        let mut report = held.clone();
+        report.restart_pending = false;
+        report.health = None;
+        report.last_seen_ms += 30_000;
+        a.put(&uid, &report).expect("report");
+        let stored = a.get(&uid).expect("get").expect("stored");
+        assert_eq!(stored.labels, labels, "the labels stay as B set them");
+        assert!(stored.restart_pending, "the restart stays queued");
+        assert_eq!(stored.assignment, None, "the release stays");
+        assert_eq!(stored.health, None, "what the report decides is written");
+        assert_eq!(stored.last_seen_ms, report.last_seen_ms);
     }
 
     /// Verifies: ADR-0029
@@ -523,6 +815,7 @@ mod tests {
         let mut before = record();
         before.assignment = None;
         store.put(&one, &before).expect("put");
+        store.put(&two, &before).expect("put");
         store.load().expect("load");
 
         let pinned = revision("v1\n");
@@ -549,7 +842,7 @@ mod tests {
 
         let loaded = open().0.load().expect("load");
         assert!(loaded[&one] == before, "no assignment");
-        assert!(!loaded.contains_key(&two));
+        assert!(loaded[&two] == before, "no assignment");
         assert_eq!(store.pinning(Pin::Deployment("stable")), 0);
         assert_eq!(store.pinning(Pin::Configuration("base")), 0);
         configs
@@ -600,6 +893,84 @@ mod tests {
             &|_| test.mend("agents"),
         );
         assert!(left.is_empty(), "no revision: {left:?}");
+    }
+
+    /// Two releases over the same two Agents, given them in opposite orders, both commit: each
+    /// writes the rows in the order of their `instance_uid`, so the second waits for the first
+    /// rather than holding the row the first needs next. The first is held at a gate in the
+    /// database after its first row; the gate opens once the second waits for that row's lock, or
+    /// has reached the gate itself, which only a release that writes in the order given does, and
+    /// then the two would deadlock.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    #[test]
+    fn two_releases_over_the_same_agents_in_opposite_orders_both_commit() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let (low, high) = (InstanceUid([1; 16]), InstanceUid([2; 16]));
+        let mut bare = record();
+        bare.assignment = None;
+        let store = PgAgentStore::new(database.clone());
+        store.put(&low, &bare).expect("put");
+        store.put(&high, &bare).expect("put");
+        test.sql(
+            "CREATE TABLE fleet_test_gate (open boolean NOT NULL); \
+             INSERT INTO fleet_test_gate VALUES (false); \
+             CREATE FUNCTION fleet_test_wait() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN \
+             WHILE NOT (SELECT open FROM fleet_test_gate) LOOP PERFORM pg_sleep(0.01); \
+             END LOOP; RETURN NEW; END $$; \
+             CREATE TRIGGER fleet_test_wait AFTER UPDATE ON agents \
+             FOR EACH ROW EXECUTE FUNCTION fleet_test_wait();",
+        );
+        let sessions = |condition: &str| {
+            test.rows(&format!(
+                "SELECT 1 FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND {condition}"
+            ))
+            .len()
+        };
+        let at_gate = || sessions("wait_event = 'PgSleep' AND query LIKE 'UPDATE agents%'");
+        let until = |what: &str, done: &dyn Fn() -> bool| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while !done() {
+                assert!(std::time::Instant::now() < deadline, "{what}");
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+        let release = |deployment: &str, order: [InstanceUid; 2]| {
+            let mut released = bare.clone();
+            released.assignment = Some(Assignment {
+                deployment: deployment.to_string(),
+                package: None,
+                configurations: BTreeMap::new(),
+            });
+            let database = database.clone();
+            std::thread::spawn(move || {
+                PgAgentStore::new(database).release(&[], &order.map(|uid| (uid, released.clone())))
+            })
+        };
+
+        let first = release("first", [high, low]);
+        until("the first reaches the gate", &|| at_gate() == 1);
+        let second = release("second", [low, high]);
+        until("the second waits for the row, or reaches the gate", &|| {
+            at_gate() == 2
+                || sessions("wait_event_type = 'Lock' AND query LIKE 'UPDATE agents%'") == 1
+        });
+        test.sql("UPDATE fleet_test_gate SET open = true");
+        first
+            .join()
+            .expect("the first's thread")
+            .expect("the first commits");
+        second
+            .join()
+            .expect("the second's thread")
+            .expect("the second commits");
+        assert_eq!(
+            test.rows("SELECT DISTINCT deployment FROM agents"),
+            [[Some("second".to_string())]],
+            "the second, which waited, wrote last"
+        );
     }
 
     /// A row that does not decode fails startup naming its `instance_uid` (ADR-0029 clause 4).
