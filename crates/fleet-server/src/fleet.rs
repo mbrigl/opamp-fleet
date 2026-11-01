@@ -2326,28 +2326,40 @@ impl AppState {
             && msg.flags & AgentToServerFlags::RequestInstanceUid as u64 != 0
         {
             let new_uid = InstanceUid::default();
-            if let Some(mut record) = fleet.remove(&uid) {
-                // The labels go with it (ADR-0024 clause 21); the old identity leaves its group,
-                // and the new one is placed below.
-                let group = record.placement.group.take();
-                fleet.insert(new_uid, record);
-                self.unplace(&mut fleet, &uid, group);
-                // The stored record follows the identity in one step (ADR-0024 clause 14); what
-                // this report changes is written by the dirty check at this exchange's end.
-                if let Err(e) =
-                    self.agent_store
-                        .rekey(&uid, &new_uid, &fleet[&new_uid].to_persisted())
-                {
-                    warn!(old = %uid, new = %new_uid, error = %e, "cannot move the agent record");
+            // The stored record follows the identity in one step (ADR-0024 clause 14), before what
+            // is held does; what this report changes is written by the dirty check at this
+            // exchange's end. A move that fails leaves the Agent under the identity it has, and
+            // the reply assigns none, so the Agent asks again with its next report.
+            let moved = match fleet.get(&uid) {
+                None => Ok(()),
+                Some(record) => self
+                    .agent_store
+                    .rekey(&uid, &new_uid, &record.to_persisted()),
+            };
+            match moved {
+                Ok(()) => {
+                    if let Some(mut record) = fleet.remove(&uid) {
+                        // The labels go with it (ADR-0024 clause 21); the old identity leaves its
+                        // group, and the new one is placed below.
+                        let group = record.placement.group.take();
+                        fleet.insert(new_uid, record);
+                        self.unplace(&mut fleet, &uid, group);
+                        self.written.lock().expect("written lock").remove(&uid);
+                    }
+                    info!(old = %uid, new = %new_uid, "assigned a server-generated instance_uid");
+                    identification = Some(AgentIdentification {
+                        new_instance_uid: new_uid.as_bytes().to_vec(),
+                    });
+                    rekeyed = Some((uid, new_uid));
+                    uid = new_uid;
                 }
-                self.written.lock().expect("written lock").remove(&uid);
+                Err(e) => {
+                    warn!(
+                        agent = %uid, error = %e,
+                        "cannot move the agent record; it keeps its identity"
+                    );
+                }
             }
-            info!(old = %uid, new = %new_uid, "assigned a server-generated instance_uid");
-            identification = Some(AgentIdentification {
-                new_instance_uid: new_uid.as_bytes().to_vec(),
-            });
-            rekeyed = Some((uid, new_uid));
-            uid = new_uid;
         }
 
         // Duplicate instance_uid detection (a Baseline SHOULD): the same identity alive on
@@ -6450,13 +6462,14 @@ mod tests {
     /// A store passing every call to `inner`, whose next reads of one record can be made to fail,
     /// and which can run an act once right after a read of one record: what lets a test place
     /// another instance's write between the read and what is done with it. It counts the reads of
-    /// one record and the reads of several.
+    /// one record and the reads of several, and its re-keys can be made to fail.
     struct Hooked {
         inner: Box<dyn AgentStore>,
         failing_gets: Arc<AtomicU64>,
         after_get: Arc<Mutex<Option<Act>>>,
         gets: Arc<AtomicU64>,
         batched_gets: Arc<AtomicU64>,
+        failing_rekeys: Arc<std::sync::atomic::AtomicBool>,
     }
 
     /// What [`Hooked`] runs once after a read.
@@ -6470,6 +6483,7 @@ mod tests {
                 after_get: Arc::new(Mutex::new(None)),
                 gets: Arc::new(AtomicU64::new(0)),
                 batched_gets: Arc::new(AtomicU64::new(0)),
+                failing_rekeys: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             }
         }
     }
@@ -6564,6 +6578,9 @@ mod tests {
             new: &InstanceUid,
             record: &PersistedAgent,
         ) -> Result<(), String> {
+            if self.failing_rekeys.load(Ordering::SeqCst) {
+                return Err("the move is held back".to_string());
+            }
             self.inner.rekey(old, new, record)
         }
         fn release(
@@ -6702,6 +6719,42 @@ mod tests {
         a.take_up_agents(Some(&HashSet::from([uid])))
             .expect("take up");
         assert_eq!(view(&a, &uid).labels["tier"], "core", "A's own act stays");
+    }
+
+    /// A re-key whose move of the stored record fails leaves the Agent under the identity it has:
+    /// the reply assigns no new one, the record stays stored and held under the old uid, and the
+    /// session is not ended as one of an Agent forgotten.
+    /// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts, ADR-0024
+    #[test]
+    fn a_rekey_whose_move_fails_keeps_the_agent_under_its_identity() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let hooked = Hooked::new(Box::new(crate::postgres::agents::PgAgentStore::new(
+            database.clone(),
+        )));
+        let failing = hooked.failing_rekeys.clone();
+        let a = on_postgres(&database, Box::new(hooked));
+        let uid = InstanceUid([0x67; 16]);
+        a.process(report(&uid, 1), Transport::WebSocket, Some(7));
+
+        failing.store(true, Ordering::SeqCst);
+        let mut rekey = report(&uid, 2);
+        rekey.flags = AgentToServerFlags::RequestInstanceUid as u64;
+        let answered = a.process(rekey, Transport::WebSocket, Some(7));
+        assert_eq!(answered.uid, Some(uid), "carried under its identity");
+        assert!(
+            answered.reply.agent_identification.is_none(),
+            "no new identity is assigned"
+        );
+        assert!(a.take_forgotten(7).is_empty(), "its session goes on");
+        assert_eq!(view(&a, &uid).instance_uid, uid.to_string());
+        assert_eq!(
+            test.rows("SELECT instance_uid FROM agents"),
+            [vec![Some(uid.to_string())]],
+            "the record stays stored under it"
+        );
     }
 
     /// What differs is read again under the fleet lock in one read, however many records differ:
