@@ -39,3 +39,15 @@ it. The cases seen so far:
 
 with the human: ADR-0007 clause 5 keeps every part of the system with the human and sets the cap on
 open unattended work at zero.
+
+## Where it stands
+
+Four cases wait for their event: `audit_log` (a drain or the line itself), the packages bound
+(waits of seconds), the self-update test (a pid log every run appends to), and the `test-check-all`
+TERM case (an `armed` marker and a go-file). The fifth,
+`a_config_change_reaches_both_supervised_agents_over_one_connection`, waits correctly and fails on
+a defect: a heartbeat that crosses a rollout's push makes the Server offer the same configuration
+hash again, and the Client applies every offer it receives, so the queued repeat restarts the
+process once more after `APPLIED`. Delaying the Server's push reproduces it every time. Whether
+the Client ignores a repeat of the hash it applies or has applied, as ADR-0027 clause 49 does for
+packages, or the Server stops re-offering, is the human's to decide; the ticket closes with that fix.
