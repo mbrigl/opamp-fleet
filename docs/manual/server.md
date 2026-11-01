@@ -1299,9 +1299,9 @@ names a predecessor while the database records no archive. Removing a whole chai
 record is not detected by the database itself. Nor is a cut made with pruning: whoever can write to
 the database can append one `audit.pruned` with a correct hash to an open chain and delete the head
 of any chain up to the entry it names, young entries included, and the record still holds. Only an
-`audit.pruned` in a chain that itself holds links another. A record that holds shows that what is
-left is linked, not that nothing younger than `retain_days` was removed; the signed chain heads,
-once they land, detect both.
+`audit.pruned` in a chain that itself holds links another or carries the predecessor on. A record
+that holds shows that what is left is linked, not that nothing younger than `retain_days` was
+removed; the signed chain heads, once they land, detect both.
 
 The record goes back `[audit] retain_days` (365 by default, at most 36 500). At its start and once a
 day after, each instance removes from its own chain the entries the database stored more than that
