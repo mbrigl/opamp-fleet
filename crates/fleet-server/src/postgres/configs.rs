@@ -352,7 +352,7 @@ mod tests {
                 .expect("collect")
                 .into_keys()
                 .collect::<Vec<_>>(),
-            [v2.clone()],
+            std::slice::from_ref(&v2),
             "what is kept is answered"
         );
         assert_eq!(
