@@ -2132,6 +2132,57 @@ fn an_agent_rekeyed_at_its_request_keeps_its_stored_record() {
         .any(|view| view.instance_uid == rekeyed.to_string()));
 }
 
+/// An Agent rekeyed at its request through A is dropped under its old identity by B, which
+/// loaded it: the move announces the old identity forgotten, so B holds no record of it under a
+/// name no store keeps.
+/// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts, ADR-0024
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_agent_rekeyed_through_one_instance_is_dropped_under_its_old_identity_by_another() {
+    use fleet_server::fleet::{AppState, Transport};
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let a = Arc::new(AppState::on(&records(&schema)).expect("state"));
+    let uid = InstanceUid([0x54; 16]);
+    let report = move |flags: u64, sequence_num: u64| AgentToServer {
+        instance_uid: uid.as_bytes().to_vec(),
+        sequence_num,
+        capabilities: AgentCapabilities::ReportsStatus as u64,
+        flags,
+        ..Default::default()
+    };
+    let on_a = a.clone();
+    tokio::task::spawn_blocking(move || on_a.process(report(0, 1), Transport::WebSocket, Some(7)))
+        .await
+        .expect("report");
+    // B loads the record at startup, and listens before A moves it.
+    let b = Instance::start(&pki, &schema, schema.config_on(schema.config.port)).await;
+    assert!(b.has_read(1).await, "B follows");
+    assert!(view_of(&b, uid).is_some(), "B loaded it");
+
+    let on_a = a.clone();
+    let rekeyed = tokio::task::spawn_blocking(move || {
+        on_a.process(
+            report(
+                opamp::proto::AgentToServerFlags::RequestInstanceUid as u64,
+                2,
+            ),
+            Transport::WebSocket,
+            Some(7),
+        )
+        .uid
+    })
+    .await
+    .expect("rekey")
+    .expect("carried under its new identity");
+    assert_ne!(rekeyed, uid);
+    assert!(
+        eventually(Duration::from_secs(10), || view_of(&b, uid).is_none()).await,
+        "B drops the old identity"
+    );
+}
+
 /// A rollout on A to Agents forgotten through B meanwhile, before A heard of it, releases to the
 /// others alone: the press counts only the Agents it wrote an assignment for, a rollout to one
 /// forgotten Agent answers that it is unknown, and A holds neither any more.

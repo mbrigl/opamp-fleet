@@ -320,8 +320,12 @@ pub trait AgentStore: Send + Sync {
 
     /// The identity reassignment (`RequestInstanceUid`): one operation, so an adapter with atomic
     /// rename or transactions can make it one step. A shared store moves the record as it is
-    /// stored and writes nothing of `record`, so what another Server set stays, and moves nothing
-    /// of a record it no longer holds.
+    /// stored and writes nothing of `record`, so what another Server set stays, moves nothing of
+    /// a record it no longer holds, and announces the old identity forgotten, so another Server
+    /// holding it drops it.
+    ///
+    /// # Errors
+    /// Returns an error when the record cannot be moved; it then stays under `old`.
     fn rekey(
         &self,
         old: &InstanceUid,

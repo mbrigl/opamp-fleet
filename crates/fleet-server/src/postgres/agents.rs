@@ -368,7 +368,8 @@ impl AgentStore for PgAgentStore {
 
     /// One transaction: the row as it is stored moved to its new key, its assignment's
     /// Configurations with it, and nothing of `record` written, so a label change or a release
-    /// another instance committed stays; a record no longer stored is moved nowhere.
+    /// another instance committed stays; the old key announced forgotten, so an instance that
+    /// loaded it drops it; a record no longer stored is moved nowhere.
     fn rekey(
         &self,
         old: &InstanceUid,
@@ -411,6 +412,7 @@ impl AgentStore for PgAgentStore {
                     .execute("DELETE FROM agents WHERE instance_uid = $1", &[&old])
                     .await
                     .map_err(sql)?;
+                notify(&*transaction, FORGOTTEN, &old).await?;
             }
             transaction.commit().await.map_err(sql)?;
             Ok(moved)
