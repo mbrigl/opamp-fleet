@@ -1216,8 +1216,9 @@ It walks every chain in `seq` order, lists each open one with its last entry —
 lease that is held, or of one that lapsed and no instance has taken over yet — and names the chain
 and the first entry that fails, exiting non-zero: an entry altered or removed, entries missing
 from the end of a closed chain, or an entry after its close. Without `--archive` it reports the
-predecessor as not checked; an archive the database records that no chain names fails. Removing
-a whole chain together with its record is not detected by the database itself.
+predecessor as not checked; an archive the database records that no chain names fails, and so
+does a chain that names a predecessor while the database records no archive. Removing a whole
+chain together with its record is not detected by the database itself.
 
 A Server that was on PostgreSQL before this release kept its audit record in files under
 `data_dir/audit/`. At its first start, before the database holds any chain or archive, it records

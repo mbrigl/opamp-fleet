@@ -509,6 +509,13 @@ pub fn verify(database: &Database, archive: Option<&Path>) -> Result<Verified, S
                  as its predecessor — the first chain is gone"
             ));
         }
+        (Some((chain, (seq, _))), None) => {
+            verified.failed = true;
+            verified.lines.push(format!(
+                "chain {chain} names entry {seq} of an archive as its predecessor, and the \
+                 database records no archive"
+            ));
+        }
         (Some((chain, named)), Some(recorded)) if named != recorded => {
             verified.failed = true;
             verified.lines.push(format!(
@@ -1437,6 +1444,35 @@ mod tests {
         database.offer_archive(None);
         offer_archive_in(&database, &archive).expect("a chain exists: it is not read");
         assert_eq!(database.archive_offered(), None);
+    }
+
+    /// A chain that names a predecessor while the database records no archive fails
+    /// `audit-verify`, with or without `--archive`: the archive's row is gone.
+    /// Verifies: ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance
+    #[test]
+    fn a_predecessor_whose_archive_row_is_gone_fails_verification() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let dir = tempfile::tempdir().expect("tempdir");
+        file_record(dir.path(), 3);
+        let archive = dir.path().join(crate::fs::AUDIT);
+        let database = shared(&test);
+        offer_archive_in(&database, &archive).expect("offer");
+        database.take_lease("host-a", LAPSE).expect("lease");
+        test.sql("DELETE FROM audit_archive");
+        for checked in [None, Some(archive.as_path())] {
+            let verified = verify(&database, checked).expect("verify");
+            assert!(verified.failed, "{:?}", verified.lines);
+            assert!(
+                verified
+                    .lines
+                    .iter()
+                    .any(|line| line.contains("records no archive")),
+                "{:?}",
+                verified.lines
+            );
+        }
     }
 
     /// An archive the database records that no chain names as its predecessor fails
