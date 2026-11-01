@@ -406,7 +406,11 @@ impl BlobStore for S3BlobStore {
         let removed = self.delete_key(staging);
         copied?;
         if let Err(e) = removed {
-            // The blob is stored; a cleanup once this lease is no longer live deletes what is left.
+            // The blob is stored, and the staging object is a stray. The cleanup deletes it only
+            // once this lease is no longer live and an instance starts or takes the lease over
+            // when it lapses; a lease released at an orderly shutdown is taken over by none, so
+            // the object may stay until the next start of an instance. It costs storage only: no
+            // Package entry names it, and the store's listing passes over it.
             tracing::warn!(error = %e, "cannot delete an upload's staging object");
         }
         Ok((sha256, size))

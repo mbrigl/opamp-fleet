@@ -360,7 +360,8 @@ In the bucket, an upload in progress lives under `<prefix>staging/<lease>/`, `<l
 lease of the instance that writes it, or `fs` on the filesystem record store. Those of a lease that
 is no longer live are interrupted uploads: an instance deletes them when it starts and whenever it
 takes over a lapsed lease, and never those of a live one; on the filesystem record store, every
-staging object goes at startup. Any other key under `<prefix>` that is not `blobs/<sha256>` fails
+staging object goes at startup. A lease released at an orderly shutdown is taken over by no
+instance, so what its uploads left stays until an instance next starts; it costs storage only. Any other key under `<prefix>` that is not `blobs/<sha256>` fails
 startup naming it. At startup the Server lists the bucket for each artifact's size and downloads
 nothing: unlike the filesystem store, it does not hash the artifacts again. An object altered in the
 bucket is served, and the Client's own hash and signature checks refuse it. The bucket, its
