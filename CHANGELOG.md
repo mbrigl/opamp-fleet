@@ -86,7 +86,11 @@ once its tag exists.
   instance takes them up from the database at once; a restart is sent once, by the instance that
   clears it. A rollout writes its Agents in the order of their `instance_uid`, so two rollouts
   over the same Agents on two instances never deadlock. An Agent an instance has not held is read
-  from the database at its first report there. The filesystem store is unchanged.
+  from the database at its first report there. With the filesystem store too, a label change and a
+  restart request are written to the Agent's record before they are answered: a request that cannot
+  be written is answered `500`, where it was logged and answered as done; an Agent whose record has
+  no file yet, because its first write failed, is answered `404` until its next report writes it;
+  and a queued restart whose record cannot be read is sent once it can.
   **What to do:** nothing.
 
 - **The UI colours as TOML only the Client's own configuration**
