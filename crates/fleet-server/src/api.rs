@@ -3705,3 +3705,39 @@ async fn lift_revocation(
         Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A store refusal of the Package routes is answered with the status the REST contract names
+    /// for it — among them the signature write onto an entry another instance replaced, a
+    /// conflict with the entry's stored state, whose message also begins as a `400`'s does.
+    /// Verifies: ADR-0027
+    #[test]
+    fn a_package_refusal_is_answered_with_its_status() {
+        for (refusal, status) in [
+            ("no package set otelcol@1.0.0", StatusCode::NOT_FOUND),
+            (
+                "no entry linux-amd64 in set otelcol@1.0.0",
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                "set otelcol@1.0.0 is assigned to an Agent and its entries are immutable",
+                StatusCode::CONFLICT,
+            ),
+            (
+                "the entry linux-amd64 in set otelcol@1.0.0 has changed since this Server read \
+                 it — read the Package again and sign what it holds",
+                StatusCode::CONFLICT,
+            ),
+            ("the signature is empty", StatusCode::BAD_REQUEST),
+        ] {
+            assert_eq!(
+                package_error(refusal.to_string()).status(),
+                status,
+                "{refusal}"
+            );
+        }
+    }
+}

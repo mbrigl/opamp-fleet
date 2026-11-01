@@ -239,7 +239,7 @@ pub struct Package {
 /// installs, and the operator's signature over it (ADR-0027). The signature lives here because what
 /// it covers — `fleet_core::package::statement` — names the Agent type, the version and this hash,
 /// and no Deployment: one signature serves every Deployment that holds the Package.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Entry {
     pub platform: Platform,
     /// SHA-256 of the artifact bytes, computed here as they arrive.
@@ -416,21 +416,31 @@ pub trait PackageBackend: Send + Sync {
 
     /// Writes or, with `None`, clears the signature of the entry for `platform` — only while the
     /// stored entry still names the bytes `content_hash`, since a signature covers that hash
-    /// (ADR-0027). Answers whether such an entry was stored; another instance may have replaced
-    /// or removed it since this one read it.
+    /// (ADR-0027). Another instance may have replaced or removed the entry since this one read
+    /// it: then nothing is written, and the entry as stored is answered.
     fn sign(
         &self,
         id: &PackageId,
         platform: &Platform,
         content_hash: &[u8],
         signature: Option<&[u8]>,
-    ) -> Result<bool, String>;
+    ) -> Result<Signed, String>;
 
     /// Removes the entry of one platform; removing what is absent is not an error.
     fn remove_entry(&self, id: &PackageId, platform: &Platform) -> Result<(), String>;
 
     /// Deletes one Package's metadata, its entries with it; its blobs are the store's to collect.
     fn remove(&self, id: &PackageId) -> Result<(), String>;
+}
+
+/// What a signature write found ([`PackageBackend::sign`]).
+#[derive(Clone, Debug)]
+pub enum Signed {
+    /// The stored entry named the bytes, and its signature is written.
+    Written,
+    /// The stored entry names other bytes, or there is none: nothing is written, and this is the
+    /// entry as stored.
+    Changed(Option<Entry>),
 }
 
 /// What happens to blobs outside the lock on the Packages. A request to the blob store may take as
@@ -734,14 +744,16 @@ impl PackageStore {
             .entries
             .get_mut(platform)
             .ok_or_else(|| no_entry(id, platform))?;
-        if !self
+        match self
             .backend
             .sign(id, platform, &entry.content_hash, Some(&signature))?
         {
-            return Err(changed_entry(id, platform));
+            Signed::Written => {
+                entry.signature = Some(signature);
+                Ok(signature_state(self.key.as_deref(), id, entry))
+            }
+            Signed::Changed(stored) => Err(take_up(set, id, platform, stored)),
         }
-        entry.signature = Some(signature);
-        Ok(signature_state(self.key.as_deref(), id, entry))
     }
 
     /// Takes one entry's signature away (ADR-0027); `Ok(false)` when the entry carries none.
@@ -760,11 +772,13 @@ impl PackageStore {
         if entry.signature.is_none() {
             return Ok(false);
         }
-        if !self.backend.sign(id, platform, &entry.content_hash, None)? {
-            return Err(changed_entry(id, platform));
+        match self.backend.sign(id, platform, &entry.content_hash, None)? {
+            Signed::Written => {
+                entry.signature = None;
+                Ok(true)
+            }
+            Signed::Changed(stored) => Err(take_up(set, id, platform, stored)),
         }
-        entry.signature = None;
-        Ok(true)
     }
 
     /// Writes one entry into the Package's map and its metadata — the single path every entry
@@ -1112,9 +1126,26 @@ fn no_entry(id: &PackageId, platform: &Platform) -> String {
     format!("no entry {}-{} in set {id}", platform.os, platform.arch)
 }
 
+/// Holds the entry for `platform` as the store answered it, after a signature write found that
+/// another instance replaced or removed it, and answers the refusal. A signature covers the
+/// bytes, so it is never written onto others; the Package read again through this Server shows
+/// what it holds now, and a signature of that is written. The blob the old entry named is the
+/// other instance's to collect, which replaced it.
+fn take_up(
+    set: &mut Package,
+    id: &PackageId,
+    platform: &Platform,
+    stored: Option<Entry>,
+) -> String {
+    match stored {
+        Some(entry) => set.entries.insert(platform.clone(), entry),
+        None => set.entries.remove(platform),
+    };
+    changed_entry(id, platform)
+}
+
 /// The refusal of a signature write whose entry the store no longer holds with the bytes this
-/// Server read: another instance replaced or removed it. A signature covers the bytes, so it is
-/// never written onto others.
+/// Server read: another instance replaced or removed it.
 fn changed_entry(id: &PackageId, platform: &Platform) -> String {
     format!(
         "the entry {}-{} in set {id} has changed since this Server read it — read the Package \
@@ -1533,6 +1564,58 @@ mod tests {
         assert!(store
             .offer_for_assigned(Some(&set), Some(&linux_agent))
             .is_none());
+    }
+
+    /// A signature written through an instance whose entry another instance replaced is refused
+    /// with the entry having changed, and writes nothing. The refusing instance takes up the
+    /// entry as stored, so the Package read again through it shows the new bytes, and a signature
+    /// written again through it is stored. Two stores on one data directory stand in for two
+    /// instances.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it, ADR-0027
+    #[test]
+    fn a_signature_on_bytes_another_instance_replaced_is_refused_and_signed_anew() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let a = PackageStore::open(dir.path().to_path_buf()).expect("open A");
+        let set = stored_set(&a, "otelcol", "1.0.0", b"first");
+        let b = PackageStore::open(dir.path().to_path_buf()).expect("open B");
+        a.put_entry(&set, &linux(), b"second".to_vec())
+            .expect("A replaces the bytes");
+        let replaced = a.summary(&set).expect("summary").entries[0]
+            .content_hash
+            .clone();
+        assert_ne!(
+            b.summary(&set).expect("summary").entries[0].content_hash,
+            replaced,
+            "B holds the old bytes"
+        );
+
+        let refused = b
+            .put_signature(&set, &linux(), vec![5u8; 64])
+            .expect_err("B's signature covers bytes the store no longer holds");
+        assert!(refused.contains("has changed since"), "{refused}");
+        let read_again = b.summary(&set).expect("summary");
+        assert_eq!(
+            read_again.entries[0].content_hash, replaced,
+            "B read again shows the bytes A stored"
+        );
+        assert_eq!(
+            read_again.entries[0].signature_state,
+            SignatureState::Missing
+        );
+        let refused = b
+            .remove_signature(&set, &linux())
+            .map_err(|e| e.contains("has changed since"));
+        assert_eq!(refused, Ok(false), "there is no signature to take away");
+
+        assert_eq!(
+            b.put_signature(&set, &linux(), vec![6u8; 64]),
+            Ok(SignatureState::Unchecked),
+            "signed anew through B"
+        );
+        let reopened = PackageStore::open(dir.path().to_path_buf()).expect("reopen");
+        let stored = reopened.summary(&set).expect("summary");
+        assert_eq!(stored.entries[0].content_hash, replaced);
+        assert_eq!(stored.entries[0].signature, Some(hex::encode([6u8; 64])));
     }
 
     /// A signature has to name an entry the Package holds (`no entry`, a `404`), and has to be

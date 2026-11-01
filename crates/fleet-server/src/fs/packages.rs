@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::packages::{Entry, Package, PackageBackend, PackageId, Platform};
+use crate::packages::{Entry, Package, PackageBackend, PackageId, Platform, Signed};
 
 /// One file per Package, `<agent_type>@<version>.json`, owner-only.
 pub struct FsPackageBackend {
@@ -151,16 +151,16 @@ impl PackageBackend for FsPackageBackend {
         platform: &Platform,
         content_hash: &[u8],
         signature: Option<&[u8]>,
-    ) -> Result<bool, String> {
+    ) -> Result<Signed, String> {
         if self.read(id)?.is_none() {
-            return Ok(false);
+            return Ok(Signed::Changed(None));
         }
         self.amend(id, |package| match package.entries.get_mut(platform) {
             Some(entry) if entry.content_hash == content_hash => {
                 entry.signature = signature.map(<[u8]>::to_vec);
-                (true, true)
+                (true, Signed::Written)
             }
-            _ => (false, false),
+            stored => (false, Signed::Changed(stored.cloned())),
         })
     }
 

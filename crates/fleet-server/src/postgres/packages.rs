@@ -10,7 +10,9 @@ use std::sync::Arc;
 use tokio_postgres::GenericClient;
 
 use super::{client, signed, sql, unsigned, Database};
-use crate::packages::{Entry, Package, PackageBackend, PackageId, Platform, ED25519_SIGNATURE_LEN};
+use crate::packages::{
+    Entry, Package, PackageBackend, PackageId, Platform, Signed, ED25519_SIGNATURE_LEN,
+};
 
 /// The Packages in `packages` and `package_entries`.
 pub struct PgPackageBackend {
@@ -91,19 +93,21 @@ impl PackageBackend for PgPackageBackend {
     }
 
     /// One statement on the entry's row, conditioned on the bytes it names: the row is locked
-    /// by the update, so it is decided from what is stored.
+    /// by the update, so it is decided from what is stored. When it writes nothing, the entry as
+    /// stored is read in the same transaction.
     fn sign(
         &self,
         id: &PackageId,
         platform: &Platform,
         content_hash: &[u8],
         signature: Option<&[u8]>,
-    ) -> Result<bool, String> {
+    ) -> Result<Signed, String> {
         let (id, platform) = (id.clone(), platform.clone());
         let (sha256, signature) = (hex::encode(content_hash), signature.map(<[u8]>::to_vec));
         self.database.run(move |pool| async move {
-            let client = client(&pool).await?;
-            let updated = client
+            let mut client = client(&pool).await?;
+            let transaction = client.transaction().await.map_err(sql)?;
+            let updated = transaction
                 .execute(
                     "UPDATE package_entries SET signature = $6 WHERE agent_type = $1 \
                      AND version = $2 AND os = $3 AND arch = $4 AND sha256 = $5",
@@ -118,7 +122,23 @@ impl PackageBackend for PgPackageBackend {
                 )
                 .await
                 .map_err(sql)?;
-            Ok(updated == 1)
+            let signed = if updated == 1 {
+                Signed::Written
+            } else {
+                let stored = transaction
+                    .query_opt(
+                        &format!(
+                            "SELECT {ENTRY} FROM package_entries WHERE agent_type = $1 \
+                             AND version = $2 AND os = $3 AND arch = $4"
+                        ),
+                        &[&id.agent_type, &id.version, &platform.os, &platform.arch],
+                    )
+                    .await
+                    .map_err(sql)?;
+                Signed::Changed(stored.as_ref().map(entry).transpose()?.map(|(_, e)| e))
+            };
+            transaction.commit().await.map_err(sql)?;
+            Ok(signed)
         })
     }
 
@@ -177,46 +197,57 @@ pub(crate) async fn read_all(client: &impl GenericClient) -> Result<Vec<Package>
         );
     }
     for row in client
-        .query(
-            "SELECT agent_type, version, os, arch, sha256, size, signature FROM package_entries",
-            &[],
-        )
+        .query(&format!("SELECT {ENTRY} FROM package_entries"), &[])
         .await
         .map_err(sql)?
     {
-        let (agent_type, version): (String, String) = (row.get(0), row.get(1));
-        let named = |e: String| format!("package {agent_type}@{version} in the database: {e}");
-        let id = PackageId::load(&agent_type, &version).map_err(named)?;
-        let package = packages
+        let (id, entry) = entry(&row)?;
+        packages
             .get_mut(&id)
-            .ok_or_else(|| named("an entry of a Package that is not there".to_string()))?;
-        let platform = Platform::new(row.get(2), row.get(3))
-            .map_err(|e| named(format!("invalid platform: {e}")))?;
-        let sha256: String = row.get(4);
-        let content_hash = hex::decode(&sha256)
-            .ok()
-            .filter(|_| crate::blobs::is_hash(&sha256))
-            .ok_or_else(|| named(format!("invalid sha256 {sha256:?}")))?;
-        let signature: Option<Vec<u8>> = row.get(6);
-        if let Some(signature) = &signature {
-            if signature.len() != ED25519_SIGNATURE_LEN {
-                return Err(named(format!(
-                    "invalid signature: {} bytes, not {ED25519_SIGNATURE_LEN}",
-                    signature.len()
-                )));
-            }
-        }
-        package.entries.insert(
-            platform.clone(),
-            Entry {
-                platform,
-                content_hash,
-                size: unsigned(row.get(5)),
-                signature,
-            },
-        );
+            .ok_or_else(|| {
+                format!("package {id} in the database: an entry of a Package that is not there")
+            })?
+            .entries
+            .insert(entry.platform.clone(), entry);
     }
     Ok(packages.into_values().collect())
+}
+
+/// The columns of an entry, in the order [`entry`] reads them.
+const ENTRY: &str = "agent_type, version, os, arch, sha256, size, signature";
+
+/// One row of `package_entries`, selected as [`ENTRY`] names its columns. A row that does not
+/// decode — an identity or platform a write would refuse, a hash that is no blob's name, a
+/// signature of the wrong length — fails, naming its Package.
+fn entry(row: &tokio_postgres::Row) -> Result<(PackageId, Entry), String> {
+    let (agent_type, version): (String, String) = (row.get(0), row.get(1));
+    let named = |e: String| format!("package {agent_type}@{version} in the database: {e}");
+    let id = PackageId::load(&agent_type, &version).map_err(named)?;
+    let platform = Platform::new(row.get(2), row.get(3))
+        .map_err(|e| named(format!("invalid platform: {e}")))?;
+    let sha256: String = row.get(4);
+    let content_hash = hex::decode(&sha256)
+        .ok()
+        .filter(|_| crate::blobs::is_hash(&sha256))
+        .ok_or_else(|| named(format!("invalid sha256 {sha256:?}")))?;
+    let signature: Option<Vec<u8>> = row.get(6);
+    if let Some(signature) = &signature {
+        if signature.len() != ED25519_SIGNATURE_LEN {
+            return Err(named(format!(
+                "invalid signature: {} bytes, not {ED25519_SIGNATURE_LEN}",
+                signature.len()
+            )));
+        }
+    }
+    Ok((
+        id,
+        Entry {
+            platform,
+            content_hash,
+            size: unsigned(row.get(5)),
+            signature,
+        },
+    ))
 }
 
 /// Creates or replaces one Package, its entries exactly `package`'s, inside the caller's
@@ -289,6 +320,17 @@ mod tests {
     /// One entry as plain values: os, arch, hash, size, signature.
     type Shown = (String, String, Vec<u8>, u64, Option<Vec<u8>>);
 
+    /// One entry as plain values, to compare.
+    fn shown_entry(entry: &Entry) -> Shown {
+        (
+            entry.platform.os.clone(),
+            entry.platform.arch.clone(),
+            entry.content_hash.clone(),
+            entry.size,
+            entry.signature.clone(),
+        )
+    }
+
     /// A Package as plain values, to compare.
     fn shown(package: &Package) -> (String, Vec<Shown>) {
         (
@@ -352,37 +394,51 @@ mod tests {
         assert_eq!(loaded(&*open()), [shown(&replaced), shown(&two)]);
 
         let windows = Platform::new("windows", "amd64").expect("platform");
-        assert!(
-            !store
-                .sign(
-                    &one.id,
-                    &windows,
-                    &[9; 32],
-                    Some(&[7; ED25519_SIGNATURE_LEN])
-                )
-                .expect("sign"),
-            "a signature is not written onto other bytes than it names"
-        );
-        assert!(store
+        match store
             .sign(
                 &one.id,
                 &windows,
-                &[2; 32],
-                Some(&[7; ED25519_SIGNATURE_LEN])
+                &[9; 32],
+                Some(&[7; ED25519_SIGNATURE_LEN]),
             )
-            .expect("sign"));
+            .expect("sign")
+        {
+            Signed::Changed(Some(stored)) => assert_eq!(
+                shown_entry(&stored),
+                shown_entry(&replaced.entries[&windows]),
+                "the entry as stored is answered"
+            ),
+            _ => panic!("a signature is not written onto other bytes than it names"),
+        }
+        assert!(matches!(
+            store
+                .sign(
+                    &one.id,
+                    &windows,
+                    &[2; 32],
+                    Some(&[7; ED25519_SIGNATURE_LEN])
+                )
+                .expect("sign"),
+            Signed::Written
+        ));
         let mut signed = replaced.clone();
         signed.entries.get_mut(&windows).expect("windows").signature =
             Some(vec![7; ED25519_SIGNATURE_LEN]);
         assert_eq!(loaded(&*open()), [shown(&signed), shown(&two)]);
-        assert!(store
-            .sign(&one.id, &windows, &[2; 32], None)
-            .expect("clear"));
+        assert!(matches!(
+            store
+                .sign(&one.id, &windows, &[2; 32], None)
+                .expect("clear"),
+            Signed::Written
+        ));
         signed.entries.get_mut(&windows).expect("windows").signature = None;
         assert_eq!(loaded(&*open()), [shown(&signed), shown(&two)]);
-        assert!(!store
-            .sign(&two.id, &windows, &[2; 32], None)
-            .expect("no such entry"));
+        assert!(matches!(
+            store
+                .sign(&two.id, &windows, &[2; 32], None)
+                .expect("no such entry"),
+            Signed::Changed(None)
+        ));
 
         store.remove_entry(&one.id, &linux).expect("remove entry");
         store
