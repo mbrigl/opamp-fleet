@@ -411,22 +411,18 @@ impl AgentStore for PgAgentStore {
     ) -> Result<(), String> {
         let _ = record;
         let (old, new) = (*old, *new);
-        let rest = COLUMNS
-            .split(", ")
-            .skip(1)
-            .chain(["connected", "holder"])
-            .collect::<Vec<_>>()
-            .join(", ");
         let moved = self.database.run(move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
             let (old, new) = (old.to_string(), new.to_string());
+            // The row copied whole, its key replaced, so no column is named and a column added
+            // later moves with it.
             let moved = transaction
                 .execute(
-                    &format!(
-                        "INSERT INTO agents (instance_uid, {rest}) \
-                         SELECT $2, {rest} FROM agents WHERE instance_uid = $1"
-                    ),
+                    "INSERT INTO agents SELECT moved.* FROM agents AS a, \
+                     jsonb_populate_record(a, jsonb_build_object('instance_uid', $2::text)) \
+                         AS moved \
+                     WHERE a.instance_uid = $1",
                     &[&old, &new],
                 )
                 .await
@@ -1026,6 +1022,31 @@ mod tests {
         b.remove(&uid).expect("forget");
         assert_eq!(a.write_report(&uid, &report), Ok(false));
         assert_eq!(a.get(&uid), Ok(None), "nothing created");
+    }
+
+    /// A re-key on PostgreSQL moves every column of the row, one the code names nowhere included.
+    /// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts
+    #[test]
+    fn a_rekey_on_postgres_moves_every_column() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let store = PgAgentStore::new(test.open());
+        let (old, new) = (InstanceUid::default(), InstanceUid::default());
+        store.put(&old, &record()).expect("put");
+        test.sql(&format!(
+            "ALTER TABLE agents ADD COLUMN later text; \
+             UPDATE agents SET later = 'kept', connected = true WHERE instance_uid = '{old}'"
+        ));
+        store.rekey(&old, &new, &record()).expect("rekey");
+        assert_eq!(
+            test.rows("SELECT instance_uid, later, connected::text FROM agents"),
+            [vec![
+                Some(new.to_string()),
+                Some("kept".to_string()),
+                Some("true".to_string())
+            ]]
+        );
     }
 
     /// A release on PostgreSQL writes the assignment of each record alone: the labels, the queued
