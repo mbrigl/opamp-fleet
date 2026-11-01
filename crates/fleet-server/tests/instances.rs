@@ -221,6 +221,18 @@ struct Instance {
 impl Instance {
     /// An instance on `config`, in the test's schema, sharing the database.
     async fn start(pki: &Pki, schema: &Schema, config: PostgresConfig) -> Self {
+        Self::start_following(pki, schema, config, true).await
+    }
+
+    /// [`start`](Self::start), its lease renewals compared with the list's version only where
+    /// `renewals` says so: a test of what a notification, or the connection made again, does
+    /// alone turns the comparison off.
+    async fn start_following(
+        pki: &Pki,
+        schema: &Schema,
+        config: PostgresConfig,
+        renewals: bool,
+    ) -> Self {
         opamp::tls::install_ring_provider();
         let dir = tempfile::tempdir().expect("tempdir");
         let name = schema.name.clone();
@@ -287,8 +299,11 @@ impl Instance {
             let database = database.clone();
             fleet_server::instance::Lease::take(database, TIMES, "test-host").expect("lease")
         };
-        let following =
-            fleet_server::instance::follow(&database, state.clone(), Some(lease.list_versions()));
+        let following = fleet_server::instance::follow(
+            &database,
+            state.clone(),
+            renewals.then(|| lease.list_versions()),
+        );
         let state_kept = state.clone();
         let agent_listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let operator_listener = TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -1085,7 +1100,8 @@ async fn a_revocation_committed_while_the_listening_connection_was_cut_ends_its_
     let pki = Pki::new();
     let network = Cuttable::to(database_address(&schema));
     let a = Instance::start(&pki, &schema, schema.config_on(schema.config.port)).await;
-    let b = Instance::start(&pki, &schema, schema.config_on(network.port)).await;
+    // Without the renewals' comparison, which would catch the revocation on its own.
+    let b = Instance::start_following(&pki, &schema, schema.config_on(network.port), false).await;
     assert!(b.has_read(1).await, "B never listened");
 
     let (cert, key) = pki.issue("edge-01");
@@ -1206,10 +1222,9 @@ async fn an_etag_one_instance_answered_is_answered_304_by_another() {
         assert_eq!(status, reqwest::StatusCode::OK);
         let etag = etag.expect("an ETag");
         let version = schema.query("SELECT version FROM revocation_list_version");
-        assert_eq!(
-            etag,
-            format!("\"list-{}\"", version[0]),
-            "the ETag is the list's version in the database"
+        assert!(
+            etag.starts_with(&format!("\"list-{}-", version[0])),
+            "the ETag names the list's version in the database: {etag}"
         );
         assert_ne!(Some(&etag), moved.as_ref(), "a revocation moves the ETag");
         assert_eq!(
@@ -1420,7 +1435,10 @@ async fn an_instance_reads_nothing_again_for_its_own_notifications() {
         return;
     };
     let pki = Pki::new();
-    let a = Instance::start(&pki, &schema, schema.config_on(schema.config.port)).await;
+    // A without the renewals' comparison, whose read for B's revocation would count beside the
+    // notification's.
+    let a =
+        Instance::start_following(&pki, &schema, schema.config_on(schema.config.port), false).await;
     let b = Instance::start(&pki, &schema, schema.config_on(schema.config.port)).await;
     assert!(
         a.has_read(1).await && b.has_read(1).await,
