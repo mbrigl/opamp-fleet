@@ -1327,7 +1327,9 @@ impl AppState {
     /// and one the store no longer holds, forgotten through another instance, is dropped. The
     /// WebSocket loops are woken, so a connected Agent is offered what it was released, or sent the
     /// restart requested, at once. The records are read before the fleet lock is taken, so no
-    /// report waits for the read.
+    /// report waits for the read; one that differs from what is held is read again under the lock
+    /// and taken up from that read, since an act of this instance made after the first read, which
+    /// it never hears announced, wrote the store and what is held together under that lock.
     ///
     /// # Errors
     /// Returns an error when the store cannot be read; what is held is then kept.
@@ -1357,7 +1359,26 @@ impl AppState {
         };
         let mut fleet = self.fleet.lock().expect("fleet lock");
         let mut moved = 0usize;
+        let mut failed = None;
         for (uid, persisted) in stored {
+            let Some(record) = fleet.get(&uid) else {
+                continue;
+            };
+            let differs = persisted.is_none_or(|persisted| {
+                record.assignment != persisted.assignment
+                    || record.restart_pending != persisted.restart_pending
+                    || record.labels != persisted.labels
+            });
+            if !differs {
+                continue;
+            }
+            let persisted = match self.agent_store.get(&uid) {
+                Ok(persisted) => persisted,
+                Err(e) => {
+                    failed = Some(e);
+                    break;
+                }
+            };
             let Some(record) = fleet.get_mut(&uid) else {
                 continue;
             };
@@ -1392,7 +1413,7 @@ impl AppState {
                 "took up what another instance wrote to the agents' records"
             );
         }
-        Ok(())
+        failed.map_or(Ok(()), Err)
     }
 
     /// A receiver that fires whenever any Configuration changes; WebSocket loops use it to push
@@ -6619,5 +6640,38 @@ mod tests {
             Some(&of_host("h1")),
         );
         assert_eq!(view(&a, &labelled).labels["tier"], "edge", "held as stored");
+    }
+
+    /// A label change made on A after A's take-up read the record, before it took the fleet lock,
+    /// is not undone by what that read found: what differs is read again under the lock. A never
+    /// hears its own announcement, so nothing else would correct it.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    #[test]
+    fn a_take_up_never_undoes_a_newer_act_of_its_own_instance() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let hooked = Hooked::new(Box::new(crate::postgres::agents::PgAgentStore::new(
+            database.clone(),
+        )));
+        let after_get = hooked.after_get.clone();
+        let a = Arc::new(on_postgres(&database, Box::new(hooked)));
+        let b = on_postgres(
+            &database,
+            Box::new(crate::postgres::agents::PgAgentStore::new(database.clone())),
+        );
+        let uid = InstanceUid([0x63; 16]);
+        a.process(report(&uid, 1), Transport::Http, None);
+        label(&b, &uid, &[("tier", "edge")]);
+
+        // A's take-up reads B's labels; then an operator sets other labels through A.
+        let on_a = Arc::downgrade(&a);
+        *after_get.lock().expect("hook lock") = Some(Box::new(move || {
+            label(&on_a.upgrade().expect("A"), &uid, &[("tier", "core")]);
+        }));
+        a.take_up_agents(Some(&HashSet::from([uid])))
+            .expect("take up");
+        assert_eq!(view(&a, &uid).labels["tier"], "core", "A's own act stays");
     }
 }
