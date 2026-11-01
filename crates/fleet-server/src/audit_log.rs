@@ -1171,6 +1171,9 @@ mod tests {
         until("the writer never retried", || {
             memory.lines().iter().any(|l| l.contains("audit.resumed"))
         });
+        // The line is in the store a moment before the writer clears its failure; a drain is
+        // answered after that, on the writer's own thread.
+        written(&audit);
         audit
             .record(Entry::new("admission.admitted", "admitted"))
             .expect("recording works again once the store does");
