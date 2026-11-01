@@ -54,3 +54,55 @@ the ledger again for its own acts would cross every reload it makes during an en
 with the human: ADR-0007 clause 5 keeps every part of the system with the human and sets the cap on
 open unattended work at zero. It decides when a revoked session ends and when an approved
 certificate is handed out.
+
+## Where it stands
+
+Worked with the human on
+`ticket/several-server-instances/05-every-change-reaches-every-instance`; the session stopped at a
+coherent point, with what is left either more work of the same kind or a decision for the human.
+
+Done:
+
+- The notification names its kind, its identifier and the instance that sent it, as JSON on the one
+  channel. Every connection of an instance carries a random origin as the session setting
+  `opamp_fleet.origin`, so every store's `NOTIFY` names its sender without passing it on, and the
+  listener hands on none its own instance sent. A payload that does not read counts as a kind
+  nobody knows.
+- `instance::follow(database, state)` replaces `follow_revocations`: the ledger for `revocation`,
+  `certificate` and `host`; the floors for `floor`; the enrolment window and queue for `enrolment`
+  and `window`, waking the connections waiting on them; the Configurations for `configuration`, the
+  Deployments for `deployment`, the Packages for `package`, each read again whole; and the record of each Agent an `assignment`
+  names, its assignment taken up and the WebSocket loops woken. A connection made again, and a kind
+  not known, read all of these, every held Agent's record included.
+- Sent now: every enrolment act on PostgreSQL (a request taken in, decided, approved, withdrawn; the
+  window opened, closed, ended, saved), a Package created, its entry or signature written or
+  removed, or deleted, a Configuration saved, collected or deleted, a Deployment
+  written, amended, losing a member or deleted, and a rollout's release (each assignment by its
+  `instance_uid`, each pinned Configuration by name).
+- Criterion 8 is `scripts/check-all.sh`, green with the stores env.
+- Criteria 1 to 7 are tests in `tests/instances.rs`, each failing without its mechanism (checked by
+  mutation): `a_rollout_on_one_instance_is_offered_by_the_instance_that_carries_the_agent`,
+  `an_enrolment_approved_on_one_instance_is_handed_out_by_the_other`,
+  `a_revocation_committed_while_the_listening_connection_was_cut_ends_its_session_once_back`,
+  `a_notification_of_an_unknown_kind_has_everything_read_again`,
+  `an_etag_one_instance_answered_is_answered_304_by_another`,
+  `a_package_published_on_one_instance_is_listed_by_the_other`,
+  `an_instance_reads_nothing_again_for_its_own_notifications`,
+  `a_floor_set_on_one_instance_is_served_by_the_other`.
+
+Open, each a decision for the human before it is built:
+
+- The revocation list's version. The Gateways' `ETag` is the SHA-256 of the list's body today; two
+  instances that hold the same list answer the same one, so criterion 5 holds. The stores draft's
+  clause 10 decides a counter in the database that every revocation, lift and list-moving register
+  change increments, which is also what clause 10 of the multi-instance draft compares at each lease
+  renewal. Options: (a) add the counter (a migration), serve it as the `ETag` on PostgreSQL, and
+  compare it at each renewal; (b) keep the hash as the `ETag`, add the counter only for the renewal
+  check, and revise the stores draft's clause 10; (c) keep the hash and drop the renewal check from
+  the draft. Recommended: (a), as the draft decides, since the renewal check needs a value read
+  without the list.
+- Labels set, a restart requested and an Agent forgotten are not announced. They are written today
+  by the whole-record `put` every report also uses, so announcing them needs either a port call per
+  act now, or the per-column writes of ticket 04. Options: (a) ticket 04 announces its column writes
+  through this ticket's envelope, and the take-up reads those columns as it reads the assignment;
+  (b) a `put` with an announcement here, rewritten in ticket 04. Recommended: (a).
