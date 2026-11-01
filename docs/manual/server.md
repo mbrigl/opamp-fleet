@@ -440,8 +440,9 @@ an error naming the database, ends every session, refuses every write from then 
 Restart it once the database answers. With the blobs in S3 and no CA key in a file, any number of
 instances share one database.
 
-With `"postgres"`, `data_dir` holds the audit record (`audit/`) and, with the filesystem blob
-store, the artifacts (`blobs/`), and nothing else. A record of the filesystem store found there —
+With `"postgres"`, `data_dir` holds, with the filesystem blob store, the artifacts (`blobs/`),
+and an `audit/` a Server wrote there before as the archive, and nothing else; the audit record is
+in the database. A record of the filesystem store found there —
 `agents/`, `configurations/`, `revocations.json` and the rest — stops the start, naming it and
 `server migrate-to-postgres`. A backup takes the database and `data_dir` together.
 
@@ -560,8 +561,8 @@ endpoint = "wss://fleet.example:4320/v1/opamp"
 ## Where the Server keeps its state
 
 Everything the Server knows survives a restart under one directory, `data_dir`, in a fixed layout —
-or, with [`[database]`](#database) `store = "postgres"`, in the database, with only `audit/` and
-`blobs/` left under `data_dir`. With the filesystem store the layout is:
+or, with [`[database]`](#database) `store = "postgres"`, in the database, with only `blobs/`, and
+an archived `audit/`, left under `data_dir`. With the filesystem store the layout is:
 
 | Path | One file per | Holds |
 |---|---|---|
@@ -614,9 +615,13 @@ server migrate-to-postgres --from /var/lib/opamp-fleet/fleet-data \
   refuse stops the copy, naming it, before anything is written into the database. It only reads
   the old `data_dir`: what a start would repair there — a missing directory, a leftover temporary
   file, a mode — it leaves as it is.
-- It copies `audit/` and, with the filesystem blob store, `blobs/` into the new `data_dir` byte
-  for byte, so the audit chain still verifies; then it applies the schema and writes every record
-  in one transaction.
+- With the filesystem blob store it copies `blobs/` into the new `data_dir` byte for byte; then it
+  applies the schema and writes every record in one transaction.
+- It copies no audit entry. The old `audit/` stays where it is as the closed archive, which no
+  Server writes to again, and the copy records the `seq` and the hash of its last entry: the first
+  audit chain in the database names that entry as its `predecessor`, and
+  `server audit-verify --config <server.toml> --archive <old data_dir>/audit` checks the link.
+  Keep the archive as long as you keep the record; deleting it is yours.
 - It copies rather than moves: the old `data_dir` stays as the backup. It prints what it copied,
   and exits non-zero when it could not copy all of it, leaving the database without the Server's
   tables and the new `data_dir` empty.
@@ -1145,7 +1150,8 @@ host not marked — answers every downstream peer `503` and closes their session
 
 ## The audit record
 
-Every security decision leaves one line in `data_dir/audit/`: each admission and refusal on the
+Every security decision leaves one entry in the audit record — in `data_dir/audit/` on the
+filesystem store, in the database on PostgreSQL: each admission and refusal on the
 Agent plane, each refused operator sign-in, each enrolment request, approval and rejection, each
 certificate issued, each revocation and the session it ended, each request for the Gateways'
 revocation list from a host not marked as a Gateway, each download a host may not fetch, each
@@ -1173,7 +1179,44 @@ disk, a failed device — it admits no Agent and runs no operator act, answering
 can. A certificate request in that time is answered `Unavailable` with a time to retry, and the
 Agent asks again. Refusals past ten a second from one address are counted into one line, not
 dropped.
-`[audit] max_file_bytes` (64 MiB) and `keep_files` (16) bound the space it takes.
+`[audit] max_file_bytes` (64 MiB) and `keep_files` (16) bound the space it takes on the filesystem
+store.
+
+### The audit record on PostgreSQL
+
+On PostgreSQL the record is one chain per lease: each instance opens a chain of its own with each
+lease it takes, named by the lease's instance id, and every entry names its chain. Its first entry
+is `audit.chain_opened` with the host. An orderly shutdown closes the chain with
+`audit.chain_closed`, `reason` `shutdown`, before the lease is released; when it cannot, the lease
+is left to lapse. An instance that takes over a lapsed lease — at its own start, or at any
+renewal — closes that lease's chain with `reason` `lease_lapsed` and `closed_by` its own chain, and
+from then on the database refuses the dead chain an entry. Decisions an instance queued under a
+lease that lapsed before they were written go into the chain of its next lease, each with
+`taken_under` naming the old chain; none is lost. Several chains are therefore no gap: there is at
+least one per start.
+
+```console
+$ server audit-verify --config /etc/opamp-fleet/server.toml \
+    --archive /var/lib/opamp-fleet/fleet-data/audit
+chain 6c1e…-9b0a on fleet-1: 812 entries, closed
+chain 0d93…-41f2 on fleet-2: 5113 entries, open — its last entry is 5113 admission.admitted at 2026-11-01T09:12:44Z
+the archive /var/lib/opamp-fleet/fleet-data/audit holds, and ends on entry 2047, the predecessor chain 6c1e…-9b0a names
+2 chains, 1 open: the record holds
+```
+
+`audit-verify --config` reads the database with the Server's own credentials and changes nothing.
+It walks every chain in `seq` order, lists each open one with its last entry — the chain of a
+lease that is held, or of one that lapsed and no instance has taken over yet — and names the chain
+and the first entry that fails, exiting non-zero: an entry altered or removed, entries missing
+from the end of a closed chain, or an entry after its close. Without `--archive` it reports the
+predecessor as not checked. Removing a whole chain together with its record is not detected by
+the database itself.
+
+A Server that was on PostgreSQL before this release kept its audit record in files under
+`data_dir/audit/`. At its first start, before the database holds any chain or archive, it records
+the last entry of those files as the archive, as `server migrate-to-postgres` does, and the first
+chain names it as its `predecessor`: check the link with `--archive <data_dir>/audit`. An empty or
+missing `audit/` records nothing, and an instance without a `data_dir` has nothing to link.
 
 ## Configurations: what the fleet runs
 
