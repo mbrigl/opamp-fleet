@@ -1296,18 +1296,18 @@ and the first entry that fails, exiting non-zero: an entry altered or removed, e
 from the end of a closed chain, or an entry after its close. Without `--archive` it reports the
 predecessor as not checked; an archive the database records that no chain names fails, and so
 does a chain that names a predecessor while the database records no archive. Removing a whole
-chain together with its record is not detected by the database itself. Nor is a cut made with pruning: whoever
-can write to the database can append one `audit.pruned` with a correct hash to an open chain and
-delete the head of any chain up to the entry it names, young entries included, and the record
-still holds, as it takes the links of every `audit.pruned` it finds. A record that holds shows that
-what is left is linked, not that nothing younger than `retain_days` was removed; the signed chain
-heads, once they land, detect both.
+chain together with its record is not detected by the database itself. Nor is a cut made with
+pruning: whoever can write to the database can append one `audit.pruned` with a correct hash to an
+open chain and delete the head of any chain up to the entry it names, young entries included, and
+the record still holds, as it takes the links of every `audit.pruned` it finds. A record that holds
+shows that what is left is linked, not that nothing younger than `retain_days` was removed; the
+signed chain heads, once they land, detect both.
 
 The record goes back `[audit] retain_days` (365 by default, at most 36 500). At its start and
 once a day after, each instance removes from its own chain the entries the database stored more
-than that many days ago, as far as every entry from the chain's start is that old; one instance at a time, whichever
-holds the prune lock, does the same for every closed chain, and another that finds the lock held
-leaves them to the next day. A chain that is still open because no instance took over its lapsed
+than that many days ago, as far as every entry from the chain's start is that old; one instance
+at a time, whichever holds the prune lock, does the same for every closed chain, and another that
+finds the lock held leaves them to the next day. A chain that is still open because no instance took over its lapsed
 lease is pruned once it is closed. Before anything goes, the instance writes an `audit.pruned`
 into its own chain for each chain it prunes, naming it as `pruned_chain` with the `seq` and hash
 of the last entry removed (`last_seq`, `last_hash`); `audit-verify --config` checks that what is

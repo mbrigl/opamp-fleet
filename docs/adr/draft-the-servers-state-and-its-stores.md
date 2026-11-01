@@ -292,9 +292,9 @@ and configured in the Server's configuration alone, and move an old layout by an
       prunes further is linked by the `audit.pruned` recorded for it in that prune. Where an entry
       it removes names the archive as its `predecessor`, the `audit.chain_opened` of the first
       chain or an `audit.pruned` that carried it, a new `audit.pruned` carries the predecessor on
-      as `predecessor_chain`, `predecessor_seq` and `predecessor_hash`. A closed chain with no entries
-      left keeps its record. The filesystem store holds one chain, which is never closed, and its
-      rotation bounds it.
+      as `predecessor_chain`, `predecessor_seq` and `predecessor_hash`. A closed chain with no
+      entries left keeps its record. The filesystem store holds one chain, which is never closed,
+      and its rotation bounds it.
     - `max_file_bytes` and `keep_files` apply to the filesystem store alone and `retain_days` to the
       PostgreSQL store alone. A key that does not apply to the configured store fails startup,
       naming it.
