@@ -401,7 +401,8 @@ impl AgentStore for PgAgentStore {
 
     /// One transaction: the row as it is stored moved to its new key, its assignment's
     /// Configurations with it, and nothing of `record` written, so a label change or a release
-    /// another instance committed stays; the old key announced forgotten, so an instance that
+    /// another instance committed stays, the row locked before it is copied so one committed
+    /// during the move does too; the old key announced forgotten, so an instance that
     /// loaded it drops it; a record no longer stored is moved nowhere.
     fn rekey(
         &self,
@@ -415,6 +416,16 @@ impl AgentStore for PgAgentStore {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
             let (old, new) = (old.to_string(), new.to_string());
+            // The row locked first, so the copy is of its latest committed version and a write
+            // another instance makes meanwhile waits, then finds no row, rather than being lost
+            // between the copy and the delete.
+            transaction
+                .execute(
+                    "SELECT 1 FROM agents WHERE instance_uid = $1 FOR UPDATE",
+                    &[&old],
+                )
+                .await
+                .map_err(sql)?;
             // The row copied whole, its key replaced, so no column is named and a column added
             // later moves with it.
             let moved = transaction
@@ -1022,6 +1033,71 @@ mod tests {
         b.remove(&uid).expect("forget");
         assert_eq!(a.write_report(&uid, &report), Ok(false));
         assert_eq!(a.get(&uid), Ok(None), "nothing created");
+    }
+
+    /// A label change through B that holds the row while A re-keys it is moved with the row: the
+    /// re-key waits for it, and copies the row as B committed it, so B's labels stay under the new
+    /// key. A trigger holds B's write open, mid-transaction, until the test lets it go, once A
+    /// waits for B.
+    /// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts
+    #[test]
+    fn a_label_change_committed_during_a_rekey_moves_with_the_row() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let (a, b) = (
+            PgAgentStore::new(database.clone()),
+            PgAgentStore::new(database),
+        );
+        let (old, new) = (InstanceUid::default(), InstanceUid::default());
+        a.put(&old, &record()).expect("put");
+        let key = i64::from(u32::from_be_bytes([new.0[12], new.0[13], new.0[14], new.0[15]]) >> 1);
+        test.sql(&format!(
+            "CREATE FUNCTION fleet_test_gate() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN \
+                 PERFORM pg_advisory_lock_shared({key}); \
+                 PERFORM pg_advisory_unlock_shared({key}); RETURN NULL; END $$; \
+             CREATE TRIGGER fleet_test_gate AFTER UPDATE OF labels ON agents \
+                 FOR EACH ROW EXECUTE FUNCTION fleet_test_gate();"
+        ));
+        let gate = test.gate(key);
+        let one = |query: &str| test.rows(query).first().and_then(|row| row[0].clone());
+        let until = |query: &str| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            loop {
+                if let Some(found) = one(query) {
+                    break found;
+                }
+                assert!(std::time::Instant::now() < deadline, "never: {query}");
+            }
+        };
+
+        let labelled = std::thread::spawn(move || {
+            b.set_labels(
+                &old,
+                &BTreeMap::from([("tier".to_string(), "core".to_string())]),
+            )
+        });
+        // B has updated the row, and waits at the gate with the row locked.
+        let b_pid = until(&format!(
+            "SELECT pid::text FROM pg_locks WHERE locktype = 'advisory' AND NOT granted \
+             AND objid::text = '{key}'"
+        ));
+        let rekeyed = std::thread::spawn(move || a.rekey(&old, &new, &record()));
+        until(&format!(
+            "SELECT pid::text FROM pg_stat_activity WHERE {b_pid} = ANY(pg_blocking_pids(pid))"
+        ));
+        gate.open();
+        assert_eq!(labelled.join().expect("B"), Ok(true));
+        assert_eq!(rekeyed.join().expect("A"), Ok(()));
+        assert_eq!(
+            test.rows("SELECT instance_uid, labels::text FROM agents"),
+            [vec![
+                Some(new.to_string()),
+                Some(r#"{"tier":"core"}"#.to_string())
+            ]],
+            "B's labels moved with the row"
+        );
     }
 
     /// A re-key on PostgreSQL moves every column of the row, one the code names nowhere included.
