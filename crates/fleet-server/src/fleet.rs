@@ -7464,7 +7464,8 @@ mod tests {
     }
 
     /// A record that does not decode, which every read that meets it fails, can still be
-    /// forgotten through an instance that does not hold it, and is gone after.
+    /// forgotten through an instance that does not hold it, and is gone after, with what its
+    /// assignment pinned: the Deployment it was released through may be deleted then.
     /// Verifies: ADR-draft-the-servers-state-and-its-stores, ADR-draft-the-fleet-record-of-agents-and-hosts
     #[test]
     fn a_record_that_does_not_decode_can_be_forgotten() {
@@ -7477,14 +7478,28 @@ mod tests {
             .put(&uid, &crate::agent_store::tests::record())
             .expect("put");
         test.sql("UPDATE agents SET health = '\\xff'::bytea");
-        let state = on_postgres(
+        let dir = tempfile::tempdir().expect("blobs");
+        let state = delivering_on(
             &database,
             Box::new(crate::postgres::agents::PgAgentStore::open(database.clone()).expect("open")),
+            dir.path(),
+        );
+        assert!(
+            matches!(
+                state.delete_deployment("stable"),
+                Err(DeploymentError::Conflict(_))
+            ),
+            "its assignment pins the Deployment"
         );
         assert!(state.fleet_view().is_err(), "the fleet cannot be read");
         assert!(
             state.forget_agent(&uid).is_ok(),
             "it is forgotten all the same"
+        );
+        // Before any read of the fleet, which would take up its absence.
+        assert!(
+            state.delete_deployment("stable").is_ok(),
+            "and pins nothing any more"
         );
         assert!(state.fleet_view().expect("readable again").is_empty());
     }
