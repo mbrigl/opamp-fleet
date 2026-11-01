@@ -6,7 +6,10 @@ On PostgreSQL an instance keeps in memory only the Agents whose connection it ho
 first report, and answers the rest from the database; on files the Server keeps the whole fleet as
 today. A report writes only what a report decides; a label change, a requested restart and a rollout
 write their own columns, so a write by the carrying instance never undoes what another instance set.
-Presence, with its holder, is written in batches every `presence_interval_secs`.
+Presence, with its holder, is written in batches every `presence_interval_secs`. A write that
+touches several Agents' rows, a rollout's release and a presence batch among them, takes them in
+the order of their `instance_uid`, so two such writes on two instances do not deadlock; today a
+rollout's release writes them unsorted.
 
 ## Acceptance criteria
 
