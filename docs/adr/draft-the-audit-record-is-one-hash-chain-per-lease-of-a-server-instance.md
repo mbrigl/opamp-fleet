@@ -74,14 +74,14 @@ store the record stays one chain, and `server audit-verify` walks every chain th
      ([ADR-draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token](draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token.md),
      signed chain heads); this draft lands without them.
    - Pruning leaves one more cut that the store itself does not detect. Whoever can write to the
-     database can append one `audit.pruned` with a correct hash at the end of any open chain,
-     naming any chain and any of its entries as the last removed, and then delete that chain's
-     entries up to it, younger ones included: `server audit-verify` accepts the link, because it
-     cannot tell the age of what is gone. It takes links and a carried predecessor only from an
-     `audit.pruned` in a chain whose own walk holds, so an `audit.pruned` in a chain that fails
-     vouches for nothing. The
-     signed chain heads detect the cut; until then a record that holds shows that what is left is
-     linked, not that no entry younger than `retain_days` was removed.
+     database can place one `audit.pruned` with a correct hash in a chain that then holds — at the
+     end of an open chain, for example, or of a closed one whose record they rewrite — naming any
+     chain and any of its entries as the last removed, and then delete that chain's entries up to
+     it, younger ones included: `server audit-verify` accepts the link, because it cannot tell the
+     age of what is gone. It takes links and a carried predecessor only from an `audit.pruned` in a
+     chain whose own walk holds, so an `audit.pruned` in a chain that fails vouches for nothing.
+     The signed chain heads detect the cut; until then a record that holds shows that what is left
+     is linked, not that no entry younger than `retain_days` was removed.
 
 4. **[ADR-draft-the-servers-state-and-its-stores](draft-the-servers-state-and-its-stores.md) clause
    12 decides it: How long the record goes back.**
