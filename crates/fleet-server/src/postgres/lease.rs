@@ -160,8 +160,8 @@ impl Database {
                 .map(|row| row.get(0))
                 .collect();
             // Each removed lease's chain is closed for it, and this lease's chain opened, in the
-            // same transaction (ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance
-            // clause 3).
+            // same transaction (clause 3 of
+            // ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance).
             let mut written = Vec::new();
             for lapsed in &taken_over {
                 written

@@ -230,8 +230,8 @@ fn migrate(mut args: impl Iterator<Item = String>) -> ! {
 /// `server migrate-to-postgres --from <data_dir> --data-dir <new> [--config <server.toml>]`
 /// (ADR-0029 clause 27): copies the records of `data_dir` into the database the configuration
 /// names, and its filesystem blobs into a new, empty `data_dir`, leaving the old one as the backup
-/// and its audit record as the archive the first chain links to. It is run while the Server is stopped; it takes the database's lock, so a
-/// Server still running against it stops the copy. Prints what it copied, and exits non-zero when
+/// and its audit record as the archive the first chain links to. It is run while the Server is
+/// stopped; it takes the database's lock, so a Server still running against it stops the copy. Prints what it copied, and exits non-zero when
 /// it could not copy all of it, leaving the database without the Server's tables.
 fn migrate_to_postgres(mut args: impl Iterator<Item = String>) -> ! {
     let (mut from, mut data_dir, mut config) = (None, None, None);
@@ -656,7 +656,7 @@ async fn main() {
             // database stay as the archive, which the first chain names (clause 6 of
             // ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance).
             let archive = config.data_dir.join(fleet_server::fs::AUDIT);
-            match fleet_server::postgres::audit::archive_tail(&archive) {
+            match fleet_server::postgres::audit::archive_end(&archive) {
                 Ok(end) => database.offer_archive(end),
                 Err(e) => {
                     eprintln!("{e}");

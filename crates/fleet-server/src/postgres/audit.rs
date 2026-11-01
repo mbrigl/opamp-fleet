@@ -53,18 +53,19 @@ impl PgAuditStore {
             .run_writing(lines.len(), move |pool| async move {
                 let mut client = client(&pool).await?;
                 let transaction = client.transaction().await.map_err(sql)?;
-                let open = transaction
+                let closed = transaction
                     .query_opt(
-                        "SELECT closed_hash IS NULL FROM audit_chains WHERE id = $1::text::uuid \
+                        "SELECT closed_hash FROM audit_chains WHERE id = $1::text::uuid \
                          FOR UPDATE",
                         &[&chain],
                     )
                     .await
                     .map_err(sql)?;
-                match open.map(|row| row.get::<_, bool>(0)) {
+                let count = i64::try_from(lines.len()).unwrap_or(i64::MAX);
+                match closed.map(|row| row.get::<_, Option<String>>(0)) {
                     None => return Err(format!("the audit chain {chain} does not exist")),
-                    Some(false) => return Err(format!("the audit chain {chain} is closed")),
-                    Some(true) => {}
+                    Some(Some(_)) => return Err(format!("the audit chain {chain} is closed")),
+                    Some(None) => {}
                 }
                 let live = transaction
                     .query_opt(
@@ -88,9 +89,17 @@ impl PgAuditStore {
                     .await
                     .map_err(sql)?
                     .get(0);
-                let count = i64::try_from(lines.len()).unwrap_or(i64::MAX);
-                if last == first - 1 + count && !closing {
-                    // A commit whose answer was lost landed after all: the lines are there.
+                // A write whose answer was lost may have landed, and lines queued since joined the
+                // batch: the lines already stored are the batch's first ones, and only the rest is
+                // written.
+                let landed = last - (first - 1);
+                if !(0..=count).contains(&landed) {
+                    return Err(format!(
+                        "the audit chain {chain} ends at entry {last}, not at {}",
+                        first - 1
+                    ));
+                }
+                if landed > 0 {
                     let stored: Option<String> = transaction
                         .query_opt(
                             "SELECT line FROM audit_entries WHERE chain = $1::text::uuid \
@@ -100,17 +109,19 @@ impl PgAuditStore {
                         .await
                         .map_err(sql)?
                         .map(|row| row.get(0));
-                    if stored.as_deref() == lines.last().map(String::as_str) {
-                        return Ok(());
+                    let index = usize::try_from(landed - 1).unwrap_or(usize::MAX);
+                    if stored.as_deref() != lines.get(index).map(String::as_str) {
+                        return Err(format!(
+                            "the audit chain {chain} ends at entry {last} on a line this \
+                             instance did not write there"
+                        ));
                     }
                 }
-                if last != first - 1 {
-                    return Err(format!(
-                        "the audit chain {chain} ends at entry {last}, not at {}",
-                        first - 1
-                    ));
-                }
-                let seqs: Vec<i64> = (first..first + count).collect();
+                let all_last = lines.last().cloned();
+                let rest = usize::try_from(landed).unwrap_or(usize::MAX);
+                let lines = lines[rest..].to_vec();
+                let first = first + landed;
+                let seqs: Vec<i64> = (first..first + count - landed).collect();
                 transaction
                     .execute(
                         "INSERT INTO audit_entries (chain, seq, line) \
@@ -121,7 +132,7 @@ impl PgAuditStore {
                     .await
                     .map_err(sql)?;
                 if closing {
-                    let hash = lines.last().map(|line| line_hash(line)).unwrap_or_default();
+                    let hash = all_last.map(|line| line_hash(&line)).unwrap_or_default();
                     transaction
                         .execute(
                             "UPDATE audit_chains SET closed_at = now(), closed_hash = $2 \
@@ -171,6 +182,24 @@ impl AuditStore for PgAuditStore {
 
     fn close(&mut self, seq: u64, lines: &[&str]) -> Result<(), String> {
         self.write(seq, lines, true)
+    }
+
+    fn stored(&mut self, chain: &str, seq: u64) -> Result<Vec<String>, String> {
+        let (chain, from) = (chain.to_string(), super::signed(seq));
+        self.database.run(move |pool| async move {
+            let client = client(&pool).await?;
+            Ok(client
+                .query(
+                    "SELECT line FROM audit_entries WHERE chain = $1::text::uuid AND seq >= $2 \
+                     ORDER BY seq",
+                    &[&chain, &from],
+                )
+                .await
+                .map_err(sql)?
+                .iter()
+                .map(|row| row.get(0))
+                .collect())
+        })
     }
 
     fn current_bytes(&self) -> u64 {
@@ -365,14 +394,31 @@ pub fn verify_in(
     verify(&database, archive)
 }
 
-/// Walks every chain on `database`; see [`verify_on`].
+/// What one snapshot of the record holds, walked: each chain with its host and what its walk
+/// found, the archive the database records, and the chain that names a predecessor.
+struct Snapshot {
+    chains: Vec<(String, String, Result<crate::audit_log::Walked, String>)>,
+    archive: Option<(u64, String)>,
+    named: Option<(String, (u64, String))>,
+}
+
+/// Walks every chain on `database`; see [`verify_on`]. The chain records and every entry are read
+/// in one read-only snapshot, so a chain an instance closes meanwhile is seen either open or
+/// closed, never half of each.
 ///
 /// # Errors
 /// As [`verify_on`].
 pub fn verify(database: &Database, archive: Option<&Path>) -> Result<Verified, String> {
-    let chains = database.run(|pool| async move {
-        let client = client(&pool).await?;
-        Ok(client
+    let snapshot = database.run_within(super::IMPORT_TIMEOUT, |pool| async move {
+        let mut client = client(&pool).await?;
+        let transaction = client
+            .build_transaction()
+            .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
+            .read_only(true)
+            .start()
+            .await
+            .map_err(sql)?;
+        let records: Vec<(String, String, Option<String>)> = transaction
             .query(
                 "SELECT id::text, host, closed_hash FROM audit_chains ORDER BY opened_at, id",
                 &[],
@@ -380,35 +426,71 @@ pub fn verify(database: &Database, archive: Option<&Path>) -> Result<Verified, S
             .await
             .map_err(sql)?
             .iter()
+            .map(|row| (row.get(0), row.get(1), row.get(2)))
+            .collect();
+        let mut chains = Vec::new();
+        for (chain, host, closed_hash) in records {
+            let walked = walk(&*transaction, &chain)
+                .await?
+                .and_then(|walk| walk.finish(closed_hash.as_deref()));
+            chains.push((chain, host, walked));
+        }
+        let archive = transaction
+            .query_opt("SELECT seq, hash FROM audit_archive", &[])
+            .await
+            .map_err(sql)?
             .map(|row| {
                 (
-                    row.get::<_, String>(0),
+                    super::unsigned(row.get::<_, i64>(0)),
                     row.get::<_, String>(1),
-                    row.get::<_, Option<String>>(2),
                 )
-            })
-            .collect::<Vec<_>>())
+            });
+        // Read from the first entries themselves, so a chain whose walk fails still says what it
+        // names.
+        let mut named = None;
+        for row in transaction
+            .query(
+                "SELECT chain::text, line FROM audit_entries WHERE seq = 1 \
+                 AND line LIKE '%\"predecessor_hash\"%'",
+                &[],
+            )
+            .await
+            .map_err(sql)?
+        {
+            let line: String = row.get(1);
+            let value: serde_json::Value = serde_json::from_str(&line).unwrap_or_default();
+            if let (Some(seq), Some(hash)) = (
+                value
+                    .get("predecessor_seq")
+                    .and_then(serde_json::Value::as_u64),
+                value
+                    .get("predecessor_hash")
+                    .and_then(serde_json::Value::as_str),
+            ) {
+                named = Some((row.get::<_, String>(0), (seq, hash.to_string())));
+            }
+        }
+        transaction.commit().await.map_err(sql)?;
+        Ok(Snapshot {
+            chains,
+            archive,
+            named,
+        })
     })?;
     let mut verified = Verified::default();
-    let (mut open, mut predecessor) = (0, None);
-    for (chain, host, closed_hash) in &chains {
-        match walk(database, chain).and_then(|walk| walk.finish(closed_hash.as_deref())) {
+    let mut open = 0;
+    for (chain, host, walked) in &snapshot.chains {
+        match walked {
+            Ok(walked) if walked.closed => verified.lines.push(format!(
+                "chain {chain} on {host}: {} entries, closed",
+                walked.entries
+            )),
             Ok(walked) => {
-                if walked.closed {
-                    verified.lines.push(format!(
-                        "chain {chain} on {host}: {} entries, closed",
-                        walked.entries
-                    ));
-                } else {
-                    open += 1;
-                    verified.lines.push(format!(
-                        "chain {chain} on {host}: {} entries, open — its last entry is {} {} at {}",
-                        walked.entries, walked.last_seq, walked.last_event, walked.last_time
-                    ));
-                }
-                if let Some(named) = walked.predecessor {
-                    predecessor = Some((chain.clone(), named));
-                }
+                open += 1;
+                verified.lines.push(format!(
+                    "chain {chain} on {host}: {} entries, open — its last entry is {} {} at {}",
+                    walked.entries, walked.last_seq, walked.last_event, walked.last_time
+                ));
             }
             Err(e) => {
                 verified.failed = true;
@@ -416,7 +498,25 @@ pub fn verify(database: &Database, archive: Option<&Path>) -> Result<Verified, S
             }
         }
     }
-    match (predecessor, archive) {
+    match (&snapshot.named, &snapshot.archive) {
+        (None, Some((seq, _))) => {
+            verified.failed = true;
+            verified.lines.push(format!(
+                "the database records an archive that ends on entry {seq}, and no chain names it \
+                 as its predecessor — the first chain is gone"
+            ));
+        }
+        (Some((chain, named)), Some(recorded)) if named != recorded => {
+            verified.failed = true;
+            verified.lines.push(format!(
+                "chain {chain} names entry {} as its predecessor, and the database records the \
+                 archive's end as entry {}",
+                named.0, recorded.0
+            ));
+        }
+        _ => {}
+    }
+    match (snapshot.named, archive) {
         (None, Some(dir)) => {
             verified.failed = true;
             verified.lines.push(format!(
@@ -458,7 +558,7 @@ pub fn verify(database: &Database, archive: Option<&Path>) -> Result<Verified, S
     }
     verified.lines.push(format!(
         "{} chains, {open} open: {}",
-        chains.len(),
+        snapshot.chains.len(),
         if verified.failed {
             "the record does not hold"
         } else {
@@ -468,60 +568,72 @@ pub fn verify(database: &Database, archive: Option<&Path>) -> Result<Verified, S
     Ok(verified)
 }
 
-/// Walks the entries of `chain` in `seq` order, a page at a time.
-fn walk(database: &Database, chain: &str) -> Result<ChainWalk, String> {
+/// Walks the entries of `chain` in `seq` order, a page at a time, in the snapshot `transaction`
+/// reads. The outer error is the database's; the inner one the chain's first entry that fails.
+async fn walk(
+    transaction: &impl GenericClient,
+    chain: &str,
+) -> Result<Result<ChainWalk, String>, String> {
     let mut walk = ChainWalk::new(chain);
     let mut after = 0i64;
     loop {
-        let id = chain.to_string();
-        let page = database.run(move |pool| async move {
-            let client = client(&pool).await?;
-            Ok(client
-                .query(
-                    "SELECT seq, line FROM audit_entries WHERE chain = $1::text::uuid \
-                     AND seq > $2 ORDER BY seq LIMIT $3",
-                    &[&id, &after, &PAGE],
-                )
-                .await
-                .map_err(sql)?
-                .iter()
-                .map(|row| (row.get::<_, i64>(0), row.get::<_, String>(1)))
-                .collect::<Vec<_>>())
-        })?;
-        let Some((last, _)) = page.last() else {
-            return Ok(walk);
+        let page = transaction
+            .query(
+                "SELECT seq, line FROM audit_entries WHERE chain = $1::text::uuid \
+                 AND seq > $2 ORDER BY seq LIMIT $3",
+                &[&chain, &after, &PAGE],
+            )
+            .await
+            .map_err(sql)?;
+        let Some(last) = page.last() else {
+            return Ok(Ok(walk));
         };
-        after = *last;
-        for (seq, line) in &page {
-            walk.step(super::unsigned(*seq), line)?;
+        after = last.get(0);
+        for row in &page {
+            if let Err(e) = walk.step(super::unsigned(row.get::<_, i64>(0)), row.get(1)) {
+                return Ok(Err(e));
+            }
         }
     }
 }
 
-/// The `seq` and the hash of the last entry of the file record in `dir`, as it stands: what a
-/// move from files records as the archive's end. `None` when `dir` does not exist or holds no
-/// entry.
+/// The `seq` and the hash of the last entry of the file record in `dir`, once its whole chain
+/// holds: what a move from files records as the archive's end, and what `audit-verify --archive`
+/// checks the predecessor against. `None` when `dir` does not exist or holds no entry.
 ///
 /// # Errors
-/// Returns an error when the files cannot be read.
-pub fn archive_tail(dir: &Path) -> Result<Option<(u64, String)>, String> {
+/// Returns an error when the files cannot be read, when the chain breaks, and when the record ends
+/// in a torn line — a crash mid-write — naming the file: an end recorded there could never be
+/// verified.
+pub fn archive_end(dir: &Path) -> Result<Option<(u64, String)>, String> {
     if !dir.is_dir() {
         return Ok(None);
     }
-    Ok(crate::fs::audit_tail(dir)?.map(|tail| (tail.last_seq, line_hash(&tail.last_line))))
-}
-
-/// The `seq` and the hash of the last entry of the file record in `dir`, once its whole chain
-/// holds; `None` when it holds no entry.
-///
-/// # Errors
-/// Returns an error when the files cannot be read or the chain breaks.
-pub fn archive_end(dir: &Path) -> Result<Option<(u64, String)>, String> {
+    let files = crate::fs::audit_files(dir)?;
     let mut texts = Vec::new();
-    for file in crate::fs::audit_files(dir)? {
-        let text = std::fs::read_to_string(&file)
+    for file in &files {
+        let text = std::fs::read_to_string(file)
             .map_err(|e| format!("cannot read {}: {e}", file.display()))?;
         texts.push((file.display().to_string(), text));
+    }
+    let Some(tail) = crate::fs::audit_tail(dir)? else {
+        return Ok(None);
+    };
+    if tail.torn {
+        let newest = files
+            .iter()
+            .rev()
+            .find(|file| std::fs::metadata(file).is_ok_and(|meta| meta.len() > 0))
+            .map_or_else(
+                || dir.display().to_string(),
+                |file| file.display().to_string(),
+            );
+        return Err(format!(
+            "the audit record in {} ends in a torn line, in {newest}: a crash cut it mid-write, \
+             and an end recorded there could never be verified — keep a copy of the file, cut \
+             the torn line from it so the record ends on its last whole entry, and try again",
+            dir.display()
+        ));
     }
     crate::audit_log::verify(texts.iter().flat_map(|(name, text)| {
         text.lines()
@@ -530,7 +642,7 @@ pub fn archive_end(dir: &Path) -> Result<Option<(u64, String)>, String> {
             .map(move |(index, line)| (format!("{name}:{}", index + 1), line))
     }))
     .map_err(|e| format!("the archive's chain breaks at {e}"))?;
-    Ok(crate::fs::audit_tail(dir)?.map(|tail| (tail.last_seq, line_hash(&tail.last_line))))
+    Ok(Some((tail.last_seq, line_hash(&tail.last_line))))
 }
 
 #[cfg(test)]
@@ -682,8 +794,8 @@ mod tests {
     }
 
     /// An instance killed without a shutdown leaves its chain open; the instance that takes over
-    /// its lapsed lease, at a take or at a renewal, closes it with `audit.chain_closed`, `reason` `lease_lapsed`
-    /// and `closed_by` its own chain, and from then on the store refuses the dead chain an entry.
+    /// its lapsed lease, at a take or at a renewal, closes it with `audit.chain_closed`, `reason`
+    /// `lease_lapsed` and `closed_by` its own chain, and from then on the store refuses the dead chain an entry.
     /// Two instances that try at once take it over once.
     /// Verifies: ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance, ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
     #[test]
@@ -887,7 +999,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         file_record(dir.path(), 3);
         let archive = dir.path().join(crate::fs::AUDIT);
-        let end = archive_tail(&archive).expect("tail").expect("entries");
+        let end = archive_end(&archive).expect("tail").expect("entries");
         assert_eq!(end.0, 3);
 
         let database = shared(&test);
@@ -905,7 +1017,7 @@ mod tests {
 
         // Offered again by a later start, over files that went on: nothing more is recorded.
         file_record(dir.path(), 1);
-        database.offer_archive(archive_tail(&archive).expect("tail"));
+        database.offer_archive(archive_end(&archive).expect("tail"));
         let later = database.take_lease("host-a", LAPSE).expect("lease");
         assert!(!lines(&test, &later.instance_id)[0].contains("predecessor"));
         assert_eq!(
@@ -921,21 +1033,309 @@ mod tests {
     fn a_first_start_without_audit_files_records_no_archive() {
         let dir = tempfile::tempdir().expect("tempdir");
         assert_eq!(
-            archive_tail(&dir.path().join("missing")).expect("missing"),
+            archive_end(&dir.path().join("missing")).expect("missing"),
             None
         );
         std::fs::create_dir(dir.path().join("empty")).expect("mkdir");
-        assert_eq!(
-            archive_tail(&dir.path().join("empty")).expect("empty"),
-            None
-        );
+        assert_eq!(archive_end(&dir.path().join("empty")).expect("empty"), None);
         let Some(test) = TestDatabase::named() else {
             return;
         };
         let database = shared(&test);
-        database.offer_archive(archive_tail(&dir.path().join("empty")).expect("empty"));
+        database.offer_archive(archive_end(&dir.path().join("empty")).expect("empty"));
         let first = database.take_lease("host-a", LAPSE).expect("lease");
         assert!(test.rows("SELECT seq FROM audit_archive").is_empty());
         assert!(!lines(&test, &first.instance_id)[0].contains("predecessor"));
+    }
+
+    /// A store whose first append lands in the database and then answers an error, as a commit
+    /// whose answer was lost does. It says when the lines landed, and answers only once the test
+    /// lets it: a gate, so what the test does in between happens while the answer is awaited.
+    struct LostAnswer {
+        inner: PgAuditStore,
+        landed: Option<std::sync::mpsc::Sender<()>>,
+        gate: std::sync::mpsc::Receiver<()>,
+    }
+
+    impl AuditStore for LostAnswer {
+        fn chain(&mut self) -> Chain {
+            self.inner.chain()
+        }
+        fn tail(&mut self) -> Result<Option<Tail>, String> {
+            self.inner.tail()
+        }
+        fn append(&mut self, seq: u64, lines: &[&str]) -> Result<(), String> {
+            self.inner.append(seq, lines)?;
+            let Some(landed) = self.landed.take() else {
+                return Ok(());
+            };
+            landed.send(()).expect("the test listens");
+            self.gate
+                .recv_timeout(Duration::from_secs(10))
+                .expect("the test opens the gate");
+            Err("the commit's answer was lost".to_string())
+        }
+        fn close(&mut self, seq: u64, lines: &[&str]) -> Result<(), String> {
+            self.inner.close(seq, lines)
+        }
+        fn stored(&mut self, chain: &str, seq: u64) -> Result<Vec<String>, String> {
+            self.inner.stored(chain, seq)
+        }
+        fn current_bytes(&self) -> u64 {
+            0
+        }
+        fn rotate(&mut self, _keep: usize) -> Result<Vec<(String, String)>, String> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// An instance whose writer writes through [`LostAnswer`]; the channels say when the first
+    /// write landed and let its answer go.
+    fn losing(
+        test: &TestDatabase,
+    ) -> (
+        Writing,
+        std::sync::mpsc::Receiver<()>,
+        std::sync::mpsc::Sender<()>,
+    ) {
+        let database = shared(test);
+        let chain = database
+            .take_lease("host-a", LAPSE)
+            .expect("lease")
+            .instance_id;
+        let (held, watched) = watch::channel(Some(chain.clone()));
+        let (landed, has_landed) = std::sync::mpsc::channel();
+        let (open, gate) = std::sync::mpsc::channel();
+        let audit = AuditLog::start_under(
+            Box::new(LostAnswer {
+                inner: PgAuditStore::new(database.clone(), watched.clone()),
+                landed: Some(landed),
+                gate,
+            }),
+            Limits::default(),
+            Arc::new(crate::clock::SystemClock),
+            watched,
+        )
+        .expect("start");
+        (
+            Writing {
+                database,
+                held,
+                audit,
+                chain,
+            },
+            has_landed,
+            open,
+        )
+    }
+
+    fn count(lines: &[String], needle: &str) -> usize {
+        lines.iter().filter(|line| line.contains(needle)).count()
+    }
+
+    /// A write that landed although its answer was lost is recognised as landed: alone, it is not
+    /// written again, and with an entry queued while the answer was awaited, only that entry is
+    /// written after it. The writer recovers, and each decision is in the chain once.
+    /// Verifies: ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance
+    #[test]
+    fn a_write_whose_answer_was_lost_is_not_written_again() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        // Alone.
+        let (a, landed, open) = losing(&test);
+        a.audit.record(admitted(1)).expect("record");
+        landed
+            .recv_timeout(Duration::from_secs(10))
+            .expect("landed");
+        open.send(()).expect("open");
+        assert!(
+            a.audit.drain(Duration::from_secs(10)),
+            "the writer did not recover"
+        );
+        let chain = lines(&test, &a.chain);
+        assert_eq!(count(&chain, "\"n\":1"), 1, "{chain:#?}");
+
+        // With an entry queued while the answer was awaited.
+        let (b, landed, open) = losing(&test);
+        b.audit.record(admitted(1)).expect("record");
+        landed
+            .recv_timeout(Duration::from_secs(10))
+            .expect("landed");
+        b.audit
+            .record(admitted(2))
+            .expect("queued while the answer is awaited");
+        open.send(()).expect("open");
+        assert!(
+            b.audit.drain(Duration::from_secs(10)),
+            "the writer stayed failing"
+        );
+        let chain = lines(&test, &b.chain);
+        assert_eq!(count(&chain, "\"n\":1"), 1, "{chain:#?}");
+        assert_eq!(count(&chain, "\"n\":2"), 1, "{chain:#?}");
+        let verified = verify(&b.database, None).expect("verify");
+        assert!(!verified.failed, "{:?}", verified.lines);
+    }
+
+    /// A write into a chain whose answer was lost, and then a new lease: the lines that landed in
+    /// the old chain stay there alone, and only the rest is written into the new one, so no
+    /// decision is recorded twice.
+    /// Verifies: ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance
+    #[test]
+    fn a_landed_write_is_not_written_again_into_the_next_chain() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let (a, landed, open) = losing(&test);
+        a.audit.record(admitted(1)).expect("record");
+        landed
+            .recv_timeout(Duration::from_secs(10))
+            .expect("landed");
+        lapse(&test, &a.chain);
+        let next = a
+            .database
+            .take_lease("host-a", LAPSE)
+            .expect("new lease")
+            .instance_id;
+        a.held.send_replace(Some(next.clone()));
+        open.send(()).expect("open");
+        assert!(
+            a.audit.drain(Duration::from_secs(10)),
+            "the writer stayed failing"
+        );
+        a.audit.record(admitted(2)).expect("record");
+        assert!(a.audit.drain(Duration::from_secs(10)));
+        let (old, new) = (lines(&test, &a.chain), lines(&test, &next));
+        assert_eq!(count(&old, "\"n\":1"), 1, "{old:#?}");
+        assert_eq!(count(&new, "\"n\":1"), 0, "written twice: {new:#?}");
+        assert_eq!(count(&new, "\"n\":2"), 1, "{new:#?}");
+        let verified = verify(&a.database, None).expect("verify");
+        assert!(!verified.failed, "{:?}", verified.lines);
+    }
+
+    /// A writer that reaches its chain while a take is closing it waits for the take's
+    /// transaction, on the chain's row, and then finds the chain closed: it never writes past the
+    /// closing entry. The take's transaction is held open by the test until the writer is seen
+    /// waiting.
+    /// Verifies: ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance
+    #[test]
+    fn a_writer_waits_for_a_closing_take_and_then_finds_the_chain_closed() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let a = writing(&test, "host-a");
+        let chain = a.chain.clone();
+        let closer = shared(&test);
+        let (locked, is_locked) = std::sync::mpsc::channel();
+        let (release, released) = tokio::sync::oneshot::channel::<()>();
+        let closing = {
+            let chain = chain.clone();
+            std::thread::spawn(move || {
+                closer.run_within(Duration::from_secs(30), move |pool| async move {
+                    let mut client = client(&pool).await?;
+                    let transaction = client.transaction().await.map_err(sql)?;
+                    close_lapsed(&*transaction, &chain, "test-closer")
+                        .await?
+                        .expect("an open chain");
+                    locked.send(()).expect("the test listens");
+                    released.await.map_err(|e| e.to_string())?;
+                    transaction.commit().await.map_err(sql)
+                })
+            })
+        };
+        is_locked
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the take closed the chain in its transaction");
+        let (_held, watched) = watch::channel(Some(chain.clone()));
+        let database = a.database.clone();
+        let writer = std::thread::spawn(move || {
+            let mut store = PgAuditStore::new(database, watched);
+            store.chain();
+            let line = render(2, 0, &admitted(1).with("chain", chain.as_str()), "unused");
+            store.append(2, &[&line])
+        });
+        let waiting = || {
+            test.rows(
+                "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' \
+                 AND query LIKE 'SELECT closed_hash FROM audit_chains%FOR UPDATE'",
+            )[0][0]
+                .as_deref()
+                != Some("0")
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(4);
+        while !waiting() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the writer did not wait for the chain's row"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        release.send(()).expect("release");
+        closing.join().expect("closer").expect("the take committed");
+        let err = writer
+            .join()
+            .expect("writer")
+            .expect_err("a chain closed meanwhile takes no entry");
+        assert!(err.contains("is closed"), "{err}");
+        let chain = lines(&test, &a.chain);
+        assert!(
+            chain
+                .last()
+                .expect("entries")
+                .contains("audit.chain_closed"),
+            "{chain:#?}"
+        );
+    }
+
+    /// An archive that ends in a torn line, a crash mid-write, is refused, naming the file, rather
+    /// than recorded as an end that could never verify; one whose chain breaks is refused too.
+    /// Verifies: ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance
+    #[test]
+    fn an_archive_that_ends_in_a_torn_line_is_refused_naming_the_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        file_record(dir.path(), 3);
+        let archive = dir.path().join(crate::fs::AUDIT);
+        assert!(archive_end(&archive).expect("whole").is_some());
+        let file = crate::fs::audit_files(&archive)
+            .expect("files")
+            .pop()
+            .expect("a file");
+        let mut text = std::fs::read_to_string(&file).expect("read");
+        let whole = text.clone();
+        text.push_str("{\"seq\":4,\"pr");
+        std::fs::write(&file, &text).expect("write");
+        let err = archive_end(&archive).expect_err("a torn end");
+        assert!(
+            err.contains("torn") && err.contains(&file.display().to_string()),
+            "{err}"
+        );
+
+        let broken = whole.replacen("\"n\":1", "\"n\":7", 1);
+        std::fs::write(&file, broken).expect("write");
+        let err = archive_end(&archive).expect_err("a broken chain");
+        assert!(err.contains("chain breaks"), "{err}");
+    }
+
+    /// An archive the database records that no chain names as its predecessor fails
+    /// `audit-verify`, with or without `--archive`: the first chain is gone.
+    /// Verifies: ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance
+    #[test]
+    fn an_archive_no_chain_names_fails_verification() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = shared(&test);
+        database.take_lease("host-a", LAPSE).expect("lease");
+        test.sql("INSERT INTO audit_archive (seq, hash) VALUES (3, 'abc')");
+        let verified = verify(&database, None).expect("verify");
+        assert!(verified.failed, "{:?}", verified.lines);
+        assert!(
+            verified
+                .lines
+                .iter()
+                .any(|line| line.contains("no chain names it")),
+            "{:?}",
+            verified.lines
+        );
     }
 }

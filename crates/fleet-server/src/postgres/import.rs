@@ -251,7 +251,7 @@ fn copy(
     // (ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance clause 6).
     let audit = from.join(fs::AUDIT);
     let archive_end =
-        super::audit::archive_tail(&audit)?.map(|(seq, hash)| (super::signed(seq), hash));
+        super::audit::archive_end(&audit)?.map(|(seq, hash)| (super::signed(seq), hash));
     report.lines.push(match &archive_end {
         Some((seq, _)) => format!(
             "the audit record stays in {} as the archive; its last entry, {seq}, is the \
@@ -945,5 +945,34 @@ mod tests {
             "{:?}",
             altered.lines
         );
+    }
+
+    /// A file record that ends in a torn line stops the copy, naming the file, before anything is
+    /// written: its end could never be verified as the first chain's predecessor.
+    /// Verifies: ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance
+    #[test]
+    fn a_copy_refuses_an_audit_record_that_ends_in_a_torn_line() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (old, new) = (dir.path().join("old"), dir.path().join("new"));
+        fixture(&old);
+        let file = fs::audit_files(&old.join(fs::AUDIT))
+            .expect("files")
+            .pop()
+            .expect("a file");
+        let mut text = std::fs::read_to_string(&file).expect("read");
+        text.push_str("{\"seq\":4,\"pr");
+        std::fs::write(&file, text).expect("write");
+        let err =
+            run_in(&old, &new, &test.config(), true, Some(&test.schema)).expect_err("a torn end");
+        assert!(
+            err.contains("torn") && err.contains(&file.display().to_string()),
+            "{err}"
+        );
+        let database = crate::postgres::Database::connect(&test.config(), Some(&test.schema))
+            .expect("connect");
+        assert!(database.server_tables().expect("tables").is_empty());
     }
 }

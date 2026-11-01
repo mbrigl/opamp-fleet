@@ -93,6 +93,17 @@ pub trait AuditStore: Send {
         Err("this record is one chain, which is never closed".to_string())
     }
 
+    /// The lines the chain of the lease `chain` holds from `seq` on, in order, whether or not it is
+    /// closed: what a write whose answer was lost left there. A store of one chain holds none to
+    /// ask for.
+    ///
+    /// # Errors
+    /// Returns an error when the store cannot be read.
+    fn stored(&mut self, chain: &str, seq: u64) -> Result<Vec<String>, String> {
+        let _ = (chain, seq);
+        Ok(Vec::new())
+    }
+
     /// Where the record left off, if it holds anything.
     ///
     /// # Errors
@@ -592,6 +603,11 @@ impl Writer {
     /// once it is. A closing entry that could not be written is taken back, so the chain stays
     /// open for the instance that takes over the lease to close.
     fn close_chain(&mut self) -> bool {
+        // Into the chain of the lease held now, so that a closing entry taken back leaves the
+        // writer where that chain ends.
+        if self.follow_chain().is_err() {
+            return false;
+        }
         let (seq, prev) = (self.seq, self.prev.clone());
         self.append(
             Entry::new("audit.chain_closed", "recorded").with("reason", "shutdown"),
@@ -727,7 +743,22 @@ impl Writer {
 
     /// Takes up the chain `chain` where the store says it ends, and gives every line of the batch
     /// its place in it again.
+    ///
+    /// A write into the old chain whose answer was lost may have landed: the lines of the batch the
+    /// old chain holds are written already, and are dropped rather than written twice.
     fn switch_to(&mut self, chain: String) -> Result<(), String> {
+        if let (Some(old), Some(first)) = (self.chain.clone(), self.batch.first().map(|l| l.seq)) {
+            let stored = self.store.stored(&old, first)?;
+            let landed = self
+                .batch
+                .iter()
+                .zip(&stored)
+                .take_while(|(line, stored)| line.text == **stored)
+                .count();
+            for line in self.batch.drain(..landed) {
+                emit(line.seq, &line.entry.event, &line.entry.outcome, &line.text);
+            }
+        }
         let (seq, prev) = match self.store.tail()? {
             None => (0, GENESIS.to_string()),
             Some(tail) => (tail.last_seq, line_hash(&tail.last_line)),
@@ -749,6 +780,19 @@ impl Writer {
         self.commit_as(false);
     }
 
+    /// Where the store keeps one chain per lease: takes up the chain of the lease held now, if it
+    /// is not the one the batch was placed in. An error while no lease is held.
+    fn follow_chain(&mut self) -> Result<(), String> {
+        if !self.per_lease {
+            return Ok(());
+        }
+        match self.store.chain() {
+            Chain::Unleased => Err("no lease is held, so there is no chain to write into".into()),
+            Chain::Lease(chain) if self.chain.as_ref() != Some(&chain) => self.switch_to(chain),
+            Chain::Lease(_) | Chain::One => Ok(()),
+        }
+    }
+
     /// Hands the batch to the store in one append, or, with `closing`, closes the chain on its
     /// last line. A line counts as written only once the store has synced it. When the append
     /// fails, every line of the batch is lost as a single one is, and the chain goes on from the
@@ -758,17 +802,14 @@ impl Writer {
         if self.batch.is_empty() {
             return;
         }
-        let ready = if self.per_lease {
-            match self.store.chain() {
-                Chain::Unleased => {
-                    Err("no lease is held, so there is no chain to write into".into())
-                }
-                Chain::Lease(chain) if self.chain.as_ref() != Some(&chain) => self.switch_to(chain),
-                Chain::Lease(_) | Chain::One => Ok(()),
+        let ready = self.follow_chain();
+        if self.batch.is_empty() {
+            // Every line had landed in the chain it was written into.
+            if ready.is_ok() {
+                self.failing.store(false, Ordering::SeqCst);
             }
-        } else {
-            Ok(())
-        };
+            return;
+        }
         let batch = std::mem::take(&mut self.batch);
         let first = batch.first().map_or(0, |line| line.seq);
         let written = ready.and_then(|()| {
