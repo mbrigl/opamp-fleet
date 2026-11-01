@@ -2245,7 +2245,7 @@ fn an_agent_rekeyed_at_its_request_keeps_its_stored_record() {
         .process(
             report(
                 opamp::proto::AgentToServerFlags::RequestInstanceUid as u64,
-                3,
+                2,
             ),
             Transport::WebSocket,
             Some(7),
