@@ -9,7 +9,10 @@ write their own columns, so a write by the carrying instance never undoes what a
 Presence, with its holder, is written in batches every `presence_interval_secs`. A write that
 touches several Agents' rows, a rollout's release and a presence batch among them, takes them in
 the order of their `instance_uid`, so two such writes on two instances do not deadlock; today a
-rollout's release writes them unsorted.
+rollout's release writes them unsorted. A label change, a restart request and a forgotten Agent
+are each announced in ticket 05's notification format, in the transaction that writes them, and
+the instance that carries the Agent takes them up from those columns; labels place the Agent in
+its groups again.
 
 ## Acceptance criteria
 
@@ -17,6 +20,9 @@ rollout's release writes them unsorted.
   the notification arrives, then the labels stay as B set them
 - [ ] Given a restart requested through B, when A writes the Agent's next report, then the request
   stays until it is carried out, and is cleared only if no later request set it again
+- [ ] Given an Agent carried by A, when its labels are set, a restart is requested or it is
+  forgotten through B, then A acts on it within one second: it places the Agent in its groups
+  again, restarts it, or ends its session
 - [ ] Given an instance carrying 1 000 Agents at a 30-second heartbeat, when they report, then
   presence is written in batches and never once per heartbeat
 - [ ] Given a restarted instance, when an Agent it does not carry is read on the Operator plane,
