@@ -1315,9 +1315,12 @@ that what is left of each chain begins right after that entry. A closed chain wi
 keeps its record, listed as `0 entries, closed`, and its closing hash must be one an `audit.pruned`
 names. An `audit.pruned` is pruned in its turn: the prune that removes one records the links still
 needed again, and carries on the archive's predecessor once the first chain's `audit.chain_opened`
-is gone. A prune deletes from all the chains it prunes in one transaction, so one that stops
-part-way deletes nothing. Upgrade all instances together: a Server of a release before this one does
-not know `audit.pruned`, and its `audit-verify --config` reports every pruned chain as broken.
+is gone. A prune deletes from all the chains it prunes in one transaction, in batches of a few
+thousand entries, so one that stops part-way deletes nothing; a prune that does not end within five
+minutes is rolled back whole and tried again at the next start or day, and says so in the log as
+`cannot prune the audit record`. A day is 24 hours, whatever the database's time zone. Upgrade all
+instances together: a Server of a release before this one does not know `audit.pruned`, and its
+`audit-verify --config` reports every pruned chain as broken.
 
 A Server that was on PostgreSQL before this release kept its audit record in files under
 `data_dir/audit/`. At its first start, before the database holds any chain or archive, it records
