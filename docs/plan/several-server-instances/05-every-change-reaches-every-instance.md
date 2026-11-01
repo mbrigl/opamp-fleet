@@ -71,9 +71,10 @@ Done:
 - `instance::follow(database, state)` replaces `follow_revocations`: the ledger for `revocation`,
   `certificate` and `host`; the floors for `floor`; the enrolment window and queue for `enrolment`
   and `window`, waking the connections waiting on them; the Configurations for `configuration`, the
-  Deployments for `deployment`, the Packages for `package`, each read again whole; and the record of each Agent an `assignment`
-  names, its assignment taken up and the WebSocket loops woken. A connection made again, and a kind
-  not known, read all of these, every held Agent's record included.
+  Deployments for `deployment`, the Packages for `package`, each read again whole; and the record
+  of each Agent an `assignment` names, its assignment taken up and the WebSocket loops woken. A
+  connection made again, and a kind not known, read all of these, every held Agent's record
+  included.
 - Sent now: every enrolment act on PostgreSQL (a request taken in, decided, approved, withdrawn; the
   window opened, closed, ended, saved), a Package created, its entry or signature written or
   removed, or deleted, a Configuration saved, collected or deleted, a Deployment
