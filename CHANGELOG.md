@@ -66,6 +66,18 @@ once its tag exists.
   **What to do:** nothing to upgrade. On a `409` that says an entry has changed, read the Package
   again and sign the bytes it holds.
 
+- **With PostgreSQL, an Agent's report, its labels, a restart request and a rollout each write
+  their own columns of its record**
+  ([ADR-draft-the-fleet-record-of-agents-and-hosts](docs/adr/draft-the-fleet-record-of-agents-and-hosts.md)).
+  The Server instance that carries an Agent writes only what a report decides, so labels, a
+  restart or a release made through another instance on the same database stay, and that
+  instance takes them up from the database at once; a restart is sent once, by the instance that
+  clears it. A rollout writes its Agents in the order of their `instance_uid`, so two rollouts
+  over the same Agents on two instances never deadlock. An Agent an instance has not held is read
+  from the database at its first report there. The schema is unchanged, and so is the filesystem
+  store.
+  **What to do:** nothing.
+
 - **The UI colours as TOML only the Client's own configuration**
   ([ADR-0031](docs/adr/0031-the-ui-colours-configurations-with-shiki.md)). The core's UI chooses a
   grammar for `otelcol*`, the Client's own type and `fluent-bit` alone. An Agent of the one other
