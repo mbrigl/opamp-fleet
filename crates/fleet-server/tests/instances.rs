@@ -2204,3 +2204,58 @@ async fn a_rollout_counts_only_the_agents_it_released_to() {
     }
     assert!(view_of(&a, kept).is_some_and(|view| view.assigned_deployment == "stable"));
 }
+
+/// The shutdown flush of A writes only the Agents A heard from: an Agent B carries, which A
+/// only loaded, keeps what B wrote of it, and an Agent A heard from keeps a `last_seen_ms`
+/// another instance wrote later.
+/// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts
+#[test]
+fn the_shutdown_flush_writes_only_the_agents_this_instance_heard_from() {
+    use fleet_server::fleet::{AppState, Transport};
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let (carried_by_b, heard_by_a) = (InstanceUid([0x81; 16]), InstanceUid([0x82; 16]));
+    let report = |uid: InstanceUid, sequence_num: u64, healthy: bool| AgentToServer {
+        instance_uid: uid.as_bytes().to_vec(),
+        sequence_num,
+        capabilities: AgentCapabilities::ReportsStatus as u64
+            | AgentCapabilities::ReportsHealth as u64,
+        health: Some(opamp::proto::ComponentHealth {
+            healthy,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let b = AppState::on(&records(&schema)).expect("state");
+    b.process(report(carried_by_b, 1, true), Transport::Http, None);
+    // A loads the record at startup, and B writes the Agent's next report.
+    let a = AppState::on(&records(&schema)).expect("state");
+    b.process(report(carried_by_b, 2, false), Transport::Http, None);
+    a.process(report(heard_by_a, 1, true), Transport::Http, None);
+    // Another instance wrote a later presence of the Agent A heard from.
+    schema.sql(&format!(
+        "UPDATE agents SET last_seen_ms = last_seen_ms + 600000 WHERE instance_uid = '{heard_by_a}'"
+    ));
+    let column = |column: &str, uid: InstanceUid| {
+        schema.query(&format!(
+            "SELECT {column}::text FROM agents WHERE instance_uid = '{uid}'"
+        ))
+    };
+    let (sequence, last_seen) = (
+        column("sequence_num", carried_by_b),
+        column("last_seen_ms", heard_by_a),
+    );
+
+    a.flush_agents();
+    assert_eq!(
+        column("sequence_num", carried_by_b),
+        sequence,
+        "what B wrote stays"
+    );
+    assert_eq!(
+        column("last_seen_ms", heard_by_a),
+        last_seen,
+        "last_seen_ms does not move back"
+    );
+}

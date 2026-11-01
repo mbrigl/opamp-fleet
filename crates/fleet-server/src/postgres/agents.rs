@@ -596,18 +596,22 @@ const REPORTED: [&str; 12] = [
     "host",
 ];
 
-/// Writes the columns a report decides of one Agent record, inside the caller's transaction.
-/// Answers whether there was a record.
+/// Writes the columns a report decides of one Agent record, inside the caller's transaction,
+/// `last_seen_ms` only forward. Answers whether there was a record.
 async fn write_reported(
     client: &impl GenericClient,
     uid: &InstanceUid,
     record: &PersistedAgent,
 ) -> Result<bool, String> {
     let key = uid.to_string();
+    // `last_seen_ms` never moves back, as a presence batch writes it.
     let sets = REPORTED
         .iter()
         .enumerate()
-        .map(|(i, column)| format!("{column} = ${}", i + 2))
+        .map(|(i, column)| match *column {
+            "last_seen_ms" => format!("{column} = GREATEST({column}, ${})", i + 2),
+            _ => format!("{column} = ${}", i + 2),
+        })
         .collect::<Vec<_>>()
         .join(", ");
     let update = format!("UPDATE agents SET {sets} WHERE instance_uid = $1");

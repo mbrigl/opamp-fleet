@@ -116,6 +116,10 @@ pub struct AgentRecord {
     /// polling is stateless. Only the owning connection may mark the Agent disconnected, and a
     /// report from a *different* live connection is the duplicate the Baseline wants detected.
     pub owner: Option<ConnId>,
+    /// Whether this Server heard the Agent report since it started — runtime-only. What it holds
+    /// of one it did not is what it loaded, which on a shared store another instance may have
+    /// written since.
+    pub heard: bool,
     /// The operator's labels for this Agent (ADR-0024), part of its persisted record (ADR-0024
     /// clause 21): they follow a re-key and leave with a forget.
     pub labels: BTreeMap<String, String>,
@@ -280,6 +284,7 @@ impl AgentRecord {
             connection_settings_status: persisted.connection_settings_status,
             package_statuses: persisted.package_statuses,
             owner: None,
+            heard: false,
             labels: persisted.labels,
             host: persisted.host,
             placement: Placement::default(),
@@ -2138,11 +2143,15 @@ impl AppState {
 
     /// Writes every record's current state, timestamps and sequence numbers included — the
     /// graceful-shutdown flush (ADR-0024) that lets the ordinary restart restore a fleet whose
-    /// `last_seen` is current and whose next compressed report is accepted without a gap.
+    /// `last_seen` is current and whose next compressed report is accepted without a gap. On a
+    /// shared store only the records of the Agents this instance heard from are written: of the
+    /// others it holds what it loaded, and another instance carries them
+    /// (ADR-draft-the-fleet-record-of-agents-and-hosts clause 2).
     pub fn flush_agents(&self) {
         let fleet = self.fleet.lock().expect("fleet lock");
         let mut written = self.written.lock().expect("written lock");
-        for (uid, record) in fleet.iter() {
+        let shared = self.agent_store.is_shared();
+        for (uid, record) in fleet.iter().filter(|(_, record)| record.heard || !shared) {
             let persisted = record.to_persisted();
             match self.agent_store.write_report(uid, &persisted) {
                 Ok(true) => {
@@ -2431,6 +2440,7 @@ impl AppState {
         }
         record.connected = true;
         record.owner = conn;
+        record.heard = true;
         record.last_seen_ms = self.clock.now_ms();
         if msg.capabilities != 0 {
             record.capabilities = msg.capabilities;
@@ -2728,6 +2738,7 @@ impl AppState {
             connection_settings_status: None,
             package_statuses: None,
             owner: conn,
+            heard: true,
             // A new Agent waits (ADR-0026 clause 10): it is assigned nothing until an operator's
             // rollout act says so, and the fleet view shows what it could get.
             assignment: None,
@@ -4290,6 +4301,7 @@ mod tests {
             connection_settings_status: None,
             package_statuses: None,
             owner: None,
+            heard: false,
             labels: BTreeMap::new(),
             host: None,
             placement: Placement::default(),
