@@ -168,7 +168,14 @@ every change that concerns a live session by one `NOTIFY`.
    clause 2), so its next write keeps them whether or not the notification has reached it, and it
    takes them into the record it holds when the notification arrives. Where an effective description
    (ADR-0024 clause 18) needs the labels of a Client Agent this instance does not carry, or a Host's
-   subject values, the instance reads them from the database.
+   subject values, the instance reads them from the database. It finds that Client Agent among the
+   Agents the host register binds to the Host. The register binds none to a Gateway's Host, so
+   behind a Gateway the instance finds it only through the filter on the Host an Agent arrived
+   over
+   ([ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server](draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server.md));
+   until that filter exists, an Agent behind a Gateway does not inherit, in the memory of its
+   instance, the labels of a Client Agent another instance carries. What the Operator plane shows
+   is read from the database and inherits them.
 
 9. **Every change that concerns a live session is one `NOTIFY` to every instance.** The writing
    instance commits the change and, in the same transaction, sends one `NOTIFY` on one channel,
