@@ -613,11 +613,32 @@ pub struct AppState {
     forgotten: Mutex<HashMap<ConnId, Vec<InstanceUid>>>,
 }
 
-/// What the last presence batch wrote: the holder it named, and each Agent's presence.
+/// What the last presence batch wrote: the holder it named, each Agent's presence, and the count of
+/// takes the store last answered for each Agent under that holder, which a disconnect is written
+/// only under.
 #[derive(Default)]
 struct PresenceWritten {
     holder: Option<String>,
     agents: HashMap<InstanceUid, Presence>,
+    takes: HashMap<InstanceUid, u64>,
+}
+
+impl PresenceWritten {
+    /// Starts over under `holder`, where it names another.
+    fn under(&mut self, holder: &str) {
+        if self.holder.as_deref() != Some(holder) {
+            self.holder = Some(holder.to_string());
+            self.agents.clear();
+            self.takes.clear();
+        }
+    }
+
+    /// Keeps `take` as the count of takes of `uid` the store answered, unless a greater one was
+    /// kept: an answer that arrives late never replaces a later take's.
+    fn answered(&mut self, uid: InstanceUid, take: u64) {
+        let kept = self.takes.entry(uid).or_insert(take);
+        *kept = (*kept).max(take);
+    }
 }
 
 impl AppState {
@@ -2121,13 +2142,12 @@ impl AppState {
     /// # Errors
     /// Returns an error when the batch cannot be written.
     pub fn write_presence(&self, holder: &str) -> Result<usize, String> {
-        let batch: Vec<(InstanceUid, Presence)> = {
+        let batch: Vec<(InstanceUid, Presence, Option<u64>)> = {
             let fleet = self.fleet.lock().expect("fleet lock");
             let mut written = self.presence_written.lock().expect("presence lock");
-            if written.holder.as_deref() != Some(holder) {
-                written.agents.clear();
-            }
+            written.under(holder);
             written.agents.retain(|uid, _| fleet.contains_key(uid));
+            written.takes.retain(|uid, _| fleet.contains_key(uid));
             let mut batch: Vec<_> = fleet
                 .iter()
                 .map(|(uid, record)| (*uid, record.presence()))
@@ -2135,20 +2155,23 @@ impl AppState {
                     Some(written) => written != presence,
                     None => presence.connected,
                 })
+                .map(|(uid, presence)| (uid, presence, written.takes.get(&uid).copied()))
                 .collect();
-            batch.sort_by_key(|(uid, _)| uid.0);
+            batch.sort_by_key(|(uid, ..)| uid.0);
             batch
         };
         if batch.is_empty() {
             return Ok(0);
         }
-        self.agent_store.write_presence(holder, &batch)?;
+        let takes = self.agent_store.write_presence(holder, &batch)?;
         let mut written = self.presence_written.lock().expect("presence lock");
-        if written.holder.as_deref() != Some(holder) {
-            written.holder = Some(holder.to_string());
-            written.agents.clear();
+        written.under(holder);
+        written
+            .agents
+            .extend(batch.iter().map(|(uid, presence, _)| (*uid, *presence)));
+        for (uid, take) in takes {
+            written.answered(uid, take);
         }
-        written.agents.extend(batch.iter().copied());
         Ok(batch.len())
     }
 
@@ -2168,10 +2191,10 @@ impl AppState {
         let Some(holder) = self.lease.get().and_then(|lease| lease.borrow().clone()) else {
             return;
         };
-        match self.agent_store.take(uid, &holder, presence.last_seen_ms) {
+        let take = match self.agent_store.take(uid, &holder, presence.last_seen_ms) {
             Ok(Some(taken)) => {
                 if let Some(from) = &taken.from {
-                    info!(agent = %uid, from = %from, "took the agent from another instance");
+                    debug!(agent = %uid, from = %from, "took the agent from another instance");
                 }
                 if taken.likely_duplicate {
                     warn!(
@@ -2180,6 +2203,7 @@ impl AppState {
                          likely a duplicate instance_uid on two connections"
                     );
                 }
+                taken.take
             }
             // Forgotten through another instance: this exchange's write finds no record, and
             // drops it.
@@ -2188,13 +2212,11 @@ impl AppState {
                 warn!(agent = %uid, error = %e, "cannot write that the agent is connected here");
                 return;
             }
-        }
+        };
         let mut written = self.presence_written.lock().expect("presence lock");
-        if written.holder.as_deref() != Some(holder.as_str()) {
-            written.holder = Some(holder);
-            written.agents.clear();
-        }
+        written.under(&holder);
         written.agents.insert(*uid, presence);
+        written.answered(*uid, take);
     }
 
     /// Stops carrying each Agent of `uids`, every one this instance carries where `None`, whose
@@ -2287,18 +2309,28 @@ impl AppState {
     /// others it holds what it loaded, and another instance carries them
     /// (ADR-draft-the-fleet-record-of-agents-and-hosts clause 2). Of those, only the ones no other
     /// instance holds the connection of: an Agent heard here that moved to another instance keeps
-    /// what that instance wrote of it.
+    /// what that instance wrote of it. Whether one moved is told by the count of takes this
+    /// instance was last answered, never by comparing its clock with another's.
     pub fn flush_agents(&self) {
         let fleet = self.fleet.lock().expect("fleet lock");
-        let mut written = self.written.lock().expect("written lock");
         let shared = self.agent_store.is_shared();
         let holder = self.lease.get().and_then(|lease| lease.borrow().clone());
+        let takes = {
+            let presence = self.presence_written.lock().expect("presence lock");
+            if presence.holder.is_some() && presence.holder == holder {
+                presence.takes.clone()
+            } else {
+                HashMap::new()
+            }
+        };
+        let mut written = self.written.lock().expect("written lock");
         for (uid, record) in fleet.iter().filter(|(_, record)| record.heard || !shared) {
             let persisted = record.to_persisted();
             match self.agent_store.write_report_unless_held_elsewhere(
                 uid,
                 &persisted,
                 holder.as_deref(),
+                takes.get(uid).copied(),
             ) {
                 Ok(true) => {
                     written.insert(*uid, persisted.durable_digest());
@@ -6353,7 +6385,7 @@ mod tests {
     }
 
     /// One presence batch as it reached the store.
-    type Batch = Vec<(InstanceUid, Presence)>;
+    type Batch = Vec<(InstanceUid, Presence, Option<u64>)>;
 
     impl AgentStore for Counted {
         fn load(&self) -> Result<HashMap<InstanceUid, PersistedAgent>, String> {
@@ -6383,13 +6415,13 @@ mod tests {
         fn write_presence(
             &self,
             _holder: &str,
-            presence: &[(InstanceUid, Presence)],
-        ) -> Result<(), String> {
+            presence: &[(InstanceUid, Presence, Option<u64>)],
+        ) -> Result<HashMap<InstanceUid, u64>, String> {
             self.batches
                 .lock()
                 .expect("batches lock")
                 .push(presence.to_vec());
-            Ok(())
+            Ok(HashMap::new())
         }
         fn release(
             &self,
@@ -6453,9 +6485,9 @@ mod tests {
             let batches = batches.lock().expect("batches");
             let mut ordered = uids.clone();
             ordered.sort_by_key(|uid| uid.0);
-            let batch: Vec<InstanceUid> = batches[0].iter().map(|(uid, _)| *uid).collect();
+            let batch: Vec<InstanceUid> = batches[0].iter().map(|(uid, ..)| *uid).collect();
             assert_eq!(batch, ordered, "in the order of the instance_uid");
-            assert!(batches[0].iter().all(|(_, presence)| presence.connected));
+            assert!(batches[0].iter().all(|(_, presence, _)| presence.connected));
         }
 
         for beat in 2..=4u64 {
@@ -6487,7 +6519,7 @@ mod tests {
             let last = batches.last().expect("a batch");
             assert!(last
                 .iter()
-                .all(|(_, presence)| presence.last_seen_ms == now.load(Ordering::SeqCst)));
+                .all(|(_, presence, _)| presence.last_seen_ms == now.load(Ordering::SeqCst)));
         }
         assert_eq!(state.write_presence("a"), Ok(0), "nothing moved");
 
@@ -6503,6 +6535,23 @@ mod tests {
             Ok(999),
             "a new holder writes every connected one"
         );
+    }
+
+    /// The count of takes kept for an Agent only grows: a batch's answer that arrives after a later
+    /// take's keeps the take's, and a new holder starts over.
+    /// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts
+    #[test]
+    fn the_count_of_takes_kept_for_an_agent_never_moves_back() {
+        let uid = InstanceUid([1; 16]);
+        let mut written = PresenceWritten::default();
+        written.under("a");
+        written.answered(uid, 3);
+        written.answered(uid, 2);
+        assert_eq!(written.takes.get(&uid), Some(&3), "the later take's");
+        written.answered(uid, 4);
+        assert_eq!(written.takes.get(&uid), Some(&4));
+        written.under("b");
+        assert!(written.takes.is_empty(), "a new holder starts over");
     }
 
     /// The first presence batch of an instance writes the Agents it carries, not the fleet it
@@ -6607,9 +6656,10 @@ mod tests {
             uid: &InstanceUid,
             record: &PersistedAgent,
             holder: Option<&str>,
+            take: Option<u64>,
         ) -> Result<bool, String> {
             self.inner
-                .write_report_unless_held_elsewhere(uid, record, holder)
+                .write_report_unless_held_elsewhere(uid, record, holder, take)
         }
         fn create_within(
             &self,
@@ -6639,8 +6689,8 @@ mod tests {
         fn write_presence(
             &self,
             holder: &str,
-            presence: &[(InstanceUid, Presence)],
-        ) -> Result<(), String> {
+            presence: &[(InstanceUid, Presence, Option<u64>)],
+        ) -> Result<HashMap<InstanceUid, u64>, String> {
             self.inner.write_presence(holder, presence)
         }
         fn remove_if_silent(

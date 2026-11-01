@@ -982,14 +982,15 @@ mod tests {
         fn write_presence(
             &self,
             _holder: &str,
-            _presence: &[(InstanceUid, crate::agent_store::Presence)],
-        ) -> Result<(), String> {
+            _presence: &[(InstanceUid, crate::agent_store::Presence, Option<u64>)],
+        ) -> Result<std::collections::HashMap<InstanceUid, u64>, String> {
             let _ = self.begun.send(());
             self.gate
                 .lock()
                 .expect("gate lock")
                 .recv()
-                .map_err(|e| e.to_string())
+                .map_err(|e| e.to_string())?;
+            Ok(std::collections::HashMap::new())
         }
         fn release(
             &self,

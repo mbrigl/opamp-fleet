@@ -2455,7 +2455,8 @@ fn the_shutdown_flush_leaves_an_agent_that_moved_to_another_instance_as_that_one
 }
 
 /// The shutdown flush of A leaves an Agent A heard from, that moved to B since and disconnected
-/// there, as B wrote it: no instance holds it any more, and B heard it last.
+/// there, as B wrote it: no instance holds it any more, and B took it after A did, though B's
+/// clock runs behind A's.
 /// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts
 #[test]
 fn the_shutdown_flush_leaves_an_agent_that_moved_away_and_disconnected_as_last_written() {
@@ -2490,9 +2491,9 @@ fn the_shutdown_flush_leaves_an_agent_that_moved_away_and_disconnected_as_last_w
     b.process(report(2, false, false), Transport::WebSocket, Some(9));
     b.process(report(3, false, true), Transport::WebSocket, Some(9));
     b.write_presence(lease_b).expect("B's batch");
-    // B heard it after A did.
+    // B's clock runs a minute behind A's.
     schema.sql(&format!(
-        "UPDATE agents SET last_seen_ms = last_seen_ms + 1000 WHERE instance_uid = '{uid}'"
+        "UPDATE agents SET last_seen_ms = last_seen_ms - 60000 WHERE instance_uid = '{uid}'"
     ));
     let stored = || {
         schema.query(&format!(
@@ -2504,6 +2505,111 @@ fn the_shutdown_flush_leaves_an_agent_that_moved_away_and_disconnected_as_last_w
 
     a.flush_agents();
     assert_eq!(stored(), ["none 2"], "what B wrote stays");
+}
+
+/// A's presence batch writes the disconnect of an Agent A took back from B, whose clock runs
+/// ahead of A's: the row still holds the count of takes A was answered, whatever `last_seen_ms` B
+/// stamped it with.
+/// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts, ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+#[test]
+fn a_disconnect_is_written_after_an_instance_whose_clock_runs_ahead_held_the_agent() {
+    use fleet_server::fleet::{AppState, Transport};
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let uid = InstanceUid([0x85; 16]);
+    let report = |sequence_num: u64, goodbye: bool| AgentToServer {
+        instance_uid: uid.as_bytes().to_vec(),
+        sequence_num,
+        capabilities: AgentCapabilities::ReportsStatus as u64,
+        agent_disconnect: goodbye.then(opamp::proto::AgentDisconnect::default),
+        ..Default::default()
+    };
+    let (lease_a, lease_b) = (
+        "00000000-0000-7000-8000-00000000000a",
+        "00000000-0000-7000-8000-00000000000b",
+    );
+    let [a, b] = [lease_a, lease_b].map(|lease| {
+        let state = AppState::on(&records(&schema)).expect("state");
+        state.serve_under(tokio::sync::watch::channel(Some(lease.to_string())).1);
+        state
+    });
+    a.process(report(1, false), Transport::WebSocket, Some(7));
+    b.process(report(2, false), Transport::WebSocket, Some(9));
+    // B's clock runs a minute and a half ahead of A's.
+    schema.sql(&format!(
+        "UPDATE agents SET last_seen_ms = last_seen_ms + 90000 WHERE instance_uid = '{uid}'"
+    ));
+    // A's first connection closes; the Agent reconnects to A, which takes it back, and says
+    // goodbye.
+    a.mark_disconnected(&[uid], 7);
+    a.process(report(3, false), Transport::WebSocket, Some(8));
+    a.process(report(4, true), Transport::WebSocket, Some(8));
+    a.write_presence(lease_a).expect("A's batch");
+    assert_eq!(
+        schema.query(&format!(
+            "SELECT coalesce(holder::text, 'none') || ' ' || connected FROM agents \
+             WHERE instance_uid = '{uid}'"
+        )),
+        ["none false"]
+    );
+}
+
+/// A presence batch that names A anew, over an Agent B took and disconnected, counts as a take:
+/// A's disconnect is written under the count it answered, the shutdown flush of B, which took the
+/// Agent before, leaves what A wrote, and that of A, which disconnected the Agent last, writes it.
+/// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts, ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+#[test]
+fn a_batch_that_names_its_instance_anew_counts_as_a_take() {
+    use fleet_server::fleet::{AppState, Transport};
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let uid = InstanceUid([0x86; 16]);
+    let report = |sequence_num: u64, healthy: bool, goodbye: bool| AgentToServer {
+        instance_uid: uid.as_bytes().to_vec(),
+        sequence_num,
+        capabilities: AgentCapabilities::ReportsStatus as u64
+            | AgentCapabilities::ReportsHealth as u64,
+        health: Some(opamp::proto::ComponentHealth {
+            healthy,
+            ..Default::default()
+        }),
+        agent_disconnect: goodbye.then(opamp::proto::AgentDisconnect::default),
+        ..Default::default()
+    };
+    let (lease_a, lease_b) = (
+        "00000000-0000-7000-8000-00000000000a",
+        "00000000-0000-7000-8000-00000000000b",
+    );
+    let a = AppState::on(&records(&schema)).expect("state");
+    let b = AppState::on(&records(&schema)).expect("state");
+    b.serve_under(tokio::sync::watch::channel(Some(lease_b.to_string())).1);
+    // A, still without a lease, takes nothing at the connecting report.
+    a.process(report(1, true, false), Transport::WebSocket, Some(7));
+    b.process(report(2, false, false), Transport::WebSocket, Some(9));
+    b.process(report(3, false, true), Transport::WebSocket, Some(9));
+    b.write_presence(lease_b).expect("B's batch");
+    a.serve_under(tokio::sync::watch::channel(Some(lease_a.to_string())).1);
+    a.write_presence(lease_a).expect("A's batch");
+    let stored = || {
+        schema.query(&format!(
+            "SELECT coalesce(holder::text, 'none') || ' ' || connected || ' ' || sequence_num \
+             FROM agents WHERE instance_uid = '{uid}'"
+        ))
+    };
+    assert_eq!(stored(), [format!("{lease_a} true 2")]);
+    a.process(report(4, false, true), Transport::WebSocket, Some(7));
+    a.write_presence(lease_a).expect("A's disconnect");
+    assert_eq!(stored(), ["none false 4"], "the disconnect is written");
+
+    b.flush_agents();
+    assert_eq!(stored(), ["none false 4"], "what A wrote stays");
+    schema.sql(&format!(
+        "UPDATE agents SET sequence_num = 0 WHERE instance_uid = '{uid}'"
+    ));
+    a.flush_agents();
+    assert_eq!(stored(), ["none false 4"], "A's flush writes it");
 }
 
 /// An Agent that has just connected to A is not forgotten through B before A's next presence

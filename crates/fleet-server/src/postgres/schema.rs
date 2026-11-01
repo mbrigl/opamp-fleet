@@ -113,12 +113,12 @@ pub const MIGRATIONS: &[Migration] = &[
         oldest_server: "0.6.1",
         sql: AGENT_PRESENCE,
     },
-    // A column only added, with a default; the release before it neither reads nor writes it, so
-    // the takes of its instances are not counted.
+    // Two columns only added, with defaults; the release before it neither reads nor writes them,
+    // and names no holder, so it takes no Agent.
     Migration {
         version: 9,
         oldest_server: "0.6.1",
-        sql: HOLDER_CHANGES,
+        sql: TAKES,
     },
 ];
 
@@ -375,11 +375,14 @@ ALTER TABLE agents ADD COLUMN connected boolean NOT NULL DEFAULT false;
 ALTER TABLE agents ADD COLUMN holder uuid;
 ";
 
-/// When the holder of each Agent changed, the latest eleven times, by the database's clock: what
-/// tells a likely duplicate whose connections instances take in turn
+/// How each Agent was taken
 /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
-/// clause 8).
-const HOLDER_CHANGES: &str = r"
+/// clause 8): `takes` counts every take and every batch that names a holder anew, so an instance
+/// writes a disconnect only where the row still holds the count it was answered, with no clock
+/// compared; `holder_changes` holds when the holder changed, the latest eleven times, by the
+/// database's clock, which tells a likely duplicate whose connections instances take in turn.
+const TAKES: &str = r"
+ALTER TABLE agents ADD COLUMN takes bigint NOT NULL DEFAULT 0;
 ALTER TABLE agents ADD COLUMN holder_changes timestamptz[] NOT NULL DEFAULT '{}';
 ";
 

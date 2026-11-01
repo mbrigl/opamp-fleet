@@ -165,6 +165,9 @@ pub struct Taken {
     /// Whether this take is the one that made the holder change more than ten times within a
     /// minute: the Agent is likely a duplicate whose connections two instances take in turn.
     pub likely_duplicate: bool,
+    /// The count of takes of the Agent, this one included: what a disconnect this instance writes
+    /// must find still stored.
+    pub take: u64,
 }
 
 /// What [`AgentStore::create_within`] did with the record of an Agent first heard of.
@@ -271,11 +274,13 @@ pub trait AgentStore: Send + Sync {
     }
 
     /// [`write_report`](Self::write_report) at the shutdown flush: on a shared store only where
-    /// the stored holder is `holder`, or is none and the stored `last_seen_ms` is no newer than
-    /// the record's, so an Agent that moved to another Server keeps what that Server wrote of it,
-    /// also once it disconnected there (ADR-draft-the-fleet-record-of-agents-and-hosts clause 2). `holder` is the instance id of
-    /// this Server's lease, `None` without one. Answers whether it wrote the record. A store whose
-    /// one Server is its only writer writes as `write_report` does.
+    /// the stored holder is `holder`, or is none and the stored count of takes is still `take`,
+    /// the count this Server was last answered for the Agent, so an Agent that moved to another
+    /// Server keeps what that Server wrote of it, also once it disconnected there, however the
+    /// Servers' clocks differ (ADR-draft-the-fleet-record-of-agents-and-hosts clause 2). `holder`
+    /// is the instance id of this Server's lease, `None` without one, and `take` is `None` where
+    /// this Server was answered none. Answers whether it wrote the record. A store whose one
+    /// Server is its only writer writes as `write_report` does.
     ///
     /// # Errors
     /// Returns an error when the record cannot be written.
@@ -284,8 +289,9 @@ pub trait AgentStore: Send + Sync {
         uid: &InstanceUid,
         record: &PersistedAgent,
         holder: Option<&str>,
+        take: Option<u64>,
     ) -> Result<bool, String> {
-        let _ = holder;
+        let _ = (holder, take);
         self.write_report(uid, record)
     }
 
@@ -335,29 +341,33 @@ pub trait AgentStore: Send + Sync {
 
     /// Writes the presence of the Agents `holder` carries, one batch, in the order of their
     /// `instance_uid` whatever order they are given in, so two batches over the same Agents never
-    /// deadlock (ADR-draft-the-fleet-record-of-agents-and-hosts clause 4). A connected Agent names
-    /// `holder` as the instance that holds its connection only where the stored presence names
-    /// `holder`, or none, or an instance without a live lease: a batch read before another instance
-    /// took the Agent never undoes that take, and writes nothing of it. A disconnect is written only
-    /// of an Agent whose stored presence names `holder` or none, so it never undoes another
-    /// instance's take, and is no older than it, so it never undoes a connect written since;
-    /// `last_seen_ms` never moves back. A record no longer stored is written nothing. A store whose
-    /// one Server holds every presence in memory keeps none, and writes nothing.
+    /// deadlock (ADR-draft-the-fleet-record-of-agents-and-hosts clause 4). Each Agent comes with
+    /// the count of takes `holder` was last answered for it, `None` where it was answered none. A
+    /// connected Agent names `holder` as the instance that holds its connection only where the
+    /// stored presence names `holder`, or none, or an instance without a live lease: a batch read
+    /// before another instance took the Agent never undoes that take, and writes nothing of it.
+    /// Naming `holder` anew counts as a take. A disconnect is written only of an Agent whose stored
+    /// presence names `holder` and still holds the count it comes with, so it never undoes another
+    /// instance's take, nor a take of `holder` made since, however the instances' clocks differ;
+    /// `last_seen_ms` never moves back. A record no longer stored is written nothing. Answers the
+    /// count of takes of each connected Agent it wrote. A store whose one Server holds every
+    /// presence in memory keeps none, writes nothing, and answers none.
     ///
     /// # Errors
     /// Returns an error when the batch cannot be written; nothing of it is then written.
     fn write_presence(
         &self,
         holder: &str,
-        presence: &[(InstanceUid, Presence)],
-    ) -> Result<(), String> {
+        presence: &[(InstanceUid, Presence, Option<u64>)],
+    ) -> Result<HashMap<InstanceUid, u64>, String> {
         let _ = (holder, presence);
-        Ok(())
+        Ok(HashMap::new())
     }
 
     /// Takes an Agent whose connection `holder` now carries, outside the batches: one conditional
     /// step that names `holder` as the instance that holds its connection, writes it connected and
-    /// last heard from at `last_seen_ms`, which never moves back, and answers the holder it replaced. A shared store announces the take to the other Servers when
+    /// last heard from at `last_seen_ms`, which never moves back, counts the take, and answers the
+    /// count and the holder it replaced. A shared store announces the take to the other Servers when
     /// the holder it replaced is another Server with a live lease, so that one stops carrying it,
     /// and counts each change of holder, so the take that makes it change more than ten times
     /// within a minute says so
