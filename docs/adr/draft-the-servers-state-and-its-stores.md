@@ -308,18 +308,19 @@ and configured in the Server's configuration alone, and move an old layout by an
     ([ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it](draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md)
     clause 2). The lock is taken whatever the blob store: with `"fs"` the instance is alone and
     the lock decides nothing, but the PostgreSQL record store does not ask which blob store it
-    serves, and one rule for every PostgreSQL Server costs one session per upload and per sweep.
-    - An upload holds the same lock shared, from its check that its blob is stored until its
-      entry is committed, and a sweep holds it alone. A sweep therefore never deletes a blob that
-      an upload is about to name, and an upload whose blob a sweep deleted first is refused, to be
-      uploaded again.
-    - The lock is a session-level advisory lock, held on a connection of its own, outside the
-      pool: one session more for each upload and sweep in progress, which the database's
-      `max_connections` must allow for. An upload waits for it as long as the database's
-      `lock_timeout` of 5 seconds, and a sweep 60 seconds, its session's `statement_timeout` raised
-      to let it. A session that ends while it holds the lock is logged: the lock is gone with it,
-      and an upload whose hold was lost so before its entry is written is refused, to be uploaded
-      again.
+    serves, and one rule for every PostgreSQL Server costs one session per sweep.
+    - A sweep holds the lock alone. An upload takes it shared inside the transaction that writes
+      its entry, checks there that its blob is stored, and commits, the lock let go with the
+      transaction. A sweep therefore never runs between an upload's check and its commit, and
+      never deletes a blob that an entry is about to name. An upload whose blob a sweep deleted
+      first is refused, to be uploaded again, and one whose transaction does not commit, its
+      session ended included, writes no entry.
+    - A sweep's lock is a session-level advisory lock, held on a connection of its own, outside
+      the pool: one session more for each sweep in progress, which the database's
+      `max_connections` must allow for. It waits for the lock 60 seconds, its session's
+      `statement_timeout` raised to let it; an upload waits as long as the database's
+      `lock_timeout` of 5 seconds. A sweep's session that ends while it holds the lock is logged,
+      as the lock is gone with it; one that ends before it had the lock is not.
     - A startup sweep that cannot have the lock fails startup, naming the lock. A sweep after an
       act logs it, and the blobs it would have deleted stay until the next startup. A sweep after
       an act runs once the act has let go of every lock of its Server's own, such as the fleet's,

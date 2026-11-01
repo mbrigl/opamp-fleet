@@ -92,7 +92,7 @@ every change that concerns a live session by one `NOTIFY`.
    token's instances on its host is the operator's. The Server does not copy keys between tokens.
    With `store = "s3"` every instance uses the same bucket and prefix, and every sweep of
    unreferenced blobs and every staging cleanup run under an advisory lock, so one instance does
-   them at a time, and an upload holds it shared until its entry is committed;
+   them at a time, and an upload takes it shared in the transaction that writes its entry;
    [ADR-draft-the-servers-state-and-its-stores](draft-the-servers-state-and-its-stores.md) clause 14
    decides it for the blob store. An instance on PostgreSQL and S3 keeps nothing on its own disk
    (that draft's clause 1): it reads its configuration, its TLS files and its secret files, all of
