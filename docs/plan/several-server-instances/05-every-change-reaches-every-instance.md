@@ -11,7 +11,9 @@ and the Hosts again on each; `floor` is sent and not yet followed. Each instance
 sessions it holds. A lost listening connection, or a kind it does not know, counts as every
 notification: it drops its caches, re-reads the revocation list, the assignments, the holders, the
 labels, the enrolment state and the floors. The revocation list has one version, so a Gateway's
-`ETag` answered by one instance is answered `304` by any.
+`ETag` answered by one instance is answered `304` by any. Each notification names the instance that
+sent it, and an instance does not act on its own: it already holds what it committed, and reading
+the ledger again for its own acts would cross every reload it makes during an enrolment wave.
 
 ## Acceptance criteria
 
@@ -25,6 +27,8 @@ labels, the enrolment state and the floors. The revocation list has one version,
   re-reads as after a lost connection
 - [ ] Given a Gateway holding the revocation list's `ETag` from A, when it asks B, then B answers
   `304`
+- [ ] Given an enrolment wave on A, when A's own notifications arrive, then A reads nothing again
+  for them, and B still takes each of them up
 - [ ] Given a floor set on A, when an Agent asks B for the floors, then B serves the new floor
 - [ ] Given a single Server on the filesystem store and one on PostgreSQL, when the existing
   integration suite and the store checks run, then both pass unchanged
