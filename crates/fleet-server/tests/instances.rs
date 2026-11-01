@@ -34,6 +34,45 @@ const TIMES: LeaseTimes = LeaseTimes {
 struct Schema {
     config: PostgresConfig,
     name: String,
+    /// Released once the schema is dropped, after this test's instances closed their connections.
+    _slot: Slot,
+}
+
+/// How many tests work in a schema at once. Each runs instances whose pools, listening
+/// connections and leases hold up to eight connections together, and the test database, like
+/// CI's, admits 100 (three of them reserved), so the tests the harness would otherwise run at
+/// once, one per core, can exhaust it.
+const SCHEMAS_AT_ONCE: usize = 8;
+
+/// One of the [`SCHEMAS_AT_ONCE`] places a test works in, held until it is dropped.
+struct Slot;
+
+/// The places taken, and the wake-up of a test that waits for one.
+static SLOTS: (std::sync::Mutex<usize>, std::sync::Condvar) =
+    (std::sync::Mutex::new(0), std::sync::Condvar::new());
+
+impl Slot {
+    /// Waits until fewer than [`SCHEMAS_AT_ONCE`] tests work in a schema, and takes a place.
+    fn take() -> Slot {
+        let (taken, freed) = &SLOTS;
+        let mut taken = freed
+            .wait_while(taken.lock().expect("slots"), |taken| {
+                *taken >= SCHEMAS_AT_ONCE
+            })
+            .expect("slots");
+        *taken += 1;
+        Slot
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        let (taken, freed) = &SLOTS;
+        *taken
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) -= 1;
+        freed.notify_one();
+    }
 }
 
 impl Schema {
@@ -70,6 +109,7 @@ impl Schema {
         let schema = Schema {
             config,
             name: format!("fleet_test_{}", hex::encode(random)),
+            _slot: Slot::take(),
         };
         schema.sql(&format!("CREATE SCHEMA {}", schema.name));
         Some(schema)
