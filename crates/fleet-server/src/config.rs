@@ -216,6 +216,11 @@ pub struct AuditConfig {
 /// How many days an entry is kept on PostgreSQL where `[audit] retain_days` is not set.
 pub const DEFAULT_RETAIN_DAYS: u64 = 365;
 
+/// The most days `[audit] retain_days` keeps an entry: a century, longer than any duty to keep a
+/// record, and far inside PostgreSQL's range of times, which a cutoff past about 2.4 million days
+/// would leave, failing every prune.
+pub const MAX_RETAIN_DAYS: u64 = 36_500;
+
 impl AuditConfig {
     /// The filesystem store's bounds, the defaults where a key is not set.
     #[must_use]
@@ -264,6 +269,12 @@ impl AuditConfig {
                     "[audit] {key} must be greater than 0 — the record is never switched off"
                 ));
             }
+        }
+        if let Some(days) = self.retain_days.filter(|days| *days > MAX_RETAIN_DAYS) {
+            return Err(format!(
+                "[audit] retain_days is {days}, more than {MAX_RETAIN_DAYS} — a century is the \
+                 longest the record is kept"
+            ));
         }
         Ok(())
     }
@@ -3227,6 +3238,13 @@ mod tests {
 
         assert_eq!(load(postgres).expect("defaults").audit.retain_days(), 365);
         assert_eq!(
+            load(&on(postgres, "retain_days = 36500\n"))
+                .expect("a century")
+                .audit
+                .retain_days(),
+            36_500
+        );
+        assert_eq!(
             load(&on(postgres, "retain_days = 1\n"))
                 .expect("set")
                 .audit
@@ -3252,6 +3270,7 @@ mod tests {
                 "max_file_bytes",
             ),
             (on(postgres, "retain_days = 0\n"), "retain_days"),
+            (on(postgres, "retain_days = 36501\n"), "retain_days"),
             (on(files, "keep_files = 0\n"), "keep_files"),
             (on(files, "max_file_bytes = 0\n"), "max_file_bytes"),
         ] {
