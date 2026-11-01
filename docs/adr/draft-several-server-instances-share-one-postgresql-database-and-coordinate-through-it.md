@@ -460,6 +460,9 @@ initialises a module once per process:
   B's memory holds an older, lower floor.
 - Two instances saving one Configuration at once keep both revisions; two instances uploading two
   entries of one Package keep both; two instances adding two members to one Deployment keep both.
+- A Configuration whose revision a rollout through A pins is not deleted through B, and a Package
+  A pins is neither changed nor deleted through B, though B's memory holds no such pin; a deletion
+  through B while A's rollout has not committed waits for it and is then refused.
 - One hundred heartbeats of one Agent within one presence interval write its presence once.
 - An Agent that reconnects from B to A is held by A, and B stops carrying it.
 - An Agent no instance carries is in no instance's memory, and A's Operator plane lists it, with
