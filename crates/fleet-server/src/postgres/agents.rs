@@ -2354,19 +2354,36 @@ mod tests {
         assert!(a.get(&one).expect("get") == Some(stored), "created whole");
     }
 
-    /// A row that does not decode fails startup naming its `instance_uid` (ADR-0029 clause 4).
-    /// Verifies: ADR-0029
+    /// A row that does not decode fails the read that meets it, naming its `instance_uid`: the
+    /// load, the query, the query of it and the read of it. Opening the adapter, which reads the
+    /// assignments alone, does not meet it (ADR-draft-the-servers-state-and-its-stores clause 4).
+    /// Verifies: ADR-0029, ADR-draft-the-servers-state-and-its-stores
     #[test]
-    fn an_agent_row_that_does_not_decode_fails_the_load_naming_it() {
+    fn an_agent_row_that_does_not_decode_fails_the_read_that_meets_it_naming_it() {
         let Some(test) = TestDatabase::named() else {
             return;
         };
-        let store = PgAgentStore::new(test.open());
+        let database = test.open();
+        let store = PgAgentStore::new(database.clone());
         let uid = InstanceUid::default();
         store.put(&uid, &record()).expect("put");
         test.sql("UPDATE agents SET health = '\\xff'::bytea");
-        let err = store.load().expect_err("not protobuf");
-        assert!(err.contains(&uid.to_string()), "{err}");
-        assert!(err.contains("health"), "{err}");
+        let errors = [
+            store.load().map(|_| ()).expect_err("load"),
+            store.query(None).map(|_| ()).expect_err("query"),
+            store
+                .query(Some(&[uid]))
+                .map(|_| ())
+                .expect_err("query of it"),
+            store.get(&uid).map(|_| ()).expect_err("get"),
+        ];
+        for err in errors {
+            assert!(err.contains(&uid.to_string()), "{err}");
+            assert!(err.contains("health"), "{err}");
+        }
+        assert!(
+            PgAgentStore::open(database).is_ok(),
+            "opening meets no record"
+        );
     }
 }
