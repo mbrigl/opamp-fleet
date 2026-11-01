@@ -682,6 +682,11 @@ struct State {
     owners: BTreeMap<String, String>,
     /// Every revoked certificate, once built: `None` after a change it has not caught up with.
     revoked: Option<BTreeSet<CertId>>,
+    /// Counts this instance's own acts on the trust state, each bumped under the lock the act
+    /// writes the store under: a reload that reads the store outside the lock swaps its read in
+    /// only while this has not moved since the read began
+    /// ([`Revocations::reload_ledger`]).
+    acts: u64,
     /// How often the revoked set was built.
     #[cfg(test)]
     rebuilds: usize,
@@ -701,6 +706,32 @@ fn owners_of(hosts: &BTreeMap<String, Host>) -> BTreeMap<String, String> {
 }
 
 impl State {
+    /// The state `ledger` holds, every chain's root and count built.
+    fn loaded(ledger: Ledger) -> Self {
+        let mut state = State {
+            issued: BTreeMap::new(),
+            revocations: ledger.revocations,
+            roots: BTreeMap::new(),
+            descendants: BTreeMap::new(),
+            earliest_expiry_ms: u64::MAX,
+            owners: owners_of(&ledger.hosts),
+            hosts: ledger.hosts,
+            hosts_version: 0,
+            revoked: None,
+            acts: 0,
+            #[cfg(test)]
+            rebuilds: 0,
+        };
+        state.take_up_register(ledger.issued);
+        state
+    }
+
+    /// Counts an act of this instance's own on the trust state: called under the lock the act's
+    /// write to the store is made under.
+    fn acted(&mut self) {
+        self.acts += 1;
+    }
+
     /// Takes up `issued` as the register, with every entry's root, every root's count, and the
     /// earliest end a prune waits for.
     fn take_up_register(&mut self, issued: Vec<Issued>) {
@@ -869,23 +900,7 @@ impl Revocations {
         let ledger = store.load()?;
         let revocations = Revocations {
             authorities,
-            state: Mutex::new({
-                let mut state = State {
-                    issued: BTreeMap::new(),
-                    revocations: ledger.revocations,
-                    roots: BTreeMap::new(),
-                    descendants: BTreeMap::new(),
-                    earliest_expiry_ms: u64::MAX,
-                    owners: owners_of(&ledger.hosts),
-                    hosts: ledger.hosts,
-                    hosts_version: 0,
-                    revoked: None,
-                    #[cfg(test)]
-                    rebuilds: 0,
-                };
-                state.take_up_register(ledger.issued);
-                state
-            }),
+            state: Mutex::new(State::loaded(ledger)),
             store,
             clock,
             hosts_written: Mutex::new(0),
@@ -955,6 +970,8 @@ impl Revocations {
         bootstrap: Option<&CertId>,
     ) -> Result<(), String> {
         let mut state = self.state.lock().expect("revocation lock");
+        // The prune and the register's write below are acts on the trust state.
+        state.acted();
         if bootstrap.is_some_and(|bootstrap| state.revoked().contains(bootstrap)) {
             return Err(BOOTSTRAP_REVOKED.to_string());
         }
@@ -1000,7 +1017,8 @@ impl Revocations {
             _ => None,
         };
         if self.store.writes_hosts_by_act() {
-            // Written under the lock, so a reload this instance makes meanwhile reads it back.
+            // Written under the lock and counted, so a reload this instance reads meanwhile is not
+            // swapped in without it.
             if let Some(act) = act {
                 self.write_act_logged(&act);
             }
@@ -1129,6 +1147,7 @@ impl Revocations {
             .is_some_and(|entry| entry.extend(not_after_ms));
         if extended {
             state.earliest_expiry_ms = state.earliest_expiry_ms.min(not_after_ms);
+            state.acted();
         }
         if !(binds || extended) {
             return Ok(());
@@ -1153,6 +1172,7 @@ impl Revocations {
     pub fn release(&self, instance_uid: &[u8]) -> Result<(), String> {
         let uid = hex::encode(instance_uid);
         let mut state = self.state.lock().expect("revocation lock");
+        state.acted();
         // The store answers for the binding, as another instance may have made it after this one
         // last read the Hosts.
         let stored = self.store.unbind(&uid)?;
@@ -1172,6 +1192,7 @@ impl Revocations {
     /// binding another Host holds refuses it, naming that Host, and is what `state` holds from
     /// then on; a Host the store holds marked as a Gateway is bound none.
     fn bind(&self, state: &mut State, uid: &str, host: &str, row: &Host) -> Result<bool, String> {
+        state.acted();
         let bound = self.store.bind_seen(uid, host, row)?;
         Self::take_up(state, uid, host, bound)
     }
@@ -1250,6 +1271,7 @@ impl Revocations {
     pub fn rebind(&self, old: &[u8], new: &[u8]) -> Result<(), String> {
         let (old, new) = (hex::encode(old), hex::encode(new));
         let mut state = self.state.lock().expect("revocation lock");
+        state.acted();
         let held = state.owners.remove(&old);
         if let Some(host) = &held {
             if let Some(entry) = state.hosts.get_mut(host) {
@@ -1297,6 +1319,7 @@ impl Revocations {
         if !known {
             return Ok(false);
         }
+        state.acted();
         if self.store.writes_hosts_by_act() {
             // The mark and the release of every binding it ends are one write.
             self.store.write_host_act(&HostAct::Gateway {
@@ -1453,6 +1476,7 @@ impl Revocations {
     /// have added the same revocation, or filled the list, since this one last read it.
     fn add(&self, revoked: Revoked) -> Result<Revocation, RevokeError> {
         let mut state = self.state.lock().expect("revocation lock");
+        state.acted();
         let entry = Revocation {
             id: entry_id(&revoked),
             revoked,
@@ -1500,6 +1524,7 @@ impl Revocations {
     /// Returns an error when the store cannot write it.
     pub fn lift(&self, id: &str) -> Result<bool, String> {
         let mut state = self.state.lock().expect("revocation lock");
+        state.acted();
         // The store decides: another instance may have added the entry, or lifted it.
         let lifted = self.store.remove_revocation(id)?;
         let before = state.revocations.len();
@@ -1574,24 +1599,40 @@ impl Revocations {
     /// open session checks itself against what is stored
     /// (ADR-draft-admission-by-client-certificate-and-revocation clause 32).
     ///
-    /// It reads under the lock every act of this instance's own is written under, so an act
-    /// written meanwhile is never put back out of what is held.
+    /// The store is read outside the lock, so no revocation check, `speaks_for` or report waits for
+    /// the read, only for the swap. A read that began before an act of this instance's own
+    /// committed may not hold it, so it is swapped in only when no such act was counted since it
+    /// began, and read again otherwise. A store that writes the Hosts whole writes them once the
+    /// lock is released; it is the only writer of its ledger, so nothing reloads it.
     ///
     /// # Errors
     /// Returns an error when the store cannot be read; what is held is then kept.
     pub fn reload_ledger(&self) -> Result<(), String> {
-        let mut state = self.state.lock().expect("revocation lock");
-        let ledger = self.store.load()?;
-        state.owners = owners_of(&ledger.hosts);
-        state.hosts = ledger.hosts;
-        state.take_up_register(ledger.issued);
-        let changed = state.revocations != ledger.revocations;
-        state.revocations = ledger.revocations;
-        drop(state);
-        if changed {
-            self.changes.send_modify(|rev| *rev += 1);
+        loop {
+            let began = self.state.lock().expect("revocation lock").acts;
+            let mut fresh = State::loaded(self.store.load()?);
+            // Built here, so the first check after the swap does not build it under the lock.
+            fresh.revoked();
+            let mut state = self.state.lock().expect("revocation lock");
+            if state.acts != began {
+                continue;
+            }
+            fresh.hosts_version = state.hosts_version;
+            fresh.acts = state.acts;
+            #[cfg(test)]
+            {
+                fresh.rebuilds = state.rebuilds;
+            }
+            let changed = state.revocations != fresh.revocations;
+            let held = std::mem::replace(&mut *state, fresh);
+            drop(state);
+            // What was held is dropped once the lock is released.
+            drop(held);
+            if changed {
+                self.changes.send_modify(|rev| *rev += 1);
+            }
+            return Ok(());
         }
-        Ok(())
     }
 
     /// Announces every new revocation; an open session checks itself against the list on each.
@@ -2873,5 +2914,307 @@ mod tests {
         let state = revocations.state.lock().expect("lock");
         assert_eq!(state.roots.get(&id("b2")), Some(&id("a1")));
         assert_eq!(state.descendants.get(&id("a1")), Some(&2));
+    }
+
+    /// The patience of a test that waits on another thread.
+    const PATIENCE: std::time::Duration = std::time::Duration::from_secs(5);
+
+    /// What an armed read says when it has begun, and what it waits on to answer.
+    type Hold = (
+        std::sync::mpsc::SyncSender<()>,
+        std::sync::mpsc::Receiver<()>,
+    );
+
+    /// A store whose next read, once armed, takes what it holds and then waits for a go-ahead
+    /// before it answers it, as a read of a large ledger takes its time.
+    #[derive(Clone, Default)]
+    struct ReadHeld {
+        inner: Memory,
+        hold: Arc<Mutex<Option<Hold>>>,
+        loads: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    /// The read a test holds open: `reading` says it has begun, `go` lets it answer.
+    struct Reading {
+        reading: std::sync::mpsc::Receiver<()>,
+        go: std::sync::mpsc::Sender<()>,
+    }
+
+    impl ReadHeld {
+        /// Holds the next read open; counts the reads from here on.
+        fn arm(&self) -> Reading {
+            let (began, reading) = std::sync::mpsc::sync_channel(1);
+            let (go, wait) = std::sync::mpsc::channel();
+            *self.hold.lock().expect("lock") = Some((began, wait));
+            self.loads.store(0, Ordering::SeqCst);
+            Reading { reading, go }
+        }
+    }
+
+    impl LedgerStore for ReadHeld {
+        fn load(&self) -> Result<Ledger, String> {
+            self.loads.fetch_add(1, Ordering::SeqCst);
+            let ledger = self.inner.load()?;
+            let hold = self.hold.lock().expect("lock").take();
+            if let Some((began, wait)) = hold {
+                began.send(()).map_err(|e| e.to_string())?;
+                wait.recv_timeout(PATIENCE)
+                    .map_err(|_| "held past the test's patience".to_string())?;
+            }
+            Ok(ledger)
+        }
+        fn put_issued(&self, issued: &Issued) -> Result<(), String> {
+            self.inner.put_issued(issued)
+        }
+        fn remove_issued(&self, id: &CertId) -> Result<(), String> {
+            self.inner.remove_issued(id)
+        }
+        fn add_revocation(&self, entry: &Revocation, bound: usize) -> Result<Added, String> {
+            self.inner.add_revocation(entry, bound)
+        }
+        fn remove_revocation(&self, id: &str) -> Result<bool, String> {
+            self.inner.remove_revocation(id)
+        }
+        fn save_hosts(&self, hosts: &BTreeMap<String, Host>) -> Result<(), String> {
+            self.inner.save_hosts(hosts)
+        }
+    }
+
+    fn open_held(store: &ReadHeld) -> Arc<Revocations> {
+        Arc::new(
+            Revocations::open(
+                Box::new(store.clone()),
+                Arc::new(Manual(AtomicU64::new(NOW))),
+                vec![Authority {
+                    role: "client".into(),
+                    subject: name_hash(CA),
+                    name: "CN=fleet client CA".into(),
+                }],
+            )
+            .expect("open"),
+        )
+    }
+
+    /// Starts a reload whose read the store holds open, and answers once the read has begun.
+    fn reload_held(
+        store: &ReadHeld,
+        revocations: &Arc<Revocations>,
+    ) -> (
+        std::sync::mpsc::Sender<()>,
+        std::thread::JoinHandle<Result<(), String>>,
+    ) {
+        let Reading { reading, go } = store.arm();
+        let reloader = {
+            let revocations = revocations.clone();
+            std::thread::spawn(move || revocations.reload_ledger())
+        };
+        reading.recv_timeout(PATIENCE).expect("the read has begun");
+        (go, reloader)
+    }
+
+    /// A revocation check, `speaks_for` and a report's check wait for a reload's swap only, not
+    /// for its read of the store, and a reload no act of this instance's own crossed is swapped in
+    /// after one read.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    #[test]
+    fn a_check_does_not_wait_for_a_reloads_read() {
+        let store = ReadHeld::default();
+        let revocations = open_held(&store);
+        // Another instance revokes a1 and binds an Agent to h1.
+        store
+            .inner
+            .add_revocation(
+                &Revocation {
+                    id: "other".into(),
+                    revoked: Revoked::Certificate {
+                        authority: "client".into(),
+                        issuers: vec![name_hash(CA)],
+                        serial: "a1".into(),
+                    },
+                    revoked_ms: NOW,
+                },
+                MAX_REVOCATIONS,
+            )
+            .expect("another instance revokes");
+        store
+            .inner
+            .save_hosts(&BTreeMap::from([(
+                "h1".to_string(),
+                Host {
+                    instance_uids: [hex::encode([1; 16])].into(),
+                    ..Host::default()
+                },
+            )]))
+            .expect("another instance binds");
+        let (go, reloader) = reload_held(&store, &revocations);
+        let (answered, answer) = std::sync::mpsc::channel();
+        {
+            let revocations = revocations.clone();
+            std::thread::spawn(move || {
+                let revoked = revocations.is_certificate_revoked(&id("a1"));
+                let speaks = revocations.speaks_for("h1");
+                let reports = revocations.may_report("h1", &[1; 16]);
+                let _ = answered.send((revoked, speaks, reports));
+            });
+        }
+        let checked = answer.recv_timeout(std::time::Duration::from_secs(1));
+        go.send(()).expect("go");
+        let (revoked, speaks, reports) = checked.expect("answered while the read is held open");
+        assert!(!revoked, "answered from what was held before the read");
+        assert_eq!(speaks, SpeaksFor::Agents(BTreeSet::new()));
+        assert!(reports.is_ok());
+        reloader.join().expect("reloader").expect("reloaded");
+        assert_eq!(store.loads.load(Ordering::SeqCst), 1, "read once");
+        assert!(revocations.is_certificate_revoked(&id("a1")));
+        assert_eq!(
+            revocations.speaks_for("h1"),
+            SpeaksFor::Agents([hex::encode([1; 16])].into())
+        );
+    }
+
+    /// An act of this instance's own committed while a reload reads the store holds once the read
+    /// ends: the read is not swapped in, and the store is read again.
+    fn an_own_act_outlives_a_reload(
+        setup: impl FnOnce(&Revocations),
+        act: impl FnOnce(&Revocations),
+        holds: impl Fn(&Revocations) -> bool,
+    ) {
+        let store = ReadHeld::default();
+        let revocations = open_held(&store);
+        setup(&revocations);
+        let (go, reloader) = reload_held(&store, &revocations);
+        act(&revocations);
+        assert!(holds(&revocations), "the act holds before the read ends");
+        go.send(()).expect("go");
+        reloader.join().expect("reloader").expect("reloaded");
+        assert!(
+            holds(&revocations),
+            "the read taken before the act put it back"
+        );
+        assert_eq!(store.loads.load(Ordering::SeqCst), 2, "read again");
+    }
+
+    fn uid(n: u8) -> String {
+        hex::encode([n; 16])
+    }
+
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    #[test]
+    fn a_revocation_made_during_a_reload_holds() {
+        an_own_act_outlives_a_reload(
+            |r| r.record(facts("a1", FAR), &[1; 16], None).expect("record"),
+            |r| {
+                r.revoke_certificate("client", "a1").expect("revoke");
+            },
+            |r| r.is_certificate_revoked(&id("a1")),
+        );
+    }
+
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    #[test]
+    fn a_lift_made_during_a_reload_holds() {
+        an_own_act_outlives_a_reload(
+            |r| {
+                r.record(facts("a1", FAR), &[1; 16], None).expect("record");
+                r.revoke_certificate("client", "a1").expect("revoke");
+            },
+            |r| {
+                let entry = r.list().pop().expect("an entry");
+                assert!(r.lift(&entry.id).expect("lift"));
+            },
+            |r| !r.is_certificate_revoked(&id("a1")),
+        );
+    }
+
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    #[test]
+    fn a_binding_made_during_a_reload_holds() {
+        an_own_act_outlives_a_reload(
+            |r| {
+                r.record(on_host("a1", "h1"), &[1; 16], None)
+                    .expect("record")
+            },
+            // The end of the certificate the Host already holds: the report binds, and moves its
+            // valid until nowhere.
+            |r| {
+                r.check_report("h1", &SubjectValues::default(), NOW + 1_000_000, &[1; 16])
+                    .expect("binds");
+            },
+            |r| r.speaks_for("h1") == SpeaksFor::Agents([uid(1)].into()),
+        );
+    }
+
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    #[test]
+    fn a_valid_until_moved_during_a_reload_holds() {
+        let until = |r: &Revocations| {
+            r.hosts()
+                .into_iter()
+                .find(|(n, ..)| n == "h1")
+                .and_then(|(_, host, _)| host.valid_until_ms)
+        };
+        an_own_act_outlives_a_reload(
+            |r| {
+                r.check_report("h1", &SubjectValues::default(), NOW + 1_000, &[1; 16])
+                    .expect("binds");
+            },
+            |r| {
+                r.check_report("h1", &SubjectValues::default(), FAR, &[1; 16])
+                    .expect("extends");
+            },
+            move |r| until(r) == Some(FAR),
+        );
+    }
+
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    #[test]
+    fn a_register_write_made_during_a_reload_holds() {
+        an_own_act_outlives_a_reload(
+            |_| {},
+            |r| {
+                r.record(on_host("a1", "h1"), &[1; 16], None)
+                    .expect("record")
+            },
+            |r| r.issued_entry(&id("a1")).is_some() && r.hosts().iter().any(|(n, ..)| n == "h1"),
+        );
+    }
+
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    #[test]
+    fn a_release_made_during_a_reload_holds() {
+        an_own_act_outlives_a_reload(
+            |r| {
+                r.check_report("h1", &SubjectValues::default(), FAR, &[1; 16])
+                    .expect("binds");
+            },
+            |r| r.release(&[1; 16]).expect("release"),
+            |r| r.speaks_for("h1") == SpeaksFor::Agents(BTreeSet::new()),
+        );
+    }
+
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    #[test]
+    fn a_rekey_made_during_a_reload_holds() {
+        an_own_act_outlives_a_reload(
+            |r| {
+                r.check_report("h1", &SubjectValues::default(), FAR, &[1; 16])
+                    .expect("binds");
+            },
+            |r| r.rebind(&[1; 16], &[2; 16]).expect("rebind"),
+            |r| r.speaks_for("h1") == SpeaksFor::Agents([uid(2)].into()),
+        );
+    }
+
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    #[test]
+    fn a_gateway_mark_made_during_a_reload_holds() {
+        an_own_act_outlives_a_reload(
+            |r| {
+                r.check_report("h1", &SubjectValues::default(), FAR, &[1; 16])
+                    .expect("binds");
+            },
+            |r| assert!(r.set_gateway("h1", true).expect("mark")),
+            |r| r.is_gateway("h1"),
+        );
     }
 }
