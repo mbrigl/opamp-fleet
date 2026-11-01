@@ -710,7 +710,6 @@ mod tests {
             &records,
             Some(&new),
             &crate::config::BlobsConfig::default(),
-            None,
         )
         .expect("every entry finds its blob in the new data_dir");
         assert!(!state_packages.is_empty());

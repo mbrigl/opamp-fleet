@@ -95,6 +95,18 @@ impl Role {
 
     /// Runs `statements` as the administrator, in the role's schema.
     fn sql(&self, statements: &str) {
+        self.query(statements, None);
+    }
+
+    /// How many rows `table` of the role's schema holds.
+    fn count(&self, table: &str) -> i64 {
+        self.query("", Some(format!("SELECT count(*) FROM {table}")))
+            .expect("a count")
+    }
+
+    /// Runs `statements` as the administrator, in the role's schema, and then `count`, a query of
+    /// one number, answering it.
+    fn query(&self, statements: &str, count: Option<String>) -> Option<i64> {
         let mut pg = tokio_postgres::Config::new();
         pg.host(&self.host)
             .port(self.port)
@@ -135,10 +147,20 @@ impl Role {
                         }
                     };
                     client.batch_execute(&statements).await.expect("sql");
+                    match count {
+                        Some(query) => Some(
+                            client
+                                .query_one(query.as_str(), &[])
+                                .await
+                                .expect("count")
+                                .get::<_, i64>(0),
+                        ),
+                        None => None,
+                    }
                 })
         })
         .join()
-        .expect("the statements' thread");
+        .expect("the statements' thread")
     }
 
     /// `[database.postgres]` for the role, its password in a file under `dir`.
@@ -426,4 +448,81 @@ fn a_server_on_postgresql_and_s3_serves_from_a_directory_it_cannot_write() {
         read,
         "nothing is written beside what it reads"
     );
+}
+
+/// A bucket that fails at startup, unreachable or holding a key outside the store's layout, stops
+/// the Server before it takes its lease: no lease row and no audit chain is left for another
+/// instance to count as live or to close as lapsed
+/// (ADR-draft-the-servers-state-and-its-stores clause 16,
+/// ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+/// clause 2).
+// Verifies: ADR-draft-the-servers-state-and-its-stores, ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+#[test]
+fn a_bucket_that_fails_startup_leaves_no_lease_behind() {
+    opamp::tls::install_ring_provider();
+    let Some(role) = Role::named() else { return };
+    let Some(bucket) = Bucket::named() else {
+        return;
+    };
+    bucket.plant("otelcol.bin");
+    let unreachable = format!(
+        "[blobs]\nstore = \"s3\"\n[blobs.s3]\nendpoint = \"http://127.0.0.1:{}\"\n\
+         bucket = \"fleet\"\nregion = \"us-east-1\"\n",
+        ports::spare_port()
+    );
+    for (case, blobs, named) in [
+        (
+            "a stray key",
+            bucket.section(),
+            format!("{}otelcol.bin", bucket.prefix),
+        ),
+        ("an unreachable bucket", unreachable, "fleet".to_string()),
+    ] {
+        let files = tempfile::tempdir().expect("tempdir");
+        let cert = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_string()])
+            .expect("a self-signed certificate");
+        std::fs::write(files.path().join("cert.pem"), cert.cert.pem()).expect("write cert");
+        std::fs::write(
+            files.path().join("key.pem"),
+            cert.signing_key.serialize_pem(),
+        )
+        .expect("write key");
+        let config = files.path().join("server.toml");
+        std::fs::write(
+            &config,
+            format!(
+                "listen = \"127.0.0.1:{agent}\"\n\
+                 [tls]\ncert_file = {cert:?}\nkey_file = {key:?}\nclient_ca_file = {cert:?}\n\
+                 [rest]\nlisten = \"127.0.0.1:{operator}\"\n\
+                 [database]\nstore = \"postgres\"\n{database}{blobs}",
+                agent = ports::spare_port(),
+                operator = ports::spare_port(),
+                cert = files.path().join("cert.pem").display().to_string(),
+                key = files.path().join("key.pem").display().to_string(),
+                database = role.section(files.path()),
+            ),
+        )
+        .expect("write server.toml");
+        let output = Command::new(env!("CARGO_BIN_EXE_server"))
+            .arg("--config")
+            .arg(&config)
+            .current_dir(files.path())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .output()
+            .expect("run the server");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success(),
+            "{case}: the start fails:\n{stderr}"
+        );
+        assert!(stderr.contains(&named), "{case}: names {named}:\n{stderr}");
+        assert_eq!(role.count("leases"), 0, "{case}: no lease is left");
+        assert_eq!(
+            role.count("audit_chains"),
+            0,
+            "{case}: no audit chain is left"
+        );
+    }
 }

@@ -294,7 +294,6 @@ impl Instance {
             &records,
             Some(dir.path()),
             &toml::from_str::<fleet_server::config::BlobsConfig>("").expect("blobs"),
-            None,
         )
         .expect("packages");
         let state = Arc::new(

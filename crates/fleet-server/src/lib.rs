@@ -264,23 +264,20 @@ impl packages::PackageStore {
         data_dir: std::path::PathBuf,
         blobs: &config::BlobsConfig,
     ) -> Result<Self, String> {
-        Self::open_on(
-            &Records::Files(data_dir.clone()),
-            Some(&data_dir),
-            blobs,
-            None,
-        )
-        .map(|(store, _)| store)
+        Self::open_on(&Records::Files(data_dir.clone()), Some(&data_dir), blobs)
+            .map(|(store, _)| store)
     }
 
     /// [`open_with`](Self::open_with), the Package records in `records` (ADR-0029) and the bytes
     /// in the store `[blobs]` chooses, the filesystem's under `data_dir`, which is `None` only
     /// with PostgreSQL and S3 (ADR-draft-the-servers-state-and-its-stores clause 1).
     ///
-    /// On the bucket, an upload is staged under `lease`, the lease the instance holds, or `fs`
-    /// without one, and the staging objects of every lease that is not live are deleted (clause
-    /// 16); the cleanup comes back for the instance to run again whenever it takes over a lapsed
-    /// lease.
+    /// On the bucket the staging objects of every lease that is not live are deleted (clause 16),
+    /// and the cleanup comes back for the instance to run again whenever it takes over a lapsed
+    /// lease. With the filesystem record store an upload is staged under `fs`. On PostgreSQL the
+    /// store is opened before the instance takes its lease, so that a bucket that fails leaves no
+    /// lease behind, and it takes no upload until
+    /// [`StagingCleanup::stage_under`](s3::StagingCleanup::stage_under) names that lease.
     ///
     /// # Errors
     /// As [`open_with`](Self::open_with), and when the filesystem blob store has no `data_dir`.
@@ -288,7 +285,6 @@ impl packages::PackageStore {
         records: &Records,
         data_dir: Option<&std::path::Path>,
         blobs: &config::BlobsConfig,
-        lease: Option<instance::Held>,
     ) -> Result<(Self, Option<s3::StagingCleanup>), String> {
         let backend = records.packages()?;
         let Some(bucket) = blobs.s3() else {
@@ -297,10 +293,10 @@ impl packages::PackageStore {
             return Self::with_backend(backend, Box::new(FsBlobStore::open(data_dir)?))
                 .map(|store| (store, None));
         };
-        let store = s3::S3BlobStore::open(bucket)?.staged_by(match lease {
-            Some(held) => s3::Uploader::Lease(held),
-            None => s3::Uploader::Alone,
-        });
+        let store = match records {
+            Records::Files(_) => s3::S3BlobStore::open(bucket)?,
+            Records::Postgres(_) => s3::S3BlobStore::open(bucket)?.awaiting_a_lease(),
+        };
         let live: s3::LiveLeases = match records {
             // One Server and no lease: every staging object is a leftover.
             Records::Files(_) => Arc::new(|| Ok(std::collections::HashSet::new())),

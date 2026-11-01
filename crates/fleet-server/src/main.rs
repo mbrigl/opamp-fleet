@@ -602,6 +602,48 @@ async fn main() {
             std::process::exit(1);
         }
     };
+    // The package store before the lease, so that a bucket that fails startup leaves no lease
+    // and no audit chain behind. Its startup cleanup needs no lease of this instance: it lists the
+    // staging keys before it asks which leases are live
+    // (ADR-draft-the-servers-state-and-its-stores clause 16).
+    let packages = config
+        .packages
+        .verification_key()
+        .and_then(|key| {
+            if key.is_some() {
+                // ADR-0027.
+                info!("checking package signatures against [packages] verification_key");
+            }
+            fleet_server::packages::PackageStore::open_on(
+                &records,
+                config.data_dir(),
+                &config.blobs,
+            )
+            .map(|(store, staging)| {
+                (
+                    store.with_verifier(key.map(|key| {
+                        Box::new(fleet_server::config::Ed25519Verifier::new(key))
+                            as Box<dyn fleet_server::packages::SignatureVerifier>
+                    })),
+                    staging,
+                )
+            })
+        })
+        .and_then(|(store, staging)| {
+            if !store.is_empty() {
+                // ADR-0027.
+                info!("offering software packages to the fleet");
+            }
+            fleet_server::fleet::PackageOffering::on(&records, store)
+                .map(|offering| (offering, staging))
+        });
+    let (packages, staging) = match packages {
+        Ok((offering, staging)) => (Some(offering), staging),
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
     // With PostgreSQL, a lease before anything is decided and before either listener opens
     // (clauses 1 to 3 of
     // ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it):
@@ -645,54 +687,13 @@ async fn main() {
         }
         fleet_server::Records::Files(_) => None,
     };
-    // The package store after the lease: on S3 an upload is staged under it, and the startup
-    // cleanup keeps the staging objects of every live lease, this one's among them.
-    let packages = config
-        .packages
-        .verification_key()
-        .and_then(|key| {
-            if key.is_some() {
-                // ADR-0027.
-                info!("checking package signatures against [packages] verification_key");
-            }
-            fleet_server::packages::PackageStore::open_on(
-                &records,
-                config.data_dir(),
-                &config.blobs,
-                lease.as_ref().map(fleet_server::instance::Lease::held),
-            )
-            .map(|(store, staging)| {
-                (
-                    store.with_verifier(key.map(|key| {
-                        Box::new(fleet_server::config::Ed25519Verifier::new(key))
-                            as Box<dyn fleet_server::packages::SignatureVerifier>
-                    })),
-                    staging,
-                )
-            })
-        })
-        .and_then(|(store, staging)| {
-            if !store.is_empty() {
-                // ADR-0027.
-                info!("offering software packages to the fleet");
-            }
-            fleet_server::fleet::PackageOffering::on(&records, store)
-                .map(|offering| (offering, staging))
-        });
-    let packages = match packages {
-        Ok((offering, staging)) => {
-            // Whenever this instance takes over a lapsed lease, the uploads that lease left in
-            // the bucket go (ADR-draft-the-servers-state-and-its-stores clause 16).
-            if let (Some(staging), Some(lease)) = (staging, &lease) {
-                clean_staging_on_takeover(staging, lease.takeovers());
-            }
-            Some(offering)
-        }
-        Err(e) => {
-            eprintln!("{e}");
-            std::process::exit(1);
-        }
-    };
+    // On the bucket, this instance's uploads are staged under its lease, and whenever it takes over
+    // a lapsed lease, the uploads that lease left go
+    // (ADR-draft-the-servers-state-and-its-stores clause 16).
+    if let (Some(staging), Some(lease)) = (staging, &lease) {
+        staging.stage_under(lease.held());
+        clean_staging_on_takeover(staging, lease.takeovers());
+    }
     // The audit record (ADR-0023), opened before anything is decided: one chain in files, or on
     // PostgreSQL the chain of each lease
     // (ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance).
