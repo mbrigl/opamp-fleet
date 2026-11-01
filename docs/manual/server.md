@@ -1289,19 +1289,19 @@ the archive /var/lib/opamp-fleet/fleet-data/audit holds, and ends on entry 2047,
 2 chains, 1 open: the record holds
 ```
 
-`audit-verify --config` reads the database with the Server's own credentials and changes nothing.
-It walks every chain in `seq` order, lists each open one with its last entry — the chain of a
-lease that is held, or of one that lapsed and no instance has taken over yet — and names the chain
-and the first entry that fails, exiting non-zero: an entry altered or removed, entries missing
-from the end of a closed chain, or an entry after its close. Without `--archive` it reports the
-predecessor as not checked; an archive the database records that no chain names fails, and so
-does a chain that names a predecessor while the database records no archive. Removing a whole
-chain together with its record is not detected by the database itself. Nor is a cut made with
-pruning: whoever can write to the database can append one `audit.pruned` with a correct hash to an
-open chain and delete the head of any chain up to the entry it names, young entries included, and
-the record still holds, as it takes the links of every `audit.pruned` it finds. A record that holds
-shows that what is left is linked, not that nothing younger than `retain_days` was removed; the
-signed chain heads, once they land, detect both.
+`audit-verify --config` reads the database with the Server's own credentials and changes nothing. It
+walks every chain in `seq` order, lists each open one with its last entry — the chain of a lease
+that is held, or of one that lapsed and no instance has taken over yet — and names the chain and the
+first entry that fails, exiting non-zero: an entry altered or removed, entries missing from the end
+of a closed chain, or an entry after its close. Without `--archive` it reports the predecessor as
+not checked; an archive the database records that no chain names fails, and so does a chain that
+names a predecessor while the database records no archive. Removing a whole chain together with its
+record is not detected by the database itself. Nor is a cut made with pruning: whoever can write to
+the database can append one `audit.pruned` with a correct hash to an open chain and delete the head
+of any chain up to the entry it names, young entries included, and the record still holds. Only an
+`audit.pruned` in a chain that itself holds links another. A record that holds shows that what is
+left is linked, not that nothing younger than `retain_days` was removed; the signed chain heads,
+once they land, detect both.
 
 The record goes back `[audit] retain_days` (365 by default, at most 36 500). At its start and once a
 day after, each instance removes from its own chain the entries the database stored more than that
