@@ -304,6 +304,16 @@ jobs:
   postgres-store:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    # A bucket beside the database, for the test of a Server on PostgreSQL and S3, which keeps
+    # nothing on its disk (ADR-draft-the-servers-state-and-its-stores clause 1).
+    services:
+      rustfs:
+        image: rustfs/rustfs:1.0.3@sha256:9ca9559533b537d10482fe923288b676ad08f92a7069d9a17327fbae3cab688b
+        env:
+          RUSTFS_ACCESS_KEY: fleet-ci
+          RUSTFS_SECRET_KEY: fleet-ci-secret
+        ports:
+          - 9000:9000
     steps:
       - uses: actions/checkout@v7
         with:
@@ -344,6 +354,20 @@ jobs:
           exit 1
       - name: Write the password file
         run: (umask 077 && printf '%s' fleet-ci > "$RUNNER_TEMP/postgres-password")
+      - name: Create the bucket
+        run: |
+          empty="$(printf '' | sha256sum | cut -d' ' -f1)"
+          for _ in $(seq 1 30); do
+            if curl -fsS --aws-sigv4 aws:amz:us-east-1:s3 --user fleet-ci:fleet-ci-secret \
+                -H "x-amz-content-sha256: $empty" -X PUT http://127.0.0.1:9000/fleet; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "rustfs did not create the bucket" >&2
+          exit 1
+      - name: Write the secret key file
+        run: (umask 077 && printf '%s' fleet-ci-secret > "$RUNNER_TEMP/s3-secret")
       - name: Test against PostgreSQL
         # Over TLS against the CA above; each test works in a schema of its own
         # (ADR-0029 clause 25). Skipped is not passed: the database is named, so every PostgreSQL
@@ -355,4 +379,8 @@ jobs:
           FLEET_TEST_POSTGRES_USER: fleet
           FLEET_TEST_POSTGRES_PASSWORD_FILE: ${{ runner.temp }}/postgres-password
           FLEET_TEST_POSTGRES_CA_FILE: ${{ runner.temp }}/postgres-tls/ca.pem
+          FLEET_TEST_S3_ENDPOINT: http://127.0.0.1:9000
+          FLEET_TEST_S3_BUCKET: fleet
+          FLEET_TEST_S3_ACCESS_KEY_ID: fleet-ci
+          FLEET_TEST_S3_SECRET_ACCESS_KEY_FILE: ${{ runner.temp }}/s3-secret
         run: bash scripts/check-store.sh postgres

@@ -65,6 +65,12 @@ pub fn exclusive(config: &config::ServerConfig) -> postgres::Exclusive {
     }
 }
 
+/// An error of the data directory, naming the key that chose it: a Server given none falls back
+/// to `fleet-data` in its working directory, which the operator may not have meant.
+fn named(error: String) -> String {
+    format!("data_dir: {error}")
+}
+
 /// Where the Server keeps its records (ADR-0029 clause 1): files under `data_dir`, or one
 /// PostgreSQL database. The composition root asks it for each port's adapter, so the rest of the
 /// Server names the ports alone.
@@ -83,13 +89,18 @@ impl Records {
     /// Returns an error naming the path or the key when the data directory or the database cannot
     /// be opened.
     pub fn open(config: &config::ServerConfig) -> Result<Self, String> {
-        match config.database.postgres() {
-            None => {
-                fs::open_data_dir(&config.data_dir, config.blobs.s3().is_none())?;
-                Ok(Records::Files(config.data_dir.clone()))
+        match (config.database.postgres(), config.data_dir()) {
+            (None, Some(data_dir)) => {
+                fs::open_data_dir(data_dir, config.blobs.s3().is_none()).map_err(named)?;
+                Ok(Records::Files(data_dir.to_path_buf()))
             }
-            Some(database) => {
-                fs::open_data_dir_beside_database(&config.data_dir, config.blobs.s3().is_none())?;
+            (None, None) => Err("the filesystem record store needs data_dir".to_string()),
+            (Some(database), data_dir) => {
+                // With S3 too the Server keeps nothing on its disk and has no data directory
+                // (ADR-draft-the-servers-state-and-its-stores clause 1).
+                if let Some(data_dir) = data_dir {
+                    fs::open_data_dir_beside_database(data_dir).map_err(named)?;
+                }
                 Ok(Records::Postgres(postgres::Database::open(
                     database,
                     exclusive(config),
@@ -253,36 +264,63 @@ impl packages::PackageStore {
         data_dir: std::path::PathBuf,
         blobs: &config::BlobsConfig,
     ) -> Result<Self, String> {
-        Self::open_on(&Records::Files(data_dir.clone()), &data_dir, blobs)
+        Self::open_on(&Records::Files(data_dir.clone()), Some(&data_dir), blobs)
+            .map(|(store, _)| store)
     }
 
     /// [`open_with`](Self::open_with), the Package records in `records` (ADR-0029) and the bytes
-    /// in the store `[blobs]` chooses, the filesystem's under `data_dir`.
+    /// in the store `[blobs]` chooses, the filesystem's under `data_dir`, which is `None` only
+    /// with PostgreSQL and S3 (ADR-draft-the-servers-state-and-its-stores clause 1).
+    ///
+    /// On the bucket the staging objects of every lease that is not live are deleted (clause 16),
+    /// and the cleanup comes back for the instance to run again whenever it takes over a lapsed
+    /// lease. With the filesystem record store an upload is staged under `fs`. On PostgreSQL the
+    /// store is opened before the instance takes its lease, so that a bucket that fails leaves no
+    /// lease behind, and it takes no upload until
+    /// [`StagingCleanup::stage_under`](s3::StagingCleanup::stage_under) names that lease.
     ///
     /// # Errors
-    /// As [`open_with`](Self::open_with).
+    /// As [`open_with`](Self::open_with), and when the filesystem blob store has no `data_dir`.
     pub fn open_on(
         records: &Records,
-        data_dir: &std::path::Path,
+        data_dir: Option<&std::path::Path>,
         blobs: &config::BlobsConfig,
-    ) -> Result<Self, String> {
+    ) -> Result<(Self, Option<s3::StagingCleanup>), String> {
         let backend = records.packages()?;
         let Some(bucket) = blobs.s3() else {
-            return Self::with_backend(backend, Box::new(FsBlobStore::open(data_dir)?));
+            let data_dir =
+                data_dir.ok_or_else(|| "the filesystem blob store needs data_dir".to_string())?;
+            return Self::with_backend(backend, Box::new(FsBlobStore::open(data_dir)?))
+                .map(|store| (store, None));
         };
-        let store = s3::S3BlobStore::open(bucket)?;
-        let referenced: Vec<String> = backend
-            .load()?
-            .iter()
-            .flat_map(|package| package.entries.values())
-            .map(|entry| hex::encode(&entry.content_hash))
-            .collect();
-        s3::copy_from_filesystem(
-            &data_dir.join(fs::BLOBS),
-            referenced.iter().map(String::as_str),
-            &store,
-        )?;
-        Self::with_backend(backend, Box::new(store))
+        let store = match records {
+            Records::Files(_) => s3::S3BlobStore::open(bucket)?,
+            Records::Postgres(_) => s3::S3BlobStore::open(bucket)?.awaiting_a_lease(),
+        };
+        let live: s3::LiveLeases = match records {
+            // One Server and no lease: every staging object is a leftover.
+            Records::Files(_) => Arc::new(|| Ok(std::collections::HashSet::new())),
+            Records::Postgres(database) => {
+                let database = database.clone();
+                Arc::new(move || database.live_leases())
+            }
+        };
+        let cleanup = s3::StagingCleanup::new(store.clone(), live);
+        cleanup.run()?;
+        if let Some(data_dir) = data_dir {
+            let referenced: Vec<String> = backend
+                .load()?
+                .iter()
+                .flat_map(|package| package.entries.values())
+                .map(|entry| hex::encode(&entry.content_hash))
+                .collect();
+            s3::copy_from_filesystem(
+                &data_dir.join(fs::BLOBS),
+                referenced.iter().map(String::as_str),
+                &store,
+            )?;
+        }
+        Self::with_backend(backend, Box::new(store)).map(|store| (store, Some(cleanup)))
     }
 }
 

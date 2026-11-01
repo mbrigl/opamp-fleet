@@ -9,8 +9,9 @@
 #
 # The store is named through the environment the tests read: FLEET_TEST_S3_ENDPOINT,
 # FLEET_TEST_S3_BUCKET, FLEET_TEST_S3_ACCESS_KEY_ID, and FLEET_TEST_S3_SECRET_ACCESS_KEY_FILE, or
-# FLEET_TEST_POSTGRES_HOST, _PORT, _DBNAME, _USER, _PASSWORD_FILE, and _CA_FILE. Skipped is not
-# passed: once a store is named, a test that reports it skipped fails the run.
+# FLEET_TEST_POSTGRES_HOST, _PORT, _DBNAME, _USER, _PASSWORD_FILE, and _CA_FILE; 'postgres' needs a
+# bucket named too, for a Server on both stores. Skipped is not passed: once a store is named, a test
+# that reports it skipped fails the run.
 #
 # Usage:
 #     scripts/check-store.sh s3|postgres
@@ -38,10 +39,16 @@ command -v cargo >/dev/null || { echo "cargo is required (rust-toolchain.toml na
 log="$(mktemp)"
 trap 'rm -f "$log"' EXIT
 cargo test -p fleet-server --lib --locked "$filter" -- --nocapture 2>&1 | tee "$log"
-# Several Server instances on one database, each through its real listeners: an integration test
-# of its own, against the same database.
+# Several Server instances on one database, each through its real listeners, and a Server on
+# PostgreSQL and S3 that keeps nothing on its disk: integration tests of their own, against the same
+# database, the latter with the bucket the FLEET_TEST_S3_* variables name too.
 if [[ "$1" == "postgres" ]]; then
   cargo test -p fleet-server --locked --test instances -- --nocapture 2>&1 | tee -a "$log"
+  cargo test -p fleet-server --locked --test stateless_instance -- --nocapture 2>&1 | tee -a "$log"
+  if grep -q "skipped: no S3 store" "$log"; then
+    echo "the test of a Server on PostgreSQL and S3 was skipped: name a bucket too" >&2
+    exit 1
+  fi
 fi
 if grep -q "$skipped" "$log"; then
   echo "a $1 test was skipped although a store is named" >&2

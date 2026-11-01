@@ -8,6 +8,7 @@
 //! one at a time, under a lock for the transaction, so two instances that start together each see
 //! the other's.
 
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use super::{client, sql, Database, Exclusive, EXCLUSIVE_LOCK};
@@ -275,6 +276,27 @@ impl Database {
         })
     }
 
+    /// The instance ids of the leases that are live: what the cleanup of the staging objects in
+    /// the bucket keeps (ADR-draft-the-servers-state-and-its-stores clause 16).
+    ///
+    /// # Errors
+    /// Returns an error naming the database when it cannot be reached.
+    pub fn live_leases(&self) -> Result<HashSet<String>, String> {
+        self.run(|pool| async move {
+            let client = client(&pool).await?;
+            Ok(client
+                .query(
+                    "SELECT instance_id::text FROM leases WHERE expires_at > now()",
+                    &[],
+                )
+                .await
+                .map_err(sql)?
+                .iter()
+                .map(|row| row.get(0))
+                .collect())
+        })
+    }
+
     /// Releases the lease of `instance_id`, at an orderly shutdown.
     ///
     /// # Errors
@@ -356,6 +378,31 @@ mod tests {
                 first.instance_id
             ))
             .is_empty());
+    }
+
+    /// The leases that are live are those not lapsed and not released: what the cleanup of the
+    /// staging objects keeps.
+    /// Verifies: ADR-draft-the-servers-state-and-its-stores
+    #[test]
+    fn the_live_leases_are_those_neither_lapsed_nor_released() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = shared(&test);
+        let lapsed = database.take_lease("host-a", LAPSE).expect("a");
+        let live = database.take_lease("host-b", LAPSE).expect("b");
+        let released = database.take_lease("host-c", LAPSE).expect("c");
+        test.sql(&format!(
+            "UPDATE leases SET expires_at = now() WHERE instance_id = '{}'",
+            lapsed.instance_id
+        ));
+        database
+            .release_lease(&released.instance_id)
+            .expect("release");
+        assert_eq!(
+            database.live_leases().expect("live"),
+            HashSet::from([live.instance_id])
+        );
     }
 
     /// An instance that must be alone fails startup while another live lease exists, naming the
