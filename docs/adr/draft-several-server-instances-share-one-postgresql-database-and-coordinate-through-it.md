@@ -157,13 +157,13 @@ every change that concerns a live session by one `NOTIFY`.
    instances that take one Agent at once therefore never both drop it. The newest connection is the
    one whose take commits last: where the take for an Agent's older connection commits after the
    take for its newer one, as a slower write may, the older connection's instance holds the row and
-   the other stops carrying the Agent, which then takes it back at the Agent's next report on it. Duplicate detection and
-   the rekeying of a newcomer stay within one instance. An Agent whose holder changes more than ten
-   times in a minute is logged as a likely duplicate. An Agent's labels stay in its record
-   ([ADR-0024](0024-the-fleet-record-of-agents-and-hosts.md) clause 21), and there is no other copy.
-   A label change, a rollout's assignments and a restart request made through any instance are
-   written to their own columns of the record in the database and announced (clause 9). The
-   instance that carries the Agent writes only what a report decides
+   the other stops carrying the Agent and takes it back at the Agent's next report on it. Duplicate
+   detection and the rekeying of a newcomer stay within one instance. An Agent whose holder changes
+   more than ten times in a minute is logged as a likely duplicate. An Agent's labels stay in its
+   record ([ADR-0024](0024-the-fleet-record-of-agents-and-hosts.md) clause 21), and there is no
+   other copy. A label change, a rollout's assignments and a restart request made through any
+   instance are written to their own columns of the record in the database and announced
+   (clause 9). The instance that carries the Agent writes only what a report decides
    ([ADR-draft-the-fleet-record-of-agents-and-hosts](draft-the-fleet-record-of-agents-and-hosts.md)
    clause 2), so its next write keeps them whether or not the notification has reached it, and it
    takes them into the record it holds when the notification arrives. Where an effective description
