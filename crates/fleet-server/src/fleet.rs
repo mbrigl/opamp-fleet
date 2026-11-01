@@ -643,14 +643,9 @@ impl AppState {
         // absent assignment means what it says rather than "not migrated yet".
         let mut fleet = HashMap::new();
         let mut written = HashMap::new();
-        let mut presence = PresenceWritten::default();
         for (uid, persisted) in agent_store.load()? {
             written.insert(uid, persisted.durable_digest());
-            let record = AgentRecord::from_persisted(persisted);
-            // A restored Agent is not carried here, and nothing of its presence is written for it
-            // until it reports here.
-            presence.agents.insert(uid, record.presence());
-            fleet.insert(uid, record);
+            fleet.insert(uid, AgentRecord::from_persisted(persisted));
         }
         if !fleet.is_empty() {
             info!(agents = fleet.len(), "restored the fleet");
@@ -689,7 +684,7 @@ impl AppState {
             stale_after: DEFAULT_STALE_AFTER,
             max_agents: DEFAULT_MAX_AGENTS,
             presence_interval: Duration::ZERO,
-            presence_written: Mutex::new(presence),
+            presence_written: Mutex::new(PresenceWritten::default()),
             forgotten: Mutex::new(HashMap::new()),
         };
         state.place_all();
@@ -2080,10 +2075,13 @@ impl AppState {
         self.written.lock().expect("written lock").remove(uid);
     }
 
-    /// Writes the presence of the Agents this instance holds that moved since the last batch, in
+    /// Writes the presence of the Agents this instance carries that moved since the last batch, in
     /// one batch naming `holder`, the instance id of the lease it serves under
     /// (ADR-draft-the-fleet-record-of-agents-and-hosts clause 4): a heartbeat reaches the store at
-    /// most once per batch and Agent. Under a new holder every presence is written again. Read
+    /// most once per batch and Agent. An Agent it holds and never carried under `holder`, one
+    /// restored at startup among them, is written only once it is connected here, so the first
+    /// batch writes the Agents carried and not the fleet; under a new holder the connected ones
+    /// are written again. Read
     /// under the fleet lock and written after it is released, so no report waits for the batch. A
     /// batch that fails is written again with the next one. Answers how many it wrote.
     ///
@@ -2100,7 +2098,10 @@ impl AppState {
             let mut batch: Vec<_> = fleet
                 .iter()
                 .map(|(uid, record)| (*uid, record.presence()))
-                .filter(|(uid, presence)| written.agents.get(uid) != Some(presence))
+                .filter(|(uid, presence)| match written.agents.get(uid) {
+                    Some(written) => written != presence,
+                    None => presence.connected,
+                })
                 .collect();
             batch.sort_by_key(|(uid, _)| uid.0);
             batch
@@ -6338,9 +6339,41 @@ mod tests {
         );
         assert_eq!(
             state.write_presence("b"),
-            Ok(1000),
-            "a new holder writes them all"
+            Ok(999),
+            "a new holder writes every connected one"
         );
+    }
+
+    /// The first presence batch of an instance writes the Agents it carries, not the fleet it
+    /// restored: a restored Agent is written once it is connected here.
+    /// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts
+    #[test]
+    fn the_first_presence_batch_writes_only_the_agents_carried() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let restored: Vec<InstanceUid> = (0..100).map(|_| InstanceUid::default()).collect();
+        {
+            let store = crate::fs::FsAgentStore::open(dir.path()).expect("agents");
+            for uid in &restored {
+                store
+                    .put(uid, &crate::agent_store::tests::record())
+                    .expect("put");
+            }
+        }
+        let batches = Arc::new(Mutex::new(Vec::new()));
+        let state = AppState::with_stores(
+            Box::new(Counted {
+                inner: crate::fs::FsAgentStore::open(dir.path()).expect("agents"),
+                puts: Arc::new(AtomicU64::new(0)),
+                batches: batches.clone(),
+            }),
+            Box::new(crate::fs::FsConfigBackend::open(dir.path()).expect("configs")),
+            Box::new(crate::clock::SystemClock),
+        )
+        .expect("state");
+        assert_eq!(state.write_presence("a"), Ok(0), "none is carried");
+        state.process(report(&restored[0], 8), Transport::WebSocket, Some(1));
+        assert_eq!(state.write_presence("a"), Ok(1), "the one connected here");
+        assert_eq!(batches.lock().expect("batches")[0][0].0, restored[0]);
     }
 
     /// A store passing every call to `inner`, whose next reads of one record can be made to fail,
