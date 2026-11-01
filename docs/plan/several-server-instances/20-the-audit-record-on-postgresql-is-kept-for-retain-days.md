@@ -16,8 +16,8 @@ left keeps its record. `retain_days` with the filesystem store, or `keep_files` 
 - [ ] Given entries older than `retain_days`, when the prune runs, then they are removed,
   `audit.pruned` records the last removed hash, and `audit-verify` still passes
 - [ ] Given two instances and old entries in a chain closed at a shutdown and in one closed for a
-  lapsed lease, when both prune, then one at a time removes them, its `audit.pruned` names both
-  chains, and a closed chain with no entries left keeps its record
+  lapsed lease, when both prune, then one at a time removes them, its `audit.pruned` entries name
+  both chains, and a closed chain with no entries left keeps its record
 - [ ] Given `retain_days` with `store = "fs"`, or `keep_files` or `max_file_bytes` with
   `store = "postgres"`, when the Server starts, then it fails naming the key
 - [ ] Given a pruned chain whose first retained entry's `prev` is not the hash its `audit.pruned`
