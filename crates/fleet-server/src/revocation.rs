@@ -22,6 +22,11 @@ pub const MAX_REVOCATIONS: usize = 100_000;
 /// The certificates the register holds at most (ADR-0029 clause 9).
 pub const MAX_ISSUED: usize = 100_000;
 
+/// The reads of a reload swapped in no more, as an act of this instance's own committed while
+/// each ran, before the reload reads the store under the state lock
+/// ([`Revocations::reload_ledger`]).
+pub const RELOAD_SWAPS_REFUSED: usize = 3;
+
 /// The certificates the register holds at most in one chain — below one root, the first
 /// certificate a chain renews from: enough for a Gateway's downstream Agents, few enough that one
 /// member cannot fill the register (ADR-0029 clause 9).
@@ -1602,36 +1607,52 @@ impl Revocations {
     /// The store is read outside the lock, so no revocation check, `speaks_for` or report waits for
     /// the read, only for the swap. A read that began before an act of this instance's own
     /// committed may not hold it, so it is swapped in only when no such act was counted since it
-    /// began, and read again otherwise. A store that writes the Hosts whole writes them once the
-    /// lock is released; it is the only writer of its ledger, so nothing reloads it.
+    /// began, and read again otherwise. After [`RELOAD_SWAPS_REFUSED`] reads refused so, the store
+    /// is read once under the lock, so a stream of own acts cannot keep this instance from taking
+    /// up the other instances' acts. A store that writes the Hosts whole writes them once the lock
+    /// is released; it is the only writer of its ledger, so nothing reloads it.
     ///
     /// # Errors
     /// Returns an error when the store cannot be read; what is held is then kept.
     pub fn reload_ledger(&self) -> Result<(), String> {
-        loop {
+        for _ in 0..RELOAD_SWAPS_REFUSED {
             let began = self.state.lock().expect("revocation lock").acts;
-            let mut fresh = State::loaded(self.store.load()?);
-            // Built here, so the first check after the swap does not build it under the lock.
-            fresh.revoked();
-            let mut state = self.state.lock().expect("revocation lock");
-            if state.acts != began {
-                continue;
+            let fresh = self.read_ledger()?;
+            let state = self.state.lock().expect("revocation lock");
+            if state.acts == began {
+                self.swap(state, fresh);
+                return Ok(());
             }
-            fresh.hosts_version = state.hosts_version;
-            fresh.acts = state.acts;
-            #[cfg(test)]
-            {
-                fresh.rebuilds = state.rebuilds;
-            }
-            let changed = state.revocations != fresh.revocations;
-            let held = std::mem::replace(&mut *state, fresh);
-            drop(state);
-            // What was held is dropped once the lock is released.
-            drop(held);
-            if changed {
-                self.changes.send_modify(|rev| *rev += 1);
-            }
-            return Ok(());
+        }
+        let state = self.state.lock().expect("revocation lock");
+        let fresh = self.read_ledger()?;
+        self.swap(state, fresh);
+        Ok(())
+    }
+
+    /// The state the store holds, its revoked set built, so the first check after the swap does
+    /// not build it under the lock.
+    fn read_ledger(&self) -> Result<State, String> {
+        let mut fresh = State::loaded(self.store.load()?);
+        fresh.revoked();
+        Ok(fresh)
+    }
+
+    /// Swaps `fresh` in for what `state` holds, and announces the list when it changed.
+    fn swap(&self, mut state: MutexGuard<'_, State>, mut fresh: State) {
+        fresh.hosts_version = state.hosts_version;
+        fresh.acts = state.acts;
+        #[cfg(test)]
+        {
+            fresh.rebuilds = state.rebuilds;
+        }
+        let changed = state.revocations != fresh.revocations;
+        let held = std::mem::replace(&mut *state, fresh);
+        drop(state);
+        // What was held is dropped once the lock is released.
+        drop(held);
+        if changed {
+            self.changes.send_modify(|rev| *rev += 1);
         }
     }
 
@@ -3216,5 +3237,104 @@ mod tests {
             |r| assert!(r.set_gateway("h1", true).expect("mark")),
             |r| r.is_gateway("h1"),
         );
+    }
+
+    /// A store each of whose reads, made while the state lock is free, sees an act of the
+    /// instance's own commit, as in a wave of enrolments on this instance.
+    #[derive(Clone, Default)]
+    struct Acting {
+        inner: Memory,
+        revocations: Arc<std::sync::OnceLock<std::sync::Weak<Revocations>>>,
+        loads: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl LedgerStore for Acting {
+        fn load(&self) -> Result<Ledger, String> {
+            let n = self.loads.fetch_add(1, Ordering::SeqCst);
+            // Past this the reload would read for ever: answered as a failed read instead.
+            if n > 10 * RELOAD_SWAPS_REFUSED {
+                return Err("the reload never swapped its read in".into());
+            }
+            let ledger = self.inner.load()?;
+            let revocations = self.revocations.get().and_then(std::sync::Weak::upgrade);
+            if let Some(revocations) = revocations {
+                // Free only while the read runs outside the lock; the read under it acts not.
+                let free = revocations.state.try_lock().is_ok();
+                if free {
+                    revocations
+                        .revoke_certificate("client", &format!("{:x}", 0xa0 + n))
+                        .expect("an own revocation");
+                }
+            }
+            Ok(ledger)
+        }
+        fn put_issued(&self, issued: &Issued) -> Result<(), String> {
+            self.inner.put_issued(issued)
+        }
+        fn remove_issued(&self, id: &CertId) -> Result<(), String> {
+            self.inner.remove_issued(id)
+        }
+        fn add_revocation(&self, entry: &Revocation, bound: usize) -> Result<Added, String> {
+            self.inner.add_revocation(entry, bound)
+        }
+        fn remove_revocation(&self, id: &str) -> Result<bool, String> {
+            self.inner.remove_revocation(id)
+        }
+        fn save_hosts(&self, hosts: &BTreeMap<String, Host>) -> Result<(), String> {
+            self.inner.save_hosts(hosts)
+        }
+    }
+
+    /// Own acts that keep crossing a reload's reads do not keep it from ending: after
+    /// `RELOAD_SWAPS_REFUSED` refused swaps it reads once under the lock and swaps that in, with
+    /// another instance's act and every own act held.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    #[test]
+    fn a_reload_crossed_by_own_acts_ends_after_its_bounded_reads() {
+        let store = Acting::default();
+        let revocations = Arc::new(
+            Revocations::open(
+                Box::new(store.clone()),
+                Arc::new(Manual(AtomicU64::new(NOW))),
+                vec![Authority {
+                    role: "client".into(),
+                    subject: name_hash(CA),
+                    name: "CN=fleet client CA".into(),
+                }],
+            )
+            .expect("open"),
+        );
+        store
+            .revocations
+            .set(Arc::downgrade(&revocations))
+            .expect("set once");
+        // Another instance binds an Agent to h1.
+        store
+            .inner
+            .save_hosts(&BTreeMap::from([(
+                "h1".to_string(),
+                Host {
+                    instance_uids: [uid(1)].into(),
+                    ..Host::default()
+                },
+            )]))
+            .expect("another instance binds");
+        store.loads.store(0, Ordering::SeqCst);
+        revocations.reload_ledger().expect("the reload ends");
+        assert_eq!(
+            store.loads.load(Ordering::SeqCst),
+            RELOAD_SWAPS_REFUSED + 1,
+            "the bounded reads, then one under the lock"
+        );
+        assert_eq!(
+            revocations.speaks_for("h1"),
+            SpeaksFor::Agents([uid(1)].into())
+        );
+        for n in 0..RELOAD_SWAPS_REFUSED {
+            assert!(
+                revocations.is_certificate_revoked(&id(&format!("{:x}", 0xa0 + n))),
+                "own revocation {n} held"
+            );
+        }
     }
 }
