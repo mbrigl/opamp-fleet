@@ -428,6 +428,7 @@ pub fn verify(database: &Database, archive: Option<&Path>) -> Result<Verified, S
         // begin, and the predecessor it carries on once the first chain's opening is pruned.
         let mut links: Vec<(String, super::audit_prune::Link)> = Vec::new();
         let mut named = Vec::new();
+        let mut carried = Vec::new();
         for row in transaction
             .query(
                 "SELECT chain::text, line FROM audit_entries \
@@ -440,8 +441,12 @@ pub fn verify(database: &Database, archive: Option<&Path>) -> Result<Verified, S
             if let Some((link, predecessor)) =
                 super::audit_prune::read_pruned(&row.get::<_, String>(1))
             {
-                links.push((row.get(0), link));
-                named.extend(predecessor.map(|named| (named.chain, (named.seq, named.hash))));
+                let source: String = row.get(0);
+                carried.extend(
+                    predecessor
+                        .map(|named| (source.clone(), (named.chain, (named.seq, named.hash)))),
+                );
+                links.push((source, link));
             }
         }
         let records: Vec<(String, String, Option<String>)> = transaction
@@ -486,6 +491,13 @@ pub fn verify(database: &Database, archive: Option<&Path>) -> Result<Verified, S
                 break;
             }
         }
+        // A carried predecessor counts, as a link does, only from a chain that holds.
+        named.extend(
+            carried
+                .into_iter()
+                .filter(|(source, _)| holding.contains(source))
+                .map(|(_, named)| named),
+        );
         let chains = records
             .into_iter()
             .zip(walks)

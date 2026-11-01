@@ -633,6 +633,47 @@ mod tests {
         );
     }
 
+    /// A predecessor carried on by an `audit.pruned` in a chain that fails names nothing: the
+    /// archive the database records is then named by no chain, and `audit-verify` fails.
+    /// Verifies: ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance
+    #[test]
+    fn a_predecessor_carried_by_a_chain_that_fails_names_nothing() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = shared(&test);
+        database.offer_archive(Some((7, "ab".repeat(32))));
+        let first = writing_on(database, "host-a");
+        first.decide(1);
+        assert!(first.audit.close(Duration::from_secs(10)), "not closed");
+        let b = writing(&test, "host-b");
+        age_all(&test, &first.chain);
+        assert!(b.prune().predecessor, "the first chain's opening named it");
+        let verified = held(&b.database);
+        assert!(
+            verified.lines.iter().any(|line| line.contains("entry 7")),
+            "{:?}",
+            verified.lines
+        );
+
+        // B's opening is altered: B fails, and the predecessor it carries is named by no chain.
+        test.sql(&format!(
+            "UPDATE audit_entries SET line = replace(line, 'host-b', 'host-z') \
+             WHERE chain = '{}' AND seq = 1",
+            b.chain
+        ));
+        let verified = verify(&b.database, None).expect("verify");
+        assert!(verified.failed, "{:?}", verified.lines);
+        assert!(
+            verified
+                .lines
+                .iter()
+                .any(|line| line.contains("no chain names it as its predecessor")),
+            "a failing chain named the predecessor: {:?}",
+            verified.lines
+        );
+    }
+
     /// A chain linked by an `audit.pruned` in a chain opened before it holds once that chain is
     /// found holding, whichever order the chains are walked in.
     /// Verifies: ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance
