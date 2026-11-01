@@ -155,7 +155,18 @@ impl Schema {
 }
 
 impl Drop for Schema {
+    /// Drops the schema while the instances' background work may still query it. One table at a
+    /// time, each in a transaction of its own, so the drop never holds one table's lock while it
+    /// waits for another's, which an instance's transaction reading two tables in the other order
+    /// would answer with a deadlock.
     fn drop(&mut self) {
+        let tables = self.query(&format!(
+            "SELECT tablename FROM pg_tables WHERE schemaname = '{}'",
+            self.name
+        ));
+        for table in tables {
+            self.sql(&format!("DROP TABLE IF EXISTS {table} CASCADE"));
+        }
         self.sql(&format!("DROP SCHEMA IF EXISTS {} CASCADE", self.name));
     }
 }
