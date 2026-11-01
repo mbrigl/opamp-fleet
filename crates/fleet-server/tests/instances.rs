@@ -224,6 +224,8 @@ struct Instance {
     floors: Arc<PackageFloors>,
     enrolment: Arc<Enrolment>,
     following: fleet_server::instance::Following,
+    /// The admission throttle of the Agent plane, where it was started with one.
+    throttle: Option<Arc<fleet_server::throttle::Throttle>>,
     database: Arc<Database>,
     held: fleet_server::instance::Held,
     stop: Option<tokio::sync::oneshot::Sender<()>>,
@@ -239,7 +241,18 @@ impl Instance {
     /// [`start`](Self::start), taking up nothing another instance commits until
     /// [`follow`](Self::follow) is called: what it hears is held back until then.
     async fn start_deaf(pki: &Pki, schema: &Schema, config: PostgresConfig) -> Self {
-        Self::start_with(pki, schema, config, true, false).await
+        Self::start_with(pki, schema, config, true, false, None).await
+    }
+
+    /// [`start`](Self::start), its Agent plane's admission counted by a throttle of `limits`, as
+    /// the binary wires one.
+    async fn start_throttled(
+        pki: &Pki,
+        schema: &Schema,
+        config: PostgresConfig,
+        limits: fleet_server::throttle::Limits,
+    ) -> Self {
+        Self::start_with(pki, schema, config, true, true, Some(limits)).await
     }
 
     /// Starts taking up what other instances commit, for an instance started deaf.
@@ -256,17 +269,18 @@ impl Instance {
         config: PostgresConfig,
         renewals: bool,
     ) -> Self {
-        Self::start_with(pki, schema, config, renewals, true).await
+        Self::start_with(pki, schema, config, renewals, true, None).await
     }
 
     /// [`start_following`](Self::start_following), following other instances where `follows`
-    /// says so.
+    /// says so, and its admission throttled where `throttle` names limits.
     async fn start_with(
         pki: &Pki,
         schema: &Schema,
         config: PostgresConfig,
         renewals: bool,
         follows: bool,
+        throttle: Option<fleet_server::throttle::Limits>,
     ) -> Self {
         opamp::tls::install_ring_provider();
         let dir = tempfile::tempdir().expect("tempdir");
@@ -323,11 +337,14 @@ impl Instance {
         ))
         .expect("tls config");
         let planes = fleet_server::tls::server_tls(&tls, None, None).expect("server material");
-        let agents = fleet_server::agent_app(
-            state.clone(),
-            fleet_server::transport::Admission::new(true)
-                .with_revocations(Some(revocations.clone())),
-        );
+        let throttle = throttle
+            .map(|limits| Arc::new(fleet_server::throttle::Throttle::new(limits, clock.clone())));
+        let mut admission = fleet_server::transport::Admission::new(true)
+            .with_revocations(Some(revocations.clone()));
+        if let Some(throttle) = &throttle {
+            admission = admission.with_throttle(throttle.clone());
+        }
+        let agents = fleet_server::agent_app(state.clone(), admission);
         let operators = fleet_server::operator_app(state.clone(), None);
 
         let lease = {
@@ -381,6 +398,7 @@ impl Instance {
             floors,
             enrolment,
             following,
+            throttle,
             database,
             held,
             stop: Some(stop),
@@ -2686,4 +2704,305 @@ impl std::io::Write for Collect {
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
     }
+}
+
+/// A layer-4 balancer in front of the Agent plane: each new connection goes, its bytes unread, to
+/// the target the test names, or to the next target that takes it when that one does not.
+struct Balancer {
+    address: SocketAddr,
+    target: Arc<std::sync::Mutex<usize>>,
+}
+
+impl Balancer {
+    async fn to(targets: Vec<SocketAddr>) -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let address = listener.local_addr().expect("addr");
+        let target = Arc::new(std::sync::Mutex::new(0usize));
+        let chosen = target.clone();
+        tokio::spawn(async move {
+            while let Ok((mut inbound, _)) = listener.accept().await {
+                let first = *chosen.lock().expect("target");
+                let targets = targets.clone();
+                tokio::spawn(async move {
+                    for i in 0..targets.len() {
+                        let to = targets[(first + i) % targets.len()];
+                        if let Ok(mut outbound) = tokio::net::TcpStream::connect(to).await {
+                            let _ =
+                                tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        Balancer { address, target }
+    }
+
+    /// Sends the next connections to target `index`.
+    fn send_to(&self, index: usize) {
+        *self.target.lock().expect("target") = index;
+    }
+}
+
+/// Signs a Gateway's certificate for a Host, registers it through `instance` and marks the Host
+/// as a Gateway; the files go into `dir`, with the CA's.
+fn mark_gateway(instance: &Instance, pki: &Pki, dir: &std::path::Path) {
+    let path = |file: &str| dir.join(file).display().to_string();
+    std::fs::write(dir.join("ca.pem"), &pki.ca_pem).expect("write");
+    std::fs::write(dir.join("ca-key.pem"), &pki.ca_key_pem).expect("write");
+    let signer = fleet_server::ca::ClientCa::from_config(
+        &toml::from_str::<fleet_server::config::ClientCaConfig>(&format!(
+            "cert_file = {:?}\nkey_file = {:?}\n",
+            path("ca.pem"),
+            path("ca-key.pem"),
+        ))
+        .expect("client_ca config"),
+    )
+    .expect("client ca");
+    let key = KeyPair::generate().expect("key");
+    let csr = CertificateParams::new(vec!["gateway".to_string()])
+        .expect("params")
+        .serialize_request(&key)
+        .expect("csr")
+        .pem()
+        .expect("pem");
+    let signed = signer
+        .sign(
+            &csr,
+            "gateway-host",
+            &fleet_server::revocation::SubjectValues::default(),
+        )
+        .expect("sign");
+    let host = signed.facts.host.clone().expect("a host");
+    instance
+        .revocations
+        .record(signed.facts, &[7; 16], None)
+        .expect("register");
+    assert!(instance.revocations.set_gateway(&host, true).expect("mark"));
+    std::fs::write(dir.join("gateway.pem"), &signed.pem).expect("write");
+    std::fs::write(dir.join("gateway-key.pem"), key.serialize_pem()).expect("write");
+}
+
+/// A Gateway with the certificate [`mark_gateway`] wrote into `dir`, its pool reaching the Agent
+/// plane through `balancer`, its downstream listener on a port of its own.
+async fn gateway(
+    pki: &Pki,
+    balancer: &Balancer,
+    dir: &std::path::Path,
+) -> (SocketAddr, tokio::sync::watch::Sender<bool>) {
+    let path = |file: &str| dir.join(file).display().to_string();
+    let (listener_cert, listener_key) = pki.issue("127.0.0.1");
+    std::fs::write(dir.join("listener.pem"), listener_cert).expect("write");
+    std::fs::write(dir.join("listener-key.pem"), listener_key).expect("write");
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let downstream = listener.local_addr().expect("addr");
+    let config: fleet_agent::config::ClientConfig = toml::from_str(&format!(
+        r#"
+        endpoint = "wss://localhost:{port}/v1/opamp"
+        state_dir = {state:?}
+        [tls]
+        ca_file = {ca:?}
+        cert_file = {cert:?}
+        key_file = {key:?}
+        [gateway]
+        listen = "{downstream}"
+        upstream_connections = 4
+        [gateway.tls]
+        cert_file = {listener:?}
+        key_file = {listener_key:?}
+        client_ca_file = {ca:?}
+        "#,
+        port = balancer.address.port(),
+        state = path("state"),
+        ca = path("ca.pem"),
+        cert = path("gateway.pem"),
+        key = path("gateway-key.pem"),
+        listener = path("listener.pem"),
+        listener_key = path("listener-key.pem"),
+    ))
+    .expect("gateway config");
+    let (stop, shutdown) = fleet_agent::shutdown::shutdown_channel();
+    tokio::spawn(async move {
+        fleet_agent::gateway::run_on(Arc::new(config), listener, shutdown)
+            .await
+            .expect("gateway");
+    });
+    assert!(
+        eventually(Duration::from_secs(5), || Instance::takes_connections(
+            downstream
+        ))
+        .await
+    );
+    (downstream, stop)
+}
+
+/// A WebSocket to the Gateway at `downstream`, presenting `cert`.
+async fn behind(downstream: SocketAddr, pki: &Pki, cert: &str, key: &str) -> Socket {
+    let config = opamp::tls::client_builder()
+        .with_root_certificates(opamp::tls::root_store(pki.ca_pem.as_bytes()).expect("roots"))
+        .with_client_auth_cert(
+            opamp::tls::certificates(cert.as_bytes()).expect("cert"),
+            opamp::tls::private_key(key.as_bytes()).expect("key"),
+        )
+        .expect("client auth");
+    tokio_tungstenite::connect_async_tls_with_config(
+        format!("wss://{downstream}/v1/opamp"),
+        None,
+        false,
+        Some(tokio_tungstenite::Connector::Rustls(Arc::new(config))),
+    )
+    .await
+    .map(|(socket, _)| socket)
+    .expect("admitted by the gateway")
+}
+
+/// One report of `uid` until one is answered, each waited for a second, as an Agent's heartbeat
+/// sends the next: a report the Gateway wrote to a connection the instance was closing is lost.
+/// Answers the reply, and the sequence number it bore.
+async fn reported(
+    session: &mut Socket,
+    uid: InstanceUid,
+    sequence_num: &mut u64,
+) -> opamp::proto::ServerToAgent {
+    use futures_util::SinkExt;
+    use tokio_tungstenite::tungstenite::Message as Ws;
+    for _ in 0..20 {
+        *sequence_num += 1;
+        let report = AgentToServer {
+            instance_uid: uid.as_bytes().to_vec(),
+            sequence_num: *sequence_num,
+            capabilities: AgentCapabilities::ReportsStatus as u64,
+            ..Default::default()
+        };
+        let framed = opamp::frame::encode_within(&report, usize::MAX).expect("frame");
+        session.send(Ws::Binary(framed.into())).await.expect("send");
+        if let Some(reply) = next_message(session, Duration::from_secs(1)).await {
+            return reply;
+        }
+    }
+    panic!("no report of {uid} was answered");
+}
+
+/// A Gateway whose pool connections reach A and B through a balancer keeps each downstream
+/// Agent on one instance while its pool connection lives: its holder never changes. When A
+/// stops, each downstream Agent A held is taken over by B once, at its next report, and stays
+/// connected to the Gateway; B refuses none of the pool's connections, and the Gateway goes on
+/// admitting downstream peers.
+/// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it, ADR-0015
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_gateway_keeps_its_agents_on_one_instance_and_moves_those_of_a_stopped_one_once() {
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let mut a = Instance::start(&pki, &schema, schema.config_on(schema.config.port)).await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    // B is started once the Gateway's Host is marked, so it reads the mark at its start.
+    mark_gateway(&a, &pki, dir.path());
+    // A single failed admission would put the Gateway's address into back-off on B.
+    let b = Instance::start_throttled(
+        &pki,
+        &schema,
+        schema.config_on(schema.config.port),
+        fleet_server::throttle::Limits {
+            max_failures: 1,
+            ..fleet_server::throttle::Limits::default()
+        },
+    )
+    .await;
+    let balancer = Balancer::to(vec![a.agent, b.agent]).await;
+    let (downstream, _stop) = gateway(&pki, &balancer, dir.path()).await;
+    let (a_id, b_id) = (
+        a.instance_id().expect("a lease"),
+        b.instance_id().expect("a lease"),
+    );
+    let uids: Vec<InstanceUid> = (1..=4u8).map(|n| InstanceUid([0xa0 + n; 16])).collect();
+    let mut sessions = Vec::new();
+    let mut sequence = [0u64; 4];
+    // Each of the first four Agents opens a pool connection of its own: two to A, two to B.
+    for (i, uid) in uids.iter().enumerate() {
+        balancer.send_to(i / 2);
+        let (cert, key) = pki.issue(&format!("edge-{i}"));
+        let mut session = behind(downstream, &pki, &cert, &key).await;
+        reported(&mut session, *uid, &mut sequence[i]).await;
+        sessions.push(session);
+    }
+    let presence = |uid: InstanceUid| {
+        schema.query(&format!(
+            "SELECT holder::text || ' ' || cardinality(holder_changes) FROM agents \
+             WHERE instance_uid = '{uid}'"
+        ))
+    };
+    let holders: Vec<Vec<String>> = uids.iter().map(|uid| presence(*uid)).collect();
+    assert_eq!(
+        holders,
+        [
+            [format!("{a_id} 0")],
+            [format!("{a_id} 0")],
+            [format!("{b_id} 0")],
+            [format!("{b_id} 0")]
+        ],
+        "two on each instance"
+    );
+    // In another order each round, so a pool that placed each report anew would move some.
+    for round in 1..=3 {
+        for k in 0..uids.len() {
+            let i = (k + round) % uids.len();
+            reported(&mut sessions[i], uids[i], &mut sequence[i]).await;
+        }
+    }
+    let unchanged: Vec<Vec<String>> = uids.iter().map(|uid| presence(*uid)).collect();
+    assert_eq!(unchanged, holders, "no holder changed while the pool lives");
+
+    // A stops: its listener closes, its sessions end, and its lease is released.
+    balancer.send_to(1);
+    let _ = a.stop.take().expect("running").send(());
+    assert!(
+        eventually(Duration::from_secs(15), || schema.query(&format!(
+            "SELECT count(*) FROM leases WHERE instance_id = '{a_id}'"
+        )) == ["0"])
+        .await,
+        "A released its lease"
+    );
+    for (i, uid) in uids.iter().enumerate() {
+        let reply = reported(&mut sessions[i], *uid, &mut sequence[i]).await;
+        assert!(reply.error_response.is_none(), "{:?}", reply.error_response);
+    }
+    for (i, uid) in uids.iter().enumerate() {
+        reported(&mut sessions[i], *uid, &mut sequence[i]).await;
+    }
+    let moved: Vec<Vec<String>> = uids.iter().map(|uid| presence(*uid)).collect();
+    assert_eq!(
+        moved,
+        [
+            [format!("{b_id} 1")],
+            [format!("{b_id} 1")],
+            [format!("{b_id} 0")],
+            [format!("{b_id} 0")]
+        ],
+        "A's Agents taken over by B once each, B's left"
+    );
+    assert!(uids
+        .iter()
+        .all(|uid| view_of(&b, *uid).is_some_and(|view| view.connected)));
+    let throttle = b.throttle.as_ref().expect("B's throttle");
+    let gateway_address: std::net::IpAddr = "127.0.0.1".parse().expect("address");
+    assert_eq!(
+        throttle.retry_after(gateway_address),
+        None,
+        "B's throttle holds the Gateway's address in no back-off"
+    );
+    assert!(
+        throttle.begin(gateway_address).is_some(),
+        "B's throttle counted no failure of the Gateway's"
+    );
+
+    // The Gateway goes on admitting a new downstream peer.
+    let (cert, key) = pki.issue("edge-late");
+    let mut late = behind(downstream, &pki, &cert, &key).await;
+    let mut late_sequence = 0;
+    reported(&mut late, InstanceUid([0xaf; 16]), &mut late_sequence).await;
 }

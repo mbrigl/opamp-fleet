@@ -1024,6 +1024,7 @@ dependencies = [
  "constant_time_eq",
  "deadpool-postgres",
  "flate2",
+ "fleet-agent",
  "fleet-core",
  "futures-util",
  "hex",
