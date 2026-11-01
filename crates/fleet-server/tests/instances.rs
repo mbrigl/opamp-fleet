@@ -2371,6 +2371,58 @@ fn the_shutdown_flush_leaves_an_agent_that_moved_to_another_instance_as_that_one
     );
 }
 
+/// The shutdown flush of A leaves an Agent A heard from, that moved to B since and disconnected
+/// there, as B wrote it: no instance holds it any more, and B heard it last.
+/// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts
+#[test]
+fn the_shutdown_flush_leaves_an_agent_that_moved_away_and_disconnected_as_last_written() {
+    use fleet_server::fleet::{AppState, Transport};
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let uid = InstanceUid([0x84; 16]);
+    let report = |sequence_num: u64, healthy: bool, goodbye: bool| AgentToServer {
+        instance_uid: uid.as_bytes().to_vec(),
+        sequence_num,
+        capabilities: AgentCapabilities::ReportsStatus as u64
+            | AgentCapabilities::ReportsHealth as u64,
+        health: Some(opamp::proto::ComponentHealth {
+            healthy,
+            ..Default::default()
+        }),
+        agent_disconnect: goodbye.then(opamp::proto::AgentDisconnect::default),
+        ..Default::default()
+    };
+    let (lease_a, lease_b) = (
+        "00000000-0000-7000-8000-00000000000a",
+        "00000000-0000-7000-8000-00000000000b",
+    );
+    let [a, b] = [lease_a, lease_b].map(|lease| {
+        let state = AppState::on(&records(&schema)).expect("state");
+        state.serve_under(tokio::sync::watch::channel(Some(lease.to_string())).1);
+        state
+    });
+    a.process(report(1, true, false), Transport::WebSocket, Some(7));
+    // The Agent reconnects to B, reports there, and says goodbye; B writes the disconnect.
+    b.process(report(2, false, false), Transport::WebSocket, Some(9));
+    b.process(report(3, false, true), Transport::WebSocket, Some(9));
+    b.write_presence(lease_b).expect("B's batch");
+    // B heard it after A did.
+    schema.sql(&format!(
+        "UPDATE agents SET last_seen_ms = last_seen_ms + 1000 WHERE instance_uid = '{uid}'"
+    ));
+    let stored = || {
+        schema.query(&format!(
+            "SELECT coalesce(holder::text, 'none') || ' ' || sequence_num FROM agents \
+             WHERE instance_uid = '{uid}'"
+        ))
+    };
+    assert_eq!(stored(), ["none 2"]);
+
+    a.flush_agents();
+    assert_eq!(stored(), ["none 2"], "what B wrote stays");
+}
+
 /// An Agent that has just connected to A is not forgotten through B before A's next presence
 /// batch: the report that connects it writes that A holds it, at once.
 /// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts

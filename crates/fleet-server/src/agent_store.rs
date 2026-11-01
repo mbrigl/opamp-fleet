@@ -254,9 +254,9 @@ pub trait AgentStore: Send + Sync {
     }
 
     /// [`write_report`](Self::write_report) at the shutdown flush: on a shared store only where
-    /// no other Server holds the Agent's connection, where the stored holder is none or `holder`,
-    /// so an Agent that moved to another Server keeps what that Server wrote of it
-    /// (ADR-draft-the-fleet-record-of-agents-and-hosts clause 2). `holder` is the instance id of
+    /// the stored holder is `holder`, or is none and the stored `last_seen_ms` is no newer than
+    /// the record's, so an Agent that moved to another Server keeps what that Server wrote of it,
+    /// also once it disconnected there (ADR-draft-the-fleet-record-of-agents-and-hosts clause 2). `holder` is the instance id of
     /// this Server's lease, `None` without one. Answers whether it wrote the record. A store whose
     /// one Server is its only writer writes as `write_report` does.
     ///

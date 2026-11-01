@@ -141,7 +141,8 @@ impl AgentStore for PgAgentStore {
         })
     }
 
-    /// [`write_report`](AgentStore::write_report), of a row whose holder is none or `holder`.
+    /// [`write_report`](AgentStore::write_report), of a row whose holder is `holder`, or none and
+    /// no newer than the record.
     fn write_report_unless_held_elsewhere(
         &self,
         uid: &InstanceUid,
@@ -677,7 +678,8 @@ const REPORTED: [&str; 12] = [
 
 /// Writes the columns a report decides of one Agent record, inside the caller's transaction,
 /// `last_seen_ms` only forward. Where `unless_held_elsewhere` is given, only of a row whose holder
-/// is none or the one it names. Answers whether it wrote a record.
+/// is the one it names, or of one no instance holds whose `last_seen_ms` is no newer than the
+/// record's. Answers whether it wrote a record.
 async fn write_reported(
     client: &impl GenericClient,
     uid: &InstanceUid,
@@ -695,9 +697,17 @@ async fn write_reported(
         })
         .collect::<Vec<_>>()
         .join(", ");
+    // A row no instance holds is written only where this copy is no older than it: another
+    // instance that carried the Agent since clears the holder at its disconnect, and what it
+    // wrote stays.
+    let last_seen = REPORTED
+        .iter()
+        .position(|column| *column == "last_seen_ms")
+        .expect("last_seen_ms is reported")
+        + 2;
     let held = match unless_held_elsewhere {
         Some(_) => format!(
-            " AND (holder IS NULL OR holder = ${}::text::uuid)",
+            " AND (holder = ${}::text::uuid OR (holder IS NULL AND last_seen_ms <= ${last_seen}))",
             REPORTED.len() + 2
         ),
         None => String::new(),
