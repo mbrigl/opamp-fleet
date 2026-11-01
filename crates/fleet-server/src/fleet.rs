@@ -6626,6 +6626,7 @@ mod tests {
         gets: Arc<AtomicU64>,
         batched_gets: Arc<AtomicU64>,
         failing_rekeys: Arc<std::sync::atomic::AtomicBool>,
+        after_holders: Arc<Mutex<Option<Act>>>,
     }
 
     /// What [`Hooked`] runs once after a read.
@@ -6640,6 +6641,7 @@ mod tests {
                 gets: Arc::new(AtomicU64::new(0)),
                 batched_gets: Arc::new(AtomicU64::new(0)),
                 failing_rekeys: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                after_holders: Arc::new(Mutex::new(None)),
             }
         }
     }
@@ -6741,7 +6743,12 @@ mod tests {
             &self,
             uids: &[InstanceUid],
         ) -> Result<HashMap<InstanceUid, Option<String>>, String> {
-            self.inner.holders(uids)
+            let holders = self.inner.holders(uids);
+            let after = self.after_holders.lock().expect("hook lock").take();
+            if let Some(after) = after {
+                after();
+            }
+            holders
         }
         fn rekey(
             &self,
@@ -6866,6 +6873,49 @@ mod tests {
         rekey.flags = AgentToServerFlags::RequestInstanceUid as u64;
         a.process(rekey, Transport::WebSocket, Some(3));
         assert_eq!(kept(&a, &rekeyed), (false, false), "re-keyed");
+    }
+
+    /// An instance that heard another took an Agent reads the holder again under the fleet lock
+    /// before it stops carrying it: a take of its own made between its first read and the lock, by
+    /// the Agent's new connection here, keeps the Agent carried.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    #[test]
+    fn an_agent_taken_back_here_between_the_two_reads_of_its_holder_stays_carried() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let hooked = Hooked::new(Box::new(crate::postgres::agents::PgAgentStore::new(
+            database.clone(),
+        )));
+        let after_holders = hooked.after_holders.clone();
+        let a = Arc::new(on_postgres(&database, Box::new(hooked)));
+        a.serve_under(
+            tokio::sync::watch::channel(Some("00000000-0000-7000-8000-00000000000a".to_string())).1,
+        );
+        let b = on_postgres(
+            &database,
+            Box::new(crate::postgres::agents::PgAgentStore::new(database.clone())),
+        );
+        b.serve_under(
+            tokio::sync::watch::channel(Some("00000000-0000-7000-8000-00000000000b".to_string())).1,
+        );
+        let uid = InstanceUid([0x74; 16]);
+        a.process(report(&uid, 1), Transport::WebSocket, Some(7));
+        b.process(report(&uid, 2), Transport::WebSocket, Some(9));
+        // Between A's first read of the holder and its fleet lock, the Agent's old connection to A
+        // closes and it connects to A again, which takes it back.
+        let again = a.clone();
+        *after_holders.lock().expect("hook lock") = Some(Box::new(move || {
+            again.mark_disconnected(&[uid], 7);
+            again.process(report(&uid, 3), Transport::WebSocket, Some(8));
+        }));
+        a.release_taken(None).expect("release");
+        assert!(
+            after_holders.lock().expect("hook lock").is_none(),
+            "the take came between the reads"
+        );
+        assert!(view(&a, &uid).connected, "still carried");
     }
 
     /// On PostgreSQL a first report here whose read of the stored record failed goes on from the
