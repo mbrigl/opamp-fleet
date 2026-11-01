@@ -668,6 +668,85 @@ mod tests {
         );
     }
 
+    /// Two instances that each add a Package of one Agent type to one Deployment at once, neither
+    /// replacing, add one: the other is refused with the type taken, naming the Package that won.
+    /// The first is held at a gate in the database between its read of the held type and its
+    /// write, so the second runs exactly then; the gate opens once the second waits for the
+    /// Deployment's row, or has reached the gate itself, which only an amendment that took no hold
+    /// does.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it, ADR-0027
+    #[test]
+    fn two_packages_of_one_type_added_at_once_add_one() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        PgDeploymentBackend::new(database.clone())
+            .save("stable", &selector("stable"))
+            .expect("save");
+        test.sql(
+            "CREATE TABLE fleet_test_gate (open boolean NOT NULL); \
+             INSERT INTO fleet_test_gate VALUES (false); \
+             CREATE FUNCTION fleet_test_wait() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN \
+             WHILE NOT (SELECT open FROM fleet_test_gate) LOOP PERFORM pg_sleep(0.01); \
+             END LOOP; RETURN NEW; END $$; \
+             CREATE TRIGGER fleet_test_wait BEFORE INSERT ON deployment_packages \
+             FOR EACH ROW EXECUTE FUNCTION fleet_test_wait();",
+        );
+        let sessions = |condition: &str| {
+            test.rows(&format!(
+                "SELECT 1 FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND {condition}"
+            ))
+            .len()
+        };
+        let at_gate =
+            || sessions("wait_event = 'PgSleep' AND query LIKE 'INSERT INTO deployment_packages%'");
+        let until = |what: &str, done: &dyn Fn() -> bool| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while !done() {
+                assert!(std::time::Instant::now() < deadline, "{what}");
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+        let add = |version: &str| {
+            let (database, id) = (database.clone(), id(version));
+            std::thread::spawn(move || {
+                PgDeploymentBackend::new(database)
+                    .amend("stable", &Change::PutPackage { id, replace: false })
+            })
+        };
+
+        let first = add("1.0.0");
+        until("the first reaches the gate", &|| at_gate() == 1);
+        let second = add("2.0.0");
+        until("the second waits for the row, or reaches the gate", &|| {
+            at_gate() == 2
+                || sessions(
+                    "wait_event_type = 'Lock' AND query LIKE \
+                     'SELECT 1 FROM deployments WHERE name = $1 FOR UPDATE'",
+                ) == 1
+        });
+        test.sql("UPDATE fleet_test_gate SET open = true");
+        let first = first.join().expect("the first's thread");
+        let second = second.join().expect("the second's thread");
+        assert_eq!(
+            first.expect("the first adds its Package").packages["otelcol"],
+            id("1.0.0")
+        );
+        assert_eq!(
+            second,
+            Err(DeploymentError::TypeTaken {
+                agent_type: "otelcol".to_string(),
+                held: id("1.0.0"),
+            }),
+            "the second is refused, naming the first"
+        );
+        assert_eq!(
+            test.rows("SELECT version FROM deployment_packages"),
+            [[Some("1.0.0".to_string())]]
+        );
+    }
+
     /// A row that does not decode fails the load naming it (ADR-0029 clause 6).
     /// Verifies: ADR-0029
     #[test]
