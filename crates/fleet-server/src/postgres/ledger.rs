@@ -1018,7 +1018,15 @@ mod tests {
     /// in place, a list at its bound takes no more, and Hosts saved again are exactly the new ones.
     fn contract(open: &dyn Fn() -> Box<dyn LedgerStore>) {
         let store = open();
-        assert_eq!(store.load().expect("empty"), Ledger::default());
+        // The list's version is the store's own, kept by one store and not by another; what the
+        // contract compares is what both hold.
+        assert_eq!(
+            Ledger {
+                version: None,
+                ..store.load().expect("empty")
+            },
+            Ledger::default()
+        );
         let (root, renewal) = (issued("0a", None), issued("0b", Some("0a")));
         store.put_issued(&root).expect("put");
         store.put_issued(&renewal).expect("put");

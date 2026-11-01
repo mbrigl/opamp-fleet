@@ -596,6 +596,14 @@ mod tests {
         }))
     }
 
+    /// What a ledger holds, without the version only a database keeps.
+    fn ledger_content(ledger: crate::revocation::Ledger) -> crate::revocation::Ledger {
+        crate::revocation::Ledger {
+            version: None,
+            ..ledger
+        }
+    }
+
     /// The copy over a fixture `data_dir` carries every record into the database and the audit
     /// record and the blobs into the new `data_dir`, keeps the chain verifiable, leaves the old
     /// `data_dir` unchanged, and refuses a database that holds the Server's tables and a
@@ -646,10 +654,11 @@ mod tests {
             expected.deployments
         );
         assert!(records.agents().expect("a").load().expect("load") == expected.agents);
-        assert_eq!(
-            records.ledger().expect("l").load().expect("load"),
-            expected.ledger
-        );
+        // The list's version is the database's own, which the files keep none of: the move starts
+        // it at the migration's 0.
+        let ledger = records.ledger().expect("l").load().expect("load");
+        assert_eq!(ledger.version, Some(0));
+        assert_eq!(ledger_content(ledger), ledger_content(expected.ledger));
         let bootstrap = records.bootstrap().expect("b");
         let entries = bootstrap.load().expect("load");
         assert_eq!(
