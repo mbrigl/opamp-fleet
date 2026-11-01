@@ -2079,9 +2079,9 @@ fn an_agent_forgotten_through_one_instance_is_not_written_again_by_another() {
         .all(|view| view.instance_uid != reporting.to_string()));
 }
 
-/// An Agent that asks for a new identity keeps its stored record under the new key, and the
-/// instance that carries it keeps carrying it: the record moves in the store, and is not dropped
-/// as one forgotten.
+/// An Agent that asks for a new identity keeps its stored record under the new key, labels set
+/// through another instance included, and the instance that carries it keeps carrying it: the
+/// record moves in the store as it is stored, and is not dropped as one forgotten.
 /// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts
 #[test]
 fn an_agent_rekeyed_at_its_request_keeps_its_stored_record() {
@@ -2089,7 +2089,7 @@ fn an_agent_rekeyed_at_its_request_keeps_its_stored_record() {
     let Some(schema) = Schema::named() else {
         return;
     };
-    let a = AppState::on(&records(&schema)).expect("state");
+    let [a, b] = [(); 2].map(|()| AppState::on(&records(&schema)).expect("state"));
     let uid = InstanceUid([0x53; 16]);
     let report = |flags: u64, sequence_num: u64| AgentToServer {
         instance_uid: uid.as_bytes().to_vec(),
@@ -2099,6 +2099,12 @@ fn an_agent_rekeyed_at_its_request_keeps_its_stored_record() {
         ..Default::default()
     };
     a.process(report(0, 1), Transport::WebSocket, Some(7));
+    assert!(b
+        .set_labels(
+            &uid,
+            std::collections::BTreeMap::from([("tier".to_string(), "edge".to_string())]),
+        )
+        .is_ok());
     let rekeyed = a
         .process(
             report(
@@ -2114,6 +2120,11 @@ fn an_agent_rekeyed_at_its_request_keeps_its_stored_record() {
     assert_eq!(
         schema.query("SELECT instance_uid FROM agents"),
         [rekeyed.to_string()]
+    );
+    assert_eq!(
+        schema.query("SELECT labels::text FROM agents"),
+        [r#"{"tier":"edge"}"#],
+        "the labels B set stay"
     );
     assert!(a
         .snapshot()

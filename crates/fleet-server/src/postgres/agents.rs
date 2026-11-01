@@ -366,28 +366,61 @@ impl AgentStore for PgAgentStore {
         Ok(forgotten)
     }
 
-    /// One transaction: the record under its new key, and the old key gone.
+    /// One transaction: the row as it is stored moved to its new key, its assignment's
+    /// Configurations with it, and nothing of `record` written, so a label change or a release
+    /// another instance committed stays; a record no longer stored is moved nowhere.
     fn rekey(
         &self,
         old: &InstanceUid,
         new: &InstanceUid,
         record: &PersistedAgent,
     ) -> Result<(), String> {
-        let (old, new, record) = (*old, *new, record.clone());
-        let assignment = record.assignment.clone();
-        self.transaction(move |mut client| async move {
+        let _ = record;
+        let (old, new) = (*old, *new);
+        let rest = COLUMNS
+            .split(", ")
+            .skip(1)
+            .chain(["connected", "holder"])
+            .collect::<Vec<_>>()
+            .join(", ");
+        let moved = self.database.run(move |pool| async move {
+            let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
-            transaction
+            let (old, new) = (old.to_string(), new.to_string());
+            let moved = transaction
                 .execute(
-                    "DELETE FROM agents WHERE instance_uid = $1",
-                    &[&old.to_string()],
+                    &format!(
+                        "INSERT INTO agents (instance_uid, {rest}) \
+                         SELECT $2, {rest} FROM agents WHERE instance_uid = $1"
+                    ),
+                    &[&old, &new],
                 )
                 .await
-                .map_err(sql)?;
-            write(&*transaction, &new, &record).await?;
-            transaction.commit().await.map_err(sql)
+                .map_err(sql)?
+                > 0;
+            if moved {
+                transaction
+                    .execute(
+                        "UPDATE agent_assignment_configurations SET instance_uid = $2 \
+                         WHERE instance_uid = $1",
+                        &[&old, &new],
+                    )
+                    .await
+                    .map_err(sql)?;
+                transaction
+                    .execute("DELETE FROM agents WHERE instance_uid = $1", &[&old])
+                    .await
+                    .map_err(sql)?;
+            }
+            transaction.commit().await.map_err(sql)?;
+            Ok(moved)
         })?;
-        self.stored([(&old, None), (&new, assignment.as_ref())]);
+        if moved {
+            let mut assignments = self.assignments.lock().expect("assignments lock");
+            if let Some(assignment) = assignments.remove(&old) {
+                assignments.insert(new, assignment);
+            }
+        }
         Ok(())
     }
 
@@ -719,7 +752,7 @@ async fn write_configurations(
 }
 
 /// Creates or replaces one Agent record whole, its assignment's Configurations exactly the
-/// record's, inside the caller's transaction: what an import and a re-key write.
+/// record's, inside the caller's transaction: what an import writes.
 pub(crate) async fn write(
     client: &impl GenericClient,
     uid: &InstanceUid,
