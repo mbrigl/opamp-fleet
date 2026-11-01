@@ -793,11 +793,6 @@ impl AppState {
         self
     }
 
-    /// The staleness budget in force: the heartbeat interval this Server offered when it offered
-    /// one — the period it actually asked for — else the configured default. Three of them, not
-    /// one: a single missed heartbeat is a lost packet, and a fleet view that flickers on every
-    /// hiccup is one nobody trusts. On a shared store the presence interval besides, since what is
-    /// stored may be one interval old (ADR-draft-the-fleet-record-of-agents-and-hosts clause 8).
     /// Names the lease this instance serves under on a shared store: the presence it writes when
     /// an Agent connects here names that lease's instance id as the holder, at once
     /// (ADR-draft-the-fleet-record-of-agents-and-hosts clause 11). Set once; a later call is
@@ -806,6 +801,11 @@ impl AppState {
         let _ = self.lease.set(lease);
     }
 
+    /// The staleness budget in force: the heartbeat interval this Server offered when it offered
+    /// one — the period it actually asked for — else the configured default. Three of them, not
+    /// one: a single missed heartbeat is a lost packet, and a fleet view that flickers on every
+    /// hiccup is one nobody trusts. On a shared store the presence interval besides, since what is
+    /// stored may be one interval old (ADR-draft-the-fleet-record-of-agents-and-hosts clause 8).
     fn stale_after(&self) -> Duration {
         self.heartbeat_budget() + self.presence_interval
     }
@@ -1615,11 +1615,10 @@ impl AppState {
         // The release may have replaced a pinned revision nothing references any more.
         self.collect_revisions(touched);
         drop(fleet);
+        self.push.send_modify(|rev| *rev += 1);
         if released == 0 {
-            self.push.send_modify(|rev| *rev += 1);
             return Err(RolloutError::UnknownAgent);
         }
-        self.push.send_modify(|rev| *rev += 1);
         info!(agent = %uid, deployment = %deployment.name, "rollout to agent");
         Ok(())
     }
@@ -1896,7 +1895,8 @@ impl AppState {
             {
                 Some(true) => {}
                 Some(false) => return Err(ForgetError::StillReporting),
-                // Held but not stored: a first write that failed. What is held is forgotten.
+                // Held but not stored: forgotten or re-keyed through another instance, and not yet
+                // heard of here. What is held is forgotten.
                 None if fleet.contains_key(uid) => {}
                 None => return Err(ForgetError::UnknownAgent),
             }
