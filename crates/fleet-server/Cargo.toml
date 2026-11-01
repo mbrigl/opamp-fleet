@@ -59,5 +59,9 @@ tokio-postgres-rustls.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+# A Gateway in front of two instances in one test process
+# (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+# clause 21). The Client depends on the Server only for its own tests, so this is no cycle.
+fleet-agent = { path = "../fleet-agent" }
 tokio-tungstenite.workspace = true
 tempfile = "3"

@@ -106,14 +106,27 @@ report, its own labels and its Client Agent's labels, in that order of precedenc
      `put` does, and create none; it answers whether there was a record, and on a shared store
      none means the Agent was forgotten through another instance, which the fleet then drops
      rather than create it again (ADR-0024 clause 14);
-   - `write_report_unless_held_elsewhere(uid, &PersistedAgent, holder)` — `write_report` at the
-     graceful-shutdown flush: on a shared store only of a record whose stored holder is `holder`,
-     or is none and whose stored `last_seen_ms` is no newer than the copy's, so an Agent that
-     moved to another instance keeps what that instance wrote of it, also once it disconnected
-     there;
+   - `write_report_unless_held_elsewhere(uid, &PersistedAgent, holder, take)` — `write_report` at
+     the graceful-shutdown flush: on a shared store only of a record whose stored holder is
+     `holder`, or is none and whose stored count of takes is still `take`, the count this instance
+     was last answered, so an Agent that moved to another instance keeps what that instance wrote
+     of it, also once it disconnected there;
    - `write_presence(holder, presences)` — one batch of the presence of the Agents `holder`
-     carries (clauses 3 and 4), in the order of their `instance_uid`; a disconnect is written only
-     of a record whose stored holder is `holder` or none;
+     carries (clauses 3 and 4), in the order of their `instance_uid`, each with the count of
+     takes `holder` was last answered for it; a connected Agent names `holder` only where the
+     stored holder is `holder`, none, or an instance without a live lease, so a batch never undoes
+     another instance's take, and naming `holder` anew counts as a take, whose count the batch
+     answers; a disconnect is written only of a record whose stored holder is `holder` and whose
+     stored count of takes is still the one it comes with, so it never undoes a take made since,
+     by this instance or another;
+   - `take(uid, holder, last_seen_ms)` — the take at a connecting report of
+     [ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it](draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md)
+     clause 8: names `holder`, raises the record's count of takes by one and answers it, answers
+     the holder it replaced and whether this change of holder is the eleventh within a minute,
+     counted on the database's clock, and announces the take where it replaced another instance,
+     whether or not its lease is live; the take that commits last holds the record;
+   - `holders(uids)` — the stored holder of each, which an instance that heard of a take reads
+     before it stops carrying the Agent;
    - `remove_if_silent(uid, silent_before_ms)` — forget one record of a shared store when its
      stored presence lets it go, read and removed in one step (clause 11);
    - `set_labels(uid, labels)` and `set_restart_pending(uid, pending)` — the acts that decide them,
@@ -158,8 +171,10 @@ report, its own labels and its Client Agent's labels, in that order of precedenc
    clause 8 says. On graceful shutdown every record and every presence is flushed, so an ordinary
    restart restores current values; on PostgreSQL the flush writes only the records of the Agents
    this instance heard report, and of those only the ones whose stored holder is this instance, or
-   is none and whose stored `last_seen_ms` is no newer than this instance's, and the presence in a
-   last batch. A failed write is logged, never fatal; on PostgreSQL a
+   is none and whose stored count of takes is still the one this instance was last answered, and
+   the presence in a last batch. Whether a disconnect or a flush is written is decided by that
+   count, which only the database raises, and never by comparing `last_seen_ms`, which each
+   instance writes by its own clock. A failed write is logged, never fatal; on PostgreSQL a
    presence batch that fails is retried with the next one.
 
 5. **Stored records are secret-bearing, whatever the backend.** A reported effective
