@@ -92,6 +92,7 @@ impl Database {
         bound: Duration,
     ) -> Result<Taken, String> {
         let exclusive = self.exclusive().clone();
+        let files = self.archive_offered();
         let host = host.to_string();
         let sent = Instant::now();
         let (id, taken_over) = self.run_within(bound, move |pool| async move {
@@ -158,6 +159,18 @@ impl Database {
                 .iter()
                 .map(|row| row.get(0))
                 .collect();
+            // Each removed lease's chain is closed for it, and this lease's chain opened, in the
+            // same transaction (clause 3 of
+            // ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance).
+            let mut written = Vec::new();
+            for lapsed in &taken_over {
+                written
+                    .extend(super::audit::close_lapsed(&*transaction, lapsed, &instance_id).await?);
+            }
+            written.push(
+                super::audit::open_chain(&*transaction, &instance_id, &host, files.as_ref())
+                    .await?,
+            );
             transaction
                 .execute(
                     "INSERT INTO leases \
@@ -174,6 +187,9 @@ impl Database {
                 .await
                 .map_err(sql)?;
             transaction.commit().await.map_err(sql)?;
+            for line in &written {
+                line.emit();
+            }
             Ok((instance_id, taken_over))
         })?;
         Ok(Taken {
@@ -216,6 +232,47 @@ impl Database {
             sent,
             list_version: super::unsigned(version),
         }))
+    }
+
+    /// Takes over every lease other than `instance_id`'s that has lapsed, waiting at most `bound`
+    /// for the answer: what an instance does after each renewal
+    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// clause 18). Each lease is removed in one transaction with the closing of its audit chain,
+    /// `closed_by` the chain of `instance_id`; the removal locks the lease, so one instance alone
+    /// takes it. Answers the leases taken over.
+    ///
+    /// # Errors
+    /// Returns an error naming the database when it does not answer within `bound`.
+    pub fn take_over_lapsed(
+        &self,
+        instance_id: &str,
+        bound: Duration,
+    ) -> Result<Vec<String>, String> {
+        let id = instance_id.to_string();
+        self.run_within(bound, move |pool| async move {
+            let mut client = client(&pool).await?;
+            let transaction = client.transaction().await.map_err(sql)?;
+            let lapsed: Vec<String> = transaction
+                .query(
+                    "DELETE FROM leases WHERE expires_at <= now() \
+                     AND instance_id <> $1::text::uuid RETURNING instance_id::text",
+                    &[&id],
+                )
+                .await
+                .map_err(sql)?
+                .iter()
+                .map(|row| row.get(0))
+                .collect();
+            let mut written = Vec::new();
+            for chain in &lapsed {
+                written.extend(super::audit::close_lapsed(&*transaction, chain, &id).await?);
+            }
+            transaction.commit().await.map_err(sql)?;
+            for line in &written {
+                line.emit();
+            }
+            Ok(lapsed)
+        })
     }
 
     /// Releases the lease of `instance_id`, at an orderly shutdown.

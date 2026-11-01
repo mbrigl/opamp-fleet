@@ -4,8 +4,10 @@
 //! The database is checked first: it must hold none of the Server's tables, and nothing is created
 //! before it has been found so. Every record of the old `data_dir` is then read through the
 //! filesystem adapters — from a copy, since they repair what they open — so a record that would
-//! fail a Server's startup fails here before anything is written. The audit record and, with the
-//! filesystem blob store, the blobs are copied byte for byte into the new `data_dir`; then the
+//! fail a Server's startup fails here before anything is written. With the filesystem blob store,
+//! the blobs are copied byte for byte into the new `data_dir`. The audit record is not copied: the
+//! old `audit/` stays as the closed archive, and the `seq` and the hash of its last entry are
+//! recorded for the first chain the database opens to name as its predecessor. Then the
 //! schema and every record are written in one transaction, so a copy that fails leaves the
 //! database without the Server's tables, and the new `data_dir` as empty as it was. The old
 //! `data_dir` is only read — no directory created, no mode changed, no file removed: it stays as
@@ -244,20 +246,23 @@ fn copy(
     let records = records?;
 
     let mut report = Report::default();
+    // No audit entry is copied: the files stay where they are as the closed archive, and its last
+    // entry is recorded for the first chain to name as its predecessor
+    // (ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance clause 6).
     let audit = from.join(fs::AUDIT);
-    let audit_files = if audit.is_dir() {
-        fs::audit_files(&audit)?
-    } else {
-        Vec::new()
-    };
-    fs::create_private_dir(&to.join(fs::AUDIT))?;
-    for file in &audit_files {
-        let name = file.file_name().expect("a file in the audit directory");
-        copy_file(file, &to.join(fs::AUDIT).join(name))?;
-    }
-    report
-        .lines
-        .push(format!("{} audit files, unchanged", audit_files.len()));
+    let archive = super::audit::archive_checked(&audit)?;
+    let archive_end = archive.map(|archive| {
+        report.lines.extend(archive.unlinked);
+        (super::signed(archive.end.0), archive.end.1)
+    });
+    report.lines.push(match &archive_end {
+        Some((seq, _)) => format!(
+            "the audit record stays in {} as the archive; its last entry, {seq}, is the \
+             predecessor of the first chain",
+            audit.display()
+        ),
+        None => "no audit record to link".to_string(),
+    });
     if filesystem_blobs {
         let blobs = from.join(fs::BLOBS);
         let target = to.join(fs::BLOBS);
@@ -289,6 +294,15 @@ fn copy(
             let transaction = client.transaction().await.map_err(sql)?;
             schema::apply(&*transaction, schema::MIGRATIONS, ours).await?;
             records.write(&*transaction).await?;
+            if let Some((seq, hash)) = archive_end {
+                transaction
+                    .execute(
+                        "INSERT INTO audit_archive (seq, hash) VALUES ($1, $2)",
+                        &[&seq, &hash],
+                    )
+                    .await
+                    .map_err(sql)?;
+            }
             transaction.commit().await.map_err(sql)
         })
         .map_err(|e| {
@@ -581,19 +595,7 @@ mod tests {
 
     /// How many entries the chain in `dir` holds, verified.
     fn verified(dir: &Path) -> Result<u64, String> {
-        let mut texts = Vec::new();
-        for file in fs::audit_files(dir)? {
-            texts.push((
-                file.display().to_string(),
-                std::fs::read_to_string(&file).expect("read"),
-            ));
-        }
-        crate::audit_log::verify(texts.iter().flat_map(|(name, text)| {
-            text.lines()
-                .filter(|line| !line.trim().is_empty())
-                .enumerate()
-                .map(move |(index, line)| (format!("{name}:{index}"), line))
-        }))
+        fs::verify_audit(dir)?.1.map(|held| held.entries)
     }
 
     /// What a ledger holds, without the version only a database keeps.
@@ -604,9 +606,9 @@ mod tests {
         }
     }
 
-    /// The copy over a fixture `data_dir` carries every record into the database and the audit
-    /// record and the blobs into the new `data_dir`, keeps the chain verifiable, leaves the old
-    /// `data_dir` unchanged, and refuses a database that holds the Server's tables and a
+    /// The copy over a fixture `data_dir` carries every record into the database and the blobs
+    /// into the new `data_dir`, leaves the audit record where it is as the archive and records its
+    /// last entry, leaves the old `data_dir` unchanged, and refuses a database that holds the Server's tables and a
     /// `--data-dir` that is not empty (ADR-0029 clause 27).
     /// Verifies: ADR-0029
     #[test]
@@ -636,11 +638,13 @@ mod tests {
             report.lines.iter().any(|line| line == "1 agents"),
             "{report:?}"
         );
-        assert!(report
-            .lines
-            .iter()
-            .any(|line| line == "3 audit files, unchanged"
-                || line.ends_with("audit files, unchanged")));
+        assert!(
+            report
+                .lines
+                .iter()
+                .any(|line| line.contains("as the archive; its last entry, 3,")),
+            "{report:?}"
+        );
         assert_eq!(snapshot(&old), before, "the old data_dir is unchanged");
 
         let database = test.open();
@@ -710,18 +714,19 @@ mod tests {
         .expect("every entry finds its blob in the new data_dir");
         assert!(!state_packages.is_empty());
 
+        // No audit entry is copied: the old record stays as the archive, and its end is recorded.
+        assert!(!new.join(fs::AUDIT).exists(), "the audit record was copied");
+        assert_eq!(verified(&old.join(fs::AUDIT)), Ok(3));
+        let tail = fs::audit_tail(&old.join(fs::AUDIT))
+            .expect("tail")
+            .expect("entries");
         assert_eq!(
-            verified(&new.join(fs::AUDIT)),
-            verified(&old.join(fs::AUDIT))
+            test.rows("SELECT seq::text, hash FROM audit_archive"),
+            vec![vec![
+                Some(tail.last_seq.to_string()),
+                Some(crate::audit_log::line_hash(&tail.last_line))
+            ]]
         );
-        assert!(verified(&new.join(fs::AUDIT)).expect("the chain holds") >= 3);
-        for file in fs::audit_files(&old.join(fs::AUDIT)).expect("files") {
-            let copied = new.join(fs::AUDIT).join(file.file_name().expect("name"));
-            assert_eq!(
-                std::fs::read(&copied).expect("read"),
-                std::fs::read(&file).expect("read")
-            );
-        }
         drop((records, state_packages, bootstrap));
 
         // The lock goes with its session, which the server notices once the connection closes.
@@ -808,5 +813,157 @@ mod tests {
             .expect("connect");
         assert!(database.server_tables().expect("tables").is_empty());
         assert!(!new.exists(), "the new data_dir is left as it was: absent");
+    }
+
+    /// After a move from files, the first chain the database opens names the archive's last entry
+    /// as its predecessor; `audit-verify --archive` checks the link over the untouched archive and
+    /// fails, naming the predecessor, once the archive's last entry was changed or removed;
+    /// without `--archive` the predecessor is reported as not checked.
+    /// Verifies: ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance
+    #[test]
+    fn the_first_chain_names_the_archive_and_audit_verify_checks_the_link() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (old, new) = (dir.path().join("old"), dir.path().join("new"));
+        fixture(&old);
+        run_in(&old, &new, &test.config(), true, Some(&test.schema)).expect("copy");
+        let archive = old.join(fs::AUDIT);
+        let tail = fs::audit_tail(&archive).expect("tail").expect("entries");
+
+        // The lock of the copy goes with its session; the first lease opens the first chain.
+        let mut database = None;
+        for _ in 0..50 {
+            if let Ok(opened) = Database::open_in(
+                &test.config(),
+                super::super::Exclusive::Shared,
+                Some(&test.schema),
+            ) {
+                database = Some(opened);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let database = database.expect("the copy's lock was not released");
+        let first = database
+            .take_lease("host-a", std::time::Duration::from_secs(30))
+            .expect("lease");
+        let second = database
+            .take_lease("host-b", std::time::Duration::from_secs(30))
+            .expect("lease");
+        let opened = test.rows(&format!(
+            "SELECT line FROM audit_entries WHERE chain = '{}' AND seq = 1",
+            first.instance_id
+        ));
+        let opened = opened[0][0].clone().expect("chain_opened");
+        assert!(
+            opened.contains(&format!("\"predecessor_seq\":{}", tail.last_seq)),
+            "{opened}"
+        );
+        assert!(
+            opened.contains(&crate::audit_log::line_hash(&tail.last_line)),
+            "{opened}"
+        );
+        let later = test.rows(&format!(
+            "SELECT line FROM audit_entries WHERE chain = '{}' AND seq = 1",
+            second.instance_id
+        ));
+        assert!(
+            !later[0][0].clone().expect("line").contains("predecessor"),
+            "only the first chain names the archive"
+        );
+
+        // Through the connection `audit-verify --config` makes.
+        let checked =
+            super::super::audit::verify_in(&test.config(), Some(&test.schema), Some(&archive))
+                .expect("verify");
+        assert!(!checked.failed, "{:?}", checked.lines);
+        assert!(
+            checked
+                .lines
+                .iter()
+                .any(|line| line.contains("holds, and ends on entry 3")),
+            "{:?}",
+            checked.lines
+        );
+        let unchecked = super::super::audit::verify(&database, None).expect("verify");
+        assert!(!unchecked.failed, "{:?}", unchecked.lines);
+        assert!(
+            unchecked
+                .lines
+                .iter()
+                .any(|line| line.contains("was not checked")),
+            "{:?}",
+            unchecked.lines
+        );
+
+        // The archive's last entry removed: its chain still holds, but ends elsewhere.
+        let newest = fs::audit_files(&archive)
+            .expect("files")
+            .pop()
+            .expect("a file");
+        let text = std::fs::read_to_string(&newest).expect("read");
+        let mut lines: Vec<&str> = text.lines().collect();
+        lines.pop();
+        std::fs::write(&newest, lines.join("\n") + "\n").expect("write");
+        let removed = super::super::audit::verify(&database, Some(&archive)).expect("verify");
+        assert!(removed.failed, "{:?}", removed.lines);
+        assert!(
+            removed
+                .lines
+                .iter()
+                .any(|line| line.contains("the predecessor") && line.contains("entry 3")),
+            "{:?}",
+            removed.lines
+        );
+
+        // Changed instead: the chain the predecessor names does not end there.
+        let mut changed: Vec<String> = text.lines().map(str::to_string).collect();
+        let last = changed
+            .pop()
+            .expect("a line")
+            .replace("\"n\":\"2\"", "\"n\":\"9\"");
+        changed.push(last);
+        std::fs::write(&newest, changed.join("\n") + "\n").expect("write");
+        let altered = super::super::audit::verify(&database, Some(&archive)).expect("verify");
+        assert!(altered.failed, "{:?}", altered.lines);
+        assert!(
+            altered
+                .lines
+                .iter()
+                .any(|line| line.contains("the predecessor")),
+            "{:?}",
+            altered.lines
+        );
+    }
+
+    /// A file record that ends in a torn line stops the copy, naming the file, before anything is
+    /// written: its end could never be verified as the first chain's predecessor.
+    /// Verifies: ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance
+    #[test]
+    fn a_copy_refuses_an_audit_record_that_ends_in_a_torn_line() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (old, new) = (dir.path().join("old"), dir.path().join("new"));
+        fixture(&old);
+        let file = fs::audit_files(&old.join(fs::AUDIT))
+            .expect("files")
+            .pop()
+            .expect("a file");
+        let mut text = std::fs::read_to_string(&file).expect("read");
+        text.push_str("{\"seq\":4,\"pr");
+        std::fs::write(&file, text).expect("write");
+        let err =
+            run_in(&old, &new, &test.config(), true, Some(&test.schema)).expect_err("a torn end");
+        assert!(
+            err.contains("torn") && err.contains(&file.display().to_string()),
+            "{err}"
+        );
+        let database = crate::postgres::Database::connect(&test.config(), Some(&test.schema))
+            .expect("connect");
+        assert!(database.server_tables().expect("tables").is_empty());
     }
 }

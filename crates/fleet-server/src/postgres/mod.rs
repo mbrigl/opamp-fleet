@@ -15,6 +15,7 @@
 //! a channel for its work there.
 
 pub mod agents;
+pub mod audit;
 pub mod bootstrap;
 pub mod configs;
 pub mod deployments;
@@ -127,6 +128,10 @@ pub struct Database {
     /// What the notifications this instance sends name as their sender: random, one per open
     /// database, so two instances in one process are two origins.
     origin: String,
+    /// The end of the file record under `data_dir/audit/` this Server kept before its record moved
+    /// into the database, which the first chain names as its predecessor
+    /// ([`offer_archive`](Self::offer_archive)).
+    archive: std::sync::Mutex<Option<(u64, String)>>,
     /// What one call may take ([`CALL_TIMEOUT`]).
     bound: Duration,
     /// Dropped last: the connections' tasks run on it.
@@ -304,6 +309,7 @@ impl Database {
             closing,
             name,
             origin,
+            archive: std::sync::Mutex::new(None),
             bound,
             bridge,
         })
@@ -374,6 +380,20 @@ impl Database {
                 .map_err(sql)?;
             Ok(rows.iter().map(|row| row.get(0)).collect())
         })
+    }
+
+    /// Offers `end`, the `seq` and the hash of the last entry of the audit files a Server on
+    /// PostgreSQL wrote under `data_dir/audit/` before its record moved into the database, as the
+    /// archive: the take that opens the first chain the database holds records it, unless an
+    /// archive is recorded already, and the chain names it as its predecessor
+    /// (ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance clause 6).
+    pub fn offer_archive(&self, end: Option<(u64, String)>) {
+        *self.archive.lock().expect("archive lock") = end;
+    }
+
+    /// What [`offer_archive`](Self::offer_archive) offered.
+    pub(crate) fn archive_offered(&self) -> Option<(u64, String)> {
+        self.archive.lock().expect("archive lock").clone()
     }
 
     /// Runs `work` on the database's runtime with the pool, and waits for it at most

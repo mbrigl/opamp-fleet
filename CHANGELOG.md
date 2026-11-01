@@ -40,6 +40,23 @@ once its tag exists.
 
 ### Changed
 
+- **On PostgreSQL the audit record is in the database, one hash chain per lease**
+  ([ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance](docs/adr/draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance.md)).
+  Each instance opens a chain with each lease, closes it at an orderly shutdown, and closes the
+  chain of every lapsed lease it takes over; entries queued under a lease that lapsed land in the
+  next chain, marked `taken_under`. `server audit-verify --config <server.toml>` walks every
+  chain and lists the open ones. `server migrate-to-postgres` no longer copies `audit/` into the
+  new `data_dir`: the old one stays as the archive, the first chain names its last entry as
+  `predecessor`, and `audit-verify --archive <dir>` checks the link. The Server adds the tables
+  `audit_chains`, `audit_entries` and `audit_archive` at its first start (migration 7); the
+  release before runs on that schema and keeps writing its record to files.
+  A Server already on PostgreSQL kept its record in `data_dir/audit/`: its first start records the
+  last entry there as the archive, which the first chain names the same way.
+  **What to do:** on PostgreSQL, verify with `server audit-verify --config` from now on, and keep
+  the files under `data_dir/audit/` as the archive of the record before the upgrade. Start the
+  Server that holds that `data_dir` first, and alone: only the start that opens the first chain
+  links the archive.
+
 - **With PostgreSQL, the revocation list has one version, and it is the Gateways' `ETag`**
   ([ADR-draft-the-servers-state-and-its-stores](docs/adr/draft-the-servers-state-and-its-stores.md)).
   Every revocation and every lift moves a counter in the database, in its own transaction, and
@@ -86,6 +103,23 @@ once its tag exists.
   Server and the Clients in either order.
   **What to do:** nothing. A Configuration that sets `reports_available_components: false` under
   `extensions.opamp.capabilities` to work around this can drop the setting.
+
+- **`server audit-verify <dir>` holds a record the Server repaired after a crash, and binds the
+  repair to the entries before it.** A crash mid-write leaves a torn last line, and the next start
+  follows it with `audit.chain_broken` chained on its hash
+  ([ADR-draft-an-append-only-audit-record](docs/adr/draft-an-append-only-audit-record.md)).
+  `audit-verify` failed on that torn line as not an entry, and on a torn line cut inside a
+  character could not read the file at all. It now takes the repair as holding, and still fails a
+  torn line nothing follows. `audit.chain_broken` now also names as `last_whole` the hash of the
+  last whole entry before the torn line, and `audit-verify` fails a repair whose `last_whole`
+  does not match it, so the entries before a repair can no longer be replaced unseen. A repair
+  written before this release names no `last_whole`: `audit-verify` holds it and names it as a
+  repair without a link, since the entries before it are not bound by those after it. A crash
+  during the repair itself, which left two torn lines that `audit-verify` refused for good, is
+  now closed by one linked `audit.chain_broken` at the next start, and holds. A line with bytes
+  that are not UTF-8 anywhere but in a character cut short at its end fails, naming the line.
+  **What to do:** nothing. Where `audit-verify` names a repair without a link, compare the entries
+  before it against a copy taken earlier.
 
 - **A stop right after the Client starts ends it cleanly.** Its `SIGTERM` and `SIGINT` handlers
   were installed only once the task waiting for them first ran; a stop before that ended the Client
