@@ -20,17 +20,17 @@ recording why it may stay.
 
 ## Acceptance criteria
 
-- [ ] Given an Agent carried by A, when its connection moves to B, then B holds it, A stops carrying
+- [x] Given an Agent carried by A, when its connection moves to B, then B holds it, A stops carrying
   it, and neither drops it twice
-- [ ] Given an Agent B took from A, when a presence batch of A that was due before the take is
+- [x] Given an Agent B took from A, when a presence batch of A that was due before the take is
   written after it, then the row still names B as the holder
-- [ ] Given an Agent whose holder changes eleven times within a minute, when the eleventh change
+- [x] Given an Agent whose holder changes eleven times within a minute, when the eleventh change
   lands, then one line is logged naming it as a likely duplicate
-- [ ] Given a Gateway whose pool connections live, when its downstream Agents report, then their
+- [x] Given a Gateway whose pool connections live, when its downstream Agents report, then their
   holder does not change
-- [ ] Given a Gateway with pool connections on A and B, when A is stopped, then each downstream
+- [x] Given a Gateway with pool connections on A and B, when A is stopped, then each downstream
   Agent of A is taken over once, and the Gateway's pool is not refused by B's throttle
-- [ ] Given a single Server on the filesystem store and one on PostgreSQL, when the existing
+- [x] Given a single Server on the filesystem store and one on PostgreSQL, when the existing
   integration suite and the store checks run, then both pass unchanged
 
 ## Read first
@@ -52,3 +52,22 @@ recording why it may stay.
 with the human: ADR-0007 clause 5 keeps every part of the system with the human and sets the cap on
 open unattended work at zero. It decides which instance serves an Agent, and duplicate detection
 across instances.
+
+## Status
+
+Criteria 1 to 6 are met on this branch. What is left is the disconnect guard of the presence batch,
+a decision the ticket leaves to the human between two options:
+
+- **A monotonic per-row counter.** A column the take increments and answers; the instance keeps
+  the value of its last take per Agent, and a batch writes a disconnect only where the row names
+  this instance and still holds that value. No clock is compared, and a reconnect within the same
+  millisecond is no longer undone. It costs a column (a migration), a value per carried Agent,
+  and a batch whose connected rows name the instance anew answering the counter too.
+- **Keep the guard and record why it may stay.** The harm needs clock skew larger than the time
+  between an instance taking an Agent back and its disconnect, after another instance pushed
+  `last_seen_ms` forward. The row then reads connected under this instance while it runs, and
+  forgetting is refused until the Agent has been silent past the budget plus the skew.
+
+The session that worked the criteria recommends the counter. Implementing either needs no further
+decision; the first changes `write_presence`, the take, and the schema.
+
