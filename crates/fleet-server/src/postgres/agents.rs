@@ -41,19 +41,35 @@ struct Pins {
     /// Counts the commits of this instance that changed an assignment.
     commits: u64,
     /// The count at which this instance last committed the assignment of each record, kept only
-    /// while a read is in flight, the one thing it decides: it is empty whenever none is, so what
-    /// an Agent's re-keys or many releases add leaves with the read.
+    /// while it can decide for a read in flight: one above where the oldest read in flight began.
+    /// What an Agent's re-keys or many releases add therefore leaves once every read that began
+    /// before it has ended, and every read ends within its call's bound.
     committed: HashMap<InstanceUid, u64>,
-    /// The reads in flight.
-    reading: usize,
+    /// Where each read in flight began, and how many began there.
+    in_flight: BTreeMap<u64, usize>,
 }
 
 impl Pins {
     /// Notes that this instance committed the assignment of `uid` at `commit`, for the reads in
     /// flight; with none in flight there is nothing to note it for.
     fn committed(&mut self, uid: InstanceUid, commit: u64) {
-        if self.reading > 0 {
+        if !self.in_flight.is_empty() {
             self.committed.insert(uid, commit);
+        }
+    }
+
+    /// Ends the read that began at `commit`, and drops each count that no read still in flight
+    /// can be decided by: those at or below where the oldest of them began.
+    fn ended(&mut self, commit: u64) {
+        if let Some(count) = self.in_flight.get_mut(&commit) {
+            *count -= 1;
+            if *count == 0 {
+                self.in_flight.remove(&commit);
+            }
+        }
+        match self.in_flight.keys().next().copied() {
+            None => self.committed = HashMap::new(),
+            Some(oldest) => self.committed.retain(|_, noted| *noted > oldest),
         }
     }
 }
@@ -66,11 +82,10 @@ struct Began<'a> {
 
 impl Drop for Began<'_> {
     fn drop(&mut self) {
-        let mut pins = self.pins.lock().expect("assignments lock");
-        pins.reading -= 1;
-        if pins.reading == 0 {
-            pins.committed = HashMap::new();
-        }
+        self.pins
+            .lock()
+            .expect("assignments lock")
+            .ended(self.commit);
     }
 }
 
@@ -135,10 +150,11 @@ impl PgAgentStore {
     /// Where a read begins: what it reads is taken over no commit of this instance made since.
     fn began(&self) -> Began<'_> {
         let mut pins = self.assignments.lock().expect("assignments lock");
-        pins.reading += 1;
+        let commit = pins.commits;
+        *pins.in_flight.entry(commit).or_default() += 1;
         Began {
             pins: &self.assignments,
-            commit: pins.commits,
+            commit,
         }
     }
 
@@ -1698,6 +1714,75 @@ mod tests {
             "kept for the read in flight"
         );
         assert_eq!(kept(&store), 0, "and gone with it");
+    }
+
+    /// Of two reads in flight, the one that ends first leaves what the other is decided by: a
+    /// release committed while both were in flight is still noted when the older read takes up its
+    /// snapshot, so it does not take the older assignment over the release.
+    /// Verifies: ADR-0026, ADR-draft-the-servers-state-and-its-stores
+    #[test]
+    fn a_read_that_ends_first_leaves_what_an_older_read_in_flight_is_decided_by() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let store = PgAgentStore::open(test.open()).expect("open");
+        let (agent, other) = (InstanceUid([9; 16]), InstanceUid([10; 16]));
+        let mut bare = record();
+        bare.assignment = None;
+        store.put(&agent, &bare).expect("put");
+        store.put(&other, &bare).expect("put");
+        // The older read has taken its snapshot: the Agent with no assignment.
+        let older = store.began();
+        let released = PersistedAgent {
+            assignment: Some(Assignment {
+                deployment: "stable".to_string(),
+                package: None,
+                configurations: BTreeMap::new(),
+            }),
+            ..bare
+        };
+        assert_eq!(store.release(&[], &[(agent, released)]), Ok(vec![agent]));
+        // A read begins after the release and is still in flight; a short one begins after it and
+        // ends before both.
+        let middle = store.began();
+        store.get_many(&[other]).expect("read");
+        store.refresh(older, Read::Only(&[agent]), |_| None, std::iter::empty());
+        drop(middle);
+        assert_eq!(
+            store.pinning(Pin::Deployment("stable")),
+            1,
+            "the older read did not take its snapshot over the release"
+        );
+    }
+
+    /// Under reads that always overlap, what is kept of the commits is only what the oldest read
+    /// in flight can be decided by: an Agent that re-keys on every report does not grow it.
+    /// Verifies: ADR-draft-the-servers-state-and-its-stores
+    #[test]
+    fn under_overlapping_reads_the_commits_kept_follow_the_oldest_read_in_flight() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let store = PgAgentStore::open(test.open()).expect("open");
+        let kept = |store: &PgAgentStore| store.assignments.lock().expect("pins").committed.len();
+        let mut uid = InstanceUid([11; 16]);
+        store.put(&uid, &record()).expect("put");
+        let mut in_flight = store.began();
+        for n in 0..50u8 {
+            let next_read = store.began();
+            let next = InstanceUid([12, n, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+            store.rekey(&uid, &next, &record()).expect("rekey");
+            uid = next;
+            // The older read ends; one is in flight at every moment.
+            drop(std::mem::replace(&mut in_flight, next_read));
+        }
+        assert_eq!(
+            kept(&store),
+            2,
+            "the last re-key's, which the read in flight may need"
+        );
+        drop(in_flight);
+        assert_eq!(kept(&store), 0);
     }
 
     /// The query reads each record with its stored presence: connected only while the instance
