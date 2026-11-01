@@ -4,7 +4,7 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use opamp::attributes;
@@ -605,6 +605,9 @@ pub struct AppState {
     /// The presence of each held Agent as the last batch wrote it, and the holder it named, so a
     /// batch writes only what moved since. Locked strictly after `fleet`.
     presence_written: Mutex<PresenceWritten>,
+    /// The lease this instance serves under on a shared store, whose instance id the presence
+    /// written at a connecting report names as the holder; unset where there is none.
+    lease: OnceLock<watch::Receiver<Option<String>>>,
     /// The Agents forgotten while a WebSocket carried them, by that connection, until its loop
     /// takes them and ends their session (ADR-0024 clause 10). Locked strictly after `fleet`.
     forgotten: Mutex<HashMap<ConnId, Vec<InstanceUid>>>,
@@ -685,6 +688,7 @@ impl AppState {
             max_agents: DEFAULT_MAX_AGENTS,
             presence_interval: Duration::ZERO,
             presence_written: Mutex::new(PresenceWritten::default()),
+            lease: OnceLock::new(),
             forgotten: Mutex::new(HashMap::new()),
         };
         state.place_all();
@@ -794,6 +798,14 @@ impl AppState {
     /// one: a single missed heartbeat is a lost packet, and a fleet view that flickers on every
     /// hiccup is one nobody trusts. On a shared store the presence interval besides, since what is
     /// stored may be one interval old (ADR-draft-the-fleet-record-of-agents-and-hosts clause 8).
+    /// Names the lease this instance serves under on a shared store: the presence it writes when
+    /// an Agent connects here names that lease's instance id as the holder, at once
+    /// (ADR-draft-the-fleet-record-of-agents-and-hosts clause 11). Set once; a later call is
+    /// ignored.
+    pub fn serve_under(&self, lease: watch::Receiver<Option<String>>) {
+        let _ = self.lease.set(lease);
+    }
+
     fn stale_after(&self) -> Duration {
         self.heartbeat_budget() + self.presence_interval
     }
@@ -2119,6 +2131,33 @@ impl AppState {
         Ok(batch.len())
     }
 
+    /// On a shared store, writes at once that `uid` is connected here, naming this instance as its
+    /// holder, so that no other instance forgets it as not connected while the next batch is due
+    /// (ADR-draft-the-fleet-record-of-agents-and-hosts clause 11): one write per connect, never
+    /// per heartbeat. Without a lease nothing is written. One that fails is logged, and the next
+    /// batch writes it.
+    fn write_connected(&self, uid: &InstanceUid, presence: Presence) {
+        if !self.agent_store.is_shared() {
+            return;
+        }
+        let Some(holder) = self.lease.get().and_then(|lease| lease.borrow().clone()) else {
+            return;
+        };
+        if let Err(e) = self
+            .agent_store
+            .write_presence(&holder, &[(*uid, presence)])
+        {
+            warn!(agent = %uid, error = %e, "cannot write that the agent is connected here");
+            return;
+        }
+        let mut written = self.presence_written.lock().expect("presence lock");
+        if written.holder.as_deref() != Some(holder.as_str()) {
+            written.holder = Some(holder);
+            written.agents.clear();
+        }
+        written.agents.insert(*uid, presence);
+    }
+
     /// The Agents forgotten while connection `conn` carried them, taken once: its loop ends their
     /// session (ADR-0024 clause 10).
     pub fn take_forgotten(&self, conn: ConnId) -> Vec<InstanceUid> {
@@ -2439,10 +2478,14 @@ impl AppState {
         if !record.connected || record.owner != conn || restarted {
             record.components_demanded = None;
         }
+        let connects = created || !record.connected || record.owner != conn;
         record.connected = true;
         record.owner = conn;
         record.heard = true;
         record.last_seen_ms = self.clock.now_ms();
+        if connects {
+            self.write_connected(&uid, record.presence());
+        }
         if msg.capabilities != 0 {
             record.capabilities = msg.capabilities;
         }

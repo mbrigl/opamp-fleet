@@ -734,6 +734,7 @@ async fn main() {
             }) {
                 Ok(lease) => {
                     logged.follow(lease.held());
+                    state.serve_under(lease.held());
                     if let Some(interval) = config.database.presence_interval() {
                         fleet_server::instance::write_presence(
                             state.clone(),

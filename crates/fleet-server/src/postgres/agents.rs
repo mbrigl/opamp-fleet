@@ -264,7 +264,8 @@ impl AgentStore for PgAgentStore {
     }
 
     /// One transaction: the rows locked in the order of their `instance_uid`, byte by byte as the
-    /// release orders them, then the batch written in one statement.
+    /// release orders them, then the batch written in one statement. A disconnect older than the
+    /// presence stored is not written: the Agent connected again since, written at that connect.
     fn write_presence(
         &self,
         holder: &str,
@@ -304,10 +305,13 @@ impl AgentStore for PgAgentStore {
                 .execute(
                     "UPDATE agents AS a SET \
                      last_seen_ms = GREATEST(a.last_seen_ms, p.last_seen_ms), \
-                     connected = CASE WHEN p.connected OR a.holder IS NULL \
-                         OR a.holder = $4::text::uuid THEN p.connected ELSE a.connected END, \
+                     connected = CASE WHEN p.connected THEN true \
+                         WHEN (a.holder IS NULL OR a.holder = $4::text::uuid) \
+                             AND a.last_seen_ms <= p.last_seen_ms THEN false \
+                         ELSE a.connected END, \
                      holder = CASE WHEN p.connected THEN $4::text::uuid \
-                         WHEN a.holder IS NULL OR a.holder = $4::text::uuid THEN NULL \
+                         WHEN (a.holder IS NULL OR a.holder = $4::text::uuid) \
+                             AND a.last_seen_ms <= p.last_seen_ms THEN NULL \
                          ELSE a.holder END \
                      FROM unnest($1::text[], $2::boolean[], $3::bigint[]) \
                          AS p(instance_uid, connected, last_seen_ms) \
@@ -1231,6 +1235,14 @@ mod tests {
             store.remove_if_silent(&two, 1_000),
             Ok(Some(true)),
             "a holder without a live lease holds no connection"
+        );
+        store
+            .write_presence(&a, &[(three, at(4_000, false))])
+            .expect("a disconnect older than the presence stored");
+        assert_eq!(
+            presence(three),
+            [[Some("true".into()), Some(a.clone()), Some("5000".into())]],
+            "a connect written since stays"
         );
         store
             .write_presence(&a, &[(three, at(6_000, false))])

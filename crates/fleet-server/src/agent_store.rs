@@ -283,8 +283,9 @@ pub trait AgentStore: Send + Sync {
     /// `instance_uid` whatever order they are given in, so two batches over the same Agents never
     /// deadlock (ADR-draft-the-fleet-record-of-agents-and-hosts clause 4). A connected Agent names
     /// `holder` as the instance that holds its connection; a disconnect is written only of an Agent
-    /// whose stored presence names `holder` or none, so it never undoes another instance's take;
-    /// `last_seen_ms` never moves back. A record no longer stored is written nothing. A store whose
+    /// whose stored presence names `holder` or none, so it never undoes another instance's take,
+    /// and is no older than it, so it never undoes a connect written since; `last_seen_ms` never
+    /// moves back. A record no longer stored is written nothing. A store whose
     /// one Server holds every presence in memory keeps none, and writes nothing.
     ///
     /// # Errors

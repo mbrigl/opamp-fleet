@@ -387,7 +387,7 @@ password_file = "/run/secrets/fleet-db-password"
 | `store` | `"fs"` | `"fs"` or `"postgres"`. Any other value fails startup naming the key; so do `"postgres"` without a `[database.postgres]` section and a `[database.postgres]` section beside `"fs"`. |
 | `lease_renew_secs` | `10` | With `"postgres"` alone: how often an instance renews its lease, from 1 to 3600. Set with `"fs"`, it fails startup naming it. |
 | `lease_secs` | `30` | With `"postgres"` alone: how long after its last renewal a lease lapses, at least three renewals and at most 3600. Set with `"fs"`, it fails startup naming it. |
-| `presence_interval_secs` | `30` | With `"postgres"` alone: how often an instance writes, in one batch, where each Agent it carries is connected and when it was last heard from, from 10 to 60. A heartbeat reaches the database at most once per interval and Agent, so the staleness budget grows by this interval. Set with `"fs"`, it fails startup naming it. |
+| `presence_interval_secs` | `30` | With `"postgres"` alone: how often an instance writes, in one batch, where each Agent it carries is connected and when it was last heard from, from 10 to 60. The report that connects an Agent to an instance writes it at once, so no other instance forgets an Agent that has just connected. A heartbeat reaches the database at most once per interval and Agent, so the staleness budget grows by this interval. Set with `"fs"`, it fails startup naming it. |
 | `postgres.host` | — | Required with `"postgres"`. The database's host name or IP address — what its certificate must name. |
 | `postgres.port` | `5432` | Its port. |
 | `postgres.dbname` | — | Required with `"postgres"`. The database. The Server does not create it. |

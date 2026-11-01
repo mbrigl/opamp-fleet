@@ -323,6 +323,7 @@ impl Instance {
             let database = database.clone();
             fleet_server::instance::Lease::take(database, TIMES, "test-host").expect("lease")
         };
+        state.serve_under(lease.held());
         let following = if follows {
             fleet_server::instance::follow(
                 &database,
@@ -2257,5 +2258,38 @@ fn the_shutdown_flush_writes_only_the_agents_this_instance_heard_from() {
         column("last_seen_ms", heard_by_a),
         last_seen,
         "last_seen_ms does not move back"
+    );
+}
+
+/// An Agent that has just connected to A is not forgotten through B before A's next presence
+/// batch: the report that connects it writes that A holds it, at once.
+/// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_agent_just_connected_is_not_forgotten_through_another_instance() {
+    use fleet_server::fleet::{AppState, ForgetError};
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let a = Instance::start(&pki, &schema, schema.config_on(schema.config.port)).await;
+    let b = Arc::new(AppState::on(&records(&schema)).expect("state"));
+    let (cert, key) = pki.issue("edge-01");
+    let uid = InstanceUid([0x91; 16]);
+    let attributes: Attributes<'_> = (&[("service.name", "otelcol")], &[]);
+    let mut session = websocket(&a, &pki, &cert, &key).await;
+    report_as(&mut session, uid, 1, 0, attributes, true).await;
+    assert_eq!(
+        schema.query(&format!(
+            "SELECT holder::text FROM agents WHERE instance_uid = '{uid}' AND connected"
+        )),
+        [a.instance_id().expect("a lease")],
+        "A wrote that it holds the Agent"
+    );
+    let forgotten = tokio::task::spawn_blocking(move || b.forget_agent(&uid))
+        .await
+        .expect("forget");
+    assert!(
+        matches!(forgotten, Err(ForgetError::StillReporting)),
+        "B sees A holds it"
     );
 }

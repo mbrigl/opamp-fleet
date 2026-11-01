@@ -72,7 +72,7 @@ once its tag exists.
   `forgotten`; one that carries other Agents too stays open. With PostgreSQL each instance writes
   where the Agents it carries are connected, and which instance holds them, in one batch every
   `[database] presence_interval_secs` (default 30, from 10 to 60), and a heartbeat reaches the
-  database at most once per batch. Forgetting through any instance is decided from that stored
+  database at most once per batch; the report that connects an Agent writes it at once. Forgetting through any instance is decided from that stored
   presence, and the staleness budget adds the interval. `max_agents` bounds the Agent records in
   the database, for all instances together. Migration 7 adds two columns to the Agents' table.
   **What to do:** with PostgreSQL, set `max_agents` alike on every instance. Set
