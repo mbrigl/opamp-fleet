@@ -101,10 +101,11 @@ once its tag exists.
   ([ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it](docs/adr/draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md)).
   The instance an Agent connects to names itself as the Agent's holder at once, and the instance
   that held it before stops carrying it; a presence batch of that instance written afterwards no
-  longer names it again. An Agent whose holder changes more than ten times within a minute is
-  logged as a likely duplicate, with the warning `the agent's holder changed more than ten times
-  within a minute; likely a duplicate instance_uid on two connections`. Migration 9 adds a column
-  to the Agents' table.
+  longer names it again. Whether a disconnect is written depends no more on the instances' clocks
+  agreeing, and an Agent that reconnects within the same millisecond stays connected. An Agent
+  whose holder changes more than ten times within a minute is logged as a likely duplicate, with
+  the warning `the agent's holder changed more than ten times within a minute; likely a duplicate
+  instance_uid on two connections`. Migration 9 adds two columns to the Agents' table.
   **What to do:** nothing. On that warning, look for two hosts that run an Agent with one
   `instance_uid`, such as a cloned VM.
 
