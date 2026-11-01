@@ -9,6 +9,10 @@ just pinned, and the sweep on one may delete a blob that a new entry written thr
 Both checks move into the transaction that acts: the pins are read from the stored assignments
 under the row lock of the Configuration or the Package, and a blob is swept only when no stored
 entry names it, read in the same transaction that removes it.
+Both the sweep and the cleanup of staged uploads take the advisory lock the stores draft's clause
+14 names, so that two instances never delete the same keys at once. A staged upload whose instance
+released its lease without deleting it, or whose takeover cleanup failed, is not left until some
+instance starts: the sweep removes the staged uploads of every lease that is not live.
 
 ## Acceptance criteria
 
@@ -16,6 +20,8 @@ entry names it, read in the same transaction that removes it.
   Configuration, then B refuses it, though its own memory holds no such pin
 - [ ] Given an entry written through A that names a new blob, when B sweeps its blobs before it has
   read that entry, then the blob is kept
+- [ ] Given a staged upload of a lease released at an orderly shutdown, when the next sweep runs on
+  any instance, then the upload is removed, and two instances sweeping at once delete it once
 - [ ] Given a test that removes the read of the stored pins or entries, when it runs, then the two
   cases above fail
 - [ ] Given a single Server on the filesystem store and one on PostgreSQL, when the existing
