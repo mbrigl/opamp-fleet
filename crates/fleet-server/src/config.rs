@@ -3221,9 +3221,11 @@ mod tests {
         }
     }
 
-    /// A Server on files given no data directory it can write — the image's, which names none, run
-    /// from `/` — fails startup naming `data_dir` and the directory, and writes nothing elsewhere
-    /// (ADR-draft-releases-attestations-and-the-server-image clause 16).
+    /// A Server on files given a data directory it cannot create fails startup naming `data_dir`
+    /// and the directory (ADR-draft-releases-attestations-and-the-server-image clause 16). The
+    /// image's case is the default `fleet-data` under `/`, which the account cannot write; the test
+    /// names the directory under an unwritable one instead, as the working directory is the whole
+    /// test process's.
     /// Verifies: ADR-draft-releases-attestations-and-the-server-image
     #[cfg(unix)]
     #[test]

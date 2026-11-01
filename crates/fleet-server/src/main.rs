@@ -924,14 +924,11 @@ fn clean_staging_on_takeover(
     tokio::spawn(async move {
         while takeovers.changed().await.is_ok() {
             let staging = staging.clone();
-            match tokio::task::spawn_blocking(move || staging.run()).await {
-                Ok(Ok(_)) => {}
-                Ok(Err(e)) => {
-                    warn!(error = %e, "could not delete the staging objects of a lapsed lease")
-                }
-                Err(e) => {
-                    warn!(error = %e, "could not delete the staging objects of a lapsed lease")
-                }
+            let ran = tokio::task::spawn_blocking(move || staging.run())
+                .await
+                .unwrap_or_else(|e| Err(e.to_string()));
+            if let Err(e) = ran {
+                warn!(error = %e, "could not delete the staging objects of a lapsed lease");
             }
         }
     });

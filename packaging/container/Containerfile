@@ -1,5 +1,5 @@
-# The Server's image (ADR-draft-releases-attestations-and-the-server-image): the binary the release built and checked, on a distroless glibc
-# base, and nothing else.
+# The Server's image (ADR-draft-releases-attestations-and-the-server-image): the binary the
+# release built and checked, on a distroless glibc base, and nothing else.
 #
 # No `RUN`: the image copies a binary that already exists, so a multi-architecture build needs no
 # emulation and the image holds exactly the bytes the release tested for its version and described

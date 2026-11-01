@@ -578,7 +578,7 @@ fn all<'i>(instructions: &'i [(String, String)], keyword: &str) -> Vec<&'i str> 
 
 const BASE: &str = "gcr.io/distroless/cc-debian13:nonroot";
 
-// Verifies: ADR-0034, ADR-draft-releases-attestations-and-the-server-image
+// Verifies: ADR-draft-releases-attestations-and-the-server-image
 #[test]
 fn the_containerfile_copies_the_release_binary_onto_a_pinned_distroless_base_and_runs_nothing() {
     let text = containerfile();
