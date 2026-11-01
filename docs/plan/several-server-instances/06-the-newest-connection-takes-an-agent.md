@@ -11,7 +11,12 @@ re-home once each at their next report, spread over one heartbeat interval, and 
 revocation list and floors are served on. A presence batch, and the write at a connecting report,
 name their holder unconditionally for every connected Agent they carry, so a batch that was due
 while another instance took the Agent can undo that take; the batch becomes conditional too, naming
-itself only where the row names it or no instance with a live lease, and a test holds it.
+itself only where the row names it or no instance with a live lease, and a test holds it. The
+batch's disconnect guard, `a.last_seen_ms <= p.last_seen_ms`, compares this instance's clock with
+a value another instance's clock may have pushed forward: with clock skew a genuine disconnect is
+not written yet counted as written, so the row stays connected under the old holder until its lease
+lapses or the Agent goes silent; the guard is settled here, by a monotonic per-row counter or by
+recording why it may stay.
 
 ## Acceptance criteria
 
