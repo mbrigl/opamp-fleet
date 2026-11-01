@@ -666,6 +666,9 @@ pub struct Revocations {
     state: Mutex<State>,
     /// The version of the hosts last written: one write at a time, never an older over a newer.
     hosts_written: Mutex<u64>,
+    /// Held by a reload for its whole course, so two reloads never swap an older read over a newer
+    /// one; no check takes it.
+    reloading: Mutex<()>,
     changes: watch::Sender<u64>,
 }
 
@@ -909,6 +912,7 @@ impl Revocations {
             store,
             clock,
             hosts_written: Mutex::new(0),
+            reloading: Mutex::new(()),
             changes: watch::channel(0).0,
         };
         let forgotten = {
@@ -1610,11 +1614,13 @@ impl Revocations {
     /// began, and read again otherwise. After [`RELOAD_SWAPS_REFUSED`] reads refused so, the store
     /// is read once under the lock, so a stream of own acts cannot keep this instance from taking
     /// up the other instances' acts. A store that writes the Hosts whole writes them once the lock
-    /// is released; it is the only writer of its ledger, so nothing reloads it.
+    /// is released; it is the only writer of its ledger, so nothing reloads it. Reloads run one at
+    /// a time, so a read is never swapped in over a later one.
     ///
     /// # Errors
     /// Returns an error when the store cannot be read; what is held is then kept.
     pub fn reload_ledger(&self) -> Result<(), String> {
+        let _reloading = self.reloading.lock().expect("reload lock");
         for _ in 0..RELOAD_SWAPS_REFUSED {
             let began = self.state.lock().expect("revocation lock").acts;
             let fresh = self.read_ledger()?;
@@ -1631,24 +1637,27 @@ impl Revocations {
     }
 
     /// The state the store holds, its revoked set built, so the first check after the swap does
-    /// not build it under the lock.
-    fn read_ledger(&self) -> Result<State, String> {
+    /// not build it under the lock, and a copy of its list, which the swap compares with what was
+    /// held once the lock is released.
+    fn read_ledger(&self) -> Result<(State, Vec<Revocation>), String> {
         let mut fresh = State::loaded(self.store.load()?);
         fresh.revoked();
-        Ok(fresh)
+        let list = fresh.revocations.clone();
+        Ok((fresh, list))
     }
 
-    /// Swaps `fresh` in for what `state` holds, and announces the list when it changed.
-    fn swap(&self, mut state: MutexGuard<'_, State>, mut fresh: State) {
+    /// Swaps `fresh` in for what `state` holds, and announces the list when it changed from what
+    /// was held.
+    fn swap(&self, mut state: MutexGuard<'_, State>, (mut fresh, list): (State, Vec<Revocation>)) {
         fresh.hosts_version = state.hosts_version;
         fresh.acts = state.acts;
         #[cfg(test)]
         {
             fresh.rebuilds = state.rebuilds;
         }
-        let changed = state.revocations != fresh.revocations;
         let held = std::mem::replace(&mut *state, fresh);
         drop(state);
+        let changed = held.revocations != list;
         // What was held is dropped once the lock is released.
         drop(held);
         if changed {
@@ -2946,13 +2955,147 @@ mod tests {
         std::sync::mpsc::Receiver<()>,
     );
 
+    /// A store in memory that writes each act on the Hosts and each binding as the PostgreSQL
+    /// store does, as one write on the rows it names, under the state lock; the shape of the only
+    /// store an instance reloads.
+    #[derive(Clone, Default)]
+    struct ByAct(Memory);
+
+    impl ByAct {
+        fn bound(hosts: &mut BTreeMap<String, Host>, uid: &str, host: &str) -> Bound {
+            if let Some((other, _)) = hosts
+                .iter()
+                .find(|(name, entry)| *name != host && entry.instance_uids.contains(uid))
+            {
+                return Bound::Taken(other.clone());
+            }
+            let entry = hosts.entry(host.to_string()).or_default();
+            if entry.gateway {
+                return Bound::Gateway;
+            }
+            entry.instance_uids.insert(uid.to_string());
+            Bound::Bound
+        }
+
+        fn row(entry: &Host) -> Host {
+            Host {
+                instance_uids: BTreeSet::new(),
+                ..entry.clone()
+            }
+        }
+    }
+
+    impl LedgerStore for ByAct {
+        fn load(&self) -> Result<Ledger, String> {
+            self.0.load()
+        }
+        fn put_issued(&self, issued: &Issued) -> Result<(), String> {
+            self.0.put_issued(issued)
+        }
+        fn remove_issued(&self, id: &CertId) -> Result<(), String> {
+            self.0.remove_issued(id)
+        }
+        fn register_minting(
+            &self,
+            issued: &Issued,
+            _: &RegisterBounds,
+            mint: Option<(&str, &Host)>,
+            _: Option<&CertId>,
+        ) -> Result<Registered, String> {
+            self.0.put_issued(issued)?;
+            if let Some((host, entry)) = mint {
+                let mut ledger = self.0 .0.lock().expect("lock");
+                ledger
+                    .hosts
+                    .entry(host.to_string())
+                    .or_insert_with(|| Self::row(entry));
+            }
+            Ok(Registered::Registered)
+        }
+        fn add_revocation(&self, entry: &Revocation, bound: usize) -> Result<Added, String> {
+            self.0.add_revocation(entry, bound)
+        }
+        fn remove_revocation(&self, id: &str) -> Result<bool, String> {
+            self.0.remove_revocation(id)
+        }
+        fn bind(&self, instance_uid: &str, host: &str) -> Result<Bound, String> {
+            let mut ledger = self.0 .0.lock().expect("lock");
+            Ok(Self::bound(&mut ledger.hosts, instance_uid, host))
+        }
+        fn bind_seen(&self, instance_uid: &str, host: &str, row: &Host) -> Result<Bound, String> {
+            let mut ledger = self.0 .0.lock().expect("lock");
+            ledger
+                .hosts
+                .entry(host.to_string())
+                .or_insert_with(|| Self::row(row));
+            Ok(Self::bound(&mut ledger.hosts, instance_uid, host))
+        }
+        fn unbind(&self, instance_uid: &str) -> Result<Option<String>, String> {
+            let mut ledger = self.0 .0.lock().expect("lock");
+            Ok(ledger.hosts.iter_mut().find_map(|(name, entry)| {
+                entry
+                    .instance_uids
+                    .remove(instance_uid)
+                    .then(|| name.clone())
+            }))
+        }
+        fn writes_hosts_by_act(&self) -> bool {
+            true
+        }
+        fn write_host_act(&self, act: &HostAct) -> Result<(), String> {
+            let hosts = &mut self.0 .0.lock().expect("lock").hosts;
+            match act {
+                HostAct::Seen { host, entry } => match hosts.get_mut(host) {
+                    Some(held) => {
+                        held.extend(entry.valid_until_ms.unwrap_or(0));
+                    }
+                    None => {
+                        hosts.insert(host.clone(), Self::row(entry));
+                    }
+                },
+                HostAct::Extended(untils) => {
+                    for (host, until) in untils {
+                        if let Some(held) = hosts.get_mut(host) {
+                            held.extend(*until);
+                        }
+                    }
+                }
+                HostAct::Gateway { host, gateway } => {
+                    let held = hosts.entry(host.clone()).or_default();
+                    held.gateway = *gateway;
+                    if *gateway {
+                        held.instance_uids.clear();
+                    }
+                }
+                HostAct::Forgotten {
+                    hosts: ended,
+                    now_ms,
+                } => hosts.retain(|name, held| {
+                    !ended.contains(name)
+                        || held.gateway
+                        || held.valid_until_ms.is_none_or(|t| t > *now_ms)
+                }),
+            }
+            Ok(())
+        }
+        fn save_hosts(&self, hosts: &BTreeMap<String, Host>) -> Result<(), String> {
+            self.0.save_hosts(hosts)
+        }
+    }
+
     /// A store whose next read, once armed, takes what it holds and then waits for a go-ahead
     /// before it answers it, as a read of a large ledger takes its time.
-    #[derive(Clone, Default)]
+    #[derive(Clone)]
     struct ReadHeld {
-        inner: Memory,
+        inner: Arc<dyn LedgerStore>,
         hold: Arc<Mutex<Option<Hold>>>,
         loads: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Default for ReadHeld {
+        fn default() -> Self {
+            Self::over(Arc::new(Memory::default()))
+        }
     }
 
     /// The read a test holds open: `reading` says it has begun, `go` lets it answer.
@@ -2962,6 +3105,19 @@ mod tests {
     }
 
     impl ReadHeld {
+        fn over(inner: Arc<dyn LedgerStore>) -> Self {
+            ReadHeld {
+                inner,
+                hold: Arc::default(),
+                loads: Arc::default(),
+            }
+        }
+
+        /// Over a store that writes the Hosts by act.
+        fn by_act() -> Self {
+            Self::over(Arc::new(ByAct::default()))
+        }
+
         /// Holds the next read open; counts the reads from here on.
         fn arm(&self) -> Reading {
             let (began, reading) = std::sync::mpsc::sync_channel(1);
@@ -2990,11 +3146,48 @@ mod tests {
         fn remove_issued(&self, id: &CertId) -> Result<(), String> {
             self.inner.remove_issued(id)
         }
+        fn register_issued(
+            &self,
+            issued: &Issued,
+            bounds: &RegisterBounds,
+        ) -> Result<Registered, String> {
+            self.inner.register_issued(issued, bounds)
+        }
+        fn register_minting(
+            &self,
+            issued: &Issued,
+            bounds: &RegisterBounds,
+            mint: Option<(&str, &Host)>,
+            bootstrap: Option<&CertId>,
+        ) -> Result<Registered, String> {
+            self.inner.register_minting(issued, bounds, mint, bootstrap)
+        }
         fn add_revocation(&self, entry: &Revocation, bound: usize) -> Result<Added, String> {
             self.inner.add_revocation(entry, bound)
         }
         fn remove_revocation(&self, id: &str) -> Result<bool, String> {
             self.inner.remove_revocation(id)
+        }
+        fn bind(&self, instance_uid: &str, host: &str) -> Result<Bound, String> {
+            self.inner.bind(instance_uid, host)
+        }
+        fn bind_seen(&self, instance_uid: &str, host: &str, row: &Host) -> Result<Bound, String> {
+            self.inner.bind_seen(instance_uid, host, row)
+        }
+        fn unbind(&self, instance_uid: &str) -> Result<Option<String>, String> {
+            self.inner.unbind(instance_uid)
+        }
+        fn rebind(&self, old: &str, new: &str) -> Result<Option<(String, Bound)>, String> {
+            self.inner.rebind(old, new)
+        }
+        fn unbind_host(&self, host: &str) -> Result<(), String> {
+            self.inner.unbind_host(host)
+        }
+        fn writes_hosts_by_act(&self) -> bool {
+            self.inner.writes_hosts_by_act()
+        }
+        fn write_host_act(&self, act: &HostAct) -> Result<(), String> {
+            self.inner.write_host_act(act)
         }
         fn save_hosts(&self, hosts: &BTreeMap<String, Host>) -> Result<(), String> {
             self.inner.save_hosts(hosts)
@@ -3095,24 +3288,34 @@ mod tests {
 
     /// An act of this instance's own committed while a reload reads the store holds once the read
     /// ends: the read is not swapped in, and the store is read again.
+    ///
+    /// Crossed on both shapes of store: one that writes the Hosts whole once the lock is released,
+    /// and one that writes each act under it, as the PostgreSQL store, the one reloaded, does.
     fn an_own_act_outlives_a_reload(
-        setup: impl FnOnce(&Revocations),
-        act: impl FnOnce(&Revocations),
+        setup: impl Fn(&Revocations),
+        act: impl Fn(&Revocations),
         holds: impl Fn(&Revocations) -> bool,
     ) {
-        let store = ReadHeld::default();
-        let revocations = open_held(&store);
-        setup(&revocations);
-        let (go, reloader) = reload_held(&store, &revocations);
-        act(&revocations);
-        assert!(holds(&revocations), "the act holds before the read ends");
-        go.send(()).expect("go");
-        reloader.join().expect("reloader").expect("reloaded");
-        assert!(
-            holds(&revocations),
-            "the read taken before the act put it back"
-        );
-        assert_eq!(store.loads.load(Ordering::SeqCst), 2, "read again");
+        for (shape, store) in [
+            ("whole", ReadHeld::default()),
+            ("by act", ReadHeld::by_act()),
+        ] {
+            let revocations = open_held(&store);
+            setup(&revocations);
+            let (go, reloader) = reload_held(&store, &revocations);
+            act(&revocations);
+            assert!(
+                holds(&revocations),
+                "{shape}: the act holds before the read ends"
+            );
+            go.send(()).expect("go");
+            reloader.join().expect("reloader").expect("reloaded");
+            assert!(
+                holds(&revocations),
+                "{shape}: the read taken before the act put it back"
+            );
+            assert_eq!(store.loads.load(Ordering::SeqCst), 2, "{shape}: read again");
+        }
     }
 
     fn uid(n: u8) -> String {
@@ -3336,5 +3539,55 @@ mod tests {
                 "own revocation {n} held"
             );
         }
+        assert_eq!(
+            revocations.list(),
+            store.inner.load().expect("load").revocations,
+            "the read under the lock holds what the store holds"
+        );
+    }
+
+    /// Two reloads at once never swap an older read over a newer one: the second reads once the
+    /// first has swapped.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    #[test]
+    fn a_reload_never_swaps_an_older_read_over_a_newer_one() {
+        let store = ReadHeld::default();
+        let revocations = open_held(&store);
+        let (go, first) = reload_held(&store, &revocations);
+        // Another instance revokes a1 after the first read began.
+        store
+            .inner
+            .add_revocation(
+                &Revocation {
+                    id: "other".into(),
+                    revoked: Revoked::Certificate {
+                        authority: "client".into(),
+                        issuers: vec![name_hash(CA)],
+                        serial: "a1".into(),
+                    },
+                    revoked_ms: NOW,
+                },
+                MAX_REVOCATIONS,
+            )
+            .expect("another instance revokes");
+        let (done, second) = std::sync::mpsc::channel();
+        {
+            let revocations = revocations.clone();
+            std::thread::spawn(move || {
+                let _ = done.send(revocations.reload_ledger());
+            });
+        }
+        // A second reload that did not wait for the first ends here, its newer read swapped in.
+        let early = second.recv_timeout(std::time::Duration::from_millis(300));
+        go.send(()).expect("go");
+        first.join().expect("first").expect("first reloaded");
+        early
+            .or_else(|_| second.recv_timeout(PATIENCE))
+            .expect("the second reload ends")
+            .expect("second reloaded");
+        assert!(
+            revocations.is_certificate_revoked(&id("a1")),
+            "the older read was swapped in last"
+        );
     }
 }
