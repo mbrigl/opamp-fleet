@@ -39,6 +39,7 @@ stack is named in its environment, as the service smoke test and the store check
 - docs/plan/several-server-instances/08-the-audit-record-is-one-chain-per-lease.md
 - docs/plan/several-server-instances/09-an-instance-on-postgresql-and-s3-needs-no-disk.md
 - docs/plan/several-server-instances/18-a-reload-holds-the-state-lock-only-to-swap.md
+- docs/plan/several-server-instances/19-what-an-assignment-pins-is-decided-in-the-transaction.md
 
 ## Mode
 
