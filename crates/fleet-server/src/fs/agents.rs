@@ -320,7 +320,7 @@ impl AgentStore for FsAgentStore {
         &self,
         revisions: &[Pinned],
         agents: &[(InstanceUid, PersistedAgent)],
-    ) -> Result<(), String> {
+    ) -> Result<Vec<InstanceUid>, String> {
         for pinned in revisions {
             super::configs::retain(&self.configurations, pinned)?;
         }
@@ -347,7 +347,7 @@ impl AgentStore for FsAgentStore {
                 }
             }
         }
-        Ok(())
+        Ok(written.into_iter().map(|(uid, ..)| uid).collect())
     }
 
     fn pinning(&self, pin: Pin<'_>) -> usize {

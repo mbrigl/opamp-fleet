@@ -289,7 +289,7 @@ mod tests {
 
     /// Adds `pinned` as a rollout that writes no record does.
     fn release(agents: &dyn AgentStore, pinned: &Pinned) -> Result<(), String> {
-        agents.release(std::slice::from_ref(pinned), &[])
+        agents.release(std::slice::from_ref(pinned), &[]).map(drop)
     }
 
     fn revision(body: &str) -> Revision {

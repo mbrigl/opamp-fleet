@@ -343,7 +343,9 @@ pub trait AgentStore: Send + Sync {
     /// record a shared store writes the assignment alone, and of a record it no longer holds
     /// nothing; it writes them in the order of their `instance_uid` whatever order they are given
     /// in, so two releases over the same Agents on two Servers wait for each other and never
-    /// deadlock.
+    /// deadlock. Answers the Agents whose records it wrote, in the order given: on a shared store
+    /// not one forgotten through another Server, whose assignment a rollout therefore neither
+    /// counts nor holds.
     ///
     /// # Errors
     /// Returns an error when the revisions or a record cannot be written.
@@ -351,7 +353,7 @@ pub trait AgentStore: Send + Sync {
         &self,
         revisions: &[Pinned],
         agents: &[(InstanceUid, PersistedAgent)],
-    ) -> Result<(), String>;
+    ) -> Result<Vec<InstanceUid>, String>;
 
     /// How many stored assignments pin `pin` (ADR-0026 clause 12).
     fn pinning(&self, pin: Pin<'_>) -> usize;

@@ -395,7 +395,7 @@ impl AgentStore for PgAgentStore {
         &self,
         revisions: &[Pinned],
         agents: &[(InstanceUid, PersistedAgent)],
-    ) -> Result<(), String> {
+    ) -> Result<Vec<InstanceUid>, String> {
         let revisions = revisions.to_vec();
         let mut records: Vec<(String, Option<Assignment>)> = agents
             .iter()
@@ -403,30 +403,38 @@ impl AgentStore for PgAgentStore {
             .collect();
         records.sort_by(|(a, _), (b, _)| a.cmp(b));
         let written = revisions.len() + records.len();
-        self.database.run_writing(written, move |pool| async move {
-            let mut client = client(&pool).await?;
-            let transaction = client.transaction().await.map_err(sql)?;
-            super::configs::retain(&*transaction, &revisions).await?;
-            let pinned: BTreeSet<&str> = revisions
-                .iter()
-                .map(|pinned| pinned.configuration.as_str())
-                .collect();
-            for configuration in pinned {
-                notify(&*transaction, CONFIGURATION, configuration).await?;
-            }
-            for (key, assignment) in &records {
-                if write_assignment(&*transaction, key, assignment.as_ref()).await? {
-                    notify(&*transaction, ASSIGNMENT, key).await?;
+        let wrote: BTreeSet<String> =
+            self.database.run_writing(written, move |pool| async move {
+                let mut client = client(&pool).await?;
+                let transaction = client.transaction().await.map_err(sql)?;
+                super::configs::retain(&*transaction, &revisions).await?;
+                let pinned: BTreeSet<&str> = revisions
+                    .iter()
+                    .map(|pinned| pinned.configuration.as_str())
+                    .collect();
+                for configuration in pinned {
+                    notify(&*transaction, CONFIGURATION, configuration).await?;
                 }
-            }
-            transaction.commit().await.map_err(sql)
-        })?;
+                let mut wrote = BTreeSet::new();
+                for (key, assignment) in records {
+                    if write_assignment(&*transaction, &key, assignment.as_ref()).await? {
+                        notify(&*transaction, ASSIGNMENT, &key).await?;
+                        wrote.insert(key);
+                    }
+                }
+                transaction.commit().await.map_err(sql)?;
+                Ok(wrote)
+            })?;
+        let wrote: Vec<&(InstanceUid, PersistedAgent)> = agents
+            .iter()
+            .filter(|(uid, _)| wrote.contains(&uid.to_string()))
+            .collect();
         self.stored(
-            agents
+            wrote
                 .iter()
                 .map(|(uid, record)| (uid, record.assignment.as_ref())),
         );
-        Ok(())
+        Ok(wrote.into_iter().map(|(uid, _)| *uid).collect())
     }
 
     fn pinning(&self, pin: Pin<'_>) -> usize {

@@ -1466,13 +1466,15 @@ impl AppState {
     /// keeps — and the revisions and the records carrying the new assignments go to the store as
     /// one operation. Only once it succeeded are they the fleet's. A failure leaves the fleet's
     /// assignments as they were, the store puts back the records it wrote, and the revisions the
-    /// stored assignments do not reference are collected. Answers the Configurations the old and
-    /// new assignments name, whose unreferenced revisions the caller collects.
+    /// stored assignments do not reference are collected. An Agent whose record the store no
+    /// longer holds, forgotten through another instance, is released nothing: it is dropped here
+    /// too and its session ended. Answers how many Agents were released to, and the Configurations
+    /// the old and new assignments name, whose unreferenced revisions the caller collects.
     fn write_releases(
         &self,
         fleet: &mut HashMap<InstanceUid, AgentRecord>,
         releases: Vec<(InstanceUid, Option<Assignment>)>,
-    ) -> Result<Vec<String>, RolloutError> {
+    ) -> Result<(usize, Vec<String>), RolloutError> {
         let names: BTreeSet<String> = releases
             .iter()
             .flat_map(|(_, release)| release.iter())
@@ -1494,13 +1496,20 @@ impl AppState {
                         (uid, persisted)
                     })
                     .collect();
-                self.agent_store.release(revisions, &agents)?;
-                Ok(agents)
+                let wrote = self.agent_store.release(revisions, &agents)?;
+                Ok((agents, wrote))
             })
             .map_err(|e| {
                 self.collect_revisions(names);
                 RolloutError::Storage(e)
             })?;
+        let (agents, wrote) = written;
+        let (written, forgotten): (Vec<_>, Vec<_>) =
+            agents.into_iter().partition(|(uid, _)| wrote.contains(uid));
+        for (uid, _) in &forgotten {
+            self.drop_forgotten(fleet, uid);
+        }
+        let count = written.len();
         let mut digests = self.written.lock().expect("written lock");
         let mut touched = Vec::new();
         for (uid, persisted) in written {
@@ -1514,7 +1523,7 @@ impl AppState {
             );
             digests.insert(uid, persisted.durable_digest());
         }
-        Ok(touched)
+        Ok((count, touched))
     }
 
     /// Collects every retained revision of `names` no stored assignment references any more — a
@@ -1569,10 +1578,14 @@ impl AppState {
         if release == record.assignment {
             refuse_a_package_left_out(store, &deployment, record, release.as_ref())?;
         }
-        let touched = self.write_releases(&mut fleet, vec![(*uid, release)])?;
+        let (released, touched) = self.write_releases(&mut fleet, vec![(*uid, release)])?;
         // The release may have replaced a pinned revision nothing references any more.
         self.collect_revisions(touched);
         drop(fleet);
+        if released == 0 {
+            self.push.send_modify(|rev| *rev += 1);
+            return Err(RolloutError::UnknownAgent);
+        }
         self.push.send_modify(|rev| *rev += 1);
         info!(agent = %uid, deployment = %deployment.name, "rollout to agent");
         Ok(())
@@ -1609,8 +1622,7 @@ impl AppState {
         }
         // In one order, so a rollout that fails part-way fails the same way every time.
         releases.sort_by_key(|(uid, _)| uid.0);
-        let assigned = releases.len();
-        let touched = self.write_releases(&mut fleet, releases)?;
+        let (assigned, touched) = self.write_releases(&mut fleet, releases)?;
         self.collect_revisions(touched);
         drop(fleet);
         self.push.send_modify(|rev| *rev += 1);
@@ -6209,7 +6221,7 @@ mod tests {
             &self,
             revisions: &[crate::configs::Pinned],
             agents: &[(InstanceUid, PersistedAgent)],
-        ) -> Result<(), String> {
+        ) -> Result<Vec<InstanceUid>, String> {
             self.inner.release(revisions, agents)
         }
         fn pinning(&self, pin: Pin<'_>) -> usize {
@@ -6420,7 +6432,7 @@ mod tests {
             &self,
             revisions: &[crate::configs::Pinned],
             agents: &[(InstanceUid, PersistedAgent)],
-        ) -> Result<(), String> {
+        ) -> Result<Vec<InstanceUid>, String> {
             self.inner.release(revisions, agents)
         }
         fn pinning(&self, pin: Pin<'_>) -> usize {

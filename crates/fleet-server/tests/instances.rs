@@ -2119,3 +2119,88 @@ fn an_agent_rekeyed_at_its_request_keeps_its_stored_record() {
         .iter()
         .any(|view| view.instance_uid == rekeyed.to_string()));
 }
+
+/// A rollout on A to Agents forgotten through B meanwhile, before A heard of it, releases to the
+/// others alone: the press counts only the Agents it wrote an assignment for, a rollout to one
+/// forgotten Agent answers that it is unknown, and A holds neither any more.
+/// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts, ADR-0026
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_rollout_counts_only_the_agents_it_released_to() {
+    use fleet_server::fleet::{AppState, RolloutError, Transport};
+    use opamp::proto::{AgentDescription, AnyValue, KeyValue};
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let a = Instance::start_deaf(&pki, &schema, schema.config_on(schema.config.port)).await;
+    let b = AppState::on(&records(&schema)).expect("state");
+    let (kept, forgotten, named) = (
+        InstanceUid([0x71; 16]),
+        InstanceUid([0x72; 16]),
+        InstanceUid([0x73; 16]),
+    );
+    let report = |uid: InstanceUid| AgentToServer {
+        instance_uid: uid.as_bytes().to_vec(),
+        sequence_num: 1,
+        capabilities: AgentCapabilities::ReportsStatus as u64
+            | AgentCapabilities::AcceptsRemoteConfig as u64,
+        agent_description: Some(AgentDescription {
+            identifying_attributes: vec![KeyValue {
+                key: "service.name".to_string(),
+                value: Some(AnyValue {
+                    value: Some(opamp::proto::any_value::Value::StringValue(
+                        "otelcol".to_string(),
+                    )),
+                }),
+            }],
+            non_identifying_attributes: Vec::new(),
+        }),
+        ..Default::default()
+    };
+    let on_a = a.state.clone();
+    let (to_one, released) = tokio::task::spawn_blocking(move || {
+        for uid in [kept, forgotten, named] {
+            on_a.process(report(uid), Transport::Http, None);
+        }
+        on_a.save_configuration(
+            "collector",
+            fleet_server::configs::Revision {
+                body: "receivers: {}".to_string(),
+                role: String::new(),
+                service_name: "otelcol".to_string(),
+            },
+        )
+        .expect("save");
+        on_a.deployment_store()
+            .expect("deployments")
+            .put(
+                "stable",
+                std::collections::BTreeMap::from([(
+                    "service.name".to_string(),
+                    "otelcol".to_string(),
+                )]),
+            )
+            .expect("deployment");
+        on_a.put_deployment_configuration("stable", "collector")
+            .expect("hold it");
+        // Silent past any budget, and forgotten through B.
+        schema.sql("UPDATE agents SET last_seen_ms = last_seen_ms - 120000");
+        for uid in [forgotten, named] {
+            assert!(b.forget_agent(&uid).is_ok(), "B forgets {uid}");
+        }
+        let to_one = on_a.rollout_to_agent(&named, None);
+        (
+            to_one,
+            on_a.rollout_deployment("stable")
+                .map_err(|e| format!("{e:?}")),
+        )
+    })
+    .await
+    .expect("roll out");
+    assert_eq!(released, Ok(1), "only the Agent still stored is counted");
+    assert!(matches!(to_one, Err(RolloutError::UnknownAgent)));
+    for uid in [forgotten, named] {
+        assert!(view_of(&a, uid).is_none(), "A holds {uid} no more");
+    }
+    assert!(view_of(&a, kept).is_some_and(|view| view.assigned_deployment == "stable"));
+}
