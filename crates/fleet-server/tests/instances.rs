@@ -2025,3 +2025,97 @@ async fn an_agent_forgotten_through_one_instance_has_its_session_ended_by_the_on
     );
     assert!(view_of(&a, uid).is_none(), "and holds it no more");
 }
+
+/// An Agent forgotten through B stays forgotten when A, which holds it and has not heard of it
+/// yet, writes its next report or flushes at shutdown: A writes nothing of it again, neither the
+/// record nor the labels it held, and drops the Agent it reported for and ends its session.
+/// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts, ADR-0024
+#[test]
+fn an_agent_forgotten_through_one_instance_is_not_written_again_by_another() {
+    use fleet_server::fleet::{AppState, Transport};
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let [a, b] = [(); 2].map(|()| AppState::on(&records(&schema)).expect("state"));
+    let (reporting, flushed) = (InstanceUid([0x51; 16]), InstanceUid([0x52; 16]));
+    let report = |uid: InstanceUid, sequence_num: u64, healthy: bool| AgentToServer {
+        instance_uid: uid.as_bytes().to_vec(),
+        sequence_num,
+        capabilities: AgentCapabilities::ReportsStatus as u64
+            | AgentCapabilities::ReportsHealth as u64,
+        health: Some(opamp::proto::ComponentHealth {
+            healthy,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    for (conn, uid) in [(7, reporting), (8, flushed)] {
+        a.process(report(uid, 1, true), Transport::WebSocket, Some(conn));
+    }
+    assert!(b
+        .set_labels(
+            &reporting,
+            std::collections::BTreeMap::from([("tier".to_string(), "edge".to_string())]),
+        )
+        .is_ok());
+    // No presence is stored for either, and B decides from what is stored.
+    for uid in [reporting, flushed] {
+        assert!(b.forget_agent(&uid).is_ok(), "B forgets {uid}");
+    }
+
+    // A has not heard of it, and the next report changed its health.
+    let answered = a.process(report(reporting, 2, false), Transport::WebSocket, Some(7));
+    assert_eq!(answered.uid, None, "A carries it no more");
+    a.flush_agents();
+    assert!(
+        schema.query("SELECT instance_uid FROM agents").is_empty(),
+        "neither is written again"
+    );
+    assert_eq!(a.take_forgotten(7), [reporting], "its session ends");
+    assert!(a
+        .snapshot()
+        .iter()
+        .all(|view| view.instance_uid != reporting.to_string()));
+}
+
+/// An Agent that asks for a new identity keeps its stored record under the new key, and the
+/// instance that carries it keeps carrying it: the record moves in the store, and is not dropped
+/// as one forgotten.
+/// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts
+#[test]
+fn an_agent_rekeyed_at_its_request_keeps_its_stored_record() {
+    use fleet_server::fleet::{AppState, Transport};
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let a = AppState::on(&records(&schema)).expect("state");
+    let uid = InstanceUid([0x53; 16]);
+    let report = |flags: u64, sequence_num: u64| AgentToServer {
+        instance_uid: uid.as_bytes().to_vec(),
+        sequence_num,
+        capabilities: AgentCapabilities::ReportsStatus as u64,
+        flags,
+        ..Default::default()
+    };
+    a.process(report(0, 1), Transport::WebSocket, Some(7));
+    let rekeyed = a
+        .process(
+            report(
+                opamp::proto::AgentToServerFlags::RequestInstanceUid as u64,
+                2,
+            ),
+            Transport::WebSocket,
+            Some(7),
+        )
+        .uid
+        .expect("carried under its new identity");
+    assert_ne!(rekeyed, uid);
+    assert_eq!(
+        schema.query("SELECT instance_uid FROM agents"),
+        [rekeyed.to_string()]
+    );
+    assert!(a
+        .snapshot()
+        .iter()
+        .any(|view| view.instance_uid == rekeyed.to_string()));
+}

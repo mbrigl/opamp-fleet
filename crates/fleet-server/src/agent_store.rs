@@ -221,6 +221,20 @@ pub trait AgentStore: Send + Sync {
     /// whose one Server is its only writer may write the whole record, which that Server holds.
     fn put(&self, uid: &InstanceUid, record: &PersistedAgent) -> Result<(), String>;
 
+    /// Writes the part of a stored record a report decides, as [`put`](Self::put) does of one that
+    /// exists, and creates none: what the fleet writes of an Agent whose record it created or read.
+    /// Answers whether there was a record. On a shared store none means another Server forgot the
+    /// Agent, and writing it again would undo that and pass the bound of
+    /// [`create_within`](Self::create_within) (ADR-0024 clause 14). A store whose one Server is its
+    /// only writer writes the record whole.
+    ///
+    /// # Errors
+    /// Returns an error when the record cannot be written.
+    fn write_report(&self, uid: &InstanceUid, record: &PersistedAgent) -> Result<bool, String> {
+        self.put(uid, record)?;
+        Ok(true)
+    }
+
     /// Creates the record of an Agent first heard of, unless the store holds `max_records` records
     /// already. A shared store counts them where they are stored, in the step that creates it, so
     /// the bound holds for every Server on it, however many create at once (ADR-0021 clause 12).

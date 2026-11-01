@@ -101,7 +101,16 @@ impl AgentStore for PgAgentStore {
         let created = self.database.run(move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
-            let created = write_reported(&*transaction, &uid, &record).await?;
+            // One another instance created in between the two is written to again, the columns a
+            // report decides alone.
+            let created = loop {
+                if write_reported(&*transaction, &uid, &record).await? {
+                    break false;
+                }
+                if insert(&*transaction, &uid, &record, "DO NOTHING").await? {
+                    break true;
+                }
+            };
             transaction.commit().await.map_err(sql)?;
             Ok(created.then_some(record.assignment))
         })?;
@@ -109,6 +118,15 @@ impl AgentStore for PgAgentStore {
             self.stored([(&uid, assignment.as_ref())]);
         }
         Ok(())
+    }
+
+    /// The columns a report decides, of a row that is there; nothing where none is.
+    fn write_report(&self, uid: &InstanceUid, record: &PersistedAgent) -> Result<bool, String> {
+        let (uid, record) = (*uid, record.clone());
+        self.database.run(move |pool| async move {
+            let client = client(&pool).await?;
+            write_reported(&**client, &uid, &record).await
+        })
     }
 
     /// One transaction under a lock only creations take, so two instances creating at once count
@@ -570,8 +588,8 @@ const REPORTED: [&str; 12] = [
     "host",
 ];
 
-/// Creates one Agent record whole, or writes the columns a report decides of one that exists,
-/// inside the caller's transaction. Answers whether it created it.
+/// Writes the columns a report decides of one Agent record, inside the caller's transaction.
+/// Answers whether there was a record.
 async fn write_reported(
     client: &impl GenericClient,
     uid: &InstanceUid,
@@ -602,37 +620,28 @@ async fn write_reported(
     );
     let effective_config = record.effective_config.as_deref().map(str::as_bytes);
     let transport = record.transport.as_str();
-    // No row: the record is new, or was forgotten, and is written whole. One another instance
-    // created in between the two is written to again, the columns a report decides alone.
-    loop {
-        let updated = client
-            .execute(
-                &update,
-                &[
-                    &key,
-                    &sequence_num,
-                    &capabilities,
-                    &transport,
-                    &last_seen_ms,
-                    &effective_config,
-                    &description,
-                    &health,
-                    &remote_config_status,
-                    &connection_settings_status,
-                    &package_statuses,
-                    &available_components,
-                    &record.host,
-                ],
-            )
-            .await
-            .map_err(sql)?;
-        if updated > 0 {
-            return Ok(false);
-        }
-        if insert(client, uid, record, "DO NOTHING").await? {
-            return Ok(true);
-        }
-    }
+    Ok(client
+        .execute(
+            &update,
+            &[
+                &key,
+                &sequence_num,
+                &capabilities,
+                &transport,
+                &last_seen_ms,
+                &effective_config,
+                &description,
+                &health,
+                &remote_config_status,
+                &connection_settings_status,
+                &package_statuses,
+                &available_components,
+                &record.host,
+            ],
+        )
+        .await
+        .map_err(sql)?
+        > 0)
 }
 
 /// Writes the assignment of one Agent record alone, its Configurations exactly the assignment's,
@@ -873,7 +882,7 @@ mod tests {
 
     /// A report's write on PostgreSQL leaves what the acts wrote through another instance: the
     /// labels, a queued restart and the assignment stay as they are stored, while what the report
-    /// decides is written; a record that is not there is written whole.
+    /// decides is written; a record that is not there is not written.
     /// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts, ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
     #[test]
     fn a_report_written_on_postgres_keeps_what_the_acts_wrote() {
@@ -914,13 +923,18 @@ mod tests {
         report.restart_pending = false;
         report.health = None;
         report.last_seen_ms += 30_000;
-        a.put(&uid, &report).expect("report");
+        assert_eq!(a.write_report(&uid, &report), Ok(true));
         let stored = a.get(&uid).expect("get").expect("stored");
         assert_eq!(stored.labels, labels, "the labels stay as B set them");
         assert!(stored.restart_pending, "the restart stays queued");
         assert_eq!(stored.assignment, None, "the release stays");
         assert_eq!(stored.health, None, "what the report decides is written");
         assert_eq!(stored.last_seen_ms, report.last_seen_ms);
+
+        // A record forgotten meanwhile is not written again.
+        b.remove(&uid).expect("forget");
+        assert_eq!(a.write_report(&uid, &report), Ok(false));
+        assert_eq!(a.get(&uid), Ok(None), "nothing created");
     }
 
     /// Verifies: ADR-0029

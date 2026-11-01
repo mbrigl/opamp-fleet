@@ -1350,12 +1350,7 @@ impl AppState {
                 continue;
             };
             let Some(persisted) = persisted else {
-                let group = record.placement.group.clone();
-                self.end_session(&uid, record);
-                fleet.remove(&uid);
-                self.written.lock().expect("written lock").remove(&uid);
-                self.unplace(&mut fleet, &uid, group);
-                info!(agent = %uid, "dropped an agent forgotten through another instance");
+                self.drop_forgotten(&mut fleet, &uid);
                 moved += 1;
                 continue;
             };
@@ -1989,31 +1984,74 @@ impl AppState {
     /// along on whatever write happens, so the common heartbeat reaches no storage backend at
     /// all; [`flush_agents`](Self::flush_agents) is what makes them current on a graceful stop.
     /// A write that fails is logged, never fatal: a fleet that keeps running on a full disk beats
-    /// one that refuses reports.
-    fn persist_if_dirty(&self, uid: &InstanceUid, record: &AgentRecord) {
-        if let Err(e) = self.persist(uid, record) {
-            warn!(agent = %uid, error = %e, "cannot persist the agent record");
+    /// one that refuses reports. Answers whether the record is still stored: on a shared store
+    /// one forgotten through another instance is not, and is not written again.
+    fn persist_if_dirty(&self, uid: &InstanceUid, record: &AgentRecord) -> bool {
+        match self.persist(uid, record) {
+            Ok(stored) => stored,
+            Err(e) => {
+                warn!(agent = %uid, error = %e, "cannot persist the agent record");
+                true
+            }
         }
     }
 
     /// Writes one record when its durable content changed since it was last written, and says
-    /// whether the write failed — for an operator's act that must not be answered unwritten.
+    /// whether the write failed — for an operator's act that must not be answered unwritten — or
+    /// found no record to write, as of an Agent forgotten through another instance. The record was
+    /// created or read before (ADR-0024 clause 14), so only what a report decides is written of
+    /// it, and nothing creates it again.
     ///
     /// The `written` lock — and the fleet lock every caller holds while it reads `record` — stays
     /// held across the store's write. Releasing it would let two writes of one record race, and an
     /// older state land after a newer one while `written` names the newer; and an act is answered
     /// only once its record is written (ADR-0024 clause 4). What a store's write may take is
     /// bounded instead: a PostgreSQL call fails after `postgres::CALL_TIMEOUT` (ADR-0029 clause 24).
-    fn persist(&self, uid: &InstanceUid, record: &AgentRecord) -> Result<(), String> {
+    fn persist(&self, uid: &InstanceUid, record: &AgentRecord) -> Result<bool, String> {
         let persisted = record.to_persisted();
         let digest = persisted.durable_digest();
         let mut written = self.written.lock().expect("written lock");
         if written.get(uid) == Some(&digest) {
-            return Ok(());
+            return Ok(true);
         }
-        self.agent_store.put(uid, &persisted)?;
+        if !self.agent_store.write_report(uid, &persisted)? {
+            return Ok(false);
+        }
         written.insert(*uid, digest);
-        Ok(())
+        Ok(true)
+    }
+
+    /// Answers a report of an Agent whose record another instance forgot while this one wrote it:
+    /// the Agent is dropped here too and its session ended, and the reply offers nothing
+    /// (ADR-0024 clause 10).
+    fn forgotten_elsewhere(
+        &self,
+        fleet: &mut HashMap<InstanceUid, AgentRecord>,
+        uid: &InstanceUid,
+        reported: &InstanceUid,
+    ) -> Processed {
+        self.drop_forgotten(fleet, uid);
+        self.push.send_modify(|rev| *rev += 1);
+        Processed {
+            reply: ServerToAgent {
+                instance_uid: reported.as_bytes().to_vec(),
+                capabilities: self.capabilities(),
+                ..Default::default()
+            },
+            uid: None,
+            disconnected: false,
+        }
+    }
+
+    /// Drops an Agent another instance forgot from what this one holds, and ends its session.
+    fn drop_forgotten(&self, fleet: &mut HashMap<InstanceUid, AgentRecord>, uid: &InstanceUid) {
+        let Some(record) = fleet.remove(uid) else {
+            return;
+        };
+        self.end_session(uid, &record);
+        self.written.lock().expect("written lock").remove(uid);
+        self.unplace(fleet, uid, record.placement.group.clone());
+        info!(agent = %uid, "dropped an agent forgotten through another instance");
     }
 
     /// Drops one record from the store and the dirty-check ledger — the storage half of
@@ -2094,10 +2132,12 @@ impl AppState {
         let mut written = self.written.lock().expect("written lock");
         for (uid, record) in fleet.iter() {
             let persisted = record.to_persisted();
-            match self.agent_store.put(uid, &persisted) {
-                Ok(()) => {
+            match self.agent_store.write_report(uid, &persisted) {
+                Ok(true) => {
                     written.insert(*uid, persisted.durable_digest());
                 }
+                // Forgotten through another instance: not written again.
+                Ok(false) => {}
                 Err(e) => warn!(agent = %uid, error = %e, "cannot flush the agent record"),
             }
         }
@@ -2203,9 +2243,15 @@ impl AppState {
                 let group = record.placement.group.take();
                 fleet.insert(new_uid, record);
                 self.unplace(&mut fleet, &uid, group);
-                // The persisted record follows the identity (ADR-0024): the old key leaves the
-                // store now, the new one is written by the dirty check at this exchange's end.
-                self.unpersist(&uid);
+                // The stored record follows the identity in one step (ADR-0024 clause 14); what
+                // this report changes is written by the dirty check at this exchange's end.
+                if let Err(e) =
+                    self.agent_store
+                        .rekey(&uid, &new_uid, &fleet[&new_uid].to_persisted())
+                {
+                    warn!(old = %uid, new = %new_uid, error = %e, "cannot move the stored agent record");
+                }
+                self.written.lock().expect("written lock").remove(&uid);
             }
             info!(old = %uid, new = %new_uid, "assigned a server-generated instance_uid");
             identification = Some(AgentIdentification {
@@ -2499,7 +2545,9 @@ impl AppState {
                     Ok(outcome) => outcome,
                     Err(e) => {
                         warn!(agent = %uid, error = %e, "held back a certificate: the audit record is unavailable");
-                        self.persist_if_dirty(&uid, record);
+                        if !self.persist_if_dirty(&uid, record) {
+                            return self.forgotten_elsewhere(&mut fleet, &uid, &reported);
+                        }
                         return Processed {
                             reply: unavailable(&msg.instance_uid, &e),
                             uid: Some(uid),
@@ -2531,7 +2579,9 @@ impl AppState {
                         );
                         // The report's updates above are already in the record, so they are
                         // persisted even though the CSR is refused (ADR-0024).
-                        self.persist_if_dirty(&uid, record);
+                        if !self.persist_if_dirty(&uid, record) {
+                            return self.forgotten_elsewhere(&mut fleet, &uid, &reported);
+                        }
                         return Processed {
                             reply: bad_request(&e),
                             uid: Some(uid),
@@ -2581,7 +2631,9 @@ impl AppState {
                 != 0
             && self.take_restart(&uid, record)
         {
-            self.persist_if_dirty(&uid, record);
+            if !self.persist_if_dirty(&uid, record) {
+                return self.forgotten_elsewhere(&mut fleet, &uid, &reported);
+            }
             return Processed {
                 reply: restart_command(&uid, self.capabilities()),
                 uid: Some(uid),
@@ -2591,7 +2643,9 @@ impl AppState {
 
         // Everything this report changed is in the record now; persist it if it moved the
         // durable state (ADR-0024) — a heartbeat did not, and writes nothing.
-        self.persist_if_dirty(&uid, record);
+        if !self.persist_if_dirty(&uid, record) {
+            return self.forgotten_elsewhere(&mut fleet, &uid, &reported);
+        }
 
         // The config offer — composed from this Agent's assignments (ADR-0026), gated by the
         // hash comparison, and only toward an Agent that both said goodbye ≠ true and declared
@@ -6311,6 +6365,9 @@ mod tests {
         }
         fn put(&self, uid: &InstanceUid, record: &PersistedAgent) -> Result<(), String> {
             self.inner.put(uid, record)
+        }
+        fn write_report(&self, uid: &InstanceUid, record: &PersistedAgent) -> Result<bool, String> {
+            self.inner.write_report(uid, record)
         }
         fn create_within(
             &self,
