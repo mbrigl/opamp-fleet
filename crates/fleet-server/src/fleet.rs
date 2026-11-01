@@ -1086,8 +1086,8 @@ impl AppState {
     /// The record of `uid` as the Operator plane reads it from the shared store, placed as
     /// [`stored_fleet`](Self::stored_fleet) places it, without the whole fleet: one read of it and
     /// of the Agents the host register binds to the same Host, which are the group its Client
-    /// Agent is found in. An Agent the register binds to no Host is read alone, and placed among
-    /// the whole fleet only behind a Gateway, whose groups the register does not know.
+    /// Agent is found in. An Agent that arrived over a Gateway is placed among the whole fleet,
+    /// since the register knows no group behind a Gateway, whatever Host it binds the Agent to.
     fn stored_agent(&self, uid: &InstanceUid) -> Result<Option<AgentRecord>, String> {
         let bound = self.revocations.as_ref().and_then(|revocations| {
             let host = revocations.bound_host(uid.as_bytes())?;
@@ -1105,13 +1105,14 @@ impl AppState {
             uids.push(*uid);
         }
         let mut read = self.records_of(self.agent_store.query(Some(&uids))?);
+        // What places it is the Host it arrived over, not the one it is bound to: an Agent bound to
+        // a direct Host may report over a Gateway since.
         let behind_a_gateway = read.get(uid).is_some_and(|record| {
-            bound.is_none()
-                && record.host.as_deref().is_some_and(|host| {
-                    self.revocations
-                        .as_ref()
-                        .is_some_and(|revocations| revocations.is_gateway(host))
-                })
+            record.host.as_deref().is_some_and(|host| {
+                self.revocations
+                    .as_ref()
+                    .is_some_and(|revocations| revocations.is_gateway(host))
+            })
         });
         if behind_a_gateway {
             return Ok(self.stored_fleet()?.remove(uid));
@@ -2216,17 +2217,23 @@ impl AppState {
         // another, so what decides is the presence stored, read and removed in one step
         // (ADR-draft-the-fleet-record-of-agents-and-hosts clause 11).
         // On a shared store an Agent this instance does not hold has its assignment read first, so
-        // the revisions only it pinned are collected once it is gone.
+        // the revisions only it pinned are collected once it is gone. A record that cannot be
+        // read, one that does not decode among them, is still forgotten, and what it pinned is
+        // left to the next collection of its Configurations: forgetting is how such a record goes.
         let mut unheld_configurations = Vec::new();
         if self.agent_store.is_shared() {
             if !fleet.contains_key(uid) {
-                unheld_configurations = self
-                    .agent_store
-                    .get(uid)
-                    .map_err(ForgetError::Storage)?
-                    .and_then(|stored| stored.assignment)
-                    .map(|assignment| assignment.configurations.into_keys().collect())
-                    .unwrap_or_default();
+                match self.agent_store.get(uid) {
+                    Ok(stored) => {
+                        unheld_configurations = stored
+                            .and_then(|stored| stored.assignment)
+                            .map(|assignment| assignment.configurations.into_keys().collect())
+                            .unwrap_or_default();
+                    }
+                    Err(e) => {
+                        warn!(agent = %uid, error = %e, "cannot read the record to forget; forgetting it without collecting what it pinned");
+                    }
+                }
             }
             let silent_before = now_ms.saturating_sub(budget.as_millis() as u64);
             match self
@@ -7310,7 +7317,9 @@ mod tests {
             crate::postgres::agents::PgAgentStore::open(database.clone()).expect("open"),
         ));
         let whole = hooked.whole_queries.clone();
-        let b = on_postgres(&database, Box::new(hooked));
+        let dir = tempfile::tempdir().expect("blobs");
+        let b = delivering_on(&database, Box::new(hooked), dir.path());
+        aim_at_the_early_ring(&b);
         let view = b.agent_view(&agent).expect("read").expect("known");
         assert_eq!(
             view.inherited_labels.get("ring").map(String::as_str),
@@ -7322,11 +7331,12 @@ mod tests {
             .expect("read")
             .is_none());
         assert!(
-            matches!(
-                b.rollout_to_agent(&agent, None),
-                Err(RolloutError::UnknownResource(_) | RolloutError::NotApplicable(_))
-            ),
-            "known, and nothing to roll out"
+            b.rollout_to_agent(&agent, None).is_ok(),
+            "the Deployment aimed at the inherited label releases to it"
+        );
+        assert_eq!(
+            released_through(&database, &agent).as_deref(),
+            Some("early")
         );
         assert_eq!(
             whole.load(Ordering::SeqCst),
@@ -7334,6 +7344,149 @@ mod tests {
             "no read of the whole fleet"
         );
         assert!(b.snapshot().is_empty());
+    }
+
+    /// An instance on PostgreSQL with package delivery, its blobs under `dir`.
+    fn delivering_on(
+        database: &Arc<crate::postgres::Database>,
+        agents: Box<dyn AgentStore>,
+        dir: &std::path::Path,
+    ) -> AppState {
+        let records = crate::Records::Postgres(database.clone());
+        let (packages, _) = PackageStore::open_on(
+            &records,
+            Some(dir),
+            &toml::from_str::<crate::config::BlobsConfig>("").expect("blobs"),
+        )
+        .expect("packages");
+        on_postgres(database, agents).with_packages(Some(
+            PackageOffering::on(&records, packages).expect("deployments"),
+        ))
+    }
+
+    /// A Deployment `early`, selecting `ring=early`, that holds a Configuration for `otelcol`.
+    fn aim_at_the_early_ring(state: &AppState) {
+        state
+            .save_configuration(
+                "collector",
+                Revision {
+                    body: "receivers: {}\n".to_string(),
+                    role: String::new(),
+                    service_name: "otelcol".to_string(),
+                },
+            )
+            .expect("save");
+        state
+            .deployment_store()
+            .expect("deployments")
+            .put(
+                "early",
+                BTreeMap::from([("ring".to_string(), "early".to_string())]),
+            )
+            .expect("deployment");
+        state
+            .put_deployment_configuration("early", "collector")
+            .expect("hold it");
+    }
+
+    /// The Deployment the stored assignment of `uid` was released through.
+    fn released_through(
+        database: &Arc<crate::postgres::Database>,
+        uid: &InstanceUid,
+    ) -> Option<String> {
+        crate::postgres::agents::PgAgentStore::new(database.clone())
+            .get(uid)
+            .expect("read")
+            .and_then(|stored| stored.assignment)
+            .map(|assignment| assignment.deployment)
+    }
+
+    /// An Agent bound to a direct Host that reports over a Gateway since is placed by the Gateway
+    /// it arrived over: the list, its view and a rollout to it all inherit the labels of the
+    /// Client Agent behind that Gateway.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it, ADR-draft-the-fleet-record-of-agents-and-hosts
+    #[test]
+    fn an_agent_bound_to_a_direct_host_and_arriving_over_a_gateway_is_placed_by_the_gateway() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let a = on_postgres(
+            &database,
+            Box::new(crate::postgres::agents::PgAgentStore::open(database.clone()).expect("open")),
+        );
+        let (gateway, client, agent) = (
+            InstanceUid([0xa1; 16]),
+            InstanceUid([0xa2; 16]),
+            InstanceUid([0xa3; 16]),
+        );
+        let subject = crate::revocation::SubjectValues::default;
+        report_over(&a, "g", subject(), gateway, &[]);
+        assert_eq!(a.set_gateway("g", true), Ok(true));
+        report_over(&a, "h1", subject(), agent, &[]);
+        report_over(
+            &a,
+            "g",
+            subject(),
+            client,
+            &[("supervisor.kind.collector", "true"), ("host.name", "m1")],
+        );
+        report_over(&a, "g", subject(), agent, &[("host.name", "m1")]);
+        label(&a, &client, &[("ring", "early")]);
+
+        let dir = tempfile::tempdir().expect("blobs");
+        let b = delivering_on(
+            &database,
+            Box::new(crate::postgres::agents::PgAgentStore::open(database.clone()).expect("open")),
+            dir.path(),
+        );
+        aim_at_the_early_ring(&b);
+        let inherited =
+            |view: &AgentView| (view.inherited_labels.clone(), view.client_agent.clone());
+        let expected = (
+            BTreeMap::from([("ring".to_string(), "early".to_string())]),
+            client.to_string(),
+        );
+        let listed = b
+            .fleet_view()
+            .expect("fleet")
+            .into_iter()
+            .find(|view| view.instance_uid == agent.to_string())
+            .expect("listed");
+        assert_eq!(inherited(&listed), expected, "the list");
+        let viewed = b.agent_view(&agent).expect("read").expect("known");
+        assert_eq!(inherited(&viewed), expected, "its view");
+        assert!(b.rollout_to_agent(&agent, None).is_ok(), "a rollout to it");
+        assert_eq!(
+            released_through(&database, &agent).as_deref(),
+            Some("early")
+        );
+    }
+
+    /// A record that does not decode, which every read that meets it fails, can still be
+    /// forgotten through an instance that does not hold it, and is gone after.
+    /// Verifies: ADR-draft-the-servers-state-and-its-stores, ADR-draft-the-fleet-record-of-agents-and-hosts
+    #[test]
+    fn a_record_that_does_not_decode_can_be_forgotten() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let uid = InstanceUid([0x84; 16]);
+        crate::postgres::agents::PgAgentStore::new(database.clone())
+            .put(&uid, &crate::agent_store::tests::record())
+            .expect("put");
+        test.sql("UPDATE agents SET health = '\\xff'::bytea");
+        let state = on_postgres(
+            &database,
+            Box::new(crate::postgres::agents::PgAgentStore::open(database.clone()).expect("open")),
+        );
+        assert!(state.fleet_view().is_err(), "the fleet cannot be read");
+        assert!(
+            state.forget_agent(&uid).is_ok(),
+            "it is forgotten all the same"
+        );
+        assert!(state.fleet_view().expect("readable again").is_empty());
     }
 
     /// Forgetting an Agent this instance on PostgreSQL does not hold collects the revision only its
