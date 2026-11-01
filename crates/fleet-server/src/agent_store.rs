@@ -144,6 +144,15 @@ impl PersistedAgent {
     }
 }
 
+/// Where one Agent is connected, as the instance that carries it writes it
+/// (ADR-draft-the-fleet-record-of-agents-and-hosts clauses 3 and 4): whether a connection carries
+/// it, and when it was last heard from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Presence {
+    pub connected: bool,
+    pub last_seen_ms: u64,
+}
+
 /// What an assignment can pin (ADR-0026 clause 12): what a deletion asks about before it goes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Pin<'a> {
@@ -201,6 +210,25 @@ pub trait AgentStore: Send + Sync {
     /// whose one Server is its only writer may write the whole record, which that Server holds.
     fn put(&self, uid: &InstanceUid, record: &PersistedAgent) -> Result<(), String>;
 
+    /// Creates the record of an Agent first heard of, unless the store holds `max_records` records
+    /// already. A shared store counts them where they are stored, in the step that creates it, so
+    /// the bound holds for every Server on it, however many create at once (ADR-0021 clause 12).
+    /// Answers whether the record is stored: created, or there already, which passes no bound. A
+    /// store whose one Server holds every record bounds them in memory, and creates it.
+    ///
+    /// # Errors
+    /// Returns an error when the records cannot be counted or the record written.
+    fn create_within(
+        &self,
+        uid: &InstanceUid,
+        record: &PersistedAgent,
+        max_records: usize,
+    ) -> Result<bool, String> {
+        let _ = max_records;
+        self.put(uid, record)?;
+        Ok(true)
+    }
+
     /// Sets the labels of one record and nothing else, and announces it to the other Servers on the
     /// store. Answers whether there was a record to set them on.
     ///
@@ -225,6 +253,43 @@ pub trait AgentStore: Send + Sync {
 
     /// Forgets one record (ADR-0024); removing what is already absent is not an error.
     fn remove(&self, uid: &InstanceUid) -> Result<(), String>;
+
+    /// Writes the presence of the Agents `holder` carries, one batch, in the order of their
+    /// `instance_uid` whatever order they are given in, so two batches over the same Agents never
+    /// deadlock (ADR-draft-the-fleet-record-of-agents-and-hosts clause 4). A connected Agent names
+    /// `holder` as the instance that holds its connection; a disconnect is written only of an Agent
+    /// whose stored presence names `holder` or none, so it never undoes another instance's take;
+    /// `last_seen_ms` never moves back. A record no longer stored is written nothing. A store whose
+    /// one Server holds every presence in memory keeps none, and writes nothing.
+    ///
+    /// # Errors
+    /// Returns an error when the batch cannot be written; nothing of it is then written.
+    fn write_presence(
+        &self,
+        holder: &str,
+        presence: &[(InstanceUid, Presence)],
+    ) -> Result<(), String> {
+        let _ = (holder, presence);
+        Ok(())
+    }
+
+    /// Forgets one record of a shared store when its stored presence lets it go: when no instance
+    /// with a live lease holds its connection, or it was last heard from before `silent_before_ms`
+    /// (ADR-draft-the-fleet-record-of-agents-and-hosts clause 11). The presence is read and the
+    /// record removed in one step, so no report written meanwhile is forgotten unseen. Answers
+    /// `None` when there is no record, `Some(false)` when it is still reporting and is kept.
+    ///
+    /// # Errors
+    /// Returns an error when the record cannot be read or removed, and on a store that keeps no
+    /// presence, whose one Server decides from what it holds.
+    fn remove_if_silent(
+        &self,
+        uid: &InstanceUid,
+        silent_before_ms: u64,
+    ) -> Result<Option<bool>, String> {
+        let _ = (uid, silent_before_ms);
+        Err("this store keeps no presence; its Server decides from what it holds".to_string())
+    }
 
     /// The identity reassignment (`RequestInstanceUid`): one operation, so an adapter with atomic
     /// rename or transactions can make it one step.

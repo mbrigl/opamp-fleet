@@ -1933,3 +1933,95 @@ async fn a_restart_requested_through_one_instance_stays_until_the_carrying_insta
     assert!(is_restart(&sent), "{sent:?}");
     assert_eq!(queued(), ["false"]);
 }
+
+/// The ceiling on Agent records holds for the fleet: with room for one, an Agent first heard of
+/// through B is refused once A stored another, and the one A stored keeps reporting through B.
+/// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it, ADR-0021
+#[test]
+fn the_ceiling_on_agent_records_holds_across_instances() {
+    use fleet_server::fleet::{AppState, Transport};
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let [a, b] = [(); 2].map(|()| {
+        AppState::on(&records(&schema))
+            .expect("state")
+            .with_max_agents(1)
+    });
+    let report = |uid: InstanceUid| AgentToServer {
+        instance_uid: uid.as_bytes().to_vec(),
+        sequence_num: 1,
+        capabilities: AgentCapabilities::ReportsStatus as u64,
+        ..Default::default()
+    };
+    let (first, second) = (InstanceUid([0x31; 16]), InstanceUid([0x32; 16]));
+    let refused = |processed: fleet_server::fleet::Processed| {
+        processed
+            .reply
+            .error_response
+            .is_some_and(|error| error.error_message.contains("ceiling"))
+    };
+    assert!(!refused(a.process(report(first), Transport::Http, None)));
+    assert!(
+        refused(b.process(report(second), Transport::Http, None)),
+        "B counts what A stored"
+    );
+    assert!(
+        !refused(b.process(report(first), Transport::Http, None)),
+        "a stored Agent passes no ceiling"
+    );
+    assert_eq!(
+        schema.query("SELECT instance_uid FROM agents"),
+        [first.to_string()]
+    );
+}
+
+/// An Agent carried by A that went quiet is forgotten through B, which decides from the presence
+/// A wrote: refused while it reports, forgotten once it is silent past the budget, and A then ends
+/// its session within one second.
+/// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts, ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_agent_forgotten_through_one_instance_has_its_session_ended_by_the_one_that_carries_it()
+{
+    use fleet_server::fleet::ForgetError;
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let b = Instance::start(&pki, &schema, schema.config_on(schema.config.port)).await;
+    let a = Instance::start(&pki, &schema, schema.config_on(schema.config.port)).await;
+    let (cert, key) = pki.issue("edge-01");
+    let uid = InstanceUid([0x41; 16]);
+    let attributes: Attributes<'_> = (&[("service.name", "otelcol")], &[]);
+    let mut session = websocket(&a, &pki, &cert, &key).await;
+    report_as(&mut session, uid, 1, 0, attributes, true).await;
+    let (on_a, holder) = (a.state.clone(), a.instance_id().expect("a lease"));
+    tokio::task::spawn_blocking(move || on_a.write_presence(&holder))
+        .await
+        .expect("batch")
+        .expect("A writes the presence");
+    let forget = || {
+        let on_b = b.state.clone();
+        async move {
+            tokio::task::spawn_blocking(move || on_b.forget_agent(&uid))
+                .await
+                .expect("forget")
+        }
+    };
+
+    assert!(
+        matches!(forget().await, Err(ForgetError::StillReporting)),
+        "B sees A holds it, and that it reports"
+    );
+    // The Agent went quiet two minutes ago, past any budget; A's presence is as it last wrote it.
+    schema.sql(&format!(
+        "UPDATE agents SET last_seen_ms = last_seen_ms - 120000 WHERE instance_uid = '{uid}'"
+    ));
+    assert!(forget().await.is_ok(), "B forgets an Agent it never held");
+    assert_eq!(
+        closed_within(&mut session, Duration::from_secs(1)).await,
+        Some((1000, "forgotten".to_string())),
+        "A ends its session within one second"
+    );
+    assert!(view_of(&a, uid).is_none(), "and holds it no more");
+}

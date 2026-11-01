@@ -23,7 +23,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
-use crate::agent_store::{AgentStore, PersistedAgent, Pin};
+use crate::agent_store::{AgentStore, PersistedAgent, Pin, Presence};
 use crate::audit::{Audit, Entry};
 use crate::configs::{ConfigBackend, ConfigStore, Configuration, DesiredConfig, Revision};
 use crate::deployments::{self, deployment_for, Deployment, DeploymentError, DeploymentStore};
@@ -232,6 +232,14 @@ impl AgentRecord {
 
     /// What of this record survives a restart (ADR-0024): everything report-derived or
     /// operator-queued, never what a live connection knows.
+    /// Where it is connected, as a presence batch writes it.
+    fn presence(&self) -> Presence {
+        Presence {
+            connected: self.connected,
+            last_seen_ms: self.last_seen_ms,
+        }
+    }
+
     fn to_persisted(&self) -> PersistedAgent {
         PersistedAgent {
             sequence_num: self.sequence_num,
@@ -299,6 +307,8 @@ pub enum ForgetError {
     /// hashes that stop the Server re-offering, so its next exchange would re-apply its
     /// configuration, which for a managed Agent restarts the Managed Process.
     StillReporting,
+    /// The store could not be read or written.
+    Storage(String),
 }
 
 /// Why a rollout act (ADR-0026 clause 9) was refused.
@@ -583,6 +593,23 @@ pub struct AppState {
     /// growth past the ceiling is refused. The real defence against a flood is admission by client
     /// certificate (ADR-0021); this is the backstop that bounds what an admitted peer can do.
     max_agents: usize,
+    /// How often an instance on a shared store writes the presence of the Agents it carries
+    /// (ADR-draft-the-fleet-record-of-agents-and-hosts clause 4); zero where the store keeps none.
+    /// What is stored may be one interval old, so it adds to the staleness budget (clause 8).
+    presence_interval: Duration,
+    /// The presence of each held Agent as the last batch wrote it, and the holder it named, so a
+    /// batch writes only what moved since. Locked strictly after `fleet`.
+    presence_written: Mutex<PresenceWritten>,
+    /// The Agents forgotten while a WebSocket carried them, by that connection, until its loop
+    /// takes them and ends their session (ADR-0024 clause 10). Locked strictly after `fleet`.
+    forgotten: Mutex<HashMap<ConnId, Vec<InstanceUid>>>,
+}
+
+/// What the last presence batch wrote: the holder it named, and each Agent's presence.
+#[derive(Default)]
+struct PresenceWritten {
+    holder: Option<String>,
+    agents: HashMap<InstanceUid, Presence>,
 }
 
 impl AppState {
@@ -611,9 +638,14 @@ impl AppState {
         // absent assignment means what it says rather than "not migrated yet".
         let mut fleet = HashMap::new();
         let mut written = HashMap::new();
+        let mut presence = PresenceWritten::default();
         for (uid, persisted) in agent_store.load()? {
             written.insert(uid, persisted.durable_digest());
-            fleet.insert(uid, AgentRecord::from_persisted(persisted));
+            let record = AgentRecord::from_persisted(persisted);
+            // A restored Agent is not carried here, and nothing of its presence is written for it
+            // until it reports here.
+            presence.agents.insert(uid, record.presence());
+            fleet.insert(uid, record);
         }
         if !fleet.is_empty() {
             info!(agents = fleet.len(), "restored the fleet");
@@ -651,6 +683,9 @@ impl AppState {
             uploading_bytes: AtomicU64::new(0),
             stale_after: DEFAULT_STALE_AFTER,
             max_agents: DEFAULT_MAX_AGENTS,
+            presence_interval: Duration::ZERO,
+            presence_written: Mutex::new(presence),
+            forgotten: Mutex::new(HashMap::new()),
         };
         state.place_all();
         Ok(state)
@@ -745,11 +780,26 @@ impl AppState {
         self
     }
 
+    /// Sets how often the presence of the Agents this instance carries is written to a shared
+    /// store (ADR-draft-the-fleet-record-of-agents-and-hosts clause 4), which the staleness budget
+    /// adds (clause 8).
+    #[must_use]
+    pub fn with_presence_interval(mut self, interval: Duration) -> Self {
+        self.presence_interval = interval;
+        self
+    }
+
     /// The staleness budget in force: the heartbeat interval this Server offered when it offered
     /// one — the period it actually asked for — else the configured default. Three of them, not
     /// one: a single missed heartbeat is a lost packet, and a fleet view that flickers on every
-    /// hiccup is one nobody trusts.
+    /// hiccup is one nobody trusts. On a shared store the presence interval besides, since what is
+    /// stored may be one interval old (ADR-draft-the-fleet-record-of-agents-and-hosts clause 8).
     fn stale_after(&self) -> Duration {
+        self.heartbeat_budget() + self.presence_interval
+    }
+
+    /// Three heartbeat intervals, or the configured default.
+    fn heartbeat_budget(&self) -> Duration {
         match self
             .connection_offer
             .as_ref()
@@ -1301,6 +1351,7 @@ impl AppState {
             };
             let Some(persisted) = persisted else {
                 let group = record.placement.group.clone();
+                self.end_session(&uid, record);
                 fleet.remove(&uid);
                 self.written.lock().expect("written lock").remove(&uid);
                 self.unplace(&mut fleet, &uid, group);
@@ -1785,15 +1836,38 @@ impl AppState {
     /// its row on a decommissioned host permanently unremovable.
     pub fn forget_agent(&self, uid: &InstanceUid) -> Result<(), ForgetError> {
         let mut fleet = self.fleet.lock().expect("fleet lock");
-        let record = fleet.get(uid).ok_or(ForgetError::UnknownAgent)?;
-        if record.connected && !is_silent(record, self.stale_after(), self.clock.now_ms()) {
-            return Err(ForgetError::StillReporting);
+        let (budget, now_ms) = (self.stale_after(), self.clock.now_ms());
+        if let Some(record) = fleet.get(uid) {
+            if record.connected && !is_silent(record, budget, now_ms) {
+                return Err(ForgetError::StillReporting);
+            }
+        }
+        // Forgetting that left a stored record behind would be the "remembering under another
+        // name" ADR-0024 rejected: the record leaves the store with the row, its labels with it
+        // (ADR-0024 clause 21). On a shared store the instance that carries the Agent may be
+        // another, so what decides is the presence stored, read and removed in one step
+        // (ADR-draft-the-fleet-record-of-agents-and-hosts clause 11).
+        if self.agent_store.is_shared() {
+            let silent_before = now_ms.saturating_sub(budget.as_millis() as u64);
+            match self
+                .agent_store
+                .remove_if_silent(uid, silent_before)
+                .map_err(ForgetError::Storage)?
+            {
+                Some(true) => {}
+                Some(false) => return Err(ForgetError::StillReporting),
+                // Held but not stored: a first write that failed. What is held is forgotten.
+                None if fleet.contains_key(uid) => {}
+                None => return Err(ForgetError::UnknownAgent),
+            }
+            self.written.lock().expect("written lock").remove(uid);
+        } else {
+            if !fleet.contains_key(uid) {
+                return Err(ForgetError::UnknownAgent);
+            }
+            self.unpersist(uid);
         }
         let removed = fleet.remove(uid);
-        // Forgetting that left a stored record behind would be the "remembering under another
-        // name" ADR-0024 rejected — the record leaves the store with the row, its labels with it
-        // (ADR-0024 clause 21).
-        self.unpersist(uid);
         // Its `instance_uid` leaves the Host it was bound to: whichever host reports it next binds
         // it (ADR-0024 clause 10).
         if let Some(revocations) = &self.revocations {
@@ -1802,6 +1876,8 @@ impl AppState {
             }
         }
         if let Some(record) = removed {
+            // A session that still carries it ends (ADR-0024 clause 10).
+            self.end_session(uid, &record);
             // A Client Agent forgotten takes its labels from the Agents that inherited them.
             self.unplace(&mut fleet, uid, record.placement.group.clone());
             // A pinned revision only this Agent referenced is unreferenced now (ADR-0026).
@@ -1947,6 +2023,67 @@ impl AppState {
             warn!(agent = %uid, error = %e, "cannot remove the agent record from the store");
         }
         self.written.lock().expect("written lock").remove(uid);
+    }
+
+    /// Writes the presence of the Agents this instance holds that moved since the last batch, in
+    /// one batch naming `holder`, the instance id of the lease it serves under
+    /// (ADR-draft-the-fleet-record-of-agents-and-hosts clause 4): a heartbeat reaches the store at
+    /// most once per batch and Agent. Under a new holder every presence is written again. Read
+    /// under the fleet lock and written after it is released, so no report waits for the batch. A
+    /// batch that fails is written again with the next one. Answers how many it wrote.
+    ///
+    /// # Errors
+    /// Returns an error when the batch cannot be written.
+    pub fn write_presence(&self, holder: &str) -> Result<usize, String> {
+        let batch: Vec<(InstanceUid, Presence)> = {
+            let fleet = self.fleet.lock().expect("fleet lock");
+            let mut written = self.presence_written.lock().expect("presence lock");
+            if written.holder.as_deref() != Some(holder) {
+                written.agents.clear();
+            }
+            written.agents.retain(|uid, _| fleet.contains_key(uid));
+            let mut batch: Vec<_> = fleet
+                .iter()
+                .map(|(uid, record)| (*uid, record.presence()))
+                .filter(|(uid, presence)| written.agents.get(uid) != Some(presence))
+                .collect();
+            batch.sort_by_key(|(uid, _)| uid.0);
+            batch
+        };
+        if batch.is_empty() {
+            return Ok(0);
+        }
+        self.agent_store.write_presence(holder, &batch)?;
+        let mut written = self.presence_written.lock().expect("presence lock");
+        if written.holder.as_deref() != Some(holder) {
+            written.holder = Some(holder.to_string());
+            written.agents.clear();
+        }
+        written.agents.extend(batch.iter().copied());
+        Ok(batch.len())
+    }
+
+    /// The Agents forgotten while connection `conn` carried them, taken once: its loop ends their
+    /// session (ADR-0024 clause 10).
+    pub fn take_forgotten(&self, conn: ConnId) -> Vec<InstanceUid> {
+        self.forgotten
+            .lock()
+            .expect("forgotten lock")
+            .remove(&conn)
+            .unwrap_or_default()
+    }
+
+    /// Notes that `record`, just forgotten as `uid`, was carried by a live WebSocket, whose loop
+    /// then ends its session.
+    fn end_session(&self, uid: &InstanceUid, record: &AgentRecord) {
+        if let (true, Some(conn)) = (record.connected, record.owner) {
+            self.forgotten
+                .lock()
+                .expect("forgotten lock")
+                .entry(conn)
+                .or_default()
+                .push(*uid);
+        }
     }
 
     /// Writes every record's current state, timestamps and sequence numbers included — the
@@ -2103,8 +2240,43 @@ impl AppState {
         // UIDs (ADR-0021) grow the in-memory map and its per-Agent disk mirror without bound. Known
         // Agents keep reporting; only a *new* UID at capacity is refused, `Unavailable` so a Client
         // that legitimately raced in retries rather than gives up. The real gate is admission
-        // (ADR-0021); this bounds the damage while the endpoint is open.
-        if !known && fleet.len() >= self.max_agents {
+        // (ADR-0021); this bounds the damage while the endpoint is open. On a shared store the
+        // ceiling bounds the records stored, counted by the store as it creates this one, so it
+        // holds for the fleet and not for one instance; a record stored already passes none.
+        let created = if known || !self.agent_store.is_shared() {
+            Ok(false)
+        } else {
+            let record = self.new_record(msg.sequence_num, transport, conn);
+            self.agent_store
+                .create_within(&uid, &record.to_persisted(), self.max_agents)
+                .inspect(|&stored| {
+                    if stored {
+                        info!(agent = %uid, transport = transport.as_str(), "new agent");
+                        fleet.insert(uid, record);
+                    }
+                })
+        };
+        let created = match created {
+            Ok(created) => created,
+            Err(e) => {
+                drop(fleet);
+                warn!(agent = %uid, error = %e, "cannot store a new agent's record");
+                return Processed {
+                    reply: unavailable(
+                        &msg.instance_uid,
+                        "the Server cannot store this Agent's record now; retry later",
+                    ),
+                    uid: None,
+                    disconnected: false,
+                };
+            }
+        };
+        let at_ceiling = if self.agent_store.is_shared() {
+            !known && !created
+        } else {
+            !known && fleet.len() >= self.max_agents
+        };
+        if at_ceiling {
             drop(fleet);
             warn!(
                 agent = %uid,
@@ -2130,6 +2302,11 @@ impl AppState {
                 if let Err(e) =
                     revocations.check_report(host, &subject, not_after_ms, bound.as_bytes())
                 {
+                    // A record created for this report goes with it.
+                    if created {
+                        fleet.remove(&uid);
+                        self.unpersist(&uid);
+                    }
                     return Processed {
                         reply: bad_request(&e),
                         uid: None,
@@ -2146,29 +2323,7 @@ impl AppState {
         }
         let record = fleet.entry(uid).or_insert_with(|| {
             info!(agent = %uid, transport = transport.as_str(), "new agent");
-            AgentRecord {
-                labels: BTreeMap::new(),
-                host: None,
-                placement: Placement::default(),
-                sequence_num: msg.sequence_num,
-                capabilities: 0,
-                description: None,
-                health: None,
-                effective_config: None,
-                remote_config_status: None,
-                transport,
-                connected: true,
-                last_seen_ms: self.clock.now_ms(),
-                restart_pending: false,
-                available_components: None,
-                components_demanded: None,
-                connection_settings_status: None,
-                package_statuses: None,
-                owner: conn,
-                // A new Agent waits (ADR-0026 clause 10): it is assigned nothing until an
-                // operator's rollout act says so, and the fleet view shows what it could get.
-                assignment: None,
-            }
+            self.new_record(msg.sequence_num, transport, conn)
         });
 
         // A compressed report (unchanged fields omitted) is only usable if our state is current.
@@ -2462,6 +2617,38 @@ impl AppState {
             },
             uid: Some(uid),
             disconnected,
+        }
+    }
+
+    /// The record of an Agent first heard of now.
+    fn new_record(
+        &self,
+        sequence_num: u64,
+        transport: Transport,
+        conn: Option<ConnId>,
+    ) -> AgentRecord {
+        AgentRecord {
+            labels: BTreeMap::new(),
+            host: None,
+            placement: Placement::default(),
+            sequence_num,
+            capabilities: 0,
+            description: None,
+            health: None,
+            effective_config: None,
+            remote_config_status: None,
+            transport,
+            connected: true,
+            last_seen_ms: self.clock.now_ms(),
+            restart_pending: false,
+            available_components: None,
+            components_demanded: None,
+            connection_settings_status: None,
+            package_statuses: None,
+            owner: conn,
+            // A new Agent waits (ADR-0026 clause 10): it is assigned nothing until an operator's
+            // rollout act says so, and the fleet view shows what it could get.
+            assignment: None,
         }
     }
 
@@ -2866,6 +3053,7 @@ impl AppState {
                 }
             }
         }
+        self.forgotten.lock().expect("forgotten lock").remove(&conn);
     }
 
     /// The Agents each Host carries (ADR-0024 clause 24) — those whose record names it as the Host
@@ -5898,5 +6086,166 @@ mod tests {
             "it comes back unlabelled"
         );
         assert!(!dir.join("labels").exists(), "no label store is written");
+    }
+
+    /// A store that counts what reaches it: the record writes, and each presence batch as it is
+    /// written.
+    struct Counted {
+        inner: crate::fs::FsAgentStore,
+        puts: Arc<AtomicU64>,
+        batches: Arc<Mutex<Vec<Batch>>>,
+    }
+
+    /// One presence batch as it reached the store.
+    type Batch = Vec<(InstanceUid, Presence)>;
+
+    impl AgentStore for Counted {
+        fn load(&self) -> Result<HashMap<InstanceUid, PersistedAgent>, String> {
+            self.inner.load()
+        }
+        fn put(&self, uid: &InstanceUid, record: &PersistedAgent) -> Result<(), String> {
+            self.puts.fetch_add(1, Ordering::SeqCst);
+            self.inner.put(uid, record)
+        }
+        fn set_labels(
+            &self,
+            uid: &InstanceUid,
+            labels: &BTreeMap<String, String>,
+        ) -> Result<bool, String> {
+            self.inner.set_labels(uid, labels)
+        }
+        fn set_restart_pending(
+            &self,
+            uid: &InstanceUid,
+            pending: bool,
+        ) -> Result<Option<bool>, String> {
+            self.inner.set_restart_pending(uid, pending)
+        }
+        fn remove(&self, uid: &InstanceUid) -> Result<(), String> {
+            self.inner.remove(uid)
+        }
+        fn write_presence(
+            &self,
+            _holder: &str,
+            presence: &[(InstanceUid, Presence)],
+        ) -> Result<(), String> {
+            self.batches
+                .lock()
+                .expect("batches lock")
+                .push(presence.to_vec());
+            Ok(())
+        }
+        fn release(
+            &self,
+            revisions: &[crate::configs::Pinned],
+            agents: &[(InstanceUid, PersistedAgent)],
+        ) -> Result<(), String> {
+            self.inner.release(revisions, agents)
+        }
+        fn pinning(&self, pin: Pin<'_>) -> usize {
+            self.inner.pinning(pin)
+        }
+        fn referenced_revisions(&self, name: &str) -> BTreeSet<String> {
+            self.inner.referenced_revisions(name)
+        }
+    }
+
+    /// A clock the test moves.
+    struct Manual(Arc<AtomicU64>);
+
+    impl Clock for Manual {
+        fn now_ms(&self) -> u64 {
+            self.0.load(Ordering::SeqCst)
+        }
+    }
+
+    /// An instance carrying 1 000 Agents at a 30-second heartbeat writes their presence in
+    /// batches: no heartbeat writes a record or a presence, each batch writes every presence that
+    /// moved since the last one, in the order of the `instance_uid`, and nothing when none moved.
+    /// A disconnect is written in the next batch, and under a new holder every presence again.
+    /// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts
+    #[test]
+    fn presence_is_written_in_batches_and_never_once_per_heartbeat() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (puts, batches) = (
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(Mutex::new(Vec::new())),
+        );
+        let now = Arc::new(AtomicU64::new(1_000_000));
+        let state = AppState::with_stores(
+            Box::new(Counted {
+                inner: crate::fs::FsAgentStore::open(dir.path()).expect("agents"),
+                puts: puts.clone(),
+                batches: batches.clone(),
+            }),
+            Box::new(crate::fs::FsConfigBackend::open(dir.path()).expect("configs")),
+            Box::new(Manual(now.clone())),
+        )
+        .expect("state")
+        .with_presence_interval(Duration::from_secs(30));
+        let uids: Vec<InstanceUid> = (0..1000).map(|_| InstanceUid::default()).collect();
+        for (conn, uid) in (1..).zip(&uids) {
+            state.process(report(uid, 1), Transport::WebSocket, Some(conn));
+        }
+        let first_reports = puts.load(Ordering::SeqCst);
+        assert!(
+            batches.lock().expect("batches").is_empty(),
+            "no report wrote a presence"
+        );
+        assert_eq!(state.write_presence("a"), Ok(1000));
+        {
+            let batches = batches.lock().expect("batches");
+            let mut ordered = uids.clone();
+            ordered.sort_by_key(|uid| uid.0);
+            let batch: Vec<InstanceUid> = batches[0].iter().map(|(uid, _)| *uid).collect();
+            assert_eq!(batch, ordered, "in the order of the instance_uid");
+            assert!(batches[0].iter().all(|(_, presence)| presence.connected));
+        }
+
+        for beat in 2..=4u64 {
+            now.fetch_add(30_000, Ordering::SeqCst);
+            for (conn, uid) in (1..).zip(&uids) {
+                let heartbeat = AgentToServer {
+                    instance_uid: uid.as_bytes().to_vec(),
+                    sequence_num: beat,
+                    ..Default::default()
+                };
+                state.process(heartbeat, Transport::WebSocket, Some(conn));
+            }
+            assert_eq!(
+                puts.load(Ordering::SeqCst),
+                first_reports,
+                "no heartbeat writes a record"
+            );
+            assert_eq!(
+                batches.lock().expect("batches").len() as u64,
+                beat - 1,
+                "no heartbeat writes a presence"
+            );
+            assert_eq!(
+                state.write_presence("a"),
+                Ok(1000),
+                "one batch for the round"
+            );
+            let batches = batches.lock().expect("batches");
+            let last = batches.last().expect("a batch");
+            assert!(last
+                .iter()
+                .all(|(_, presence)| presence.last_seen_ms == now.load(Ordering::SeqCst)));
+        }
+        assert_eq!(state.write_presence("a"), Ok(0), "nothing moved");
+
+        state.mark_disconnected(&uids[..1], 1);
+        assert_eq!(state.write_presence("a"), Ok(1), "the disconnect");
+        assert!(
+            !batches.lock().expect("batches").last().expect("a batch")[0]
+                .1
+                .connected
+        );
+        assert_eq!(
+            state.write_presence("b"),
+            Ok(1000),
+            "a new holder writes them all"
+        );
     }
 }

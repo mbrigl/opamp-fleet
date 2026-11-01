@@ -404,6 +404,33 @@ pub fn follow(
     following
 }
 
+/// Writes the presence of the Agents this instance carries every `interval`, in one batch under the
+/// instance id of the lease it holds, and nothing while it holds none
+/// (ADR-draft-the-fleet-record-of-agents-and-hosts clause 4). A batch that fails is logged, and what
+/// it held is written with the next one.
+pub fn write_presence(state: Arc<AppState>, held: Held, interval: Duration) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(interval);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // The first tick is at once, and nothing has reported yet.
+        tick.tick().await;
+        loop {
+            tick.tick().await;
+            let Some(holder) = held.borrow().clone() else {
+                continue;
+            };
+            let state = state.clone();
+            match tokio::task::spawn_blocking(move || state.write_presence(&holder)).await {
+                Ok(Ok(written)) => debug!(agents = written, "wrote the presence of the agents"),
+                Ok(Err(e)) => {
+                    warn!(error = %e, "could not write the presence of the agents; the next batch writes it")
+                }
+                Err(e) => warn!(error = %e, "could not write the presence of the agents"),
+            }
+        }
+    });
+}
+
 /// What [`follow`] has read again so far, for a test to tell what it took up.
 #[derive(Clone, Default)]
 pub struct Following {

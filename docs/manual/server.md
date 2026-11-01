@@ -233,8 +233,8 @@ configures the Server.
 | `max_message_size_bytes` | `67108864` (64 MiB) | The largest OpAMP message accepted or sent, in either direction and on either transport. The protocol requires a limit and recommends this value; a fleet of status reports needs far less. An oversized HTTP request is answered `413`, an oversized WebSocket message closes the connection with `1009`. A request or message that has begun and delivers less than 64 KiB in a minute is answered `408`, or closes its connection with `1008`. |
 | `max_package_size_bytes` | `1073741824` (1 GiB) | The largest artifact the package-upload route accepts. A package is a program, not a message — an `otelcol-contrib` binary is a few hundred megabytes — so this bound is far larger, and it applies to that one route. The upload has no deadline, but like every request body it must deliver 64 KiB in each minute once it has begun, or it is answered `408`. |
 | `max_total_package_bytes` | `17179869184` (16 GiB) | The total size of all stored artifacts before a new upload is refused `507`. Where `max_package_size_bytes` bounds one artifact, this bounds the whole store, so no caller fills the disk by uploading many artifacts under distinct names. Identical bytes are stored once and counted once. `0` is refused at startup. |
-| `max_agents` | `100000` | The most Agent records the fleet holds at once. A report bearing a **new** `instance_uid` past this ceiling is answered `Unavailable` rather than admitted, so an admitted peer minting fresh self-asserted UIDs cannot exhaust memory and disk; Agents already known keep reporting. The defence against an anonymous flood is [admission](#authentication) by client certificate; this is the backstop behind it. `0` is refused at startup. |
-| `stale_after_secs` | `90` | How long an Agent that declares `ReportsHeartbeat` may be silent before the fleet view marks it **stale**. Ignored when `[connection_offer]` names a heartbeat interval — then the budget is three of those. Only heartbeating Agents can go stale: one that promised no periodic report is never late. |
+| `max_agents` | `100000` | The most Agent records the fleet holds at once. A report bearing a **new** `instance_uid` past this ceiling is answered `Unavailable` rather than admitted, so an admitted peer minting fresh self-asserted UIDs cannot exhaust memory and disk; Agents already known keep reporting. With PostgreSQL it bounds the records in the database, counted as each is created, so it holds for all instances together; set it alike on each. The defence against an anonymous flood is [admission](#authentication) by client certificate; this is the backstop behind it. `0` is refused at startup. |
+| `stale_after_secs` | `90` | How long an Agent that declares `ReportsHeartbeat` may be silent before the fleet view marks it **stale**. Ignored when `[connection_offer]` names a heartbeat interval — then the budget is three of those. With PostgreSQL the budget adds `[database] presence_interval_secs`. Only heartbeating Agents can go stale: one that promised no periodic report is never late. |
 
 ### `[rest]`
 
@@ -387,6 +387,7 @@ password_file = "/run/secrets/fleet-db-password"
 | `store` | `"fs"` | `"fs"` or `"postgres"`. Any other value fails startup naming the key; so do `"postgres"` without a `[database.postgres]` section and a `[database.postgres]` section beside `"fs"`. |
 | `lease_renew_secs` | `10` | With `"postgres"` alone: how often an instance renews its lease, from 1 to 3600. Set with `"fs"`, it fails startup naming it. |
 | `lease_secs` | `30` | With `"postgres"` alone: how long after its last renewal a lease lapses, at least three renewals and at most 3600. Set with `"fs"`, it fails startup naming it. |
+| `presence_interval_secs` | `30` | With `"postgres"` alone: how often an instance writes, in one batch, where each Agent it carries is connected and when it was last heard from, from 10 to 60. A heartbeat reaches the database at most once per interval and Agent, so the staleness budget grows by this interval. Set with `"fs"`, it fails startup naming it. |
 | `postgres.host` | — | Required with `"postgres"`. The database's host name or IP address — what its certificate must name. |
 | `postgres.port` | `5432` | Its port. |
 | `postgres.dbname` | — | Required with `"postgres"`. The database. The Server does not create it. |
@@ -1788,6 +1789,12 @@ staleness budget. That is not caution for its own sake: the record holds the has
 Server not to re-offer what an Agent already has, so forgetting a live Agent has its configuration
 sent again, and a Managed Process restarts whenever a configuration arrives. Stop the agent first,
 or wait for it to fall silent. An Agent that is already disconnected can be forgotten at once.
+
+An Agent that went quiet on a connection still open, as behind a Gateway, has its session ended:
+a WebSocket that carried it alone is closed with code `1000` and the reason `forgotten`, and one
+that carries other Agents too, as a Gateway's does, stays open for them. With PostgreSQL any
+instance may forget it: the instance decides from the presence stored in the database, and the
+instance that carries the Agent ends its session within a second.
 
 The same applies to one that comes back later: it is offered its configuration, its connection
 settings, and its packages afresh. The packages cost nothing — the Client re-installs nothing whose

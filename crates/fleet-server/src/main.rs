@@ -666,7 +666,8 @@ async fn main() {
                 .with_max_package_size(config.max_package_size_bytes)
                 .with_max_total_package_bytes(config.max_total_package_bytes)
                 .with_stale_after(std::time::Duration::from_secs(config.stale_after_secs))
-                .with_max_agents(config.max_agents),
+                .with_max_agents(config.max_agents)
+                .with_presence_interval(config.database.presence_interval().unwrap_or_default()),
         ),
         Err(e) => {
             eprintln!("{e}");
@@ -733,6 +734,13 @@ async fn main() {
             }) {
                 Ok(lease) => {
                     logged.follow(lease.held());
+                    if let Some(interval) = config.database.presence_interval() {
+                        fleet_server::instance::write_presence(
+                            state.clone(),
+                            lease.held(),
+                            interval,
+                        );
+                    }
                     fleet_server::instance::follow(
                         database,
                         state.clone(),
@@ -779,6 +787,17 @@ async fn main() {
     // The graceful-shutdown flush (ADR-0024): every record's current timestamp and sequence
     // number, so the ordinary restart restores a fleet without gaps or false silence.
     state.flush_agents();
+    // And the presence of every Agent, its sessions ended by the drain, before the lease goes
+    // (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    // clause 3).
+    if let Some(holder) = lease
+        .as_ref()
+        .and_then(|lease| lease.held().borrow().clone())
+    {
+        if let Err(e) = state.write_presence(&holder) {
+            warn!(error = %e, "could not write the presence of the agents before the lease goes");
+        }
+    }
     // What is still queued for the audit record is written before the process, and the writer
     // thread with it, ends (ADR-0023).
     if !audit_log.drain(std::time::Duration::from_secs(5)) {

@@ -528,3 +528,59 @@ async fn a_shutdown_closes_the_websocket_sessions_before_serve_returns() {
         CloseCode::Away
     );
 }
+
+/// Forgets `uid` once it is silent past the server's budget, polling until it is.
+async fn forget_once_silent(server: &support::TestServer, uid: &InstanceUid) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while server.state.forget_agent(uid).is_err() {
+        assert!(tokio::time::Instant::now() < deadline, "never silent");
+        tokio::task::yield_now().await;
+    }
+}
+
+/// Forgetting an Agent that went quiet ends its session (ADR-0024 clause 10): the socket that
+/// carried it alone is closed, normally and saying why, and one that carries other Agents as well,
+/// as a Gateway's does, stays open and serves them.
+/// Verifies: ADR-0024
+#[tokio::test]
+async fn forgetting_an_agent_ends_its_session() {
+    // A zero budget makes an Agent silent once the clock passes its last report.
+    let server = support::spawn_with_stale_after(Duration::ZERO).await;
+    let (quiet, gatewayed, talking) = (
+        InstanceUid::default(),
+        InstanceUid::default(),
+        InstanceUid::default(),
+    );
+    let mut alone = connect(server.addr).await;
+    send(&mut alone, &full_report(&quiet, "quiet", 1)).await;
+    recv(&mut alone).await;
+    let mut gateway = connect(server.addr).await;
+    for uid in [&gatewayed, &talking] {
+        send(&mut gateway, &full_report(uid, "behind", 1)).await;
+        recv(&mut gateway).await;
+    }
+
+    forget_once_silent(&server, &quiet).await;
+    let closed = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            match alone.next().await {
+                Some(Ok(Message::Close(Some(frame)))) => {
+                    return (u16::from(frame.code), frame.reason.to_string())
+                }
+                Some(Ok(_)) => continue,
+                other => panic!("the session ended without a close frame: {other:?}"),
+            }
+        }
+    })
+    .await
+    .expect("the session ends within a second");
+    assert_eq!(closed, (1000, "forgotten".to_string()));
+
+    forget_once_silent(&server, &gatewayed).await;
+    send(&mut gateway, &compressed_report(&talking, 2)).await;
+    assert_eq!(
+        recv(&mut gateway).await.instance_uid,
+        talking.as_bytes(),
+        "the shared socket still serves the Agent it carries"
+    );
+}

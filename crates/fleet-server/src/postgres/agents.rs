@@ -14,7 +14,7 @@ use tokio_postgres::GenericClient;
 
 use super::notify::{notify, ASSIGNMENT, CONFIGURATION, FORGOTTEN, LABELS, RESTART};
 use super::{client, signed, sql, unsigned, Database};
-use crate::agent_store::{AgentStore, PersistedAgent, Pin};
+use crate::agent_store::{AgentStore, PersistedAgent, Pin, Presence};
 use crate::configs::Pinned;
 use crate::fleet::{Assignment, Transport};
 use crate::packages::PackageId;
@@ -111,6 +111,44 @@ impl AgentStore for PgAgentStore {
         Ok(())
     }
 
+    /// One transaction under a lock only creations take, so two instances creating at once count
+    /// each other's rows; a report's write of a record that exists waits for none of it.
+    fn create_within(
+        &self,
+        uid: &InstanceUid,
+        record: &PersistedAgent,
+        max_records: usize,
+    ) -> Result<bool, String> {
+        let (uid, record) = (*uid, record.clone());
+        let max = i64::try_from(max_records).unwrap_or(i64::MAX);
+        self.database.run(move |pool| async move {
+            let mut client = client(&pool).await?;
+            let transaction = client.transaction().await.map_err(sql)?;
+            transaction
+                .execute(&format!("SELECT pg_advisory_xact_lock({CREATE_LOCK})"), &[])
+                .await
+                .map_err(sql)?;
+            let key = uid.to_string();
+            let stored = transaction
+                .query_one(
+                    "SELECT count(*), count(*) FILTER (WHERE instance_uid = $1) FROM agents",
+                    &[&key],
+                )
+                .await
+                .map_err(sql)?;
+            let (count, there): (i64, i64) = (stored.get(0), stored.get(1));
+            if there > 0 {
+                return Ok(true);
+            }
+            if count >= max {
+                return Ok(false);
+            }
+            insert(&*transaction, &uid, &record, "DO NOTHING").await?;
+            transaction.commit().await.map_err(sql)?;
+            Ok(true)
+        })
+    }
+
     fn set_labels(
         &self,
         uid: &InstanceUid,
@@ -194,6 +232,105 @@ impl AgentStore for PgAgentStore {
         })?;
         self.stored([(&uid, None)]);
         Ok(())
+    }
+
+    /// One transaction: the rows locked in the order of their `instance_uid`, byte by byte as the
+    /// release orders them, then the batch written in one statement.
+    fn write_presence(
+        &self,
+        holder: &str,
+        presence: &[(InstanceUid, Presence)],
+    ) -> Result<(), String> {
+        if presence.is_empty() {
+            return Ok(());
+        }
+        let holder = holder.to_string();
+        let mut batch: Vec<(String, bool, i64)> = presence
+            .iter()
+            .map(|(uid, presence)| {
+                (
+                    uid.to_string(),
+                    presence.connected,
+                    signed(presence.last_seen_ms),
+                )
+            })
+            .collect();
+        batch.sort_by(|(a, ..), (b, ..)| a.cmp(b));
+        let written = batch.len();
+        self.database.run_writing(written, move |pool| async move {
+            let mut client = client(&pool).await?;
+            let transaction = client.transaction().await.map_err(sql)?;
+            let uids: Vec<&str> = batch.iter().map(|(uid, ..)| uid.as_str()).collect();
+            let connected: Vec<bool> = batch.iter().map(|(_, connected, _)| *connected).collect();
+            let last_seen: Vec<i64> = batch.iter().map(|(.., last_seen)| *last_seen).collect();
+            transaction
+                .execute(
+                    "SELECT 1 FROM agents WHERE instance_uid = ANY($1) \
+                     ORDER BY instance_uid COLLATE \"C\" FOR UPDATE",
+                    &[&uids],
+                )
+                .await
+                .map_err(sql)?;
+            transaction
+                .execute(
+                    "UPDATE agents AS a SET \
+                     last_seen_ms = GREATEST(a.last_seen_ms, p.last_seen_ms), \
+                     connected = CASE WHEN p.connected OR a.holder IS NULL \
+                         OR a.holder = $4::text::uuid THEN p.connected ELSE a.connected END, \
+                     holder = CASE WHEN p.connected THEN $4::text::uuid \
+                         WHEN a.holder IS NULL OR a.holder = $4::text::uuid THEN NULL \
+                         ELSE a.holder END \
+                     FROM unnest($1::text[], $2::boolean[], $3::bigint[]) \
+                         AS p(instance_uid, connected, last_seen_ms) \
+                     WHERE a.instance_uid = p.instance_uid",
+                    &[&uids, &connected, &last_seen, &holder],
+                )
+                .await
+                .map_err(sql)?;
+            transaction.commit().await.map_err(sql)
+        })
+    }
+
+    /// One transaction: the row under its lock, its presence read as live only while its holder's
+    /// lease is, and the row removed and announced when that lets it go.
+    fn remove_if_silent(
+        &self,
+        uid: &InstanceUid,
+        silent_before_ms: u64,
+    ) -> Result<Option<bool>, String> {
+        let key = uid.to_string();
+        let silent_before = signed(silent_before_ms);
+        let forgotten = self.database.run(move |pool| async move {
+            let mut client = client(&pool).await?;
+            let transaction = client.transaction().await.map_err(sql)?;
+            let Some(row) = transaction
+                .query_opt(
+                    "SELECT a.connected AND EXISTS (SELECT 1 FROM leases AS l \
+                         WHERE l.instance_id = a.holder AND l.expires_at > now()), \
+                     a.last_seen_ms FROM agents AS a WHERE a.instance_uid = $1 FOR UPDATE OF a",
+                    &[&key],
+                )
+                .await
+                .map_err(sql)?
+            else {
+                return Ok(None);
+            };
+            let (connected, last_seen): (bool, i64) = (row.get(0), row.get(1));
+            if connected && unsigned(last_seen) >= unsigned(silent_before) {
+                return Ok(Some(false));
+            }
+            transaction
+                .execute("DELETE FROM agents WHERE instance_uid = $1", &[&key])
+                .await
+                .map_err(sql)?;
+            notify(&*transaction, FORGOTTEN, &key).await?;
+            transaction.commit().await.map_err(sql)?;
+            Ok(Some(true))
+        })?;
+        if forgotten == Some(true) {
+            self.stored([(uid, None)]);
+        }
+        Ok(forgotten)
     }
 
     /// One transaction: the record under its new key, and the old key gone.
@@ -281,6 +418,10 @@ impl AgentStore for PgAgentStore {
             .collect()
     }
 }
+
+/// The lock the creation of a record is counted under, by the key its schema gives it.
+const CREATE_LOCK: &str =
+    "hashtextextended('opamp-fleet-server-agents:' || coalesce(current_schema(), ''), 0)";
 
 /// The columns of a row, in the order [`read_all`] selects and [`write`] inserts them.
 const COLUMNS: &str = "instance_uid, sequence_num, capabilities, transport, last_seen_ms, \
@@ -610,6 +751,7 @@ async fn insert(
 mod tests {
     use super::*;
     use crate::agent_store::tests::record;
+    use crate::agent_store::Presence;
     use crate::configs::{revision_hash, Configuration, Revision};
     use crate::fs::{FsAgentStore, FsConfigBackend};
     use crate::postgres::testing::TestDatabase;
@@ -971,6 +1113,228 @@ mod tests {
             [[Some("second".to_string())]],
             "the second, which waited, wrote last"
         );
+    }
+
+    /// A presence batch writes where each Agent is connected and by whom: a connected Agent names
+    /// the holder, `last_seen_ms` never moves back, and a disconnect written by an instance that is
+    /// not the holder leaves the holder's presence. Forgetting decides from it: an Agent a live
+    /// lease holds and that was heard from recently is kept; one whose holder holds no live lease
+    /// reads as disconnected and goes, announced; one silent past the bound goes too.
+    /// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts, ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    #[test]
+    fn a_presence_batch_names_the_holder_and_forgetting_decides_from_it() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let a = database
+            .take_lease("a", std::time::Duration::from_secs(60))
+            .expect("lease")
+            .instance_id;
+        let store = PgAgentStore::new(database.clone());
+        let (one, two, three) = (
+            InstanceUid([1; 16]),
+            InstanceUid([2; 16]),
+            InstanceUid([3; 16]),
+        );
+        for uid in [one, two, three] {
+            store.put(&uid, &record()).expect("put");
+        }
+        let at = |last_seen_ms: u64, connected: bool| Presence {
+            connected,
+            last_seen_ms,
+        };
+        store
+            .write_presence(
+                &a,
+                &[
+                    (two, at(5_000, true)),
+                    (one, at(5_000, true)),
+                    (three, at(5_000, true)),
+                ],
+            )
+            .expect("batch");
+        let presence = |uid: InstanceUid| {
+            test.rows(&format!(
+                "SELECT connected::text, holder::text, last_seen_ms::text FROM agents \
+                 WHERE instance_uid = '{uid}'"
+            ))
+        };
+        assert_eq!(
+            presence(one),
+            [[Some("true".into()), Some(a.clone()), Some("5000".into())]]
+        );
+        store
+            .write_presence(&a, &[(one, at(4_000, true))])
+            .expect("an older one");
+        assert_eq!(presence(one)[0][2].as_deref(), Some("5000"), "never back");
+        let other = "00000000-0000-4000-8000-000000000001";
+        store
+            .write_presence(other, &[(one, at(6_000, false))])
+            .expect("not the holder's");
+        assert_eq!(
+            presence(one),
+            [[Some("true".into()), Some(a.clone()), Some("6000".into())]],
+            "the holder's presence stays"
+        );
+
+        assert_eq!(
+            store.remove_if_silent(&one, 1_000),
+            Ok(Some(false)),
+            "still reporting"
+        );
+        assert_eq!(
+            store.remove_if_silent(&one, 7_000),
+            Ok(Some(true)),
+            "silent"
+        );
+        assert_eq!(store.remove_if_silent(&one, 7_000), Ok(None), "gone");
+        test.sql(&format!("DELETE FROM leases WHERE instance_id = '{a}'"));
+        assert_eq!(
+            store.remove_if_silent(&two, 1_000),
+            Ok(Some(true)),
+            "a holder without a live lease holds no connection"
+        );
+        store
+            .write_presence(&a, &[(three, at(6_000, false))])
+            .expect("the holder's disconnect");
+        assert_eq!(
+            presence(three),
+            [[Some("false".into()), None, Some("6000".into())]]
+        );
+        assert_eq!(
+            store.remove_if_silent(&three, 1_000),
+            Ok(Some(true)),
+            "disconnected"
+        );
+        assert!(store.load().expect("load").is_empty());
+    }
+
+    /// Two presence batches over the same two Agents, given them in opposite orders, both commit:
+    /// each locks the rows in the order of their `instance_uid` before it writes them, as the
+    /// gated release test above shows for a release.
+    /// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts
+    #[test]
+    fn two_presence_batches_over_the_same_agents_in_opposite_orders_both_commit() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let (low, high) = (InstanceUid([1; 16]), InstanceUid([2; 16]));
+        let store = PgAgentStore::new(database.clone());
+        store.put(&low, &record()).expect("put");
+        store.put(&high, &record()).expect("put");
+        // A fleet large enough that the database finds each row of a batch by its key, in the
+        // order the batch names them, rather than scanning the table in one order for both.
+        test.sql(
+            "INSERT INTO agents (instance_uid, sequence_num, capabilities, transport, \
+             last_seen_ms, restart_pending, labels) SELECT 'filler-' || n, 0, 0, 'http', 0, false, \
+             '{}' FROM generate_series(1, 5000) AS n; ANALYZE agents",
+        );
+        test.sql(
+            "CREATE TABLE fleet_test_gate (open boolean NOT NULL); \
+             INSERT INTO fleet_test_gate VALUES (false); \
+             CREATE FUNCTION fleet_test_wait() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN \
+             WHILE NOT (SELECT open FROM fleet_test_gate) LOOP PERFORM pg_sleep(0.01); \
+             END LOOP; RETURN NEW; END $$; \
+             CREATE TRIGGER fleet_test_wait BEFORE UPDATE ON agents \
+             FOR EACH ROW EXECUTE FUNCTION fleet_test_wait();",
+        );
+        let sessions = |condition: &str| {
+            test.rows(&format!(
+                "SELECT 1 FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND {condition}"
+            ))
+            .len()
+        };
+        let at_gate = || sessions("wait_event = 'PgSleep'");
+        let until = |what: &str, done: &dyn Fn() -> bool| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while !done() {
+                assert!(std::time::Instant::now() < deadline, "{what}");
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+        let batch = |holder: &'static str, order: [InstanceUid; 2]| {
+            let database = database.clone();
+            std::thread::spawn(move || {
+                PgAgentStore::new(database).write_presence(
+                    holder,
+                    &order.map(|uid| {
+                        (
+                            uid,
+                            Presence {
+                                connected: true,
+                                last_seen_ms: 9_000,
+                            },
+                        )
+                    }),
+                )
+            })
+        };
+        let (first_holder, second_holder) = (
+            "00000000-0000-4000-8000-000000000001",
+            "00000000-0000-4000-8000-000000000002",
+        );
+        let first = batch(first_holder, [high, low]);
+        until("the first reaches the gate", &|| at_gate() == 1);
+        let second = batch(second_holder, [low, high]);
+        until("the second waits for a row, or reaches the gate", &|| {
+            at_gate() == 2 || sessions("wait_event_type = 'Lock'") == 1
+        });
+        test.sql("UPDATE fleet_test_gate SET open = true");
+        first
+            .join()
+            .expect("the first's thread")
+            .expect("the first commits");
+        second
+            .join()
+            .expect("the second's thread")
+            .expect("the second commits");
+        assert_eq!(
+            test.rows("SELECT DISTINCT holder::text FROM agents WHERE holder IS NOT NULL"),
+            [[Some(second_holder.to_string())]],
+            "the second, which waited, wrote last"
+        );
+    }
+
+    /// The ceiling on records holds for every instance on the store: the store counts its rows as
+    /// it creates one, so a record past it is not created through any of them, and one stored
+    /// already passes none.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    #[test]
+    fn the_records_are_bounded_where_they_are_stored() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let (a, b) = (
+            PgAgentStore::new(database.clone()),
+            PgAgentStore::new(database),
+        );
+        let (one, two, three) = (
+            InstanceUid([1; 16]),
+            InstanceUid([2; 16]),
+            InstanceUid([3; 16]),
+        );
+        assert_eq!(a.create_within(&one, &record(), 2), Ok(true));
+        assert_eq!(b.create_within(&two, &record(), 2), Ok(true));
+        assert_eq!(
+            a.create_within(&three, &record(), 2),
+            Ok(false),
+            "past the ceiling"
+        );
+        assert_eq!(
+            b.create_within(&three, &record(), 2),
+            Ok(false),
+            "on either instance"
+        );
+        assert_eq!(
+            b.create_within(&one, &record(), 2),
+            Ok(true),
+            "stored already"
+        );
+        assert_eq!(a.load().expect("load").len(), 2);
+        assert!(a.get(&one).expect("get") == Some(record()), "created whole");
     }
 
     /// A row that does not decode fails startup naming its `instance_uid` (ADR-0029 clause 4).
