@@ -1,14 +1,21 @@
 //! The notifications the instances on one database share
 //! (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
-//! clause 9): one channel per schema, a `NOTIFY` that names a kind of change and nothing else,
-//! sent in the transaction that commits the change, and a connection of each instance's own that
-//! listens. A channel is the database's, not the schema's, so its name carries the schema: two
-//! fleets in two schemas of one database never hear each other.
+//! clause 9): one channel per schema, a `NOTIFY` that names a kind of change, the identifier it
+//! concerns and the instance that sent it, and nothing else, sent in the transaction that commits
+//! the change, and a connection of each instance's own that listens. A channel is the database's,
+//! not the schema's, so its name carries the schema: two fleets in two schemas of one database
+//! never hear each other.
+//!
+//! Every connection of an instance carries the instance's origin as the session setting
+//! [`ORIGIN_SETTING`], so a notification names its sender whichever store sends it, and the
+//! listener hands on none that its own instance sent: that instance holds what it committed
+//! already.
 
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use futures_util::StreamExt as _;
+use serde::{Deserialize, Serialize};
 use tokio_postgres::tls::MakeTlsConnect;
 use tokio_postgres::{AsyncMessage, GenericClient, NoTls, Socket};
 
@@ -16,6 +23,9 @@ use super::{sql, Database, Tls};
 
 /// The channel every instance on a schema listens on, as SQL: its name and the schema's.
 const CHANNEL: &str = "'opamp_fleet:' || coalesce(current_schema(), '')";
+
+/// The session setting every connection of an instance carries its origin in.
+pub(crate) const ORIGIN_SETTING: &str = "opamp_fleet.origin";
 
 /// The kind a revocation added or lifted is announced as.
 pub const REVOCATION: &str = "revocation";
@@ -29,47 +39,109 @@ pub const CERTIFICATE: &str = "certificate";
 /// The kind a Host written or removed, or an `instance_uid` bound or released, is announced as.
 pub const HOST: &str = "host";
 
+/// The kind an enrolment request queued, decided or withdrawn is announced as.
+pub const ENROLMENT: &str = "enrolment";
+
+/// The kind the enrolment window opened, moved, closed or ended is announced as.
+pub const WINDOW: &str = "window";
+
 /// How long a listener waits before it connects again after its connection ended.
 const RECONNECT: Duration = Duration::from_secs(1);
+
+/// One notification as it travels: its kind, the identifier it concerns, and the origin of the
+/// instance that sent it.
+#[derive(Serialize, Deserialize)]
+struct Payload {
+    kind: String,
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    from: Option<String>,
+}
+
+/// A change another instance committed: its kind and the identifier it concerns, empty where the
+/// kind names none.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Notice {
+    pub kind: String,
+    pub id: String,
+}
+
+impl Notice {
+    /// A notice of `kind` concerning `id`.
+    #[must_use]
+    pub fn new(kind: &str, id: &str) -> Self {
+        Notice {
+            kind: kind.to_string(),
+            id: id.to_string(),
+        }
+    }
+}
 
 /// What a listener hears.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Heard {
-    /// A change of this kind was committed, by this instance or another.
-    Notified(String),
+    /// Another instance committed a change of this kind. A payload that does not read is heard as
+    /// a notice of a kind no instance knows.
+    Notified(Notice),
     /// The listening connection was made, the first time or again after it ended: whatever was
     /// committed in between was not heard.
     Listening,
 }
 
-/// Announces a change of `kind` to every instance, in the transaction `client` is in, so it is
-/// heard once the change is committed and never when it is not.
+/// Announces a change of `kind` concerning `id` to every other instance, in the transaction
+/// `client` is in, so it is heard once the change is committed and never when it is not. It names
+/// the origin the connection carries.
 ///
 /// # Errors
 /// Returns the database's error.
-pub(crate) async fn notify(client: &impl GenericClient, kind: &str) -> Result<(), String> {
+pub(crate) async fn notify(
+    client: &impl GenericClient,
+    kind: &str,
+    id: &str,
+) -> Result<(), String> {
     client
-        .execute(&format!("SELECT pg_notify({CHANNEL}, $1)"), &[&kind])
+        .execute(
+            &format!(
+                "SELECT pg_notify({CHANNEL}, json_build_object('kind', $1::text, 'id', $2::text, \
+                 'from', current_setting('{ORIGIN_SETTING}', true))::text)"
+            ),
+            &[&kind, &id],
+        )
         .await
         .map_err(sql)?;
     Ok(())
 }
 
+/// What `payload` says, unless `origin` sent it: a payload that does not read is a notice of a
+/// kind nobody knows, which counts as every notification.
+fn heard(payload: &str, origin: &str) -> Option<Notice> {
+    match serde_json::from_str::<Payload>(payload) {
+        Ok(payload) if payload.from.as_deref() == Some(origin) => None,
+        Ok(payload) => Some(Notice {
+            kind: payload.kind,
+            id: payload.id,
+        }),
+        Err(_) => Some(Notice::new("", "")),
+    }
+}
+
 impl Database {
     /// Listens on a connection of its own for as long as the database is open, and hands `on`
-    /// every kind of change announced, and [`Heard::Listening`] each time the connection is made.
-    /// A connection that ends is made again after a second.
+    /// every change another instance announced, and [`Heard::Listening`] each time the connection
+    /// is made. What this instance announced itself is not handed on. A connection that ends is
+    /// made again after a second.
     pub fn listen(&self, on: impl Fn(Heard) + Send + Sync + 'static) {
         let (pg, tls, name) = (self.pg.clone(), self.tls.clone(), self.name.clone());
-        let closing = self.closing.clone();
+        let (closing, origin) = (self.closing.clone(), self.origin.clone());
         self.bridge.spawn(async move {
             loop {
                 if closing.load(Ordering::SeqCst) {
                     return;
                 }
                 let ended = match &tls {
-                    Tls::Rustls(tls) => listen_once(&pg, tls.clone(), &on).await,
-                    Tls::Plain => listen_once(&pg, NoTls, &on).await,
+                    Tls::Rustls(tls) => listen_once(&pg, tls.clone(), &origin, &on).await,
+                    Tls::Plain => listen_once(&pg, NoTls, &origin, &on).await,
                 };
                 if closing.load(Ordering::SeqCst) {
                     return;
@@ -87,7 +159,12 @@ impl Database {
 }
 
 /// One listening connection, until it ends: why it ended.
-async fn listen_once<T>(pg: &tokio_postgres::Config, tls: T, on: &impl Fn(Heard)) -> String
+async fn listen_once<T>(
+    pg: &tokio_postgres::Config,
+    tls: T,
+    origin: &str,
+    on: &impl Fn(Heard),
+) -> String
 where
     T: MakeTlsConnect<Socket>,
     T::Stream: Send + 'static,
@@ -96,13 +173,13 @@ where
         Ok(connected) => connected,
         Err(e) => return sql(e),
     };
-    let (heard, mut hearing) = tokio::sync::mpsc::unbounded_channel();
+    let (heard_tx, mut hearing) = tokio::sync::mpsc::unbounded_channel();
     let driven = tokio::spawn(async move {
         let mut messages = futures_util::stream::poll_fn(move |cx| connection.poll_message(cx));
         while let Some(message) = messages.next().await {
             match message {
                 Ok(AsyncMessage::Notification(notification)) => {
-                    let _ = heard.send(notification.payload().to_string());
+                    let _ = heard_tx.send(notification.payload().to_string());
                 }
                 Ok(_) => {}
                 Err(e) => return sql(e),
@@ -123,8 +200,10 @@ where
         return sql(e);
     }
     on(Heard::Listening);
-    while let Some(kind) = hearing.recv().await {
-        on(Heard::Notified(kind));
+    while let Some(payload) = hearing.recv().await {
+        if let Some(notice) = heard(&payload, origin) {
+            on(Heard::Notified(notice));
+        }
     }
     driven
         .await
@@ -137,12 +216,13 @@ mod tests {
     use super::super::{client, Exclusive};
     use super::*;
 
-    /// A change announced in a transaction is heard by every listening instance once it is
-    /// committed, and not when it is rolled back, nor when it is announced in another schema of
-    /// the same database; each listener hears that it listens first.
+    /// A change announced in a transaction is heard by every other listening instance once it is
+    /// committed, with the identifier it names, and not when it is rolled back, nor by the instance
+    /// that announced it, nor when it is announced in another schema of the same database; each
+    /// listener hears that it listens first.
     /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
     #[test]
-    fn a_committed_change_is_heard_by_every_instance() {
+    fn a_committed_change_is_heard_by_every_other_instance() {
         let Some(test) = TestDatabase::named() else {
             return;
         };
@@ -167,24 +247,42 @@ mod tests {
         .expect("another schema")
         .run(|pool| async move {
             let client = client(&pool).await?;
-            notify(&**client, "elsewhere").await
+            notify(&**client, "elsewhere", "").await
         })
         .expect("notify in another schema");
-        for commit in [false, true] {
-            a.run(move |pool| async move {
+        let announce = |on: &Database, kind: &'static str, commit: bool| {
+            on.run(move |pool| async move {
                 let mut client = client(&pool).await?;
                 let transaction = client.transaction().await.map_err(sql)?;
-                notify(&*transaction, if commit { "kept" } else { "dropped" }).await?;
+                notify(&*transaction, kind, "the-id").await?;
                 if commit {
                     transaction.commit().await.map_err(sql)?;
                 }
                 Ok(())
             })
             .expect("notify");
-        }
+        };
+        announce(&a, "dropped", false);
+        announce(&b, "own", true);
+        announce(&a, "kept", true);
         assert_eq!(
             hearing.recv_timeout(Duration::from_secs(10)),
-            Ok(Heard::Notified("kept".to_string()))
+            Ok(Heard::Notified(Notice::new("kept", "the-id")))
         );
+    }
+
+    /// A payload names its sender; one this instance sent is not handed on, and one that does not
+    /// read is a notice of a kind nobody knows.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    #[test]
+    fn a_notice_from_this_instance_is_passed_over_and_an_unreadable_one_is_unknown() {
+        let sent = r#"{"kind":"floor","id":"otelcol","from":"a"}"#;
+        assert_eq!(heard(sent, "a"), None);
+        assert_eq!(heard(sent, "b"), Some(Notice::new("floor", "otelcol")));
+        assert_eq!(
+            heard(r#"{"kind":"floor","id":"otelcol","from":null}"#, "a"),
+            Some(Notice::new("floor", "otelcol"))
+        );
+        assert_eq!(heard("floor", "a"), Some(Notice::new("", "")));
     }
 }

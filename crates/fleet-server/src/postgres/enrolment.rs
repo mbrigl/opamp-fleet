@@ -13,6 +13,7 @@ use tokio_postgres::GenericClient;
 
 use deadpool_postgres::Object;
 
+use super::notify::{notify, ENROLMENT, WINDOW};
 use super::{client, signed, sql, unsigned, Database};
 use crate::enrolment::{
     Approval, Decision, DecisionError, EnrolmentStore, Persisted, PersistedRequest, Took,
@@ -78,6 +79,7 @@ impl EnrolmentStore for PgEnrolmentStore {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
             write(&*transaction, &persisted).await?;
+            notify(&*transaction, WINDOW, "").await?;
             transaction.commit().await.map_err(sql)
         })
     }
@@ -146,6 +148,7 @@ impl EnrolmentStore for PgEnrolmentStore {
                 )
                 .await
                 .map_err(sql)?;
+            notify(&*transaction, ENROLMENT, &id).await?;
             transaction.commit().await.map_err(sql)?;
             Ok(Took::Added)
         })
@@ -181,6 +184,7 @@ impl EnrolmentStore for PgEnrolmentStore {
                 )
                 .await
                 .map_err(sql)?;
+            notify(&*transaction, ENROLMENT, &id).await?;
             transaction.commit().await.map_err(sql)?;
             Ok(true)
         })
@@ -219,6 +223,7 @@ impl EnrolmentStore for PgEnrolmentStore {
                             )
                             .await
                             .map_err(sql)?;
+                        notify(&***held.client(), ENROLMENT, &request_id).await?;
                         Found::Revoked
                     } else {
                         Found::Waiting(request)
@@ -245,6 +250,7 @@ impl EnrolmentStore for PgEnrolmentStore {
                             )
                             .await
                             .map_err(sql)?;
+                        notify(&***held.client(), ENROLMENT, &id).await?;
                         held.client().batch_execute("COMMIT").await.map_err(sql)?;
                         drop(held.let_go());
                         Ok(Approval::Approved(decision))
@@ -263,8 +269,9 @@ impl EnrolmentStore for PgEnrolmentStore {
         let issuers = issuers.to_vec();
         let serial = serial.to_string();
         self.database.run(move |pool| async move {
-            let client = client(&pool).await?;
-            let withdrawn = client
+            let mut client = client(&pool).await?;
+            let transaction = client.transaction().await.map_err(sql)?;
+            let withdrawn = transaction
                 .execute(
                     "DELETE FROM enrolment_requests WHERE request -> 'decision' IS NULL \
                      AND request -> 'requester' -> 'bootstrap' ->> 'serial' = $2 \
@@ -273,6 +280,10 @@ impl EnrolmentStore for PgEnrolmentStore {
                 )
                 .await
                 .map_err(sql)?;
+            if withdrawn > 0 {
+                notify(&*transaction, ENROLMENT, &serial).await?;
+            }
+            transaction.commit().await.map_err(sql)?;
             Ok(usize::try_from(withdrawn).unwrap_or(usize::MAX))
         })
     }
@@ -280,8 +291,9 @@ impl EnrolmentStore for PgEnrolmentStore {
     fn withdraw(&self, ids: &[String]) -> Result<(), String> {
         let ids = ids.to_vec();
         self.database.run(move |pool| async move {
-            let client = client(&pool).await?;
-            client
+            let mut client = client(&pool).await?;
+            let transaction = client.transaction().await.map_err(sql)?;
+            let withdrawn = transaction
                 .execute(
                     "DELETE FROM enrolment_requests WHERE id = ANY($1) \
                      AND request -> 'decision' IS NULL",
@@ -289,14 +301,18 @@ impl EnrolmentStore for PgEnrolmentStore {
                 )
                 .await
                 .map_err(sql)?;
-            Ok(())
+            if withdrawn > 0 {
+                notify(&*transaction, ENROLMENT, "").await?;
+            }
+            transaction.commit().await.map_err(sql)
         })
     }
 
     fn open_window(&self, until_ms: u64) -> Result<(), String> {
         self.database.run(move |pool| async move {
-            let client = client(&pool).await?;
-            client
+            let mut client = client(&pool).await?;
+            let transaction = client.transaction().await.map_err(sql)?;
+            transaction
                 .execute(
                     "INSERT INTO enrolment_window (singleton, until_ms) VALUES (true, $1) \
                      ON CONFLICT (singleton) DO UPDATE SET until_ms = EXCLUDED.until_ms",
@@ -304,7 +320,8 @@ impl EnrolmentStore for PgEnrolmentStore {
                 )
                 .await
                 .map_err(sql)?;
-            Ok(())
+            notify(&*transaction, WINDOW, "").await?;
+            transaction.commit().await.map_err(sql)
         })
     }
 
@@ -324,6 +341,7 @@ impl EnrolmentStore for PgEnrolmentStore {
                 .execute("DELETE FROM enrolment_requests", &[])
                 .await
                 .map_err(sql)?;
+            notify(&*transaction, WINDOW, "").await?;
             transaction.commit().await.map_err(sql)
         })
     }
@@ -344,6 +362,7 @@ impl EnrolmentStore for PgEnrolmentStore {
                     .execute("DELETE FROM enrolment_requests", &[])
                     .await
                     .map_err(sql)?;
+                notify(&*transaction, WINDOW, "").await?;
             }
             transaction.commit().await.map_err(sql)?;
             Ok(ended > 0)

@@ -53,7 +53,7 @@ impl LedgerStore for PgLedgerStore {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
             write_issued(&*transaction, &issued).await?;
-            notify(&*transaction, CERTIFICATE).await?;
+            notify(&*transaction, CERTIFICATE, &issued.facts.id.serial).await?;
             transaction.commit().await.map_err(sql)
         })
     }
@@ -70,7 +70,7 @@ impl LedgerStore for PgLedgerStore {
                 )
                 .await
                 .map_err(sql)?;
-            notify(&*transaction, CERTIFICATE).await?;
+            notify(&*transaction, CERTIFICATE, &id.serial).await?;
             transaction.commit().await.map_err(sql)
         })
     }
@@ -138,10 +138,10 @@ impl LedgerStore for PgLedgerStore {
                 }
             }
             write_issued(&*transaction, &issued).await?;
-            notify(&*transaction, CERTIFICATE).await?;
+            notify(&*transaction, CERTIFICATE, &issued.facts.id.serial).await?;
             if let Some((host, entry)) = &mint {
                 if write_seen(&*transaction, host, entry).await? {
-                    notify(&*transaction, HOST).await?;
+                    notify(&*transaction, HOST, host).await?;
                 }
             }
             transaction.commit().await.map_err(sql)?;
@@ -190,7 +190,7 @@ impl LedgerStore for PgLedgerStore {
                     )
                     .await
                     .map_err(sql)?;
-                super::notify::notify(&*transaction, super::notify::REVOCATION).await?;
+                super::notify::notify(&*transaction, super::notify::REVOCATION, &wider.id).await?;
                 transaction.commit().await.map_err(sql)?;
                 return Ok(Added::Widened(wider));
             }
@@ -205,8 +205,9 @@ impl LedgerStore for PgLedgerStore {
                 return Ok(Added::Full);
             }
             let position = last.map_or(0, |last| last + 1);
+            let id = entry.id.clone();
             write_revocations(&*transaction, &[(position, entry)]).await?;
-            super::notify::notify(&*transaction, super::notify::REVOCATION).await?;
+            super::notify::notify(&*transaction, super::notify::REVOCATION, &id).await?;
             transaction.commit().await.map_err(sql)?;
             Ok(Added::Added)
         })
@@ -224,7 +225,7 @@ impl LedgerStore for PgLedgerStore {
             if removed == 0 {
                 return Ok(false);
             }
-            super::notify::notify(&*transaction, super::notify::REVOCATION).await?;
+            super::notify::notify(&*transaction, super::notify::REVOCATION, &id).await?;
             transaction.commit().await.map_err(sql)?;
             Ok(true)
         })
@@ -299,7 +300,7 @@ impl LedgerStore for PgLedgerStore {
                 append_to_array(&*transaction, &instance_uid, &host).await?;
             }
             if made || inserted > 0 {
-                notify(&*transaction, HOST).await?;
+                notify(&*transaction, HOST, &host).await?;
             }
             transaction.commit().await.map_err(sql)?;
             Ok(Bound::Bound)
@@ -313,7 +314,7 @@ impl LedgerStore for PgLedgerStore {
             let transaction = client.transaction().await.map_err(sql)?;
             let host = unbind_in(&*transaction, &instance_uid).await?;
             if host.is_some() {
-                notify(&*transaction, HOST).await?;
+                notify(&*transaction, HOST, host.as_deref().unwrap_or_default()).await?;
             }
             transaction.commit().await.map_err(sql)?;
             Ok(host)
@@ -349,7 +350,7 @@ impl LedgerStore for PgLedgerStore {
             if holder == host {
                 append_to_array(&*transaction, &new, &host).await?;
             }
-            notify(&*transaction, HOST).await?;
+            notify(&*transaction, HOST, &host).await?;
             transaction.commit().await.map_err(sql)?;
             let bound = if holder == host {
                 Bound::Bound
@@ -370,7 +371,7 @@ impl LedgerStore for PgLedgerStore {
                 .await
                 .map_err(sql)?;
             if removed > 0 {
-                notify(&*transaction, HOST).await?;
+                notify(&*transaction, HOST, &host).await?;
             }
             transaction.commit().await.map_err(sql)
         })
@@ -452,7 +453,7 @@ impl LedgerStore for PgLedgerStore {
                 }
             };
             if changed {
-                notify(&*transaction, HOST).await?;
+                notify(&*transaction, HOST, "").await?;
             }
             transaction.commit().await.map_err(sql)
         })
@@ -490,7 +491,7 @@ impl LedgerStore for PgLedgerStore {
             for (host, entry) in &changed {
                 write_host(&*transaction, host, entry).await?;
             }
-            notify(&*transaction, HOST).await?;
+            notify(&*transaction, HOST, "").await?;
             transaction.commit().await.map_err(sql)
         })?;
         hosts.clone_into(&mut written);
@@ -914,6 +915,7 @@ mod tests {
     use super::*;
     use crate::fs::FsLedgerStore;
     use crate::postgres::testing::TestDatabase;
+    use crate::postgres::Exclusive;
     use crate::revocation::{Revoked, SubjectValues};
 
     fn issued(serial: &str, predecessor: Option<&str>) -> Issued {
@@ -1735,6 +1737,25 @@ mod tests {
         }
     }
 
+    /// Instance B, on a database handle of its own, so it hears what the instances on `database`
+    /// announce, following the notifications on the runtime it answers.
+    fn follower(
+        test: &TestDatabase,
+    ) -> (Arc<crate::revocation::Revocations>, tokio::runtime::Runtime) {
+        let database = Database::open_in(&test.config(), Exclusive::Shared, Some(&test.schema))
+            .expect("B's database");
+        let b = Arc::new(instances_on(&database)());
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        {
+            let _entered = runtime.enter();
+            let state = crate::fleet::AppState::on(&crate::Records::Postgres(database.clone()))
+                .expect("B's state")
+                .with_revocations(Some(b.clone()));
+            crate::instance::follow(&database, Arc::new(state));
+        }
+        (b, runtime)
+    }
+
     /// A release and a re-key hold for every instance, whatever the instance that makes them holds
     /// in memory: B never heard of A's bindings, and what it releases and moves is what a third
     /// instance finds stored; a Gateway's mark leaves its Host bound none in the store
@@ -1818,12 +1839,7 @@ mod tests {
             .expect("bind");
         a.check_report("h1", &subject, 1_000, b"\x02")
             .expect("bind");
-        let b = Arc::new(instance());
-        let runtime = tokio::runtime::Runtime::new().expect("runtime");
-        {
-            let _entered = runtime.enter();
-            crate::instance::follow_revocations(&database, b.clone());
-        }
+        let (b, _runtime) = follower(&test);
         let eventually = |condition: &dyn Fn() -> bool| {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
             while std::time::Instant::now() < deadline {
@@ -1968,12 +1984,7 @@ mod tests {
         let database = test.open();
         let instance = instances_on(&database);
         let a = instance();
-        let b = Arc::new(instance());
-        let runtime = tokio::runtime::Runtime::new().expect("runtime");
-        {
-            let _entered = runtime.enter();
-            crate::instance::follow_revocations(&database, b.clone());
-        }
+        let (b, _runtime) = follower(&test);
         let eventually = |condition: &dyn Fn() -> bool| {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
             while std::time::Instant::now() < deadline {
