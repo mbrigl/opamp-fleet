@@ -3,7 +3,7 @@
 - **Status:** 🟡 proposed
 - **Date:** 2026-10-27
 - **Deciders:** Markus Brigl
-- **Applies to:** every storage port in `crates/fleet-server/src/` (`agent_store.rs`, `configs.rs`, `deployments.rs`, `packages.rs`, `blobs.rs`, `bootstrap.rs`, `enrolment.rs`, `revocation.rs`, `audit.rs`) and every adapter under `crates/fleet-server/src/fs/`, `crates/fleet-server/src/postgres/` and `crates/fleet-server/src/s3.rs`, the embedded schema and its migrations, the wiring in `crates/fleet-server/src/lib.rs` and `crates/fleet-server/src/main.rs`, `data_dir`, the `[blobs]` and `[database]` sections and the `[audit]` keys `max_file_bytes`, `keep_files` and `retain_days` of `server.toml` and their parsing in `crates/fleet-server/src/config.rs`, `config/server.toml`, the `server migrate` and `server migrate-to-postgres` commands, the `object_store`, `tokio-postgres`, `deadpool-postgres` and `tokio-postgres-rustls` dependencies in `Cargo.toml` and `deny.toml`, the S3 and PostgreSQL adapters' tests and the CI jobs that run them, the rustfs and postgres services in `observability/compose.yaml` and their forward into the Dev Container, `docs/ARCHITECTURE.md`, and every document that names where the Server keeps its state
+- **Applies to:** every storage port in `crates/fleet-server/src/` (`agent_store.rs`, `configs.rs`, `deployments.rs`, `packages.rs`, `blobs.rs`, `bootstrap.rs`, `enrolment.rs`, `revocation.rs`, `audit.rs`) and every adapter under `crates/fleet-server/src/fs/`, `crates/fleet-server/src/postgres/` and `crates/fleet-server/src/s3.rs`, the embedded schema and its migrations, the wiring in `crates/fleet-server/src/lib.rs` and `crates/fleet-server/src/main.rs`, `data_dir`, the `[blobs]` and `[database]` sections and the `[audit]` keys `max_file_bytes`, `keep_files` and `retain_days` of `server.toml` and their parsing in `crates/fleet-server/src/config.rs`, `config/server.toml`, the `server migrate`, `server migrate-to-postgres` and `server blobs-to-s3` commands, the `object_store`, `tokio-postgres`, `deadpool-postgres` and `tokio-postgres-rustls` dependencies in `Cargo.toml` and `deny.toml`, the S3 and PostgreSQL adapters' tests and the CI jobs that run them, the rustfs and postgres services in `observability/compose.yaml` and their forward into the Dev Container, `docs/ARCHITECTURE.md`, and every document that names where the Server keeps its state
 
 ## Context
 
@@ -377,9 +377,18 @@ and configured in the Server's configuration alone, and move an old layout by an
     `put` does, and logs each one. A file whose content does not match its name fails startup,
     naming it. The Server does not delete `data_dir/blobs/`, does not write to it again, and with
     `store = "s3"` does not create it; removing it is the operator's. With PostgreSQL and S3 the
-    Server has no `data_dir` (clause 1), and `server migrate-to-postgres` makes the same copy from
-    the old `data_dir` (clause 27). The reverse switch copies nothing: a Package entry whose blob
-    the chosen store does not hold fails startup, naming the entry.
+    Server has no `data_dir` (clause 1), and two commands make the copy instead, never a start:
+    - `server migrate-to-postgres` from the old `data_dir`, as the records move (clause 27).
+    - `server blobs-to-s3 --data-dir <data_dir>`, for a Server already on PostgreSQL with the
+      filesystem blob store. It runs once, with the `server.toml` that names the database and the
+      bucket, and refuses to run while any instance holds a live lease. It uploads, as above,
+      every blob of `<data_dir>/blobs/` that a Package entry references and the bucket lacks, then
+      checks that the bucket holds the blob of every entry, and fails naming an entry whose blob it
+      does not hold. It only reads `<data_dir>`. The operator then removes `data_dir` from
+      `server.toml`; removing the directory is theirs.
+
+    The reverse switch copies nothing: a Package entry whose blob the chosen store does not hold
+    fails startup, naming the entry.
 
 20. **The object store is external; the adapter only connects to it.** The Server ships with no
     object store and creates nothing in one but the objects of clause 16. In production the
@@ -521,6 +530,9 @@ and configured in the Server's configuration alone, and move an old layout by an
       empty.
     - It applies the schema and copies every record of the old `data_dir` into the database in one
       transaction.
+    - It reads the old `data_dir` in place and changes nothing there: it creates no directory,
+      changes no mode and removes no leftover temporary file, which a Server's start would repair.
+      It copies no record elsewhere to read it, so no private key is written a second time.
     - With the filesystem blob store it copies `blobs/` into the new `data_dir`.
     - With S3 it takes no `--data-dir`, as a Server on PostgreSQL and S3 has none (clause 1), and
       one named fails the copy, naming the flag. Before the transaction it uploads into the bucket
@@ -824,7 +836,8 @@ Tests that carry `Verifies: ADR-0029`:
   `the_cleanup_lists_the_staging_keys_before_it_asks_which_leases_are_live`;
   [`postgres/import.rs`](../../crates/fleet-server/src/postgres/import.rs)
   `migrate_to_postgres_leaves_the_audit_as_an_archive_and_records_its_last_entry`,
-  `migrate_to_postgres_with_s3_uploads_the_referenced_blobs_and_takes_no_data_dir`.
+  `migrate_to_postgres_with_s3_uploads_the_referenced_blobs_and_takes_no_data_dir`,
+  `blobs_to_s3_uploads_the_referenced_blobs_and_checks_every_entry`.
 - Tests that will carry `Verifies: ADR-draft-the-servers-state-and-its-stores`, for clause 23:
   [`postgres/mod.rs`](../../crates/fleet-server/src/postgres/mod.rs)
   `a_server_holds_a_lease_before_it_opens_a_listener`,
