@@ -184,6 +184,36 @@ impl PackageBackend for PgPackageBackend {
             transaction.commit().await.map_err(sql)
         })
     }
+
+    /// On a connection of its own (ADR-draft-the-servers-state-and-its-stores clause 14).
+    fn hold_blobs(&self, alone: bool) -> Result<crate::blobs::BlobHold, String> {
+        self.hold(alone)
+    }
+
+    /// From the stored entries, read under the caller's hold.
+    fn named(&self, hashes: &[String]) -> Result<std::collections::HashSet<String>, String> {
+        let hashes = hashes.to_vec();
+        self.database.run(move |pool| async move {
+            let client = client(&pool).await?;
+            Ok(client
+                .query(
+                    "SELECT DISTINCT sha256 FROM package_entries WHERE sha256 = ANY($1)",
+                    &[&hashes],
+                )
+                .await
+                .map_err(sql)?
+                .iter()
+                .map(|row| row.get(0))
+                .collect())
+        })
+    }
+}
+
+impl PgPackageBackend {
+    /// [`PackageBackend::hold_blobs`] on the database.
+    fn hold(&self, alone: bool) -> Result<crate::blobs::BlobHold, String> {
+        self.database.hold_blobs(alone)
+    }
 }
 
 /// Holds the Package's row `FOR UPDATE` until the caller's transaction ends, and then counts the
@@ -594,6 +624,7 @@ mod tests {
         let mut reported = record();
         reported.assignment = None;
         agents.put(&uid, &reported).expect("report");
+        test.store_deployments(&["stable"]);
         let key = 0x19_0001;
         let gate = test.hold_assignment_writes(key);
         let mut released = record();
@@ -621,5 +652,239 @@ mod tests {
             test.rows("SELECT version FROM packages"),
             [[Some("1.2.3".to_string())]]
         );
+    }
+
+    /// A blob store on a directory that holds the first call of `at` (`"put"` once the bytes are
+    /// stored, `"exists"` before it answers) until the test lets it go: where a test holds an
+    /// upload between its steps. The directory stands in for the bucket every instance shares.
+    struct Pausing {
+        inner: crate::fs::FsBlobStore,
+        at: &'static str,
+        reached: std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>>,
+        go: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl Pausing {
+        /// The store, the receiver told once `at` is reached, and the sender that lets it go.
+        fn at(
+            dir: &std::path::Path,
+            at: &'static str,
+        ) -> (
+            Self,
+            std::sync::mpsc::Receiver<()>,
+            std::sync::mpsc::Sender<()>,
+        ) {
+            let (reached, reaches) = std::sync::mpsc::channel();
+            let (go, goes) = std::sync::mpsc::channel();
+            (
+                Pausing {
+                    inner: crate::fs::FsBlobStore::open(dir).expect("blobs"),
+                    at,
+                    reached: std::sync::Mutex::new(Some(reached)),
+                    go: std::sync::Mutex::new(goes),
+                },
+                reaches,
+                go,
+            )
+        }
+
+        fn pause(&self, operation: &str) {
+            if operation != self.at {
+                return;
+            }
+            if let Some(reached) = self.reached.lock().expect("reached").take() {
+                reached.send(()).expect("reached");
+                self.go.lock().expect("go").recv().expect("go");
+            }
+        }
+    }
+
+    impl crate::blobs::BlobStore for Pausing {
+        fn put(&self, bytes: &mut dyn std::io::Read) -> Result<(String, u64), String> {
+            let put = self.inner.put(bytes);
+            self.pause("put");
+            put
+        }
+        fn get(&self, sha256: &str) -> Result<Box<dyn std::io::Read + Send>, String> {
+            self.inner.get(sha256)
+        }
+        fn exists(&self, sha256: &str) -> Result<bool, String> {
+            self.pause("exists");
+            self.inner.exists(sha256)
+        }
+        fn delete(&self, sha256: &str) -> Result<(), String> {
+            self.inner.delete(sha256)
+        }
+        fn list(&self) -> Result<Vec<(String, u64)>, String> {
+            self.inner.list()
+        }
+    }
+
+    /// The package store of one instance on `database`, its blobs in `dir`.
+    fn instance(database: &Arc<Database>, dir: &std::path::Path) -> crate::packages::PackageStore {
+        crate::packages::PackageStore::with_backend(
+            Box::new(PgPackageBackend::new(database.clone())),
+            Box::new(crate::fs::FsBlobStore::open(dir).expect("blobs")),
+        )
+        .expect("open")
+    }
+
+    /// Waits until `done` holds; a test fails after 30 seconds without.
+    fn until(what: &str, done: &dyn Fn() -> bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !done() {
+            assert!(std::time::Instant::now() < deadline, "never: {what}");
+            std::thread::yield_now();
+        }
+    }
+
+    /// B deletes the one entry it holds of a blob; an entry written through A, which B has not
+    /// read, names the same blob, and B's sweep keeps it: it reads the stored entries under the
+    /// blob store's lock, not what B holds.
+    /// Verifies: ADR-draft-the-servers-state-and-its-stores, ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    #[test]
+    fn a_sweep_keeps_a_blob_an_entry_stored_through_another_writer_names() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let linux = Platform::new("linux", "amd64").expect("platform");
+        let (first, second) = (
+            PackageId::new("otelcol", "1.0.0").expect("id"),
+            PackageId::new("otelcol", "2.0.0").expect("id"),
+        );
+        let a = instance(&database, dir.path());
+        a.create(&first).expect("create");
+        a.put_entry(&first, &linux, b"the same bytes".to_vec())
+            .expect("an entry");
+        let b = instance(&database, dir.path());
+        a.create(&second).expect("create");
+        a.put_entry(&second, &linux, b"the same bytes".to_vec())
+            .expect("an entry of the same bytes, which B has not read");
+        let (sha256, _) = b.artifact(&first, &linux).expect("B holds the first");
+        assert!(
+            b.artifact(&second, &linux).is_none(),
+            "B has not read the second"
+        );
+        assert_eq!(b.delete_entry(&first, &linux), Ok(true));
+        assert!(
+            dir.path().join("blobs").join(hex::encode(&sha256)).exists(),
+            "the blob the second entry names is kept"
+        );
+        a.reload().expect("A reads what B deleted");
+        assert_eq!(a.delete_entry(&second, &linux), Ok(true));
+        assert!(
+            !dir.path().join("blobs").join(hex::encode(&sha256)).exists(),
+            "and goes with the last entry that names it"
+        );
+    }
+
+    /// An upload holds the blob store's lock shared from its check that its blob is stored until
+    /// its entry is committed: a sweep that starts meanwhile, at another instance's start, waits
+    /// for it, then reads the entry and keeps the blob.
+    /// Verifies: ADR-draft-the-servers-state-and-its-stores
+    #[test]
+    fn an_upload_holds_off_a_sweep_until_its_entry_is_committed() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let id = PackageId::new("otelcol", "1.0.0").expect("id");
+        let linux = Platform::new("linux", "amd64").expect("platform");
+        let (pausing, reaches, go) = Pausing::at(dir.path(), "exists");
+        let a = Arc::new(
+            crate::packages::PackageStore::with_backend(
+                Box::new(PgPackageBackend::new(database.clone())),
+                Box::new(pausing),
+            )
+            .expect("open A"),
+        );
+        a.create(&id).expect("create");
+        let uploading = std::thread::spawn({
+            let (a, id, linux) = (a.clone(), id.clone(), linux.clone());
+            move || a.put_entry(&id, &linux, b"an artifact".to_vec())
+        });
+        reaches
+            .recv()
+            .expect("A checks its blob, holding the lock shared");
+        let starting = std::thread::spawn({
+            let (database, dir) = (database.clone(), dir.path().to_path_buf());
+            move || instance(&database, &dir).artifact(&id, &linux)
+        });
+        until("B's sweep waits for the lock, or ends", &|| {
+            test.waits_for_the_blob_lock() || starting.is_finished()
+        });
+        go.send(()).expect("go on");
+        assert_eq!(uploading.join().expect("A"), Ok(()));
+        let found = starting.join().expect("B").expect("B opens with the entry");
+        assert!(
+            dir.path()
+                .join("blobs")
+                .join(hex::encode(&found.0))
+                .exists(),
+            "the blob A's entry names is kept"
+        );
+    }
+
+    /// An upload whose blob a sweep deleted before the upload checked for it is refused, to be
+    /// uploaded again, and writes no entry.
+    /// Verifies: ADR-draft-the-servers-state-and-its-stores
+    #[test]
+    fn an_upload_whose_blob_a_sweep_took_first_is_refused() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let id = PackageId::new("otelcol", "1.0.0").expect("id");
+        let linux = Platform::new("linux", "amd64").expect("platform");
+        let (pausing, reaches, go) = Pausing::at(dir.path(), "put");
+        let a = Arc::new(
+            crate::packages::PackageStore::with_backend(
+                Box::new(PgPackageBackend::new(database.clone())),
+                Box::new(pausing),
+            )
+            .expect("open A"),
+        );
+        a.create(&id).expect("create");
+        let uploading = std::thread::spawn({
+            let (a, id, linux) = (a.clone(), id.clone(), linux.clone());
+            move || a.put_entry(&id, &linux, b"an artifact".to_vec())
+        });
+        reaches.recv().expect("A's bytes are stored");
+        // Another instance starts, and its sweep deletes the blob no entry names yet.
+        drop(instance(&database, dir.path()));
+        go.send(()).expect("go on");
+        let refused = uploading.join().expect("A").expect_err("refused");
+        assert!(refused.contains("upload it again"), "{refused}");
+        assert!(
+            test.rows("SELECT 1 FROM package_entries").is_empty(),
+            "no entry is written"
+        );
+    }
+
+    /// A sweep at startup that cannot have the blob store's lock fails the start, naming the lock.
+    /// Verifies: ADR-draft-the-servers-state-and-its-stores
+    #[test]
+    fn a_startup_sweep_that_cannot_have_the_lock_fails_naming_it() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        // The hold is a session of its own, as another instance's would be.
+        let database = test.open();
+        let hold = database.hold_blobs(true).expect("another instance sweeps");
+        database.wait_for_sweeps(std::time::Duration::from_millis(200));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let err = crate::packages::PackageStore::with_backend(
+            Box::new(PgPackageBackend::new(database.clone())),
+            Box::new(crate::fs::FsBlobStore::open(dir.path()).expect("blobs")),
+        )
+        .map(drop)
+        .expect_err("the lock is held");
+        assert!(err.contains("blob store's lock"), "{err}");
+        drop(hold);
+        drop(instance(&database, dir.path()));
     }
 }

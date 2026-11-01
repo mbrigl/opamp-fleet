@@ -273,10 +273,11 @@ impl packages::PackageStore {
     /// with PostgreSQL and S3 (ADR-draft-the-servers-state-and-its-stores clause 1).
     ///
     /// On the bucket the staging objects of every lease that is not live are deleted (clause 16),
-    /// and the cleanup comes back for the instance to run again whenever it takes over a lapsed
-    /// lease. With the filesystem record store an upload is staged under `fs`. On PostgreSQL the
-    /// store is opened before the instance takes its lease, so that a bucket that fails leaves no
-    /// lease behind, and it takes no upload until
+    /// with PostgreSQL under the blob store's lock (clause 14) and by every sweep, and the cleanup
+    /// comes back for the instance to run again whenever it takes over a lapsed lease. With the
+    /// filesystem record store an upload is staged under `fs`, and everything staged is deleted
+    /// at startup alone. On PostgreSQL the store is opened before the instance takes its lease, so
+    /// that a bucket that fails leaves no lease behind, and it takes no upload until
     /// [`StagingCleanup::stage_under`](s3::StagingCleanup::stage_under) names that lease.
     ///
     /// # Errors
@@ -293,20 +294,32 @@ impl packages::PackageStore {
             return Self::with_backend(backend, Box::new(FsBlobStore::open(data_dir)?))
                 .map(|store| (store, None));
         };
-        let store = match records {
-            Records::Files(_) => s3::S3BlobStore::open(bucket)?,
-            Records::Postgres(_) => s3::S3BlobStore::open(bucket)?.awaiting_a_lease(),
-        };
-        let live: s3::LiveLeases = match records {
-            // One Server and no lease: every staging object is a leftover.
-            Records::Files(_) => Arc::new(|| Ok(std::collections::HashSet::new())),
+        let (store, live, hold): (_, s3::LiveLeases, s3::HoldBlobs) = match records {
+            // One Server and no lease: every staging object is a leftover, and nobody else
+            // sweeps.
+            Records::Files(_) => {
+                let store = s3::S3BlobStore::open(bucket)?;
+                store.clean_staging_with(&|| Ok(std::collections::HashSet::new()))?;
+                (
+                    store,
+                    Arc::new(|| Ok(std::collections::HashSet::new())),
+                    Arc::new(|| Ok(blobs::BlobHold::none())),
+                )
+            }
+            // The startup cleanup runs in the sweep of `with_backend`, under the lock.
             Records::Postgres(database) => {
-                let database = database.clone();
-                Arc::new(move || database.live_leases())
+                let (live, hold) = (database.clone(), database.clone());
+                let live: s3::LiveLeases = Arc::new(move || live.live_leases());
+                (
+                    s3::S3BlobStore::open(bucket)?
+                        .awaiting_a_lease()
+                        .with_live(live.clone()),
+                    live,
+                    Arc::new(move || hold.hold_blobs(true)),
+                )
             }
         };
-        let cleanup = s3::StagingCleanup::new(store.clone(), live);
-        cleanup.run()?;
+        let cleanup = s3::StagingCleanup::new(store.clone(), live, hold);
         if let Some(data_dir) = data_dir {
             let referenced: Vec<String> = backend
                 .load()?

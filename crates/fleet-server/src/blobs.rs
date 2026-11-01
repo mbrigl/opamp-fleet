@@ -45,6 +45,37 @@ pub trait BlobStore: Send + Sync {
     /// # Errors
     /// Returns an error when the store cannot be listed.
     fn list(&self) -> Result<Vec<(String, u64)>, String>;
+
+    /// Deletes what uploads that were cut off left behind, of every writer that is no longer live
+    /// (ADR-draft-the-servers-state-and-its-stores clause 16), and answers how many objects it
+    /// deleted: what every sweep runs, under the blob store's lock. A store that stages no upload
+    /// apart from its blobs, or whose one Server cleans up only at startup, deletes nothing here,
+    /// which the default does.
+    ///
+    /// # Errors
+    /// Returns an error when the leftovers cannot be listed or deleted.
+    fn clean_staging(&self) -> Result<usize, String> {
+        Ok(0)
+    }
+}
+
+/// A hold on the blob store's lock
+/// (ADR-draft-the-servers-state-and-its-stores clause 14), released when it is dropped. A store
+/// that is its one Server's alone holds nothing.
+pub struct BlobHold(#[allow(dead_code)] Option<Box<dyn Send>>);
+
+impl BlobHold {
+    /// A hold on nothing: what a store with no other writer answers.
+    #[must_use]
+    pub fn none() -> Self {
+        BlobHold(None)
+    }
+
+    /// A hold that `held` keeps until it is dropped.
+    #[must_use]
+    pub fn of(held: Box<dyn Send>) -> Self {
+        BlobHold(Some(held))
+    }
 }
 
 /// Whether `value` is a blob's name: 64 lowercase hex characters. Nothing else names a blob, so

@@ -606,6 +606,13 @@ impl AgentStore for PgAgentStore {
                 for id in packages {
                     hold_pinned_package(&*transaction, id).await?;
                 }
+                let deployments: BTreeSet<&str> = records
+                    .iter()
+                    .filter_map(|(_, assignment)| Some(assignment.as_ref()?.deployment.as_str()))
+                    .collect();
+                for name in deployments {
+                    hold_released_through(&*transaction, name).await?;
+                }
                 let pinned: BTreeSet<&str> = revisions
                     .iter()
                     .map(|pinned| pinned.configuration.as_str())
@@ -668,6 +675,21 @@ async fn hold_pinned_package(client: &impl GenericClient, id: &PackageId) -> Res
         .map_err(sql)?
         .map(drop)
         .ok_or_else(|| format!("no package set {id}"))
+}
+
+/// Holds the row of the Deployment `name` `FOR KEY SHARE` inside a rollout's transaction, as
+/// [`hold_pinned_package`] holds a Package's: its deletion, which counts the assignments that name
+/// it, waits for the rollout's commit. A Deployment that is not stored is an error.
+async fn hold_released_through(client: &impl GenericClient, name: &str) -> Result<(), String> {
+    client
+        .query_opt(
+            "SELECT 1 FROM deployments WHERE name = $1 FOR KEY SHARE",
+            &[&name],
+        )
+        .await
+        .map_err(sql)?
+        .map(drop)
+        .ok_or_else(|| format!("no deployment {name:?}"))
 }
 
 /// The lock the creation of a record is counted under, by the key its schema gives it.
@@ -1284,6 +1306,8 @@ mod tests {
             return;
         };
         let store = PgAgentStore::new(test.open());
+        // A rollout releases through a stored Deployment.
+        test.store_deployments(&["canary"]);
         let uid = InstanceUid::default();
         let stored = record();
         store.put(&uid, &stored).expect("put");
@@ -1333,6 +1357,8 @@ mod tests {
             return;
         };
         let database = test.open();
+        // A rollout releases through a stored Deployment.
+        test.store_deployments(&["stable", "canary"]);
         contract(&|| {
             (
                 Box::new(PgAgentStore::new(database.clone())),
@@ -1453,6 +1479,8 @@ mod tests {
         };
         let database = test.open();
         let (low, high) = (InstanceUid([1; 16]), InstanceUid([2; 16]));
+        // A rollout releases through a stored Deployment.
+        test.store_deployments(&["first", "second"]);
         let mut bare = record();
         bare.assignment = None;
         let store = PgAgentStore::new(database.clone());

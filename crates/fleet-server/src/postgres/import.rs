@@ -355,7 +355,14 @@ pub fn blobs_to_s3(
     config: &PostgresConfig,
     bucket: &S3BlobsConfig,
 ) -> Result<Report, String> {
-    blobs_to_s3_in(data_dir, config, bucket, None)
+    blobs_to_s3_in(
+        data_dir,
+        config,
+        bucket,
+        None,
+        super::SWEEP_WAIT,
+        &crate::s3::S3BlobStore::open,
+    )
 }
 
 /// [`blobs_to_s3`] in the schema `schema` rather than the role's default.
@@ -364,6 +371,8 @@ pub(crate) fn blobs_to_s3_in(
     config: &PostgresConfig,
     bucket: &S3BlobsConfig,
     schema: Option<&str>,
+    sweep_wait: std::time::Duration,
+    open: &dyn Fn(&S3BlobsConfig) -> Result<crate::s3::S3BlobStore, String>,
 ) -> Result<Report, String> {
     let blobs = data_dir.join(fs::BLOBS);
     if !blobs.is_dir() {
@@ -393,10 +402,20 @@ pub(crate) fn blobs_to_s3_in(
             database.name()
         ));
     }
-    let packages = crate::Records::Postgres(database).packages()?.load()?;
-    let store = crate::s3::S3BlobStore::open(bucket)?;
+    // The blob store's lock, alone, for the whole run: an instance that starts meanwhile waits at
+    // its startup sweep rather than deleting this command's staging objects
+    // (ADR-draft-the-servers-state-and-its-stores clause 19).
+    let hold = database.hold_blobs_within(true, sweep_wait)?;
+    let packages = crate::Records::Postgres(database.clone())
+        .packages()?
+        .load()?;
+    let store = open(bucket)?;
+    let uploaded = upload(&blobs, &packages, &store, bucket)?;
+    // The hold's connection runs on the database's runtime: the database outlives it.
+    drop(hold);
+    drop(database);
     Ok(Report {
-        lines: vec![upload(&blobs, &packages, &store, bucket)?],
+        lines: vec![uploaded],
     })
 }
 
@@ -978,13 +997,27 @@ mod tests {
              expires_at) VALUES ('7c1d6a52-3f0e-4b8e-9a51-0d2c6e4f8a10', 'elsewhere', false, \
              now(), now(), now() + interval '1 hour')",
         );
-        let err = blobs_to_s3_in(&data_dir, &test.config(), &bucket, Some(&test.schema))
-            .expect_err("an instance runs");
+        let err = blobs_to_s3_in(
+            &data_dir,
+            &test.config(),
+            &bucket,
+            Some(&test.schema),
+            super::super::SWEEP_WAIT,
+            &crate::s3::S3BlobStore::open,
+        )
+        .expect_err("an instance runs");
         assert!(err.contains("live lease"), "{err}");
         test.sql("DELETE FROM leases");
 
-        let report =
-            blobs_to_s3_in(&data_dir, &test.config(), &bucket, Some(&test.schema)).expect("upload");
+        let report = blobs_to_s3_in(
+            &data_dir,
+            &test.config(),
+            &bucket,
+            Some(&test.schema),
+            super::super::SWEEP_WAIT,
+            &crate::s3::S3BlobStore::open,
+        )
+        .expect("upload");
         assert_eq!(
             report.lines,
             vec![format!(
@@ -1017,8 +1050,15 @@ mod tests {
             )
             .expect("every entry finds its blob in the bucket");
         }
-        let again_report =
-            blobs_to_s3_in(&data_dir, &test.config(), &bucket, Some(&test.schema)).expect("again");
+        let again_report = blobs_to_s3_in(
+            &data_dir,
+            &test.config(),
+            &bucket,
+            Some(&test.schema),
+            super::super::SWEEP_WAIT,
+            &crate::s3::S3BlobStore::open,
+        )
+        .expect("again");
         assert!(
             again_report.lines[0].contains(", 0 of them uploaded"),
             "{again_report:?}"
@@ -1027,11 +1067,108 @@ mod tests {
         let mut elsewhere = again(&bucket);
         elsewhere.prefix = format!("{}elsewhere/", bucket.prefix);
         std::fs::remove_file(data_dir.join(fs::BLOBS).join(&artifact)).expect("lose the blob");
-        let err = blobs_to_s3_in(&data_dir, &test.config(), &elsewhere, Some(&test.schema))
-            .expect_err("a blob neither holds");
+        let err = blobs_to_s3_in(
+            &data_dir,
+            &test.config(),
+            &elsewhere,
+            Some(&test.schema),
+            super::super::SWEEP_WAIT,
+            &crate::s3::S3BlobStore::open,
+        )
+        .expect_err("a blob neither holds");
         assert!(err.contains("otelcol@1.2.3"), "{err}");
         assert!(err.contains(&artifact), "{err}");
         clear(&store);
+    }
+
+    /// `server blobs-to-s3` holds the blob store's lock alone for its whole run: while it uploads,
+    /// no sweep has the lock, and with the lock held elsewhere it fails naming the lock
+    /// (ADR-draft-the-servers-state-and-its-stores clause 19).
+    /// Verifies: ADR-draft-the-servers-state-and-its-stores
+    #[test]
+    fn blobs_to_s3_holds_the_blob_lock_alone_and_fails_naming_it_when_held() {
+        use crate::s3::tests::{clear, named_store};
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let Some(bucket) = named_store() else { return };
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (old, data_dir) = (dir.path().join("old"), dir.path().join("data"));
+        fixture(&old);
+        run_in(
+            &old,
+            Blobs::Files(&data_dir),
+            &test.config(),
+            Some(&test.schema),
+        )
+        .expect("onto PostgreSQL with file blobs");
+        let short = std::time::Duration::from_millis(200);
+        // An instance that shares the database, as one on PostgreSQL and S3 does: blobs-to-s3 is
+        // alone on it all the same.
+        let instance = Database::open_in(
+            &test.config(),
+            super::super::Exclusive::Shared,
+            Some(&test.schema),
+        )
+        .expect("an instance's database");
+
+        let held = instance
+            .hold_blobs_within(true, short)
+            .expect("a sweep runs");
+        let err = blobs_to_s3_in(
+            &data_dir,
+            &test.config(),
+            &bucket,
+            Some(&test.schema),
+            short,
+            &crate::s3::S3BlobStore::open,
+        )
+        .expect_err("the lock is held");
+        assert!(err.contains("blob store's lock"), "{err}");
+        drop(held);
+
+        let (staged, at) = std::sync::mpsc::channel();
+        let (go, goes) = std::sync::mpsc::channel::<()>();
+        let goes = std::sync::Mutex::new(goes);
+        let hook: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::new(move || {
+            let _ = staged.send(());
+            goes.lock().expect("go").recv().expect("go");
+        });
+        let running = std::thread::spawn({
+            let (data_dir, config, bucket, schema) = (
+                data_dir.clone(),
+                test.config(),
+                crate::s3::tests::again(&bucket),
+                test.schema.clone(),
+            );
+            move || {
+                blobs_to_s3_in(
+                    &data_dir,
+                    &config,
+                    &bucket,
+                    Some(&schema),
+                    std::time::Duration::from_secs(30),
+                    &|bucket| {
+                        crate::s3::S3BlobStore::open(bucket)
+                            .map(|store| store.holding_at_staged(hook.clone()))
+                    },
+                )
+            }
+        });
+        at.recv().expect("blobs-to-s3 uploads");
+        let err = instance
+            .hold_blobs_within(true, short)
+            .map(drop)
+            .expect_err("no sweep while it uploads");
+        assert!(err.contains("blob store's lock"), "{err}");
+        go.send(()).expect("go on");
+        running.join().expect("blobs-to-s3").expect("it uploads");
+        drop(
+            instance
+                .hold_blobs_within(true, short)
+                .expect("the lock is let go once it ends"),
+        );
+        clear(&crate::s3::S3BlobStore::open(&bucket).expect("open"));
     }
 
     /// The database is checked before anything is touched: one that cannot be reached leaves the

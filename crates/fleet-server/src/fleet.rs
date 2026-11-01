@@ -3222,16 +3222,16 @@ impl AppState {
     /// So the operator ends that first, by an act that says so: rolling those Agents out through
     /// another Deployment, or forgetting them.
     ///
-    /// The fleet lock is held across the check and the delete, so a rollout cannot assign through
-    /// the channel in between.
+    /// The fleet lock is held across the check and the delete, so a rollout of this Server cannot
+    /// assign through the channel in between; a store that other Servers write too counts the
+    /// stored assignments again in the act that deletes.
     pub fn delete_deployment(&self, name: &str) -> Result<bool, DeploymentError> {
         let store = self.deployment_store().ok_or(DeploymentError::NotFound)?;
         let fleet = self.fleet.lock().expect("fleet lock");
         let pinning = self.agent_store.pinning(Pin::Deployment(name));
         if pinning > 0 {
-            return Err(DeploymentError::Conflict(format!(
-                "deployment {name:?} is pinned by the assignment of {pinning} Agent(s) — roll them \
-                 out through another deployment, or forget them, before deleting it"
+            return Err(DeploymentError::Conflict(deployments::pinned(
+                name, pinning,
             )));
         }
         let deleted = store.delete(name)?;

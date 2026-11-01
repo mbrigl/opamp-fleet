@@ -108,6 +108,10 @@ pub struct S3BlobStore {
     /// Set once, and shared by every clone: an instance on PostgreSQL opens the store before it
     /// takes its lease and names the lease afterwards, and takes no upload until then.
     uploader: Arc<OnceLock<Uploader>>,
+    /// The leases that are live, for the cleanup every sweep runs
+    /// ([`BlobStore::clean_staging`]); `None` with the filesystem record store, whose one Server
+    /// cleans up at startup alone, as every upload in progress is its own.
+    live: Option<LiveLeases>,
     /// Called once an upload is staged and before it is copied to its blob's key: where a test
     /// holds an upload in progress.
     #[cfg(test)]
@@ -138,6 +142,7 @@ impl S3BlobStore {
             prefix: config.prefix.clone(),
             bridge: Arc::new(Bridge::new("blobs-s3")?),
             uploader: Arc::new(OnceLock::from(Uploader::Alone)),
+            live: None,
             #[cfg(test)]
             staged: None,
         };
@@ -167,6 +172,23 @@ impl S3BlobStore {
         self
     }
 
+    /// The store, `staged` called once each upload is staged and before it is copied: where a
+    /// test outside this module holds an upload in progress.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn holding_at_staged(mut self, staged: Arc<dyn Fn() + Send + Sync>) -> Self {
+        self.staged = Some(staged);
+        self
+    }
+
+    /// The store whose every sweep deletes the staging objects of the leases `live` does not name
+    /// ([`BlobStore::clean_staging`]).
+    #[must_use]
+    pub fn with_live(mut self, live: LiveLeases) -> Self {
+        self.live = Some(live);
+        self
+    }
+
     /// The store of an instance on PostgreSQL that holds no lease yet: it takes no upload until
     /// [`StagingCleanup::stage_under`] names the lease, and never stages one under `fs`.
     #[must_use]
@@ -187,7 +209,7 @@ impl S3BlobStore {
     ///
     /// # Errors
     /// Returns an error when the staging keys cannot be listed or deleted, or `live` fails.
-    pub fn clean_staging(
+    pub fn clean_staging_with(
         &self,
         live: &dyn Fn() -> Result<HashSet<String>, String>,
     ) -> Result<usize, String> {
@@ -342,6 +364,10 @@ impl S3BlobStore {
     }
 }
 
+/// How the blob store's lock is held alone
+/// (ADR-draft-the-servers-state-and-its-stores clause 14).
+pub type HoldBlobs = Arc<dyn Fn() -> Result<crate::blobs::BlobHold, String> + Send + Sync>;
+
 /// The cleanup of the staging objects of leases that are no longer live, kept for an instance to
 /// run again whenever it takes over a lapsed lease
 /// (ADR-draft-the-servers-state-and-its-stores clause 16).
@@ -349,13 +375,15 @@ impl S3BlobStore {
 pub struct StagingCleanup {
     store: S3BlobStore,
     live: LiveLeases,
+    hold: HoldBlobs,
 }
 
 impl StagingCleanup {
-    /// The cleanup of `store`'s staging objects, `live` naming the leases that are live.
+    /// The cleanup of `store`'s staging objects, `live` naming the leases that are live, run while
+    /// `hold` holds the blob store's lock alone.
     #[must_use]
-    pub fn new(store: S3BlobStore, live: LiveLeases) -> Self {
-        StagingCleanup { store, live }
+    pub fn new(store: S3BlobStore, live: LiveLeases, hold: HoldBlobs) -> Self {
+        StagingCleanup { store, live, hold }
     }
 
     /// Stages the store's uploads under the lease `held` from now on, on every clone of the store.
@@ -365,12 +393,13 @@ impl StagingCleanup {
         let _ = self.store.uploader.set(Uploader::Lease(held));
     }
 
-    /// Runs it once; answers how many staging objects it deleted.
+    /// Runs it once, under the blob store's lock; answers how many staging objects it deleted.
     ///
     /// # Errors
-    /// As [`S3BlobStore::clean_staging`].
+    /// As [`S3BlobStore::clean_staging_with`], and when the lock is not had in time.
     pub fn run(&self) -> Result<usize, String> {
-        self.store.clean_staging(&*self.live)
+        let _hold = (self.hold)()?;
+        self.store.clean_staging_with(&*self.live)
     }
 }
 
@@ -406,11 +435,10 @@ impl BlobStore for S3BlobStore {
         let removed = self.delete_key(staging);
         copied?;
         if let Err(e) = removed {
-            // The blob is stored, and the staging object is a stray. The cleanup deletes it only
-            // once this lease is no longer live and an instance starts or takes the lease over
-            // when it lapses; a lease released at an orderly shutdown is taken over by none, so
-            // the object may stay until the next start of an instance. It costs storage only: no
-            // Package entry names it, and the store's listing passes over it.
+            // The blob is stored, and the staging object is a stray. The cleanup deletes it once
+            // this lease is no longer live, with the next sweep on any instance or when an
+            // instance takes the lease over. It costs storage only until then: no Package entry
+            // names it, and the store's listing passes over it.
             tracing::warn!(error = %e, "cannot delete an upload's staging object");
         }
         Ok((sha256, size))
@@ -449,9 +477,19 @@ impl BlobStore for S3BlobStore {
         self.delete_key(self.blob_key(sha256)?)
     }
 
+    /// The staging objects of every lease that is not live, with PostgreSQL; nothing with the
+    /// filesystem record store, whose one Server cleans up at startup.
+    fn clean_staging(&self) -> Result<usize, String> {
+        match &self.live {
+            Some(live) => self.clean_staging_with(&**live),
+            None => Ok(0),
+        }
+    }
+
     /// Every blob with its size, from the listing alone: nothing is downloaded (ADR-0029 clause 16).
     /// A staging object is passed over, as it may be an upload another instance is still writing
-    /// ([`clean_staging`](S3BlobStore::clean_staging) deletes those of leases that are not live);
+    /// ([`clean_staging_with`](S3BlobStore::clean_staging_with) deletes those of leases that are
+    /// not live);
     /// any other key under `<prefix>` fails, naming it.
     fn list(&self) -> Result<Vec<(String, u64)>, String> {
         let store = self.store.clone();
@@ -906,7 +944,7 @@ pub(crate) mod tests {
         assert_eq!(reopened.list().expect("list"), vec![(sha256.clone(), 8)]);
         assert_eq!(keys(&store).len(), 3, "the listing deletes nothing");
         let none = || Ok(HashSet::new());
-        assert_eq!(reopened.clean_staging(&none).expect("clean"), 2);
+        assert_eq!(reopened.clean_staging_with(&none).expect("clean"), 2);
         assert_eq!(
             keys(&store),
             vec![format!("{}blobs/{sha256}", config.prefix)],
@@ -969,7 +1007,7 @@ pub(crate) mod tests {
                 "lease-b".to_string(),
             ]))
         };
-        assert_eq!(b.clean_staging(&live).expect("B's cleanup"), 1);
+        assert_eq!(b.clean_staging_with(&live).expect("B's cleanup"), 1);
         assert_eq!(
             keys(&b),
             a_staged,
@@ -998,6 +1036,112 @@ pub(crate) mod tests {
         clear(&b);
     }
 
+    /// A staging object whose lease was released at an orderly shutdown goes with the next sweep
+    /// on any instance, here the one after an entry is deleted, with the blob no entry names any
+    /// more. Two instances that clean up at once delete such an object once: the second waits for
+    /// the first's hold on the blob store's lock and then finds nothing
+    /// (ADR-draft-the-servers-state-and-its-stores clauses 14 and 16).
+    /// Verifies: ADR-draft-the-servers-state-and-its-stores, ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    #[test]
+    fn the_next_sweep_on_any_instance_deletes_a_released_leases_staging_object_once() {
+        use crate::packages::{PackageId, PackageStore, Platform};
+        use crate::postgres::testing::TestDatabase;
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let Some(config) = named_store() else { return };
+        let live = "7c1d6a52-3f0e-4b8e-9a51-0d2c6e4f8a10";
+        let released = "0b5e2f1c-9d4a-4e7b-8c3f-6a1d2e9b7c40";
+        // One open of the test database: the holds below are sessions of their own on it, as
+        // each instance's would be.
+        let database = test.open();
+        let records = crate::Records::Postgres(database.clone());
+        test.sql(&format!(
+            "INSERT INTO leases (instance_id, host, must_be_alone, taken_at, renewed_at, \
+             expires_at) VALUES ('{live}', 'here', false, now(), now(), \
+             now() + interval '1 hour')"
+        ));
+        let blobs = crate::config::BlobsConfig {
+            store: "s3".to_string(),
+            s3: Some(again(&config)),
+        };
+        let (store, cleanup) = PackageStore::open_on(&records, None, &blobs).expect("open");
+        let cleanup = cleanup.expect("a cleanup on the bucket");
+        let (_named, held) = tokio::sync::watch::channel(Some(live.to_string()));
+        cleanup.stage_under(held);
+        let id = PackageId::new("otelcol", "1.0.0").expect("id");
+        let linux = Platform::new("linux", "amd64").expect("platform");
+        store.create(&id).expect("create");
+        store
+            .put_entry(&id, &linux, b"an artifact".to_vec())
+            .expect("an entry");
+        let bucket = S3BlobStore::open(&again(&config)).expect("open");
+        plant(&bucket, &format!("staging/{released}/0123456789abcdef"));
+        assert_eq!(
+            keys(&bucket).len(),
+            2,
+            "the blob and the released lease's upload"
+        );
+        assert_eq!(store.delete_entry(&id, &linux), Ok(true));
+        assert_eq!(
+            keys(&bucket),
+            Vec::<String>::new(),
+            "the sweep after the deletion takes the blob and the released lease's upload"
+        );
+
+        plant(&bucket, &format!("staging/{released}/fedcba9876543210"));
+        let (listed, lists) = std::sync::mpsc::channel();
+        let (go, goes) = std::sync::mpsc::channel::<()>();
+        let goes = std::sync::Mutex::new(goes);
+        let (a_database, b_database) = (database.clone(), database);
+        let a = StagingCleanup::new(
+            bucket.clone(),
+            Arc::new({
+                let database = a_database.clone();
+                move || {
+                    let _ = listed.send(());
+                    goes.lock().expect("go").recv().expect("go");
+                    database.live_leases()
+                }
+            }),
+            Arc::new({
+                let database = a_database.clone();
+                move || database.hold_blobs(true)
+            }),
+        );
+        let b = StagingCleanup::new(
+            bucket.clone(),
+            Arc::new({
+                let database = b_database.clone();
+                move || database.live_leases()
+            }),
+            Arc::new(move || b_database.hold_blobs(true)),
+        );
+        let first = std::thread::spawn(move || a.run());
+        lists.recv().expect("A has listed, holding the lock");
+        let second = std::thread::spawn(move || b.run());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !(test.waits_for_the_blob_lock() || second.is_finished()) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "B neither waits nor ends"
+            );
+            std::thread::yield_now();
+        }
+        go.send(()).expect("go on");
+        let deleted = (
+            first.join().expect("A").expect("A cleans up"),
+            second.join().expect("B").expect("B cleans up"),
+        );
+        assert_eq!(
+            deleted,
+            (1, 0),
+            "deleted once, by the instance that had the lock first"
+        );
+        assert_eq!(keys(&bucket), Vec::<String>::new());
+        clear(&bucket);
+    }
+
     /// An instance on PostgreSQL opens the store before it takes its lease: until the lease is
     /// named it takes no upload, and never stages one under `fs`, which every instance's cleanup
     /// deletes on sight; once named, every clone of the store stages under it
@@ -1007,7 +1151,11 @@ pub(crate) mod tests {
     fn a_store_opened_before_its_lease_takes_no_upload_until_the_lease_is_named() {
         let Some(config) = named_store() else { return };
         let store = S3BlobStore::open(&config).expect("open").awaiting_a_lease();
-        let cleanup = StagingCleanup::new(store.clone(), Arc::new(|| Ok(HashSet::new())));
+        let cleanup = StagingCleanup::new(
+            store.clone(),
+            Arc::new(|| Ok(HashSet::new())),
+            Arc::new(|| Ok(crate::blobs::BlobHold::none())),
+        );
         let err = store.put(&mut &b"x"[..]).expect_err("no lease yet");
         assert!(err.contains("holds no lease yet"), "{err}");
         assert_eq!(keys(&store), Vec::<String>::new(), "nothing is staged");
@@ -1052,7 +1200,7 @@ pub(crate) mod tests {
             plant(&store, "staging/lease-taken-after/0123456789abcdef");
             Ok(HashSet::from(["lease-live".to_string()]))
         };
-        assert_eq!(store.clean_staging(&live).expect("cleanup"), 1);
+        assert_eq!(store.clean_staging_with(&live).expect("cleanup"), 1);
         assert_eq!(
             keys(&store),
             vec![

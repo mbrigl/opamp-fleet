@@ -805,6 +805,17 @@ fn an_instance_with_an_older_floor_in_memory_cannot_lower_the_stored_one() {
     );
 }
 
+/// Stores the Deployment "stable" that [`released`] records were released through: a rollout
+/// releases through a stored Deployment.
+fn store_stable(schema: &Schema) {
+    // The first open applies the schema.
+    drop(records(schema));
+    schema.query(
+        "INSERT INTO deployments (name, selector, packages, configurations) \
+         VALUES ('stable', '{}', '{}', '{}') ON CONFLICT DO NOTHING",
+    );
+}
+
 /// An Agent's record as a rollout leaves it, its assignment pinning `hash` of `configuration`.
 fn released(configuration: &str, hash: &str) -> fleet_server::agent_store::PersistedAgent {
     fleet_server::agent_store::PersistedAgent {
@@ -844,6 +855,7 @@ fn two_revisions_rolled_out_at_once_on_two_instances_are_both_kept() {
     let Some(schema) = Schema::named() else {
         return;
     };
+    store_stable(&schema);
     let revision = |body: &str| Revision {
         body: body.to_string(),
         role: String::new(),
@@ -3315,6 +3327,7 @@ fn a_configuration_pinned_through_one_instance_is_not_deleted_through_another() 
     let Some(schema) = Schema::named() else {
         return;
     };
+    store_stable(&schema);
     let open = || {
         let records = records(&schema);
         let agents = records.agents().expect("agents");
@@ -3390,6 +3403,7 @@ fn a_package_pinned_through_one_instance_is_not_changed_through_another() {
     let Some(schema) = Schema::named() else {
         return;
     };
+    store_stable(&schema);
     // One directory stands in for the bucket both instances share.
     let blobs = tempfile::tempdir().expect("tempdir");
     let open = || {
@@ -3466,4 +3480,59 @@ fn a_package_pinned_through_one_instance_is_not_changed_through_another() {
         [format!("linux {}", "07".repeat(64))],
         "the Package is as A stored it"
     );
+}
+
+/// A Deployment an Agent was released through on one instance is not deleted through another
+/// that holds no such assignment: the deletion counts the stored assignments in its own
+/// transaction, under the Deployment's row lock.
+/// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it, ADR-0026
+#[test]
+fn a_deployment_released_through_on_one_instance_is_not_deleted_through_another() {
+    use fleet_server::agent_store::Pin;
+    use fleet_server::deployments::{DeploymentError, DeploymentStore};
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let a_agents = records(&schema).agents().expect("agents");
+    a_agents.load().expect("load");
+    let a = DeploymentStore::open(records(&schema).deployments().expect("deployments"))
+        .expect("open A");
+    let channel = std::collections::BTreeMap::from([("channel".to_string(), "stable".to_string())]);
+    a.put("stable", channel).expect("save");
+    // B reads the Deployment before A releases through it.
+    let b_agents = records(&schema).agents().expect("agents");
+    b_agents.load().expect("load");
+    let b = DeploymentStore::open(records(&schema).deployments().expect("deployments"))
+        .expect("open B");
+    let uid = InstanceUid([0x19; 16]);
+    a_agents
+        .put(
+            &uid,
+            &fleet_server::agent_store::PersistedAgent {
+                assignment: None,
+                ..released("base", "")
+            },
+        )
+        .expect("report");
+    let mut record = released("base", "");
+    if let Some(assignment) = record.assignment.as_mut() {
+        assignment.configurations.clear();
+    }
+    a_agents
+        .release(&[], &[(uid, record)])
+        .expect("roll out through A");
+    assert_eq!(
+        b_agents.pinning(Pin::Deployment("stable")),
+        0,
+        "B holds no pin"
+    );
+    match b.delete("stable") {
+        Err(DeploymentError::Conflict(refusal)) => assert!(
+            refusal.ends_with(&fleet_server::deployments::pinned("stable", 1)),
+            "{refusal}"
+        ),
+        other => panic!("B deleted it: {other:?}"),
+    }
+    assert_eq!(schema.query("SELECT name FROM deployments"), ["stable"]);
+    assert!(b.get("stable").is_some(), "and B still holds it");
 }

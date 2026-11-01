@@ -540,6 +540,8 @@ mod tests {
         };
         let database = test.open();
         let configs = PgConfigBackend::new(database.clone());
+        // A rollout releases through a stored Deployment.
+        test.store_deployments(&["stable"]);
         configs.save("base", &revision("v1\n")).expect("save");
         let held = pinned("base", "v1\n");
         release(&PgAgentStore::new(database.clone()), &held)
@@ -660,6 +662,7 @@ mod tests {
         let mut reported = record();
         reported.assignment = None;
         agents.put(&uid, &reported).expect("report");
+        test.store_deployments(&["stable"]);
         let key = 0x19_0002;
         let gate = test.hold_assignment_writes(key);
         let pin = pinned("base", "receivers: {}\n");

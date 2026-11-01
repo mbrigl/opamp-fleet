@@ -113,8 +113,9 @@ impl DeploymentBackend for FsDeploymentBackend {
         Ok(changed)
     }
 
-    fn remove(&self, name: &str) -> Result<(), String> {
-        super::remove_file(&self.path(name))
+    /// The assignments are the Agent store's, which its one Server asked before it deletes.
+    fn remove(&self, name: &str) -> Result<(), DeploymentError> {
+        super::remove_file(&self.path(name)).map_err(DeploymentError::Storage)
     }
 }
 

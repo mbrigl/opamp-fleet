@@ -137,19 +137,50 @@ impl DeploymentBackend for PgDeploymentBackend {
         })
     }
 
-    /// The Deployment and its members go in one statement, the members by cascade.
-    fn remove(&self, name: &str) -> Result<(), String> {
+    /// One transaction: the Deployment's row is held `FOR UPDATE`, which waits for every rollout
+    /// that releases through it and keeps every other out until this one commits; then the stored
+    /// assignments that name it are counted, and only when none does are the Deployment and its
+    /// members deleted, the members by cascade.
+    fn remove(&self, name: &str) -> Result<(), DeploymentError> {
         let name = name.to_string();
-        self.database.run(move |pool| async move {
+        let decided = self.database.run(move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
+            let held = transaction
+                .query_opt(
+                    "SELECT 1 FROM deployments WHERE name = $1 FOR UPDATE",
+                    &[&name],
+                )
+                .await
+                .map_err(sql)?;
+            if held.is_none() {
+                transaction.commit().await.map_err(sql)?;
+                return Ok(Ok(()));
+            }
+            let pinning: i64 = transaction
+                .query_one(
+                    "SELECT count(*) FROM agents WHERE deployment = $1",
+                    &[&name],
+                )
+                .await
+                .map_err(sql)?
+                .get(0);
+            if pinning > 0 {
+                transaction.commit().await.map_err(sql)?;
+                return Ok(Err(DeploymentError::Conflict(crate::deployments::pinned(
+                    &name,
+                    usize::try_from(pinning).unwrap_or(usize::MAX),
+                ))));
+            }
             transaction
                 .execute("DELETE FROM deployments WHERE name = $1", &[&name])
                 .await
                 .map_err(sql)?;
             super::notify::notify(&*transaction, super::notify::DEPLOYMENT, &name).await?;
-            transaction.commit().await.map_err(sql)
-        })
+            transaction.commit().await.map_err(sql)?;
+            Ok(Ok(()))
+        });
+        decided.map_err(DeploymentError::Storage)?
     }
 }
 
@@ -771,5 +802,57 @@ mod tests {
         test.sql("DELETE FROM deployments WHERE name = 'aimless'");
         let err = store.load().expect_err("a reference without a version");
         assert!(err.contains("\"odd\""), "{err}");
+    }
+
+    /// A deletion of a Deployment through B while a rollout through A that releases through it
+    /// has not yet committed waits for the rollout, and then refuses it from the assignment the
+    /// rollout stored: the rollout holds the Deployment's row until it commits.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it, ADR-0026
+    #[test]
+    fn a_deletion_waits_for_a_rollout_through_the_deployment_and_is_refused() {
+        use crate::agent_store::{tests::record, AgentStore as _};
+        use crate::postgres::agents::PgAgentStore;
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let (agents, b) = (
+            PgAgentStore::new(database.clone()),
+            PgDeploymentBackend::new(database),
+        );
+        put(&b, &deployment("stable", None, &[]));
+        let uid = opamp::uid::InstanceUid::default();
+        let mut reported = record();
+        reported.assignment = None;
+        agents.put(&uid, &reported).expect("report");
+        let key = 0x19_0003;
+        let gate = test.hold_assignment_writes(key);
+        let mut released = record();
+        if let Some(assignment) = released.assignment.as_mut() {
+            assignment.package = None;
+            assignment.configurations.clear();
+        }
+        let rollout = std::thread::spawn(move || agents.release(&[], &[(uid, released)]));
+        // A has written the assignment, and waits at the gate with its transaction open.
+        let a_pid = test.once(&format!(
+            "SELECT pid::text FROM pg_locks WHERE locktype = 'advisory' AND NOT granted \
+             AND objid::text = '{key}'"
+        ));
+        let deletion = std::thread::spawn(move || b.remove("stable"));
+        test.once(&format!(
+            "SELECT pid::text FROM pg_stat_activity WHERE {a_pid} = ANY(pg_blocking_pids(pid))"
+        ));
+        gate.open();
+        assert_eq!(rollout.join().expect("A").map(|wrote| wrote.len()), Ok(1));
+        assert_eq!(
+            deletion.join().expect("B"),
+            Err(DeploymentError::Conflict(crate::deployments::pinned(
+                "stable", 1
+            )))
+        );
+        assert_eq!(
+            test.rows("SELECT name FROM deployments"),
+            [[Some("stable".to_string())]]
+        );
     }
 }
