@@ -1298,6 +1298,20 @@ predecessor as not checked; an archive the database records that no chain names 
 does a chain that names a predecessor while the database records no archive. Removing a whole
 chain together with its record is not detected by the database itself.
 
+The record goes back `[audit] retain_days` (365 by default). At its start and once a day after,
+each instance removes from its own chain the entries the database stored more than that many days
+ago, as far as every entry from the chain's start is that old; one instance at a time, whichever
+holds the prune lock, does the same for every closed chain, and another that finds the lock held
+leaves them to the next day. A chain that is still open because no instance took over its lapsed
+lease is pruned once it is closed. Before anything goes, the instance writes an `audit.pruned`
+into its own chain for each chain it prunes, naming it as `pruned_chain` with the `seq` and hash
+of the last entry removed (`last_seq`, `last_hash`); `audit-verify --config` checks that what is
+left of each chain begins right after that entry. A closed chain with no entries left keeps its
+record, listed as `0 entries, closed`, and its closing hash must be one an `audit.pruned` names.
+An `audit.pruned` is pruned in its turn: the prune that removes one records the links still needed
+again, and carries on the archive's predecessor once the first chain's `audit.chain_opened` is
+gone.
+
 A Server that was on PostgreSQL before this release kept its audit record in files under
 `data_dir/audit/`. At its first start, before the database holds any chain or archive, it records
 the last entry of those files as the archive, as `server migrate-to-postgres` does, and the first

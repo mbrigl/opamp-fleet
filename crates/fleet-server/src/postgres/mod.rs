@@ -16,6 +16,7 @@
 
 pub mod agents;
 pub mod audit;
+pub mod audit_prune;
 pub mod bootstrap;
 pub mod configs;
 pub mod deployments;
