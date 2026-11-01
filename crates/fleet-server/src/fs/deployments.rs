@@ -2,12 +2,14 @@
 //! [`DeploymentBackend`](crate::deployments::DeploymentBackend).
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 use crate::configs::validate_name;
-use crate::deployments::{check_selector, Deployment, DeploymentBackend};
+use crate::deployments::{
+    check_selector, Change, Deployment, DeploymentBackend, DeploymentError, Member,
+};
 use crate::packages::PackageId;
 
 /// One JSON file per Deployment under `<data_dir>/deployments/`, owner-only (ADR-0029).
@@ -28,31 +30,87 @@ impl FsDeploymentBackend {
     }
 }
 
-impl DeploymentBackend for FsDeploymentBackend {
-    fn load(&self) -> Result<Vec<Deployment>, String> {
-        let mut deployments = Vec::new();
-        for (stem, path) in super::json_files(&self.dir)? {
-            let text = std::fs::read_to_string(&path)
-                .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-            let meta: DeploymentMeta = serde_json::from_str(&text)
-                .map_err(|e| format!("cannot parse {}: {e}", path.display()))?;
-            let deployment = meta.into_deployment(&path)?;
-            // The file name is derived from the name; a mismatch means a write would land
-            // somewhere else, so it is refused rather than silently corrected.
-            if stem != deployment.name {
-                return Err(super::misnamed(&path, "name"));
-            }
-            deployments.push(deployment);
-        }
-        Ok(deployments)
-    }
-
-    fn put(&self, deployment: &Deployment) -> Result<(), String> {
+impl FsDeploymentBackend {
+    /// Creates or replaces one Deployment's file whole, members and all — the write of `server
+    /// migrate`, and of every change here, as this Server is the file's only writer.
+    pub(crate) fn put(&self, deployment: &Deployment) -> Result<(), String> {
         let bytes = serde_json::to_vec_pretty(&DeploymentMeta::of(deployment))
             .expect("deployment serializes");
         // Owner-only, like the directory: a Selector says which hosts an operator considers a
         // channel, which is not another local user's business.
         super::replace_owner_only(&self.path(&deployment.name), &bytes)
+    }
+
+    /// The Deployment its file `path`, whose stem is `stem`, holds.
+    fn parse(stem: &str, path: &Path) -> Result<Deployment, String> {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        let meta: DeploymentMeta = serde_json::from_str(&text)
+            .map_err(|e| format!("cannot parse {}: {e}", path.display()))?;
+        let deployment = meta.into_deployment(path)?;
+        // The file name is derived from the name; a mismatch means a write would land
+        // somewhere else, so it is refused rather than silently corrected.
+        if stem != deployment.name {
+            return Err(super::misnamed(path, "name"));
+        }
+        Ok(deployment)
+    }
+
+    /// The Deployment `name` as its file holds it; `None` when there is no file.
+    fn read(&self, name: &str) -> Result<Option<Deployment>, String> {
+        let path = self.path(name);
+        if !path.exists() {
+            return Ok(None);
+        }
+        Self::parse(name, &path).map(Some)
+    }
+}
+
+impl DeploymentBackend for FsDeploymentBackend {
+    fn load(&self) -> Result<Vec<Deployment>, String> {
+        let mut deployments = Vec::new();
+        for (stem, path) in super::json_files(&self.dir)? {
+            deployments.push(Self::parse(&stem, &path)?);
+        }
+        Ok(deployments)
+    }
+
+    fn save(&self, name: &str, selector: &BTreeMap<String, String>) -> Result<Deployment, String> {
+        let deployment = match self.read(name)? {
+            Some(existing) => Deployment {
+                selector: selector.clone(),
+                ..existing
+            },
+            None => Deployment {
+                name: name.to_string(),
+                selector: selector.clone(),
+                packages: BTreeMap::new(),
+                configurations: BTreeSet::new(),
+            },
+        };
+        self.put(&deployment)?;
+        Ok(deployment)
+    }
+
+    fn amend(&self, name: &str, change: &Change) -> Result<Deployment, DeploymentError> {
+        let mut deployment = self
+            .read(name)
+            .map_err(DeploymentError::Storage)?
+            .ok_or(DeploymentError::NotFound)?;
+        change.apply(&mut deployment)?;
+        self.put(&deployment).map_err(DeploymentError::Storage)?;
+        Ok(deployment)
+    }
+
+    fn drop_member(&self, member: &Member) -> Result<Vec<Deployment>, String> {
+        let mut changed = Vec::new();
+        for mut deployment in self.load()? {
+            if member.drop_from(&mut deployment) {
+                self.put(&deployment)?;
+                changed.push(deployment);
+            }
+        }
+        Ok(changed)
     }
 
     fn remove(&self, name: &str) -> Result<(), String> {

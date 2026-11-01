@@ -2,9 +2,10 @@
 //! [`ConfigBackend`](crate::configs::ConfigBackend) — one JSON file per Configuration under
 //! `<data_dir>/configurations/`, owner-only, written in one step (ADR-0029).
 
-use std::path::PathBuf;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 
-use crate::configs::{ConfigBackend, Configuration};
+use crate::configs::{ConfigBackend, Configuration, Pinned, Revision};
 
 /// One JSON file per Configuration under `configurations/`, named after it.
 pub struct FsConfigBackend {
@@ -20,56 +21,124 @@ impl FsConfigBackend {
     }
 }
 
-/// Writes one Configuration into the `configurations/` directory `dir`, owner-only, in one step —
-/// the write this store and a rollout's revisions (ADR-0029 clause 2) share.
-pub(crate) fn write(dir: &std::path::Path, config: &Configuration) -> Result<(), String> {
+/// Writes one Configuration into the `configurations/` directory `dir`, owner-only, in one step.
+pub(crate) fn write(dir: &Path, config: &Configuration) -> Result<(), String> {
     let json = serde_json::to_vec_pretty(config).expect("a Configuration serializes");
     super::replace(&dir.join(format!("{}.json", config.name)), &json)
 }
 
+/// The Configuration `name` as its file in `dir` holds it; `None` when there is no file.
+fn read(dir: &Path, name: &str) -> Result<Option<Configuration>, String> {
+    let path = dir.join(format!("{name}.json"));
+    match std::fs::read_to_string(&path) {
+        Ok(text) => parse(name, &path, &text).map(Some),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("cannot read {}: {e}", path.display())),
+    }
+}
+
+/// Adds one retained revision to the Configuration's file in `dir`, in one step — the write this
+/// store and a rollout's revisions (ADR-0029 clause 2) share. The file is this Server's alone, so
+/// what it reads is what it wrote.
+pub(crate) fn retain(dir: &Path, pinned: &Pinned) -> Result<(), String> {
+    let mut config = read(dir, &pinned.configuration)?
+        .ok_or_else(|| format!("no configuration {:?}", pinned.configuration))?;
+    if config.retained.get(&pinned.hash) == Some(&pinned.revision) {
+        return Ok(());
+    }
+    config
+        .retained
+        .insert(pinned.hash.clone(), pinned.revision.clone());
+    write(dir, &config)
+}
+
+/// One stored Configuration from the text of its file `path`, whose stem is `stem`. A file in a
+/// shape this Server does not write is refused naming it: there is no legacy reader, so it is
+/// named rather than guessed at.
+fn parse(stem: &str, path: &Path, text: &str) -> Result<Configuration, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(text).map_err(|e| format!("cannot parse {}: {e}", path.display()))?;
+    if names_a_selector(&value) {
+        // The shape before ADR-0026: a Configuration aimed by itself. Read as content only,
+        // it would silently reach nobody — or, put into a Deployment, other hosts than it
+        // named — so it is refused and the operator decides where it belongs.
+        return Err(format!(
+            "{} carries a selector, and a Configuration has none any more (ADR-0026): put \
+             it into a Deployment, whose Selector aims it, and remove the selector from \
+             the file; a data directory an older Server wrote is moved by `server migrate` \
+             (ADR-0029)",
+            path.display()
+        ));
+    }
+    let config: Configuration = serde_json::from_value(value)
+        .map_err(|e| format!("cannot parse {}: {e}", path.display()))?;
+    if config.name != stem {
+        return Err(super::misnamed(path, "name"));
+    }
+    // A Configuration is written for one Agent type (ADR-0026 clause 2); one without it
+    // would reach no Agent, so the operator saves it again with a type.
+    crate::configs::check_type(&config.saved).map_err(|e| {
+        format!(
+            "{}: {e} — save it again with the Agent type it is written for",
+            path.display()
+        )
+    })?;
+    Ok(config)
+}
+
+impl FsConfigBackend {
+    /// Creates or replaces one Configuration whole, its retained revisions exactly `config`'s —
+    /// the write of `server migrate`, which moves a data directory no Server is running on.
+    pub(crate) fn put(&self, config: &Configuration) -> Result<(), String> {
+        write(&self.dir, config)
+    }
+}
+
 impl ConfigBackend for FsConfigBackend {
     /// A file that does not parse is a startup error that names it, and that includes a file in a
-    /// shape this Server does not write: there is no legacy reader, so it is named rather than
-    /// guessed at.
+    /// shape this Server does not write.
     fn load(&self) -> Result<Vec<Configuration>, String> {
         let mut configs = Vec::new();
         for (stem, path) in super::json_files(&self.dir)? {
             let text = std::fs::read_to_string(&path)
                 .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-            let value: serde_json::Value = serde_json::from_str(&text)
-                .map_err(|e| format!("cannot parse {}: {e}", path.display()))?;
-            if names_a_selector(&value) {
-                // The shape before ADR-0026: a Configuration aimed by itself. Read as content only,
-                // it would silently reach nobody — or, put into a Deployment, other hosts than it
-                // named — so it is refused and the operator decides where it belongs.
-                return Err(format!(
-                    "{} carries a selector, and a Configuration has none any more (ADR-0026): put \
-                     it into a Deployment, whose Selector aims it, and remove the selector from \
-                     the file; a data directory an older Server wrote is moved by `server migrate` \
-                     (ADR-0029)",
-                    path.display()
-                ));
-            }
-            let config: Configuration = serde_json::from_value(value)
-                .map_err(|e| format!("cannot parse {}: {e}", path.display()))?;
-            if config.name != stem {
-                return Err(super::misnamed(&path, "name"));
-            }
-            // A Configuration is written for one Agent type (ADR-0026 clause 2); one without it
-            // would reach no Agent, so the operator saves it again with a type.
-            crate::configs::check_type(&config.saved).map_err(|e| {
-                format!(
-                    "{}: {e} — save it again with the Agent type it is written for",
-                    path.display()
-                )
-            })?;
-            configs.push(config);
+            configs.push(parse(&stem, &path, &text)?);
         }
         Ok(configs)
     }
 
-    fn put(&self, config: &Configuration) -> Result<(), String> {
-        write(&self.dir, config)
+    /// The file is read and written back with its retained revisions as they were: the file
+    /// is the record, and this Server its only writer.
+    fn save(&self, name: &str, saved: &Revision) -> Result<(), String> {
+        let config = match read(&self.dir, name)? {
+            Some(existing) => Configuration {
+                saved: saved.clone(),
+                ..existing
+            },
+            None => Configuration {
+                name: name.to_string(),
+                saved: saved.clone(),
+                retained: BTreeMap::new(),
+            },
+        };
+        write(&self.dir, &config)
+    }
+
+    /// The assignments are the Agent store's, which answered `referenced` from what it stores.
+    fn collect(
+        &self,
+        name: &str,
+        referenced: &BTreeSet<String>,
+    ) -> Result<BTreeMap<String, Revision>, String> {
+        let Some(mut config) = read(&self.dir, name)? else {
+            return Ok(BTreeMap::new());
+        };
+        if config.retained.keys().all(|hash| referenced.contains(hash)) {
+            return Ok(config.retained);
+        }
+        config.retained.retain(|hash, _| referenced.contains(hash));
+        write(&self.dir, &config)?;
+        Ok(config.retained)
     }
 
     fn remove(&self, name: &str) -> Result<(), String> {
@@ -92,7 +161,8 @@ fn names_a_selector(value: &serde_json::Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::configs::tests::{put_assigned, revision, with_role};
+    use crate::agent_store::AgentStore as _;
+    use crate::configs::tests::{put_assigned, put_released, revision, with_role};
     use crate::configs::{ConfigStore, ROLE_SUPPLEMENTARY};
 
     fn open(dir: &std::path::Path) -> Result<ConfigStore, String> {
@@ -105,7 +175,10 @@ mod tests {
     fn the_store_round_trips_through_the_directory() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = open(dir.path()).expect("open");
-        let assignments = put_assigned(&store, "base", revision("receivers: {}\n"));
+        let agents = crate::fs::FsAgentStore::open(dir.path()).expect("agents");
+        let assignments = put_released(&store, "base", revision("receivers: {}\n"), |pinned| {
+            agents.release(pinned, &[])
+        });
         store
             .put_saved("other", revision("exporters: {}\n"))
             .expect("put");

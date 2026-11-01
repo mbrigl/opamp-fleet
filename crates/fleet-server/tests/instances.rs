@@ -663,3 +663,244 @@ fn an_instance_with_an_older_floor_in_memory_cannot_lower_the_stored_one() {
         "removed on A, it is set anew on B, whatever B held"
     );
 }
+
+/// An Agent's record as a rollout leaves it, its assignment pinning `hash` of `configuration`.
+fn released(configuration: &str, hash: &str) -> fleet_server::agent_store::PersistedAgent {
+    fleet_server::agent_store::PersistedAgent {
+        sequence_num: 1,
+        capabilities: AgentCapabilities::ReportsStatus as u64,
+        description: None,
+        health: None,
+        effective_config: None,
+        remote_config_status: None,
+        connection_settings_status: None,
+        package_statuses: None,
+        available_components: None,
+        transport: fleet_server::fleet::Transport::WebSocket,
+        last_seen_ms: 0,
+        restart_pending: false,
+        assignment: Some(fleet_server::fleet::Assignment {
+            deployment: "stable".to_string(),
+            package: None,
+            configurations: std::collections::BTreeMap::from([(
+                configuration.to_string(),
+                hash.to_string(),
+            )]),
+        }),
+        labels: std::collections::BTreeMap::new(),
+        host: None,
+    }
+}
+
+/// Two instances that each roll a revision of one Configuration out at the same moment keep both
+/// revisions: each adds the row it pins and deletes none, and the collection each runs after its
+/// rollout reckons what the Configuration keeps from the stored assignments, in its own
+/// transaction, not from the one assignment the instance knows of.
+/// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it, ADR-0026
+#[test]
+fn two_revisions_rolled_out_at_once_on_two_instances_are_both_kept() {
+    use fleet_server::configs::{revision_hash, ConfigStore, Revision};
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let revision = |body: &str| Revision {
+        body: body.to_string(),
+        role: String::new(),
+        service_name: "otelcol".to_string(),
+    };
+    let instances: Vec<_> = (0..2)
+        .map(|_| {
+            let records = records(&schema);
+            let agents = records.agents().expect("agents");
+            agents.load().expect("load");
+            let configs = ConfigStore::open(records.configs().expect("configs")).expect("open");
+            Arc::new((configs, agents))
+        })
+        .collect();
+    instances[0]
+        .0
+        .put_saved("base", revision("v0\n"))
+        .expect("save");
+    let mut expected = Vec::new();
+    for round in 0..8u32 {
+        let at_once = Arc::new(std::sync::Barrier::new(2));
+        let rolling: Vec<_> = instances
+            .iter()
+            .enumerate()
+            .map(|(n, instance)| {
+                let (instance, at_once) = (instance.clone(), at_once.clone());
+                let body = format!("v{round}.{n}\n");
+                expected.push(revision_hash(&revision(&body)));
+                std::thread::spawn(move || {
+                    let (configs, agents) = &*instance;
+                    at_once.wait();
+                    configs.put_saved("base", revision(&body)).expect("save");
+                    let names = std::collections::BTreeSet::from(["base".to_string()]);
+                    configs
+                        .pin(&names, |hashes, pinned| {
+                            let uid = InstanceUid::default();
+                            agents.release(pinned, &[(uid, released("base", &hashes["base"]))])
+                        })
+                        .expect("roll out");
+                    configs
+                        .retain_only("base", &agents.referenced_revisions("base"))
+                        .expect("collect");
+                })
+            })
+            .collect();
+        for thread in rolling {
+            thread.join().expect("the rolling thread");
+        }
+    }
+    let mut kept = schema.query("SELECT hash FROM configuration_revisions");
+    kept.sort();
+    expected.sort();
+    assert_eq!(
+        kept, expected,
+        "every revision an assignment pins is kept, and only those"
+    );
+    let mut pinned = schema.query("SELECT revision FROM agent_assignment_configurations");
+    pinned.sort();
+    assert_eq!(pinned, expected, "and every assignment is stored");
+}
+
+/// Two instances that each add an entry of another platform to one Package at the same moment
+/// keep both: each writes the row of its platform, and neither writes the Package it holds over
+/// the other's.
+/// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it, ADR-0027
+#[test]
+fn two_entries_added_at_once_on_two_instances_are_both_kept() {
+    use fleet_server::packages::{PackageId, PackageStore, Platform};
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let blobs = tempfile::tempdir().expect("tempdir");
+    let instances: Vec<Arc<PackageStore>> = (0..2)
+        .map(|n| {
+            let root = blobs.path().join(n.to_string());
+            std::fs::create_dir(&root).expect("the instance's directory");
+            Arc::new(
+                PackageStore::with_backend(
+                    records(&schema).packages().expect("packages"),
+                    Box::new(fleet_server::fs::FsBlobStore::open(&root).expect("blobs")),
+                )
+                .expect("open"),
+            )
+        })
+        .collect();
+    let mut expected = Vec::new();
+    for round in 0..8u32 {
+        let id = PackageId::new("otelcol", &format!("1.0.{round}")).expect("id");
+        for instance in &instances {
+            instance.create(&id).expect("create");
+        }
+        let at_once = Arc::new(std::sync::Barrier::new(2));
+        let adding: Vec<_> = instances
+            .iter()
+            .zip(["amd64", "arm64"])
+            .map(|(instance, arch)| {
+                expected.push(format!("1.0.{round} {arch}"));
+                let (instance, at_once, id) = (instance.clone(), at_once.clone(), id.clone());
+                std::thread::spawn(move || {
+                    let platform = Platform::new("linux", arch).expect("platform");
+                    at_once.wait();
+                    instance
+                        .put_entry(&id, &platform, format!("{arch} {round}").into_bytes())
+                        .expect("add the entry");
+                })
+            })
+            .collect();
+        for thread in adding {
+            thread.join().expect("the adding thread");
+        }
+    }
+    let mut kept = schema.query("SELECT version || ' ' || arch FROM package_entries");
+    kept.sort();
+    expected.sort();
+    assert_eq!(kept, expected, "every entry of both instances is held");
+}
+
+/// Two instances that each add a member to one Deployment at the same moment keep both: each
+/// writes the row of its member under the Deployment's row lock, and neither writes the
+/// Deployment it holds over the other's. A type another instance filled is refused from what is
+/// stored, whatever the refusing instance holds in memory.
+/// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it, ADR-0026, ADR-0027
+#[test]
+fn two_members_added_at_once_on_two_instances_are_both_kept() {
+    use fleet_server::deployments::{DeploymentError, DeploymentStore};
+    use fleet_server::packages::PackageId;
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let instances: Vec<Arc<DeploymentStore>> = (0..2)
+        .map(|_| {
+            Arc::new(
+                DeploymentStore::open(records(&schema).deployments().expect("deployments"))
+                    .expect("open"),
+            )
+        })
+        .collect();
+    let channel = std::collections::BTreeMap::from([("channel".to_string(), "stable".to_string())]);
+    instances[0].put("stable", channel.clone()).expect("save");
+    instances[1]
+        .put("stable", channel)
+        .expect("save on the other");
+    let mut expected = Vec::new();
+    for round in 0..8u32 {
+        let at_once = Arc::new(std::sync::Barrier::new(2));
+        let adding: Vec<_> = instances
+            .iter()
+            .zip(["a", "b"])
+            .map(|(instance, side)| {
+                let (configuration, agent_type) =
+                    (format!("{side}-{round}"), format!("{side}-type-{round}"));
+                expected.push((configuration.clone(), agent_type.clone()));
+                let (instance, at_once) = (instance.clone(), at_once.clone());
+                std::thread::spawn(move || {
+                    let id = PackageId::new(&agent_type, "1.0.0").expect("id");
+                    at_once.wait();
+                    instance
+                        .put_configuration("stable", &configuration)
+                        .expect("add the Configuration");
+                    instance
+                        .put_package("stable", &id, false)
+                        .expect("add the Package");
+                })
+            })
+            .collect();
+        for thread in adding {
+            thread.join().expect("the adding thread");
+        }
+    }
+    let sorted = |mut rows: Vec<String>| {
+        rows.sort();
+        rows
+    };
+    assert_eq!(
+        sorted(schema.query("SELECT configuration FROM deployment_configurations")),
+        sorted(expected.iter().map(|(c, _)| c.clone()).collect()),
+        "every Configuration of both instances is held"
+    );
+    assert_eq!(
+        sorted(schema.query("SELECT agent_type FROM deployment_packages")),
+        sorted(expected.iter().map(|(_, p)| p.clone()).collect()),
+        "every Package of both instances is held"
+    );
+
+    let held = PackageId::new("otelcol", "1.0.0").expect("id");
+    instances[0]
+        .put_package("stable", &held, false)
+        .expect("A adds otelcol");
+    assert_eq!(
+        instances[1].put_package(
+            "stable",
+            &PackageId::new("otelcol", "2.0.0").expect("id"),
+            false
+        ),
+        Err(DeploymentError::TypeTaken {
+            agent_type: "otelcol".to_string(),
+            held,
+        }),
+        "B, which never heard of it, is refused from what is stored"
+    );
+}

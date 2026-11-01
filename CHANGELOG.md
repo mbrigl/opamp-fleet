@@ -40,6 +40,20 @@ once its tag exists.
 
 ### Changed
 
+- **With PostgreSQL, a Configuration's revisions, a Package's entries and a Deployment's members are
+  written one row at a time**
+  ([ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it](docs/adr/draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md)).
+  Every act writes the rows it names and decides from what is stored, so two Server instances on
+  one database that edit one Configuration, Package or Deployment at once keep both changes, and a
+  revision another instance's rollout pins is never collected. At its first start the Server adds
+  the tables `deployment_packages` and `deployment_configurations` (migration 5) and fills them from
+  the `packages` and `configurations` columns of `deployments`, which it keeps writing; the release
+  before runs on that schema. A signature written onto an entry another instance has replaced or
+  removed since is answered `409`, naming the entry; the Package read again through the same
+  instance shows what it holds now. The filesystem store is unchanged.
+  **What to do:** nothing to upgrade. On a `409` that says an entry has changed, read the Package
+  again and sign the bytes it holds.
+
 - **The UI colours as TOML only the Client's own configuration**
   ([ADR-0031](docs/adr/0031-the-ui-colours-configurations-with-shiki.md)). The core's UI chooses a
   grammar for `otelcol*`, the Client's own type and `fluent-bit` alone. An Agent of the one other

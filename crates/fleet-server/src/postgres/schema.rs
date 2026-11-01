@@ -28,7 +28,7 @@ pub const SCHEMA_TABLE: &str = "fleet_schema";
 
 /// Every table the migrations create, so that a database holding any of them is recognised as one
 /// the Server already wrote ([`super::Database::server_tables`]).
-pub const TABLES: [&str; 17] = [
+pub const TABLES: [&str; 19] = [
     "configurations",
     "configuration_revisions",
     "deployments",
@@ -45,6 +45,8 @@ pub const TABLES: [&str; 17] = [
     "package_floors",
     "leases",
     "host_bindings",
+    "deployment_packages",
+    "deployment_configurations",
     // Not tables of the records, but the Server's all the same.
     SCHEMA_TABLE,
 ];
@@ -75,6 +77,14 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 4,
         oldest_server: "0.6.1",
         sql: HOST_BINDINGS,
+    },
+    // Two tables only added, filled from the Deployments' columns; the release before it keeps
+    // reading those columns, which this release writes too, from the rows. What the release
+    // before writes into them while both run is ticket 11's.
+    Migration {
+        version: 5,
+        oldest_server: "0.6.1",
+        sql: DEPLOYMENT_MEMBERS,
     },
 ];
 
@@ -257,6 +267,30 @@ CREATE TABLE host_bindings (
 INSERT INTO host_bindings (instance_uid, host)
     SELECT uid, host FROM hosts, unnest(instance_uids) AS uid WHERE NOT gateway;
 CREATE INDEX certificates_predecessor ON certificates (predecessor_issuer, predecessor_serial);
+";
+
+/// The members of each Deployment, one row each
+/// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+/// clause 19): its Packages keyed by Agent type, so it holds at most one of each, and its
+/// Configurations by name. They are filled from the `packages` and `configurations` columns of
+/// `deployments`, which stay, written from these rows, for the release before.
+const DEPLOYMENT_MEMBERS: &str = r"
+CREATE TABLE deployment_packages (
+    deployment text NOT NULL REFERENCES deployments (name) ON DELETE CASCADE,
+    agent_type text NOT NULL,
+    version text NOT NULL,
+    PRIMARY KEY (deployment, agent_type)
+);
+CREATE TABLE deployment_configurations (
+    deployment text NOT NULL REFERENCES deployments (name) ON DELETE CASCADE,
+    configuration text NOT NULL,
+    PRIMARY KEY (deployment, configuration)
+);
+INSERT INTO deployment_packages (deployment, agent_type, version)
+    SELECT name, package->>'agent_type', package->>'version'
+        FROM deployments, json_array_elements(packages) AS package;
+INSERT INTO deployment_configurations (deployment, configuration)
+    SELECT DISTINCT name, configuration FROM deployments, unnest(configurations) AS configuration;
 ";
 
 /// This Server's version, `MAJOR.MINOR.PATCH`: the base of the version it reports, so a
