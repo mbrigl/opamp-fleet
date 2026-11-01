@@ -48,7 +48,7 @@ and its clause 3 the lease of
 [ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it](draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md).
 Its clause 3 also changes the recovery from a torn line: the repair records the hash of the last
 whole entry before the torn line, and the verifier checks it, so the anchor at the end of a record
-binds every entry before a repair as well.
+binds every entry before a linked repair as well.
 
 ## Decision
 
@@ -104,6 +104,13 @@ the SHA-256 of the entry before it, emit the same entry as a `tracing` event wit
      `last_whole` is kept as written, since an entry is never rewritten: `server audit-verify`
      holds it and names it as a repair without a link, because the entries before it are not
      bound by those after it.
+   - A crash during the repair itself leaves a run of torn lines: the torn piece, then a torn
+     `audit.chain_broken`. The next start keeps the run, closes it with a newline, and writes one
+     `audit.chain_broken` that chains on the last torn line by its `prev` and names as
+     `last_whole` the last whole entry before the run, wherever the files hold it, in the same
+     file or an earlier one. `server audit-verify` holds a run of torn lines closed by one
+     `audit.chain_broken` whose `last_whole` links to the last whole entry before the run; a run
+     closed by an `audit.chain_broken` that names no `last_whole`, or a run nothing closes, fails.
    - On the PostgreSQL store a Server instance draws a random chain identifier with each lease it
      takes and opens a chain of its own: a chain record with the identifier, the host name and the
      time it was opened, and a first entry `audit.chain_opened` whose `prev` is 64 zeros. The
@@ -200,7 +207,10 @@ store. Where the record is kept, its permissions, its writing and how long it go
   `a_truncated_file_is_recorded_as_a_broken_chain`,
   `a_torn_line_holds_only_when_the_next_entry_records_it_as_broken` and
   `a_repair_without_a_link_holds_and_is_named`; `crates/fleet-server/src/fs/audit.rs` test
-  `a_line_torn_inside_a_character_verifies_as_the_store_hashed_it`;
+  `a_line_torn_inside_a_character_verifies_as_the_store_hashed_it`,
+  `a_line_with_an_invalid_byte_inside_is_refused_naming_it`,
+  `a_torn_line_that_opens_a_file_is_linked_to_the_file_before` and
+  `a_crash_during_the_repair_is_closed_by_one_linked_repair`;
   `crates/fleet-server/src/postgres/audit.rs` tests
   `an_archive_the_file_store_repaired_after_a_crash_is_linked` and
   `an_archive_whose_entries_before_a_repair_were_replaced_fails_audit_verify`.
