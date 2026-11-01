@@ -473,6 +473,102 @@ mod tests {
         );
     }
 
+    /// A rollout that pins a revision already stored, while another instance collects the
+    /// Configuration, keeps it: the collection's `FOR UPDATE` on the Configuration's row waits for
+    /// the rollout's `FOR KEY SHARE`, and its delete then reads the assignment the rollout
+    /// committed. The rollout is held at a gate in the database between its revision and its
+    /// record, so the collection runs exactly then; the gate opens once the collection waits, or
+    /// once it has finished, which only a collection that took no hold does.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    #[test]
+    fn a_collection_keeps_a_stored_revision_a_rollout_pins_meanwhile() {
+        use crate::agent_store::AgentStore as _;
+        use crate::postgres::agents::PgAgentStore;
+        use opamp::uid::InstanceUid;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let configs = PgConfigBackend::new(database.clone());
+        configs.save("base", &revision("v1\n")).expect("save");
+        let held = pinned("base", "v1\n");
+        configs
+            .retain(&held)
+            .expect("a revision stored and pinned by nothing");
+        test.sql(
+            "CREATE TABLE fleet_test_gate (open boolean NOT NULL); \
+             INSERT INTO fleet_test_gate VALUES (false); \
+             CREATE FUNCTION fleet_test_wait() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN \
+             WHILE NOT (SELECT open FROM fleet_test_gate) LOOP PERFORM pg_sleep(0.01); \
+             END LOOP; RETURN NEW; END $$; \
+             CREATE TRIGGER fleet_test_wait BEFORE INSERT OR UPDATE ON agents \
+             FOR EACH ROW EXECUTE FUNCTION fleet_test_wait();",
+        );
+        let waiting = |condition: &str| {
+            !test
+                .rows(&format!(
+                    "SELECT 1 FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND {condition}"
+                ))
+                .is_empty()
+        };
+        let until = |what: &str, done: &dyn Fn() -> bool| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while !done() {
+                assert!(std::time::Instant::now() < deadline, "{what}");
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+
+        let mut record = crate::agent_store::tests::record();
+        if let Some(assignment) = record.assignment.as_mut() {
+            assignment.configurations = BTreeMap::from([("base".to_string(), held.hash.clone())]);
+        }
+        let rollout = {
+            let (database, held) = (database.clone(), held.clone());
+            std::thread::spawn(move || {
+                PgAgentStore::new(database)
+                    .release(&[held], &[(InstanceUid::default(), record)])
+                    .expect("the rollout")
+            })
+        };
+        until("the rollout reaches the gate", &|| {
+            waiting("wait_event = 'PgSleep' AND query LIKE 'INSERT INTO agents%'")
+        });
+        let collected = Arc::new(AtomicBool::new(false));
+        let collection = {
+            let (database, collected) = (database.clone(), collected.clone());
+            std::thread::spawn(move || {
+                let kept = PgConfigBackend::new(database)
+                    .collect("base", &BTreeSet::new())
+                    .expect("the collection");
+                collected.store(true, Ordering::SeqCst);
+                kept
+            })
+        };
+        until("the collection waits or ends", &|| {
+            collected.load(Ordering::SeqCst)
+                || waiting(
+                    "wait_event_type = 'Lock' AND (query LIKE \
+                     'SELECT 1 FROM configurations WHERE name = $1 FOR UPDATE' \
+                     OR query LIKE 'DELETE FROM configuration_revisions r %')",
+                )
+        });
+        test.sql("UPDATE fleet_test_gate SET open = true");
+        rollout.join().expect("the rollout's thread");
+        let kept = collection.join().expect("the collection's thread");
+        assert_eq!(
+            kept.into_keys().collect::<Vec<_>>(),
+            std::slice::from_ref(&held.hash),
+            "the collection kept what the rollout pins"
+        );
+        assert_eq!(
+            test.rows("SELECT hash FROM configuration_revisions"),
+            [[Some(held.hash)]],
+            "and so does the database"
+        );
+    }
+
     /// A row that does not decode fails the load naming it, rather than being skipped.
     /// Verifies: ADR-0029
     #[test]
