@@ -1620,7 +1620,12 @@ impl Revocations {
     /// # Errors
     /// Returns an error when the store cannot be read; what is held is then kept.
     pub fn reload_ledger(&self) -> Result<(), String> {
-        let _reloading = self.reloading.lock().expect("reload lock");
+        // It guards no data, so a reload that panicked leaves nothing to distrust: the next one
+        // reads again rather than ending every take-up of the other instances' acts.
+        let _reloading = self
+            .reloading
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         for _ in 0..RELOAD_SWAPS_REFUSED {
             let began = self.state.lock().expect("revocation lock").acts;
             let fresh = self.read_ledger()?;
@@ -3570,6 +3575,11 @@ mod tests {
                 MAX_REVOCATIONS,
             )
             .expect("another instance revokes");
+        // The first reload holds the reloads' lock while its read is open, so a second waits.
+        assert!(
+            revocations.reloading.try_lock().is_err(),
+            "a reload's read runs without the reloads' lock"
+        );
         let (done, second) = std::sync::mpsc::channel();
         {
             let revocations = revocations.clone();
@@ -3577,17 +3587,91 @@ mod tests {
                 let _ = done.send(revocations.reload_ledger());
             });
         }
-        // A second reload that did not wait for the first ends here, its newer read swapped in.
-        let early = second.recv_timeout(std::time::Duration::from_millis(300));
         go.send(()).expect("go");
         first.join().expect("first").expect("first reloaded");
-        early
-            .or_else(|_| second.recv_timeout(PATIENCE))
+        second
+            .recv_timeout(PATIENCE)
             .expect("the second reload ends")
             .expect("second reloaded");
         assert!(
             revocations.is_certificate_revoked(&id("a1")),
             "the older read was swapped in last"
         );
+    }
+
+    /// A store whose next read, once armed, panics.
+    #[derive(Clone, Default)]
+    struct PanicsOnce {
+        inner: Memory,
+        armed: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl LedgerStore for PanicsOnce {
+        fn load(&self) -> Result<Ledger, String> {
+            assert!(
+                !self.armed.swap(false, Ordering::SeqCst),
+                "a read that panics"
+            );
+            self.inner.load()
+        }
+        fn put_issued(&self, issued: &Issued) -> Result<(), String> {
+            self.inner.put_issued(issued)
+        }
+        fn remove_issued(&self, id: &CertId) -> Result<(), String> {
+            self.inner.remove_issued(id)
+        }
+        fn add_revocation(&self, entry: &Revocation, bound: usize) -> Result<Added, String> {
+            self.inner.add_revocation(entry, bound)
+        }
+        fn remove_revocation(&self, id: &str) -> Result<bool, String> {
+            self.inner.remove_revocation(id)
+        }
+        fn save_hosts(&self, hosts: &BTreeMap<String, Host>) -> Result<(), String> {
+            self.inner.save_hosts(hosts)
+        }
+    }
+
+    /// A reload whose read panicked does not end the reloads after it: the next one reads and
+    /// swaps, and takes up what another instance committed.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    #[test]
+    fn a_reload_after_one_that_panicked_still_swaps() {
+        let store = PanicsOnce::default();
+        let revocations = Arc::new(
+            Revocations::open(
+                Box::new(store.clone()),
+                Arc::new(Manual(AtomicU64::new(NOW))),
+                vec![Authority {
+                    role: "client".into(),
+                    subject: name_hash(CA),
+                    name: "CN=fleet client CA".into(),
+                }],
+            )
+            .expect("open"),
+        );
+        store
+            .inner
+            .add_revocation(
+                &Revocation {
+                    id: "other".into(),
+                    revoked: Revoked::Certificate {
+                        authority: "client".into(),
+                        issuers: vec![name_hash(CA)],
+                        serial: "a1".into(),
+                    },
+                    revoked_ms: NOW,
+                },
+                MAX_REVOCATIONS,
+            )
+            .expect("another instance revokes");
+        store.armed.store(true, Ordering::SeqCst);
+        let panicked = {
+            let revocations = revocations.clone();
+            std::thread::spawn(move || revocations.reload_ledger()).join()
+        };
+        assert!(panicked.is_err(), "the armed read panics");
+        assert!(!revocations.is_certificate_revoked(&id("a1")));
+        revocations.reload_ledger().expect("the next reload reads");
+        assert!(revocations.is_certificate_revoked(&id("a1")));
     }
 }
