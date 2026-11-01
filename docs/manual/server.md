@@ -623,7 +623,9 @@ server migrate-to-postgres --from /var/lib/opamp-fleet/fleet-data \
   `server audit-verify --config <server.toml> --archive <old data_dir>/audit` checks the link.
   Keep the archive as long as you keep the record; deleting it is yours. An archive whose chain
   breaks, or that ends in a torn line a crash left, stops the copy, naming the file: cut the torn
-  line from it, keeping a copy, so the record ends on its last whole entry.
+  line from it, keeping a copy, so the record ends on its last whole entry. A torn line that a
+  start on the filesystem store already followed with `audit.chain_broken` holds, and needs
+  nothing.
 - It copies rather than moves: the old `data_dir` stays as the backup. It prints what it copied,
   and exits non-zero when it could not copy all of it, leaving the database without the Server's
   tables and the new `data_dir` empty.
@@ -1172,7 +1174,10 @@ $ server audit-verify /var/lib/opamp-fleet-server/audit
 ```
 
 Each line carries the SHA-256 of the line before it, so a line edited or removed afterwards breaks
-the chain where it happened; `audit-verify` names the first entry that does not follow. Against an
+the chain where it happened; `audit-verify` names the first entry that does not follow. A crash
+mid-write leaves a torn last line; the next start keeps it, and its first entry,
+`audit.chain_broken`, chains on from it, which `audit-verify` takes as holding. A torn line still
+at the end, or one no `audit.chain_broken` follows, fails. Against an
 intruder on the Server host that only helps with a copy taken before, so ship the directory off the
 host. The record also goes to the Server's log under the target `audit`.
 

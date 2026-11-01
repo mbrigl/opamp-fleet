@@ -1316,6 +1316,43 @@ mod tests {
         assert!(err.contains("chain breaks"), "{err}");
     }
 
+    /// An archive the file store repaired after a crash (the torn line kept, then
+    /// `audit.chain_broken` chained on it) is taken as the archive and its link verifies; only a
+    /// torn line still at the end is refused.
+    /// Verifies: ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance
+    #[test]
+    fn an_archive_the_file_store_repaired_after_a_crash_is_linked() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        file_record(dir.path(), 3);
+        let archive = dir.path().join(crate::fs::AUDIT);
+        let file = crate::fs::audit_files(&archive)
+            .expect("files")
+            .pop()
+            .expect("a file");
+        // A crash mid-write: the last entry is cut short.
+        let text = std::fs::read_to_string(&file).expect("read");
+        std::fs::write(&file, &text[..text.len() - 20]).expect("tear");
+        assert!(archive_end(&archive).expect_err("torn").contains("torn"));
+        // The file store's next start repairs it.
+        file_record(dir.path(), 1);
+        let repaired = std::fs::read_to_string(&file).expect("read");
+        assert!(repaired.contains("audit.chain_broken"), "{repaired}");
+        let end = archive_end(&archive)
+            .expect("a repaired archive")
+            .expect("entries");
+        assert_eq!(end.0, 4, "two whole entries, the broken mark and one more");
+
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = shared(&test);
+        database.offer_archive(Some(end.clone()));
+        let first = database.take_lease("host-a", LAPSE).expect("lease");
+        assert!(lines(&test, &first.instance_id)[0].contains(&end.1));
+        let verified = verify(&database, Some(&archive)).expect("verify");
+        assert!(!verified.failed, "{:?}", verified.lines);
+    }
+
     /// An archive the database records that no chain names as its predecessor fails
     /// `audit-verify`, with or without `--archive`: the first chain is gone.
     /// Verifies: ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance

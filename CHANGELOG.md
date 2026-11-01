@@ -102,6 +102,13 @@ once its tag exists.
   **What to do:** nothing. A Configuration that sets `reports_available_components: false` under
   `extensions.opamp.capabilities` to work around this can drop the setting.
 
+- **`server audit-verify <dir>` holds a record the Server repaired after a crash.** A crash
+  mid-write leaves a torn last line, and the next start follows it with `audit.chain_broken`
+  chained on its hash ([ADR-0023](docs/adr/0023-an-append-only-audit-record.md)). `audit-verify`
+  failed on that torn line as not an entry; it now takes it as holding when `audit.chain_broken`
+  follows it, and still fails a torn line nothing follows.
+  **What to do:** nothing.
+
 - **A stop right after the Client starts ends it cleanly.** Its `SIGTERM` and `SIGINT` handlers
   were installed only once the task waiting for them first ran; a stop before that ended the Client
   by the signal itself. The handlers are now in place before the Client starts anything.

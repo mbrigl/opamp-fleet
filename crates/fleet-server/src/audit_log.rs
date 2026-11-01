@@ -858,21 +858,45 @@ fn rfc3339(ms: u64) -> String {
 }
 
 /// Walks lines in order and names the first whose `prev` does not match the line before it
-/// (ADR-0023 clause 3); `Ok(count)` when the whole chain holds.
+/// (ADR-0023 clause 3); `Ok(count)` when the whole chain holds. A line that is not an entry holds
+/// when the file store repaired it: the torn piece a crash left, followed by `audit.chain_broken`
+/// chained on its hash. A torn line nothing follows does not hold.
 ///
 /// # Errors
 /// Returns the position of the first break.
 pub fn verify<'a>(lines: impl IntoIterator<Item = (String, &'a str)>) -> Result<u64, String> {
     let mut prev: Option<String> = None;
+    // The torn line the next entry must record as broken: its place, its hash and why it is not
+    // an entry.
+    let mut torn: Option<(String, String, String)> = None;
     let mut count = 0;
     for (place, line) in lines {
-        let value: Value =
-            serde_json::from_str(line).map_err(|e| format!("{place}: not an audit entry: {e}"))?;
+        let value: Value = match serde_json::from_str(line) {
+            Ok(value) => value,
+            Err(e) => {
+                if let Some((place, _, e)) = torn {
+                    return Err(format!(
+                        "{place}: not an audit entry: {e}, and no audit.chain_broken follows it"
+                    ));
+                }
+                torn = Some((place, line_hash(line), e.to_string()));
+                continue;
+            }
+        };
         let stated = value
             .get("prev")
             .and_then(Value::as_str)
             .ok_or_else(|| format!("{place}: no prev"))?;
-        if let Some(prev) = &prev {
+        if let Some((torn_place, hash, e)) = torn.take() {
+            if value.get("event").and_then(Value::as_str) != Some("audit.chain_broken")
+                || stated != hash
+            {
+                return Err(format!(
+                    "{torn_place}: not an audit entry: {e}, and the entry after it does not \
+                     record it as audit.chain_broken"
+                ));
+            }
+        } else if let Some(prev) = &prev {
             if stated != prev {
                 return Err(format!(
                     "{place}: prev {stated} does not match the entry before it ({prev})"
@@ -881,6 +905,11 @@ pub fn verify<'a>(lines: impl IntoIterator<Item = (String, &'a str)>) -> Result<
         }
         prev = Some(line_hash(line));
         count += 1;
+    }
+    if let Some((place, _, e)) = torn {
+        return Err(format!(
+            "{place}: not an audit entry: {e} — a torn last line a crash left"
+        ));
     }
     Ok(count)
 }
@@ -1421,6 +1450,49 @@ mod tests {
             "it counts on from the last whole entry, never from 1: {}",
             lines[2]
         );
+    }
+
+    /// `audit-verify` holds the file store's repair (a torn line, then `audit.chain_broken` chained
+    /// on its hash), and refuses a torn line nothing records as broken, in the middle or at the
+    /// end.
+    /// Verifies: ADR-0023
+    #[test]
+    fn a_torn_line_holds_only_when_the_next_entry_records_it_as_broken() {
+        let place = |lines: &[String]| -> Vec<(String, String)> {
+            lines
+                .iter()
+                .enumerate()
+                .map(|(i, l)| (i.to_string(), l.clone()))
+                .collect()
+        };
+        let check = |lines: &[String]| {
+            let placed = place(lines);
+            verify(placed.iter().map(|(p, l)| (p.clone(), l.as_str())))
+        };
+        let first = format!("{{\"seq\":1,\"prev\":\"{GENESIS}\",\"event\":\"a\"}}");
+        let fragment = "{\"seq\":2,\"pr".to_string();
+        let broken = |event: &str, prev: &str| {
+            format!("{{\"seq\":2,\"prev\":\"{prev}\",\"event\":\"{event}\"}}")
+        };
+        let repaired = broken("audit.chain_broken", &line_hash(&fragment));
+        let after = format!(
+            "{{\"seq\":3,\"prev\":\"{}\",\"event\":\"a\"}}",
+            line_hash(&repaired)
+        );
+        assert_eq!(
+            check(&[first.clone(), fragment.clone(), repaired.clone(), after]),
+            Ok(3)
+        );
+        let err = check(&[first.clone(), fragment.clone()]).expect_err("torn at the end");
+        assert!(err.starts_with("1:") && err.contains("torn"), "{err}");
+        let other = broken("admission.admitted", &line_hash(&fragment));
+        let err = check(&[first.clone(), fragment.clone(), other]).expect_err("not broken");
+        assert!(err.starts_with("1:"), "{err}");
+        let elsewhere = broken("audit.chain_broken", &line_hash(&first));
+        let err = check(&[first.clone(), fragment.clone(), elsewhere]).expect_err("other prev");
+        assert!(err.starts_with("1:"), "{err}");
+        let err = check(&[first, fragment.clone(), fragment, repaired]).expect_err("two torn");
+        assert!(err.starts_with("1:"), "{err}");
     }
 
     /// Verifies: ADR-0023
