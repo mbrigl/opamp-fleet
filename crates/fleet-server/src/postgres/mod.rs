@@ -866,6 +866,33 @@ pub(crate) mod testing {
                 .expect("query")
         }
 
+        /// Holds every write of an Agent's assignment open, mid-transaction, at a gate the test
+        /// opens: a rollout then holds what it holds until its commit for as long as the test
+        /// needs. Advisory locks span the database, every test's schema, so each test names a
+        /// `key` of its own.
+        pub(crate) fn hold_assignment_writes(&self, key: i64) -> Gate {
+            self.sql(&format!(
+                "CREATE FUNCTION fleet_test_hold() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN \
+                     PERFORM pg_advisory_lock_shared({key}); \
+                     PERFORM pg_advisory_unlock_shared({key}); RETURN NULL; END $$; \
+                 CREATE TRIGGER fleet_test_hold AFTER UPDATE OF deployment ON agents \
+                     FOR EACH ROW EXECUTE FUNCTION fleet_test_hold();"
+            ));
+            self.gate(key)
+        }
+
+        /// The first column of the first row `query` answers, once it answers one; a test fails
+        /// after 30 seconds without.
+        pub(crate) fn once(&self, query: &str) -> String {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            loop {
+                if let Some(found) = self.rows(query).first().and_then(|row| row[0].clone()) {
+                    break found;
+                }
+                assert!(std::time::Instant::now() < deadline, "never: {query}");
+            }
+        }
+
         fn admin_connection(&self) -> (tokio_postgres::Config, Tls) {
             let password =
                 crate::config::read_secret_file("password_file", &self.config.password_file)

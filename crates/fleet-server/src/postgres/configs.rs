@@ -11,7 +11,9 @@ use tokio_postgres::GenericClient;
 
 use super::notify::{notify, CONFIGURATION};
 use super::{client, sql, Database};
-use crate::configs::{check_type, validate_name, ConfigBackend, Configuration, Pinned, Revision};
+use crate::configs::{
+    check_type, validate_name, ConfigBackend, Configuration, Pinned, Removal, Revision,
+};
 
 /// The Configurations in `configurations` and `configuration_revisions`.
 pub struct PgConfigBackend {
@@ -109,18 +111,47 @@ impl ConfigBackend for PgConfigBackend {
         })
     }
 
-    /// The Configuration and its revisions go in one statement, the revisions by cascade.
-    fn remove(&self, name: &str) -> Result<(), String> {
+    /// One transaction: the Configuration's row is held `FOR UPDATE`, which waits for every
+    /// rollout that holds it to pin one of its revisions and keeps every other out until this one
+    /// commits; then the stored assignments that name it are counted, and only when none does
+    /// are the Configuration and its revisions deleted, the revisions by cascade.
+    fn remove(&self, name: &str) -> Result<Removal, String> {
         let name = name.to_string();
         self.database.run(move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
+            let held = transaction
+                .query_opt(
+                    "SELECT 1 FROM configurations WHERE name = $1 FOR UPDATE",
+                    &[&name],
+                )
+                .await
+                .map_err(sql)?;
+            if held.is_none() {
+                transaction.commit().await.map_err(sql)?;
+                return Ok(Removal::Absent);
+            }
+            let pinning: i64 = transaction
+                .query_one(
+                    "SELECT count(*) FROM agent_assignment_configurations WHERE configuration = $1",
+                    &[&name],
+                )
+                .await
+                .map_err(sql)?
+                .get(0);
+            if pinning > 0 {
+                transaction.commit().await.map_err(sql)?;
+                return Ok(Removal::Pinned(
+                    usize::try_from(pinning).unwrap_or(usize::MAX),
+                ));
+            }
             transaction
                 .execute("DELETE FROM configurations WHERE name = $1", &[&name])
                 .await
                 .map_err(sql)?;
             notify(&*transaction, CONFIGURATION, &name).await?;
-            transaction.commit().await.map_err(sql)
+            transaction.commit().await.map_err(sql)?;
+            Ok(Removal::Removed)
         })
     }
 }
@@ -547,6 +578,8 @@ mod tests {
 
         let mut record = crate::agent_store::tests::record();
         if let Some(assignment) = record.assignment.as_mut() {
+            // A rollout pins only a Package that is stored, and this test stores none.
+            assignment.package = None;
             assignment.configurations = BTreeMap::from([("base".to_string(), held.hash.clone())]);
         }
         let rollout = {
@@ -605,5 +638,52 @@ mod tests {
         test.sql("INSERT INTO configurations VALUES ('untyped', 'x', '', '')");
         let err = store.load().expect_err("no Agent type");
         assert!(err.contains("\"untyped\""), "{err}");
+    }
+
+    /// A deletion of a Configuration through B while a rollout through A that pins one of its
+    /// revisions has not yet committed waits for the rollout, and then refuses it from the
+    /// assignment the rollout stored: the rollout holds the Configuration's row until it commits.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it, ADR-0026
+    #[test]
+    fn a_deletion_waits_for_a_rollout_that_pins_the_configuration_and_is_refused() {
+        use crate::agent_store::tests::record;
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let (agents, b) = (
+            PgAgentStore::new(database.clone()),
+            PgConfigBackend::new(database),
+        );
+        b.save("base", &revision("receivers: {}\n")).expect("save");
+        let uid = opamp::uid::InstanceUid::default();
+        let mut reported = record();
+        reported.assignment = None;
+        agents.put(&uid, &reported).expect("report");
+        let key = 0x19_0002;
+        let gate = test.hold_assignment_writes(key);
+        let pin = pinned("base", "receivers: {}\n");
+        let mut released = record();
+        if let Some(assignment) = released.assignment.as_mut() {
+            assignment.package = None;
+            assignment.configurations = BTreeMap::from([("base".to_string(), pin.hash.clone())]);
+        }
+        let rollout = std::thread::spawn(move || agents.release(&[pin], &[(uid, released)]));
+        // A has written the assignment, and waits at the gate with its transaction open.
+        let a_pid = test.once(&format!(
+            "SELECT pid::text FROM pg_locks WHERE locktype = 'advisory' AND NOT granted \
+             AND objid::text = '{key}'"
+        ));
+        let deletion = std::thread::spawn(move || b.remove("base"));
+        test.once(&format!(
+            "SELECT pid::text FROM pg_stat_activity WHERE {a_pid} = ANY(pg_blocking_pids(pid))"
+        ));
+        gate.open();
+        assert_eq!(rollout.join().expect("A").map(|wrote| wrote.len()), Ok(1));
+        assert_eq!(deletion.join().expect("B"), Ok(Removal::Pinned(1)));
+        assert_eq!(
+            test.rows("SELECT configuration FROM configuration_revisions"),
+            [[Some("base".to_string())]]
+        );
     }
 }

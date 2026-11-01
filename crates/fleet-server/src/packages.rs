@@ -7,7 +7,8 @@
 //! **candidate** such an act would release. A Package reaches an Agent only as an **upgrade**
 //! over what it reports (ADR-0026), beside the type and platform tests. The
 //! immutability of an assigned Package's entries is enforced by the fleet, which knows the
-//! assignments.
+//! assignments, and again by a backend that other Servers write too, from the assignments it
+//! stores.
 //!
 //! Package *bodies* are opaque bytes: what a package contains and how it is applied is the Agent's
 //! business (the specification forbids the Server abstracting over it). The Server's job is to
@@ -656,7 +657,8 @@ impl PackageStore {
     }
 
     /// The gate every entry write passes: the Package must exist. The immutability of an
-    /// assigned Package (ADR-0026) is the fleet's to enforce — only it knows the assignments.
+    /// assigned Package (ADR-0026) is the fleet's to enforce — only it knows the assignments —
+    /// and a database backend's, which counts the stored ones in the write.
     ///
     /// # Errors
     /// Returns an error when no Package of that identity exists.
@@ -1139,6 +1141,26 @@ fn referenced(sets: &BTreeMap<PackageId, Package>, sha256: &str) -> bool {
     sets.values()
         .flat_map(|set| set.entries.values())
         .any(|entry| hex::encode(&entry.content_hash) == sha256)
+}
+
+/// The refusal every write to the entries of an assigned Package answers with (ADR-0026 clause
+/// 13), whether the Server found the assignment in what it holds or in what is stored.
+#[must_use]
+pub fn assigned(id: &PackageId) -> String {
+    format!(
+        "set {id} is assigned to an Agent and its entries are immutable — create the next version \
+         as a new set and roll that out"
+    )
+}
+
+/// The refusal of the deletion of a Package that the assignments of `pinning` Agents pin
+/// (ADR-0026 clause 12).
+#[must_use]
+pub fn pinned(id: &PackageId, pinning: usize) -> String {
+    format!(
+        "package {id} is pinned by the assignment of {pinning} Agent(s) — roll them out through a \
+         Deployment without it, or forget them, before deleting it"
+    )
 }
 
 /// The refusal for an entry a Package does not hold.

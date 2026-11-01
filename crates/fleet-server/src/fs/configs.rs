@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use crate::configs::{ConfigBackend, Configuration, Pinned, Revision};
+use crate::configs::{ConfigBackend, Configuration, Pinned, Removal, Revision};
 
 /// One JSON file per Configuration under `configurations/`, named after it.
 pub struct FsConfigBackend {
@@ -141,8 +141,10 @@ impl ConfigBackend for FsConfigBackend {
         Ok(config.retained)
     }
 
-    fn remove(&self, name: &str) -> Result<(), String> {
-        super::remove_file(&self.dir.join(format!("{name}.json")))
+    /// The assignments are the Agent store's, which its one Server asked before it deletes.
+    fn remove(&self, name: &str) -> Result<Removal, String> {
+        super::remove_file(&self.dir.join(format!("{name}.json")))?;
+        Ok(Removal::Removed)
     }
 }
 
@@ -189,7 +191,7 @@ mod tests {
             reopened.compose(&assignments).expect("pinned").entries[0].body,
             "receivers: {}\n"
         );
-        assert!(reopened.delete("base").expect("delete"));
+        assert_eq!(reopened.delete("base").expect("delete"), Removal::Removed);
         assert!(!dir.path().join("configurations/base.json").exists());
         assert_eq!(open(dir.path()).expect("open").list().len(), 1);
     }

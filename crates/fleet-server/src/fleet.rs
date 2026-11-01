@@ -25,7 +25,7 @@ use tracing::{debug, info, warn};
 
 use crate::agent_store::{AgentStore, Creation, PersistedAgent, Pin, Presence};
 use crate::audit::{Audit, Entry};
-use crate::configs::{ConfigBackend, ConfigStore, Configuration, DesiredConfig, Revision};
+use crate::configs::{ConfigBackend, ConfigStore, Configuration, DesiredConfig, Removal, Revision};
 use crate::deployments::{self, deployment_for, Deployment, DeploymentError, DeploymentStore};
 use crate::enrolment::{DecisionError, Enrolment};
 use crate::labels::{LabelError, Sources};
@@ -2004,18 +2004,28 @@ impl AppState {
     /// a Deployment without it first, or forgotten. A deleted Configuration leaves every Deployment
     /// that held it.
     ///
-    /// The fleet lock is held across the check and the delete, so a rollout cannot pin it in
-    /// between.
+    /// The fleet lock is held across the check and the delete, so a rollout of this Server cannot
+    /// pin it in between. A store that other Servers write too counts the stored assignments again
+    /// in the act that deletes (ADR-draft-the-servers-state-and-its-stores clause 2), so a pin
+    /// written through another instance refuses it as well.
     pub fn delete_configuration(&self, name: &str) -> Result<bool, DeleteError> {
         let fleet = self.fleet.lock().expect("fleet lock");
-        let pinning = self.agent_store.pinning(Pin::Configuration(name));
-        if pinning > 0 {
-            return Err(DeleteError::Pinned(format!(
+        let pinned = |pinning: usize| {
+            DeleteError::Pinned(format!(
                 "configuration {name:?} is pinned by the assignment of {pinning} Agent(s) — roll \
                  them out through a Deployment without it, or forget them, before deleting it"
-            )));
+            ))
+        };
+        let pinning = self.agent_store.pinning(Pin::Configuration(name));
+        if pinning > 0 {
+            return Err(pinned(pinning));
         }
-        let deleted = self.configs.delete(name).map_err(DeleteError::Storage)?;
+        // The store decides again from what it stores: another instance may have pinned it.
+        let deleted = match self.configs.delete(name).map_err(DeleteError::Storage)? {
+            Removal::Removed => true,
+            Removal::Absent => false,
+            Removal::Pinned(pinning) => return Err(pinned(pinning)),
+        };
         if deleted {
             if let Some(store) = self.deployment_store() {
                 let left = store
@@ -3170,7 +3180,9 @@ impl AppState {
 
     /// Whether any Agent's assignment references this Package — the gate that makes an assigned
     /// Package's bytes immutable (ADR-0026 clause 13). The Agent store answers it (ADR-0029
-    /// clause 2); the fleet lock keeps a rollout from pinning it meanwhile.
+    /// clause 2); the fleet lock keeps a rollout of this Server from pinning it meanwhile. A
+    /// store that other Servers write too refuses the write again from the stored assignments, in
+    /// the act that writes.
     fn package_set_assigned(&self, id: &PackageId) -> bool {
         let _fleet = self.fleet.lock().expect("fleet lock");
         self.agent_store.pinning(Pin::Package(id)) > 0
@@ -3233,10 +3245,7 @@ impl AppState {
     /// The refusal every write to an assigned Package answers with (ADR-0026 clause 13).
     fn refuse_if_assigned(&self, id: &PackageId) -> Result<(), String> {
         if self.package_set_assigned(id) {
-            return Err(format!(
-                "set {id} is assigned to an Agent and its entries are immutable — create the \
-                 next version as a new set and roll that out"
-            ));
+            return Err(crate::packages::assigned(id));
         }
         Ok(())
     }
@@ -3326,16 +3335,14 @@ impl AppState {
     /// deletion must not change what a running Agent receives. A deleted Package leaves every
     /// Deployment that held it. Nothing is uninstalled either way (ADR-0027).
     ///
-    /// The fleet lock is held across the check and the delete, so a rollout cannot pin it in
-    /// between.
+    /// The fleet lock is held across the check and the delete, so a rollout of this Server cannot
+    /// pin it in between; a store that other Servers write too counts the stored assignments again
+    /// in the act that deletes.
     pub fn delete_package_set(&self, id: &PackageId) -> Result<bool, String> {
         let fleet = self.fleet.lock().expect("fleet lock");
         let pinning = self.agent_store.pinning(Pin::Package(id));
         if pinning > 0 {
-            return Err(format!(
-                "package {id} is pinned by the assignment of {pinning} Agent(s) — roll them out \
-                 through a Deployment without it, or forget them, before deleting it"
-            ));
+            return Err(crate::packages::pinned(id, pinning));
         }
         let deleted = self.package_store()?.delete_set(id)?;
         if deleted {

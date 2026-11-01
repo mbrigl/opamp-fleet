@@ -579,7 +579,9 @@ impl AgentStore for PgAgentStore {
     /// One transaction: the revisions and the assignments that pin them commit together or not at
     /// all (ADR-0029 clause 21). Each record's assignment is written alone, in the order of the
     /// `instance_uid`, so two releases over the same Agents lock their rows in one order; a record
-    /// forgotten meanwhile is written nothing.
+    /// forgotten meanwhile is written nothing. The row of each Package an assignment pins is held
+    /// `FOR KEY SHARE` until the commit, as each pinned Configuration's is, so a write to the
+    /// Package that counts the assignments pinning it waits for these.
     fn release(
         &self,
         revisions: &[Pinned],
@@ -597,6 +599,13 @@ impl AgentStore for PgAgentStore {
                 let mut client = client(&pool).await?;
                 let transaction = client.transaction().await.map_err(sql)?;
                 super::configs::retain(&*transaction, &revisions).await?;
+                let packages: BTreeSet<&PackageId> = records
+                    .iter()
+                    .filter_map(|(_, assignment)| assignment.as_ref()?.package.as_ref())
+                    .collect();
+                for id in packages {
+                    hold_pinned_package(&*transaction, id).await?;
+                }
                 let pinned: BTreeSet<&str> = revisions
                     .iter()
                     .map(|pinned| pinned.configuration.as_str())
@@ -643,6 +652,22 @@ impl AgentStore for PgAgentStore {
             .filter_map(|assignment| assignment.configurations.get(name).cloned())
             .collect()
     }
+}
+
+/// Holds the row of the Package `id` `FOR KEY SHARE` inside a rollout's transaction: a write to
+/// the Package, which holds it `FOR UPDATE` and then counts the assignments that pin it, waits for
+/// the rollout's commit, while other rollouts that pin it go on beside it. A Package that is not
+/// stored is an error, as a Configuration that is not is.
+async fn hold_pinned_package(client: &impl GenericClient, id: &PackageId) -> Result<(), String> {
+    client
+        .query_opt(
+            "SELECT 1 FROM packages WHERE agent_type = $1 AND version = $2 FOR KEY SHARE",
+            &[&id.agent_type, &id.version],
+        )
+        .await
+        .map_err(sql)?
+        .map(drop)
+        .ok_or_else(|| format!("no package set {id}"))
 }
 
 /// The lock the creation of a record is counted under, by the key its schema gives it.

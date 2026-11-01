@@ -12,7 +12,8 @@ use tokio_postgres::GenericClient;
 use super::notify::{notify, PACKAGE};
 use super::{client, signed, sql, unsigned, Database};
 use crate::packages::{
-    Entry, Package, PackageBackend, PackageId, Platform, Signed, ED25519_SIGNATURE_LEN,
+    assigned, pinned, Entry, Package, PackageBackend, PackageId, Platform, Signed,
+    ED25519_SIGNATURE_LEN,
 };
 
 /// The Packages in `packages` and `package_entries`.
@@ -56,23 +57,14 @@ impl PackageBackend for PgPackageBackend {
         })
     }
 
-    /// The entry's row alone, inserted or replaced; the Package's row is held `FOR KEY SHARE`
-    /// by the reference, so a deletion of the Package waits for it or is waited for.
+    /// The entry's row alone, inserted or replaced, while no stored assignment pins the Package
+    /// ([`hold_unassigned`]).
     fn put_entry(&self, id: &PackageId, entry: &Entry) -> Result<(), String> {
         let (id, entry) = (id.clone(), entry.clone());
         self.database.run(move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
-            if transaction
-                .query_opt(
-                    "SELECT 1 FROM packages WHERE agent_type = $1 AND version = $2 \
-                     FOR KEY SHARE",
-                    &[&id.agent_type, &id.version],
-                )
-                .await
-                .map_err(sql)?
-                .is_none()
-            {
+            if !hold_unassigned(&*transaction, &id, |id, _| assigned(id)).await? {
                 return Err(format!("no package set {id}"));
             }
             transaction
@@ -98,9 +90,10 @@ impl PackageBackend for PgPackageBackend {
         })
     }
 
-    /// One statement on the entry's row, conditioned on the bytes it names: the row is locked
-    /// by the update, so it is decided from what is stored. When it writes nothing, the entry as
-    /// stored is read in the same transaction.
+    /// One statement on the entry's row, conditioned on the bytes it names, while no stored
+    /// assignment pins the Package ([`hold_unassigned`]): the row is locked by the update, so it is
+    /// decided from what is stored. When it writes nothing, the entry as stored is read in the same
+    /// transaction.
     fn sign(
         &self,
         id: &PackageId,
@@ -113,6 +106,7 @@ impl PackageBackend for PgPackageBackend {
         self.database.run(move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
+            hold_unassigned(&*transaction, &id, |id, _| assigned(id)).await?;
             let updated = transaction
                 .execute(
                     "UPDATE package_entries SET signature = $6 WHERE agent_type = $1 \
@@ -149,11 +143,13 @@ impl PackageBackend for PgPackageBackend {
         })
     }
 
+    /// The entry's row alone, while no stored assignment pins the Package ([`hold_unassigned`]).
     fn remove_entry(&self, id: &PackageId, platform: &Platform) -> Result<(), String> {
         let (id, platform) = (id.clone(), platform.clone());
         self.database.run(move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
+            hold_unassigned(&*transaction, &id, |id, _| assigned(id)).await?;
             let removed = transaction
                 .execute(
                     "DELETE FROM package_entries WHERE agent_type = $1 AND version = $2 \
@@ -169,12 +165,14 @@ impl PackageBackend for PgPackageBackend {
         })
     }
 
-    /// The Package and its entries go in one statement, the entries by cascade.
+    /// The Package and its entries go in one statement, the entries by cascade, while no stored
+    /// assignment pins it ([`hold_unassigned`]).
     fn remove(&self, id: &PackageId) -> Result<(), String> {
         let id = id.clone();
         self.database.run(move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
+            hold_unassigned(&*transaction, &id, pinned).await?;
             transaction
                 .execute(
                     "DELETE FROM packages WHERE agent_type = $1 AND version = $2",
@@ -186,6 +184,43 @@ impl PackageBackend for PgPackageBackend {
             transaction.commit().await.map_err(sql)
         })
     }
+}
+
+/// Holds the Package's row `FOR UPDATE` until the caller's transaction ends, and then counts the
+/// stored assignments that pin it, failing with `refusal` when any does (ADR-0026 clauses 12 and
+/// 13). A rollout holds the row of each Package it pins `FOR KEY SHARE` until its assignments are
+/// committed, so the count waits for it and sees them, and no rollout pins the Package until this
+/// transaction ends
+/// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+/// clause 19). Answers whether the Package is stored.
+async fn hold_unassigned(
+    client: &impl GenericClient,
+    id: &PackageId,
+    refusal: fn(&PackageId, usize) -> String,
+) -> Result<bool, String> {
+    if client
+        .query_opt(
+            "SELECT 1 FROM packages WHERE agent_type = $1 AND version = $2 FOR UPDATE",
+            &[&id.agent_type, &id.version],
+        )
+        .await
+        .map_err(sql)?
+        .is_none()
+    {
+        return Ok(false);
+    }
+    let pinning: i64 = client
+        .query_one(
+            "SELECT count(*) FROM agents WHERE package_agent_type = $1 AND package_version = $2",
+            &[&id.agent_type, &id.version],
+        )
+        .await
+        .map_err(sql)?
+        .get(0);
+    if pinning > 0 {
+        return Err(refusal(id, usize::try_from(pinning).unwrap_or(usize::MAX)));
+    }
+    Ok(true)
 }
 
 /// Every Package with its entries. A row that does not decode — an identity or platform a write
@@ -535,5 +570,56 @@ mod tests {
         test.sql("UPDATE package_entries SET sha256 = 'not-a-hash'");
         let err = store.load().map(|_| ()).expect_err("not a hash");
         assert!(err.contains("otelcol@1.2.3"), "{err}");
+    }
+
+    /// A deletion of a Package through B while a rollout through A that pins it has not yet
+    /// committed waits for the rollout, and then refuses it from the assignment the rollout
+    /// stored: the rollout holds the Package's row until it commits.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it, ADR-0026
+    #[test]
+    fn a_deletion_waits_for_a_rollout_that_pins_the_package_and_is_refused() {
+        use crate::agent_store::{tests::record, AgentStore as _};
+        use crate::postgres::agents::PgAgentStore;
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let (agents, b) = (
+            PgAgentStore::new(database.clone()),
+            PgPackageBackend::new(database),
+        );
+        let id = PackageId::new("otelcol", "1.2.3").expect("id");
+        b.create(&id).expect("create");
+        let uid = opamp::uid::InstanceUid::default();
+        let mut reported = record();
+        reported.assignment = None;
+        agents.put(&uid, &reported).expect("report");
+        let key = 0x19_0001;
+        let gate = test.hold_assignment_writes(key);
+        let mut released = record();
+        if let Some(assignment) = released.assignment.as_mut() {
+            assignment.configurations.clear();
+        }
+        let rollout = std::thread::spawn(move || agents.release(&[], &[(uid, released)]));
+        // A has written the assignment, and waits at the gate with its transaction open.
+        let a_pid = test.once(&format!(
+            "SELECT pid::text FROM pg_locks WHERE locktype = 'advisory' AND NOT granted \
+             AND objid::text = '{key}'"
+        ));
+        let deletion = std::thread::spawn(move || b.remove(&id));
+        test.once(&format!(
+            "SELECT pid::text FROM pg_stat_activity WHERE {a_pid} = ANY(pg_blocking_pids(pid))"
+        ));
+        gate.open();
+        assert_eq!(rollout.join().expect("A").map(|wrote| wrote.len()), Ok(1));
+        let refused = deletion.join().expect("B").expect_err("refused");
+        assert!(
+            refused.ends_with(&pinned(&PackageId::new("otelcol", "1.2.3").expect("id"), 1)),
+            "{refused}"
+        );
+        assert_eq!(
+            test.rows("SELECT version FROM packages"),
+            [[Some("1.2.3".to_string())]]
+        );
     }
 }
