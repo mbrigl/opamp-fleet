@@ -399,6 +399,25 @@ bucket holds every artifact is yours. A large `data_dir/blobs/` makes that first
 its upload. Nothing is copied back: switching from `"s3"` to `"fs"`, an entry whose artifact
 `data_dir/blobs/` lacks fails the start, naming the entry.
 
+That copy at startup is the filesystem record store's. A Server on PostgreSQL and S3 has no
+`data_dir`, so a Server already on PostgreSQL with the filesystem blob store moves its artifacts
+once, with every instance stopped:
+
+1. Change `server.toml` to how the Server will start: `[blobs] store = "s3"` with its `[blobs.s3]`
+   section, and no `data_dir`.
+2. Upload the artifacts from the old directory:
+
+   ```sh
+   server blobs-to-s3 --data-dir /var/lib/opamp-fleet/fleet-data \
+       --config /etc/opamp-fleet/server.toml
+   ```
+
+   It refuses while any instance holds a live lease. It uploads every artifact a Package entry
+   names that the bucket lacks, hashed as above, then checks that the bucket holds the artifact of
+   every entry, and fails naming an entry whose artifact it does not hold. It only reads the
+   directory, and a second run uploads nothing again.
+3. Start the Server. The old directory is no longer read; removing it is yours.
+
 ### `[database]`
 
 Optional. Where the Server keeps its records: one file per record under `data_dir`, the default, or

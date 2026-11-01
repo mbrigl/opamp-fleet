@@ -340,7 +340,67 @@ fn copy(from: &Path, target: Target<'_>, database: &Database) -> Result<Report, 
     Ok(report)
 }
 
-/// Uploads into the bucket every blob of `packages` it lacks from the old `blobs/` directory,
+/// `server blobs-to-s3 --data-dir <data_dir>` (ADR-draft-the-servers-state-and-its-stores clause
+/// 19): the blobs of a Server already on PostgreSQL with the filesystem blob store, uploaded into
+/// the bucket `bucket` names. It runs while no instance holds a live lease, under the database's
+/// exclusive lock, and only reads `data_dir`; the database is read and not changed, its schema
+/// included. Answers what it uploaded.
+///
+/// # Errors
+/// Returns an error when the database holds none of the Server's tables, when an instance holds a
+/// live lease, when `data_dir` holds no `blobs/`, when a blob does not match its name or cannot be
+/// uploaded, and naming every Package entry whose blob the bucket does not then hold.
+pub fn blobs_to_s3(
+    data_dir: &Path,
+    config: &PostgresConfig,
+    bucket: &S3BlobsConfig,
+) -> Result<Report, String> {
+    blobs_to_s3_in(data_dir, config, bucket, None)
+}
+
+/// [`blobs_to_s3`] in the schema `schema` rather than the role's default.
+pub(crate) fn blobs_to_s3_in(
+    data_dir: &Path,
+    config: &PostgresConfig,
+    bucket: &S3BlobsConfig,
+    schema: Option<&str>,
+) -> Result<Report, String> {
+    let blobs = data_dir.join(fs::BLOBS);
+    if !blobs.is_dir() {
+        return Err(format!(
+            "--data-dir: {} holds no blobs/ — name the data_dir the Server kept its artifacts in",
+            data_dir.display()
+        ));
+    }
+    let database = std::sync::Arc::new(Database::connect_as(
+        config,
+        schema,
+        super::CALL_TIMEOUT,
+        super::Exclusive::Alone("server blobs-to-s3".to_string()),
+    )?);
+    if database.server_tables()?.is_empty() {
+        return Err(format!(
+            "the {} holds none of the Server's tables — name the database the Server runs on",
+            database.name()
+        ));
+    }
+    let live = database.live_leases()?;
+    if !live.is_empty() {
+        return Err(format!(
+            "{} instances hold a live lease on the {} — stop every Server instance, then run \
+             blobs-to-s3 again",
+            live.len(),
+            database.name()
+        ));
+    }
+    let packages = crate::Records::Postgres(database).packages()?.load()?;
+    let store = crate::s3::S3BlobStore::open(bucket)?;
+    Ok(Report {
+        lines: vec![upload(&blobs, &packages, &store, bucket)?],
+    })
+}
+
+/// Uploads into the bucket every blob of `packages` it lacks from the `blobs/` directory `blobs`,
 /// each hashed against its name, as a Server's switch to S3 does (clause 19), and checks that the
 /// bucket then holds every one. Answers the report's line.
 fn upload(
@@ -876,6 +936,101 @@ mod tests {
                 .is_empty(),
             "the database holds none of the Server's tables"
         );
+        clear(&store);
+    }
+
+    /// `server blobs-to-s3` moves the blobs of a Server already on PostgreSQL with the filesystem
+    /// blob store: it refuses while an instance holds a live lease, uploads every blob a Package
+    /// entry references and nothing else, leaves the data directory as it was, and a Server on
+    /// PostgreSQL and S3 then opens every entry's blob; a second run uploads nothing. An entry whose
+    /// blob the bucket does not hold afterwards fails it, naming the entry
+    /// (ADR-draft-the-servers-state-and-its-stores clause 19).
+    /// Verifies: ADR-draft-the-servers-state-and-its-stores
+    #[test]
+    fn blobs_to_s3_uploads_the_referenced_blobs_and_checks_every_entry() {
+        use crate::s3::tests::{again, clear, keys, named_store};
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let Some(bucket) = named_store() else { return };
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (old, data_dir) = (dir.path().join("old"), dir.path().join("data"));
+        fixture(&old);
+        run_in(
+            &old,
+            Blobs::Files(&data_dir),
+            &test.config(),
+            Some(&test.schema),
+        )
+        .expect("onto PostgreSQL with file blobs");
+        let artifact = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(b"the artifact"));
+        let unreferenced =
+            hex::encode(<sha2::Sha256 as sha2::Digest>::digest(b"no entry names it"));
+        std::fs::write(
+            data_dir.join(fs::BLOBS).join(&unreferenced),
+            b"no entry names it",
+        )
+        .expect("unreferenced");
+        let before = snapshot(&data_dir);
+
+        test.sql(
+            "INSERT INTO leases (instance_id, host, must_be_alone, taken_at, renewed_at, \
+             expires_at) VALUES ('7c1d6a52-3f0e-4b8e-9a51-0d2c6e4f8a10', 'elsewhere', false, \
+             now(), now(), now() + interval '1 hour')",
+        );
+        let err = blobs_to_s3_in(&data_dir, &test.config(), &bucket, Some(&test.schema))
+            .expect_err("an instance runs");
+        assert!(err.contains("live lease"), "{err}");
+        test.sql("DELETE FROM leases");
+
+        let report =
+            blobs_to_s3_in(&data_dir, &test.config(), &bucket, Some(&test.schema)).expect("upload");
+        assert_eq!(
+            report.lines,
+            vec![format!(
+                "1 blobs in bucket {}, 1 of them uploaded from {}",
+                bucket.bucket,
+                data_dir.join(fs::BLOBS).display()
+            )]
+        );
+        let store = crate::s3::S3BlobStore::open(&bucket).expect("open");
+        assert_eq!(
+            keys(&store),
+            vec![format!("{}blobs/{artifact}", bucket.prefix)],
+            "the referenced blob alone, and no staging object"
+        );
+        assert_eq!(
+            snapshot(&data_dir),
+            before,
+            "the data directory is only read"
+        );
+        {
+            // A Server's open, its lock released before the next run.
+            let records = crate::Records::Postgres(test.open());
+            crate::packages::PackageStore::open_on(
+                &records,
+                None,
+                &crate::config::BlobsConfig {
+                    store: "s3".to_string(),
+                    s3: Some(again(&bucket)),
+                },
+            )
+            .expect("every entry finds its blob in the bucket");
+        }
+        let again_report =
+            blobs_to_s3_in(&data_dir, &test.config(), &bucket, Some(&test.schema)).expect("again");
+        assert!(
+            again_report.lines[0].contains(", 0 of them uploaded"),
+            "{again_report:?}"
+        );
+
+        let mut elsewhere = again(&bucket);
+        elsewhere.prefix = format!("{}elsewhere/", bucket.prefix);
+        std::fs::remove_file(data_dir.join(fs::BLOBS).join(&artifact)).expect("lose the blob");
+        let err = blobs_to_s3_in(&data_dir, &test.config(), &elsewhere, Some(&test.schema))
+            .expect_err("a blob neither holds");
+        assert!(err.contains("otelcol@1.2.3"), "{err}");
+        assert!(err.contains(&artifact), "{err}");
         clear(&store);
     }
 

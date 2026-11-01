@@ -22,7 +22,8 @@ fn usage() -> ! {
          server audit-verify --config <server.toml> [--archive <old data_dir>/audit]\n       \
          server pki status [--config <server.toml>]\n       \
          server migrate --config-dir <old> --packages-dir <old> --data-dir <new>\n       \
-         server migrate-to-postgres --from <data_dir> [--data-dir <new>] [--config <server.toml>]"
+         server migrate-to-postgres --from <data_dir> [--data-dir <new>] [--config <server.toml>]\n       \
+         server blobs-to-s3 --data-dir <data_dir> [--config <server.toml>]"
     );
     std::process::exit(2);
 }
@@ -292,6 +293,55 @@ fn migrate_to_postgres(mut args: impl Iterator<Item = String>) -> ! {
     }
 }
 
+/// `server blobs-to-s3 --data-dir <data_dir> [--config <server.toml>]`
+/// (ADR-draft-the-servers-state-and-its-stores clause 19): uploads the artifacts of a Server
+/// already on PostgreSQL with the filesystem blob store into the bucket the configuration names,
+/// once, while no instance runs. The configuration is the one the Server will start with: the
+/// database, the bucket, and no `data_dir`. Prints what it uploaded, and exits non-zero when an
+/// entry's artifact is missing from the bucket afterwards.
+fn blobs_to_s3(mut args: impl Iterator<Item = String>) -> ! {
+    let (mut data_dir, mut config) = (None, None);
+    while let Some(flag) = args.next() {
+        let slot = match flag.as_str() {
+            "--data-dir" => &mut data_dir,
+            "--config" => &mut config,
+            _ => usage(),
+        };
+        match args.next() {
+            Some(path) if slot.is_none() => *slot = Some(PathBuf::from(path)),
+            _ => usage(),
+        }
+    }
+    let Some(data_dir) = data_dir else { usage() };
+    let config = load_config(config).config;
+    let (Some(database), Some(bucket)) = (config.database.postgres(), config.blobs.s3()) else {
+        eprintln!(
+            "the configuration names no database or no bucket — set [database] store = \
+             \"postgres\" and [blobs] store = \"s3\" as the Server will start, then run again"
+        );
+        std::process::exit(1);
+    };
+    match fleet_server::postgres::import::blobs_to_s3(&data_dir, database, bucket) {
+        Ok(report) => {
+            for line in &report.lines {
+                println!("{line}");
+            }
+            println!(
+                "the bucket {} holds every artifact the database {} names — start the Server; {} \
+                 is no longer read, and removing it is yours",
+                bucket.bucket,
+                database.dbname,
+                data_dir.display()
+            );
+            std::process::exit(0);
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    }
+}
+
 /// What makes the entry `server.toml` keeps from a secret.
 type Hasher = fn(&str) -> Result<String, String>;
 
@@ -404,6 +454,7 @@ fn parse_args() -> Option<PathBuf> {
             "pki" => pki(args),
             "migrate" => migrate(args),
             "migrate-to-postgres" => migrate_to_postgres(args),
+            "blobs-to-s3" => blobs_to_s3(args),
             "--config" => match args.next() {
                 Some(path) => config = Some(PathBuf::from(path)),
                 None => usage(),
