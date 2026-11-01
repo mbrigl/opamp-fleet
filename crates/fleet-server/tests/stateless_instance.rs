@@ -2,7 +2,8 @@
 //! (ADR-draft-the-servers-state-and-its-stores clause 1): started from a directory it cannot write,
 //! with no data directory, it serves, and writes no file. In the bucket it keeps the staging
 //! objects of every live lease and deletes those of a lease that is no longer live, at startup and
-//! whenever it takes over a lapsed lease (clause 16).
+//! whenever it takes over a lapsed lease (clause 16), and an upload it takes is staged under its
+//! own lease and lands as one blob.
 //!
 //! The Server works in the schema that is its role's default, so the test makes a role of its own
 //! with a schema of its name, which it drops afterwards. It runs against the database the
@@ -434,6 +435,43 @@ fn a_server_on_postgresql_and_s3_serves_from_a_directory_it_cannot_write() {
         bucket.keys(),
         [format!("{}staging/{live}/0123456789abcdef", bucket.prefix)],
         "the live lease's staging object stays"
+    );
+
+    // An upload through the operator plane is staged under this instance's lease, which it names
+    // only after it opened the bucket, and lands as one blob.
+    let package = format!("https://127.0.0.1:{operator}/api/v1/packages/otelcol/1.0.0");
+    let artifact = b"an artifact the operator uploads".to_vec();
+    let (created, uploaded) = bucket.runtime.block_on(async {
+        let client = reqwest::Client::builder()
+            .tls_certs_only([
+                reqwest::Certificate::from_pem(cert.cert.pem().as_bytes()).expect("the root")
+            ])
+            .build()
+            .expect("a client");
+        let created = client
+            .put(&package)
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .expect("create the package");
+        let uploaded = client
+            .put(format!("{package}/entries/linux/amd64"))
+            .body(artifact.clone())
+            .send()
+            .await
+            .expect("upload the entry");
+        (created.status(), uploaded.status())
+    });
+    assert_eq!(created, 200);
+    assert_eq!(uploaded, 200, "the upload is taken under the lease");
+    let sha256 = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&artifact));
+    assert_eq!(
+        bucket.keys(),
+        [
+            format!("{}blobs/{sha256}", bucket.prefix),
+            format!("{}staging/{live}/0123456789abcdef", bucket.prefix),
+        ],
+        "the blob is stored, and the upload left no staging object"
     );
 
     drop(server);
