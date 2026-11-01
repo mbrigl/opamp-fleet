@@ -20,10 +20,10 @@ its groups again.
   the notification arrives, then the labels stay as B set them
 - [x] Given a restart requested through B, when A writes the Agent's next report, then the request
   stays until it is carried out, and is cleared only if no later request set it again
-- [ ] Given an Agent carried by A, when its labels are set, a restart is requested or it is
+- [x] Given an Agent carried by A, when its labels are set, a restart is requested or it is
   forgotten through B, then A acts on it within one second: it places the Agent in its groups
   again, restarts it, or ends its session
-- [ ] Given an instance carrying 1 000 Agents at a 30-second heartbeat, when they report, then
+- [x] Given an instance carrying 1 000 Agents at a 30-second heartbeat, when they report, then
   presence is written in batches and never once per heartbeat
 - [ ] Given a restarted instance, when an Agent it does not carry is read on the Operator plane,
   then its record comes from the database
@@ -44,7 +44,8 @@ its groups again.
 
 ## Status
 
-The first session wrote the record per column, and stopped there; the reading per Agent is open.
+Two sessions wrote the record per column, the presence in batches and forgetting through any
+instance, and stopped there; the reading per Agent is open.
 
 Done, with tests that fail without their mechanism:
 
@@ -54,30 +55,41 @@ Done, with tests that fail without their mechanism:
   the `instance_uid`, and nothing of a record no longer stored. The filesystem adapter writes the
   whole file for each, as clause 2 allows.
 - A restart is cleared in the store before it is sent, and sent only when it was still queued.
-- The operator acts on labels and restarts read the Agent from the database on PostgreSQL, so an
-  instance acts on an Agent it never held; an Agent an instance does not hold is loaded from the
-  database at its first report there.
-- `take_up_agents` (was `take_up_assignments`) takes the assignment, the labels and the queued
-  restart from the store, places the group again, and drops an Agent the store no longer holds.
-- Criteria 1 and 2 and the labels and restart parts of criterion 3 are decided by
-  `labels_set_through_one_instance_stay_and_reach_the_instance_that_carries_the_agent` and
-  `a_restart_requested_through_one_instance_stays_until_the_carrying_instance_sends_it`; the
-  deadlock by `two_releases_over_the_same_agents_in_opposite_orders_both_commit`.
+- The operator acts on labels and restarts read the Agent from the database on PostgreSQL; an Agent
+  an instance does not hold is loaded from the database at its first report there.
+- `take_up_agents` takes the assignment, the labels and the queued restart from the store, places
+  the group again, and drops an Agent the store no longer holds.
+- Presence: migration 7 adds `connected` and `holder` to `agents`; `[database]
+  presence_interval_secs` (default 30, from 10 to 60, PostgreSQL only); each instance writes the
+  presence that moved since its last batch, in one transaction that locks the rows in the order of
+  the `instance_uid`; a disconnect never undoes another holder's presence; the staleness budget adds
+  the interval; the presence is written once more at an orderly shutdown before the lease goes.
+- Forgetting on PostgreSQL is decided from the stored presence, read and removed in one
+  transaction, a holder without a live lease reading as disconnected. The instance that carries the
+  Agent drops it and ends its session; on both stores a WebSocket that carried only the forgotten
+  Agent is closed `1000 forgotten`, and one carrying other Agents stays open.
+- `max_agents` on PostgreSQL bounds the rows, counted under an advisory lock in the transaction that
+  creates a record; a record stored already passes no bound.
+- Criteria 1 to 4 are decided by
+  `labels_set_through_one_instance_stay_and_reach_the_instance_that_carries_the_agent`,
+  `a_restart_requested_through_one_instance_stays_until_the_carrying_instance_sends_it`,
+  `an_agent_forgotten_through_one_instance_has_its_session_ended_by_the_one_that_carries_it` and
+  `presence_is_written_in_batches_and_never_once_per_heartbeat`; the deadlocks by
+  `two_releases_over_the_same_agents_in_opposite_orders_both_commit` and
+  `two_presence_batches_over_the_same_agents_in_opposite_orders_both_commit`.
 
 Open:
 
-- Presence (`connected`, `last_seen_ms`, the holder) in batches every `presence_interval_secs`:
-  a migration adding the columns, the config key, the batch in `instance_uid` order, and the
-  budget of clause 8 (criterion 4).
-- Forgetting through B decides from the stored presence, which needs the batch; then A ends the
-  Agent's session (the rest of criterion 3). Today A drops the Agent from memory on `forgotten`,
-  and B still forgets only an Agent it holds in memory.
-- An instance on PostgreSQL holds only the Agents it carries, and the Operator plane reads the
-  rest through `get` and `query` (criteria 5 and 6). Today every instance still loads the fleet at
-  startup.
-- Decisions this leaves to the human, in the hand-off: when an Agent over plain HTTP stops being
-  carried; what `max_agents` bounds on PostgreSQL; whether forgetting ends a live session on the
-  filesystem store too; and how much of `query` lands here rather than in ticket 07.
+- An instance on PostgreSQL holds only the Agents it carries, and the Operator plane reads the rest
+  through `get` and an unfiltered, unpaged `query` (criteria 5 and 6). Today every instance still
+  loads the fleet at startup. What reads the whole fleet from memory and would read the database
+  instead: the fleet list and an Agent's view, the Hosts list, the deployment reach, a
+  Deployment's rollout (which matches every Agent against its Selector), the label inheritance from
+  a Client Agent another instance carries, and the artifact download's check of the Agents a host
+  speaks for. `PgAgentStore`'s in-memory assignments, which `pinning` and `referenced_revisions`
+  answer from, are filled by `load()`; an assignments-only read can fill them without ticket 19.
+- An Agent on plain HTTP stays in memory until another instance takes it (ticket 06) or it is
+  forgotten, as the human decided.
 
 ## Blocked by
 
