@@ -235,9 +235,17 @@ done
 bash "$d/scripts/check-all.sh" > /dev/null 2>&1 &
 runner=$!
 for _ in $(seq 100); do [[ -e "$d/armed" && -e "$d/started" ]] && break; sleep 0.1; done
+check "the check that cleans up set its trap" test -e "$d/armed"
 kill -TERM "$runner"
+# A runner that does not stop its checks would wait on them while they wait on go: the watchdog
+# ends that after 10 s, and the case fails on it rather than hanging.
+( sleep 10; touch "$d/watchdog" "$d/go"; kill -KILL "$runner" 2>/dev/null ) &
+watchdog=$!
 wait "$runner"; rc=$?
+kill "$watchdog" 2>/dev/null
+wait "$watchdog" 2>/dev/null
 touch "$d/go"
+check "a runner stopped by TERM returns before the watchdog fires" test ! -e "$d/watchdog"
 check "a runner stopped by TERM exits 143" test "$rc" -eq 143
 check "and had started a check" test -e "$d/started"
 check "and returns once a check that cleans up on TERM has done so" test -e "$d/cleaned"
