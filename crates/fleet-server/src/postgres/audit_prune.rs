@@ -633,6 +633,65 @@ mod tests {
         );
     }
 
+    /// A chain linked by an `audit.pruned` in a chain opened before it holds once that chain is
+    /// found holding, whichever order the chains are walked in.
+    /// Verifies: ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance
+    #[test]
+    fn a_chain_linked_from_an_older_chain_holds() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let a = writing(&test, "host-a");
+        let closed = writing(&test, "host-x");
+        closed.decide(3);
+        assert!(closed.audit.close(Duration::from_secs(10)), "not closed");
+        age(&test, &closed.chain, "1, 2");
+        assert_eq!(a.prune().chains.len(), 1);
+        held(&a.database);
+    }
+
+    /// An `audit.pruned` in a chain that fails vouches for nothing: the chain it linked fails
+    /// too, naming its first retained entry.
+    /// Verifies: ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance
+    #[test]
+    fn an_audit_pruned_in_a_chain_that_fails_links_no_other_chain() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let closed = writing(&test, "host-x");
+        closed.decide(3);
+        assert!(closed.audit.close(Duration::from_secs(10)), "not closed");
+        let a = writing(&test, "host-a");
+        age(&test, &closed.chain, "1, 2");
+        a.prune();
+        a.decide(1);
+        held(&a.database);
+
+        // A's opening is altered: A's walk fails at the entry after it, and so does its link.
+        test.sql(&format!(
+            "UPDATE audit_entries SET line = replace(line, 'host-a', 'host-z') \
+             WHERE chain = '{}' AND seq = 1",
+            a.chain
+        ));
+        let verified = verify(&a.database, None).expect("verify");
+        assert!(verified.failed, "{:?}", verified.lines);
+        assert!(
+            verified
+                .lines
+                .iter()
+                .any(|line| line.contains(&format!("chain {}, entry 2", a.chain))),
+            "{:?}",
+            verified.lines
+        );
+        assert!(
+            verified.lines.iter().any(|line| line
+                .contains(&format!("chain {}, entry 3", closed.chain))
+                && line.contains("audit.pruned")),
+            "the closed chain was linked by a chain that fails: {:?}",
+            verified.lines
+        );
+    }
+
     /// Once the `audit.pruned` entries themselves and the first chain's `audit.chain_opened` are
     /// pruned, the links still needed — of a closed chain with no entries left, and of one that
     /// still begins after the entry recorded — and the archive's predecessor are recorded again,

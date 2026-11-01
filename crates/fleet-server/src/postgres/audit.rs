@@ -424,26 +424,23 @@ pub fn verify(database: &Database, archive: Option<&Path>) -> Result<Verified, S
             .start()
             .await
             .map_err(sql)?;
-        // What every retained `audit.pruned` names: where each chain may begin, and the predecessor
-        // it carries on once the first chain's opening is pruned.
-        let mut links: std::collections::HashMap<String, Vec<(u64, String)>> =
-            std::collections::HashMap::new();
+        // What every retained `audit.pruned` names, by the chain it stands in: where each chain may
+        // begin, and the predecessor it carries on once the first chain's opening is pruned.
+        let mut links: Vec<(String, super::audit_prune::Link)> = Vec::new();
         let mut named = Vec::new();
         for row in transaction
             .query(
-                "SELECT line FROM audit_entries WHERE line LIKE '%\"event\":\"audit.pruned\"%'",
+                "SELECT chain::text, line FROM audit_entries \
+                 WHERE line LIKE '%\"event\":\"audit.pruned\"%'",
                 &[],
             )
             .await
             .map_err(sql)?
         {
             if let Some((link, predecessor)) =
-                super::audit_prune::read_pruned(&row.get::<_, String>(0))
+                super::audit_prune::read_pruned(&row.get::<_, String>(1))
             {
-                links
-                    .entry(link.chain)
-                    .or_default()
-                    .push((link.last_seq, link.last_hash));
+                links.push((row.get(0), link));
                 named.extend(predecessor.map(|named| (named.chain, (named.seq, named.hash))));
             }
         }
@@ -457,14 +454,49 @@ pub fn verify(database: &Database, archive: Option<&Path>) -> Result<Verified, S
             .iter()
             .map(|row| (row.get(0), row.get(1), row.get(2)))
             .collect();
-        let mut chains = Vec::new();
-        for (chain, host, closed_hash) in records {
-            let pruned = links.remove(&chain).unwrap_or_default();
-            let walked = walk(&*transaction, &chain, pruned)
-                .await?
-                .and_then(|walk| walk.finish(closed_hash.as_deref()));
-            chains.push((chain, host, walked));
+        // An `audit.pruned` links only from a chain that holds: each chain is walked with the links
+        // of its own entries and of the chains found holding, and the chains that failed are
+        // walked again until no further one holds. The newest first, as a prune links older
+        // chains from a newer one.
+        let mut holding = std::collections::HashSet::new();
+        let mut walks: Vec<Option<Result<crate::audit_log::Walked, String>>> =
+            vec![None; records.len()];
+        loop {
+            let before = holding.len();
+            for (index, (chain, _, closed_hash)) in records.iter().enumerate().rev() {
+                if holding.contains(chain) {
+                    continue;
+                }
+                let pruned: Vec<(u64, String)> = links
+                    .iter()
+                    .filter(|(source, link)| {
+                        link.chain == *chain && (source == chain || holding.contains(source))
+                    })
+                    .map(|(_, link)| (link.last_seq, link.last_hash.clone()))
+                    .collect();
+                let walked = walk(&*transaction, chain, pruned)
+                    .await?
+                    .and_then(|walk| walk.finish(closed_hash.as_deref()));
+                if walked.is_ok() {
+                    holding.insert(chain.clone());
+                }
+                walks[index] = Some(walked);
+            }
+            if holding.len() == before {
+                break;
+            }
         }
+        let chains = records
+            .into_iter()
+            .zip(walks)
+            .map(|((chain, host, _), walked)| {
+                (
+                    chain,
+                    host,
+                    walked.unwrap_or_else(|| Err("not walked".to_string())),
+                )
+            })
+            .collect();
         let archive = transaction
             .query_opt("SELECT seq, hash FROM audit_archive", &[])
             .await
