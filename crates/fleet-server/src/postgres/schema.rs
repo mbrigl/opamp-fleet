@@ -120,6 +120,13 @@ pub const MIGRATIONS: &[Migration] = &[
         oldest_server: "0.6.1",
         sql: TAKES,
     },
+    // A column only added, with a default, and an index; the release before it neither reads nor
+    // prunes by it, and its inserts take the default.
+    Migration {
+        version: 10,
+        oldest_server: "0.6.1",
+        sql: AUDIT_RECORDED_AT,
+    },
 ];
 
 /// The first schema: one table per kind of record, the parts of a record that are many in tables of
@@ -385,6 +392,18 @@ const TAKES: &str = r"
 ALTER TABLE agents ADD COLUMN takes bigint NOT NULL DEFAULT 0;
 ALTER TABLE agents ADD COLUMN holder_changes timestamptz[] NOT NULL DEFAULT '{}';
 ";
+
+/// When each audit entry was stored, by the database's clock: what its age is reckoned from when the
+/// record is pruned (ADR-draft-the-servers-state-and-its-stores clause 12). Entries stored before
+/// take the time their line carries, read as text so that a line that is no entry keeps the time of
+/// the migration rather than stopping it.
+const AUDIT_RECORDED_AT: &str = r#"
+ALTER TABLE audit_entries ADD COLUMN recorded_at timestamptz NOT NULL DEFAULT now();
+UPDATE audit_entries
+    SET recorded_at = substring(line FROM '"time":"([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z)"')::timestamptz
+    WHERE line ~ '"time":"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z"';
+CREATE INDEX audit_entries_recorded_at ON audit_entries (chain, recorded_at);
+"#;
 
 /// This Server's version, `MAJOR.MINOR.PATCH`: the base of the version it reports, so a
 /// development build understands the schema of the release it is heading for.

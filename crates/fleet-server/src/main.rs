@@ -802,6 +802,38 @@ async fn main() {
         }
     };
     let audit: Arc<dyn fleet_server::audit::Audit> = audit_log.clone();
+    // On PostgreSQL the record goes back `[audit] retain_days`: pruned at startup and once a day
+    // after (ADR-draft-the-servers-state-and-its-stores clause 12).
+    if let (fleet_server::Records::Postgres(database), Some(lease)) = (&records, &lease) {
+        let (database, audit, held) = (database.clone(), audit_log.clone(), lease.held());
+        let retain_days = config.audit.retain_days();
+        tokio::spawn(async move {
+            let mut daily = tokio::time::interval(std::time::Duration::from_secs(24 * 60 * 60));
+            loop {
+                daily.tick().await;
+                let (database, audit) = (database.clone(), audit.clone());
+                let own = held.borrow().clone();
+                let pruned = tokio::task::spawn_blocking(move || {
+                    fleet_server::postgres::audit_prune::prune(&database, audit, own, retain_days)
+                })
+                .await;
+                match pruned {
+                    Ok(Ok(rounds)) => tracing::info!(
+                        rounds = rounds.len(),
+                        chains = rounds.iter().map(|round| round.chains.len()).sum::<usize>(),
+                        carried = rounds
+                            .iter()
+                            .map(|round| round.carried.len())
+                            .sum::<usize>(),
+                        closed_chains = rounds.iter().any(|round| round.closed_chains),
+                        "pruned the audit record to {retain_days} days"
+                    ),
+                    Ok(Err(e)) => tracing::warn!(error = %e, "cannot prune the audit record"),
+                    Err(e) => tracing::warn!(error = %e, "the audit record's prune stopped"),
+                }
+            }
+        });
+    }
     if let Some(enrolment) = &enrolment {
         enrolment.set_audit(audit.clone());
     }

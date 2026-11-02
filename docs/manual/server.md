@@ -1265,7 +1265,9 @@ can. A certificate request in that time is answered `Unavailable` with a time to
 Agent asks again. Refusals past ten a second from one address are counted into one line, not
 dropped.
 `[audit] max_file_bytes` (64 MiB) and `keep_files` (16) bound the space it takes on the filesystem
-store.
+store, and `[audit] retain_days` (365, at least 1) how far back it goes on PostgreSQL. Each key
+applies to its own store alone: one set for the other store stops the Server at startup, naming
+the key.
 
 ### The audit record on PostgreSQL
 
@@ -1289,14 +1291,41 @@ the archive /var/lib/opamp-fleet/fleet-data/audit holds, and ends on entry 2047,
 2 chains, 1 open: the record holds
 ```
 
-`audit-verify --config` reads the database with the Server's own credentials and changes nothing.
-It walks every chain in `seq` order, lists each open one with its last entry — the chain of a
-lease that is held, or of one that lapsed and no instance has taken over yet — and names the chain
-and the first entry that fails, exiting non-zero: an entry altered or removed, entries missing
-from the end of a closed chain, or an entry after its close. Without `--archive` it reports the
-predecessor as not checked; an archive the database records that no chain names fails, and so
-does a chain that names a predecessor while the database records no archive. Removing a whole
-chain together with its record is not detected by the database itself.
+`audit-verify --config` reads the database with the Server's own credentials and changes nothing. It
+walks every chain in `seq` order, lists each open one with its last entry — the chain of a lease
+that is held, or of one that lapsed and no instance has taken over yet — and names the chain and the
+first entry that fails, exiting non-zero: an entry altered or removed, entries missing from the end
+of a closed chain, or an entry after its close. Without `--archive` it reports the predecessor as
+not checked; an archive the database records that no chain names fails, and so does a chain that
+names a predecessor while the database records no archive. Removing a whole chain together with its
+record is not detected by the database itself. Nor is a cut made with pruning: whoever can write to
+the database can append one `audit.pruned` with a correct hash to an open chain and delete the head
+of any chain up to the entry it names, young entries included, and the record still holds. Only an
+`audit.pruned` in a chain that itself holds links another or carries the predecessor on. A record
+that holds shows that what is left is linked, not that nothing younger than `retain_days` was
+removed; the signed chain heads, once they land, detect both.
+
+The record goes back `[audit] retain_days` (365 by default, at most 36 500). At its start and once a
+day after, each instance removes from its own chain the entries the database stored more than that
+many days ago, as far as every entry from the chain's start is that old; one instance at a time,
+whichever holds the prune lock, does the same for every closed chain, and another that finds the
+lock held leaves them to the next day. A chain that is still open because no instance took over its
+lapsed lease is pruned once it is closed. Before anything goes, the instance writes an
+`audit.pruned` into its own chain for each chain it prunes, naming it as `pruned_chain` with the
+`seq` and hash of the last entry removed (`last_seq`, `last_hash`); `audit-verify --config` checks
+that what is left of each chain begins right after that entry. A closed chain with no entries left
+keeps its record, listed as `0 entries, closed`, and its closing hash must be one an `audit.pruned`
+names. An `audit.pruned` is pruned in its turn: the prune that removes one records the links still
+needed again, and carries on the archive's predecessor once the first chain's `audit.chain_opened`
+is gone. A prune runs in rounds of at most 100 000 entries, one right after the other until nothing
+old is left, so a large record, such as the first prune after an upgrade, drains in one go. Each
+round deletes from all its chains in one transaction, in batches of a few thousand entries, and
+writes its own `audit.pruned` entries first, so a round that stops part-way deletes nothing and the
+record verifies after every round. A round that does not end within five minutes is rolled back, the
+prune stops with `cannot prune the audit record` in the log, and the next start or day goes on from
+there. A day is 24 hours, whatever the database's time zone. Upgrade all instances together: a
+Server of a release before this one does not know `audit.pruned`, and its `audit-verify --config`
+reports every pruned chain as broken.
 
 A Server that was on PostgreSQL before this release kept its audit record in files under
 `data_dir/audit/`. At its first start, before the database holds any chain or archive, it records

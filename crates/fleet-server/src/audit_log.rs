@@ -1015,15 +1015,18 @@ pub struct Walked {
 
 /// Walks one chain of a lease in `seq` order
 /// (ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance clauses 3 and 5):
-/// it starts with `audit.chain_opened` and 64 zeros as `prev`, every entry names the chain, carries
-/// the `seq` after the one before and the hash of the one before as its `prev`, and nothing follows
-/// an `audit.chain_closed`. Every error names the chain and the first entry that fails.
+/// it starts with `audit.chain_opened` and 64 zeros as `prev`, or, once pruned, after an entry an
+/// `audit.pruned` names as the last it removed; every entry names the chain, carries the `seq`
+/// after the one before and the hash of the one before as its `prev`, and nothing follows an
+/// `audit.chain_closed`. Every error names the chain and the first entry that fails.
 pub struct ChainWalk {
     chain: String,
     entries: u64,
     last: Option<(u64, String, String, String)>,
     closed_at: Option<u64>,
     predecessor: Option<(u64, String)>,
+    /// The `last_seq` and `last_hash` of every retained `audit.pruned` that names this chain.
+    pruned: std::collections::BTreeSet<(u64, String)>,
 }
 
 impl ChainWalk {
@@ -1035,7 +1038,16 @@ impl ChainWalk {
             last: None,
             closed_at: None,
             predecessor: None,
+            pruned: std::collections::BTreeSet::new(),
         }
+    }
+
+    /// The walk, knowing the `last_seq` and `last_hash` each retained `audit.pruned` names for
+    /// this chain: where the chain may begin once its first entries were pruned.
+    #[must_use]
+    pub fn pruned_after(mut self, links: impl IntoIterator<Item = (u64, String)>) -> Self {
+        self.pruned.extend(links);
+        self
     }
 
     /// Takes the entry the store keeps as `seq`, the next in order.
@@ -1064,8 +1076,18 @@ impl ChainWalk {
         let event = text("event").unwrap_or_default().to_string();
         let prev = text("prev").ok_or_else(|| fail("no prev".to_string()))?;
         match &self.last {
+            None if seq != 1 => {
+                if !self.pruned.contains(&(seq - 1, prev.to_string())) {
+                    return Err(fail(format!(
+                        "the chain does not begin with its audit.chain_opened, and no \
+                         audit.pruned names entry {} with hash {prev} as the last it removed \
+                         from it — entries before this one are missing",
+                        seq - 1
+                    )));
+                }
+            }
             None => {
-                if seq != 1 || event != "audit.chain_opened" {
+                if event != "audit.chain_opened" {
                     return Err(fail(
                         "the chain does not begin with its audit.chain_opened — entries before \
                          this one are missing"
@@ -1113,6 +1135,25 @@ impl ChainWalk {
     /// record is not closed.
     pub fn finish(self, closed_hash: Option<&str>) -> Result<Walked, String> {
         let Some((last_seq, last_hash, last_event, last_time)) = self.last else {
+            // Pruned whole: a closed chain keeps its record, and an `audit.pruned` names its
+            // closing entry as the last it removed.
+            if let Some(recorded) = closed_hash {
+                if let Some((seq, _)) = self.pruned.iter().find(|(_, hash)| hash == recorded) {
+                    return Ok(Walked {
+                        entries: 0,
+                        last_seq: *seq,
+                        last_event: String::new(),
+                        last_time: String::new(),
+                        closed: true,
+                        predecessor: None,
+                    });
+                }
+                return Err(format!(
+                    "chain {}: it holds no entry, and no audit.pruned names its closing hash \
+                     {recorded} as the last it removed from it",
+                    self.chain
+                ));
+            }
             return Err(format!("chain {}: it holds no entry", self.chain));
         };
         match (closed_hash, self.closed_at) {
@@ -1904,6 +1945,51 @@ mod tests {
             walk.step(seq, line)?;
         }
         walk.finish(closed_hash)
+    }
+
+    /// A pruned chain holds when its first retained entry follows the entry an `audit.pruned` names
+    /// as the last it removed, and a closed chain pruned whole when one names its closing hash;
+    /// a first retained entry no `audit.pruned` links, and a closed empty chain whose closing hash
+    /// none names, fail naming the chain.
+    /// Verifies: ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance
+    #[test]
+    fn a_pruned_chain_holds_only_where_an_audit_pruned_links_it() {
+        let chain = lease_chain(4, true);
+        let closing = line_hash(chain.last().expect("closing"));
+        let walk = |links: Vec<(u64, String)>, from: usize| {
+            let mut walk = ChainWalk::new("c-1").pruned_after(links);
+            for line in &chain[from..] {
+                let seq = serde_json::from_str::<Value>(line).expect("json")["seq"]
+                    .as_u64()
+                    .expect("seq");
+                walk.step(seq, line)?;
+            }
+            walk.finish(Some(&closing))
+        };
+        let removed = |seq: u64| {
+            (
+                seq,
+                line_hash(&chain[usize::try_from(seq).expect("seq") - 1]),
+            )
+        };
+
+        let held = walk(vec![removed(3)], 3).expect("linked by audit.pruned");
+        assert!(held.closed);
+        assert_eq!(held.entries, 3);
+        let err = walk(vec![removed(2)], 3).expect_err("linked to another entry");
+        assert!(err.contains("chain c-1, entry 4"), "{err}");
+        assert!(err.contains("audit.pruned"), "{err}");
+        let err = walk(Vec::new(), 3).expect_err("linked by nothing");
+        assert!(err.contains("chain c-1, entry 4"), "{err}");
+
+        let all = u64::try_from(chain.len()).expect("len");
+        let empty = walk(vec![removed(all)], chain.len()).expect("pruned whole");
+        assert!(empty.closed);
+        assert_eq!(empty.entries, 0);
+        let err = walk(vec![removed(all - 1)], chain.len())
+            .expect_err("a closing hash no audit.pruned names");
+        assert!(err.contains("chain c-1"), "{err}");
+        assert!(err.contains(&closing), "{err}");
     }
 
     /// A chain of a lease holds when it begins with its `audit.chain_opened` and every entry
