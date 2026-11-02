@@ -47,7 +47,7 @@ impl PgLedgerStore {
 }
 
 /// Moves the list's version on, inside the caller's transaction, and answers the new one
-/// (ADR-draft-the-servers-state-and-its-stores clause 10). A revocation added or widened and a lift
+/// (ADR-0044 clause 10). A revocation added or widened and a lift
 /// move it, the prune's removal of a revocation among them. A register entry the prune removes does
 /// not: it only takes expired certificates out of what the list resolves, and a Gateway that keeps
 /// refusing an expired certificate loses nothing. A register entry another instance adds is covered
@@ -304,7 +304,7 @@ impl LedgerStore for PgLedgerStore {
     /// Host's array lists, as a release before the bindings' table bound it, is answered as that
     /// Host's too, and a new binding goes into the Host's array as well; a Gateway's array binds
     /// nothing. No such release runs on this schema, whose oldest Server is 0.8.0: the arrays are
-    /// kept for the removal rule of ADR-draft-the-servers-state-and-its-stores clause 22.
+    /// kept for the removal rule of ADR-0044 clause 22.
     fn bind_seen(&self, instance_uid: &str, host: &str, row: &Host) -> Result<Bound, String> {
         let (instance_uid, host, row) = (instance_uid.to_string(), host.to_string(), row.clone());
         self.database.run(move |pool| async move {
@@ -521,7 +521,7 @@ impl LedgerStore for PgLedgerStore {
     /// Writes each Host that changed since the last commit, and removes each one that is gone with
     /// its bindings. The `instance_uids` a Host's row keeps are those this instance holds, the
     /// array a release before the bindings' table read, kept for the removal rule of
-    /// ADR-draft-the-servers-state-and-its-stores clause 22; the bindings are read from that table.
+    /// ADR-0044 clause 22; the bindings are read from that table.
     fn save_hosts(&self, hosts: &BTreeMap<String, Host>) -> Result<(), String> {
         let mut written = self.written_hosts.lock().expect("hosts lock");
         let changed: Vec<(String, Host)> = hosts
@@ -562,7 +562,7 @@ impl LedgerStore for PgLedgerStore {
 /// Removes the binding of `instance_uid` inside the caller's transaction: the Host it was bound to,
 /// `None` when it was bound to none. The Hosts' arrays, which a release before the bindings' table
 /// bound by and which are kept for the removal rule of
-/// ADR-draft-the-servers-state-and-its-stores clause 22, lose it too, so neither finds it bound
+/// ADR-0044 clause 22, lose it too, so neither finds it bound
 /// once it is released.
 async fn unbind_in(
     client: &impl GenericClient,
@@ -636,7 +636,7 @@ async fn write_seen(client: &impl GenericClient, host: &str, entry: &Host) -> Re
 
 /// Lists `instance_uid` in `host`'s array inside the caller's transaction, as a release before the
 /// bindings' table bound by it, kept for the removal rule of
-/// ADR-draft-the-servers-state-and-its-stores clause 22; a Host with no row yet takes it with the
+/// ADR-0044 clause 22; a Host with no row yet takes it with the
 /// row its act writes.
 async fn append_to_array(
     client: &impl GenericClient,
@@ -1251,14 +1251,14 @@ mod tests {
         assert_eq!(ids, expected, "nothing refused was written");
     }
 
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// Verifies: ADR-0041
     #[test]
     fn the_register_write_decides_from_the_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
         register_contract(&|| Box::new(FsLedgerStore::open(dir.path()).expect("open")));
     }
 
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// Verifies: ADR-0041
     #[test]
     fn the_register_write_decides_from_postgres() {
         let Some(test) = TestDatabase::named() else {
@@ -1271,7 +1271,7 @@ mod tests {
     /// Two instances registering at once count the register's size together: in every round two
     /// writers race for the one place left, behind a barrier, and exactly one is written while the
     /// other finds the register full.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// Verifies: ADR-0041
     #[test]
     fn two_writers_at_the_registers_bound_write_one_entry_between_them() {
         let Some(test) = TestDatabase::named() else {
@@ -1319,7 +1319,7 @@ mod tests {
     /// An instance whose view of the list is stale cannot register the renewal of a certificate
     /// another instance revoked: B never hears of the revocation through A, and the register write
     /// refuses the renewal from what the database holds.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// Verifies: ADR-0041
     #[test]
     fn a_stale_instance_cannot_register_the_renewal_of_a_revoked_certificate() {
         use crate::revocation::{Authority, Revocations, RENEWS_REVOKED};
@@ -1370,7 +1370,7 @@ mod tests {
     /// Two instances adding at once count the bound together: in every round two adders race for
     /// the one place left, behind a barrier, and exactly one is added while the other finds the
     /// list full, so the list never grows past its bound and no two entries share a place.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// Verifies: ADR-0041
     #[test]
     fn two_adders_at_the_bound_add_one_entry_between_them() {
         let Some(test) = TestDatabase::named() else {
@@ -1436,7 +1436,7 @@ mod tests {
     /// The bindings move out of the Hosts' arrays of a database a release before them wrote: each
     /// `instance_uid` an array holds is bound to its Host. An `instance_uid` two Hosts' arrays hold
     /// fails the migration, naming it, and changes nothing.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// Verifies: ADR-0041
     #[test]
     fn the_bindings_move_out_of_the_hosts_arrays() {
         use crate::postgres::schema::{MIGRATIONS, SCHEMA_TABLE};
@@ -1496,7 +1496,7 @@ mod tests {
     /// Two instances binding one `instance_uid` at once, each to a Host of its own, bind it once:
     /// in every round two binders race behind a barrier, and exactly one binds while the other is
     /// answered with the Host that holds it.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// Verifies: ADR-0041
     #[test]
     fn two_binders_of_one_instance_uid_bind_it_once() {
         let Some(test) = TestDatabase::named() else {
@@ -1538,9 +1538,9 @@ mod tests {
     /// Two instances binding two `instance_uid`s to one Host at once both bind theirs: the row
     /// each holds while it binds is a hold that waits for the other, not a share both take and
     /// then write, which the database would break as a deadlock
-    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// (ADR-0041
     /// clause 19).
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// Verifies: ADR-0041
     #[test]
     fn two_binders_of_one_host_bind_both_without_a_deadlock() {
         let Some(test) = TestDatabase::named() else {
@@ -1627,9 +1627,9 @@ mod tests {
 
     /// A binding is made with its Host's row, in one write, so no binding stands without the Host
     /// it binds to; one another Host holds writes nothing, the row it would have made included
-    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// (ADR-0041
     /// clause 19).
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// Verifies: ADR-0041
     #[test]
     fn a_binding_is_made_with_its_hosts_row() {
         let Some(test) = TestDatabase::named() else {
@@ -1757,7 +1757,7 @@ mod tests {
     /// An instance whose view of the Hosts is stale cannot bind an `instance_uid` another
     /// instance bound to another Host: B never hears of A's binding, and its report is refused
     /// naming the Host that holds the Agent, by which B decides from then on.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// Verifies: ADR-0041
     #[test]
     fn a_stale_instance_cannot_bind_an_agent_another_host_holds() {
         use crate::revocation::{bound_elsewhere, Revocations};
@@ -1816,8 +1816,8 @@ mod tests {
     /// their transactions, and with nothing else; an instance holds the version its own write left
     /// only when no other instance wrote between, and none until it reads the list again
     /// otherwise, so the version it serves never names a list it does not hold
-    /// (ADR-draft-the-servers-state-and-its-stores clause 10).
-    /// Verifies: ADR-draft-the-servers-state-and-its-stores
+    /// (ADR-0044 clause 10).
+    /// Verifies: ADR-0044
     #[test]
     fn the_list_version_moves_with_each_revocation_and_lift_and_names_only_the_list_held() {
         let Some(test) = TestDatabase::named() else {
@@ -1896,8 +1896,8 @@ mod tests {
     /// but the list A resolves lacks the renewal. A's `ETag` before it reads the ledger again and
     /// after differ, so a Gateway that fetched the first is answered in full by either instance
     /// once both hold the renewal
-    /// (ADR-draft-admission-by-client-certificate-and-revocation clauses 28 and 34).
-    /// Verifies: ADR-draft-admission-by-client-certificate-and-revocation, ADR-draft-the-servers-state-and-its-stores
+    /// (ADR-0038 clauses 28 and 34).
+    /// Verifies: ADR-0038, ADR-0044
     #[test]
     fn one_list_version_never_names_two_gateway_bodies() {
         let Some(test) = TestDatabase::named() else {
@@ -2043,9 +2043,9 @@ mod tests {
 
     /// What one instance binds, releases and moves reaches every other that follows the
     /// notifications, without a restart: B admits by A's release, A's re-key and A's binding once
-    /// it hears of them (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// it hears of them (ADR-0041
     /// clause 19).
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// Verifies: ADR-0041
     #[test]
     fn a_binding_another_instance_changes_reaches_an_instance_that_follows() {
         let Some(test) = TestDatabase::named() else {
@@ -2123,7 +2123,7 @@ mod tests {
     /// An `instance_uid` another Host's array lists, and no binding row holds, is answered as that
     /// Host's, as the release before the bindings' table, which bound by the arrays alone, left
     /// it.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// Verifies: ADR-0041
     #[test]
     fn an_instance_uid_only_an_array_lists_is_that_hosts() {
         let Some(test) = TestDatabase::named() else {
@@ -2195,8 +2195,8 @@ mod tests {
     /// A register entry another instance writes reaches an instance that follows, without a
     /// restart, and a revocation of its chain's root revokes it there: B learns of A's renewal from
     /// its notification alone, and then refuses it once the root is revoked
-    /// (ADR-draft-admission-by-client-certificate-and-revocation clause 28).
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// (ADR-0038 clause 28).
+    /// Verifies: ADR-0041
     #[test]
     fn a_renewal_another_instance_registers_is_revoked_with_its_root_on_an_instance_that_follows() {
         use crate::revocation::Revoked;
@@ -2252,7 +2252,7 @@ mod tests {
     /// An approval's fields survive a first report another instance makes from a stale view: B
     /// never heard of A's approval, makes the Host at its first report, and what is stored is
     /// still the approved Host, its valid until moved forward.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// Verifies: ADR-0041
     #[test]
     fn an_approval_survives_a_first_report_on_an_instance_that_never_heard_of_it() {
         let Some(test) = TestDatabase::named() else {

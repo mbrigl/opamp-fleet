@@ -6,7 +6,7 @@
 //! assignments that pin them together (ADR-0029 clause 2). A report, a label change, a restart
 //! request and a rollout each write their own part of a record, so on a store other Servers share
 //! the write of one never undoes another's
-//! (ADR-draft-the-fleet-record-of-agents-and-hosts clause 2). The integrity questions a deletion
+//! (ADR-0043 clause 2). The integrity questions a deletion
 //! asks — is this pinned, which revisions are referenced — are queries of the port too, so an
 //! adapter over a database answers them from its rows rather than the caller from a scan. The
 //! port speaks the *typed* record: what bytes or rows a backend turns it into is the adapter's
@@ -146,7 +146,7 @@ impl PersistedAgent {
 }
 
 /// Where one Agent is connected, as the instance that carries it writes it
-/// (ADR-draft-the-fleet-record-of-agents-and-hosts clauses 3 and 4): whether a connection carries
+/// (ADR-0043 clauses 3 and 4): whether a connection carries
 /// it, and when it was last heard from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Presence {
@@ -155,7 +155,7 @@ pub struct Presence {
 }
 
 /// One record as [`AgentStore::query`] reads it: the record, and whether its stored presence says
-/// a connection carries the Agent (ADR-draft-the-fleet-record-of-agents-and-hosts clauses 3 and 6).
+/// a connection carries the Agent (ADR-0043 clauses 3 and 6).
 #[derive(Clone, Debug, PartialEq)]
 pub struct StoredAgent {
     pub record: PersistedAgent,
@@ -165,7 +165,7 @@ pub struct StoredAgent {
 }
 
 /// What [`AgentStore::take`] found of the holder it replaced
-/// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+/// (ADR-0041
 /// clause 8).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Taken {
@@ -224,7 +224,7 @@ pub trait AgentStore: Send + Sync {
 
     /// The record of `uid` as stored now, `None` when none is: what an instance reads again when
     /// another instance announced a change to it
-    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// (ADR-0041
     /// clause 9). The default reads every record through [`load`](Self::load), as a store that
     /// is its only writer may; a shared store, and a wrapper of one, overrides it, or each read
     /// reads the whole fleet.
@@ -256,7 +256,7 @@ pub trait AgentStore: Send + Sync {
 
     /// Every stored record with its presence, or those of `only` where it names some, in the order
     /// of their `instance_uid`: what the Operator plane reads where the fleet is not in memory
-    /// (ADR-draft-the-servers-state-and-its-stores clause 3). The default reads every record
+    /// (ADR-0044 clause 3). The default reads every record
     /// through [`load`](Self::load), each disconnected, as a store that keeps no presence may; a
     /// shared store, and a wrapper of one, overrides it.
     ///
@@ -286,7 +286,7 @@ pub trait AgentStore: Send + Sync {
 
     /// Whether other Servers write this store too, so the fleet reads an Agent it does not hold
     /// from it rather than from what it loaded, and decides an act on an Agent from what it stores
-    /// (ADR-draft-the-servers-state-and-its-stores clause 3). A store that is its one Server's alone
+    /// (ADR-0044 clause 3). A store that is its one Server's alone
     /// says no.
     fn is_shared(&self) -> bool {
         false
@@ -295,7 +295,7 @@ pub trait AgentStore: Send + Sync {
     /// Creates one record, or replaces the part of it a report decides: what the Agent reported,
     /// the transport, `last_seen_ms` and the Host it arrived over. The labels, the assignment and
     /// `restart_pending` of a record that exists stay as they are stored, since the acts that
-    /// decide them write them (ADR-draft-the-fleet-record-of-agents-and-hosts clause 2). A store
+    /// decide them write them (ADR-0043 clause 2). A store
     /// whose one Server is its only writer may write the whole record, which that Server holds.
     fn put(&self, uid: &InstanceUid, record: &PersistedAgent) -> Result<(), String>;
 
@@ -317,7 +317,7 @@ pub trait AgentStore: Send + Sync {
     /// the stored holder is `holder`, or is none and the stored count of takes is still `take`,
     /// the count this Server was last answered for the Agent, so an Agent that moved to another
     /// Server keeps what that Server wrote of it, also once it disconnected there, however the
-    /// Servers' clocks differ (ADR-draft-the-fleet-record-of-agents-and-hosts clause 2). `holder`
+    /// Servers' clocks differ (ADR-0043 clause 2). `holder`
     /// is the instance id of this Server's lease, `None` without one, and `take` is `None` where
     /// this Server was answered none. Answers whether it wrote the record. A store whose one
     /// Server is its only writer writes as `write_report` does.
@@ -381,7 +381,7 @@ pub trait AgentStore: Send + Sync {
 
     /// Writes the presence of the Agents `holder` carries, one batch, in the order of their
     /// `instance_uid` whatever order they are given in, so two batches over the same Agents never
-    /// deadlock (ADR-draft-the-fleet-record-of-agents-and-hosts clause 4). Each Agent comes with
+    /// deadlock (ADR-0043 clause 4). Each Agent comes with
     /// the count of takes `holder` was last answered for it, `None` where it was answered none. A
     /// connected Agent names `holder` as the instance that holds its connection only where the
     /// stored presence names `holder`, or none, or an instance without a live lease: a batch read
@@ -411,7 +411,7 @@ pub trait AgentStore: Send + Sync {
     /// the holder it replaced is another Server, live lease or not, so that one stops carrying it,
     /// and counts each change of holder, so the take that makes it change more than ten times
     /// within a minute says so
-    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// (ADR-0041
     /// clause 8). Answers `None` when there is no record. A store whose one Server holds every
     /// presence in memory keeps none, and writes nothing.
     ///
@@ -430,7 +430,7 @@ pub trait AgentStore: Send + Sync {
     /// The holder each stored presence of `uids` names, by the id of its lease, `None` where it
     /// names none; a record not stored is left out. What an instance that heard of a take reads
     /// to decide whether it still carries the Agent
-    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// (ADR-0041
     /// clause 8).
     ///
     /// # Errors
@@ -445,7 +445,7 @@ pub trait AgentStore: Send + Sync {
 
     /// Forgets one record of a shared store when its stored presence lets it go: when no instance
     /// with a live lease holds its connection, or it was last heard from before `silent_before_ms`
-    /// (ADR-draft-the-fleet-record-of-agents-and-hosts clause 11). The presence is read and the
+    /// (ADR-0043 clause 11). The presence is read and the
     /// record removed in one step, so no report written meanwhile is forgotten unseen. Answers
     /// `None` when there is no record, `Some(false)` when it is still reporting and is kept.
     ///

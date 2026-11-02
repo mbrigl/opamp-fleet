@@ -38,7 +38,7 @@ pub struct ServerConfig {
     /// (ADR-0029): created owner-only when missing, and holding nothing but its fixed layout.
     /// `fleet-data` where it is not named, read through [`data_dir`](Self::data_dir); refused with
     /// PostgreSQL and S3, which keep nothing on the disk
-    /// (ADR-draft-the-servers-state-and-its-stores clause 1).
+    /// (ADR-0044 clause 1).
     pub data_dir: Option<PathBuf>,
     /// Refused at startup: the state lives under `data_dir` (ADR-0029), and `server migrate` moves
     /// an older installation there. Read only so that a leftover key can be named.
@@ -111,13 +111,13 @@ pub struct ServerConfig {
     #[serde(default = "default_agent_max_connections")]
     pub max_connections: usize,
     /// The new Agent-plane connections taken a second; one past it is answered `503` with a
-    /// spread `Retry-After` (ADR-draft-tls-1-3-two-planes-and-bounded-input clause 4). `0` is
+    /// spread `Retry-After` (ADR-0045 clause 4). `0` is
     /// refused at load.
     #[serde(default = "default_max_new_connections_per_sec")]
     pub max_new_connections_per_sec: u32,
     /// How long an orderly shutdown spreads the closing of the WebSocket sessions over, in seconds,
     /// from 0 to 300; 0 closes them all at once
-    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// (ADR-0041
     /// clause 3).
     #[serde(default = "default_drain_secs")]
     pub drain_secs: u64,
@@ -199,7 +199,7 @@ const AGENTS_PER_HOST: u64 = 256;
 /// The heartbeat the Baseline uses when none is offered.
 const BASELINE_HEARTBEAT_SECS: u64 = 30;
 
-/// The `[audit]` section (ADR-draft-the-servers-state-and-its-stores clause 12): the bound of the
+/// The `[audit]` section (ADR-0044 clause 12): the bound of the
 /// record on the store it is kept in. Each key applies to one store; [`check`](Self::check) refuses
 /// one set for the other.
 #[derive(Debug, Default, Deserialize)]
@@ -499,14 +499,14 @@ pub struct DatabaseConfig {
     /// The database, when `store = "postgres"`; refused beside `store = "fs"`.
     pub postgres: Option<PostgresConfig>,
     /// How often an instance renews its lease, in seconds; PostgreSQL only
-    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// (ADR-0041
     /// clause 3).
     pub lease_renew_secs: Option<u64>,
     /// How long after its last renewal a lease lapses, in seconds, at least three renewals;
     /// PostgreSQL only.
     pub lease_secs: Option<u64>,
     /// How often an instance writes the presence of the Agents it carries, in seconds, from 10 to
-    /// 60; PostgreSQL only (ADR-draft-the-fleet-record-of-agents-and-hosts clause 4).
+    /// 60; PostgreSQL only (ADR-0043 clause 4).
     pub presence_interval_secs: Option<u64>,
 }
 
@@ -533,7 +533,7 @@ const DEFAULT_PRESENCE_INTERVAL_SECS: u64 = 30;
 const PRESENCE_INTERVAL_SECS: std::ops::RangeInclusive<u64> = 10..=60;
 
 /// The lease every instance on PostgreSQL holds while it serves
-/// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+/// (ADR-0041
 /// clause 3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LeaseTimes {
@@ -1226,7 +1226,7 @@ fn listeners_collide(a: SocketAddr, b: SocketAddr) -> bool {
 impl ServerConfig {
     /// Where the Server keeps what it keeps on its own disk: `data_dir`, `fleet-data` where it is
     /// not named, and `None` with PostgreSQL and S3, which keep nothing there
-    /// (ADR-draft-the-servers-state-and-its-stores clause 1).
+    /// (ADR-0044 clause 1).
     #[must_use]
     pub fn data_dir(&self) -> Option<&Path> {
         if self.keeps_nothing_on_disk() {
@@ -3060,7 +3060,7 @@ mod tests {
 
     /// The rate of new Agent-plane connections defaults to 200 a second and the drain to 20
     /// seconds; a rate of zero and a drain past 300 seconds fail startup naming the key.
-    /// Verifies: ADR-draft-tls-1-3-two-planes-and-bounded-input, ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// Verifies: ADR-0045, ADR-0041
     #[test]
     fn the_new_connection_rate_and_the_drain_are_bounded() {
         let load = |keys: &str| {
@@ -3094,7 +3094,7 @@ mod tests {
 
     /// An instance must be alone on its database while it keeps its blobs as files or a CA key in a
     /// file, and names the key; with the blobs in S3 and no CA key on the Server it shares it.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// Verifies: ADR-0041
     #[test]
     fn an_instance_with_files_of_its_own_must_be_alone() {
         let s3 = "[blobs]\nstore = \"s3\"\n[blobs.s3]\nendpoint = \"https://s3.example\"\n\
@@ -3137,7 +3137,7 @@ mod tests {
     /// each one set fails startup naming it; with PostgreSQL they default to 10, 30 and 30 seconds,
     /// and a lease shorter than three renewals, a renewal of zero, or a presence interval outside 10
     /// to 60 seconds fails naming the key.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it, ADR-draft-the-fleet-record-of-agents-and-hosts
+    /// Verifies: ADR-0041, ADR-0043
     #[test]
     fn the_lease_keys_apply_to_postgresql_alone() {
         let load = |database: &str| {
@@ -3220,8 +3220,8 @@ mod tests {
 
     /// The `[audit]` keys apply to one store each: `max_file_bytes` and `keep_files` to the files,
     /// `retain_days` (default 365, at least 1) to PostgreSQL. A key set for the other store fails
-    /// startup naming it (ADR-draft-the-servers-state-and-its-stores clause 12).
-    /// Verifies: ADR-draft-the-servers-state-and-its-stores, ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance
+    /// startup naming it (ADR-0044 clause 12).
+    /// Verifies: ADR-0044, ADR-0042
     #[test]
     fn each_audit_key_applies_to_its_own_store_alone() {
         let load = |text: &str| {
@@ -3282,8 +3282,8 @@ mod tests {
     /// With PostgreSQL and S3 the Server keeps nothing on its disk: it has no data directory, and a
     /// `data_dir` named in the file or in the environment fails startup naming the key. With either
     /// store on the disk, `data_dir` is `fleet-data` where it is not named
-    /// (ADR-draft-the-servers-state-and-its-stores clause 1).
-    /// Verifies: ADR-draft-the-servers-state-and-its-stores
+    /// (ADR-0044 clause 1).
+    /// Verifies: ADR-0044
     #[test]
     fn with_postgresql_and_s3_a_named_data_dir_fails_startup_naming_it() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3328,11 +3328,11 @@ mod tests {
     }
 
     /// A Server on files given a data directory it cannot create fails startup naming `data_dir`
-    /// and the directory (ADR-draft-releases-attestations-and-the-server-image clause 16). The
+    /// and the directory (ADR-0040 clause 16). The
     /// image's case is the default `fleet-data` under `/`, which the account cannot write; the test
     /// names the directory under an unwritable one instead, as the working directory is the whole
     /// test process's.
-    /// Verifies: ADR-draft-releases-attestations-and-the-server-image
+    /// Verifies: ADR-0040
     #[cfg(unix)]
     #[test]
     fn a_data_dir_the_account_cannot_write_fails_startup_naming_it() {

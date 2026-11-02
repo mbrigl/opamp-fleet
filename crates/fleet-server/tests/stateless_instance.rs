@@ -1,5 +1,5 @@
 //! A Server on PostgreSQL and S3 keeps nothing on its own disk
-//! (ADR-draft-the-servers-state-and-its-stores clause 1): started from a directory it cannot write,
+//! (ADR-0044 clause 1): started from a directory it cannot write,
 //! with no data directory, it serves, and writes no file. In the bucket it keeps the staging
 //! objects of every live lease and deletes those of a lease that is no longer live, at startup and
 //! whenever it takes over a lapsed lease (clause 16), and an upload it takes is staged under its
@@ -325,7 +325,7 @@ fn instance_id() -> String {
     )
 }
 
-// Verifies: ADR-draft-the-servers-state-and-its-stores, ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+// Verifies: ADR-0044, ADR-0041
 #[test]
 fn a_server_on_postgresql_and_s3_serves_from_a_directory_it_cannot_write() {
     opamp::tls::install_ring_provider();
@@ -491,10 +491,10 @@ fn a_server_on_postgresql_and_s3_serves_from_a_directory_it_cannot_write() {
 /// A bucket that fails at startup, unreachable or holding a key outside the store's layout, stops
 /// the Server before it takes its lease: no lease row and no audit chain is left for another
 /// instance to count as live or to close as lapsed
-/// (ADR-draft-the-servers-state-and-its-stores clause 16,
-/// ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+/// (ADR-0044 clause 16,
+/// ADR-0041
 /// clause 2).
-// Verifies: ADR-draft-the-servers-state-and-its-stores, ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+// Verifies: ADR-0044, ADR-0041
 #[test]
 fn a_bucket_that_fails_startup_leaves_no_lease_behind() {
     opamp::tls::install_ring_provider();

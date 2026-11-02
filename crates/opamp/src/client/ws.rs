@@ -95,7 +95,7 @@ pub async fn run<S: Session, X: StopSignal>(
                     "admission failed: the server refused this client (HTTP 401)"
                 );
             }
-            // Throttled (ADR-draft-tls-1-3-two-planes-and-bounded-input clause 4): the Server asked
+            // Throttled (ADR-0045 clause 4): the Server asked
             // to be given this long, and is given at least that.
             Err(Connect::Refused(WsError::Http(response)))
                 if response.status() == StatusCode::SERVICE_UNAVAILABLE
@@ -369,7 +369,7 @@ mod tests {
     /// A refused upgrade waits its `Retry-After` or the next exponential step, whichever is
     /// longer, and one without the header waits the step; a connection that stood and was lost
     /// draws its first reconnect over `[0, 30 s)`.
-    /// Verifies: ADR-draft-tls-1-3-two-planes-and-bounded-input
+    /// Verifies: ADR-0045
     #[test]
     fn a_refused_upgrade_waits_its_retry_after_or_the_next_step() {
         let mut backoff = Backoff::new();

@@ -1,5 +1,5 @@
 //! The notifications the instances on one database share
-//! (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+//! (ADR-0041
 //! clause 9): one channel per schema, a `NOTIFY` that names a kind of change, the identifier it
 //! concerns and the instance that sent it, and nothing else, sent in the transaction that commits
 //! the change, and a connection of each instance's own that listens. A channel is the database's,
@@ -70,7 +70,7 @@ pub const FORGOTTEN: &str = "forgotten";
 
 /// The kind an Agent taken from another instance with a live lease is announced as, by its
 /// `instance_uid`: the instance it was taken from reads its holder again and stops carrying it
-/// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+/// (ADR-0041
 /// clause 8).
 pub const TAKEN: &str = "taken";
 
@@ -249,7 +249,7 @@ mod tests {
     /// committed, with the identifier it names, and not when it is rolled back, nor by the instance
     /// that announced it, nor when it is announced in another schema of the same database; each
     /// listener hears that it listens first.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// Verifies: ADR-0041
     #[test]
     fn a_committed_change_is_heard_by_every_other_instance() {
         let Some(test) = TestDatabase::named() else {
@@ -302,7 +302,7 @@ mod tests {
 
     /// A payload names its sender; one this instance sent is not handed on, and one that does not
     /// read is a notice of a kind nobody knows.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// Verifies: ADR-0041
     #[test]
     fn a_notice_from_this_instance_is_passed_over_and_an_unreadable_one_is_unknown() {
         let sent = r#"{"kind":"floor","id":"otelcol","from":"a"}"#;

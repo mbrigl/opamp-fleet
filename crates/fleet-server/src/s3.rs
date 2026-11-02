@@ -83,7 +83,7 @@ const LIMITS: Limits = Limits {
 };
 
 /// Whose uploads a store's staging keys are
-/// (ADR-draft-the-servers-state-and-its-stores clause 16): `<prefix>staging/<lease>/<random>`.
+/// (ADR-0044 clause 16): `<prefix>staging/<lease>/<random>`.
 #[derive(Clone)]
 pub enum Uploader {
     /// The one Server on the filesystem record store, which holds no lease: `<lease>` is `fs`.
@@ -198,7 +198,7 @@ impl S3BlobStore {
     }
 
     /// Deletes the staging objects of every lease that is not live, and never those of a live one
-    /// (ADR-draft-the-servers-state-and-its-stores clause 16): what a starting instance does, and
+    /// (ADR-0044 clause 16): what a starting instance does, and
     /// one that takes over a lapsed lease. Answers how many it deleted.
     ///
     /// The keys are listed before `live` is asked. A key is written only under a lease its writer
@@ -365,12 +365,12 @@ impl S3BlobStore {
 }
 
 /// How the blob store's lock is held alone
-/// (ADR-draft-the-servers-state-and-its-stores clause 14).
+/// (ADR-0044 clause 14).
 pub type HoldBlobs = Arc<dyn Fn() -> Result<crate::blobs::BlobHold, String> + Send + Sync>;
 
 /// The cleanup of the staging objects of leases that are no longer live, kept for an instance to
 /// run again whenever it takes over a lapsed lease
-/// (ADR-draft-the-servers-state-and-its-stores clause 16).
+/// (ADR-0044 clause 16).
 #[derive(Clone)]
 pub struct StagingCleanup {
     store: S3BlobStore,
@@ -925,7 +925,7 @@ pub(crate) mod tests {
     /// A failed upload leaves nothing under `blobs/`; the listing passes a staging object over, and
     /// with the filesystem record store, which holds no lease, the cleanup at startup deletes every
     /// one; any other key under the prefix fails startup, naming the key (ADR-0029 clause 16).
-    /// Verifies: ADR-0029, ADR-draft-the-servers-state-and-its-stores
+    /// Verifies: ADR-0029, ADR-0044
     #[test]
     fn leftover_staging_objects_go_and_unknown_keys_fail_startup_on_s3() {
         let Some(config) = named_store() else { return };
@@ -970,8 +970,8 @@ pub(crate) mod tests {
     /// An upload in progress on instance A, staged under A's lease, survives B's start, whose
     /// cleanup deletes the staging objects of a lease that lapsed and keeps those of every live
     /// one; A's upload then completes. An instance that holds no lease takes no upload
-    /// (ADR-draft-the-servers-state-and-its-stores clause 16).
-    /// Verifies: ADR-draft-the-servers-state-and-its-stores
+    /// (ADR-0044 clause 16).
+    /// Verifies: ADR-0044
     #[test]
     fn the_cleanup_leaves_the_staging_objects_of_a_live_lease_and_deletes_a_lapsed_ones() {
         let Some(config) = named_store() else { return };
@@ -1040,8 +1040,8 @@ pub(crate) mod tests {
     /// on any instance, here the one after an entry is deleted, with the blob no entry names any
     /// more. Two instances that clean up at once delete such an object once: the second waits for
     /// the first's hold on the blob store's lock and then finds nothing
-    /// (ADR-draft-the-servers-state-and-its-stores clauses 14 and 16).
-    /// Verifies: ADR-draft-the-servers-state-and-its-stores, ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// (ADR-0044 clauses 14 and 16).
+    /// Verifies: ADR-0044, ADR-0041
     #[test]
     fn the_next_sweep_on_any_instance_deletes_a_released_leases_staging_object_once() {
         use crate::packages::{PackageId, PackageStore, Platform};
@@ -1145,8 +1145,8 @@ pub(crate) mod tests {
     /// An instance on PostgreSQL opens the store before it takes its lease: until the lease is
     /// named it takes no upload, and never stages one under `fs`, which every instance's cleanup
     /// deletes on sight; once named, every clone of the store stages under it
-    /// (ADR-draft-the-servers-state-and-its-stores clause 16).
-    /// Verifies: ADR-draft-the-servers-state-and-its-stores
+    /// (ADR-0044 clause 16).
+    /// Verifies: ADR-0044
     #[test]
     fn a_store_opened_before_its_lease_takes_no_upload_until_the_lease_is_named() {
         let Some(config) = named_store() else { return };
@@ -1188,8 +1188,8 @@ pub(crate) mod tests {
     /// in between survives whether or not the answer names its lease: one under a lease the
     /// answer names live, and one under a lease taken after the question, which it cannot name.
     /// Asked first, the cleanup would list that second key and delete it
-    /// (ADR-draft-the-servers-state-and-its-stores clause 16).
-    /// Verifies: ADR-draft-the-servers-state-and-its-stores
+    /// (ADR-0044 clause 16).
+    /// Verifies: ADR-0044
     #[test]
     fn the_cleanup_lists_the_staging_keys_before_it_asks_which_leases_are_live() {
         let Some(config) = named_store() else { return };

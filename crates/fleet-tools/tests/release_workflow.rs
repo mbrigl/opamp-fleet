@@ -578,7 +578,7 @@ fn all<'i>(instructions: &'i [(String, String)], keyword: &str) -> Vec<&'i str> 
 
 const BASE: &str = "gcr.io/distroless/cc-debian13:nonroot";
 
-// Verifies: ADR-draft-releases-attestations-and-the-server-image
+// Verifies: ADR-0040
 #[test]
 fn the_containerfile_copies_the_release_binary_onto_a_pinned_distroless_base_and_runs_nothing() {
     let text = containerfile();
@@ -639,7 +639,7 @@ fn the_containerfile_copies_the_release_binary_onto_a_pinned_distroless_base_and
 
     // It sets nothing but the two listen addresses: no data directory, which a Server on
     // PostgreSQL and S3 refuses, and no secret
-    // (ADR-draft-releases-attestations-and-the-server-image clause 16).
+    // (ADR-0040 clause 16).
     let env: Vec<&str> = all(&instructions, "ENV")
         .iter()
         .flat_map(|args| args.split_whitespace())

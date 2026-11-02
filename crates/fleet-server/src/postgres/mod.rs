@@ -1,7 +1,7 @@
 //! The Server's records in one PostgreSQL database (ADR-0029): the connection every PostgreSQL
 //! adapter shares, the exclusive lock of an instance that must be alone on it, the leases every
 //! instance holds, the notifications they share, and the schema the Server applies itself
-//! (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it).
+//! (ADR-0041).
 //!
 //! The connection is TLS 1.3 on the *ring*-only client of `opamp::tls`, the database's
 //! certificate verified against the public roots or the root `ca_file` names and its host name
@@ -87,7 +87,7 @@ const APPLICATION_NAME: &str = "opamp-fleet-server";
 /// Whether an instance must be the only one on its database, and why.
 ///
 /// An instance whose blobs or CA keys are files must be alone
-/// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+/// (ADR-0041
 /// clause 2): what it keeps on its own disk no other instance can reach.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Exclusive {
@@ -418,7 +418,7 @@ impl Database {
     /// PostgreSQL wrote under `data_dir/audit/` before its record moved into the database, as the
     /// archive: the take that opens the first chain the database holds records it, unless an
     /// archive is recorded already, and the chain names it as its predecessor
-    /// (ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance clause 6).
+    /// (ADR-0042 clause 6).
     pub fn offer_archive(&self, end: Option<(u64, String)>) {
         *self.archive.lock().expect("archive lock") = end;
     }
@@ -672,13 +672,13 @@ pub(crate) const EXCLUSIVE_LOCK: &str =
     "hashtextextended('opamp-fleet-server:' || coalesce(current_schema(), ''), 0)";
 
 /// Why an instance that shares the database neither migrates nor starts while another Server
-/// holds it alone (ADR-draft-the-servers-state-and-its-stores clause 22).
+/// holds it alone (ADR-0044 clause 22).
 const HELD_ALONE_BEFORE_MIGRATING: &str = "another Server holds the database alone — a Server of \
      0.7.1 or earlier, or an instance that keeps its blobs as files ([blobs] store = \"fs\") or a \
      CA key in a file ([client_ca] key_file, [enrolment] bootstrap_ca_key_file); stop it before \
      this instance starts, which changed nothing in the database";
 
-/// The lock of the blob store (ADR-draft-the-servers-state-and-its-stores clause 14), by the key
+/// The lock of the blob store (ADR-0044 clause 14), by the key
 /// its schema gives it: a sweep or a staging cleanup holds it alone, an upload shared in the
 /// transaction that checks its blob and writes its entry, and `server blobs-to-s3` alone for its
 /// run.
@@ -1716,7 +1716,7 @@ mod tests {
     /// A second instance that must be alone, against a database one already holds alone, fails
     /// startup naming the database and the key that makes it alone; once the first is gone, the
     /// lock is free again.
-    /// Verifies: ADR-0029, ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// Verifies: ADR-0029, ADR-0041
     #[test]
     fn a_second_instance_that_must_be_alone_fails_startup_naming_it() {
         let Some(test) = TestDatabase::named() else {
@@ -1831,9 +1831,9 @@ mod tests {
     /// A Server of 0.7.1 takes the schema of migrations 1 and 2, which it knows, and refuses the
     /// schema once any migration of 0.8.0 is applied, naming 0.8.0 and changing nothing: it holds
     /// no lease, so it must not serve beside the instances of 0.8.0
-    /// (ADR-draft-the-servers-state-and-its-stores clause 22). It is asked through the check of
+    /// (ADR-0044 clause 22). It is asked through the check of
     /// [`schema::apply`], which 0.7.1 runs as it stands here.
-    /// Verifies: ADR-draft-the-servers-state-and-its-stores
+    /// Verifies: ADR-0044
     #[test]
     fn a_server_of_0_7_1_refuses_the_schema_once_a_migration_of_0_8_0_is_applied() {
         let Some(test) = TestDatabase::named() else {
@@ -1877,9 +1877,9 @@ mod tests {
     /// An instance that shares the database neither migrates nor starts while another Server holds
     /// the database alone, as a running Server of 0.7.1 does for its whole run under the same key:
     /// that Server checked the schema only at its own start, and would serve on in a schema it
-    /// refuses (ADR-draft-the-servers-state-and-its-stores clause 22). Once the lock is free, the
+    /// refuses (ADR-0044 clause 22). Once the lock is free, the
     /// instance migrates and starts.
-    /// Verifies: ADR-draft-the-servers-state-and-its-stores
+    /// Verifies: ADR-0044
     #[test]
     fn a_shared_instance_migrates_nothing_while_a_server_holds_the_database_alone() {
         let Some(test) = TestDatabase::named() else {

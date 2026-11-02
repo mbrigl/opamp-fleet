@@ -415,7 +415,7 @@ pub trait PackageBackend: Send + Sync {
     /// blob it names stored: an upload's entry, never one naming a blob a sweep deleted. A
     /// backend that other Servers write too asks `stored` inside the entry's transaction, holding
     /// the blob store's lock shared, so no sweep runs between the answer and the commit
-    /// (ADR-draft-the-servers-state-and-its-stores clause 14). A Package the store does not hold
+    /// (ADR-0044 clause 14). A Package the store does not hold
     /// is an error, and so is a blob `stored` does not find: removed while it was uploaded.
     fn put_entry(&self, id: &PackageId, entry: &Entry, stored: Stored) -> Result<(), String>;
 
@@ -437,7 +437,7 @@ pub trait PackageBackend: Send + Sync {
     /// Deletes one Package's metadata, its entries with it; its blobs are the store's to collect.
     fn remove(&self, id: &PackageId) -> Result<(), String>;
 
-    /// Holds the blob store's lock alone (ADR-draft-the-servers-state-and-its-stores clause 14)
+    /// Holds the blob store's lock alone (ADR-0044 clause 14)
     /// until the hold is dropped: what a sweep holds. A backend that other Servers write too
     /// holds it in the database; one whose one Server is its only writer holds nothing, which the
     /// default does.
@@ -530,7 +530,7 @@ impl PackageStore {
     /// entry naming a blob that is not stored, or of another size, fails the open, and a blob no
     /// entry names is deleted, as are the staging objects of every lease that is not live. The
     /// blobs are listed, the Packages read and the sweep made under the blob store's lock, held
-    /// alone (ADR-draft-the-servers-state-and-its-stores clause 14).
+    /// alone (ADR-0044 clause 14).
     ///
     /// # Errors
     /// Returns an error when the lock is not had in time, naming it, when a Package cannot be
@@ -676,7 +676,7 @@ impl PackageStore {
 
     /// Reads every Package again from the backend, as another instance created, deleted or
     /// changed one
-    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// (ADR-0041
     /// clause 12): what is held is dropped and what is stored taken in its place. It reads under
     /// the lock, so no write of this instance's own lands between the read and the swap. The blobs
     /// are not read: they are the blob store's, which every instance shares.
@@ -751,7 +751,7 @@ impl PackageStore {
                 // The backend asks whether the blob is stored as it writes the entry: on a store
                 // other Servers write too, in the entry's transaction under the blob store's lock,
                 // so no sweep of another Server deletes the blob between the answer and the commit
-                // (clause 14 of ADR-draft-the-servers-state-and-its-stores). No deletion of this
+                // (clause 14 of ADR-0044). No deletion of this
                 // blob starts here while the upload holds it, and one that ran before has answered.
                 let unanswered = Arc::new(std::sync::atomic::AtomicBool::new(false));
                 let stored: Stored = {
@@ -962,7 +962,7 @@ impl PackageStore {
     /// [`delete_set`](Self::delete_set) without its sweep, which it answers instead, `None` when
     /// no Package of that identity exists: for a caller that holds a lock of its own, which the
     /// sweep must not wait under, as it may wait for the blob store's lock
-    /// (ADR-draft-the-servers-state-and-its-stores clause 14). The caller hands the sweep to
+    /// (ADR-0044 clause 14). The caller hands the sweep to
     /// [`sweep_after`](Self::sweep_after) once it has let its lock go.
     ///
     /// # Errors
@@ -1029,7 +1029,7 @@ impl PackageStore {
     /// The sweep after an act (ADR-0029 clause 13): deletes the blobs [`doom`](Self::doom) chose
     /// that no stored entry names either, and the staging objects of every lease that is not
     /// live, under the blob store's lock held alone and with no lock on the Packages held
-    /// (ADR-draft-the-servers-state-and-its-stores clauses 14 and 16). What the backend stores is
+    /// (ADR-0044 clauses 14 and 16). What the backend stores is
     /// read under the hold, so a blob that an entry written through another Server names is kept.
     /// A failure is logged and left to the next startup, which deletes every blob no entry names.
     fn sweep(&self, doomed: impl IntoIterator<Item = String>) {
@@ -1753,7 +1753,7 @@ mod tests {
     /// entry as stored, so the Package read again through it shows the new bytes, and a signature
     /// written again through it is stored. Two stores on one data directory stand in for two
     /// instances.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it, ADR-0027
+    /// Verifies: ADR-0041, ADR-0027
     #[test]
     fn a_signature_on_bytes_another_instance_replaced_is_refused_and_signed_anew() {
         let dir = tempfile::tempdir().expect("tempdir");

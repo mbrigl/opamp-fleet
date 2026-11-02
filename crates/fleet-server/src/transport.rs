@@ -461,7 +461,7 @@ async fn gateway_revocations(State(state): State<Arc<AppState>>, request: Reques
 
 /// The Gateways' list as its body and its `ETag`. The `ETag` is the SHA-256 of the body, and where
 /// the store keeps the list's one version, as PostgreSQL does, `list-<version>-` before it
-/// (ADR-draft-the-servers-state-and-its-stores clause 10). Every instance that holds the same list
+/// (ADR-0044 clause 10). Every instance that holds the same list
 /// at the same version answers the same `ETag`; the hash keeps one version from naming two bodies,
 /// as it would when the instance that revoked had not yet taken up a renewal another instance
 /// registered. Either way it changes with the list and survives a restart.

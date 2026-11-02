@@ -599,7 +599,7 @@ pub struct AppState {
     /// certificate (ADR-0021); this is the backstop that bounds what an admitted peer can do.
     max_agents: usize,
     /// How often an instance on a shared store writes the presence of the Agents it carries
-    /// (ADR-draft-the-fleet-record-of-agents-and-hosts clause 4); zero where the store keeps none.
+    /// (ADR-0043 clause 4); zero where the store keeps none.
     /// What is stored may be one interval old, so it adds to the staleness budget (clause 8).
     presence_interval: Duration,
     /// The presence of each held Agent as the last batch wrote it, and the holder it named, so a
@@ -681,7 +681,7 @@ impl AppState {
         //
         // On a shared store an instance holds only the Agents it carries, each loaded at its first
         // report here, and loads none at startup
-        // (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+        // (ADR-0041
         // clause 8).
         let mut fleet = HashMap::new();
         let mut written = HashMap::new();
@@ -829,7 +829,7 @@ impl AppState {
     }
 
     /// Sets how often the presence of the Agents this instance carries is written to a shared
-    /// store (ADR-draft-the-fleet-record-of-agents-and-hosts clause 4), which the staleness budget
+    /// store (ADR-0043 clause 4), which the staleness budget
     /// adds (clause 8).
     #[must_use]
     pub fn with_presence_interval(mut self, interval: Duration) -> Self {
@@ -839,7 +839,7 @@ impl AppState {
 
     /// Names the lease this instance serves under on a shared store: the presence it writes when
     /// an Agent connects here names that lease's instance id as the holder, at once
-    /// (ADR-draft-the-fleet-record-of-agents-and-hosts clause 11). Set once; a later call is
+    /// (ADR-0043 clause 11). Set once; a later call is
     /// ignored.
     pub fn serve_under(&self, lease: watch::Receiver<Option<String>>) {
         let _ = self.lease.set(lease);
@@ -849,7 +849,7 @@ impl AppState {
     /// one — the period it actually asked for — else the configured default. Three of them, not
     /// one: a single missed heartbeat is a lost packet, and a fleet view that flickers on every
     /// hiccup is one nobody trusts. On a shared store the presence interval besides, since what is
-    /// stored may be one interval old (ADR-draft-the-fleet-record-of-agents-and-hosts clause 8).
+    /// stored may be one interval old (ADR-0043 clause 8).
     fn stale_after(&self) -> Duration {
         self.heartbeat_budget() + self.presence_interval
     }
@@ -992,7 +992,7 @@ impl AppState {
     /// does. On a shared store the Client Agent of a Host may be carried by another instance, so
     /// the Agents the host register binds to the Host that this instance does not hold are read
     /// from the store, and a Client Agent among them counts as one of the group
-    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// (ADR-0041
     /// clause 8). Behind a Gateway nothing is read: the register binds no Agent to a Gateway's
     /// Host, and the Agents a Gateway carries arrive over its connection, to the instance that
     /// holds it.
@@ -1067,7 +1067,7 @@ impl AppState {
     }
 
     /// The fleet as the Operator plane reads it
-    /// (ADR-draft-the-servers-state-and-its-stores clause 3): on a shared store every record as
+    /// (ADR-0044 clause 3): on a shared store every record as
     /// stored, connected as its stored presence says, placed among the others, and nothing of what
     /// this instance holds in memory; on a store this Server alone writes, what it holds.
     ///
@@ -1500,7 +1500,7 @@ impl AppState {
 
     /// Reads the Configurations and, where package delivery is armed, the Deployments and the
     /// Packages again from their stores, as another instance changed them
-    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// (ADR-0041
     /// clause 12). Each one whose flag is set is dropped and read again whole.
     ///
     /// # Errors
@@ -1526,7 +1526,7 @@ impl AppState {
     }
 
     /// Takes up what another instance wrote to the records of Agents this one holds
-    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// (ADR-0041
     /// clauses 8 and 9): the record of each Agent of `uids` this instance holds, or of every one
     /// it holds where `uids` is `None`, is read again from the store. Its assignment, its labels and
     /// its queued restart are taken into what is held, its group is placed again for its labels,
@@ -1982,7 +1982,7 @@ impl AppState {
     ///
     /// The request is written to its own column of the record before this answers, and on a shared
     /// store announced to the instance that carries the Agent, which decides from what is stored
-    /// (ADR-draft-the-fleet-record-of-agents-and-hosts clause 2).
+    /// (ADR-0043 clause 2).
     pub fn request_restart(&self, uid: &InstanceUid) -> Result<(), RestartError> {
         let mut fleet = self.fleet.lock().expect("fleet lock");
         let capabilities = if self.agent_store.is_shared() {
@@ -2215,7 +2215,7 @@ impl AppState {
         // name" ADR-0024 rejected: the record leaves the store with the row, its labels with it
         // (ADR-0024 clause 21). On a shared store the instance that carries the Agent may be
         // another, so what decides is the presence stored, read and removed in one step
-        // (ADR-draft-the-fleet-record-of-agents-and-hosts clause 11).
+        // (ADR-0043 clause 11).
         // On a shared store an Agent this instance does not hold has its assignment read first, so
         // the revisions only it pinned are collected once it is gone. A record that cannot be
         // read, one that does not decode among them, is still forgotten, and what it pinned is
@@ -2298,7 +2298,7 @@ impl AppState {
     /// Clears the queued restart of `record` in the store first, and answers whether it was still
     /// queued there, so it is delivered: one another instance delivered already is not delivered
     /// twice, and a request made after the clear stays queued
-    /// (ADR-draft-the-fleet-record-of-agents-and-hosts clause 2). One that cannot be cleared is
+    /// (ADR-0043 clause 2). One that cannot be cleared is
     /// kept for the next exchange.
     fn take_restart(&self, uid: &InstanceUid, record: &mut AgentRecord) -> bool {
         match self.agent_store.set_restart_pending(uid, false) {
@@ -2322,7 +2322,7 @@ impl AppState {
     ///
     /// The fleet lock is held across the check and the delete, so a rollout of this Server cannot
     /// pin it in between. A store that other Servers write too counts the stored assignments again
-    /// in the act that deletes (ADR-draft-the-servers-state-and-its-stores clause 2), so a pin
+    /// in the act that deletes (ADR-0044 clause 2), so a pin
     /// written through another instance refuses it as well.
     pub fn delete_configuration(&self, name: &str) -> Result<bool, DeleteError> {
         let fleet = self.fleet.lock().expect("fleet lock");
@@ -2478,7 +2478,7 @@ impl AppState {
 
     /// Writes the presence of the Agents this instance carries that moved since the last batch, in
     /// one batch naming `holder`, the instance id of the lease it serves under
-    /// (ADR-draft-the-fleet-record-of-agents-and-hosts clause 4): a heartbeat reaches the store at
+    /// (ADR-0043 clause 4): a heartbeat reaches the store at
     /// most once per batch and Agent. An Agent it holds and never carried under `holder`, one
     /// restored at startup among them, is written only once it is connected here, so the first
     /// batch writes the Agents carried and not the fleet; under a new holder the connected ones
@@ -2524,9 +2524,9 @@ impl AppState {
 
     /// On a shared store, takes `uid` at once as connected here, naming this instance as its
     /// holder, so that no other instance forgets it as not connected while the next batch is due
-    /// (ADR-draft-the-fleet-record-of-agents-and-hosts clause 11), and so that an instance that
+    /// (ADR-0043 clause 11), and so that an instance that
     /// carried it before stops carrying it
-    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// (ADR-0041
     /// clause 8): one write per connect, never per heartbeat. A take that makes the Agent's holder
     /// change more than ten times within a minute is logged as a likely duplicate. Without a lease
     /// nothing is written. One that fails is logged, and the next batch writes it, where no other
@@ -2568,7 +2568,7 @@ impl AppState {
 
     /// Stops carrying each Agent of `uids`, every one this instance carries where `None`, whose
     /// stored presence no longer names this instance as its holder: another instance took it
-    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// (ADR-0041
     /// clause 8). It is held as on a closed connection, and its disconnect is not written, since
     /// the row is the other instance's. An Agent the row still names is kept, so of two instances
     /// that take one Agent at once only the one the row does not name stops carrying it. The
@@ -2654,7 +2654,7 @@ impl AppState {
     /// `last_seen` is current and whose next compressed report is accepted without a gap. On a
     /// shared store only the records of the Agents this instance heard from are written: of the
     /// others it holds what it loaded, and another instance carries them
-    /// (ADR-draft-the-fleet-record-of-agents-and-hosts clause 2). Of those, only the ones no other
+    /// (ADR-0043 clause 2). Of those, only the ones no other
     /// instance holds the connection of: an Agent heard here that moved to another instance keeps
     /// what that instance wrote of it. Whether one moved is told by the count of takes this
     /// instance was last answered, never by comparing its clock with another's.
@@ -3293,7 +3293,7 @@ impl AppState {
     /// On a shared store, loads the record of `uid` from it when this Server does not hold one, as
     /// at an Agent's first report here: another instance may have written it, and its labels, its
     /// assignment and its queued restart are what this report goes on from
-    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// (ADR-0041
     /// clause 8). Read before the fleet lock is taken, so no other report waits for it. Answers
     /// whether it loaded one; one that cannot be read is logged, and the report goes on as an
     /// Agent's first.
@@ -3808,7 +3808,7 @@ impl AppState {
 
     /// The REST view of the fleet (`GET /api/v1/agents`), read as [`read_fleet`](Self::read_fleet)
     /// reads it: on a shared store from the database, each Agent connected as its stored presence
-    /// says (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// says (ADR-0041
     /// clause 13).
     ///
     /// # Errors
@@ -5351,7 +5351,7 @@ mod tests {
     /// A restart is delivered only while the store still holds it queued: one another Server
     /// delivered and cleared already is not sent twice, and one requested after a delivery is sent
     /// again.
-    /// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts
+    /// Verifies: ADR-0043
     #[test]
     fn a_restart_is_sent_only_while_the_store_holds_it_queued() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -6429,7 +6429,7 @@ mod tests {
 
     /// The deletion of a Package sweeps its blobs once it has let the fleet lock go: while the
     /// sweep waits for the blob store's lock, every other act of the fleet goes on.
-    /// Verifies: ADR-draft-the-servers-state-and-its-stores
+    /// Verifies: ADR-0044
     #[test]
     fn a_package_deletion_sweeps_once_it_lets_the_fleet_lock_go() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -6486,7 +6486,7 @@ mod tests {
     /// An entry's deletion sweeps once it has let go of every lock of the Package store: while
     /// its sweep waits for the blob store's lock, the deletion of another Package, which takes
     /// the fleet lock and then the store's, goes on, and so does every act behind the fleet lock.
-    /// Verifies: ADR-draft-the-servers-state-and-its-stores
+    /// Verifies: ADR-0044
     #[test]
     fn an_entry_deletion_sweeps_once_it_lets_the_store_go() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -6830,7 +6830,7 @@ mod tests {
     /// What another Server wrote to a held record is taken up from the store: a Client Agent's
     /// labels place its Client's other Agent again, so it inherits them, a queued restart is held,
     /// and a record the store no longer holds is dropped.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// Verifies: ADR-0041
     #[test]
     fn what_another_server_wrote_is_taken_up_and_places_the_group_again() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -7093,7 +7093,7 @@ mod tests {
     /// batches: no heartbeat writes a record or a presence, each batch writes every presence that
     /// moved since the last one, in the order of the `instance_uid`, and nothing when none moved.
     /// A disconnect is written in the next batch, and under a new holder every presence again.
-    /// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts
+    /// Verifies: ADR-0043
     #[test]
     fn presence_is_written_in_batches_and_never_once_per_heartbeat() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -7183,7 +7183,7 @@ mod tests {
     /// answer that arrives after a later take's keeps the take's; a take's answer replaces it, also
     /// a lower one, as a record forgotten and created again counts from the start; a new holder
     /// starts over.
-    /// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts
+    /// Verifies: ADR-0043
     #[test]
     fn the_count_of_takes_kept_for_an_agent_never_moves_back() {
         let uid = InstanceUid([1; 16]);
@@ -7202,7 +7202,7 @@ mod tests {
 
     /// The first presence batch of an instance writes the Agents it carries, not the fleet it
     /// restored: a restored Agent is written once it is connected here.
-    /// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts
+    /// Verifies: ADR-0043
     #[test]
     fn the_first_presence_batch_writes_only_the_agents_carried() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -7434,7 +7434,7 @@ mod tests {
 
     /// An instance on PostgreSQL loads no Agent record when it starts, holds none until one
     /// reports to it, and reads again only the ones it holds when it reads everything again.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it, ADR-draft-the-servers-state-and-its-stores
+    /// Verifies: ADR-0041, ADR-0044
     #[test]
     fn an_instance_on_postgres_loads_no_fleet_and_reads_again_only_what_it_holds() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -7479,7 +7479,7 @@ mod tests {
     /// On PostgreSQL an Agent's view and a rollout to it read the Agent and the Agents bound to its
     /// Host, not the whole fleet, and the view inherits the labels of its Client Agent, which this
     /// instance does not hold either.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// Verifies: ADR-0041
     #[test]
     fn an_agents_view_and_a_rollout_to_it_read_its_host_and_not_the_fleet() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -7598,7 +7598,7 @@ mod tests {
     /// An Agent bound to a direct Host that reports over a Gateway since is placed by the Gateway
     /// it arrived over: the list, its view and a rollout to it all inherit the labels of the
     /// Client Agent behind that Gateway.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it, ADR-draft-the-fleet-record-of-agents-and-hosts
+    /// Verifies: ADR-0041, ADR-0043
     #[test]
     fn an_agent_bound_to_a_direct_host_and_arriving_over_a_gateway_is_placed_by_the_gateway() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -7660,7 +7660,7 @@ mod tests {
     /// A record that does not decode, which every read that meets it fails, can still be
     /// forgotten through an instance that does not hold it, and is gone after, with what its
     /// assignment pinned: the Deployment it was released through may be deleted then.
-    /// Verifies: ADR-draft-the-servers-state-and-its-stores, ADR-draft-the-fleet-record-of-agents-and-hosts
+    /// Verifies: ADR-0044, ADR-0043
     #[test]
     fn a_record_that_does_not_decode_can_be_forgotten() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -7700,7 +7700,7 @@ mod tests {
 
     /// Forgetting an Agent this instance on PostgreSQL does not hold collects the revision only its
     /// assignment pinned, as forgetting one it holds does.
-    /// Verifies: ADR-0026, ADR-draft-the-servers-state-and-its-stores
+    /// Verifies: ADR-0026, ADR-0044
     #[test]
     fn forgetting_an_agent_held_nowhere_collects_the_revision_only_it_pinned() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -7770,7 +7770,7 @@ mod tests {
     /// What an instance wrote of an Agent's presence, the count of takes among it, leaves with the
     /// Agent wherever it leaves what the instance holds: when it is forgotten here, when it was
     /// forgotten through another instance, and under its old identity when it is re-keyed.
-    /// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts
+    /// Verifies: ADR-0043
     #[test]
     fn what_was_written_of_an_agents_presence_leaves_with_it() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -7834,7 +7834,7 @@ mod tests {
     /// An instance that heard another took an Agent reads the holder again under the fleet lock
     /// before it stops carrying it: a take of its own made between its first read and the lock, by
     /// the Agent's new connection here, keeps the Agent carried.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// Verifies: ADR-0041
     #[test]
     fn an_agent_taken_back_here_between_the_two_reads_of_its_holder_stays_carried() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -7877,7 +7877,7 @@ mod tests {
     /// On PostgreSQL a first report here whose read of the stored record failed goes on from the
     /// record another instance created, as it is stored: its labels are held, and a report the
     /// binding then refuses leaves it stored and its Agent carried where it is.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// Verifies: ADR-0041
     #[test]
     fn a_record_another_instance_created_is_taken_as_stored_and_never_removed() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -7932,7 +7932,7 @@ mod tests {
     /// A label change made on A after A's take-up read the record, before it took the fleet lock,
     /// is not undone by what that read found: what differs is read again under the lock. A never
     /// hears its own announcement, so nothing else would correct it.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// Verifies: ADR-0041
     #[test]
     fn a_take_up_never_undoes_a_newer_act_of_its_own_instance() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -7965,7 +7965,7 @@ mod tests {
     /// A re-key whose move of the stored record fails leaves the Agent under the identity it has:
     /// the reply assigns no new one, the record stays stored and held under the old uid, and the
     /// session is not ended as one of an Agent forgotten.
-    /// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts, ADR-0024
+    /// Verifies: ADR-0043, ADR-0024
     #[test]
     fn a_rekey_whose_move_fails_keeps_the_agent_under_its_identity() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -8000,7 +8000,7 @@ mod tests {
 
     /// What differs is read again under the fleet lock in one read, however many records differ:
     /// the lock is held for one round trip, not one per record.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// Verifies: ADR-0041
     #[test]
     fn a_take_up_reads_again_what_differs_in_one_read() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {

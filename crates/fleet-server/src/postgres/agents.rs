@@ -112,7 +112,7 @@ impl PgAgentStore {
 
     /// The adapter on `database`, holding what the stored assignments pin, read alone: what a
     /// deletion and a collection ask of the pins is answered from them, and no record is loaded
-    /// (ADR-draft-the-servers-state-and-its-stores clause 3).
+    /// (ADR-0044 clause 3).
     ///
     /// # Errors
     /// Returns an error when the assignments cannot be read, or one names a Package that does not
@@ -1094,7 +1094,7 @@ async fn read_assignments(
     Ok(assignments)
 }
 
-/// The columns a report decides (ADR-draft-the-fleet-record-of-agents-and-hosts clause 2): every
+/// The columns a report decides (ADR-0043 clause 2): every
 /// column but the key, the labels, `restart_pending` and the assignment's.
 const REPORTED: [&str; 12] = [
     "sequence_num",
@@ -1435,7 +1435,7 @@ mod tests {
     /// A report's write on PostgreSQL leaves what the acts wrote through another instance: the
     /// labels, a queued restart and the assignment stay as they are stored, while what the report
     /// decides is written; a record that is not there is not written.
-    /// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts, ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// Verifies: ADR-0043, ADR-0041
     #[test]
     fn a_report_written_on_postgres_keeps_what_the_acts_wrote() {
         let Some(test) = TestDatabase::named() else {
@@ -1493,7 +1493,7 @@ mod tests {
     /// re-key waits for it, and copies the row as B committed it, so B's labels stay under the new
     /// key. A trigger holds B's write open, mid-transaction, until the test lets it go, once A
     /// waits for B.
-    /// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts
+    /// Verifies: ADR-0043
     #[test]
     fn a_label_change_committed_during_a_rekey_moves_with_the_row() {
         let Some(test) = TestDatabase::named() else {
@@ -1555,7 +1555,7 @@ mod tests {
     }
 
     /// A re-key on PostgreSQL moves every column of the row, one the code names nowhere included.
-    /// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts
+    /// Verifies: ADR-0043
     #[test]
     fn a_rekey_on_postgres_moves_every_column() {
         let Some(test) = TestDatabase::named() else {
@@ -1582,7 +1582,7 @@ mod tests {
     /// A release on PostgreSQL writes the assignment of each record alone: the labels, the queued
     /// restart and what a report decided stay as they are stored, whatever the released record
     /// carries of them.
-    /// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts
+    /// Verifies: ADR-0043
     #[test]
     fn a_release_on_postgres_writes_the_assignment_alone() {
         let Some(test) = TestDatabase::named() else {
@@ -1671,7 +1671,7 @@ mod tests {
     /// assignment over it: the release pins what it pins after the query and the read of the
     /// records that began before it, so a deletion it pins stays refused. A read that began after
     /// it takes up what another instance committed.
-    /// Verifies: ADR-0026, ADR-draft-the-servers-state-and-its-stores
+    /// Verifies: ADR-0026, ADR-0044
     #[test]
     fn a_read_that_began_before_a_release_does_not_undo_what_it_pins() {
         let Some(test) = TestDatabase::named() else {
@@ -1734,7 +1734,7 @@ mod tests {
 
     /// What the adapter keeps of its commits for the reads in flight does not grow with an Agent's
     /// re-keys or releases while no read is in flight, and leaves with the last read in flight.
-    /// Verifies: ADR-draft-the-servers-state-and-its-stores
+    /// Verifies: ADR-0044
     #[test]
     fn the_commits_kept_for_reads_in_flight_do_not_grow_without_one() {
         let Some(test) = TestDatabase::named() else {
@@ -1773,7 +1773,7 @@ mod tests {
     /// Of two reads in flight, the one that ends first leaves what the other is decided by: a
     /// release committed while both were in flight is still noted when the older read takes up its
     /// snapshot, so it does not take the older assignment over the release.
-    /// Verifies: ADR-0026, ADR-draft-the-servers-state-and-its-stores
+    /// Verifies: ADR-0026, ADR-0044
     #[test]
     fn a_read_that_ends_first_leaves_what_an_older_read_in_flight_is_decided_by() {
         let Some(test) = TestDatabase::named() else {
@@ -1813,7 +1813,7 @@ mod tests {
 
     /// Under reads that always overlap, what is kept of the commits is only what the oldest read
     /// in flight can be decided by: an Agent that re-keys on every report does not grow it.
-    /// Verifies: ADR-draft-the-servers-state-and-its-stores
+    /// Verifies: ADR-0044
     #[test]
     fn under_overlapping_reads_the_commits_kept_follow_the_oldest_read_in_flight() {
         let Some(test) = TestDatabase::named() else {
@@ -1844,7 +1844,7 @@ mod tests {
     /// The query reads each record with its stored presence: connected only while the instance
     /// its presence names holds a live lease. Opening the adapter reads the stored assignments
     /// alone, so what pins what is answered without a record loaded.
-    /// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts, ADR-draft-the-servers-state-and-its-stores
+    /// Verifies: ADR-0043, ADR-0044
     #[test]
     fn the_query_reads_the_stored_presence_and_opening_reads_the_assignments_alone() {
         let Some(test) = TestDatabase::named() else {
@@ -1993,7 +1993,7 @@ mod tests {
     /// database after its first row; the gate opens once the second waits for that row's lock, or
     /// has reached the gate itself, which only a release that writes in the order given does, and
     /// then the two would deadlock.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// Verifies: ADR-0041
     #[test]
     fn two_releases_over_the_same_agents_in_opposite_orders_both_commit() {
         let Some(test) = TestDatabase::named() else {
@@ -2073,7 +2073,7 @@ mod tests {
     /// presence, and one under an earlier take leaves the presence a take wrote since. Forgetting decides from it: an Agent a live
     /// lease holds and that was heard from recently is kept; one whose holder holds no live lease
     /// reads as disconnected and goes, announced; one silent past the bound goes too.
-    /// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts, ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// Verifies: ADR-0043, ADR-0041
     #[test]
     fn a_presence_batch_names_the_holder_and_forgetting_decides_from_it() {
         let Some(test) = TestDatabase::named() else {
@@ -2185,7 +2185,7 @@ mod tests {
     /// the one it replaced. A presence batch of the instance it was taken from, read before the
     /// take and written after it, leaves the row as the take wrote it; once the taker's lease has
     /// lapsed, the batch names its own instance again, as it does over a row that names none.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// Verifies: ADR-0041
     #[test]
     fn a_batch_read_before_another_instance_took_the_agent_does_not_undo_the_take() {
         let Some(test) = TestDatabase::named() else {
@@ -2259,7 +2259,7 @@ mod tests {
     /// the same millisecond is not written, although its `last_seen_ms` is the stored one. A batch
     /// that names its instance anew answers the count it raised, and a disconnect under that count
     /// is written.
-    /// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts, ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// Verifies: ADR-0043, ADR-0041
     #[test]
     fn a_disconnect_is_written_under_the_take_it_was_carried_by_whatever_the_clocks_say() {
         let Some(test) = TestDatabase::named() else {
@@ -2341,7 +2341,7 @@ mod tests {
 
     /// A take that replaces another holder is announced, whether or not that holder's lease is
     /// live, and one that replaces none is not.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// Verifies: ADR-0041
     #[test]
     fn a_take_that_replaces_another_holder_is_announced_whatever_its_lease() {
         let Some(test) = TestDatabase::named() else {
@@ -2390,7 +2390,7 @@ mod tests {
     /// The take that makes an Agent's holder change for the eleventh time within a minute, and no
     /// other, says it is likely a duplicate; a change more than a minute old counts no more, and a
     /// take that keeps the holder, or replaces none, is no change.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// Verifies: ADR-0041
     #[test]
     fn the_eleventh_change_of_holder_within_a_minute_is_a_likely_duplicate() {
         let Some(test) = TestDatabase::named() else {
@@ -2438,7 +2438,7 @@ mod tests {
     /// Two presence batches over the same two Agents, given them in opposite orders, both commit:
     /// each locks the rows in the order of their `instance_uid` before it writes them, as the
     /// gated release test above shows for a release.
-    /// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts
+    /// Verifies: ADR-0043
     #[test]
     fn two_presence_batches_over_the_same_agents_in_opposite_orders_both_commit() {
         let Some(test) = TestDatabase::named() else {
@@ -2526,7 +2526,7 @@ mod tests {
     /// The ceiling on records holds for every instance on the store: the store counts its rows as
     /// it creates one, so a record past it is not created through any of them, and one stored
     /// already passes none.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// Verifies: ADR-0041
     #[test]
     fn the_records_are_bounded_where_they_are_stored() {
         let Some(test) = TestDatabase::named() else {
@@ -2572,8 +2572,8 @@ mod tests {
 
     /// A row that does not decode fails the read that meets it, naming its `instance_uid`: the
     /// load, the query, the query of it and the read of it. Opening the adapter, which reads the
-    /// assignments alone, does not meet it (ADR-draft-the-servers-state-and-its-stores clause 4).
-    /// Verifies: ADR-0029, ADR-draft-the-servers-state-and-its-stores
+    /// assignments alone, does not meet it (ADR-0044 clause 4).
+    /// Verifies: ADR-0029, ADR-0044
     #[test]
     fn an_agent_row_that_does_not_decode_fails_the_read_that_meets_it_naming_it() {
         let Some(test) = TestDatabase::named() else {

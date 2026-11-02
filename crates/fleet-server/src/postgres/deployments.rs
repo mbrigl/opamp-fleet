@@ -1,7 +1,7 @@
 //! Deployments in PostgreSQL (ADR-0029 clause 6): the PostgreSQL adapter behind
 //! [`DeploymentBackend`](crate::deployments::DeploymentBackend) — one row per Deployment and one
 //! per member, each call one transaction on the rows it names
-//! (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+//! (ADR-0041
 //! clause 19).
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -63,7 +63,7 @@ impl DeploymentBackend for PgDeploymentBackend {
     /// One transaction: the Deployment's row is held `FOR UPDATE`, the change decided from the
     /// member rows it reads then, the rows it names written, and the columns the release before
     /// migration 5 read written from the rows, kept for the removal rule of
-    /// ADR-draft-the-servers-state-and-its-stores clause 22.
+    /// ADR-0044 clause 22.
     fn amend(&self, name: &str, change: &Change) -> Result<Deployment, DeploymentError> {
         let (name, change) = (name.to_string(), change.clone());
         let decided = self.database.run(move |pool| async move {
@@ -276,7 +276,7 @@ async fn change_rows(
 /// Writes the `packages` and `configurations` columns of the Deployment `name` from its member
 /// rows, inside the caller's transaction, which holds its row. The release before migration 5 read
 /// its members there; no such release runs on this schema, whose oldest Server is 0.8.0, and the
-/// columns are kept for the removal rule of ADR-draft-the-servers-state-and-its-stores clause 22.
+/// columns are kept for the removal rule of ADR-0044 clause 22.
 async fn mirror(client: &impl GenericClient, name: &str) -> Result<(), String> {
     client
         .execute(
@@ -579,7 +579,7 @@ mod tests {
         contract(&|| Box::new(FsDeploymentBackend::open(dir.path()).expect("open")));
     }
 
-    /// Verifies: ADR-0029, ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// Verifies: ADR-0029, ADR-0041
     #[test]
     fn the_deployment_port_contract_holds_on_postgres() {
         let Some(test) = TestDatabase::named() else {
@@ -643,7 +643,7 @@ mod tests {
 
     /// The release before migration 5 read a Deployment's members from its own row; while those
     /// columns are kept, every change writes them from the member rows in the same transaction.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// Verifies: ADR-0041
     #[test]
     fn the_columns_the_release_before_reads_follow_the_member_rows() {
         let Some(test) = TestDatabase::named() else {
@@ -675,7 +675,7 @@ mod tests {
 
     /// Migration 5 moves the members out of the Deployments' columns into rows of their own, and
     /// the Deployments load as the release before left them.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// Verifies: ADR-0041
     #[test]
     fn the_members_move_out_of_the_deployments_columns() {
         use crate::postgres::schema::{MIGRATIONS, SCHEMA_TABLE};
@@ -713,7 +713,7 @@ mod tests {
     /// write, so the second runs exactly then; the gate opens once the second waits for the
     /// Deployment's row, or has reached the gate itself, which only an amendment that took no hold
     /// does.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it, ADR-0027
+    /// Verifies: ADR-0041, ADR-0027
     #[test]
     fn two_packages_of_one_type_added_at_once_add_one() {
         let Some(test) = TestDatabase::named() else {
@@ -809,7 +809,7 @@ mod tests {
     /// A deletion of a Deployment through B while a rollout through A that releases through it
     /// has not yet committed waits for the rollout, and then refuses it from the assignment the
     /// rollout stored: the rollout holds the Deployment's row until it commits.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it, ADR-0026
+    /// Verifies: ADR-0041, ADR-0026
     #[test]
     fn a_deletion_waits_for_a_rollout_through_the_deployment_and_is_refused() {
         use crate::agent_store::{tests::record, AgentStore as _};

@@ -1,7 +1,7 @@
 //! Package records in PostgreSQL (ADR-0029 clause 6): the PostgreSQL adapter behind
 //! [`PackageBackend`](crate::packages::PackageBackend) — one row per Package and one per entry,
 //! each entry naming its artifact by hash, and each call one transaction on the rows it names
-//! (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+//! (ADR-0041
 //! clause 19). The bytes are the blob store's, with either.
 
 use std::collections::BTreeMap;
@@ -62,7 +62,7 @@ impl PackageBackend for PgPackageBackend {
     /// ([`hold_unassigned`]). The transaction takes the blob store's lock shared first, and asks
     /// `stored` under it before it locks the Package's row: a sweep holds the lock alone, so none
     /// runs between the answer and the commit, and none deletes the blob the entry names
-    /// (ADR-draft-the-servers-state-and-its-stores clause 14). The lock goes with the
+    /// (ADR-0044 clause 14). The lock goes with the
     /// transaction, its session's end included, which writes no entry.
     fn put_entry(&self, id: &PackageId, entry: &Entry, stored: Stored) -> Result<(), String> {
         let (id, entry) = (id.clone(), entry.clone());
@@ -206,7 +206,7 @@ impl PackageBackend for PgPackageBackend {
         })
     }
 
-    /// On a connection of its own (ADR-draft-the-servers-state-and-its-stores clause 14).
+    /// On a connection of its own (ADR-0044 clause 14).
     fn hold_blobs(&self) -> Result<crate::blobs::BlobHold, String> {
         self.hold()
     }
@@ -242,7 +242,7 @@ impl PgPackageBackend {
 /// 13). A rollout holds the row of each Package it pins `FOR KEY SHARE` until its assignments are
 /// committed, so the count waits for it and sees them, and no rollout pins the Package until this
 /// transaction ends
-/// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+/// (ADR-0041
 /// clause 19). Answers whether the Package is stored.
 async fn hold_unassigned(
     client: &impl GenericClient,
@@ -635,7 +635,7 @@ mod tests {
     /// A deletion of a Package through B while a rollout through A that pins it has not yet
     /// committed waits for the rollout, and then refuses it from the assignment the rollout
     /// stored: the rollout holds the Package's row until it commits.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it, ADR-0026
+    /// Verifies: ADR-0041, ADR-0026
     #[test]
     fn a_deletion_waits_for_a_rollout_that_pins_the_package_and_is_refused() {
         use crate::agent_store::{tests::record, AgentStore as _};
@@ -771,7 +771,7 @@ mod tests {
     /// B deletes the one entry it holds of a blob; an entry written through A, which B has not
     /// read, names the same blob, and B's sweep keeps it: it reads the stored entries under the
     /// blob store's lock, not what B holds.
-    /// Verifies: ADR-draft-the-servers-state-and-its-stores, ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// Verifies: ADR-0044, ADR-0041
     #[test]
     fn a_sweep_keeps_a_blob_an_entry_stored_through_another_writer_names() {
         let Some(test) = TestDatabase::named() else {
@@ -813,7 +813,7 @@ mod tests {
     /// An upload holds the blob store's lock shared from its check that its blob is stored until
     /// its entry is committed: a sweep that starts meanwhile, at another instance's start, waits
     /// for it, then reads the entry and keeps the blob.
-    /// Verifies: ADR-draft-the-servers-state-and-its-stores
+    /// Verifies: ADR-0044
     #[test]
     fn an_upload_holds_off_a_sweep_until_its_entry_is_committed() {
         let Some(test) = TestDatabase::named() else {
@@ -860,7 +860,7 @@ mod tests {
 
     /// An upload whose blob a sweep deleted before the upload checked for it is refused, to be
     /// uploaded again, and writes no entry.
-    /// Verifies: ADR-draft-the-servers-state-and-its-stores
+    /// Verifies: ADR-0044
     #[test]
     fn an_upload_whose_blob_a_sweep_took_first_is_refused() {
         let Some(test) = TestDatabase::named() else {
@@ -898,7 +898,7 @@ mod tests {
     /// A sweep waits the whole of its wait for the blob store's lock, 60 seconds, which the
     /// pool's `statement_timeout` of 10 seconds would otherwise cut short; an upload waits the
     /// pool's `lock_timeout` of 5 seconds.
-    /// Verifies: ADR-draft-the-servers-state-and-its-stores
+    /// Verifies: ADR-0044
     #[test]
     fn a_sweep_waits_its_whole_wait_for_the_lock_and_an_upload_five_seconds() {
         let Some(test) = TestDatabase::named() else {
@@ -930,7 +930,7 @@ mod tests {
 
     /// A hold on the blob store's lock whose session the database ends is marked lost, and
     /// logged: the lock is gone with the session.
-    /// Verifies: ADR-draft-the-servers-state-and-its-stores
+    /// Verifies: ADR-0044
     #[test]
     fn a_hold_whose_session_ends_is_marked_lost() {
         let Some(test) = TestDatabase::named() else {
@@ -954,7 +954,7 @@ mod tests {
     /// An upload whose transaction loses its session after the check that its blob is stored, and
     /// with it the blob store's lock, writes no entry: a sweep may run once the lock is gone, and
     /// the entry would name what it deleted.
-    /// Verifies: ADR-draft-the-servers-state-and-its-stores
+    /// Verifies: ADR-0044
     #[test]
     fn an_upload_whose_session_ends_before_its_commit_writes_no_entry() {
         let Some(test) = TestDatabase::named() else {
@@ -1010,7 +1010,7 @@ mod tests {
     }
 
     /// A sweep at startup that cannot have the blob store's lock fails the start, naming the lock.
-    /// Verifies: ADR-draft-the-servers-state-and-its-stores
+    /// Verifies: ADR-0044
     #[test]
     fn a_startup_sweep_that_cannot_have_the_lock_fails_naming_it() {
         let Some(test) = TestDatabase::named() else {

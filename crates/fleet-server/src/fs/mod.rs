@@ -115,7 +115,7 @@ pub fn check_layout(root: &Path) -> Result<(), String> {
 }
 
 /// Opens the data directory of a Server whose records live in PostgreSQL and whose blobs are files
-/// (ADR-draft-the-servers-state-and-its-stores clause 1): it holds `blobs/`, and nothing else
+/// (ADR-0044 clause 1): it holds `blobs/`, and nothing else
 /// but `audit/`, the record of files kept before the record moved into the database, which stays
 /// as its archive and is not created. A path of the filesystem layout fails naming it and
 /// `server migrate-to-postgres` — those records would otherwise be silently left behind.
@@ -151,7 +151,7 @@ thread_local! {
 /// missing directory is read as empty rather than created, no mode is set, a temporary file a crash
 /// left is passed over rather than removed, and every write fails. What `server
 /// migrate-to-postgres` reads the old `data_dir` with, so that nothing in it changes and no record
-/// is copied elsewhere to be read (ADR-draft-the-servers-state-and-its-stores clause 27).
+/// is copied elsewhere to be read (ADR-0044 clause 27).
 pub(crate) fn reading_only<T>(read: impl FnOnce() -> T) -> T {
     struct Restore(bool);
     impl Drop for Restore {
@@ -381,8 +381,8 @@ mod tests {
     /// Read in place, a data directory changes in no way: a missing directory is read as empty
     /// and not created, a leftover temporary file stays, and a write fails naming its path;
     /// outside, the same calls repair and write as before
-    /// (ADR-draft-the-servers-state-and-its-stores clause 27).
-    /// Verifies: ADR-draft-the-servers-state-and-its-stores
+    /// (ADR-0044 clause 27).
+    /// Verifies: ADR-0044
     #[test]
     fn a_data_directory_read_in_place_is_not_written() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -480,7 +480,7 @@ mod tests {
     /// `audit/` only where an older Server left it as the archive; a record of the filesystem
     /// store found there fails the open naming it and `server migrate-to-postgres`, and anything
     /// else fails as a stray entry.
-    /// Verifies: ADR-draft-the-servers-state-and-its-stores, ADR-0028
+    /// Verifies: ADR-0044, ADR-0028
     #[test]
     fn a_data_dir_beside_the_database_holds_the_blobs_alone() {
         let dir = tempfile::tempdir().expect("tempdir");

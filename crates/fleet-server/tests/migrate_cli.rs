@@ -52,8 +52,8 @@ fn migrate_writes_a_new_data_directory_once_and_says_so() {
 /// `server migrate-to-postgres` takes no `--data-dir` when the configuration names S3, as a Server
 /// on PostgreSQL and S3 keeps nothing on its disk, and refuses one before it reaches the database
 /// or the bucket, naming the flag; with the filesystem blob store a call without it is a usage
-/// error (ADR-draft-the-servers-state-and-its-stores clause 27).
-/// Verifies: ADR-draft-the-servers-state-and-its-stores
+/// error (ADR-0044 clause 27).
+/// Verifies: ADR-0044
 #[cfg(unix)]
 #[test]
 fn migrate_to_postgres_takes_a_data_dir_with_the_filesystem_blob_store_alone() {

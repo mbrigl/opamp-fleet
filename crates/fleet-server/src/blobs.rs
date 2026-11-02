@@ -47,7 +47,7 @@ pub trait BlobStore: Send + Sync {
     fn list(&self) -> Result<Vec<(String, u64)>, String>;
 
     /// Deletes what uploads that were cut off left behind, of every writer that is no longer live
-    /// (ADR-draft-the-servers-state-and-its-stores clause 16), and answers how many objects it
+    /// (ADR-0044 clause 16), and answers how many objects it
     /// deleted: what every sweep runs, under the blob store's lock. A store that stages no upload
     /// apart from its blobs, or whose one Server cleans up only at startup, deletes nothing here,
     /// which the default does.
@@ -60,7 +60,7 @@ pub trait BlobStore: Send + Sync {
 }
 
 /// A hold on the blob store's lock
-/// (ADR-draft-the-servers-state-and-its-stores clause 14), released when it is dropped. A store
+/// (ADR-0044 clause 14), released when it is dropped. A store
 /// that is its one Server's alone holds nothing.
 pub struct BlobHold {
     #[allow(dead_code)]

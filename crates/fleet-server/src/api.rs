@@ -1548,7 +1548,7 @@ async fn delete_package_set(
         Err(e) => return error(StatusCode::BAD_REQUEST, e),
     };
     // Off the async threads: the deletion's sweep may wait up to a minute for the blob store's lock
-    // (ADR-draft-the-servers-state-and-its-stores clause 14).
+    // (ADR-0044 clause 14).
     let deleted = tokio::task::spawn_blocking({
         let id = id.clone();
         move || state.delete_package_set(&id)
@@ -1697,7 +1697,7 @@ async fn delete_package_entry(
         Err((status, why)) => return error(status, why),
     };
     // Off the async threads: the deletion's sweep may wait up to a minute for the blob store's lock
-    // (ADR-draft-the-servers-state-and-its-stores clause 14).
+    // (ADR-0044 clause 14).
     let deleted = tokio::task::spawn_blocking({
         let (id, platform) = (id.clone(), platform.clone());
         move || state.delete_package_entry(&id, &platform)

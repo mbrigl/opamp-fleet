@@ -428,7 +428,7 @@ mod tests {
     /// A crash that cuts a line inside a two-byte character leaves bytes that are not UTF-8. The
     /// record still verifies: the torn line is read the lossy way the store hashed it when it
     /// repaired the record, and the entries after the repair hold.
-    /// Verifies: ADR-0023, ADR-draft-an-append-only-audit-record
+    /// Verifies: ADR-0023, ADR-0039
     #[test]
     fn a_line_torn_inside_a_character_verifies_as_the_store_hashed_it() {
         use crate::audit::{Audit as _, Entry};
@@ -502,7 +502,7 @@ mod tests {
     /// A line that holds a byte which is not UTF-8 other than an incomplete character at its end
     /// is refused, naming the line: a whole entry whose U+FFFD was re-encoded as a stray byte
     /// does not read as the text it decodes to.
-    /// Verifies: ADR-draft-an-append-only-audit-record
+    /// Verifies: ADR-0039
     #[test]
     fn a_line_with_an_invalid_byte_inside_is_refused_naming_it() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -531,7 +531,7 @@ mod tests {
 
     /// A rotation that crashed on the first write into its new file: the torn line opens that
     /// file, and the repair names as `last_whole` the last entry of the file before it.
-    /// Verifies: ADR-draft-an-append-only-audit-record
+    /// Verifies: ADR-0039
     #[test]
     fn a_torn_line_that_opens_a_file_is_linked_to_the_file_before() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -564,7 +564,7 @@ mod tests {
     /// run with one `audit.chain_broken` linked to the last whole entry before it, and the record
     /// holds. The same across files: a torn line at the end of one, the torn repair opening the
     /// next.
-    /// Verifies: ADR-draft-an-append-only-audit-record
+    /// Verifies: ADR-0039
     #[test]
     fn a_crash_during_the_repair_is_closed_by_one_linked_repair() {
         let dir = tempfile::tempdir().expect("tempdir");

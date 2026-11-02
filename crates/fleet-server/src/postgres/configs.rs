@@ -1,7 +1,7 @@
 //! Configurations in PostgreSQL (ADR-0029 clause 5): the PostgreSQL adapter behind
 //! [`ConfigBackend`](crate::configs::ConfigBackend) — one row per Configuration, its retained
 //! revisions in rows of their own, each call one transaction on the rows it names
-//! (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+//! (ADR-0041
 //! clause 19).
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -419,7 +419,7 @@ mod tests {
         });
     }
 
-    /// Verifies: ADR-0029, ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// Verifies: ADR-0029, ADR-0041
     #[test]
     fn the_configuration_port_contract_holds_on_postgres() {
         let Some(test) = TestDatabase::named() else {
@@ -495,7 +495,7 @@ mod tests {
     /// A collection on PostgreSQL keeps every revision a stored assignment pins, whatever the
     /// caller names: the assignments are reckoned in its own transaction, so a revision another
     /// instance pinned is not collected by one that never heard of it.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// Verifies: ADR-0041
     #[test]
     fn a_collection_on_postgres_keeps_what_a_stored_assignment_pins() {
         let Some(test) = TestDatabase::named() else {
@@ -530,7 +530,7 @@ mod tests {
     /// committed. The rollout is held at a gate in the database between its revision and its
     /// record, so the collection runs exactly then; the gate opens once the collection waits, or
     /// once it has finished, which only a collection that took no hold does.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// Verifies: ADR-0041
     #[test]
     fn a_collection_keeps_a_stored_revision_a_rollout_pins_meanwhile() {
         use opamp::uid::InstanceUid;
@@ -645,7 +645,7 @@ mod tests {
     /// A deletion of a Configuration through B while a rollout through A that pins one of its
     /// revisions has not yet committed waits for the rollout, and then refuses it from the
     /// assignment the rollout stored: the rollout holds the Configuration's row until it commits.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it, ADR-0026
+    /// Verifies: ADR-0041, ADR-0026
     #[test]
     fn a_deletion_waits_for_a_rollout_that_pins_the_configuration_and_is_refused() {
         use crate::agent_store::tests::record;

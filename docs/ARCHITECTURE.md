@@ -177,13 +177,13 @@ no module.
   `postgres::audit::PgAuditStore` keeps one chain per lease; the lease's take opens it and closes
   the chains of the lapsed leases it removes, as each renewal does, and an orderly shutdown closes
   the instance's own
-  ([ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance](adr/draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance.md)).
+  ([ADR-0042](adr/0042-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance.md)).
   `postgres::audit_prune` bounds it by `[audit] retain_days`: a task `main` starts prunes at
   startup and once a day, the instance's own chain always and the closed chains while it holds the
   prune's advisory lock, recording each `audit.pruned` through the instance's writer and waiting
   for it before it deletes, in rounds of a bounded number of entries, every chain of one round in
   one transaction
-  ([ADR-draft-the-servers-state-and-its-stores](adr/draft-the-servers-state-and-its-stores.md)
+  ([ADR-0044](adr/0044-the-servers-state-and-its-stores.md)
   clause 12).
 - **Server ports beyond storage** — `fleet` owns `CertificateSigner`, which the local CA in `ca`
   implements for the CSR flow and the renewal proof (ADR-0021), and
@@ -399,7 +399,7 @@ its queue), `package-floors.json` (the floor of each Agent type) and `audit/`
 With `[database] store = "postgres"` the records are rows of one PostgreSQL database instead, and
 `data_dir` keeps, with the filesystem blob store, `blobs/` and an archived `audit/`; with the blobs
 in S3 too there is no `data_dir`, and an instance keeps nothing on its disk
-([ADR-draft-the-servers-state-and-its-stores](adr/draft-the-servers-state-and-its-stores.md)).
+([ADR-0044](adr/0044-the-servers-state-and-its-stores.md)).
 On files the Server loads every record at startup and answers from memory; on PostgreSQL an
 instance holds only the Agents connected to it, each read at its first report, and the Operator
 plane reads the fleet from the database.

@@ -152,7 +152,7 @@ impl Records {
     }
 }
 
-/// Where the copy puts the blobs (ADR-draft-the-servers-state-and-its-stores clause 27).
+/// Where the copy puts the blobs (ADR-0044 clause 27).
 #[derive(Clone, Copy)]
 pub enum Blobs<'a> {
     /// The filesystem blob store: `blobs/` is copied into this new, empty `data_dir`.
@@ -163,7 +163,7 @@ pub enum Blobs<'a> {
 }
 
 /// Copies the `data_dir` `from` into the database `config` names, and its blobs where `blobs`
-/// says (ADR-draft-the-servers-state-and-its-stores clause 27).
+/// says (ADR-0044 clause 27).
 ///
 /// # Errors
 /// Returns an error naming what could not be read or copied, when the new `data_dir` is not
@@ -260,7 +260,7 @@ fn copy(from: &Path, target: Target<'_>, database: &Database) -> Result<Report, 
     let mut report = Report::default();
     // No audit entry is copied: the files stay where they are as the closed archive, and its last
     // entry is recorded for the first chain to name as its predecessor
-    // (ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance clause 6).
+    // (ADR-0042 clause 6).
     let audit = from.join(fs::AUDIT);
     let archive = super::audit::archive_checked(&audit)?;
     let archive_end = archive.map(|archive| {
@@ -340,7 +340,7 @@ fn copy(from: &Path, target: Target<'_>, database: &Database) -> Result<Report, 
     Ok(report)
 }
 
-/// `server blobs-to-s3 --data-dir <data_dir>` (ADR-draft-the-servers-state-and-its-stores clause
+/// `server blobs-to-s3 --data-dir <data_dir>` (ADR-0044 clause
 /// 19): the blobs of a Server already on PostgreSQL with the filesystem blob store, uploaded into
 /// the bucket `bucket` names. It runs while no instance holds a live lease, under the database's
 /// exclusive lock, and only reads `data_dir`; the database is read and not changed, its schema
@@ -404,7 +404,7 @@ pub(crate) fn blobs_to_s3_in(
     }
     // The blob store's lock, alone, for the whole run: an instance that starts meanwhile waits at
     // its startup sweep rather than deleting this command's staging objects
-    // (ADR-draft-the-servers-state-and-its-stores clause 19).
+    // (ADR-0044 clause 19).
     let hold = database.hold_blobs_within(sweep_wait)?;
     let packages = crate::Records::Postgres(database.clone())
         .packages()?
@@ -873,8 +873,8 @@ mod tests {
     /// `data_dir` unchanged, and a Server on PostgreSQL and S3 then opens every entry's blob. A
     /// Package entry whose blob neither the old `data_dir` nor the bucket holds fails the copy,
     /// naming the entry, and leaves the database without the Server's tables
-    /// (ADR-draft-the-servers-state-and-its-stores clause 27).
-    /// Verifies: ADR-draft-the-servers-state-and-its-stores
+    /// (ADR-0044 clause 27).
+    /// Verifies: ADR-0044
     #[test]
     fn migrate_to_postgres_with_s3_uploads_the_referenced_blobs_and_takes_no_data_dir() {
         use crate::s3::tests::{again, clear, keys, named_store};
@@ -963,8 +963,8 @@ mod tests {
     /// entry references and nothing else, leaves the data directory as it was, and a Server on
     /// PostgreSQL and S3 then opens every entry's blob; a second run uploads nothing. An entry whose
     /// blob the bucket does not hold afterwards fails it, naming the entry
-    /// (ADR-draft-the-servers-state-and-its-stores clause 19).
-    /// Verifies: ADR-draft-the-servers-state-and-its-stores
+    /// (ADR-0044 clause 19).
+    /// Verifies: ADR-0044
     #[test]
     fn blobs_to_s3_uploads_the_referenced_blobs_and_checks_every_entry() {
         use crate::s3::tests::{again, clear, keys, named_store};
@@ -1083,8 +1083,8 @@ mod tests {
 
     /// `server blobs-to-s3` holds the blob store's lock alone for its whole run: while it uploads,
     /// no sweep has the lock, and with the lock held elsewhere it fails naming the lock
-    /// (ADR-draft-the-servers-state-and-its-stores clause 19).
-    /// Verifies: ADR-draft-the-servers-state-and-its-stores
+    /// (ADR-0044 clause 19).
+    /// Verifies: ADR-0044
     #[test]
     fn blobs_to_s3_holds_the_blob_lock_alone_and_fails_naming_it_when_held() {
         use crate::s3::tests::{clear, named_store};
@@ -1239,7 +1239,7 @@ mod tests {
     /// as its predecessor; `audit-verify --archive` checks the link over the untouched archive and
     /// fails, naming the predecessor, once the archive's last entry was changed or removed;
     /// without `--archive` the predecessor is reported as not checked.
-    /// Verifies: ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance
+    /// Verifies: ADR-0042
     #[test]
     fn the_first_chain_names_the_archive_and_audit_verify_checks_the_link() {
         let Some(test) = TestDatabase::named() else {
@@ -1360,7 +1360,7 @@ mod tests {
 
     /// A file record that ends in a torn line stops the copy, naming the file, before anything is
     /// written: its end could never be verified as the first chain's predecessor.
-    /// Verifies: ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance
+    /// Verifies: ADR-0042
     #[test]
     fn a_copy_refuses_an_audit_record_that_ends_in_a_torn_line() {
         let Some(test) = TestDatabase::named() else {

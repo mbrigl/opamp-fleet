@@ -254,7 +254,7 @@ pub struct Ledger {
     pub revocations: Vec<Revocation>,
     pub hosts: BTreeMap<String, Host>,
     /// The list's one version, as the store holds it, where the store keeps one: PostgreSQL does
-    /// (ADR-draft-the-servers-state-and-its-stores clause 10), the filesystem does not.
+    /// (ADR-0044 clause 10), the filesystem does not.
     pub version: Option<u64>,
 }
 
@@ -283,7 +283,7 @@ pub trait LedgerStore: Send + Sync {
     /// counted, and a renewal whose chain holds a revoked certificate is refused, in the write
     /// itself, so both hold for every instance on one store together and no instance with a stale
     /// view can pass them
-    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// (ADR-0041
     /// clause 19). A store that is its only writer decides as [`register_into`] does; the one
     /// that only puts what the Server decided in memory is answered `Registered`.
     ///
@@ -326,7 +326,7 @@ pub trait LedgerStore: Send + Sync {
     /// issuers widened by those `entry` names beside them ([`widened`]), and a list already
     /// holding `bound` entries takes no more. The bound is counted
     /// in the write itself, so it holds for every instance on one store together
-    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// (ADR-0041
     /// clause 19).
     ///
     /// # Errors
@@ -347,7 +347,7 @@ pub trait LedgerStore: Send + Sync {
 
     /// Binds `instance_uid` to `host`, unless another Host holds it: the binding is one row the
     /// store holds once for every instance
-    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// (ADR-0041
     /// clause 19). A store that is its only writer binds what the Server decided in memory.
     ///
     /// # Errors
@@ -412,7 +412,7 @@ pub trait LedgerStore: Send + Sync {
     /// Writes one act on the Hosts, deciding each field from what is stored: a valid until only
     /// moves forward, an approval and a subject are written only into a Host that has no row yet,
     /// and a Host is forgotten only while what is stored says it has ended
-    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// (ADR-0041
     /// clause 19). A store that writes the Hosts whole writes nothing here.
     ///
     /// # Errors
@@ -619,7 +619,7 @@ pub(crate) fn add_to(list: &mut Vec<Revocation>, entry: &Revocation, bound: usiz
 
 /// The entry `held` under the issuers of both it and `entry`, when `entry`, of the same id, names
 /// an issuer `held` does not: a serial revoked under one CA of a rotation and again under the CA
-/// file of both is revoked under both (ADR-draft-admission-by-client-certificate-and-revocation
+/// file of both is revoked under both (ADR-0038
 /// clause 27). `None` when `held` covers `entry` already. It keeps the time `held` was revoked.
 #[must_use]
 pub fn widened(held: &Revocation, entry: &Revocation) -> Option<Revocation> {
@@ -1672,10 +1672,10 @@ impl Revocations {
     /// Reads the register and the Hosts again from the store, as another instance may have changed
     /// them, so what this instance admits follows what is stored: an `instance_uid` another instance
     /// bound, released or moved, a Host it marked, and the entries it registered
-    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// (ADR-0041
     /// clause 19). The revocation list is read again too, and announced when it changed, so every
     /// open session checks itself against what is stored
-    /// (ADR-draft-admission-by-client-certificate-and-revocation clause 32).
+    /// (ADR-0038 clause 32).
     ///
     /// The store is read outside the lock, so no revocation check, `speaks_for` or report waits for
     /// the read, only for the swap. A read that began before an act of this instance's own
@@ -3306,7 +3306,7 @@ mod tests {
     /// A revocation check, `speaks_for` and a report's check wait for a reload's swap only, not
     /// for its read of the store, and a reload no act of this instance's own crossed is swapped in
     /// after one read.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// Verifies: ADR-0041
     #[test]
     fn a_check_does_not_wait_for_a_reloads_read() {
         let store = ReadHeld::default();
@@ -3399,7 +3399,7 @@ mod tests {
         hex::encode([n; 16])
     }
 
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// Verifies: ADR-0041
     #[test]
     fn a_revocation_made_during_a_reload_holds() {
         an_own_act_outlives_a_reload(
@@ -3411,7 +3411,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// Verifies: ADR-0041
     #[test]
     fn a_lift_made_during_a_reload_holds() {
         an_own_act_outlives_a_reload(
@@ -3427,7 +3427,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// Verifies: ADR-0041
     #[test]
     fn a_binding_made_during_a_reload_holds() {
         an_own_act_outlives_a_reload(
@@ -3445,7 +3445,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// Verifies: ADR-0041
     #[test]
     fn a_valid_until_moved_during_a_reload_holds() {
         let until = |r: &Revocations| {
@@ -3467,7 +3467,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// Verifies: ADR-0041
     #[test]
     fn a_register_write_made_during_a_reload_holds() {
         an_own_act_outlives_a_reload(
@@ -3480,7 +3480,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// Verifies: ADR-0041
     #[test]
     fn a_release_made_during_a_reload_holds() {
         an_own_act_outlives_a_reload(
@@ -3493,7 +3493,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// Verifies: ADR-0041
     #[test]
     fn a_rekey_made_during_a_reload_holds() {
         an_own_act_outlives_a_reload(
@@ -3506,7 +3506,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// Verifies: ADR-0041
     #[test]
     fn a_gateway_mark_made_during_a_reload_holds() {
         an_own_act_outlives_a_reload(
@@ -3568,7 +3568,7 @@ mod tests {
     /// Own acts that keep crossing a reload's reads do not keep it from ending: after
     /// `RELOAD_SWAPS_REFUSED` refused swaps it reads once under the lock and swaps that in, with
     /// another instance's act and every own act held.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// Verifies: ADR-0041
     #[test]
     fn a_reload_crossed_by_own_acts_ends_after_its_bounded_reads() {
         let store = Acting::default();
@@ -3625,7 +3625,7 @@ mod tests {
 
     /// Two reloads at once never swap an older read over a newer one: the second reads once the
     /// first has swapped.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// Verifies: ADR-0041
     #[test]
     fn a_reload_never_swaps_an_older_read_over_a_newer_one() {
         let store = ReadHeld::default();
@@ -3705,7 +3705,7 @@ mod tests {
 
     /// A reload whose read panicked does not end the reloads after it: the next one reads and
     /// swaps, and takes up what another instance committed.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// Verifies: ADR-0041
     #[test]
     fn a_reload_after_one_that_panicked_still_swaps() {
         let store = PanicsOnce::default();

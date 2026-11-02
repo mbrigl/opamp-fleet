@@ -19,7 +19,7 @@ once its tag exists.
 ### Added
 
 - **Several Server instances serve one fleet on one PostgreSQL database and one bucket**
-  ([ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it](docs/adr/draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md)).
+  ([ADR-0041](docs/adr/0041-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md)).
   Every Server on PostgreSQL is an instance:
   - **The lease.** Before it opens either listener, an instance takes a lease in the database
     under an instance id of its own. It renews the lease every `[database] lease_renew_secs`
@@ -64,7 +64,7 @@ once its tag exists.
   instances.
 
 - **`server blobs-to-s3` moves the artifacts of a Server already on PostgreSQL into a bucket**
-  ([ADR-draft-the-servers-state-and-its-stores](docs/adr/draft-the-servers-state-and-its-stores.md)).
+  ([ADR-0044](docs/adr/0044-the-servers-state-and-its-stores.md)).
   `server blobs-to-s3 --data-dir <data_dir> --config <server.toml>` takes the `server.toml` the
   Server will start with: the bucket, and no `data_dir`. It then:
   - refuses while any instance holds a live lease;
@@ -79,7 +79,7 @@ once its tag exists.
   [the manual](docs/manual/server.md#blobs) shows.
 
 - **On PostgreSQL the audit record is kept for `[audit] retain_days`**
-  ([ADR-draft-the-servers-state-and-its-stores](docs/adr/draft-the-servers-state-and-its-stores.md)).
+  ([ADR-0044](docs/adr/0044-the-servers-state-and-its-stores.md)).
   The key's default is 365 days, from 1 to 36 500.
   - At its start and once a day, each instance prunes what the database stored longer ago than
     that. It prunes its own chain, and, one instance at a time, the closed chains.
@@ -94,7 +94,7 @@ once its tag exists.
 ### Changed
 
 - **A Server of 0.7.1 refuses a database this release has started on**
-  ([ADR-draft-the-servers-state-and-its-stores](docs/adr/draft-the-servers-state-and-its-stores.md)).
+  ([ADR-0044](docs/adr/0044-the-servers-state-and-its-stores.md)).
   The migrations this release applies at its first start on PostgreSQL, 3 to 10, name 0.8.0 as the
   oldest Server that understands the schema. A Server of 0.7.1 started on that database stops,
   naming both versions, and changes nothing: it holds no lease, keeps its audit record in files
@@ -105,8 +105,8 @@ once its tag exists.
   first instance of this release starts; a rolling update that starts the new one first is
   refused. A rollback to 0.7.1 after the upgrade needs the database restored from that backup.
 - **With PostgreSQL and S3, a `data_dir` fails startup, and the image names no data directory**
-  ([ADR-draft-the-servers-state-and-its-stores](docs/adr/draft-the-servers-state-and-its-stores.md),
-  [ADR-draft-releases-attestations-and-the-server-image](docs/adr/draft-releases-attestations-and-the-server-image.md)).
+  ([ADR-0044](docs/adr/0044-the-servers-state-and-its-stores.md),
+  [ADR-0040](docs/adr/0040-releases-attestations-and-the-server-image.md)).
   - A Server on PostgreSQL and S3 keeps nothing on its disk. A `data_dir` named in `server.toml` or
     as `FLEET_SERVER__DATA_DIR` stops the start, naming the key.
   - `server migrate-to-postgres` with S3 takes no `--data-dir` and refuses one. It uploads the
@@ -122,13 +122,13 @@ once its tag exists.
   add a lifecycle rule that aborts incomplete multipart uploads under `<prefix>staging/`, as
   [the manual](docs/manual/server.md#blobs) shows.
 - **Each `[audit]` key applies to its own store**
-  ([ADR-draft-the-servers-state-and-its-stores](docs/adr/draft-the-servers-state-and-its-stores.md)).
+  ([ADR-0044](docs/adr/0044-the-servers-state-and-its-stores.md)).
   `max_file_bytes` and `keep_files` apply to the filesystem store alone, and `retain_days` to
   PostgreSQL alone. A key set for the other store stops the start, naming `[audit] <key>`.
   **What to do:** on PostgreSQL, remove `[audit] max_file_bytes` and `keep_files` from
   `server.toml` before the upgrade.
 - **With PostgreSQL, an `instance_uid` is bound to one Host by a row of its own**
-  ([ADR-draft-the-fleet-record-of-agents-and-hosts](docs/adr/draft-the-fleet-record-of-agents-and-hosts.md)).
+  ([ADR-0043](docs/adr/0043-the-fleet-record-of-agents-and-hosts.md)).
   The Server adds the table `host_bindings` at its first start (migration 4), filled from the
   Hosts, and still writes the Hosts' arrays.
   - An `instance_uid` that two Hosts hold fails the migration with `the instance_uid <uid> is
@@ -139,7 +139,7 @@ once its tag exists.
   **What to do:** on such a failure, release that `instance_uid` from all but one Host, and start
   again.
 - **On PostgreSQL the audit record is in the database, one hash chain per lease**
-  ([ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance](docs/adr/draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance.md)).
+  ([ADR-0042](docs/adr/0042-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance.md)).
   Each instance opens a chain with each lease, closes it at an orderly shutdown, and closes the
   chain of every lapsed lease it takes over; entries queued under a lease that lapsed land in the
   next chain, marked `taken_under`. `server audit-verify --config <server.toml>` walks every
@@ -155,7 +155,7 @@ once its tag exists.
   links the archive.
 
 - **With PostgreSQL, the revocation list has one version, and it is the Gateways' `ETag`**
-  ([ADR-draft-the-servers-state-and-its-stores](docs/adr/draft-the-servers-state-and-its-stores.md)).
+  ([ADR-0044](docs/adr/0044-the-servers-state-and-its-stores.md)).
   Every revocation and every lift moves a counter in the database, in its own transaction, and
   `GET /v1/gateway/revocations` answers `ETag: "list-<version>-<SHA-256 of the body>"`. Every
   Server instance on one database therefore answers the same `ETag` for the same list, and each
@@ -167,7 +167,7 @@ once its tag exists.
 
 - **With PostgreSQL, a Configuration's revisions, a Package's entries and a Deployment's members are
   written one row at a time**
-  ([ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it](docs/adr/draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md)).
+  ([ADR-0041](docs/adr/0041-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md)).
   Every act writes the rows it names and decides from what is stored, so two Server instances on
   one database that edit one Configuration, Package or Deployment at once keep both changes, and a
   revision another instance's rollout pins is never collected. At its first start the Server adds
@@ -180,7 +180,7 @@ once its tag exists.
   again and sign the bytes it holds.
 
 - **Forgetting an Agent ends its session, and with PostgreSQL any instance may forget it**
-  ([ADR-draft-the-fleet-record-of-agents-and-hosts](docs/adr/draft-the-fleet-record-of-agents-and-hosts.md)).
+  ([ADR-0043](docs/adr/0043-the-fleet-record-of-agents-and-hosts.md)).
   A WebSocket that carried only the forgotten Agent is closed with code `1000` and the reason
   `forgotten`; one that carries other Agents too stays open. With PostgreSQL each instance writes
   where the Agents it carries are connected, and which instance holds them, in one batch every
@@ -194,7 +194,7 @@ once its tag exists.
 
 - **With PostgreSQL the newest connection takes an Agent, and an Agent two instances take in turn
   is logged as a likely duplicate**
-  ([ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it](docs/adr/draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md)).
+  ([ADR-0041](docs/adr/0041-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md)).
   The instance an Agent connects to names itself as the Agent's holder at once, and the instance
   that held it before stops carrying it; a presence batch of that instance written afterwards no
   longer names it again. Whether a disconnect is written depends no more on the instances' clocks
@@ -207,7 +207,7 @@ once its tag exists.
 
 - **With PostgreSQL, an Agent's report, its labels, a restart request and a rollout each write
   their own columns of its record**
-  ([ADR-draft-the-fleet-record-of-agents-and-hosts](docs/adr/draft-the-fleet-record-of-agents-and-hosts.md)).
+  ([ADR-0043](docs/adr/0043-the-fleet-record-of-agents-and-hosts.md)).
   The Server instance that carries an Agent writes only what a report decides, so labels, a
   restart or a release made through another instance on the same database stay, and that
   instance takes them up from the database at once; a restart is sent once, by the instance that
@@ -221,7 +221,7 @@ once its tag exists.
   **What to do:** nothing.
 
 - **On PostgreSQL an instance loads no fleet, and the Operator plane reads it from the database**
-  ([ADR-draft-the-fleet-record-of-agents-and-hosts](docs/adr/draft-the-fleet-record-of-agents-and-hosts.md)).
+  ([ADR-0043](docs/adr/0043-the-fleet-record-of-agents-and-hosts.md)).
   - An instance holds in memory the Agents connected to it, each read at its first report.
   - The fleet list, an Agent's view, the Hosts, the reach counts, both rollout acts and the
     download check read the records from the database, each Agent connected as its stored
@@ -231,7 +231,7 @@ once its tag exists.
   **What to do:** nothing.
 - **With PostgreSQL, what an assignment pins is decided in the transaction, under the blob store's
   lock**
-  ([ADR-draft-the-servers-state-and-its-stores](docs/adr/draft-the-servers-state-and-its-stores.md)).
+  ([ADR-0044](docs/adr/0044-the-servers-state-and-its-stores.md)).
   These acts count the assignments stored, under the row's lock:
   - deleting a Configuration, a Package or a Deployment;
   - every write to a Package.
@@ -251,7 +251,7 @@ once its tag exists.
   alone, its lock's.
 - **A stop spreads the closing of the sessions over `drain_secs`, and the Agent plane takes at most
   `max_new_connections_per_sec` new connections**
-  ([ADR-draft-tls-1-3-two-planes-and-bounded-input](docs/adr/draft-tls-1-3-two-planes-and-bounded-input.md)).
+  ([ADR-0045](docs/adr/0045-tls-1-3-two-planes-and-bounded-input.md)).
   - An orderly stop closes both listeners at once. It closes each WebSocket session at an instant
     drawn over `drain_secs` (default 20, from 0 to 300) and cuts what is still open 2 seconds
     later. This replaces the fixed ten-second drain.
@@ -269,7 +269,7 @@ once its tag exists.
 - **`server audit-verify <dir>` holds a record the Server repaired after a crash, and binds the
   repair to the entries before it.** A crash mid-write leaves a torn last line, and the next start
   follows it with `audit.chain_broken` chained on its hash
-  ([ADR-draft-an-append-only-audit-record](docs/adr/draft-an-append-only-audit-record.md)).
+  ([ADR-0039](docs/adr/0039-an-append-only-audit-record.md)).
   `audit-verify` failed on that torn line as not an entry, and on a torn line cut inside a
   character could not read the file at all. It now takes the repair as holding, and still fails a
   torn line nothing follows. `audit.chain_broken` now also names as `last_whole` the hash of the

@@ -109,7 +109,7 @@ impl Handle {
 
     /// Stops accepting at once and tells each WebSocket session to close at an instant drawn
     /// uniformly over `over`
-    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// (ADR-0041
     /// clause 3), so the
     /// peers come back spread rather than all at once; what is still open [`SPREAD_GRACE`] after
     /// the window is cut. A window of zero tells them all at once.
@@ -311,7 +311,7 @@ impl Listener {
     }
 
     /// Takes at most `rate` new connections a second
-    /// (ADR-draft-tls-1-3-two-planes-and-bounded-input clause 4). A connection past it is served
+    /// (ADR-0045 clause 4). A connection past it is served
     /// nothing but `503` with a `Retry-After` of whole seconds drawn from 1 to 30, so a fleet that
     /// comes back at once is spread rather than turned away together; the connections already
     /// held keep working. Without it, a listener takes new connections as fast as they come; a rate
@@ -667,7 +667,7 @@ mod tests {
 
     /// A bucket of 200 a second takes exactly 200 new connections at one instant and refuses the
     /// rest, then takes 10 more after 50 ms: the rate, without the timing of a real listener.
-    /// Verifies: ADR-draft-tls-1-3-two-planes-and-bounded-input
+    /// Verifies: ADR-0045
     #[test]
     fn the_bucket_takes_its_rate_and_refills_at_it() {
         let mut bucket = Bucket::new(200);

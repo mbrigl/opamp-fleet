@@ -291,7 +291,7 @@ async fn connections_past_the_cap_are_refused_while_established_ones_keep_workin
 /// seconds and closes the connection: of 30 new connections at a rate of 20, about 20 are served
 /// and the rest are told when to come back. The exact count is the bucket's own unit test; this
 /// one is small enough to fit any listen queue.
-/// Verifies: ADR-draft-tls-1-3-two-planes-and-bounded-input
+/// Verifies: ADR-0045
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn new_connections_past_the_rate_are_answered_503_with_a_spread_retry_after() {
     let (listener, port) = bind();
@@ -340,7 +340,7 @@ async fn new_connections_past_the_rate_are_answered_503_with_a_spread_retry_afte
 /// Over TLS, a connection past the rate completes its handshake and is answered `503` with a
 /// `Retry-After`, over HTTP/1.1 alone, so its connection closes after the answer; one within the
 /// rate is offered HTTP/2 as before.
-/// Verifies: ADR-draft-tls-1-3-two-planes-and-bounded-input
+/// Verifies: ADR-0045
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_tls_connection_past_the_rate_is_answered_503_over_http_1_1() {
     use std::io::{Read as _, Write as _};
@@ -817,7 +817,7 @@ async fn a_drain_cuts_a_stuck_websocket_session_at_its_deadline() {
 /// window, so the peers do not all come back at once; a session that keeps sending closes at its
 /// instant all the same, and `serve` returns within the window and its grace.
 ///
-/// Verifies: ADR-draft-tls-1-3-two-planes-and-bounded-input
+/// Verifies: ADR-0045
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_spread_drain_closes_the_sessions_over_its_window() {
     use futures_util::{SinkExt, StreamExt};

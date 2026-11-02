@@ -15,7 +15,7 @@
 //! [`crate::fs::FsAuditStore`], one chain in files that rotate by size.
 //!
 //! On PostgreSQL the record is one chain per lease
-//! (ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance), the adapter
+//! (ADR-0042), the adapter
 //! [`crate::postgres::audit::PgAuditStore`]. Each entry is marked with the lease it was decided
 //! under. The writer writes into the chain of the lease held now: entries decided under a lease
 //! that lapsed before they were written go into the next chain, marked `taken_under` the old one,
@@ -379,7 +379,7 @@ impl AuditLog {
 
     /// [`drain`](Self::drain) at an orderly shutdown, and then, where the store keeps one chain
     /// per lease, the chain closed with `audit.chain_closed` and `reason` `shutdown`
-    /// (ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance clause 3).
+    /// (ADR-0042 clause 3).
     /// `false` when something queued was not written or the chain could not be closed: its lease
     /// is then left to lapse, so the instance that takes it over closes the chain.
     #[must_use]
@@ -1009,12 +1009,12 @@ pub struct Walked {
     pub closed: bool,
     /// The `seq` and the hash of the archive's last entry, where its `audit.chain_opened` names
     /// them as its predecessor
-    /// (ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance clause 6).
+    /// (ADR-0042 clause 6).
     pub predecessor: Option<(u64, String)>,
 }
 
 /// Walks one chain of a lease in `seq` order
-/// (ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance clauses 3 and 5):
+/// (ADR-0042 clauses 3 and 5):
 /// it starts with `audit.chain_opened` and 64 zeros as `prev`, or, once pruned, after an entry an
 /// `audit.pruned` names as the last it removed; every entry names the chain, carries the `seq`
 /// after the one before and the hash of the one before as its `prev`, and nothing follows an
@@ -1592,7 +1592,7 @@ mod tests {
     /// on its hash and naming the entry before it as `last_whole`), and refuses a torn line nothing
     /// records as broken, in the middle or at the end, and a repair whose `last_whole` is not the
     /// entry before the torn line.
-    /// Verifies: ADR-0023, ADR-draft-an-append-only-audit-record
+    /// Verifies: ADR-0023, ADR-0039
     #[test]
     fn a_torn_line_holds_only_when_the_next_entry_records_it_as_broken() {
         let first = format!("{{\"seq\":1,\"prev\":\"{GENESIS}\",\"event\":\"a\"}}");
@@ -1687,7 +1687,7 @@ mod tests {
 
     /// A repair that names no `last_whole` holds and is named by its place, as a repair without a
     /// link.
-    /// Verifies: ADR-draft-an-append-only-audit-record
+    /// Verifies: ADR-0039
     #[test]
     fn a_repair_without_a_link_holds_and_is_named() {
         let first = format!("{{\"seq\":1,\"prev\":\"{GENESIS}\",\"event\":\"a\"}}");
@@ -1951,7 +1951,7 @@ mod tests {
     /// as the last it removed, and a closed chain pruned whole when one names its closing hash;
     /// a first retained entry no `audit.pruned` links, and a closed empty chain whose closing hash
     /// none names, fail naming the chain.
-    /// Verifies: ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance
+    /// Verifies: ADR-0042
     #[test]
     fn a_pruned_chain_holds_only_where_an_audit_pruned_links_it() {
         let chain = lease_chain(4, true);
@@ -1996,7 +1996,7 @@ mod tests {
     /// follows the one before; an altered entry, one removed from the end of a closed chain, an
     /// entry after its `audit.chain_closed`, and a closing the record does not hold each fail,
     /// naming the chain and the entry; an open chain is reported open with its last entry.
-    /// Verifies: ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance
+    /// Verifies: ADR-0042
     #[test]
     fn a_chain_of_a_lease_fails_where_it_was_cut_or_changed() {
         let open = lease_chain(3, false);

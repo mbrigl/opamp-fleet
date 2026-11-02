@@ -43,7 +43,7 @@ impl Backoff {
 
     /// The delay before the first reconnect after an established connection was lost, drawn
     /// uniformly over `[0, AFTER_LOSS)`; the failures after it start the exponential steps again
-    /// (ADR-draft-tls-1-3-two-planes-and-bounded-input clause 4).
+    /// (ADR-0045 clause 4).
     ///
     /// The draw starts at zero, unlike [`advance`](Self::advance): the floor of equal jitter is
     /// what puts a whole fleet into the same half second once its Server goes away, and a fleet
@@ -98,7 +98,7 @@ mod tests {
 
     /// The first reconnect after a lost connection is drawn over the whole of `[0, 30 s)`, not its
     /// upper half, and the failures after it start again from the first exponential step.
-    /// Verifies: ADR-draft-tls-1-3-two-planes-and-bounded-input
+    /// Verifies: ADR-0045
     #[test]
     fn the_first_reconnect_after_a_lost_connection_is_drawn_over_thirty_seconds() {
         let mut backoff = Backoff::new();

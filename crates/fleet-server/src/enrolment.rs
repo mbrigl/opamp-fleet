@@ -198,7 +198,7 @@ pub enum Took {
 /// filesystem adapter ([`FsEnrolmentStore`](crate::fs::FsEnrolmentStore)) keeps them in
 /// `enrolment.json`. Each act is one write that decides from what is stored, so the queue's bounds
 /// hold for every instance on one database
-/// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+/// (ADR-0041
 /// clause 19). The acts' bodies here read and write the whole, for a store that is its only
 /// writer; a store that is shared answers each in one transaction of its own.
 pub trait EnrolmentStore: Send + Sync {
@@ -277,7 +277,7 @@ pub trait EnrolmentStore: Send + Sync {
     /// and its answer is written as the request's decision. A request the store holds no longer
     /// waiting is answered [`Approval::NotWaiting`] before anything is signed, so of two instances
     /// approving one request one signs and records it and the other nothing
-    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// (ADR-0041
     /// clause 19). A store other instances share also refuses a request whose bootstrap
     /// certificate, `bootstrap`, the list names, and withdraws it; a store that is its only writer
     /// leaves that to the list in memory.
@@ -900,7 +900,7 @@ impl Enrolment {
     }
 
     /// Reads the window and its queue again from the store, as another instance changed them
-    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// (ADR-0041
     /// clauses 9 and 10), and wakes every connection waiting on them, so a request another instance
     /// approved is handed to the connection that asked. It reads under the lock, so no act of this
     /// instance's own lands between the read and the swap; the queue is bounded, so the read is
@@ -1054,7 +1054,7 @@ pub(crate) mod tests {
     /// Two instances on one store answer a request as the store holds it: one the other approved
     /// is handed out with its certificate, and one the other decided or withdrew is not found,
     /// however the first held it, and signs nothing.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// Verifies: ADR-0041
     #[test]
     fn two_instances_on_one_store_answer_a_request_as_the_store_holds_it() {
         let clock = Arc::new(Manual(AtomicU64::new(1_000_000)));

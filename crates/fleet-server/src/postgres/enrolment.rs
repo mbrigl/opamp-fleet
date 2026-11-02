@@ -3,7 +3,7 @@
 //! request in a row of its own. Each act is one transaction on the rows it names, written before
 //! it is answered; taking a request in holds the queue against every other taker while it counts,
 //! so the queue's bounds hold for every instance on the database
-//! (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+//! (ADR-0041
 //! clause 19).
 
 use std::sync::Arc;
@@ -593,7 +593,7 @@ mod tests {
         acts(&|| Box::new(FsEnrolmentStore::open(dir.path())));
     }
 
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// Verifies: ADR-0041
     #[test]
     fn the_enrolment_acts_hold_on_postgres() {
         let Some(test) = TestDatabase::named() else {
@@ -606,7 +606,7 @@ mod tests {
     /// Two instances take a request each into a queue with one place left, behind a barrier, and
     /// exactly one is taken while the other finds the queue full; two deciding one request decide
     /// it once.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// Verifies: ADR-0041
     #[test]
     fn two_takers_at_the_queues_bound_take_one_request_between_them() {
         let Some(test) = TestDatabase::named() else {
@@ -758,7 +758,7 @@ mod tests {
     /// Of two instances approving one request, one signs and records it and the other finds it
     /// decided, signing nothing: the request's row is held from before the signature until the
     /// decision is written.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// Verifies: ADR-0041
     #[test]
     fn two_approvers_of_one_request_sign_it_once() {
         let Some(test) = TestDatabase::named() else {
@@ -872,7 +872,7 @@ mod tests {
 
     /// Two instances on one database approving one request: one hands it out, the other answers
     /// that it is not found, and the request is signed and recorded once.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// Verifies: ADR-0041
     #[test]
     fn two_instances_approving_one_request_record_one_certificate() {
         use crate::enrolment::tests::{request as submitted, requester, Echo, Manual};
@@ -935,7 +935,7 @@ mod tests {
 
     /// A take that read the window open before another instance closed it does not land in the
     /// closed window: the window's row is held for share while the request is written.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// Verifies: ADR-0041
     #[test]
     fn a_take_does_not_land_in_a_window_closed_meanwhile() {
         let Some(test) = TestDatabase::named() else {

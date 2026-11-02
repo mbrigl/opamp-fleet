@@ -46,7 +46,7 @@ use fs::{FsAgentStore, FsBlobStore, FsConfigBackend, FsDeploymentBackend, FsPack
 
 /// Whether an instance on PostgreSQL must be alone on its database, and the key that makes it so:
 /// blobs kept as files, or a CA key in a file
-/// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+/// (ADR-0041
 /// clause 2).
 #[must_use]
 pub fn exclusive(config: &config::ServerConfig) -> postgres::Exclusive {
@@ -97,7 +97,7 @@ impl Records {
             (None, None) => Err("the filesystem record store needs data_dir".to_string()),
             (Some(database), data_dir) => {
                 // With S3 too the Server keeps nothing on its disk and has no data directory
-                // (ADR-draft-the-servers-state-and-its-stores clause 1).
+                // (ADR-0044 clause 1).
                 if let Some(data_dir) = data_dir {
                     fs::open_data_dir_beside_database(data_dir).map_err(named)?;
                 }
@@ -270,7 +270,7 @@ impl packages::PackageStore {
 
     /// [`open_with`](Self::open_with), the Package records in `records` (ADR-0029) and the bytes
     /// in the store `[blobs]` chooses, the filesystem's under `data_dir`, which is `None` only
-    /// with PostgreSQL and S3 (ADR-draft-the-servers-state-and-its-stores clause 1).
+    /// with PostgreSQL and S3 (ADR-0044 clause 1).
     ///
     /// On the bucket the staging objects of every lease that is not live are deleted (clause 16),
     /// with PostgreSQL under the blob store's lock (clause 14) and by every sweep, and the cleanup
