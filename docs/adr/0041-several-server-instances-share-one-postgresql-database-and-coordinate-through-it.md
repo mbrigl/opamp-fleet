@@ -1,4 +1,4 @@
-# ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it: Several Server instances share one PostgreSQL database and coordinate through it
+# ADR-0041: Several Server instances share one PostgreSQL database and coordinate through it
 
 - **Status:** 🟡 proposed
 - **Date:** 2026-10-22
@@ -17,8 +17,8 @@ queue's `subscribe`, which hands an approved certificate to the connection that 
 `connected` is what one process knows about its own connections and is never persisted
 ([ADR-0024](0024-the-fleet-record-of-agents-and-hosts.md) clauses 3 and 6). The rate limits and the
 admission throttle are tables in memory
-([ADR-draft-tls-1-3-two-planes-and-bounded-input](draft-tls-1-3-two-planes-and-bounded-input.md)
-clause 28, ADR-draft-admission-by-client-certificate-and-revocation clause 19). Duplicate detection
+([ADR-0045](0045-tls-1-3-two-planes-and-bounded-input.md)
+clause 28, ADR-0038 clause 19). Duplicate detection
 tells two connections of one `instance_uid` apart by a connection id that only this process hands
 out.
 
@@ -32,7 +32,7 @@ active-active, sharing state only through PostgreSQL and the object store, with 
 batches, events broadcast to every instance, and a lease per instance.
 [ADR-0029](0029-the-servers-state-and-its-stores.md) (the PostgreSQL store) puts every store behind
 the ports into one database for a single instance;
-[ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance](draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance.md)
+[ADR-0042](0042-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance.md)
 (audit chains per instance) gives each writing instance its own chain. This ADR is what turns those
 into several instances. A CA key the Server holds is a file, which one instance alone can hold
 (clause 2); CA keys every instance can reach are a decision of their own.
@@ -52,7 +52,7 @@ every change that concerns a live session by one `NOTIFY`.
 
 1. **Every Server on PostgreSQL is an instance, and there is no switch for "several".** With
    `[database] store = "postgres"`
-   ([ADR-draft-the-servers-state-and-its-stores](draft-the-servers-state-and-its-stores.md)) a
+   ([ADR-0044](0044-the-servers-state-and-its-stores.md)) a
    Server takes an instance id at startup — a random UUID that is not persisted — and a lease in the
    database before it opens either listener, and keeps its listeners open only while it holds a
    lease it can prove (clause 3). Every line the instance logs carries its instance id, and the
@@ -80,18 +80,18 @@ every change that concerns a live session by one `NOTIFY`.
    prefix, and every sweep of unreferenced blobs and every staging cleanup run under an advisory
    lock, so one instance does them at a time, and an upload takes it shared in the transaction that
    writes its entry;
-   [ADR-draft-the-servers-state-and-its-stores](draft-the-servers-state-and-its-stores.md) clause 14
+   [ADR-0044](0044-the-servers-state-and-its-stores.md) clause 14
    decides it for the blob store. An instance on PostgreSQL and S3 keeps nothing on its own disk
    (that ADR's clause 1): it reads its configuration, its TLS files and its secret files, all of
    them read-only, and with no CA key on the Server, any instance can take its place. The Server's
    image names no data directory, so such an instance runs from it as it stands
-   ([ADR-draft-releases-attestations-and-the-server-image](draft-releases-attestations-and-the-server-image.md)
+   ([ADR-0040](0040-releases-attestations-and-the-server-image.md)
    clause 16).
 
 3. **The lease.** Each instance renews its lease every `[database] lease_renew_secs` (default 10)
    and it lapses `[database] lease_secs` (default 30, at least three renewals) after the last
    renewal. These two keys and `[database] presence_interval_secs`
-   ([ADR-draft-the-fleet-record-of-agents-and-hosts](draft-the-fleet-record-of-agents-and-hosts.md)
+   ([ADR-0043](0043-the-fleet-record-of-agents-and-hosts.md)
    clause 4) apply to `store = "postgres"` alone; with `store = "fs"` each fails startup, naming it.
    An instance measures its own lease from the moment it sent the last renewal the database
    confirmed, which is no later than the database's own time of that renewal, so it deems its lease
@@ -101,7 +101,7 @@ every change that concerns a live session by one `NOTIFY`.
    never serves on a lease it cannot prove, because it could not learn of a revocation. A closed
    listener is what a load balancer's or an orchestrator's probe sees: the image's probe is a TCP
    connection to `4320` for liveness and readiness
-   ([ADR-draft-releases-attestations-and-the-server-image](draft-releases-attestations-and-the-server-image.md)
+   ([ADR-0040](0040-releases-attestations-and-the-server-image.md)
    clause 17), and an instance without a lease is then neither, so no Agent is sent to it.
 
    An orderly shutdown, on `SIGTERM` among others, drains the instance. It closes both listeners at
@@ -110,30 +110,30 @@ every change that concerns a live session by one `NOTIFY`.
    instant drawn uniformly over `drain_secs` (default 20, from 0 to 300; 0 ends them all at once),
    so its Agents reconnect to the other instances without arriving all at once. Then it writes the
    presence of its Agents, closes its audit chain
-   ([ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance](draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance.md)
+   ([ADR-0042](0042-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance.md)
    clause 3) and releases its lease. The default leaves the rest of an orchestrator's usual grace
    period of 30 seconds for those writes. `drain_secs` applies on the filesystem store as well,
    where the one Server drains the same way.
 
-4. **[ADR-draft-the-fleet-record-of-agents-and-hosts](draft-the-fleet-record-of-agents-and-hosts.md)
+4. **[ADR-0043](0043-the-fleet-record-of-agents-and-hosts.md)
    clause 3 decides it: What a report or an operator decided
    persists; so does where an Agent is connected.**
 
-5. **[ADR-draft-the-fleet-record-of-agents-and-hosts](draft-the-fleet-record-of-agents-and-hosts.md)
+5. **[ADR-0043](0043-the-fleet-record-of-agents-and-hosts.md)
    clause 4 decides it: The write discipline lives above the port,
    so no backend can get it wrong.** On PostgreSQL that clause writes presence in batches.
 
-6. **[ADR-draft-the-fleet-record-of-agents-and-hosts](draft-the-fleet-record-of-agents-and-hosts.md)
+6. **[ADR-0043](0043-the-fleet-record-of-agents-and-hosts.md)
    clause 6 decides it: `connected` says a connection carrying the
    Agent is open — nothing more.**
 
-7. **[ADR-draft-the-fleet-record-of-agents-and-hosts](draft-the-fleet-record-of-agents-and-hosts.md)
+7. **[ADR-0043](0043-the-fleet-record-of-agents-and-hosts.md)
    clause 8 decides it: The budget is three heartbeat intervals,
    and on PostgreSQL the presence interval besides.**
 
 8. **On PostgreSQL an instance holds only the Agents it carries, and the newest connection takes
    an Agent.** On the filesystem store the one Server keeps the whole fleet in memory
-   ([ADR-draft-the-servers-state-and-its-stores](draft-the-servers-state-and-its-stores.md)
+   ([ADR-0044](0044-the-servers-state-and-its-stores.md)
    clause 3). Each instance keeps in memory the records of the Agents whose connection it holds,
    loaded from the database when their first report arrives, and nothing of the rest. When an
    instance begins to carry an Agent, it takes the Agent at once, outside the batch, by one update
@@ -148,14 +148,14 @@ every change that concerns a live session by one `NOTIFY`.
    detection and the rekeying of a newcomer stay within one instance. An Agent whose holder changes
    more than ten times in a minute is logged as a likely duplicate. An Agent's labels stay in its
    record
-   ([ADR-draft-the-fleet-record-of-agents-and-hosts](draft-the-fleet-record-of-agents-and-hosts.md)
+   ([ADR-0043](0043-the-fleet-record-of-agents-and-hosts.md)
    clause 21), and there is no other copy. A label change, a rollout's assignments and a restart
    request made through any instance are written to their own columns of the record in the database
    and announced (clause 9). The instance that carries the Agent writes only what a report decides
-   ([ADR-draft-the-fleet-record-of-agents-and-hosts](draft-the-fleet-record-of-agents-and-hosts.md)
+   ([ADR-0043](0043-the-fleet-record-of-agents-and-hosts.md)
    clause 2), so its next write keeps them whether or not the notification has reached it, and it
    takes them into the record it holds when the notification arrives. Where an effective description
-   (ADR-draft-the-fleet-record-of-agents-and-hosts clause 18) needs the labels of a Client Agent
+   (ADR-0043 clause 18) needs the labels of a Client Agent
    this instance does not carry, or a Host's subject values, the instance reads them from the
    database. It finds that Client Agent among the Agents the host register binds to the Host. The
    register binds none to a Gateway's Host, so behind a Gateway the instance finds it only by a read
@@ -184,18 +184,18 @@ every change that concerns a live session by one `NOTIFY`.
     package floors, the enrolment window and the requests of its enrolment connections. A
     notification of a kind the instance does not know counts as a missed one. It does the same when
     a lease renewal finds that the revocation list's version in the database
-    ([ADR-draft-the-servers-state-and-its-stores](draft-the-servers-state-and-its-stores.md) clause
+    ([ADR-0044](0044-the-servers-state-and-its-stores.md) clause
     10) is newer than the one it holds.
 
 11. **Clause 32 of
-    [ADR-draft-admission-by-client-certificate-and-revocation](draft-admission-by-client-certificate-and-revocation.md)
+    [ADR-0038](0038-admission-by-client-certificate-and-revocation.md)
     decides it: A revocation ends the sessions it
     concerns, and only those, on every instance.**
 
 12. **Caches are dropped, not updated.** Each instance may hold Configurations, Deployments,
     Packages, the package floors, the revocation list, the certificate register and the Hosts in
     memory, as the ports allow
-    ([ADR-draft-the-servers-state-and-its-stores](draft-the-servers-state-and-its-stores.md)
+    ([ADR-0044](0044-the-servers-state-and-its-stores.md)
     clause 2). A notification of their kind drops the entry, and the next use reads it again.
 
 13. **On PostgreSQL the Operator plane reads the Agents from the database.** What it shows of an
@@ -225,7 +225,7 @@ every change that concerns a live session by one `NOTIFY`.
     version the schema names fails its start, and an instance that shares the database neither
     migrates nor starts while another Server holds the database alone, as a Server of 0.7.1 does
     for its whole run
-    ([ADR-draft-the-servers-state-and-its-stores](draft-the-servers-state-and-its-stores.md)
+    ([ADR-0044](0044-the-servers-state-and-its-stores.md)
     clause 22). Between two releases that no migration tells apart, the instances of both are not
     told apart either. Which schema an instance accepts, and how it applies the migrations it
     lacks, is that ADR's clause 22.
@@ -237,7 +237,7 @@ every change that concerns a live session by one `NOTIFY`.
 
 18. **The instance that takes over the lease of a dead process closes its audit chain.** A lease
     names the audit chain of the process that holds it
-    ([ADR-draft-an-append-only-audit-record](draft-an-append-only-audit-record.md) clause 3). At
+    ([ADR-0039](0039-an-append-only-audit-record.md) clause 3). At
     every renewal an instance looks for a lease that lapsed. It takes such a lease over in one
     transaction that locks the lease, so one instance alone takes it, and in that transaction it
     appends `audit.chain_closed` to the chain the lease names, with `reason` `lease_lapsed` and
@@ -254,7 +254,7 @@ every change that concerns a live session by one `NOTIFY`.
       binding one `instance_uid` to a Host, queueing, deciding or expiring one enrolment request,
       and opening or closing the window each change the rows they name and no other, in one
       transaction that carries the notification of clause 9
-      ([ADR-draft-the-servers-state-and-its-stores](draft-the-servers-state-and-its-stores.md)
+      ([ADR-0044](0044-the-servers-state-and-its-stores.md)
       clauses 8 to 10 and 21).
     - An `instance_uid` is bound to at most one Host, by a unique constraint. A binding that meets
       another Host's fails, and the instance reads the binding that holds and decides by it.
@@ -272,7 +272,7 @@ every change that concerns a live session by one `NOTIFY`.
       Package's entries and a Deployment's members are rows of their own: an act adds or removes
       the ones it names, and the revisions a Configuration keeps are reckoned in the transaction
       from the rows and from the assignments that pin them
-      ([ADR-draft-the-servers-state-and-its-stores](draft-the-servers-state-and-its-stores.md)
+      ([ADR-0044](0044-the-servers-state-and-its-stores.md)
       clauses 2 and 21).
     - A rollout holds the row of every Configuration, Package and Deployment its assignments pin
       `FOR KEY SHARE` until it commits, and fails when one is not stored, so it never writes a pin
@@ -282,7 +282,7 @@ every change that concerns a live session by one `NOTIFY`.
 
 20. **A fleet that loses an instance comes back spread out.** The Agents of a lost instance —
     its connections cut, closed as it drains, or ended by a lapsed lease — reconnect as
-    [ADR-draft-tls-1-3-two-planes-and-bounded-input](draft-tls-1-3-two-planes-and-bounded-input.md)
+    [ADR-0045](0045-tls-1-3-two-planes-and-bounded-input.md)
     clause 4 says: the first attempt drawn over `[0, 30 s)`, and each instance bounded to
     `max_new_connections_per_sec` new connections a second.
     - Thirty seconds is a third of the 90 seconds a lease time and two heartbeat intervals make at
@@ -305,30 +305,30 @@ every change that concerns a live session by one `NOTIFY`.
       Agents behind a Gateway reach another instance spread over one heartbeat interval, as they
       report. The pool opens a replacement connection when a report needs one; the Gateway's own
       Client connection reconnects as
-      [ADR-draft-tls-1-3-two-planes-and-bounded-input](draft-tls-1-3-two-planes-and-bounded-input.md)
+      [ADR-0045](0045-tls-1-3-two-planes-and-bounded-input.md)
       clause 4 says.
     - Meanwhile the Gateway serves on what it holds: its revocation list, refreshed every 30
       seconds from whichever instance its fetch reaches and trusted for 300 seconds
       ([ADR-0015](0015-client-modes-and-the-gateway.md) clause 14), and its floors, fetched hourly
       ([ADR-0028](0028-package-versions-high-water-mark-and-floor.md) clause 16). The list's
       version is the same on every instance
-      ([ADR-draft-the-servers-state-and-its-stores](draft-the-servers-state-and-its-stores.md)
+      ([ADR-0044](0044-the-servers-state-and-its-stores.md)
       clause 10), so a fetch that reaches another instance is answered `304` and the list stays
       young enough to trust.
     - A Gateway is not refused for sending all its pool connections from one address. The admission
       throttle counts failures only
-      ([ADR-draft-admission-by-client-certificate-and-revocation](draft-admission-by-client-certificate-and-revocation.md)
+      ([ADR-0038](0038-admission-by-client-certificate-and-revocation.md)
       clause 19), and a Gateway's own certificate does not fail; the rate limits key on its host
       and on each `instance_uid`
-      ([ADR-draft-tls-1-3-two-planes-and-bounded-input](draft-tls-1-3-two-planes-and-bounded-input.md)
+      ([ADR-0045](0045-tls-1-3-two-planes-and-bounded-input.md)
       clause 28); the bound on new connections a second counts every connection alike, and a pool
       of at most `upstream_connections` (default 10) is a handful within it. A pool connection
       refused under that bound waits its `Retry-After` as any Client does.
 
 **Out of scope:** the PostgreSQL schema and adapters themselves
-([ADR-draft-the-servers-state-and-its-stores](draft-the-servers-state-and-its-stores.md)); the audit
+([ADR-0044](0044-the-servers-state-and-its-stores.md)); the audit
 chains, but for closing the chain of a process that died (clause 18)
-([ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance](draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance.md)),
+([ADR-0042](0042-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance.md)),
 and their checkpoints, a decision of their own; paging and filtering the lists that grow with the
 fleet; CA keys that every instance can reach; sharing rate limits across instances; a routing table
 or instance-to-instance messages; several databases or regions; the Agent plane's load balancer and
@@ -407,7 +407,7 @@ the database cluster, which the operator runs.
 ## Enforcement
 
 Tests that will carry `Verifies:
-ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it`, run
+ADR-0041`, run
 against the PostgreSQL that `FLEET_TEST_POSTGRES_URL` names, with two instances in one test process:
 
 - A rollout on instance A reaches an Agent connected to instance B, and a revocation on A closes

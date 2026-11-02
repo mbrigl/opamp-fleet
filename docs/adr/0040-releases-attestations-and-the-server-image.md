@@ -1,4 +1,4 @@
-# ADR-draft-releases-attestations-and-the-server-image: Releases, attestations and the Server's image
+# ADR-0040: Releases, attestations and the Server's image
 
 - **Status:** 🟡 proposed
 - **Date:** 2026-10-31
@@ -45,7 +45,7 @@ secret a file whose path the environment names
 ([ADR-0030](0030-the-servers-configuration.md)). It has no health endpoint; its two planes listen
 on `127.0.0.1:4320` and `127.0.0.1:4321` by default, and off the loopback both require TLS and the
 Operator plane requires `[rest.auth]`
-([ADR-draft-tls-1-3-two-planes-and-bounded-input](draft-tls-1-3-two-planes-and-bounded-input.md)).
+([ADR-0045](0045-tls-1-3-two-planes-and-bounded-input.md)).
 The release workflow builds Linux binaries for `x86_64-unknown-linux-gnu` and
 `aarch64-unknown-linux-gnu` on GitHub-hosted runners with the pinned toolchain
 (`rust-toolchain.toml`), from the committed lockfile, without a cache; a binary for the GNU targets
@@ -72,7 +72,7 @@ Constraints from other decisions:
 This ADR restates [ADR-0034](0034-releases-attestations-and-the-server-image.md) in full. Its
 clause 16 names no data directory, because a Server on PostgreSQL and S3 keeps none and refuses
 one its configuration names
-([ADR-draft-the-servers-state-and-its-stores](draft-the-servers-state-and-its-stores.md)
+([ADR-0044](0044-the-servers-state-and-its-stores.md)
 clause 1).
 
 ## Decision
@@ -278,7 +278,7 @@ provenance of every asset and of the image, publishing nothing that does not ver
       resolves under `/`, where `65532` cannot write, and fails startup naming `data_dir`; it never
       writes outside the volume. A Server on PostgreSQL and S3 is given none, and the volume stays
       unused
-      ([ADR-draft-the-servers-state-and-its-stores](draft-the-servers-state-and-its-stores.md)
+      ([ADR-0044](0044-the-servers-state-and-its-stores.md)
       clause 1).
     - It contains no `server.toml`, no certificate, no key and no credential. Off the loopback the
       Server refuses to start without TLS and without `[rest.auth]`, so an image started with
@@ -579,7 +579,7 @@ provenance of every asset and of the image, publishing nothing that does not ver
 - [`scripts/check-build-hardening.sh`](../../scripts/check-build-hardening.sh) check 3 fails on a
   `cargo install` in `release.yml` without an exact version, which covers the tool of clause 8.
   Its check 2 fails on a cache in `release.yml`.
-- A test that will carry `Verifies: ADR-draft-releases-attestations-and-the-server-image`, for
+- A test that will carry `Verifies: ADR-0040`, for
   clause 16: [`config.rs`](../../crates/fleet-server/src/config.rs)
   `a_data_dir_the_account_cannot_write_fails_startup_naming_it`. The check of the Containerfile
   above takes `DATA_DIR` out of the variables it allows.

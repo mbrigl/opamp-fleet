@@ -1,4 +1,4 @@
-# ADR-draft-the-fleet-record-of-agents-and-hosts: The fleet record of Agents and Hosts
+# ADR-0043: The fleet record of Agents and Hosts
 
 - **Status:** 🟡 proposed
 - **Date:** 2026-10-27
@@ -18,7 +18,7 @@ that is not reporting at that moment — a laptop that is off, a host under inve
 because it went quiet — vanishes, and every other Agent is demanded `ReportFullState` at once. The
 Server's state survives a restart with only each Agent's status determined dynamically, and the
 storage is **replaceable**
-([ADR-draft-the-servers-state-and-its-stores](draft-the-servers-state-and-its-stores.md)). The
+([ADR-0044](0044-the-servers-state-and-its-stores.md)). The
 record's access pattern is narrow — loaded whole at startup where one Server holds the fleet in
 memory, read from the store, one Agent or the list the Operator plane shows, where it does not, and
 written and deleted one Agent at a time — and its report-derived fields are prost-generated protobuf
@@ -30,7 +30,7 @@ Gateway it is the Gateway's. A plain-HTTP Agent has no socket to close. Silence 
 only from an Agent that promised to report periodically, which is what `ReportsHeartbeat` is.
 
 **What "forget" can mean.** A client certificate is issued to a Host, never to an Agent
-([ADR-draft-admission-by-client-certificate-and-revocation](draft-admission-by-client-certificate-and-revocation.md));
+([ADR-0038](0038-admission-by-client-certificate-and-revocation.md));
 nothing the Server holds can stop one Agent from connecting again. And a re-offered configuration is
 not free: the Collector plugin restarts its Managed Process when a configuration arrives, so
 dropping the gates of a live Agent bounces its process.
@@ -63,7 +63,7 @@ Agent is identified), Q-1 and Q-2.
 
 This ADR restates [ADR-0024](0024-the-fleet-record-of-agents-and-hosts.md) in full. Its clauses
 2, 3, 4, 6 and 8 take up the instances of
-[ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it](draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md).
+[ADR-0041](0041-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md).
 
 ## Decision
 
@@ -98,7 +98,7 @@ report, its own labels and its Client Agent's labels, in that order of precedenc
    - `create_within(uid, &PersistedAgent, max_records)` — create the record of an Agent first
      heard of unless the store holds `max_records` already, counted where the records are stored
      in the step that creates it, so the Agent-record ceiling `max_agents`, which
-     [ADR-draft-tls-1-3-two-planes-and-bounded-input](draft-tls-1-3-two-planes-and-bounded-input.md)
+     [ADR-0045](0045-tls-1-3-two-planes-and-bounded-input.md)
      clause 19 counts for the whole fleet, holds for every instance; a record stored already is
      answered as it is stored, and passes no bound;
    - `write_report(uid, &PersistedAgent)` — write the part of a stored record a report decides, as
@@ -119,7 +119,7 @@ report, its own labels and its Client Agent's labels, in that order of precedenc
      stored count of takes is still the one it comes with, so it never undoes a take made since,
      by this instance or another;
    - `take(uid, holder, last_seen_ms)` — the take at a connecting report of
-     [ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it](draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md)
+     [ADR-0041](0041-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md)
      clause 8: names `holder`, raises the record's count of takes by one and answers it, answers
      the holder it replaced and whether this change of holder is the eleventh within a minute,
      counted on the database's clock, and announces the take where it replaced another instance,
@@ -130,7 +130,7 @@ report, its own labels and its Client Agent's labels, in that order of precedenc
      stored presence lets it go, read and removed in one step (clause 11);
    - `set_labels(uid, labels)` and `set_restart_pending(uid, pending)` — the acts that decide them,
      each writing what it names alone; the assignments are written by the rollout operation of
-     [ADR-draft-the-servers-state-and-its-stores](draft-the-servers-state-and-its-stores.md)
+     [ADR-0044](0044-the-servers-state-and-its-stores.md)
      clause 2. The instance that delivers a restart clears `restart_pending` only while no later
      request set it again;
    - `remove(uid)` — forget one record; removing what is absent is not an error;
@@ -144,7 +144,7 @@ report, its own labels and its Client Agent's labels, in that order of precedenc
    `AppState` takes a `Box<dyn AgentStore>`; the binary wires the adapter, and
    another backend is a new adapter plus one wiring line. Which reads a Server makes follows its
    store, by the one rule of
-   [ADR-draft-the-servers-state-and-its-stores](draft-the-servers-state-and-its-stores.md)
+   [ADR-0044](0044-the-servers-state-and-its-stores.md)
    clause 3: on the filesystem store `load()` and the memory it fills, on PostgreSQL `get` and
    `query`.
 
@@ -166,7 +166,7 @@ report, its own labels and its Client Agent's labels, in that order of precedenc
    (default 30, from 10 to 60), so
    a heartbeat reaches the database at most once per interval and Agent. A change of the holding
    instance and a disconnect are written in the next batch, except as
-   [ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it](draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md)
+   [ADR-0041](0041-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md)
    clause 8 says. On graceful shutdown every record and every presence is flushed, so an ordinary
    restart restores current values; on PostgreSQL the flush writes only the records of the Agents
    this instance heard report, and of those only the ones whose stored holder is this instance, or
@@ -269,7 +269,7 @@ report, its own labels and its Client Agent's labels, in that order of precedenc
       fetch what is offered to any Agent.
     - A certificate that names no host speaks for no Agent and fetches nothing.
     - A Client whose Server signs CSRs holds a host certificate after its first connection
-      ([ADR-draft-admission-by-client-certificate-and-revocation](draft-admission-by-client-certificate-and-revocation.md)).
+      ([ADR-0038](0038-admission-by-client-certificate-and-revocation.md)).
       An operator who provisions certificates by hand names the host with that SAN URI.
     - In addition, each Agent record names the Host it last arrived over: its own Host on a
       direct connection, the Gateway's Host behind a Gateway. This is for the fleet view and for
@@ -279,7 +279,7 @@ report, its own labels and its Client Agent's labels, in that order of precedenc
       only hosts whose certificate names a host (`urn:opamp-fleet:host:<id>`).
     - A request that presents no certificate at all exists only behind `Admission::open`, which
       serves tests and loopback development and which no Server configuration serves
-      ([ADR-draft-admission-by-client-certificate-and-revocation](draft-admission-by-client-certificate-and-revocation.md)).
+      ([ADR-0038](0038-admission-by-client-certificate-and-revocation.md)).
       Such a request is not tested for an offer, just as it is not tested at admission.
 
 17. **`PUT /api/v1/agents/{instance_uid}/labels` sets an Agent's labels, whole.** Body
@@ -356,7 +356,7 @@ report, its own labels and its Client Agent's labels, in that order of precedenc
 
 **Out of scope:** a configuration surface for choosing a storage backend and where Agent records
 and Hosts are stored
-([ADR-draft-the-servers-state-and-its-stores](draft-the-servers-state-and-its-stores.md)); a
+([ADR-0044](0044-the-servers-state-and-its-stores.md)); a
 retention policy for Agents nobody claims; acting on staleness (alerts, webhooks, filters); bulk
 labelling; the exact topology behind a Gateway; a Host for a machine the Server sees no certificate
 of; labels or editable fields on a Host itself; which subject values a certificate carries
@@ -484,7 +484,7 @@ certificates already limit.
 - [opamp-go](https://github.com/open-telemetry/opamp-go) example server — keeps its agent map in
   memory and offers no persistence design to follow.
 - On the host a certificate names, renewal, and that a Gateway hides its downstream certificates:
-  [ADR-draft-admission-by-client-certificate-and-revocation](draft-admission-by-client-certificate-and-revocation.md);
+  [ADR-0038](0038-admission-by-client-certificate-and-revocation.md);
   [ADR-0017](0017-supervisor-mode-and-its-kinds.md) on `supervisor.kind.*`;
   [ADR-0016](0016-what-an-agent-reports-about-itself.md): `host.name`, `host.id`, `host.ip` and
   `host.mac` are reported attributes.
@@ -586,11 +586,11 @@ certificates already limit.
   `a_label_aims_a_set_at_part_of_the_fleet`.
 - `get` and `query` of clause 2 and clauses 3, 4, 6 and 8 as they stand here are verified by the
   tests
-  [ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it](draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md)
+  [ADR-0041](0041-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md)
   names, and `query` on PostgreSQL by
   [`postgres/agents.rs`](../../crates/fleet-server/src/postgres/agents.rs)
   `the_query_reads_the_stored_presence_and_opening_reads_the_assignments_alone`.
-- Tests that will carry `Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts`, for clause 2,
+- Tests that will carry `Verifies: ADR-0043`, for clause 2,
   run against every store adapter: `put_keeps_the_labels_the_assignments_and_a_pending_restart`,
   `set_labels_and_set_restart_pending_write_what_they_name_alone`, and
   `a_restart_requested_while_another_is_delivered_stays_pending`.

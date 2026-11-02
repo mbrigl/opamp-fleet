@@ -1,4 +1,4 @@
-# ADR-draft-the-servers-state-and-its-stores: The Server's state lives under one data directory or in PostgreSQL and S3, one store per domain
+# ADR-0044: The Server's state lives under one data directory or in PostgreSQL and S3, one store per domain
 
 - **Status:** 🟡 proposed
 - **Date:** 2026-10-27
@@ -24,12 +24,12 @@ queries, so a database adapter can enforce them without in-memory scans. A rollo
 revisions and assignments that must hold together.
 
 What a port stores is secret-bearing whatever the backend
-([ADR-draft-the-fleet-record-of-agents-and-hosts](draft-the-fleet-record-of-agents-and-hosts.md)
+([ADR-0043](0043-the-fleet-record-of-agents-and-hosts.md)
 clause 5): effective configurations, bootstrap PKCS#12 files, the certificate register. Q-1 forbids
 sending a credential or a package unencrypted beyond the loopback, which holds for the Server's
 traffic to its database and its object store as much as for an Agent's. Q-3 bounds what a new
 dependency may bring:
-[ADR-draft-tls-1-3-two-planes-and-bounded-input](draft-tls-1-3-two-planes-and-bounded-input.md)
+[ADR-0045](0045-tls-1-3-two-planes-and-bounded-input.md)
 keeps the TLS stack on rustls with *ring*, without `aws-lc-rs` and without OpenSSL, and TLS 1.3
 alone.
 
@@ -44,7 +44,7 @@ immutable, streamed through the Server in both directions, with the password rea
 the connection verified against the database's certificate and host name. Running several Server
 instances against one database or one bucket has its own questions — presence, leases, notifying
 the other instances — which
-[ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it](draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md)
+[ADR-0041](0041-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md)
 answers.
 
 Existing installations must keep their trust data. Starting empty would lose the revocation list,
@@ -61,11 +61,11 @@ default.
 
 This ADR restates [ADR-0029](0029-the-servers-state-and-its-stores.md) in full. Its clauses 1, 12,
 21 and 27 take up the chains per lease of
-[ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance](draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance.md),
+[ADR-0042](0042-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance.md),
 its clauses 2, 3, 10, 14, 16, 22 and 23 the instances of
-[ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it](draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md),
+[ADR-0041](0041-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md),
 and its clause 3 the port of
-[ADR-draft-the-fleet-record-of-agents-and-hosts](draft-the-fleet-record-of-agents-and-hosts.md).
+[ADR-0043](0043-the-fleet-record-of-agents-and-hosts.md).
 
 ## Decision
 
@@ -88,7 +88,7 @@ and configured in the Server's configuration alone, and move an old layout by an
      reads its configuration, its TLS files and its secret files, all of them read-only, and writes
      to no file. The Server's image names no data directory for that reason, and a Server in it
      that keeps state on its disk is given one by its operator
-     ([ADR-draft-releases-attestations-and-the-server-image](draft-releases-attestations-and-the-server-image.md)
+     ([ADR-0040](0040-releases-attestations-and-the-server-image.md)
      clause 16).
    - `config_dir` and `packages_dir` do not exist. A `server.toml` that names either fails
      startup, naming the key and `server migrate`.
@@ -128,13 +128,13 @@ and configured in the Server's configuration alone, and move an old layout by an
 3. **On the filesystem store the Server answers from memory; on PostgreSQL from the database.**
    - With `store = "fs"` there is one Server. It loads every record through its port at startup,
      answers from memory, and writes through the port before an act is answered, as
-     [ADR-draft-the-fleet-record-of-agents-and-hosts](draft-the-fleet-record-of-agents-and-hosts.md)
+     [ADR-0043](0043-the-fleet-record-of-agents-and-hosts.md)
      clause 4 states.
    - With `store = "postgres"` an instance holds in memory only the Agents it carries, and the
      Operator plane reads the fleet from the database
-     ([ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it](draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md)
+     ([ADR-0041](0041-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md)
      clauses 8 and 13), through the port's `get` and `query`
-     ([ADR-draft-the-fleet-record-of-agents-and-hosts](draft-the-fleet-record-of-agents-and-hosts.md)
+     ([ADR-0043](0043-the-fleet-record-of-agents-and-hosts.md)
      clause 2). An instance, too, writes through the port before an act is answered.
 
 4. **The filesystem adapter keeps one JSON file per Agent, `data_dir/agents/<instance_uid>.json`;
@@ -222,10 +222,10 @@ and configured in the Server's configuration alone, and move an old layout by an
     at most 100 000 entries, and a revocation beyond that is answered `507`. With PostgreSQL the
     list carries one version, a counter that the transaction of every revocation and every lift
     increments, and so does that of every change to the register that alters what
-    [ADR-draft-admission-by-client-certificate-and-revocation](draft-admission-by-client-certificate-and-revocation.md)
+    [ADR-0038](0038-admission-by-client-certificate-and-revocation.md)
     clause 28 revokes. Every instance reads the same version: it is the `ETag` of the Gateways'
     list (that draft's clause 34) and what an instance compares at each renewal of its lease
-    ([ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it](draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md)
+    ([ADR-0041](0041-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md)
     clause 10). A certificate entry
     is dropped with its register entry once neither the certificate nor any renewal of it is
     valid. An entry for a certificate the register never held stays until an operator removes
@@ -250,24 +250,24 @@ and configured in the Server's configuration alone, and move an old layout by an
       operator deletes the entry ([ADR-0022](0022-bootstrap-certificates-and-enrolment.md)). A
       revocation with the authority `bootstrap` removes the file before it is answered, and
       lifting the revocation
-      ([ADR-draft-admission-by-client-certificate-and-revocation](draft-admission-by-client-certificate-and-revocation.md))
+      ([ADR-0038](0038-admission-by-client-certificate-and-revocation.md))
       does not bring it back.
     - At most 10 000 valid entries are kept, and a request beyond that is answered `409`.
     - A bootstrap certificate is revoked as
-      [ADR-draft-admission-by-client-certificate-and-revocation](draft-admission-by-client-certificate-and-revocation.md)
+      [ADR-0038](0038-admission-by-client-certificate-and-revocation.md)
       states for revocation, with the authority `bootstrap`.
     - The audit records each issuance as `enrolment.bootstrap_issued`, with serial, subject,
       `not_after` and `p12`. It records each download of a PKCS#12 file as
       `enrolment.bootstrap_p12_downloaded` with the serial. It records each deletion as
       `enrolment.bootstrap_deleted` with the serial and subject
-      ([ADR-draft-an-append-only-audit-record](draft-an-append-only-audit-record.md)).
+      ([ADR-0039](0039-an-append-only-audit-record.md)).
     - When the audit cannot be written, nothing is handed out or deleted, and the request is
       answered `503`.
 
 12. **How long the record goes back.**
     - The audit record is one hash chain on the filesystem store and one hash chain per lease of
       a Server instance on the PostgreSQL store
-      ([ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance](draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance.md)),
+      ([ADR-0042](0042-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance.md)),
       kept where the Server keeps its records: in files under `data_dir/audit/` with
       `store = "fs"`, in the database with `store = "postgres"`. Each instance writes its chain by
       one writer thread of its own, in the order the decisions were taken.
@@ -336,7 +336,7 @@ and configured in the Server's configuration alone, and move an old layout by an
     instance on one database uses the same bucket and prefix. On PostgreSQL every sweep of
     unreferenced blobs (clause 13) and every cleanup of `<prefix>staging/` (clause 16) run under an
     advisory lock, so one instance does them at a time
-    ([ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it](draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md)
+    ([ADR-0041](0041-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md)
     clause 2). The lock is taken whatever the blob store: with `"fs"` the instance is alone and
     the lock decides nothing, but the PostgreSQL record store does not ask which blob store it
     serves, and one rule for every PostgreSQL Server costs one session per sweep.
@@ -369,7 +369,7 @@ and configured in the Server's configuration alone, and move an old layout by an
       Server touches no key outside `<prefix>`. A key under `<prefix>blobs/` that is not a hash,
       or any other key under `<prefix>`, fails startup naming the key.
     - `<lease>` is the identifier of the lease of the instance that writes the upload
-      ([ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it](draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md)
+      ([ADR-0041](0041-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md)
       clause 3), or `fs` with the filesystem record store, which has one Server and no lease. A
       staging object is left behind only by an upload that was cut off, or one whose staging
       object could not be deleted. The cleanup runs with every sweep of clause 13 — at startup, and
@@ -485,7 +485,7 @@ and configured in the Server's configuration alone, and move an old layout by an
     - A Configuration's revisions, a Package's entries and a Deployment's members are rows of their
       own, and a package floor one row per Agent type, written under `SELECT … FOR UPDATE` after
       the check that it is not lowered
-      ([ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it](draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md)
+      ([ADR-0041](0041-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md)
       clause 19).
 
 22. **The Server applies its own schema.**
@@ -501,7 +501,7 @@ and configured in the Server's configuration alone, and move an old layout by an
       name that release, 0.8.0. A Server of 0.7.1 holds no lease, keeps its audit record in files
       and leaves the revocation list's version where it was, so it refuses the schema once a
       Server of 0.8.0 has applied them, rather than serve beside its instances
-      ([ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it](draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md)
+      ([ADR-0041](0041-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md)
       clause 16). A rollback to 0.7.1 after the upgrade restores the database from its backup.
     - A Server checks its schema only at its own start, and a Server of 0.7.1 holds the exclusive
       lock of clause 23, under the same key, for its whole run. So an instance that shares the
@@ -522,7 +522,7 @@ and configured in the Server's configuration alone, and move an old layout by an
     lease before it opens either listener and renews the lease while it runs. An instance that
     cannot renew before its lease lapses ends its sessions, closes its listeners and takes a new
     lease once the database answers again
-    ([ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it](draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md)
+    ([ADR-0041](0041-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md)
     clauses 1 to 3). An instance with the filesystem blob store (clause 14) or a CA key in a file
     must be the only instance in the schema: it takes an exclusive lock, fails startup beside
     another live lease, makes a second instance fail startup, and refuses every call once the
@@ -612,7 +612,7 @@ and configured in the Server's configuration alone, and move an old layout by an
     - It copies no audit entry. The old `data_dir/audit/` stays where it is as the closed archive,
       and the migration records the `seq` and the hash of its last entry in the database, which
       the first chain names as its predecessor
-      ([ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance](draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance.md)
+      ([ADR-0042](0042-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance.md)
       clause 6). No Server writes to the archive again; its instances open their chains in the
       database (clause 12).
     - It copies rather than moves: the old `data_dir` stays as the backup. It prints what it
@@ -621,7 +621,7 @@ and configured in the Server's configuration alone, and move an old layout by an
     - Moving records back from PostgreSQL to files is not provided.
 
 **Out of scope:** presence, leases and notifying other instances
-([ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it](draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md));
+([ADR-0041](0041-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md));
 copying the archived filesystem audit record into the database, which clause 27 links instead;
 paging and filtering in the
 database; moving records from PostgreSQL back to files or blobs from S3 back to the filesystem;
@@ -663,7 +663,7 @@ monitors a production store or database.
   workload identity this decision asks for. Rejected.
 - **`object_store` with its default `aws` feature.** It pulls `aws-lc-rs`, a C build with cmake,
   against
-  [ADR-draft-tls-1-3-two-planes-and-bounded-input](draft-tls-1-3-two-planes-and-bounded-input.md).
+  [ADR-0045](0045-tls-1-3-two-planes-and-bounded-input.md).
   The `aws-base`, `ring` and `reqwest` features build the same client on *ring*.
 - **Hash every object again at startup.** That downloads the whole store at every start, which
   for a fleet's software costs minutes and egress. The signature and the Client's own hash check
@@ -883,7 +883,7 @@ Tests that carry `Verifies: ADR-0029`:
 - The S3 and PostgreSQL tests run in CI jobs with a rustfs and a PostgreSQL service, and are
   reported skipped where no store is named. `cargo tree` of the Server contains neither
   `aws-lc-rs` nor `openssl`; `cargo-deny` fails on a licence or source outside the allow list.
-- Tests that will carry `Verifies: ADR-draft-the-servers-state-and-its-stores`, for clauses 2, 10,
+- Tests that will carry `Verifies: ADR-0044`, for clauses 2, 10,
   21 and 22: [`postgres/schema.rs`](../../crates/fleet-server/src/postgres/schema.rs)
   `two_servers_of_a_new_version_started_together_apply_each_migration_once`;
   [`postgres/ledger.rs`](../../crates/fleet-server/src/postgres/ledger.rs)
@@ -919,7 +919,7 @@ Tests that carry `Verifies: ADR-0029`:
   `migrate_to_postgres_with_s3_uploads_the_referenced_blobs_and_takes_no_data_dir`,
   `blobs_to_s3_uploads_the_referenced_blobs_and_checks_every_entry`,
   `blobs_to_s3_holds_the_blob_lock_alone_and_fails_naming_it_when_held`.
-- Tests that will carry `Verifies: ADR-draft-the-servers-state-and-its-stores`, for clause 23:
+- Tests that will carry `Verifies: ADR-0044`, for clause 23:
   [`postgres/mod.rs`](../../crates/fleet-server/src/postgres/mod.rs)
   `a_server_holds_a_lease_before_it_opens_a_listener`,
   `an_instance_that_cannot_renew_its_lease_closes_its_listeners_until_it_holds_a_new_one`,
@@ -929,7 +929,7 @@ Tests that carry `Verifies: ADR-0029`:
   place of `a_second_server_against_the_same_database_fails_startup_naming_it` and
   `a_server_that_loses_its_lock_logs_it_and_writes_nothing_more`, which verify ADR-0029
   clause 23.
-- A test that will carry `Verifies: ADR-draft-the-servers-state-and-its-stores`, for clause 22:
+- A test that will carry `Verifies: ADR-0044`, for clause 22:
   [`postgres/mod.rs`](../../crates/fleet-server/src/postgres/mod.rs)
   `a_server_of_0_7_1_refuses_the_schema_once_a_migration_of_0_8_0_is_applied`: the schema of
   migrations 1 and 2 is taken by 0.7.1, and after each of migrations 3 to 10 it is refused, naming
@@ -938,7 +938,7 @@ Tests that carry `Verifies: ADR-0029`:
   lock held on the schema of migrations 1 and 2, as a running Server of 0.7.1 holds it, an
   instance that shares the database fails startup and the schema is left as it was, and once the
   lock is free the instance migrates and starts.
-- A test that will carry `Verifies: ADR-draft-the-servers-state-and-its-stores`:
+- A test that will carry `Verifies: ADR-0044`:
   [`fs/mod.rs`](../../crates/fleet-server/src/fs/mod.rs)
   `a_data_dir_beside_the_database_holds_the_blobs_alone`, that the Server makes `blobs/` in a
   `data_dir` beside the database with the filesystem blob store and no `audit/` there, and that
@@ -947,5 +947,5 @@ Tests that carry `Verifies: ADR-0029`:
   verifies ADR-0029 clause 1.
 - Clause 12 as it stands here, retention by `retain_days` on the PostgreSQL store included, is
   verified by the tests
-  [ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance](draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance.md)
+  [ADR-0042](0042-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance.md)
   names.

@@ -1,4 +1,4 @@
-# ADR-draft-an-append-only-audit-record: The Server keeps an append-only audit record of every security decision, each entry chained to the one before by its hash
+# ADR-0039: The Server keeps an append-only audit record of every security decision, each entry chained to the one before by its hash
 
 - **Status:** 🟡 proposed
 - **Date:** 2026-10-27
@@ -11,7 +11,7 @@
 Every security measure of the Server decides something about a peer: admission and its refusal,
 the throttle, an enrolment request and its approval, a certificate issued or renewed, a
 revocation and the sessions it ended
-([ADR-draft-admission-by-client-certificate-and-revocation](draft-admission-by-client-certificate-and-revocation.md),
+([ADR-0038](0038-admission-by-client-certificate-and-revocation.md),
 [ADR-0022](0022-bootstrap-certificates-and-enrolment.md)), a rollout
 ([ADR-0026](0026-deployments-and-rollouts.md)) and a package outcome an Agent reports
 ([ADR-0027](0027-packages-signatures-and-delivery.md)). Without a record of their own these
@@ -22,7 +22,7 @@ removed. Measure H15 of [`HARDENING.md`](../HARDENING.md) asks for exactly one r
 decision, refusals included: the half that is easy to omit and the half an investigation needs.
 
 The Agent plane admits by client certificate alone
-([ADR-draft-admission-by-client-certificate-and-revocation](draft-admission-by-client-certificate-and-revocation.md)),
+([ADR-0038](0038-admission-by-client-certificate-and-revocation.md)),
 so there is no fleet credential to offer, rotate or revoke and none for the record to cover.
 Certificate issuance is a security decision like any other and waits for its record as admission
 does.
@@ -41,13 +41,13 @@ password; neither may reach the record.
 
 Where the record is kept, in files or in PostgreSQL, its permissions, how it is written and how
 long it goes back are part of the Server's state and its stores
-([ADR-draft-the-servers-state-and-its-stores](draft-the-servers-state-and-its-stores.md)).
+([ADR-0044](0044-the-servers-state-and-its-stores.md)).
 
 This ADR restates [ADR-0023](0023-an-append-only-audit-record.md) in full. Its clauses 2, 3 and
 6 take up the chains per lease of
-[ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance](draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance.md),
+[ADR-0042](0042-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance.md),
 and its clause 3 the lease of
-[ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it](draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md).
+[ADR-0041](0041-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md).
 Its clause 3 also changes the recovery from a torn line: the repair records the hash of the last
 whole entry before the torn line, and the verifier checks it, so the anchor at the end of a record
 binds every entry before a linked repair as well.
@@ -88,7 +88,7 @@ the SHA-256 of the entry before it, emit the same entry as a `tracing` event wit
 3. **The chains.**
    - Each Server process writes its entries through one writer thread of its own, which takes
      them from the channel of clause 5 in the order the decisions were taken.
-     [ADR-draft-the-servers-state-and-its-stores](draft-the-servers-state-and-its-stores.md)
+     [ADR-0044](0044-the-servers-state-and-its-stores.md)
      clause 12 says where the entries are kept.
    - On the filesystem store the record is one chain. The first entry of a file carries the hash
      of the last entry of the file before it, or 64 zeros for the first file ever. At startup the
@@ -118,13 +118,13 @@ the SHA-256 of the entry before it, emit the same entry as a `tracing` event wit
      time it was opened, and a first entry `audit.chain_opened` whose `prev` is 64 zeros. The
      first chain the store ever opens names, as its `predecessor`, the last entry of the file
      chain a migration left as an archive
-     ([ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance](draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance.md)
+     ([ADR-0042](0042-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance.md)
      clause 6). Every
      entry the instance writes under that lease belongs to that chain, and the lease names it
-     ([ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it](draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md)
+     ([ADR-0041](0041-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md)
      clauses 1 and 3). How a chain ends, and how one that ended is told apart from one that was
      cut, is clause 3 of
-     [ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance](draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance.md).
+     [ADR-0042](0042-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance.md).
    - On the PostgreSQL store an entry is written when the transaction that inserts it commits. A
      transaction that does not commit is a failed write (clause 5).
 
@@ -154,7 +154,7 @@ the SHA-256 of the entry before it, emit the same entry as a `tracing` event wit
 **Out of scope:** an audit record on the Client; shipping the record to a remote store or
 signing entries with a key; a REST route to read the record; retention by age on the filesystem
 store. Where the record is kept, its permissions, its writing and how long it goes back are
-[ADR-draft-the-servers-state-and-its-stores](draft-the-servers-state-and-its-stores.md)'s.
+[ADR-0044](0044-the-servers-state-and-its-stores.md)'s.
 
 ## Alternatives considered
 
@@ -204,7 +204,7 @@ store. Where the record is kept, its permissions, its writing and how long it go
   `a_write_that_fails_refuses_until_one_succeeds` (clause 5).
 - `crates/fleet-server/src/fs/audit.rs` test:
   `the_record_is_owner_only_and_continues_where_it_ended` (clause 3; the file's permissions are
-  [ADR-draft-the-servers-state-and-its-stores](draft-the-servers-state-and-its-stores.md)'s).
+  [ADR-0044](0044-the-servers-state-and-its-stores.md)'s).
 - The repair's link (clause 3): `crates/fleet-server/src/audit_log.rs` tests
   `a_truncated_file_is_recorded_as_a_broken_chain`,
   `a_torn_line_holds_only_when_the_next_entry_records_it_as_broken` and
@@ -232,5 +232,5 @@ store. Where the record is kept, its permissions, its writing and how long it go
 - `crates/fleet-server/src/fleet.rs`: `unavailable_tells_the_agent_when_to_retry` (clause 5).
 - Clauses 2 and 3 as they stand here, the chains per lease on the PostgreSQL store included, are
   verified by the tests
-  [ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance](draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance.md)
+  [ADR-0042](0042-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance.md)
   names.

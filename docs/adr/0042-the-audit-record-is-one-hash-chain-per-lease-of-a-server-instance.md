@@ -1,4 +1,4 @@
-# ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance: The audit record is one hash chain per lease of a Server instance
+# ADR-0042: The audit record is one hash chain per lease of a Server instance
 
 - **Status:** 🟡 proposed
 - **Date:** 2026-10-22
@@ -7,13 +7,13 @@
 
 ## Context
 The Server keeps an append-only audit record of every security decision
-([ADR-draft-an-append-only-audit-record](draft-an-append-only-audit-record.md)). Each entry carries
+([ADR-0039](0039-an-append-only-audit-record.md)). Each entry carries
 `seq`, a counter that never repeats, and `prev`, the SHA-256 of the entry before it, so the record
 is one chain. One writer thread appends to it in the order the decisions were taken, and at startup
 the Server reads the tail of the newest file and chains on from it (clause 3). The files live under
 `data_dir/audit/` and rotate by size: a file reaching `max_file_bytes` is closed, `keep_files` are
 kept, and the deleted file's last hash is recorded first
-([ADR-draft-the-servers-state-and-its-stores](draft-the-servers-state-and-its-stores.md) clause 12).
+([ADR-0044](0044-the-servers-state-and-its-stores.md) clause 12).
 The port, `AuditStore` in `crates/fleet-server/src/audit_log.rs`, speaks in files:
 `tail`, `append`, `current_bytes`, `rotate`.
 
@@ -26,7 +26,7 @@ that neither wrote. The working note gives each writing instance a chain of its 
 heads of all chains in an HSM, and closes a chain when its instance's lease lapses. Every Server
 on PostgreSQL holds a lease, and takes a new one, under a new instance id, after it could not
 renew the old
-([ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it](draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md)
+([ADR-0041](0041-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md)
 clauses 1 and 3). A chain drawn with each lease therefore ends where the lease ends, and an
 instance that takes a new lease does not chain on from entries it wrote under a lease another
 instance may already have closed. The signing is a decision of its own; the shape of the record
@@ -45,10 +45,10 @@ We will chain the audit record per lease: on PostgreSQL each Server instance ope
 own with each lease it takes, named by an identifier it draws with the lease, on the filesystem
 store the record stays one chain, and `server audit-verify` walks every chain the store holds.
 
-1. **[ADR-draft-an-append-only-audit-record](draft-an-append-only-audit-record.md) clause 2 decides
+1. **[ADR-0039](0039-an-append-only-audit-record.md) clause 2 decides
    it: What an entry holds.**
 
-2. **[ADR-draft-an-append-only-audit-record](draft-an-append-only-audit-record.md) clause 3 decides
+2. **[ADR-0039](0039-an-append-only-audit-record.md) clause 3 decides
    it: The chains.** On the PostgreSQL store each lease (the instances ADR, clauses 1 and 3) opens
    a chain of its own, which ends with the lease.
 
@@ -57,7 +57,7 @@ store the record stays one chain, and `server audit-verify` walks every chain th
      instance writes it into its own chain at an orderly shutdown, with `reason` `shutdown`. For a
      lease that lapsed, the instance that takes it over writes it into the chain the lease names,
      with `reason` `lease_lapsed` and `closed_by` the identifier of its own chain
-     ([ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it](draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md)
+     ([ADR-0041](0041-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md)
      clause 18). No other entry is written into a chain by an instance that did not open it.
      Entries missing from its end, a last entry that is not the recorded one, or an entry after
      it fail verification.
@@ -81,7 +81,7 @@ store the record stays one chain, and `server audit-verify` walks every chain th
      The signed chain heads detect the cut; until then a record that holds shows that what is left
      is linked, not that no entry younger than `retain_days` was removed.
 
-4. **[ADR-draft-the-servers-state-and-its-stores](draft-the-servers-state-and-its-stores.md) clause
+4. **[ADR-0044](0044-the-servers-state-and-its-stores.md) clause
    12 decides it: How long the record goes back.**
 
 5. **`server audit-verify` walks every chain.** `server audit-verify <data_dir>/audit` walks the
@@ -102,7 +102,7 @@ store the record stays one chain, and `server audit-verify` walks every chain th
    that a Server wrote on the filesystem store stay where they are as a closed archive. The Server
    neither moves them nor writes to them again, `server audit-verify <dir>` verifies them as
    before, and deleting them is the operator's. `server migrate-to-postgres`
-   ([ADR-draft-the-servers-state-and-its-stores](draft-the-servers-state-and-its-stores.md)
+   ([ADR-0044](0044-the-servers-state-and-its-stores.md)
    clause 27) records the `seq` and the hash of the archive's last entry in the database, and the
    first chain the database store opens names them in its `audit.chain_opened` as its
    `predecessor`. `server audit-verify --config <server.toml> --archive <dir>` checks that the
@@ -112,7 +112,7 @@ store the record stays one chain, and `server audit-verify` walks every chain th
 **Out of scope:** checkpoints of the chain heads, signed with a key the store does not hold, a
 decision of its own;
 the leases themselves and how an instance finds one that lapsed
-([ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it](draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md));
+([ADR-0041](0041-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md));
 exporting the record to a system outside the Server; a REST route to read the record; copying the
 archived filesystem record into the database, which clause 6 links instead. Reading the record on
 the Operator plane is not decided here: without a rights model every operator who passes the guard
@@ -174,7 +174,7 @@ shell access on a Server host.
 ## Enforcement
 
 Tests that will carry `Verifies:
-ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance`:
+ADR-0042`:
 
 - On the filesystem store, the existing tests of the chain, the rotation and `audit-verify` stay
   unchanged and green.
