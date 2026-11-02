@@ -73,6 +73,15 @@ store the record stays one chain, and `server audit-verify` walks every chain th
      Checkpoints of every chain's head, signed with a key the store does not hold, detect it
      ([ADR-draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token](draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token.md),
      signed chain heads); this draft lands without them.
+   - Pruning leaves one more cut that the store itself does not detect. Whoever can write to the
+     database can place one `audit.pruned` with a correct hash in a chain that then holds — at the
+     end of an open chain, for example, or of a closed one whose record they rewrite — naming any
+     chain and any of its entries as the last removed, and then delete that chain's entries up to
+     it, younger ones included: `server audit-verify` accepts the link, because it cannot tell the
+     age of what is gone. It takes links and a carried predecessor only from an `audit.pruned` in a
+     chain whose own walk holds, so an `audit.pruned` in a chain that fails vouches for nothing.
+     The signed chain heads detect the cut; until then a record that holds shows that what is left
+     is linked, not that no entry younger than `retain_days` was removed.
 
 4. **[ADR-draft-the-servers-state-and-its-stores](draft-the-servers-state-and-its-stores.md) clause
    12 decides it: How long the record goes back.**
@@ -81,10 +90,15 @@ store the record stays one chain, and `server audit-verify` walks every chain th
    files of the filesystem store. `server audit-verify --config <server.toml>` reads the
    PostgreSQL store with the Server's own credentials and walks each chain in `seq` order: every
    `prev` matches the entry before; the first retained entry is `audit.chain_opened`, or its `prev`
-   is the hash an `audit.pruned` entry recorded as the last it removed from that chain; a closed
-   chain ends on its recorded hash, and one with no entries left has as its closing hash the last
-   removed hash an `audit.pruned` entry names for it. It names the chain and the first entry that
-   fails, lists every open chain, and exits non-zero on any failure.
+   is the `last_hash`, and its `seq` the one after the `last_seq`, of a retained `audit.pruned`
+   that names that chain as its `pruned_chain`; a closed chain ends on its recorded hash, and one
+   with no entries left has as its closing hash the `last_hash` a retained `audit.pruned` names
+   for it. An `audit.pruned` links only when the chain it stands in holds: a chain whose walk needs
+   no link from another, or only links from chains that hold, holds, and the walk is repeated
+   until no further chain does. The predecessor is read from the first chain's
+   `audit.chain_opened` or, once that is pruned, from a retained `audit.pruned` that carries it on
+   in a chain that holds, by the same rule as the links. It names the chain and the first entry
+   that fails, lists every open chain, and exits non-zero on any failure.
 
 6. **A record moved from files to the database stays linked.** The files under `data_dir/audit/`
    that a Server wrote on the filesystem store stay where they are as a closed archive. The Server
@@ -152,6 +166,9 @@ shell access on a Server host.
   `time`, which no chain guarantees across hosts.
 - Negative / trade-offs: without the signed chain heads, whoever can write to the database can
   remove a whole chain and its record without the verification noticing.
+- Negative / trade-offs: without the signed chain heads, whoever can write to the database can
+  also cut the head of any chain with one `audit.pruned` appended to an open chain, young entries
+  included, and the verification holds.
 - Negative / trade-offs: an open chain does not say whether its instance still runs; until its
   lease lapses and another instance closes it, a dead instance's chain reads as a running one's.
 - Follow-ups: an export of the record to a system the Server cannot rewrite.
@@ -171,16 +188,20 @@ ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance`:
 - Entries older than `retain_days` are removed, `audit.pruned` records the last removed hash, and
   `audit-verify` still passes.
 - With two instances, entries older than `retain_days` of a chain closed at a shutdown and of one
-  closed for a lapsed lease are removed by one instance at a time, its `audit.pruned` names both
-  chains, and a closed chain with no entries left keeps its record.
-- `retain_days` with `store = "fs"`, or `keep_files` with `store = "postgres"`, fails startup
-  naming the key.
+  closed for a lapsed lease are removed by one instance at a time, its `audit.pruned` entries name
+  both chains, and a closed chain with no entries left keeps its record.
+- When the `audit.pruned` entries themselves and the first chain's `audit.chain_opened` are
+  pruned, the links still needed and the predecessor are recorded again, and `audit-verify` still
+  passes.
+- `retain_days` with `store = "fs"`, or `keep_files` or `max_file_bytes` with
+  `store = "postgres"`, fails startup naming the key.
 - With the database held back past an instance's lease, the decisions it queued under that lease
   are written into its next chain with `taken_under` naming the old one, and `audit-verify` passes
   over both chains.
 - A pruned chain whose first retained entry's `prev` is not the hash its `audit.pruned` recorded,
   and a closed chain with no entries left whose closing hash differs from that hash, fail
-  `audit-verify`.
+  `audit-verify`; so does a chain linked only by an `audit.pruned` in a chain that fails, and an
+  archive whose predecessor only such an `audit.pruned` carries on.
 - After `server migrate-to-postgres`, the first chain's `audit.chain_opened` names the archive's
   last entry; `audit-verify --archive` passes over the untouched archive and fails, naming the
   predecessor, when the archive's last entry was changed or removed.

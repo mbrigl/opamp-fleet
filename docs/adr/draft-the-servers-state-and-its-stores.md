@@ -274,14 +274,39 @@ and configured in the Server's configuration alone, and move an old layout by an
       (default 64 MiB) is closed and a new one opened. The Server keeps `[audit] keep_files` files
       (default 16) and deletes the oldest. Before it does, it records `audit.rotated` with the
       deleted file's last hash.
-    - On the PostgreSQL store entries older than `[audit] retain_days` (default 365, at least 1) are
-      deleted once a day. Each instance prunes its own chain. Closed chains, those closed at a
-      shutdown and those closed for a lapsed lease, are pruned by the same `retain_days` by one
-      instance at a time, the one that holds a session-level advisory lock for it. Before it
-      deletes, an instance records `audit.pruned` in its own chain, naming each chain it pruned,
-      the last removed `seq` and that entry's hash. A closed chain with no entries left keeps its
-      record. The filesystem store holds one chain, which is never closed, and its rotation
-      bounds it.
+    - On the PostgreSQL store entries stored more than `[audit] retain_days` days ago (default 365,
+      at least 1, at most 36 500) are deleted, at each instance's start and once a day after. An
+      entry's age is the database's time when it was stored. From each chain the longest run of
+      entries from its start that are all that old is removed, so no younger entry goes. Each
+      instance prunes its own chain. Closed chains, those closed at a shutdown and those closed for
+      a lapsed lease, are pruned by the same `retain_days` by one instance at a time, the one that
+      holds a session-level advisory lock for it; an instance that finds the lock held leaves them
+      to the next day. A chain that is open and whose lease no instance holds is pruned once it is
+      closed. Before it deletes, an instance records in its own chain one `audit.pruned` for each
+      chain it prunes, naming it as `pruned_chain` with the last removed `seq` as `last_seq` and
+      that entry's hash as `last_hash`, and deletes only once they are written. "Days" are periods
+      of 24 hours, whatever the database's time zone.
+    - A prune runs in rounds. A round removes at most 100 000 entries across the chains it
+      prunes, taking each chain's run from its start, and records its own `audit.pruned` entries
+      before it deletes; the next round follows right away, until no entry is that old, so a
+      backlog drains over as many rounds as it needs. A round deletes from every chain in one
+      transaction, so one that stops part-way deletes nothing and every round leaves a record that
+      verifies, and within it in batches of a bounded number of entries, so no statement outgrows
+      the statement timeout every connection of the Server holds. A round that does not end
+      within five minutes is rolled back whole; the prune then stops, and the next start or day
+      goes on from where the last round that ended left the record. A round that prunes no chain
+      ends the prune too, with a warning: there is nothing a next round would do differently.
+    - An `audit.pruned` is an entry like any other and is pruned in its turn. Where an entry an
+      instance removes is an `audit.pruned` whose link is still needed, the instance records that
+      link again in a new `audit.pruned`. A link is still needed when the chain it names begins
+      right after the entry it records as last removed, or is closed with no entries left on that
+      entry's hash, and the same round does not prune that chain further; a chain the same round
+      prunes further is linked by the `audit.pruned` recorded for it in that round. Where an entry
+      it removes names the archive as its `predecessor`, the `audit.chain_opened` of the first
+      chain or an `audit.pruned` that carried it, a new `audit.pruned` carries the predecessor on
+      as `predecessor_chain`, `predecessor_seq` and `predecessor_hash`. A closed chain with no
+      entries left keeps its record. The filesystem store holds one chain, which is never closed,
+      and its rotation bounds it.
     - `max_file_bytes` and `keep_files` apply to the filesystem store alone and `retain_days` to the
       PostgreSQL store alone. A key that does not apply to the configured store fails startup,
       naming it.
