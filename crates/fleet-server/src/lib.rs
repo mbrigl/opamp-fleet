@@ -116,7 +116,7 @@ impl Records {
     pub fn agents(&self) -> Result<Box<dyn agent_store::AgentStore>, String> {
         Ok(match self {
             Records::Files(dir) => Box::new(FsAgentStore::open(dir)?),
-            Records::Postgres(db) => Box::new(postgres::agents::PgAgentStore::new(db.clone())),
+            Records::Postgres(db) => Box::new(postgres::agents::PgAgentStore::open(db.clone())?),
         })
     }
 

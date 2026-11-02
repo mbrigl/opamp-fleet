@@ -154,6 +154,16 @@ pub struct Presence {
     pub last_seen_ms: u64,
 }
 
+/// One record as [`AgentStore::query`] reads it: the record, and whether its stored presence says
+/// a connection carries the Agent (ADR-draft-the-fleet-record-of-agents-and-hosts clauses 3 and 6).
+#[derive(Clone, Debug, PartialEq)]
+pub struct StoredAgent {
+    pub record: PersistedAgent,
+    /// Connected as stored, and only while the instance it names as the holder has a live lease;
+    /// `false` on a store that keeps no presence.
+    pub connected: bool,
+}
+
 /// What [`AgentStore::take`] found of the holder it replaced
 /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
 /// clause 8).
@@ -242,6 +252,36 @@ pub trait AgentStore: Send + Sync {
             .iter()
             .filter_map(|uid| all.remove_entry(uid))
             .collect())
+    }
+
+    /// Every stored record with its presence, or those of `only` where it names some, in the order
+    /// of their `instance_uid`: what the Operator plane reads where the fleet is not in memory
+    /// (ADR-draft-the-servers-state-and-its-stores clause 3). The default reads every record
+    /// through [`load`](Self::load), each disconnected, as a store that keeps no presence may; a
+    /// shared store, and a wrapper of one, overrides it.
+    ///
+    /// # Errors
+    /// Returns an error when the records cannot be read.
+    fn query(
+        &self,
+        only: Option<&[InstanceUid]>,
+    ) -> Result<Vec<(InstanceUid, StoredAgent)>, String> {
+        let mut all: Vec<(InstanceUid, StoredAgent)> = self
+            .load()?
+            .into_iter()
+            .filter(|(uid, _)| only.is_none_or(|only| only.contains(uid)))
+            .map(|(uid, record)| {
+                (
+                    uid,
+                    StoredAgent {
+                        record,
+                        connected: false,
+                    },
+                )
+            })
+            .collect();
+        all.sort_by_key(|(uid, _)| uid.0);
+        Ok(all)
     }
 
     /// Whether other Servers write this store too, so the fleet reads an Agent it does not hold

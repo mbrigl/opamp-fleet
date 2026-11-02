@@ -10,6 +10,13 @@ two; no load is proven yet; and an instance that holds a CA key as a file runs a
 key failover is a standby that takes over once the lease has lapsed. The order of moving one Server
 on files to several instances on PostgreSQL and S3 is given as far as stage one reaches.
 
+Two bounds of label inheritance across instances are named too. An Agent behind a Gateway does not
+inherit, in the memory of the instance that carries it, the labels of a Client Agent another
+instance carries, until ticket 07's host filter; what the Operator plane shows inherits them. And a
+Client Agent bound to its Host on one instance just before another instance first places a fellow
+Agent of that Host is inherited only once that group is placed again: at a change of the Client
+Agent's labels, a forget, a change of the Agent's report, or a missed notification.
+
 ## Acceptance criteria
 
 - [ ] Given the manual, when an operator follows it from one Server on files, then they reach two
@@ -18,6 +25,9 @@ on files to several instances on PostgreSQL and S3 is given as far as stage one 
   instances, then it says such an instance runs alone and how its standby takes over
 - [ ] Given the release notes of the stage, when an operator reads them, then they name the three
   bounds: upgrade together, no load proven, a CA key file means a standby
+- [ ] Given the manual, when an operator reads about labels on several instances, then it names
+  the two bounds of inheritance: behind a Gateway, and a Client Agent bound just before its fellow
+  Agent is first placed
 - [ ] Given the manual check, when it runs, then it passes
 
 ## Read first

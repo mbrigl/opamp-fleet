@@ -455,15 +455,16 @@ fn parse_instance_uid(text: &str) -> Result<InstanceUid, Refusal> {
 
 /// One Agent as the fleet view now shows it — what a write to that Agent answers with. `204` when
 /// it was forgotten between the write and the read: the write stands, and the Agent is simply no
-/// longer in the view to return.
+/// longer in the view to return. `500` when the view cannot be read: the write stands then too,
+/// and the answer says so, so that a client does not repeat the act.
 fn agent_response(state: &AppState, uid: &InstanceUid) -> Response {
-    match state
-        .snapshot()
-        .into_iter()
-        .find(|a| a.instance_uid == uid.to_string())
-    {
-        Some(view) => Json(AgentResponse::from(view)).into_response(),
-        None => StatusCode::NO_CONTENT.into_response(),
+    match state.agent_view(uid) {
+        Ok(Some(view)) => Json(AgentResponse::from(view)).into_response(),
+        Ok(None) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("the change was written, but the Agent's view cannot be read: {e}"),
+        ),
     }
 }
 
@@ -821,10 +822,22 @@ impl From<fleet::PackageStatusView> for PackageStatusResponse {
     get,
     path = "/api/v1/agents",
     tag = "fleet",
-    responses((status = 200, description = "Every known Agent", body = [AgentResponse]))
+    responses(
+        (status = 200, description = "Every known Agent", body = [AgentResponse]),
+        (status = 500, description = "The fleet cannot be read from the store", body = ErrorBody)
+    )
 )]
-async fn agents(State(state): State<Arc<AppState>>) -> Json<Vec<AgentResponse>> {
-    Json(state.snapshot().into_iter().map(Into::into).collect())
+async fn agents(State(state): State<Arc<AppState>>) -> Response {
+    match state.fleet_view() {
+        Ok(views) => Json(
+            views
+                .into_iter()
+                .map(AgentResponse::from)
+                .collect::<Vec<_>>(),
+        )
+        .into_response(),
+        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
 }
 
 /// Queues a restart of the Agent's Managed Process, delivered as the protocol's restart command
@@ -893,7 +906,7 @@ struct LabelsBody {
         (status = 400, description = "Malformed Instance UID, an unusable label, or a key starting `fleet.`", body = ErrorBody),
         (status = 404, description = "No such Agent", body = ErrorBody),
         (status = 409, description = "A label restates an attribute the Agent reports", body = ErrorBody),
-        (status = 500, description = "The Agent's record could not be written", body = ErrorBody)
+        (status = 500, description = "The labels could not be written, or they were written and the Agent's view cannot be read from the store; the answer says which", body = ErrorBody)
     )
 )]
 async fn set_agent_labels(
@@ -952,7 +965,8 @@ struct AgentRolloutSpec {
         (status = 400, description = "Malformed Instance UID or body", body = ErrorBody),
         (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
         (status = 404, description = "No such Agent", body = ErrorBody),
-        (status = 409, description = "The Agent is in no Deployment, in a conflict, or in another one than named; or the Deployment holds nothing, or a Package with an unsigned entry", body = ErrorBody)
+        (status = 409, description = "The Agent is in no Deployment, in a conflict, or in another one than named; or the Deployment holds nothing, or a Package with an unsigned entry", body = ErrorBody),
+        (status = 500, description = "Nothing was released, as the Agent or the fleet could not be read or the release could not be written; or the release was written and the Agent's view cannot be read, which the answer says", body = ErrorBody)
     )
 )]
 async fn rollout_to_agent(
@@ -2304,13 +2318,17 @@ type Refusal = (StatusCode, String);
     tag = "deployments",
     responses(
         (status = 200, description = "Every Deployment, in name order", body = [DeploymentView]),
-        (status = 404, description = "Package delivery is not configured", body = ErrorBody)
+        (status = 404, description = "Package delivery is not configured", body = ErrorBody),
+        (status = 500, description = "The fleet cannot be read from the store", body = ErrorBody)
     )
 )]
 async fn list_deployments(State(state): State<Arc<AppState>>) -> Response {
     match deployments(&state) {
         Ok(store) => {
-            let reach = state.deployment_reach();
+            let reach = match state.deployment_reach() {
+                Ok(reach) => reach,
+                Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, e),
+            };
             Json(
                 store
                     .list()
@@ -2335,7 +2353,8 @@ async fn list_deployments(State(state): State<Arc<AppState>>) -> Response {
     params(("name" = String, Path, description = "the Deployment's name")),
     responses(
         (status = 200, description = "The Deployment", body = DeploymentView),
-        (status = 404, description = "No such Deployment, or package delivery is not configured", body = ErrorBody)
+        (status = 404, description = "No such Deployment, or package delivery is not configured", body = ErrorBody),
+        (status = 500, description = "The fleet cannot be read from the store", body = ErrorBody)
     )
 )]
 async fn get_deployment(State(state): State<Arc<AppState>>, Path(name): Path<String>) -> Response {
@@ -2368,7 +2387,8 @@ async fn get_deployment(State(state): State<Arc<AppState>>, Path(name): Path<Str
     responses(
         (status = 200, description = "The stored Deployment — distributed to nobody until rolled out", body = DeploymentView),
         (status = 400, description = "Invalid name, or a Selector that names no pair", body = ErrorBody),
-        (status = 404, description = "Package delivery is not configured", body = ErrorBody)
+        (status = 404, description = "Package delivery is not configured", body = ErrorBody),
+        (status = 500, description = "The change could not be written, or it was written and whom the Deployment reaches cannot be read from the store; the answer says which", body = ErrorBody)
     )
 )]
 async fn put_deployment(
@@ -2463,7 +2483,8 @@ async fn put_deployment_selector(
         (status = 200, description = "The Deployment, with the Package", body = DeploymentView),
         (status = 400, description = "Invalid Agent type or version", body = ErrorBody),
         (status = 404, description = "No such Deployment or Package, or package delivery is not configured", body = ErrorBody),
-        (status = 409, description = "The Deployment already holds a Package for this Agent type", body = ErrorBody)
+        (status = 409, description = "The Deployment already holds a Package for this Agent type", body = ErrorBody),
+        (status = 500, description = "The change could not be written, or it was written and whom the Deployment reaches cannot be read from the store; the answer says which", body = ErrorBody)
     )
 )]
 async fn put_deployment_package(
@@ -2506,7 +2527,8 @@ async fn put_deployment_package(
     responses(
         (status = 200, description = "The Deployment, without the Package", body = DeploymentView),
         (status = 400, description = "Invalid Agent type or version", body = ErrorBody),
-        (status = 404, description = "No such Deployment or Package in it, or package delivery is not configured", body = ErrorBody)
+        (status = 404, description = "No such Deployment or Package in it, or package delivery is not configured", body = ErrorBody),
+        (status = 500, description = "The change could not be written, or it was written and whom the Deployment reaches cannot be read from the store; the answer says which", body = ErrorBody)
     )
 )]
 async fn delete_deployment_package(
@@ -2537,7 +2559,8 @@ async fn delete_deployment_package(
     ),
     responses(
         (status = 200, description = "The Deployment, with the Configuration", body = DeploymentView),
-        (status = 404, description = "No such Deployment or Configuration, or package delivery is not configured", body = ErrorBody)
+        (status = 404, description = "No such Deployment or Configuration, or package delivery is not configured", body = ErrorBody),
+        (status = 500, description = "The change could not be written, or it was written and whom the Deployment reaches cannot be read from the store; the answer says which", body = ErrorBody)
     )
 )]
 async fn put_deployment_configuration(
@@ -2563,7 +2586,8 @@ async fn put_deployment_configuration(
     ),
     responses(
         (status = 200, description = "The Deployment, without the Configuration", body = DeploymentView),
-        (status = 404, description = "No such Deployment, or it does not hold the Configuration, or package delivery is not configured", body = ErrorBody)
+        (status = 404, description = "No such Deployment, or it does not hold the Configuration, or package delivery is not configured", body = ErrorBody),
+        (status = 500, description = "The change could not be written, or it was written and whom the Deployment reaches cannot be read from the store; the answer says which", body = ErrorBody)
     )
 )]
 async fn delete_deployment_configuration(
@@ -2622,12 +2646,20 @@ async fn rollout_deployment(
 
 /// One Deployment as the API answers with it, with the reach counts read from the fleet — so every
 /// response says whom this channel reaches as of now, and not as of whenever it was written.
+/// `500` when the reach cannot be read; a change the request made stands, and the answer says so.
 fn deployment_response(state: &AppState, deployment: Deployment) -> Response {
-    let reach = state
-        .deployment_reach()
-        .get(&deployment.name)
-        .copied()
-        .unwrap_or_default();
+    let reach = match state.deployment_reach() {
+        Ok(reach) => reach.get(&deployment.name).copied().unwrap_or_default(),
+        Err(e) => {
+            return error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!(
+                    "whom the Deployment reaches cannot be read; a change this request made was \
+                     written: {e}"
+                ),
+            )
+        }
+    };
     Json(DeploymentView::of(deployment, reach)).into_response()
 }
 
@@ -3498,14 +3530,18 @@ async fn list_certificates(State(state): State<Arc<AppState>>) -> Response {
     tag = "revocation",
     responses(
         (status = 200, description = "Every Host, by host id, with its subject values and the Agents that arrived over it (ADR-0024)", body = Vec<HostView>),
-        (status = 404, description = "Revocation is not configured", body = ErrorBody)
+        (status = 404, description = "Revocation is not configured", body = ErrorBody),
+        (status = 500, description = "The fleet cannot be read from the store", body = ErrorBody)
     )
 )]
 async fn list_hosts(State(state): State<Arc<AppState>>) -> Response {
     let Some(revocations) = state.revocations() else {
         return revocation_off();
     };
-    let mut carried = state.host_agents();
+    let mut carried = match state.host_agents() {
+        Ok(carried) => carried,
+        Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    };
     let hosts: Vec<HostView> = revocations
         .hosts()
         .into_iter()
