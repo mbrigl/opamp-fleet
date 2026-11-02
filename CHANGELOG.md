@@ -30,6 +30,10 @@ once its tag exists.
     every other: a revocation ends the session on the instance that carries it. The newest
     connection takes an Agent. The enrolment queue and the bootstrap certificates are counted for
     all instances together.
+  - **One enrolment request, two decisions.** Of two instances approving or rejecting one
+    request at once, one decides it. The other answers `404`, or `409` when it waited five
+    seconds and the first still holds the request, as on a slow database; asked again, it
+    answers how the request was decided.
   - **The log.** Each line names `instance_id=<id>`.
   - **A failover.** An instance that stops in order drains its sessions and releases its lease,
     and its Agents reconnect to another. The lease of one that ends without stopping is taken

@@ -97,6 +97,21 @@ pub enum Approval {
     Revoked,
     /// Signing or recording refused it; the request still waits.
     Refused(DecisionError),
+    /// Another instance holds the request while it decides it, for longer than a wait for a lock
+    /// lasts. Nothing was signed here, and the request may still wait.
+    Deciding,
+}
+
+/// What a rejection comes to in the store.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Decided {
+    /// The request waited and is decided now.
+    Written,
+    /// The store holds the request no longer waiting, or not at all.
+    NotWaiting,
+    /// Another instance holds the request while it decides it, for longer than a wait for a lock
+    /// lasts; nothing was written.
+    Deciding,
 }
 
 /// What a submitted request comes to.
@@ -132,6 +147,9 @@ pub enum DecisionError {
     Sign(String),
     /// The decision could not be persisted (ADR-0044 clause 8); the request still waits.
     Store(String),
+    /// Another instance is deciding the request at this moment — a `409`. Nothing was decided
+    /// here; asked again, the request is found decided, or still waiting.
+    Deciding,
 }
 
 /// Why the window could not be opened.
@@ -255,22 +273,23 @@ pub trait EnrolmentStore: Send + Sync {
     }
 
     /// Decides the waiting request `id`, and answers whether it was decided now: a request the
-    /// store does not hold, or holds decided already, is left as it is.
+    /// store does not hold, or holds decided already, is left as it is, and so is one another
+    /// instance holds while it decides it.
     ///
     /// # Errors
     /// Returns an error when the store cannot be read or written; nothing is then decided.
-    fn decide(&self, id: &str, decision: &Decision) -> Result<bool, String> {
+    fn decide(&self, id: &str, decision: &Decision) -> Result<Decided, String> {
         let mut persisted = self.load()?.unwrap_or_default();
         let Some(request) = persisted
             .requests
             .iter_mut()
             .find(|r| r.id == id && r.decision.is_none())
         else {
-            return Ok(false);
+            return Ok(Decided::NotWaiting);
         };
         request.decision = Some(decision.clone());
         self.save(&persisted)?;
-        Ok(true)
+        Ok(Decided::Written)
     }
 
     /// Approves the waiting request `id`: `sign` signs and records it while the request is held,
@@ -280,7 +299,8 @@ pub trait EnrolmentStore: Send + Sync {
     /// (ADR-0041
     /// clause 19). A store other instances share also refuses a request whose bootstrap
     /// certificate, `bootstrap`, the list names, and withdraws it; a store that is its only writer
-    /// leaves that to the list in memory.
+    /// leaves that to the list in memory. Such a store answers [`Approval::Deciding`] for a
+    /// request another instance holds while it decides it, longer than a wait for a lock lasts.
     ///
     /// # Errors
     /// Returns an error when the store cannot be read or written; nothing is then decided.
@@ -772,6 +792,7 @@ impl Enrolment {
                 Err(self.withdrawn(state, id))
             }
             Approval::Refused(e) => Err(e),
+            Approval::Deciding => Err(DecisionError::Deciding),
         }
     }
 
@@ -794,13 +815,17 @@ impl Enrolment {
         id: &str,
         decision: Decision,
     ) -> Result<(), DecisionError> {
-        let written = match &self.store {
+        let decided = match &self.store {
             Some(store) => store.decide(id, &decision).map_err(DecisionError::Store)?,
-            None => true,
+            None => Decided::Written,
         };
-        if !written {
-            state.entries.remove(id);
-            return Err(DecisionError::NotFound);
+        match decided {
+            Decided::Written => {}
+            Decided::NotWaiting => {
+                state.entries.remove(id);
+                return Err(DecisionError::NotFound);
+            }
+            Decided::Deciding => return Err(DecisionError::Deciding),
         }
         if let Some(entry) = state.entries.get_mut(id) {
             entry.decision = Some(decision);
@@ -1261,6 +1286,45 @@ pub(crate) mod tests {
         assert_eq!(enrolment.pending().len(), 1, "the request still waits");
         assert!(enrolment.close().is_err());
         assert!(!enrolment.is_open(), "closed all the same");
+    }
+
+    /// A decision on a request another instance is deciding at this moment is answered so, and
+    /// decides nothing: the request still waits here, to be decided once asked again.
+    /// Verifies: ADR-0041
+    #[test]
+    fn a_decision_on_a_request_another_instance_is_deciding_is_answered_so() {
+        #[derive(Clone, Default)]
+        struct Deciding(Memory);
+        impl EnrolmentStore for Deciding {
+            fn load(&self) -> Result<Option<Persisted>, String> {
+                self.0.load()
+            }
+            fn save(&self, persisted: &Persisted) -> Result<(), String> {
+                self.0.save(persisted)
+            }
+            fn decide(&self, _: &str, _: &Decision) -> Result<Decided, String> {
+                Ok(Decided::Deciding)
+            }
+            fn approve(
+                &self,
+                _: &str,
+                _: &CertId,
+                _: &mut dyn FnMut() -> Result<Decision, DecisionError>,
+            ) -> Result<Approval, String> {
+                Ok(Approval::Deciding)
+            }
+        }
+        let clock = Arc::new(Manual(AtomicU64::new(1_000_000)));
+        let enrolment = Enrolment::open_on(clock, Box::new(Deciding::default())).expect("open");
+        enrolment.open(600).expect("open the window");
+        enrolment.submit(request("a"), requester());
+        assert_eq!(
+            enrolment.approve("a", &Echo, "host", &|_, _, _| Ok(()), &|_| false),
+            Err(DecisionError::Deciding)
+        );
+        assert_eq!(enrolment.reject("a"), Err(DecisionError::Deciding));
+        assert_eq!(enrolment.pending().len(), 1, "the request still waits here");
+        assert!(!enrolment.is_rejected("a"));
     }
 
     /// Verifies: ADR-0038

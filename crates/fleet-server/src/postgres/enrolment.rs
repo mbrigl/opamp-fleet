@@ -16,7 +16,7 @@ use deadpool_postgres::Object;
 use super::notify::{notify, ENROLMENT, WINDOW};
 use super::{client, signed, sql, unsigned, Database};
 use crate::enrolment::{
-    Approval, Decision, DecisionError, EnrolmentStore, Persisted, PersistedRequest, Took,
+    Approval, Decided, Decision, DecisionError, EnrolmentStore, Persisted, PersistedRequest, Took,
 };
 use crate::revocation::CertId;
 
@@ -50,6 +50,15 @@ enum Found {
     NotWaiting,
     Revoked,
     Waiting(Value),
+    /// Held by another instance, which decides it.
+    Deciding,
+}
+
+/// Whether `error` ends a wait for the request's row that outlasted the session's `lock_timeout`:
+/// another instance holds the request while it decides it, signing it perhaps, and how it decides
+/// is not known yet.
+fn held_elsewhere(error: &tokio_postgres::Error) -> bool {
+    error.code() == Some(&tokio_postgres::error::SqlState::LOCK_NOT_AVAILABLE)
 }
 
 /// The window in `enrolment_window`, its requests in `enrolment_requests`.
@@ -155,26 +164,31 @@ impl EnrolmentStore for PgEnrolmentStore {
     }
 
     /// The request's row is held while it is read and written, so two instances deciding one
-    /// request decide it once.
-    fn decide(&self, id: &str, decision: &Decision) -> Result<bool, String> {
+    /// request decide it once. A wait for the row that outlasts the session's `lock_timeout`, as
+    /// behind an approval that signs, is answered [`Decided::Deciding`].
+    fn decide(&self, id: &str, decision: &Decision) -> Result<Decided, String> {
         let id = id.to_string();
         let decision = serde_json::to_value(decision).expect("a decision serializes");
         self.database.run(move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
-            let Some(row) = transaction
+            let row = match transaction
                 .query_opt(
                     "SELECT request FROM enrolment_requests WHERE id = $1 FOR UPDATE",
                     &[&id],
                 )
                 .await
-                .map_err(sql)?
-            else {
-                return Ok(false);
+            {
+                Ok(row) => row,
+                Err(e) if held_elsewhere(&e) => return Ok(Decided::Deciding),
+                Err(e) => return Err(sql(e)),
+            };
+            let Some(row) = row else {
+                return Ok(Decided::NotWaiting);
             };
             let mut request: Value = row.get(0);
             if request.get("decision").is_some_and(|d| !d.is_null()) {
-                return Ok(false);
+                return Ok(Decided::NotWaiting);
             }
             request["decision"] = decision;
             transaction
@@ -186,14 +200,15 @@ impl EnrolmentStore for PgEnrolmentStore {
                 .map_err(sql)?;
             notify(&*transaction, ENROLMENT, &id).await?;
             transaction.commit().await.map_err(sql)?;
-            Ok(true)
+            Ok(Decided::Written)
         })
     }
 
     /// The request's row is held from before it is signed until its decision is written: of two
     /// instances approving one request, the second waits for the first and then finds it decided,
-    /// signing nothing. The bootstrap certificate is looked up in the list once the row is held;
-    /// the register's write looks again, under its hold of the list.
+    /// signing nothing. A wait for the row that outlasts the session's `lock_timeout` is answered
+    /// [`Approval::Deciding`], signing nothing. The bootstrap certificate is looked up in the list
+    /// once the row is held; the register's write looks again, under its hold of the list.
     fn approve(
         &self,
         id: &str,
@@ -205,14 +220,18 @@ impl EnrolmentStore for PgEnrolmentStore {
         let (held, found) = self.database.run(move |pool| async move {
             let held = Held(Some(client(&pool).await?));
             held.client().batch_execute("BEGIN").await.map_err(sql)?;
-            let row = held
+            let row = match held
                 .client()
                 .query_opt(
                     "SELECT request FROM enrolment_requests WHERE id = $1 FOR UPDATE",
                     &[&request_id],
                 )
                 .await
-                .map_err(sql)?;
+            {
+                Ok(row) => row,
+                Err(e) if held_elsewhere(&e) => return Ok((held, Found::Deciding)),
+                Err(e) => return Err(sql(e)),
+            };
             let found = match row.map(|row| row.get::<_, Value>(0)) {
                 Some(request) if request.get("decision").is_none_or(Value::is_null) => {
                     if super::ledger::names(&***held.client(), &bootstrap).await? {
@@ -235,6 +254,7 @@ impl EnrolmentStore for PgEnrolmentStore {
         })?;
         let (finish, answer) = match found {
             Found::NotWaiting => ("ROLLBACK", Ok(Approval::NotWaiting)),
+            Found::Deciding => ("ROLLBACK", Ok(Approval::Deciding)),
             Found::Revoked => ("COMMIT", Ok(Approval::Revoked)),
             Found::Waiting(mut request) => match sign() {
                 Err(e) => ("ROLLBACK", Ok(Approval::Refused(e))),
@@ -451,7 +471,7 @@ pub(crate) async fn write(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::enrolment::{Decision, PersistedRequest, Took};
+    use crate::enrolment::{Decided, Decision, PersistedRequest, Took};
     use crate::fs::FsEnrolmentStore;
     use crate::postgres::testing::TestDatabase;
 
@@ -540,13 +560,16 @@ mod tests {
         );
 
         let approved = Decision::Approved("-----BEGIN CERTIFICATE-----".to_string());
-        assert_eq!(store.decide("a", &approved), Ok(true));
+        assert_eq!(store.decide("a", &approved), Ok(Decided::Written));
         assert_eq!(
             store.decide("a", &Decision::Rejected),
-            Ok(false),
+            Ok(Decided::NotWaiting),
             "decided once"
         );
-        assert_eq!(store.decide("none", &Decision::Rejected), Ok(false));
+        assert_eq!(
+            store.decide("none", &Decision::Rejected),
+            Ok(Decided::NotWaiting)
+        );
         let mut decided = request("a", "1");
         decided.decision = Some(approved);
         assert_eq!(
@@ -660,6 +683,7 @@ mod tests {
                         scope.spawn(move || {
                             barrier.wait();
                             store.decide(&id, &Decision::Rejected).expect("decide")
+                                == Decided::Written
                         })
                     })
                     .collect();
@@ -757,7 +781,8 @@ mod tests {
 
     /// Of two instances approving one request, one signs and records it and the other finds it
     /// decided, signing nothing: the request's row is held from before the signature until the
-    /// decision is written.
+    /// decision is written. The other finds it still being decided instead when it waited out
+    /// its `lock_timeout`, as on a database slowed by load.
     /// Verifies: ADR-0041
     #[test]
     fn two_approvers_of_one_request_sign_it_once() {
@@ -805,7 +830,7 @@ mod tests {
                 .count();
             assert_eq!(approved, 1, "round {round}: {answers:?}");
             assert!(
-                answers.contains(&Approval::NotWaiting),
+                answers.contains(&Approval::NotWaiting) || answers.contains(&Approval::Deciding),
                 "round {round}: {answers:?}"
             );
             assert_eq!(
@@ -871,7 +896,8 @@ mod tests {
     }
 
     /// Two instances on one database approving one request: one hands it out, the other answers
-    /// that it is not found, and the request is signed and recorded once.
+    /// that it is not found, or that it is being decided when it waited out its `lock_timeout`,
+    /// and the request is signed and recorded once.
     /// Verifies: ADR-0041
     #[test]
     fn two_instances_approving_one_request_record_one_certificate() {
@@ -922,7 +948,8 @@ mod tests {
             });
             assert!(answers.contains(&Ok(())), "round {round}: {answers:?}");
             assert!(
-                answers.contains(&Err(DecisionError::NotFound)),
+                answers.contains(&Err(DecisionError::NotFound))
+                    || answers.contains(&Err(DecisionError::Deciding)),
                 "round {round}: {answers:?}"
             );
             assert_eq!(
@@ -1096,5 +1123,58 @@ mod tests {
             &|| test.refuse("enrolment_requests", "NEW.id = 'z'"),
             &|| test.mend("enrolment_requests"),
         );
+    }
+
+    /// An approval or a rejection that meets a request another instance holds while it signs it,
+    /// for longer than a wait for a lock lasts, is answered that the request is being decided, and
+    /// signs nothing; the other instance's approval stands, and once it is written the request is
+    /// no longer waiting.
+    /// Verifies: ADR-0041
+    #[test]
+    fn a_decision_on_a_request_another_instance_holds_long_is_answered_deciding() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let (a, b) = (
+            &PgEnrolmentStore::new(database.clone()),
+            &PgEnrolmentStore::new(database.clone()),
+        );
+        a.open_window(u64::MAX / 4).expect("open");
+        a.take(&request("p", "1"), 1_000, 100, 100).expect("take");
+        let (signing, signs) = std::sync::mpsc::channel::<()>();
+        let (answered, answers) = std::sync::mpsc::channel();
+        let (b_approved, b_decided) = std::thread::scope(|scope| {
+            // A signs until B has answered, however long B waits.
+            let first = scope.spawn(move || {
+                a.approve("p", &bootstrap("1"), &mut || {
+                    signing.send(()).expect("signing");
+                    answers.recv().expect("B answers");
+                    Ok(Decision::Approved("pem a".to_string()))
+                })
+            });
+            signs.recv().expect("A signs");
+            let answer = (
+                b.approve("p", &bootstrap("1"), &mut || {
+                    Ok(Decision::Approved("pem b".to_string()))
+                }),
+                b.decide("p", &Decision::Rejected),
+            );
+            answered.send(()).expect("A waits");
+            assert_eq!(
+                first.join().expect("A"),
+                Ok(Approval::Approved(Decision::Approved("pem a".to_string())))
+            );
+            answer
+        });
+        assert_eq!(b_approved, Ok(Approval::Deciding));
+        assert_eq!(b_decided, Ok(Decided::Deciding));
+        assert_eq!(
+            b.approve("p", &bootstrap("1"), &mut || {
+                Ok(Decision::Approved("pem b".to_string()))
+            }),
+            Ok(Approval::NotWaiting)
+        );
+        assert_eq!(b.decide("p", &Decision::Rejected), Ok(Decided::NotWaiting));
     }
 }

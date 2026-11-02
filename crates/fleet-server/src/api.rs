@@ -3217,7 +3217,7 @@ fn through_gateway(state: &AppState, id: &str) -> Option<String> {
         (status = 204, description = "Approved and signed"),
         (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
         (status = 404, description = "No such pending request, or enrolment is not configured", body = ErrorBody),
-        (status = 409, description = "The CA could not sign the request, its bootstrap certificate is revoked, or that certificate's subject breaks the rules of ADR-0022 clause 1 — the message names the attribute, and nothing is signed", body = ErrorBody),
+        (status = 409, description = "The CA could not sign the request, its bootstrap certificate is revoked, that certificate's subject breaks the rules of ADR-0022 clause 1 — the message names the attribute —, or another Server instance is deciding the request at this moment; nothing is signed", body = ErrorBody),
         (status = 500, description = "The approval could not be persisted; the request still waits", body = ErrorBody)
     )
 )]
@@ -3252,11 +3252,23 @@ async fn approve_enrolment(
         Err(
             crate::enrolment::DecisionError::Subject(e) | crate::enrolment::DecisionError::Sign(e),
         ) => error(StatusCode::CONFLICT, e),
+        Err(crate::enrolment::DecisionError::Deciding) => deciding(&id),
         Err(crate::enrolment::DecisionError::Store(e)) => error(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("the approval could not be persisted, and the request still waits: {e}"),
         ),
     }
+}
+
+/// The answer to a decision on a request another Server instance is deciding at this moment.
+fn deciding(id: &str) -> Response {
+    error(
+        StatusCode::CONFLICT,
+        format!(
+            "another Server instance is deciding enrolment request {id:?} at this moment, and \
+             nothing was decided here; ask again to see how it was decided"
+        ),
+    )
 }
 
 /// Rejects one enrolment request; its connection is closed.
@@ -3269,6 +3281,7 @@ async fn approve_enrolment(
         (status = 204, description = "Rejected"),
         (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
         (status = 404, description = "No such pending request, or enrolment is not configured", body = ErrorBody),
+        (status = 409, description = "Another Server instance is deciding the request at this moment; nothing is decided", body = ErrorBody),
         (status = 500, description = "The rejection could not be persisted; the request still waits", body = ErrorBody)
     )
 )]
@@ -3292,6 +3305,7 @@ async fn reject_enrolment(
             );
             StatusCode::NO_CONTENT.into_response()
         }
+        Err(crate::enrolment::DecisionError::Deciding) => deciding(&id),
         Err(crate::enrolment::DecisionError::Store(e)) => error(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("the rejection could not be persisted, and the request still waits: {e}"),
