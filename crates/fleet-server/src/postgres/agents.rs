@@ -40,10 +40,11 @@ struct Pins {
     assignments: HashMap<InstanceUid, Assignment>,
     /// Counts the commits of this instance that changed an assignment.
     commits: u64,
-    /// The count at which this instance last committed the assignment of each record, kept only
-    /// while it can decide for a read in flight: one above where the oldest read in flight began.
-    /// What an Agent's re-keys or many releases add therefore leaves once every read that began
-    /// before it has ended, and every read ends within its call's bound.
+    /// The count at which this instance last committed the assignment of each record. Every count
+    /// above where the oldest read in flight began is kept, since it may decide for that read; one
+    /// at or below it is dropped, and with no read in flight none is kept. What an Agent's re-keys
+    /// or many releases add therefore leaves once every read that began before it has ended, and
+    /// every read ends within its call's bound.
     committed: HashMap<InstanceUid, u64>,
     /// Where each read in flight began, and how many began there.
     in_flight: BTreeMap<u64, usize>,
