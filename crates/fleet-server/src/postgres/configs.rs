@@ -563,13 +563,7 @@ mod tests {
              CREATE TRIGGER fleet_test_wait BEFORE INSERT OR UPDATE ON agents \
              FOR EACH ROW EXECUTE FUNCTION fleet_test_wait();",
         );
-        let waiting = |condition: &str| {
-            !test
-                .rows(&format!(
-                    "SELECT 1 FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND {condition}"
-                ))
-                .is_empty()
-        };
+        let waiting = |condition: &str| test.sessions(condition) > 0;
         let until = |what: &str, done: &dyn Fn() -> bool| {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
             while !done() {

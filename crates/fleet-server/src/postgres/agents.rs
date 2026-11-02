@@ -2017,12 +2017,7 @@ mod tests {
              CREATE TRIGGER fleet_test_wait AFTER UPDATE ON agents \
              FOR EACH ROW EXECUTE FUNCTION fleet_test_wait();",
         );
-        let sessions = |condition: &str| {
-            test.rows(&format!(
-                "SELECT 1 FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND {condition}"
-            ))
-            .len()
-        };
+        let sessions = |condition: &str| test.sessions(condition);
         let at_gate = || sessions("wait_event = 'PgSleep' AND query LIKE 'UPDATE agents%'");
         let until = |what: &str, done: &dyn Fn() -> bool| {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
@@ -2465,12 +2460,7 @@ mod tests {
              CREATE TRIGGER fleet_test_wait BEFORE UPDATE ON agents \
              FOR EACH ROW EXECUTE FUNCTION fleet_test_wait();",
         );
-        let sessions = |condition: &str| {
-            test.rows(&format!(
-                "SELECT 1 FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND {condition}"
-            ))
-            .len()
-        };
+        let sessions = |condition: &str| test.sessions(condition);
         let at_gate = || sessions("wait_event = 'PgSleep'");
         let until = |what: &str, done: &dyn Fn() -> bool| {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
