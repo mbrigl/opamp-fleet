@@ -797,7 +797,9 @@ impl AgentStore for PgAgentStore {
     /// One transaction: the revisions and the assignments that pin them commit together or not at
     /// all (ADR-0029 clause 21). Each record's assignment is written alone, in the order of the
     /// `instance_uid`, so two releases over the same Agents lock their rows in one order; a record
-    /// forgotten meanwhile is written nothing.
+    /// forgotten meanwhile is written nothing. The row of each Package an assignment pins is held
+    /// `FOR KEY SHARE` until the commit, as each pinned Configuration's is, so a write to the
+    /// Package that counts the assignments pinning it waits for these.
     fn release(
         &self,
         revisions: &[Pinned],
@@ -815,6 +817,20 @@ impl AgentStore for PgAgentStore {
                 let mut client = client(&pool).await?;
                 let transaction = client.transaction().await.map_err(sql)?;
                 super::configs::retain(&*transaction, &revisions).await?;
+                let packages: BTreeSet<&PackageId> = records
+                    .iter()
+                    .filter_map(|(_, assignment)| assignment.as_ref()?.package.as_ref())
+                    .collect();
+                for id in packages {
+                    hold_pinned_package(&*transaction, id).await?;
+                }
+                let deployments: BTreeSet<&str> = records
+                    .iter()
+                    .filter_map(|(_, assignment)| Some(assignment.as_ref()?.deployment.as_str()))
+                    .collect();
+                for name in deployments {
+                    hold_released_through(&*transaction, name).await?;
+                }
                 let pinned: BTreeSet<&str> = revisions
                     .iter()
                     .map(|pinned| pinned.configuration.as_str())
@@ -863,6 +879,37 @@ impl AgentStore for PgAgentStore {
             .filter_map(|assignment| assignment.configurations.get(name).cloned())
             .collect()
     }
+}
+
+/// Holds the row of the Package `id` `FOR KEY SHARE` inside a rollout's transaction: a write to
+/// the Package, which holds it `FOR UPDATE` and then counts the assignments that pin it, waits for
+/// the rollout's commit, while other rollouts that pin it go on beside it. A Package that is not
+/// stored is an error, as a Configuration that is not is.
+async fn hold_pinned_package(client: &impl GenericClient, id: &PackageId) -> Result<(), String> {
+    client
+        .query_opt(
+            "SELECT 1 FROM packages WHERE agent_type = $1 AND version = $2 FOR KEY SHARE",
+            &[&id.agent_type, &id.version],
+        )
+        .await
+        .map_err(sql)?
+        .map(drop)
+        .ok_or_else(|| format!("no package set {id}"))
+}
+
+/// Holds the row of the Deployment `name` `FOR KEY SHARE` inside a rollout's transaction, as
+/// [`hold_pinned_package`] holds a Package's: its deletion, which counts the assignments that name
+/// it, waits for the rollout's commit. A Deployment that is not stored is an error.
+async fn hold_released_through(client: &impl GenericClient, name: &str) -> Result<(), String> {
+    client
+        .query_opt(
+            "SELECT 1 FROM deployments WHERE name = $1 FOR KEY SHARE",
+            &[&name],
+        )
+        .await
+        .map_err(sql)?
+        .map(drop)
+        .ok_or_else(|| format!("no deployment {name:?}"))
 }
 
 /// The lock the creation of a record is counted under, by the key its schema gives it.
@@ -1542,6 +1589,8 @@ mod tests {
             return;
         };
         let store = PgAgentStore::new(test.open());
+        // A rollout releases through a stored Deployment.
+        test.store_deployments(&["canary"]);
         let uid = InstanceUid::default();
         let stored = record();
         store.put(&uid, &stored).expect("put");
@@ -1594,6 +1643,8 @@ mod tests {
             return;
         };
         let database = test.open();
+        // A rollout releases through a stored Deployment.
+        test.store_deployments(&["stable", "canary"]);
         contract(
             &|| {
                 (
@@ -1627,6 +1678,8 @@ mod tests {
             return;
         };
         let database = test.open();
+        // A rollout releases through a stored Deployment.
+        test.store_deployments(&["stable"]);
         let store = Arc::new(PgAgentStore::open(database.clone()).expect("open"));
         let uid = InstanceUid([5; 16]);
         let mut bare = record();
@@ -1727,6 +1780,8 @@ mod tests {
             return;
         };
         let store = PgAgentStore::open(test.open()).expect("open");
+        // A rollout releases through a stored Deployment.
+        test.store_deployments(&["stable"]);
         let (agent, other) = (InstanceUid([9; 16]), InstanceUid([10; 16]));
         let mut bare = record();
         bare.assignment = None;
@@ -1946,6 +2001,8 @@ mod tests {
         };
         let database = test.open();
         let (low, high) = (InstanceUid([1; 16]), InstanceUid([2; 16]));
+        // A rollout releases through a stored Deployment.
+        test.store_deployments(&["first", "second"]);
         let mut bare = record();
         bare.assignment = None;
         let store = PgAgentStore::new(database.clone());

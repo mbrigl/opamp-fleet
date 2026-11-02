@@ -90,8 +90,9 @@ every change that concerns a live session by one `NOTIFY`.
    need a network HSM, or no CA key on the Server at all, the certificates then being issued
    outside it. The Server cannot tell which host a token's files are on, so keeping a SoftHSM2
    token's instances on its host is the operator's. The Server does not copy keys between tokens.
-   With `store = "s3"` every instance uses the same bucket and prefix, and the startup sweep and the
-   staging cleanup run under an advisory lock, so one instance does them at a time;
+   With `store = "s3"` every instance uses the same bucket and prefix, and every sweep of
+   unreferenced blobs and every staging cleanup run under an advisory lock, so one instance does
+   them at a time, and an upload takes it shared in the transaction that writes its entry;
    [ADR-draft-the-servers-state-and-its-stores](draft-the-servers-state-and-its-stores.md) clause 14
    decides it for the blob store. An instance on PostgreSQL and S3 keeps nothing on its own disk
    (that draft's clause 1): it reads its configuration, its TLS files and its secret files, all of
@@ -287,6 +288,11 @@ every change that concerns a live session by one `NOTIFY`.
       from the rows and from the assignments that pin them
       ([ADR-draft-the-servers-state-and-its-stores](draft-the-servers-state-and-its-stores.md)
       clauses 2 and 21).
+    - A rollout holds the row of every Configuration, Package and Deployment its assignments pin
+      `FOR KEY SHARE` until it commits, and fails when one is not stored, so it never writes a pin
+      on what another instance deleted. The deletion of a Configuration, a Package or a Deployment,
+      and every write to a Package's entries, holds its row `FOR UPDATE` and counts the stored
+      assignments that pin it, so it waits for such a rollout and is refused once it committed.
 
 20. **A fleet that loses an instance comes back spread out.** The Agents of a lost instance —
     its connections cut, closed as it drains, or ended by a lapsed lease — reconnect as
@@ -465,6 +471,13 @@ initialises a module once per process:
   B's memory holds an older, lower floor.
 - Two instances saving one Configuration at once keep both revisions; two instances uploading two
   entries of one Package keep both; two instances adding two members to one Deployment keep both.
+- A Configuration whose revision a rollout through A pins is not deleted through B, a Package A
+  pins is neither changed nor deleted through B, and a Deployment A released through is not
+  deleted through B, though B's memory holds no such pin; a deletion through B while A's rollout
+  has not committed waits for it and is then refused.
+- A blob an entry written through A names is kept by B's sweep, though B has not read the entry;
+  the staging object of a lease released at an orderly shutdown goes with the next sweep on any
+  instance, and two instances sweeping at once delete it once.
 - One hundred heartbeats of one Agent within one presence interval write its presence once.
 - An Agent that reconnects from B to A is held by A, and B stops carrying it.
 - An Agent no instance carries is in no instance's memory, and A's Operator plane lists it, with

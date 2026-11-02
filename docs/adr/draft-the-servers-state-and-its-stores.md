@@ -318,7 +318,10 @@ and configured in the Server's configuration alone, and move an old layout by an
     - A blob is named by the lowercase hex SHA-256 of its bytes and by nothing else. Bytes already
       stored are stored once.
     - A blob that no Package entry references is deleted when its last entry goes, and at
-      startup.
+      startup. Only the startup sweep lists every blob; a sweep after an act deletes the blobs the
+      act let go. On PostgreSQL whether an entry references a blob is read from the stored
+      entries, under the lock of clause 14, and not from what the instance holds, so a blob that
+      an entry written through another instance names is kept.
     - The size limits of a Package entry
       ([ADR-0027](0027-packages-signatures-and-delivery.md)) count the blobs.
     - A Package's metadata names a blob by its hash only.
@@ -326,11 +329,29 @@ and configured in the Server's configuration alone, and move an old layout by an
 14. **One blob store, chosen in `server.toml`.** `[blobs] store` is `"fs"`, the default, or
     `"s3"`. Any other value fails startup naming the key. Both are supported in production. The
     filesystem blob store is read and written by one Server instance alone. With `"s3"` every
-    instance on one database uses the same bucket and prefix, and the startup sweep of
-    unreferenced blobs (clause 13) and the cleanup of `<prefix>staging/` (clause 16) run under an
+    instance on one database uses the same bucket and prefix. On PostgreSQL every sweep of
+    unreferenced blobs (clause 13) and every cleanup of `<prefix>staging/` (clause 16) run under an
     advisory lock, so one instance does them at a time
     ([ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it](draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md)
-    clause 2).
+    clause 2). The lock is taken whatever the blob store: with `"fs"` the instance is alone and
+    the lock decides nothing, but the PostgreSQL record store does not ask which blob store it
+    serves, and one rule for every PostgreSQL Server costs one session per sweep.
+    - A sweep holds the lock alone. An upload takes it shared inside the transaction that writes
+      its entry, checks there that its blob is stored, and commits, the lock let go with the
+      transaction. A sweep therefore never runs between an upload's check and its commit, and
+      never deletes a blob that an entry is about to name. An upload whose blob a sweep deleted
+      first is refused, to be uploaded again, and one whose transaction does not commit, its
+      session ended included, writes no entry.
+    - A sweep's lock is a session-level advisory lock, held on a connection of its own, outside
+      the pool: one session more for each sweep in progress, which the database's
+      `max_connections` must allow for. It waits for the lock 60 seconds, its session's
+      `statement_timeout` raised to let it; an upload waits as long as the database's
+      `lock_timeout` of 5 seconds. A sweep's session that ends while it holds the lock is logged,
+      as the lock is gone with it; one that ends before it had the lock is not.
+    - A startup sweep that cannot have the lock fails startup, naming the lock. A sweep after an
+      act logs it, and the blobs it would have deleted stay until the next startup. A sweep after
+      an act runs once the act has let go of every lock of its Server's own, such as the fleet's,
+      so no other act waits behind its wait for the lock.
 
 15. **The filesystem blob store** keeps one file per blob in `data_dir/blobs/`. It streams an
     upload to a staging file inside `blobs/`, hashes it on the way, and renames it to its hash. At
@@ -346,11 +367,16 @@ and configured in the Server's configuration alone, and move an old layout by an
     - `<lease>` is the identifier of the lease of the instance that writes the upload
       ([ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it](draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md)
       clause 3), or `fs` with the filesystem record store, which has one Server and no lease. A
-      staging object is left behind only by an upload that was cut off. The cleanup, at startup
-      and whenever an instance takes over a lapsed lease, deletes the staging keys of every lease
-      that is not live, and never those of a live one; with the filesystem record store it deletes
-      everything under `<prefix>staging/` at startup. A starting instance therefore never deletes
-      an upload another instance is still writing.
+      staging object is left behind only by an upload that was cut off, or one whose staging
+      object could not be deleted. The cleanup runs with every sweep of clause 13 — at startup, and
+      after an entry is replaced or deleted, a Package deleted, or an upload fails — and whenever
+      an instance takes over a lapsed lease. It deletes the staging keys of every lease that is not
+      live, and never those of a live one. With the filesystem record store it deletes everything
+      under `<prefix>staging/`, and at startup alone, as every upload in progress is its one
+      Server's. A starting instance therefore never deletes an upload another
+      instance is still writing, and a staging object that a lease released at an orderly
+      shutdown left, or that a takeover's cleanup could not delete, goes with the next sweep on
+      any instance. There is no periodic cleanup.
     - A multipart upload that was cut off before it completed is not an object, and the cleanup
       does not see it. Its parts are the operator's to expire, with a lifecycle rule on the bucket
       that aborts incomplete multipart uploads.
@@ -409,7 +435,9 @@ and configured in the Server's configuration alone, and move an old layout by an
     - `server blobs-to-s3 --data-dir <data_dir>`, for a Server already on PostgreSQL with the
       filesystem blob store. It runs once, with the `server.toml` the Server will start with,
       which names the database and the bucket and no `data_dir` (clause 1), and refuses to run
-      while any instance holds a live lease. It uploads, as above, every blob of
+      while any instance holds a live lease. It holds the lock of clause 14 alone for its whole
+      run, so an instance that starts meanwhile waits at its startup sweep and fails naming the
+      lock, rather than deleting the command's staging objects. It uploads, as above, every blob of
       `<data_dir>/blobs/` that a Package entry references and the bucket lacks, then checks that
       the bucket holds the blob of every entry, and fails naming an entry whose blob it does not
       hold. It only reads `<data_dir>`; removing the directory afterwards is the operator's.
@@ -860,11 +888,23 @@ Tests that carry `Verifies: ADR-0029`:
   `a_floor_below_the_stored_one_is_refused_in_the_transaction`;
   [`s3.rs`](../../crates/fleet-server/src/s3.rs)
   `the_cleanup_leaves_the_staging_objects_of_a_live_lease_and_deletes_a_lapsed_ones`,
-  `the_cleanup_lists_the_staging_keys_before_it_asks_which_leases_are_live`;
+  `the_cleanup_lists_the_staging_keys_before_it_asks_which_leases_are_live`,
+  `the_next_sweep_on_any_instance_deletes_a_released_leases_staging_object_once`;
+  [`postgres/packages.rs`](../../crates/fleet-server/src/postgres/packages.rs)
+  `a_sweep_keeps_a_blob_an_entry_stored_through_another_writer_names`,
+  `an_upload_holds_off_a_sweep_until_its_entry_is_committed`,
+  `an_upload_whose_blob_a_sweep_took_first_is_refused`,
+  `an_upload_whose_session_ends_before_its_commit_writes_no_entry`,
+  `a_hold_whose_session_ends_is_marked_lost`,
+  `a_sweep_waits_its_whole_wait_for_the_lock_and_an_upload_five_seconds`,
+  `a_startup_sweep_that_cannot_have_the_lock_fails_naming_it`;
+  [`fleet.rs`](../../crates/fleet-server/src/fleet.rs)
+  `a_package_deletion_sweeps_once_it_lets_the_fleet_lock_go`;
   [`postgres/import.rs`](../../crates/fleet-server/src/postgres/import.rs)
   `migrate_to_postgres_leaves_the_audit_as_an_archive_and_records_its_last_entry`,
   `migrate_to_postgres_with_s3_uploads_the_referenced_blobs_and_takes_no_data_dir`,
-  `blobs_to_s3_uploads_the_referenced_blobs_and_checks_every_entry`.
+  `blobs_to_s3_uploads_the_referenced_blobs_and_checks_every_entry`,
+  `blobs_to_s3_holds_the_blob_lock_alone_and_fails_naming_it_when_held`.
 - Tests that will carry `Verifies: ADR-draft-the-servers-state-and-its-stores`, for clause 23:
   [`postgres/mod.rs`](../../crates/fleet-server/src/postgres/mod.rs)
   `a_server_holds_a_lease_before_it_opens_a_listener`,

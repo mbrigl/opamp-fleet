@@ -136,7 +136,16 @@ impl PackageBackend for FsPackageBackend {
         })
     }
 
-    fn put_entry(&self, id: &PackageId, entry: &Entry) -> Result<(), String> {
+    /// Its one Server is its only writer: `stored` is asked once, before the entry is written.
+    fn put_entry(
+        &self,
+        id: &PackageId,
+        entry: &Entry,
+        stored: crate::packages::Stored,
+    ) -> Result<(), String> {
+        if !stored()? {
+            return Err(crate::packages::REMOVED_WHILE_UPLOADED.to_string());
+        }
         self.amend(id, |package| {
             package
                 .entries
