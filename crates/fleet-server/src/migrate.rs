@@ -36,10 +36,10 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::bootstrap::{BootstrapStore as _, Entry as BootstrapEntry};
-use crate::configs::{ConfigBackend as _, Configuration};
+use crate::configs::Configuration;
 use crate::deployments::{Deployment, DeploymentBackend as _};
 use crate::fs;
-use crate::packages::{Entry, Package, PackageBackend as _, PackageId, Platform};
+use crate::packages::{Entry, Package, PackageId, Platform};
 use crate::revocation::{Host, Issued, LedgerStore as _};
 
 /// What a migration did, line by line, and whether all of the trust data made it.

@@ -26,7 +26,7 @@ use opamp::uid::InstanceUid;
 use prost::Message;
 use sha2::{Digest, Sha256};
 
-use crate::configs::Configuration;
+use crate::configs::Pinned;
 use crate::fleet::{Assignment, Transport};
 use crate::packages::PackageId;
 
@@ -190,8 +190,12 @@ pub trait AgentStore: Send + Sync {
         self.remove(old)
     }
 
-    /// A rollout (ADR-0029 clause 2): the Configurations whose retained revisions it pins, and
-    /// the records carrying the assignments that pin them, as one operation. An adapter that
+    /// A rollout (ADR-0029 clause 2): the revisions it pins, each added to its Configuration's
+    /// retained revisions by its hash and no other revision touched, and the records carrying the
+    /// assignments that pin them, as one operation. A database adapter holds each pinned
+    /// Configuration's row against a collection until it commits, so no other instance collects a
+    /// revision it pins ([`ConfigBackend::collect`](crate::configs::ConfigBackend::collect)). An
+    /// adapter that
     /// cannot make it one step writes the revisions first, so a failure part-way leaves at most a
     /// revision nothing references — which the next load collects — and never an assignment
     /// pinning a revision that was not written. A record that cannot be written leaves the records
@@ -203,7 +207,7 @@ pub trait AgentStore: Send + Sync {
     /// Returns an error when the revisions or a record cannot be written.
     fn release(
         &self,
-        revisions: &[Configuration],
+        revisions: &[Pinned],
         agents: &[(InstanceUid, PersistedAgent)],
     ) -> Result<(), String>;
 

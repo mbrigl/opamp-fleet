@@ -429,7 +429,7 @@ only moves forward.
 | A package shows `in no deployment` | Stored and unreachable: nothing aims it. Put it in a channel. |
 | A channel shows `aims at nobody` | Its Selector names an attribute nobody reports, or a value nobody carries. Compare it against the attributes on the Agents tab. |
 | An upload answers `400` about a signature | A signature goes on the entry's own `…/signature` route; the message names it. |
-| A signature answers `409` | The Package is rolled out to an Agent, and its entries — signatures included — are frozen. Ship the next version as a new Package. |
+| A signature answers `409` | The Package is rolled out to an Agent, and its entries — signatures included — are frozen. Ship the next version as a new Package. Or, when the message says the entry has changed since the Server read it, another Server instance replaced or removed the entry: read the Package again (`GET /api/v1/packages/<agent_type>/<version>`), check the bytes it holds now, and sign those. |
 | The package routes answer `404` | The Package or entry the path names does not exist — check the Agent type and version against `GET /api/v1/packages`. |
 | An upload answers `400`, "invalid platform" | `os`/`arch` are required and must be file-name-safe: lowercase letters, digits and `_`, at most 16 characters. |
 | An Agent that accepts packages is offered nothing, and there is no conflict | No signed artifact for its platform. Check its `os.type` and `host.arch` on its fleet row against the platforms the package holds — this is the case the whole mechanism exists to make visible rather than fatal. |

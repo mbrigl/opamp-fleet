@@ -12,7 +12,7 @@ use tokio_postgres::GenericClient;
 
 use super::{client, signed, sql, unsigned, Database};
 use crate::agent_store::{AgentStore, PersistedAgent, Pin};
-use crate::configs::Configuration;
+use crate::configs::Pinned;
 use crate::fleet::{Assignment, Transport};
 use crate::packages::PackageId;
 
@@ -134,7 +134,7 @@ impl AgentStore for PgAgentStore {
     /// (ADR-0029 clause 21).
     fn release(
         &self,
-        revisions: &[Configuration],
+        revisions: &[Pinned],
         agents: &[(InstanceUid, PersistedAgent)],
     ) -> Result<(), String> {
         let (revisions, records) = (revisions.to_vec(), agents.to_vec());
@@ -142,9 +142,7 @@ impl AgentStore for PgAgentStore {
         self.database.run_writing(written, move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
-            for configuration in &revisions {
-                super::configs::write(&*transaction, configuration).await?;
-            }
+            super::configs::retain(&*transaction, &revisions).await?;
             for (uid, record) in &records {
                 write(&*transaction, uid, record).await?;
             }
@@ -357,7 +355,7 @@ pub(crate) async fn write(
 mod tests {
     use super::*;
     use crate::agent_store::tests::record;
-    use crate::configs::{revision_hash, Revision};
+    use crate::configs::{revision_hash, Configuration, Revision};
     use crate::fs::{FsAgentStore, FsConfigBackend};
     use crate::postgres::testing::TestDatabase;
 
@@ -372,12 +370,20 @@ mod tests {
         }
     }
 
+    fn pinned_of(revision: &Revision) -> Pinned {
+        Pinned {
+            configuration: "base".to_string(),
+            hash: revision_hash(revision),
+            revision: revision.clone(),
+        }
+    }
+
     /// The port's contract on either store: what is written is loaded back whole, wire types and
     /// all; a record without an assignment stays without one; a re-key moves the record; the
     /// integrity queries follow what is stored; and a rollout's revisions and assignments are
     /// both present.
     fn contract(open: Open<'_>) {
-        let (store, _) = open();
+        let (store, configs) = open();
         assert!(store.load().expect("empty").is_empty());
         let (one, two, three) = (
             InstanceUid::default(),
@@ -417,8 +423,9 @@ mod tests {
             package: None,
             configurations: BTreeMap::from([("base".to_string(), revision_hash(&pinned))]),
         });
+        configs.save("base", &pinned).expect("save");
         store
-            .release(std::slice::from_ref(&base), &[(three, released.clone())])
+            .release(&[pinned_of(&pinned)], &[(three, released.clone())])
             .expect("release");
         let (reopened, configs) = open();
         let loaded = reopened.load().expect("load");
@@ -469,14 +476,14 @@ mod tests {
     /// A rollout whose last record cannot be written leaves none of its assignments behind, on
     /// either store, and what the store answers about pins stays as it was (ADR-0029 clause 21):
     /// the records already written are put back, or never committed. `refuse(uid)` makes the
-    /// write of that Agent's record fail; `mend` takes that away. Answers the Configurations the
-    /// store holds afterwards, which the caller judges: none with PostgreSQL, at most a revision
+    /// write of that Agent's record fail; `mend` takes that away. Answers the retained revisions
+    /// the store holds afterwards, which the caller judges: none with PostgreSQL, at most one
     /// nothing references with files.
     fn a_rollout_that_fails(
         open: Open<'_>,
         refuse: &dyn Fn(&InstanceUid),
         mend: &dyn Fn(&InstanceUid),
-    ) -> Vec<Configuration> {
+    ) -> Vec<String> {
         let (store, configs) = open();
         let (one, two) = (InstanceUid::default(), InstanceUid::default());
         let mut before = record();
@@ -496,9 +503,13 @@ mod tests {
             package: None,
             configurations: BTreeMap::from([("base".to_string(), revision_hash(&pinned))]),
         });
+        configs.save("base", &base.saved).expect("save");
         refuse(&two);
         store
-            .release(&[base], &[(one, released.clone()), (two, released)])
+            .release(
+                &[pinned_of(&pinned)],
+                &[(one, released.clone()), (two, released)],
+            )
             .expect_err("the second record cannot be written");
         mend(&two);
 
@@ -507,7 +518,12 @@ mod tests {
         assert!(!loaded.contains_key(&two));
         assert_eq!(store.pinning(Pin::Deployment("stable")), 0);
         assert_eq!(store.pinning(Pin::Configuration("base")), 0);
-        configs.load().expect("load")
+        configs
+            .load()
+            .expect("load")
+            .into_iter()
+            .flat_map(|config| config.retained.into_keys())
+            .collect()
     }
 
     /// Verifies: ADR-0029

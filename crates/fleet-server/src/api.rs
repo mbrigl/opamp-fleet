@@ -1393,7 +1393,11 @@ fn package_error(e: String) -> Response {
     if e.contains("not configured") || e.starts_with("no package set") || e.starts_with("no entry")
     {
         error(StatusCode::NOT_FOUND, e)
-    } else if e.contains("immutable") || e.contains("holds no entries") || e.contains("is pinned") {
+    } else if e.contains("immutable")
+        || e.contains("holds no entries")
+        || e.contains("is pinned")
+        || e.contains("has changed since")
+    {
         error(StatusCode::CONFLICT, e)
     } else if e.starts_with("invalid") || e.starts_with("the ") || e.contains("empty") {
         error(StatusCode::BAD_REQUEST, e)
@@ -3699,5 +3703,41 @@ async fn lift_revocation(
         }
         Ok(false) => error(StatusCode::NOT_FOUND, format!("no revocation {id:?}")),
         Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A store refusal of the Package routes is answered with the status the REST contract names
+    /// for it — among them the signature write onto an entry another instance replaced, a
+    /// conflict with the entry's stored state, whose message also begins as a `400`'s does.
+    /// Verifies: ADR-0027
+    #[test]
+    fn a_package_refusal_is_answered_with_its_status() {
+        for (refusal, status) in [
+            ("no package set otelcol@1.0.0", StatusCode::NOT_FOUND),
+            (
+                "no entry linux-amd64 in set otelcol@1.0.0",
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                "set otelcol@1.0.0 is assigned to an Agent and its entries are immutable",
+                StatusCode::CONFLICT,
+            ),
+            (
+                "the entry linux-amd64 in set otelcol@1.0.0 has changed since this Server read \
+                 it — read the Package again and sign what it holds",
+                StatusCode::CONFLICT,
+            ),
+            ("the signature is empty", StatusCode::BAD_REQUEST),
+        ] {
+            assert_eq!(
+                package_error(refusal.to_string()).status(),
+                status,
+                "{refusal}"
+            );
+        }
     }
 }
