@@ -32,8 +32,8 @@ once its tag exists.
     all instances together.
   - **One enrolment request, two decisions.** Of two instances approving or rejecting one
     request at once, one decides it. The other answers `404`, or `409` when it waited five
-    seconds and the first still holds the request, as on a slow database; asked again, it
-    answers how the request was decided.
+    seconds and the first still holds the request, as on a slow database; asked again once
+    it is decided, it answers `404`.
   - **The log.** Each line names `instance_id=<id>`.
   - **A failover.** An instance that stops in order drains its sessions and releases its lease,
     and its Agents reconnect to another. The lease of one that ends without stopping is taken
@@ -61,6 +61,14 @@ once its tag exists.
       a fellow Agent of that Host is inherited there only once that group is placed again: at a
       change of the Client Agent's labels, a forget, a change of the Agent's report, or a missed
       notification.
+  - **An approval whose commit fails leaves its certificate recorded.** An approval signs the
+    certificate and records it in the register and the audit record before its decision
+    commits. When that commit fails, on a lost connection, a timeout, or a commit of another
+    database that holds the notification lock for more than five seconds, the request still
+    waits, and approving it again signs a second certificate for the same key. The first is
+    never handed to the host, so no one holds it; it stays in the register, valid, beside a Host
+    with no binding. Revoke it by its serial when the audit record shows two `issuance.signed`
+    entries with one `key_fingerprint`.
 
   The Server adds the table `leases` at its first start (migration 3).
   **What to do:** nothing to stay on one Server. To run several, follow

@@ -818,6 +818,17 @@ instance that carries an Agent, two cases do not inherit yet:
   Client Agent's labels change, an Agent of the group is forgotten, the Agent's report changes, or
   the instance has missed a notification and reads again.
 
+### An approval whose commit fails
+
+An approval signs the host's certificate and records it in the register and the audit record
+before its decision commits. When that commit fails, on a lost connection to the database, a
+timeout, or a commit elsewhere on the database server that holds the notification lock for more
+than five seconds, the approval answers `500` and the request still waits. Approving it again
+signs a second certificate for the same key. The first is never handed to the host, so no one
+holds it, but it stays in the register as valid, beside a Host with no binding. When the audit
+record shows two `issuance.signed` entries with one `key_fingerprint`, revoke the first by its
+serial.
+
 ### From one Server on files to two instances
 
 1. **Run this release** on the one Server, on files.
@@ -1992,8 +2003,8 @@ when [`[rest.auth]`](#the-operator-plane-restauth) is configured, needs Basic cr
 | `POST /api/v1/deployments/{name}/rollout` | Roll it out to every Agent it claims and would move — its Packages and Configurations in one release, the moment a rollout starts. Agents another Deployment also claims are skipped and reported as conflicts. `409` while the channel holds no Package and no Configuration, and `409` naming each Package and platform while any entry of a Package it holds lacks a signature. |
 | `GET` / `POST` / `DELETE /api/v1/enrolment/window` | Read, open or close the enrolment window — see [Enrolment](#enrolment-a-new-host-approved-by-an-operator). `POST` body: `{"open_for_secs": n}`, 1 to 86400. `404` while `[enrolment]` is not configured. |
 | `GET /api/v1/enrolments` | The pending enrolment requests, oldest first, each with its `id` — the fingerprint the enrolling Client logs. |
-| `POST /api/v1/enrolments/{id}/approve` | Sign that request and hand the host its certificate. `404` for an unknown or expired id. `409` while another instance is deciding that request; asked again, it answers how it was decided. |
-| `POST /api/v1/enrolments/{id}/reject` | Refuse that request and close its connection. `404` for an unknown or expired id. `409` while another instance is deciding that request; asked again, it answers how it was decided. |
+| `POST /api/v1/enrolments/{id}/approve` | Sign that request and hand the host its certificate. `404` for an unknown or expired id. `409` while another instance is deciding that request; asked again once it is decided, `404`. |
+| `POST /api/v1/enrolments/{id}/reject` | Refuse that request and close its connection. `404` for an unknown or expired id. `409` while another instance is deciding that request; asked again once it is decided, `404`. |
 | `GET` / `POST /api/v1/bootstrap-certificates` | List the valid bootstrap certificates the Server issued, or issue one — see [Bootstrap certificates](#bootstrap-certificates-issued-by-the-server). `POST` body: `{"subject": {…}, "validity_days": n, "password": "…"}`, `subject.organization`, `subject.organizational_unit` and `password` required (`400` naming the one missing); the answer carries the certificate and never its key, which is in the PKCS#12 file. `409` without `[enrolment] bootstrap_ca_key_file`. |
 
 The package routes answer `404` while package delivery is not configured on this Server.

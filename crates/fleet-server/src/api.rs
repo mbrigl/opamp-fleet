@@ -3266,7 +3266,7 @@ fn deciding(id: &str) -> Response {
         StatusCode::CONFLICT,
         format!(
             "another Server instance is deciding enrolment request {id:?} at this moment, and \
-             nothing was decided here; ask again to see how it was decided"
+             nothing was decided here; asked again once it is decided, this answers 404"
         ),
     )
 }
