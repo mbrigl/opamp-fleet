@@ -24,12 +24,18 @@ pub struct Taken {
     /// When the request that took it was sent: the instance measures its lease from here, which is
     /// no later than the database's own time of it.
     pub sent: Instant,
-    /// The leases of instances that were gone, which this one took over.
+    /// The leases of instances that were gone, which this one took over: every lease that had
+    /// lapsed, and the live lease of an instance that had to be alone and whose lock is free.
     pub taken_over: Vec<String>,
 }
 
-/// A new instance id: a random UUID (version 4), as text.
-fn new_instance_id() -> Result<String, String> {
+/// A new instance id: a random UUID (version 4), as text. The Server makes one at startup, before
+/// its first lease, so that its log names it from then on, and one for each new lease after a lost
+/// one.
+///
+/// # Errors
+/// Returns an error when the system gives no randomness.
+pub fn new_instance_id() -> Result<String, String> {
     let mut bytes = [0u8; 16];
     ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut bytes)
         .map_err(|_| "no randomness for an instance id".to_string())?;
@@ -54,25 +60,26 @@ impl Database {
     /// live lease of an instance that had to be alone belongs to a process that is gone, and it
     /// takes that over. An instance that shares the database fails while another instance holds it
     /// alone; a live lease of one that had to be alone and whose lock is free it takes over too.
-    /// Lapsed leases are removed.
+    /// A lapsed lease it takes over as well, removing it; [`Taken::taken_over`] names each.
     ///
     /// # Errors
     /// Returns an error naming the database when it cannot be reached, and the refusals above.
     pub fn take_lease(&self, host: &str, lapse: Duration) -> Result<Taken, String> {
-        self.take_lease_within(host, lapse, super::CALL_TIMEOUT)
+        self.take_lease_within(new_instance_id()?, host, lapse, super::CALL_TIMEOUT)
     }
 
-    /// [`take_lease`](Self::take_lease), waiting at most `bound` for the answer.
+    /// [`take_lease`](Self::take_lease) under `instance_id`, one [`new_instance_id`] made, waiting
+    /// at most `bound` for the answer.
     ///
     /// # Errors
     /// As [`take_lease`](Self::take_lease), and when the database does not answer within `bound`.
     pub fn take_lease_within(
         &self,
+        instance_id: String,
         host: &str,
         lapse: Duration,
         bound: Duration,
     ) -> Result<Taken, String> {
-        let instance_id = new_instance_id()?;
         let exclusive = self.exclusive().clone();
         let host = host.to_string();
         let sent = Instant::now();
@@ -129,13 +136,17 @@ impl Database {
                     }
                 }
             }
-            transaction
-                .execute(
-                    "DELETE FROM leases WHERE expires_at <= now() OR instance_id::text = ANY($1)",
+            let taken_over: Vec<String> = transaction
+                .query(
+                    "DELETE FROM leases WHERE expires_at <= now() OR instance_id::text = ANY($1) \
+                     RETURNING instance_id::text",
                     &[&alone],
                 )
                 .await
-                .map_err(sql)?;
+                .map_err(sql)?
+                .iter()
+                .map(|row| row.get(0))
+                .collect();
             transaction
                 .execute(
                     "INSERT INTO leases \
@@ -152,7 +163,7 @@ impl Database {
                 .await
                 .map_err(sql)?;
             transaction.commit().await.map_err(sql)?;
-            Ok((instance_id, alone))
+            Ok((instance_id, taken_over))
         })?;
         Ok(Taken {
             instance_id: id,
@@ -314,5 +325,124 @@ mod tests {
         }
         let taken = taken.expect("the lock was not released");
         assert_eq!(taken.taken_over, [held.instance_id]);
+    }
+
+    /// A lease that lapsed is taken over by the next instance that takes one, which names it; a
+    /// live lease of an instance that shares the database is not.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    #[test]
+    fn a_lapsed_lease_is_taken_over_and_named() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let (a, b, c) = (shared(&test), shared(&test), shared(&test));
+        let lapsed = a.take_lease("host-a", LAPSE).expect("a's lease");
+        let live = b.take_lease("host-b", LAPSE).expect("b's lease");
+        test.sql(&format!(
+            "UPDATE leases SET expires_at = now() WHERE instance_id = '{}'",
+            lapsed.instance_id
+        ));
+        let taken = c.take_lease("host-c", LAPSE).expect("c's lease");
+        assert_eq!(taken.taken_over, [lapsed.instance_id]);
+        assert!(!taken.taken_over.contains(&live.instance_id));
+    }
+
+    /// What a log writes, collected.
+    #[derive(Clone, Default)]
+    struct Collected(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Collected {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("log").extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The lines `take` logs.
+    fn logged(take: impl FnOnce() -> Taken) -> (Taken, Vec<String>) {
+        let collected = Collected::default();
+        let writer = collected.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_writer(move || writer.clone())
+            .finish();
+        let taken = tracing::subscriber::with_default(subscriber, take);
+        let lines = String::from_utf8(collected.0.lock().expect("log").clone())
+            .expect("utf-8")
+            .lines()
+            .map(str::to_string)
+            .collect();
+        (taken, lines)
+    }
+
+    /// An instance that takes over the lapsed lease of another logs its own instance id and the
+    /// lapsed one as a takeover; one that takes a new lease after losing its own logs the lapsed
+    /// one as its own, never as an instance that is gone
+    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// clauses 1 and 3).
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    #[test]
+    fn a_take_names_a_lapsed_lease_as_a_takeover_or_as_its_own() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let times = crate::config::LeaseTimes {
+            renew: Duration::from_secs(10),
+            lapse: LAPSE,
+        };
+        let lapse = |id: &str| {
+            test.sql(&format!(
+                "UPDATE leases SET expires_at = now() WHERE instance_id = '{id}'"
+            ));
+        };
+        let (a, b) = (shared(&test), shared(&test));
+        let gone = a.take_lease("host-a", LAPSE).expect("a's lease");
+        lapse(&gone.instance_id);
+        let (taken, lines) = logged(|| {
+            crate::instance::take_in_time(&b, times, "host-b", new_instance_id().expect("id"), None)
+                .expect("b's lease")
+        });
+        let takeover = lines
+            .iter()
+            .find(|line| line.contains("took over the lease"))
+            .unwrap_or_else(|| panic!("no takeover logged: {lines:?}"));
+        assert!(
+            takeover.contains(&format!("instance_id={}", taken.instance_id)),
+            "{takeover}"
+        );
+        assert!(
+            takeover.contains(&format!("taken_over={}", gone.instance_id)),
+            "{takeover}"
+        );
+
+        // b loses its lease and takes a new one: its own lapsed lease is no takeover.
+        lapse(&taken.instance_id);
+        let (again, lines) = logged(|| {
+            crate::instance::take_in_time(
+                &b,
+                times,
+                "host-b",
+                new_instance_id().expect("id"),
+                Some(&taken.instance_id),
+            )
+            .expect("b's new lease")
+        });
+        assert_eq!(again.taken_over, std::slice::from_ref(&taken.instance_id));
+        assert!(
+            !lines.iter().any(|line| line.contains("took over")),
+            "{lines:?}"
+        );
+        let own = lines
+            .iter()
+            .find(|line| line.contains("own lapsed lease"))
+            .unwrap_or_else(|| panic!("the own lapsed lease is not logged: {lines:?}"));
+        assert!(
+            own.contains(&format!("lapsed={}", taken.instance_id)),
+            "{own}"
+        );
     }
 }

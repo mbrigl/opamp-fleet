@@ -419,6 +419,17 @@ listeners open only while it can prove it. One that cannot renew before its leas
 session, closes both listeners, and takes a new lease under a new instance id once the database
 answers again.
 
+Each line an instance logs begins with `instance_id=<id>`, so the logs of several instances say
+which one acted. The instance makes its id as soon as its configuration names PostgreSQL, before
+it opens the database, and takes its first lease under it; between a lost lease and the next, the
+lines name the lost one. Only the lines logged before the configuration is read name none, since
+the store is not known yet. The take, the failed renewal, the loss and the release of a lease name
+the instance id as a field of their own, `instance_id`, and so does a takeover, beside
+`taken_over`, the instance id of each lease that had lapsed or whose instance is gone. A new lease
+after a lost one names the lost id as `lost`, and if its take removed the instance's own lapsed
+lease, names that as `lapsed` rather than as a takeover. On the filesystem store the log names no
+instance.
+
 An instance whose blobs are files (`[blobs] store = "fs"`) or whose CA key is a file (`[client_ca]
 key_file`, `[enrolment] bootstrap_ca_key_file`) must be alone on its database schema: it holds a
 lock on the schema it works in — its role's default — while it runs, and a second instance started
