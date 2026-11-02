@@ -744,6 +744,9 @@ async fn main() {
         }
         fleet_server::Records::Files(_) => None,
     };
+    // The handlers are installed before either plane is bound and logged as served, so a stop
+    // sent as soon as the log says so drains the planes rather than ending the process.
+    let shutdown = shutdown_signal();
     let agent_listener = bind(config.listen, "the Agent plane");
     let operator_listener = bind(config.rest.listen, "the Operator plane");
     info!(listen = %config.listen, "serving the OpAMP endpoint and package downloads over TLS");
@@ -763,7 +766,7 @@ async fn main() {
         },
         (agent_listener, operator_listener),
         lease.as_ref().map(fleet_server::instance::Lease::held),
-        shutdown_signal(),
+        shutdown,
     )
     .await;
     if let Err(e) = &served {
