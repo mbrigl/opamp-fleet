@@ -221,19 +221,31 @@ d="$(repo jobs-zero)"
 CHECK_ALL_JOBS=0 expect_exit "CHECK_ALL_JOBS=0 exits 2" 2 "$d"
 
 # A runner stopped by TERM stops the checks it started and waits for them: none finishes after
-# it, and one that cleans up on TERM has done so when the runner returns.
+# it, and one that cleans up on TERM has done so when the runner returns. The runner is stopped
+# once the check that cleans up has set its trap, and the checks finish only once they are let
+# go after it returned, so how fast they start decides nothing.
 d="$(repo stopped)"
 # shellcheck disable=SC2016 # the stub's variable, not this script's
-printf 'trap '\''sleep 0.3; touch "%s/cleaned"; exit 1'\'' TERM; sleep 5 & wait $!\n' "$d" \
-  >> "$d/${scripts[0]}"
+printf 'trap '\''sleep 0.3; touch "%s/cleaned"; exit 1'\'' TERM; touch "%s/armed"; sleep 60 & wait $!\n' \
+  "$d" "$d" >> "$d/${scripts[0]}"
 for s in "${scripts[@]}"; do
-  printf 'touch "%s/started"; sleep 1; touch "%s/finished"\n' "$d" "$d" >> "$d/$s"
+  printf 'touch "%s/started"; while [ ! -e "%s/go" ]; do sleep 0.05; done; touch "%s/finished"\n' \
+    "$d" "$d" "$d" >> "$d/$s"
 done
 bash "$d/scripts/check-all.sh" > /dev/null 2>&1 &
 runner=$!
-for _ in 1 2 3 4 5 6 7 8 9 10; do [[ -e "$d/started" ]] && break; sleep 0.1; done
+for _ in $(seq 100); do [[ -e "$d/armed" && -e "$d/started" ]] && break; sleep 0.1; done
+check "the check that cleans up set its trap" test -e "$d/armed"
 kill -TERM "$runner"
+# A runner that does not stop its checks would wait on them while they wait on go: the watchdog
+# ends that after 10 s, and the case fails on it rather than hanging.
+( sleep 10; touch "$d/watchdog" "$d/go"; kill -KILL "$runner" 2>/dev/null ) &
+watchdog=$!
 wait "$runner"; rc=$?
+kill "$watchdog" 2>/dev/null
+wait "$watchdog" 2>/dev/null
+touch "$d/go"
+check "a runner stopped by TERM returns before the watchdog fires" test ! -e "$d/watchdog"
 check "a runner stopped by TERM exits 143" test "$rc" -eq 143
 check "and had started a check" test -e "$d/started"
 check "and returns once a check that cleans up on TERM has done so" test -e "$d/cleaned"
