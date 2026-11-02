@@ -445,6 +445,13 @@ pub struct DatabaseConfig {
     pub store: String,
     /// The database, when `store = "postgres"`; refused beside `store = "fs"`.
     pub postgres: Option<PostgresConfig>,
+    /// How often an instance renews its lease, in seconds; PostgreSQL only
+    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// clause 3).
+    pub lease_renew_secs: Option<u64>,
+    /// How long after its last renewal a lease lapses, in seconds, at least three renewals;
+    /// PostgreSQL only.
+    pub lease_secs: Option<u64>,
 }
 
 impl Default for DatabaseConfig {
@@ -452,8 +459,28 @@ impl Default for DatabaseConfig {
         DatabaseConfig {
             store: default_record_store(),
             postgres: None,
+            lease_renew_secs: None,
+            lease_secs: None,
         }
     }
+}
+
+/// How often an instance renews its lease, by default.
+const DEFAULT_LEASE_RENEW_SECS: u64 = 10;
+/// How long a lease lasts after its last renewal, by default.
+const DEFAULT_LEASE_SECS: u64 = 30;
+/// The longest renewal interval and lease: an hour, far past any that serves a fleet.
+const MAX_LEASE_SECS: u64 = 3600;
+
+/// The lease every instance on PostgreSQL holds while it serves
+/// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+/// clause 3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LeaseTimes {
+    /// How often it is renewed.
+    pub renew: std::time::Duration,
+    /// How long after its last renewal it lapses.
+    pub lapse: std::time::Duration,
 }
 
 fn default_record_store() -> String {
@@ -467,9 +494,61 @@ impl DatabaseConfig {
         self.postgres.as_ref().filter(|_| self.store == "postgres")
     }
 
+    /// The lease's times, the defaults where a key is not set.
+    #[must_use]
+    pub fn lease(&self) -> LeaseTimes {
+        LeaseTimes {
+            renew: std::time::Duration::from_secs(
+                self.lease_renew_secs.unwrap_or(DEFAULT_LEASE_RENEW_SECS),
+            ),
+            lapse: std::time::Duration::from_secs(self.lease_secs.unwrap_or(DEFAULT_LEASE_SECS)),
+        }
+    }
+
+    /// The lease keys: PostgreSQL alone has a lease, so with the filesystem store each one set
+    /// fails startup naming it; with PostgreSQL a renewal is at least a second and a lease holds at
+    /// least three of them.
+    fn check_lease(&self) -> Result<(), String> {
+        if self.store == "fs" {
+            for (key, value) in [
+                ("lease_renew_secs", self.lease_renew_secs),
+                ("lease_secs", self.lease_secs),
+            ] {
+                if value.is_some() {
+                    return Err(format!(
+                        "[database] {key} is set but [database] store is \"fs\" — a lease is \
+                         what an instance on PostgreSQL holds; remove {key}"
+                    ));
+                }
+            }
+            return Ok(());
+        }
+        let LeaseTimes { renew, lapse } = self.lease();
+        if renew.is_zero() || renew.as_secs() > MAX_LEASE_SECS {
+            return Err(format!(
+                "[database] lease_renew_secs must be from 1 to {MAX_LEASE_SECS}"
+            ));
+        }
+        if lapse.as_secs() > MAX_LEASE_SECS {
+            return Err(format!(
+                "[database] lease_secs must be at most {MAX_LEASE_SECS}"
+            ));
+        }
+        if lapse < renew.saturating_mul(3) {
+            return Err(format!(
+                "[database] lease_secs must hold at least three renewals of lease_renew_secs \
+                 ({} s), not {} s",
+                renew.as_secs().saturating_mul(3),
+                lapse.as_secs()
+            ));
+        }
+        Ok(())
+    }
+
     /// Loud validation (ADR-0029 clauses 1 and 24): a known store, the database's section exactly
     /// when the store is PostgreSQL, and a connection that stays off plaintext beyond the loopback.
     fn check(&self) -> Result<(), String> {
+        self.check_lease()?;
         match (self.store.as_str(), &self.postgres) {
             ("fs", None) => Ok(()),
             ("fs", Some(_)) => Err(
@@ -2905,6 +2984,101 @@ mod tests {
             ("drain_secs = 301\n", "drain_secs"),
         ] {
             let err = load(keys).expect_err(named);
+            assert!(err.contains(named), "{named}: {err}");
+        }
+    }
+
+    /// An instance must be alone on its database while it keeps its blobs as files or a CA key in a
+    /// file, and names the key; with the blobs in S3 and no CA key on the Server it shares it.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    #[test]
+    fn an_instance_with_files_of_its_own_must_be_alone() {
+        let s3 = "[blobs]\nstore = \"s3\"\n[blobs.s3]\nendpoint = \"https://s3.example\"\n\
+                  bucket = \"fleet\"\nregion = \"eu\"\n";
+        let client_ca = "[client_ca]\ncert_file = \"ca.pem\"\nkey_file = \"ca-key.pem\"\n";
+        let bootstrap = |key: bool| {
+            format!(
+                "[enrolment]\nbootstrap_ca_file = \"b.pem\"\n{}",
+                if key {
+                    "bootstrap_ca_key_file = \"b-key.pem\"\n"
+                } else {
+                    ""
+                }
+            )
+        };
+        let exclusive = |toml: &str| {
+            crate::exclusive(&toml::from_str::<ServerConfig>(&format!("{TLS}{toml}")).expect(toml))
+        };
+        use crate::postgres::Exclusive;
+        assert_eq!(
+            exclusive(""),
+            Exclusive::Alone("[blobs] store = \"fs\"".to_string())
+        );
+        assert_eq!(exclusive(s3), Exclusive::Shared);
+        assert_eq!(
+            exclusive(&format!("{s3}{}", bootstrap(false))),
+            Exclusive::Shared
+        );
+        assert_eq!(
+            exclusive(&format!("{s3}{client_ca}")),
+            Exclusive::Alone("[client_ca] key_file".to_string())
+        );
+        assert_eq!(
+            exclusive(&format!("{s3}{}", bootstrap(true))),
+            Exclusive::Alone("[enrolment] bootstrap_ca_key_file".to_string())
+        );
+    }
+
+    /// The lease keys belong to PostgreSQL: with the filesystem store each one set fails startup
+    /// naming it; with PostgreSQL they default to 10 and 30 seconds, and a lease shorter than three
+    /// renewals, or a renewal of zero, fails naming the key.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    #[test]
+    fn the_lease_keys_apply_to_postgresql_alone() {
+        let load = |database: &str| {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("server.toml");
+            std::fs::write(&path, format!("{TLS}{database}")).expect("write");
+            ServerConfig::load(&path)
+        };
+        let postgres = "[database]\nstore = \"postgres\"\n{keys}[database.postgres]\n\
+                        host = \"db.example\"\ndbname = \"fleet\"\nuser = \"fleet\"\n\
+                        password_file = \"/run/secrets/db\"\n";
+        let with = |keys: &str| postgres.replace("{keys}", keys);
+
+        let config = load(&with("")).expect("the defaults");
+        assert_eq!(
+            config.database.lease(),
+            LeaseTimes {
+                renew: std::time::Duration::from_secs(10),
+                lapse: std::time::Duration::from_secs(30),
+            }
+        );
+        let config = load(&with("lease_renew_secs = 2\nlease_secs = 6\n")).expect("set");
+        assert_eq!(config.database.lease().renew.as_secs(), 2);
+        assert_eq!(config.database.lease().lapse.as_secs(), 6);
+
+        for (database, named) in [
+            (
+                "[database]\nlease_secs = 30\n".to_string(),
+                "[database] lease_secs",
+            ),
+            (
+                "[database]\nlease_renew_secs = 10\n".to_string(),
+                "[database] lease_renew_secs",
+            ),
+            (with("lease_renew_secs = 0\n"), "lease_renew_secs"),
+            (
+                with("lease_renew_secs = 10\nlease_secs = 29\n"),
+                "lease_secs",
+            ),
+            (with("lease_renew_secs = 3601\n"), "lease_renew_secs"),
+            (
+                with("lease_renew_secs = 10\nlease_secs = 3601\n"),
+                "lease_secs",
+            ),
+        ] {
+            let err = load(&database).expect_err(named);
             assert!(err.contains(named), "{named}: {err}");
         }
     }

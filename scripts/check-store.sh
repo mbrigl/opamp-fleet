@@ -38,6 +38,11 @@ command -v cargo >/dev/null || { echo "cargo is required (rust-toolchain.toml na
 log="$(mktemp)"
 trap 'rm -f "$log"' EXIT
 cargo test -p fleet-server --lib --locked "$filter" -- --nocapture 2>&1 | tee "$log"
+# Several Server instances on one database, each through its real listeners: an integration test
+# of its own, against the same database.
+if [[ "$1" == "postgres" ]]; then
+  cargo test -p fleet-server --locked --test instances -- --nocapture 2>&1 | tee -a "$log"
+fi
 if grep -q "$skipped" "$log"; then
   echo "a $1 test was skipped although a store is named" >&2
   exit 1

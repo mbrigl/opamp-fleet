@@ -28,7 +28,7 @@ pub const SCHEMA_TABLE: &str = "fleet_schema";
 
 /// Every table the migrations create, so that a database holding any of them is recognised as one
 /// the Server already wrote ([`super::Database::server_tables`]).
-pub const TABLES: [&str; 15] = [
+pub const TABLES: [&str; 16] = [
     "configurations",
     "configuration_revisions",
     "deployments",
@@ -43,6 +43,7 @@ pub const TABLES: [&str; 15] = [
     "enrolment_window",
     "enrolment_requests",
     "package_floors",
+    "leases",
     // Not tables of the records, but the Server's all the same.
     SCHEMA_TABLE,
 ];
@@ -59,6 +60,12 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 2,
         oldest_server: "0.6.1",
         sql: PACKAGE_FLOORS,
+    },
+    // A table only added; the release before it never reads it.
+    Migration {
+        version: 3,
+        oldest_server: "0.6.1",
+        sql: LEASES,
     },
 ];
 
@@ -196,6 +203,21 @@ CREATE TABLE package_floors (
     agent_type text PRIMARY KEY,
     version text NOT NULL,
     signature bytea NOT NULL
+);
+";
+
+/// The lease of every instance on this database
+/// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+/// clauses 1 to 3). The times are the database's own, so every instance reads the same clock. A
+/// lease whose `expires_at` has passed is lapsed, whatever its row still says.
+const LEASES: &str = r"
+CREATE TABLE leases (
+    instance_id uuid PRIMARY KEY,
+    host text NOT NULL,
+    must_be_alone boolean NOT NULL,
+    taken_at timestamptz NOT NULL,
+    renewed_at timestamptz NOT NULL,
+    expires_at timestamptz NOT NULL
 );
 ";
 

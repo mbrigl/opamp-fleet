@@ -23,6 +23,7 @@ pub mod enrolment;
 pub mod fleet;
 pub mod floors;
 pub mod fs;
+pub mod instance;
 pub mod labels;
 pub mod listen;
 pub mod migrate;
@@ -43,13 +44,34 @@ use deployments::DeploymentStore;
 use fleet::{AppState, PackageOffering};
 use fs::{FsAgentStore, FsBlobStore, FsConfigBackend, FsDeploymentBackend, FsPackageBackend};
 
+/// Whether an instance on PostgreSQL must be alone on its database, and the key that makes it so:
+/// blobs kept as files, or a CA key in a file
+/// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+/// clause 2).
+#[must_use]
+pub fn exclusive(config: &config::ServerConfig) -> postgres::Exclusive {
+    if config.blobs.s3().is_none() {
+        postgres::Exclusive::Alone("[blobs] store = \"fs\"".to_string())
+    } else if config.client_ca.is_some() {
+        postgres::Exclusive::Alone("[client_ca] key_file".to_string())
+    } else if config
+        .enrolment
+        .as_ref()
+        .is_some_and(|enrolment| enrolment.bootstrap_ca_key_file.is_some())
+    {
+        postgres::Exclusive::Alone("[enrolment] bootstrap_ca_key_file".to_string())
+    } else {
+        postgres::Exclusive::Shared
+    }
+}
+
 /// Where the Server keeps its records (ADR-0029 clause 1): files under `data_dir`, or one
 /// PostgreSQL database. The composition root asks it for each port's adapter, so the rest of the
 /// Server names the ports alone.
 pub enum Records {
     /// One file per record under this `data_dir` (ADR-0029).
     Files(std::path::PathBuf),
-    /// One PostgreSQL database, held by this Server alone (ADR-0029).
+    /// One PostgreSQL database, shared by the instances on it (ADR-0029).
     Postgres(Arc<postgres::Database>),
 }
 
@@ -68,7 +90,10 @@ impl Records {
             }
             Some(database) => {
                 fs::open_data_dir_beside_database(&config.data_dir, config.blobs.s3().is_none())?;
-                Ok(Records::Postgres(postgres::Database::open(database)?))
+                Ok(Records::Postgres(postgres::Database::open(
+                    database,
+                    exclusive(config),
+                )?))
             }
         }
     }

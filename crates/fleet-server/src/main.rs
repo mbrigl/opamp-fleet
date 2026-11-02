@@ -12,8 +12,6 @@ use std::sync::Arc;
 
 use fleet_server::config::{Layered, ServerConfig};
 use fleet_server::fleet::AppState;
-use fleet_server::listen;
-use opamp::server::listen::Handle;
 use tracing::{error, info, warn};
 
 fn usage() -> ! {
@@ -661,7 +659,7 @@ async fn main() {
         state.clone(),
         fleet_server::transport::Admission::new(true)
             .with_enrolment(issuers, enrolment)
-            .with_revocations(Some(revocations))
+            .with_revocations(Some(revocations.clone()))
             .with_audit(Some(audit.clone()))
             .with_throttle(Arc::new(fleet_server::throttle::Throttle::new(
                 limits,
@@ -692,43 +690,53 @@ async fn main() {
     }
     let operators = fleet_server::operator_app(state.clone(), operator_auth);
 
+    // With PostgreSQL, a lease before either listener opens, and the revocations of the other
+    // instances followed (clauses 1 to 3 and 11 of
+    // ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it).
+    let lease = match &records {
+        fleet_server::Records::Postgres(database) => {
+            match fleet_server::instance::Lease::take(
+                database.clone(),
+                config.database.lease(),
+                &host_name(),
+            ) {
+                Ok(lease) => {
+                    fleet_server::instance::follow_revocations(database, revocations.clone());
+                    Some(lease)
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        fleet_server::Records::Files(_) => None,
+    };
     let agent_listener = bind(config.listen, "the Agent plane");
     let operator_listener = bind(config.rest.listen, "the Operator plane");
-    // One signal, both planes: the interrupt is watched once, and the handle both servers hold
-    // drains them together within a bounded window (ADR-0012).
-    let handle = Handle::new();
-    let signalled = shutdown_signal();
-    let drain_secs = config.drain_secs;
-    tokio::spawn({
-        let handle = handle.clone();
-        async move {
-            signalled.await;
-            info!(drain_secs, "shutting down");
-            listen::shut_down(&handle, std::time::Duration::from_secs(drain_secs));
-        }
-    });
-
     info!(listen = %config.listen, "serving the OpAMP endpoint and package downloads over TLS");
     info!(listen = %config.rest.listen, "serving the REST API, the API docs, and the UI over TLS");
-    let (agents, operators) = tokio::join!(
-        listen::plane(
-            agent_listener,
-            Some(agent_tls),
-            config.max_connections,
-            handle.clone()
-        )
-        .with_max_new_connections_per_sec(config.max_new_connections_per_sec)
-        .serve(agents),
-        listen::plane(
-            operator_listener,
-            Some(operator_tls),
-            config.rest.max_connections,
-            handle
-        )
-        .serve(operators),
-    );
-    agents.expect("serve the Agent plane");
-    operators.expect("serve the Operator plane");
+    // One signal, both planes: the interrupt is watched once, and both planes drain together
+    // within a bounded window (ADR-0012).
+    let served = fleet_server::instance::serve(
+        fleet_server::instance::Planes {
+            agents,
+            operators,
+            agent_tls,
+            operator_tls,
+            agent_max_connections: config.max_connections,
+            agent_max_new_connections_per_sec: config.max_new_connections_per_sec,
+            operator_max_connections: config.rest.max_connections,
+            drain: std::time::Duration::from_secs(config.drain_secs),
+        },
+        (agent_listener, operator_listener),
+        lease.as_ref().map(fleet_server::instance::Lease::held),
+        shutdown_signal(),
+    )
+    .await;
+    if let Err(e) = &served {
+        error!("{e}");
+    }
     // The graceful-shutdown flush (ADR-0024): every record's current timestamp and sequence
     // number, so the ordinary restart restores a fleet without gaps or false silence.
     state.flush_agents();
@@ -739,6 +747,23 @@ async fn main() {
             "the audit record could not be written out before shutdown; its last entries are lost"
         );
     }
+    if let Some(lease) = lease {
+        lease.release().await;
+    }
+    // A plane that could not be served is a failure a service manager restarts on.
+    if served.is_err() {
+        std::process::exit(1);
+    }
+}
+
+/// The name of the host the Server runs on, which its lease records: the kernel's on Linux, where
+/// the Server ships, and the `HOSTNAME` variable elsewhere.
+fn host_name() -> String {
+    std::fs::read_to_string("/proc/sys/kernel/hostname")
+        .ok()
+        .or_else(|| std::env::var("HOSTNAME").ok())
+        .map(|name| name.trim().to_string())
+        .unwrap_or_default()
 }
 
 /// The shutdown signal: `SIGTERM`, which a service manager sends on stop, or `SIGINT` from a

@@ -1034,6 +1034,27 @@ impl Revocations {
             .is_some_and(|host| host.gateway)
     }
 
+    /// Reads the list again from the store, as another instance may have changed it, and
+    /// announces it, so every open session checks itself against what is stored
+    /// (ADR-draft-admission-by-client-certificate-and-revocation clause 32).
+    ///
+    /// # Errors
+    /// Returns an error when the store cannot be read; the list held is then kept.
+    pub fn reload_revocations(&self) -> Result<(), String> {
+        // Read under the lock a revocation of this instance's own is written under, so one written
+        // meanwhile is never put back out of what is held.
+        let mut state = self.state.lock().expect("revocation lock");
+        let ledger = self.store.load()?;
+        if state.revocations == ledger.revocations {
+            return Ok(());
+        }
+        state.revocations = ledger.revocations;
+        state.revoked = None;
+        drop(state);
+        self.changes.send_modify(|rev| *rev += 1);
+        Ok(())
+    }
+
     /// Announces every new revocation; an open session checks itself against the list on each.
     #[must_use]
     pub fn subscribe(&self) -> watch::Receiver<u64> {
