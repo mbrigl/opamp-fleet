@@ -281,7 +281,7 @@ impl Instance {
     /// [`start`](Self::start), taking up nothing another instance commits until
     /// [`follow`](Self::follow) is called: what it hears is held back until then.
     async fn start_deaf(pki: &Pki, schema: &Schema, config: PostgresConfig) -> Self {
-        Self::start_with(pki, schema, config, true, false, None).await
+        Self::start_with(pki, schema, config, true, false, None, None).await
     }
 
     /// [`start`](Self::start), its Agent plane's admission counted by a throttle of `limits`, as
@@ -292,7 +292,7 @@ impl Instance {
         config: PostgresConfig,
         limits: fleet_server::throttle::Limits,
     ) -> Self {
-        Self::start_with(pki, schema, config, true, true, Some(limits)).await
+        Self::start_with(pki, schema, config, true, true, Some(limits), None).await
     }
 
     /// Starts taking up what other instances commit, for an instance started deaf.
@@ -309,11 +309,23 @@ impl Instance {
         config: PostgresConfig,
         renewals: bool,
     ) -> Self {
-        Self::start_with(pki, schema, config, renewals, true, None).await
+        Self::start_with(pki, schema, config, renewals, true, None, None).await
+    }
+
+    /// [`start`](Self::start), its package blobs on the filesystem in `blobs`, which other
+    /// instances may share, rather than in a directory of its own.
+    async fn start_on_blobs(
+        pki: &Pki,
+        schema: &Schema,
+        config: PostgresConfig,
+        blobs: &std::path::Path,
+    ) -> Self {
+        Self::start_with(pki, schema, config, true, true, None, Some(blobs)).await
     }
 
     /// [`start_following`](Self::start_following), following other instances where `follows`
-    /// says so, and its admission throttled where `throttle` names limits.
+    /// says so, its admission throttled where `throttle` names limits, and its package blobs in
+    /// `blobs` where it names a directory.
     async fn start_with(
         pki: &Pki,
         schema: &Schema,
@@ -321,6 +333,7 @@ impl Instance {
         renewals: bool,
         follows: bool,
         throttle: Option<fleet_server::throttle::Limits>,
+        blobs: Option<&std::path::Path>,
     ) -> Self {
         opamp::tls::install_ring_provider();
         let dir = tempfile::tempdir().expect("tempdir");
@@ -346,7 +359,7 @@ impl Instance {
             Arc::new(Enrolment::open_on(clock.clone(), records.enrolment()).expect("enrolment"));
         let (packages, _) = fleet_server::packages::PackageStore::open_on(
             &records,
-            Some(dir.path()),
+            Some(blobs.unwrap_or(dir.path())),
             &toml::from_str::<fleet_server::config::BlobsConfig>("").expect("blobs"),
         )
         .expect("packages");
@@ -1684,9 +1697,9 @@ async fn a_rollout_on_one_instance_is_offered_by_the_instance_that_carries_the_a
         "B never wrote the Agent's record"
     );
 
-    // A knows the Agent from the database it loads at startup, as every instance does until it
-    // keeps only the Agents it carries.
+    // A holds none of it in memory: it matches the Agent as the database stores it.
     let a = Instance::start(&pki, &schema, schema.config_on(schema.config.port)).await;
+    assert!(a.state.snapshot().is_empty(), "A holds no Agent");
     let on_a = a.state.clone();
     let assigned = tokio::task::spawn_blocking(move || {
         on_a.save_configuration(
@@ -2256,7 +2269,7 @@ fn an_agent_rekeyed_at_its_request_keeps_its_stored_record() {
 }
 
 /// An Agent rekeyed at its request through A is dropped under its old identity by B, which
-/// loaded it: the move announces the old identity forgotten, so B holds no record of it under a
+/// held it: the move announces the old identity forgotten, so B holds no record of it under a
 /// name no store keeps.
 /// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts, ADR-0024
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2275,21 +2288,25 @@ async fn an_agent_rekeyed_through_one_instance_is_dropped_under_its_old_identity
         flags,
         ..Default::default()
     };
-    let on_a = a.clone();
-    tokio::task::spawn_blocking(move || on_a.process(report(0, 1), Transport::WebSocket, Some(7)))
-        .await
-        .expect("report");
-    // B loads the record at startup, and listens before A moves it.
+    // B holds the record the Agent's report to it loaded, and listens before A moves it.
     let b = Instance::start(&pki, &schema, schema.config_on(schema.config.port)).await;
     assert!(b.has_read(1).await, "B follows");
-    assert!(view_of(&b, uid).is_some(), "B loaded it");
+    let on_b = b.state.clone();
+    tokio::task::spawn_blocking(move || on_b.process(report(0, 1), Transport::WebSocket, Some(9)))
+        .await
+        .expect("report to B");
+    let on_a = a.clone();
+    tokio::task::spawn_blocking(move || on_a.process(report(0, 2), Transport::WebSocket, Some(7)))
+        .await
+        .expect("report");
+    assert!(view_of(&b, uid).is_some(), "B holds it");
 
     let on_a = a.clone();
     let rekeyed = tokio::task::spawn_blocking(move || {
         on_a.process(
             report(
                 opamp::proto::AgentToServerFlags::RequestInstanceUid as u64,
-                2,
+                3,
             ),
             Transport::WebSocket,
             Some(7),
@@ -3302,4 +3319,240 @@ async fn a_gateway_keeps_its_agents_on_one_instance_and_moves_those_of_a_stopped
     let mut late = behind(downstream, &pki, &cert, &key).await;
     let mut late_sequence = 0;
     reported(&mut late, InstanceUid([0xaf; 16]), &mut late_sequence).await;
+}
+
+/// An `otelcol` Agent on linux/amd64 that accepts packages.
+const PACKAGED: Attributes<'static> = (
+    &[("service.name", "otelcol")],
+    &[("os.type", "linux"), ("host.arch", "amd64")],
+);
+
+/// The capabilities of an Agent that is offered packages and reports what it holds.
+const TAKES_PACKAGES: u64 =
+    AgentCapabilities::AcceptsPackages as u64 | AgentCapabilities::ReportsPackageStatuses as u64;
+
+/// Through `instance`: a signed Package `otelcol@1.0.0` for linux/amd64 in a Deployment `stable`
+/// that selects `otelcol`, rolled out. Answers how many Agents it released to.
+async fn release_a_package(instance: &Instance) -> usize {
+    let state = instance.state.clone();
+    tokio::task::spawn_blocking(move || {
+        let id = fleet_server::packages::PackageId::new("otelcol", "1.0.0")?;
+        let linux = fleet_server::packages::Platform::new("linux", "amd64")?;
+        state.create_package_set(&id)?;
+        state.put_package_entry(&id, &linux, &mut &b"v1"[..])?;
+        state.put_package_entry_signature(&id, &linux, vec![1; 64])?;
+        state
+            .deployment_store()
+            .expect("deployments")
+            .put(
+                "stable",
+                std::collections::BTreeMap::from([(
+                    "service.name".to_string(),
+                    "otelcol".to_string(),
+                )]),
+            )
+            .map_err(|e| format!("{e:?}"))?;
+        state
+            .put_deployment_package("stable", &id, true)
+            .map_err(|e| format!("{e:?}"))?;
+        state
+            .rollout_deployment("stable")
+            .map_err(|e| format!("{e:?}"))
+    })
+    .await
+    .expect("release")
+    .expect("release a package")
+}
+
+/// A restarted instance loads no Agent record and holds none until one reports to it, and reads
+/// an Agent another instance carries from the database: the fleet list, the Hosts list and the
+/// deployment reach through B name the Agent A carries with its labels, its assignment and A's
+/// presence, B serves its host the artifact released to it, and once A's lease is gone the Agent
+/// reads as disconnected.
+/// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts, ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it, ADR-draft-the-servers-state-and-its-stores, ADR-0027
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_agent_carried_by_one_instance_is_read_through_another_that_holds_none_of_it() {
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    // One blob store, as instances on S3 share one bucket.
+    let blobs = tempfile::tempdir().expect("blobs");
+    let a = Instance::start_on_blobs(
+        &pki,
+        &schema,
+        schema.config_on(schema.config.port),
+        blobs.path(),
+    )
+    .await;
+    let (cert, key) = pki.issue_to_host("h1");
+    let uid = InstanceUid([0x21; 16]);
+    let mut session = websocket(&a, &pki, &cert, &key).await;
+    report_as(&mut session, uid, 1, TAKES_PACKAGES, PACKAGED, true).await;
+    let on_a = a.state.clone();
+    tokio::task::spawn_blocking(move || {
+        on_a.set_labels(
+            &uid,
+            std::collections::BTreeMap::from([("tier".to_string(), "edge".to_string())]),
+        )
+    })
+    .await
+    .expect("labels")
+    .unwrap_or_else(|_| panic!("label on A"));
+    assert_eq!(release_a_package(&a).await, 1, "A released to the Agent");
+
+    // B starts after all of it, as an instance restarted would.
+    let b = Instance::start_on_blobs(
+        &pki,
+        &schema,
+        schema.config_on(schema.config.port),
+        blobs.path(),
+    )
+    .await;
+    assert!(b.state.snapshot().is_empty(), "B loaded no Agent record");
+
+    let on_b = b.state.clone();
+    let (views, hosts, reach) = tokio::task::spawn_blocking(move || {
+        (
+            on_b.fleet_view().expect("fleet"),
+            on_b.host_agents().expect("hosts"),
+            on_b.deployment_reach().expect("reach"),
+        )
+    })
+    .await
+    .expect("read through B");
+    let view = views
+        .iter()
+        .find(|view| view.instance_uid == uid.to_string())
+        .expect("B lists the Agent A carries");
+    assert_eq!(view.labels.get("tier").map(String::as_str), Some("edge"));
+    assert_eq!(view.assigned_deployment, "stable");
+    assert_eq!(view.assigned_package, "otelcol@1.0.0");
+    assert!(view.connected, "A's presence: it holds the connection");
+    let host = hosts.get("h1").expect("B lists the Host");
+    assert_eq!(host.agents.len(), 1);
+    assert_eq!(host.agents[0].instance_uid, uid.to_string());
+    assert!(host.agents[0].connected);
+    assert_eq!(
+        (reach["stable"].claiming, reach["stable"].targeted),
+        (1, 0),
+        "the Deployment claims the Agent, released already"
+    );
+
+    let on_b = b.state.clone();
+    let offered = move || {
+        let id = fleet_server::packages::PackageId::new("otelcol", "1.0.0").expect("id");
+        let linux = fleet_server::packages::Platform::new("linux", "amd64").expect("platform");
+        on_b.offers_artifact("h1", &id, &linux)
+    };
+    assert!(
+        tokio::task::spawn_blocking(offered).await.expect("offered"),
+        "B serves the host the artifact released to the Agent A carries"
+    );
+    let on_b = b.state.clone();
+    let per_agent = tokio::task::spawn_blocking(move || {
+        on_b.rollout_to_agent(&uid, Some("stable"))
+            .map_err(|e| format!("{e:?}"))
+    })
+    .await
+    .expect("roll out");
+    assert_eq!(per_agent, Ok(()), "B rolls out to the Agent A carries");
+    assert!(b.state.snapshot().is_empty(), "B still holds none of it");
+
+    // An Agent that reports to B is what B holds.
+    let other = InstanceUid([0x22; 16]);
+    let (other_cert, other_key) = pki.issue_to_host("h2");
+    let mut other_session = websocket(&b, &pki, &other_cert, &other_key).await;
+    report_as(&mut other_session, other, 1, 0, PACKAGED, true).await;
+    let held: Vec<String> = b
+        .state
+        .snapshot()
+        .into_iter()
+        .map(|view| view.instance_uid)
+        .collect();
+    assert_eq!(held, [other.to_string()]);
+
+    drop(session);
+    drop(a);
+    let disconnected = || {
+        b.state
+            .fleet_view()
+            .expect("fleet")
+            .into_iter()
+            .any(|view| view.instance_uid == uid.to_string() && !view.connected)
+    };
+    assert!(
+        eventually(Duration::from_secs(10), disconnected).await,
+        "an Agent whose holder holds no live lease reads disconnected"
+    );
+}
+
+/// An Agent B carries inherits the labels of its Client Agent, which A carries: B reads the Client
+/// Agent from the database when it places the Agent, once it has taken up the host register
+/// another instance wrote, and follows a change of its labels made through A.
+/// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it, ADR-draft-the-fleet-record-of-agents-and-hosts
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_agent_inherits_the_labels_of_its_client_agent_that_another_instance_carries() {
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let a = Instance::start(&pki, &schema, schema.config_on(schema.config.port)).await;
+    // B hears nothing until it follows, so what it knows of the Client Agent at first is nothing.
+    let mut b = Instance::start_deaf(&pki, &schema, schema.config_on(schema.config.port)).await;
+    let (cert, key) = pki.issue_to_host("h1");
+    let (client, agent) = (InstanceUid([0x31; 16]), InstanceUid([0x32; 16]));
+    let mut client_session = websocket(&a, &pki, &cert, &key).await;
+    report_as(
+        &mut client_session,
+        client,
+        1,
+        0,
+        (
+            &[("service.name", "fleet-agent")],
+            &[("supervisor.kind.otelcol", "true")],
+        ),
+        true,
+    )
+    .await;
+    let label = |tier: &'static str| {
+        let on_a = a.state.clone();
+        async move {
+            tokio::task::spawn_blocking(move || {
+                on_a.set_labels(
+                    &client,
+                    std::collections::BTreeMap::from([("tier".to_string(), tier.to_string())]),
+                )
+                .is_ok()
+            })
+            .await
+            .expect("labels")
+        }
+    };
+    assert!(label("edge").await, "A labels the Client Agent");
+    let mut session = websocket(&b, &pki, &cert, &key).await;
+    report_as(&mut session, agent, 1, 0, PACKAGED, true).await;
+    let held_by_b = b.state.clone();
+    let inherits = |tier: &str| {
+        held_by_b.snapshot().into_iter().any(|view| {
+            view.instance_uid == agent.to_string()
+                && view.inherited_labels.get("tier").map(String::as_str) == Some(tier)
+                && view.client_agent == client.to_string()
+        })
+    };
+    assert!(
+        view_of(&b, agent).is_some_and(|view| view.inherited_labels.is_empty()),
+        "B did not know the Client Agent was bound to the Host"
+    );
+
+    b.follow();
+    assert!(
+        eventually(Duration::from_secs(10), || inherits("edge")).await,
+        "B placed the Agent under the Client Agent A carries once it read everything again"
+    );
+    assert!(label("core").await);
+    assert!(
+        eventually(Duration::from_secs(10), || inherits("core")).await,
+        "B followed the Client Agent's labels"
+    );
 }

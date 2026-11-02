@@ -143,8 +143,10 @@ and configured in the Server's configuration alone, and move an old layout by an
      unread.
    - The envelope carries a `version`. One this Server does not write fails the load rather than
      being guessed at.
-   - The PostgreSQL row holds the same fields, the wire-typed ones as `bytea` (clause 21). A row
-     that does not decode fails startup naming its `instance_uid`.
+   - The PostgreSQL row holds the same fields, the wire-typed ones as `bytea` (clause 21). Startup
+     reads the assignments alone, and one that does not decode fails startup naming its
+     `instance_uid`; any other field of a row that does not decode fails the read that meets it,
+     naming its `instance_uid`.
 
 5. **Configurations persist one record each.** With the filesystem store each is
    `data_dir/configurations/<name>.json`, written through a temp file and an atomic rename,

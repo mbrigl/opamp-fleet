@@ -8,7 +8,10 @@ whole array up to a bound. The filters run on derived columns written with each 
 labels and Host values are joined at read time. An Agent's view carries its holder, the instance id
 and host name its lease records, empty without a live lease; the UI shows it in the Agent's detail
 and the list filters by it. On the filesystem store the same queries are answered, except `holder`,
-which is answered `400`.
+which is answered `400`. The port's `query` takes the filter on the Host an Agent arrived over,
+and an instance reads through it the Client Agent of an Agent behind a Gateway that another
+instance carries, so that the Agent inherits its labels in memory too; a Gateway's artifact
+download reads through it the Agents behind that Gateway rather than the whole fleet.
 
 ## Acceptance criteria
 
@@ -21,6 +24,10 @@ which is answered `400`.
 - [ ] Given the filesystem store, when the list is read with `holder`, then the answer is `400`
 - [ ] Given a request without `limit`, when the list is read, then the whole array comes back up to
   the bound, as today
+- [ ] Given an Agent behind a Gateway carried by B and its Client Agent carried by A, when B places
+  the Agent, then it inherits the Client Agent's labels
+- [ ] Given a Gateway's host, when it fetches an artifact, then the check reads the Agents that
+  arrived over that Gateway through the host filter, and not the whole fleet
 
 ## Read first
 
@@ -35,7 +42,6 @@ which is answered `400`.
 ## Blocked by
 
 - docs/plan/several-server-instances/04-the-fleet-record-is-written-per-column.md
-- docs/plan/several-server-instances/21-the-operator-plane-reads-the-fleet-from-the-database.md
 
 ## Mode
 

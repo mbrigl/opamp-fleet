@@ -1281,6 +1281,17 @@ impl Revocations {
         Ok(true)
     }
 
+    /// The host the register binds `instance_uid` to, if it binds it to one.
+    #[must_use]
+    pub fn bound_host(&self, instance_uid: &[u8]) -> Option<String> {
+        self.state
+            .lock()
+            .expect("revocation lock")
+            .owners
+            .get(&hex::encode(instance_uid))
+            .cloned()
+    }
+
     /// The Agents a certificate naming `host` speaks for (ADR-0024 clause 16): the `instance_uid`s
     /// bound to it, or any Agent for a host marked as a Gateway. A host the register does not know
     /// speaks for none.
