@@ -93,6 +93,17 @@ once its tag exists.
 
 ### Changed
 
+- **A Server of 0.7.1 refuses a database this release has started on**
+  ([ADR-draft-the-servers-state-and-its-stores](docs/adr/draft-the-servers-state-and-its-stores.md)).
+  The migrations this release applies at its first start on PostgreSQL, 3 to 10, name 0.8.0 as the
+  oldest Server that understands the schema. A Server of 0.7.1 started on that database stops,
+  naming both versions, and changes nothing: it holds no lease, keeps its audit record in files
+  and leaves the revocation list's version where it was, so it must not serve beside an instance
+  of this release. An instance of this release that shares the database applies no migration and
+  stops, naming it, while a Server of 0.7.1 still runs on the database.
+  **What to do:** back up the database before the upgrade, and stop the 0.7.1 Server before the
+  first instance of this release starts; a rolling update that starts the new one first is
+  refused. A rollback to 0.7.1 after the upgrade needs the database restored from that backup.
 - **With PostgreSQL and S3, a `data_dir` fails startup, and the image names no data directory**
   ([ADR-draft-the-servers-state-and-its-stores](docs/adr/draft-the-servers-state-and-its-stores.md),
   [ADR-draft-releases-attestations-and-the-server-image](docs/adr/draft-releases-attestations-and-the-server-image.md)).
@@ -135,8 +146,7 @@ once its tag exists.
   chain and lists the open ones. `server migrate-to-postgres` no longer copies `audit/` into the
   new `data_dir`: the old one stays as the archive, the first chain names its last entry as
   `predecessor`, and `audit-verify --archive <dir>` checks the link. The Server adds the tables
-  `audit_chains`, `audit_entries` and `audit_archive` at its first start (migration 7); the
-  release before runs on that schema and keeps writing its record to files.
+  `audit_chains`, `audit_entries` and `audit_archive` at its first start (migration 7).
   A Server already on PostgreSQL kept its record in `data_dir/audit/`: its first start records the
   last entry there as the archive, which the first chain names the same way.
   **What to do:** on PostgreSQL, verify with `server audit-verify --config` from now on, and keep
@@ -150,9 +160,8 @@ once its tag exists.
   `GET /v1/gateway/revocations` answers `ETag: "list-<version>-<SHA-256 of the body>"`. Every
   Server instance on one database therefore answers the same `ETag` for the same list, and each
   renewal of an instance's lease compares the version with the one the instance holds. At its
-  first start the Server adds the table `revocation_list_version` (migration 6); the release
-  before runs on that schema. With the filesystem store the `ETag` is still the SHA-256 of the
-  list.
+  first start the Server adds the table `revocation_list_version` (migration 6). With the
+  filesystem store the `ETag` is still the SHA-256 of the list.
   **What to do:** nothing. A Gateway fetches the list once in full after the upgrade, because
   the `ETag` it holds no longer matches.
 
@@ -163,10 +172,10 @@ once its tag exists.
   one database that edit one Configuration, Package or Deployment at once keep both changes, and a
   revision another instance's rollout pins is never collected. At its first start the Server adds
   the tables `deployment_packages` and `deployment_configurations` (migration 5) and fills them from
-  the `packages` and `configurations` columns of `deployments`, which it keeps writing; the release
-  before runs on that schema. A signature written onto an entry another instance has replaced or
-  removed since is answered `409`, naming the entry; the Package read again through the same
-  instance shows what it holds now. The filesystem store is unchanged.
+  the `packages` and `configurations` columns of `deployments`, which it keeps writing. A signature
+  written onto an entry another instance has replaced or removed since is answered `409`, naming the
+  entry; the Package read again through the same instance shows what it holds now. The filesystem
+  store is unchanged.
   **What to do:** nothing to upgrade. On a `409` that says an entry has changed, read the Package
   again and sign the bytes it holds.
 

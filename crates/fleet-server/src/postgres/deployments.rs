@@ -62,7 +62,8 @@ impl DeploymentBackend for PgDeploymentBackend {
 
     /// One transaction: the Deployment's row is held `FOR UPDATE`, the change decided from the
     /// member rows it reads then, the rows it names written, and the columns the release before
-    /// reads written from the rows.
+    /// migration 5 read written from the rows, kept for the removal rule of
+    /// ADR-draft-the-servers-state-and-its-stores clause 22.
     fn amend(&self, name: &str, change: &Change) -> Result<Deployment, DeploymentError> {
         let (name, change) = (name.to_string(), change.clone());
         let decided = self.database.run(move |pool| async move {
@@ -273,8 +274,9 @@ async fn change_rows(
 }
 
 /// Writes the `packages` and `configurations` columns of the Deployment `name` from its member
-/// rows, inside the caller's transaction, which holds its row: the release before migration 5
-/// reads its members there.
+/// rows, inside the caller's transaction, which holds its row. The release before migration 5 read
+/// its members there; no such release runs on this schema, whose oldest Server is 0.8.0, and the
+/// columns are kept for the removal rule of ADR-draft-the-servers-state-and-its-stores clause 22.
 async fn mirror(client: &impl GenericClient, name: &str) -> Result<(), String> {
     client
         .execute(
@@ -624,8 +626,8 @@ mod tests {
         );
     }
 
-    /// The columns the release before reads are written last, from the rows: refusing that write
-    /// refuses the whole change.
+    /// The columns the release before migration 5 read are written last, from the rows: refusing
+    /// that write refuses the whole change.
     /// Verifies: ADR-0029
     #[test]
     fn a_write_that_fails_leaves_the_deployment_as_it_was_on_postgres() {
@@ -639,8 +641,8 @@ mod tests {
         );
     }
 
-    /// The release before migration 5 reads a Deployment's members from its own row, so every
-    /// change writes those columns from the member rows in the same transaction.
+    /// The release before migration 5 read a Deployment's members from its own row; while those
+    /// columns are kept, every change writes them from the member rows in the same transaction.
     /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
     #[test]
     fn the_columns_the_release_before_reads_follow_the_member_rows() {

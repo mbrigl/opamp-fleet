@@ -132,7 +132,7 @@ impl Database {
                 Exclusive::Shared => {
                     let free: bool = transaction
                         .query_one(
-                            &format!("SELECT pg_try_advisory_xact_lock({EXCLUSIVE_LOCK})"),
+                            &format!("SELECT pg_try_advisory_xact_lock_shared({EXCLUSIVE_LOCK})"),
                             &[],
                         )
                         .await
@@ -425,9 +425,11 @@ mod tests {
         other.release_lease(&lease.instance_id).expect("release");
         let held = lonely.take_lease("host-b", LAPSE).expect("alone now");
 
-        let err = shared(&test)
-            .take_lease("host-c", LAPSE)
+        let err = Database::open_in(&test.config(), Exclusive::Shared, Some(&test.schema))
+            .map(|_| ())
             .expect_err("held alone");
+        assert!(err.contains("holds the database alone"), "{err}");
+        let err = other.take_lease("host-c", LAPSE).expect_err("held alone");
         assert!(err.contains("holds the database alone"), "{err}");
         let err = alone(&test, "[client_ca] key_file")
             .map(|_| ())

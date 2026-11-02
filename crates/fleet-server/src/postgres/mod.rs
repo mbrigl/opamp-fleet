@@ -349,13 +349,15 @@ impl Database {
     /// Applies `migrations` in one transaction (ADR-0029 clause 22).
     ///
     /// # Errors
-    /// Returns an error naming the database when the schema needs a newer Server or a statement
-    /// fails; the transaction is then rolled back and the database left as it was.
+    /// Returns an error naming the database when the schema needs a newer Server, when this
+    /// instance shares the database and another Server holds it alone, or when a statement fails;
+    /// the transaction is then rolled back and the database left as it was.
     pub(crate) fn apply_schema(
         &self,
         migrations: &'static [schema::Migration],
     ) -> Result<schema::Applied, String> {
         let ours = schema::server_version();
+        let shared = matches!(self.exclusive, Exclusive::Shared);
         self.run(move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
@@ -367,6 +369,24 @@ impl Database {
                 )
                 .await
                 .map_err(sql)?;
+            // A Server that holds the database alone checked its schema at its own start and
+            // would serve on in the one migrated beside it: a Server of 0.7.1 holds this lock for
+            // its whole run. Shared and held to the commit, the lock keeps such a Server from
+            // starting meanwhile, and lets instances that share the database pass each other.
+            // An instance that must be alone holds it already, on a connection of its own.
+            if shared {
+                let free: bool = transaction
+                    .query_one(
+                        &format!("SELECT pg_try_advisory_xact_lock_shared({EXCLUSIVE_LOCK})"),
+                        &[],
+                    )
+                    .await
+                    .map_err(sql)?
+                    .get(0);
+                if !free {
+                    return Err(HELD_ALONE_BEFORE_MIGRATING.to_string());
+                }
+            }
             let applied = schema::apply(&*transaction, migrations, ours).await?;
             transaction.commit().await.map_err(sql)?;
             Ok(applied)
@@ -650,6 +670,13 @@ impl Drop for Database {
 /// Server and an instance that must be alone keep each other out.
 pub(crate) const EXCLUSIVE_LOCK: &str =
     "hashtextextended('opamp-fleet-server:' || coalesce(current_schema(), ''), 0)";
+
+/// Why an instance that shares the database neither migrates nor starts while another Server
+/// holds it alone (ADR-draft-the-servers-state-and-its-stores clause 22).
+const HELD_ALONE_BEFORE_MIGRATING: &str = "another Server holds the database alone — a Server of \
+     0.7.1 or earlier, or an instance that keeps its blobs as files ([blobs] store = \"fs\") or a \
+     CA key in a file ([client_ca] key_file, [enrolment] bootstrap_ca_key_file); stop it before \
+     this instance starts, which changed nothing in the database";
 
 /// The lock of the blob store (ADR-draft-the-servers-state-and-its-stores clause 14), by the key
 /// its schema gives it: a sweep or a staging cleanup holds it alone, an upload shared in the
@@ -1798,6 +1825,105 @@ mod tests {
             ),
             [[Some("0".to_string())]],
             "no migration of this Server was applied"
+        );
+    }
+
+    /// A Server of 0.7.1 takes the schema of migrations 1 and 2, which it knows, and refuses the
+    /// schema once any migration of 0.8.0 is applied, naming 0.8.0 and changing nothing: it holds
+    /// no lease, so it must not serve beside the instances of 0.8.0
+    /// (ADR-draft-the-servers-state-and-its-stores clause 22). It is asked through the check of
+    /// [`schema::apply`], which 0.7.1 runs as it stands here.
+    /// Verifies: ADR-draft-the-servers-state-and-its-stores
+    #[test]
+    fn a_server_of_0_7_1_refuses_the_schema_once_a_migration_of_0_8_0_is_applied() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = Database::connect(&test.config(), Some(&test.schema)).expect("connect");
+        for applied in 2..=schema::MIGRATIONS.len() {
+            let migrations = &schema::MIGRATIONS[..applied];
+            database
+                .apply_schema(migrations)
+                .expect("this Server applies them");
+            let before =
+                test.rows("SELECT version, oldest_server FROM fleet_schema ORDER BY version");
+            // 0.7.1's own list: migrations 1 and 2.
+            let answer = database.run(move |pool| async move {
+                let client = client(&pool).await?;
+                schema::apply(&**client, &schema::MIGRATIONS[..2], "0.7.1").await
+            });
+            if applied == 2 {
+                assert_eq!(
+                    answer
+                        .expect("0.7.1 runs on the schema it brought")
+                        .versions,
+                    Vec::<i32>::new()
+                );
+            } else {
+                let err = answer.expect_err("0.7.1 refuses the schema of 0.8.0");
+                assert!(
+                    err.contains("needs Server 0.8.0 or later, and this Server is 0.7.1"),
+                    "after migration {applied}: {err}"
+                );
+            }
+            assert_eq!(
+                test.rows("SELECT version, oldest_server FROM fleet_schema ORDER BY version"),
+                before,
+                "left unchanged"
+            );
+        }
+    }
+
+    /// An instance that shares the database neither migrates nor starts while another Server holds
+    /// the database alone, as a running Server of 0.7.1 does for its whole run under the same key:
+    /// that Server checked the schema only at its own start, and would serve on in a schema it
+    /// refuses (ADR-draft-the-servers-state-and-its-stores clause 22). Once the lock is free, the
+    /// instance migrates and starts.
+    /// Verifies: ADR-draft-the-servers-state-and-its-stores
+    #[test]
+    fn a_shared_instance_migrates_nothing_while_a_server_holds_the_database_alone() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        // The Server of 0.7.1: the exclusive lock for its whole run, on the schema it brought.
+        let release_before =
+            Database::connect(&test.config(), Some(&test.schema)).expect("connect");
+        release_before
+            .apply_schema(&schema::MIGRATIONS[..2])
+            .expect("its schema");
+        let before = test.rows("SELECT version, oldest_server FROM fleet_schema ORDER BY version");
+        let err = Database::open_in(&test.config(), Exclusive::Shared, Some(&test.schema))
+            .map(|_| ())
+            .expect_err("held alone");
+        assert!(err.contains("holds the database alone"), "{err}");
+        assert!(err.contains("stop it before"), "{err}");
+        assert!(
+            err.contains(&format!("database {}", test.config.dbname)),
+            "{err}"
+        );
+        assert_eq!(
+            test.rows("SELECT version, oldest_server FROM fleet_schema ORDER BY version"),
+            before,
+            "nothing migrated"
+        );
+
+        drop(release_before);
+        // The lock goes with its session, which the server notices when the connection closes.
+        let mut opened = None;
+        for _ in 0..50 {
+            if let Ok(database) =
+                Database::open_in(&test.config(), Exclusive::Shared, Some(&test.schema))
+            {
+                opened = Some(database);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(opened.is_some(), "the lock was not released");
+        assert_eq!(
+            test.rows("SELECT count(*) FROM fleet_schema"),
+            [[Some(schema::MIGRATIONS.len().to_string())]],
+            "migrated once the lock was free"
         );
     }
 

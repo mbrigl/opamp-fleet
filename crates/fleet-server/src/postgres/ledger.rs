@@ -300,10 +300,11 @@ impl LedgerStore for PgLedgerStore {
     /// transaction: a Gateway mark committed before it is seen, and one that waits for it releases
     /// what it bound. A Host whose row is marked as a Gateway is bound none (ADR-0024 clause 16).
     /// The hold is one that conflicts with itself, so two binders of one Host wait for each other
-    /// rather than both holding a share of the row they then write. Until no instance of the
-    /// release before runs, an `instance_uid` another Host's array lists, as that release binds it,
-    /// is answered as that Host's too, and a new binding goes into the Host's array as well; a
-    /// Gateway's array binds nothing.
+    /// rather than both holding a share of the row they then write. An `instance_uid` another
+    /// Host's array lists, as a release before the bindings' table bound it, is answered as that
+    /// Host's too, and a new binding goes into the Host's array as well; a Gateway's array binds
+    /// nothing. No such release runs on this schema, whose oldest Server is 0.8.0: the arrays are
+    /// kept for the removal rule of ADR-draft-the-servers-state-and-its-stores clause 22.
     fn bind_seen(&self, instance_uid: &str, host: &str, row: &Host) -> Result<Bound, String> {
         let (instance_uid, host, row) = (instance_uid.to_string(), host.to_string(), row.clone());
         self.database.run(move |pool| async move {
@@ -518,8 +519,9 @@ impl LedgerStore for PgLedgerStore {
     }
 
     /// Writes each Host that changed since the last commit, and removes each one that is gone with
-    /// its bindings. The `instance_uids` a Host's row keeps are those this instance holds, for a
-    /// release before the bindings' table; the bindings are read from that table.
+    /// its bindings. The `instance_uids` a Host's row keeps are those this instance holds, the
+    /// array a release before the bindings' table read, kept for the removal rule of
+    /// ADR-draft-the-servers-state-and-its-stores clause 22; the bindings are read from that table.
     fn save_hosts(&self, hosts: &BTreeMap<String, Host>) -> Result<(), String> {
         let mut written = self.written_hosts.lock().expect("hosts lock");
         let changed: Vec<(String, Host)> = hosts
@@ -559,7 +561,9 @@ impl LedgerStore for PgLedgerStore {
 
 /// Removes the binding of `instance_uid` inside the caller's transaction: the Host it was bound to,
 /// `None` when it was bound to none. The Hosts' arrays, which a release before the bindings' table
-/// binds by, lose it too, so neither release finds it bound once it is released.
+/// bound by and which are kept for the removal rule of
+/// ADR-draft-the-servers-state-and-its-stores clause 22, lose it too, so neither finds it bound
+/// once it is released.
 async fn unbind_in(
     client: &impl GenericClient,
     instance_uid: &str,
@@ -631,7 +635,9 @@ async fn write_seen(client: &impl GenericClient, host: &str, entry: &Host) -> Re
 }
 
 /// Lists `instance_uid` in `host`'s array inside the caller's transaction, as a release before the
-/// bindings' table binds by it; a Host with no row yet takes it with the row its act writes.
+/// bindings' table bound by it, kept for the removal rule of
+/// ADR-draft-the-servers-state-and-its-stores clause 22; a Host with no row yet takes it with the
+/// row its act writes.
 async fn append_to_array(
     client: &impl GenericClient,
     instance_uid: &str,
@@ -2045,7 +2051,9 @@ mod tests {
         let Some(test) = TestDatabase::named() else {
             return;
         };
-        let database = test.open();
+        // Both instances share the database, as two instances beside each other do.
+        let database = Database::open_in(&test.config(), Exclusive::Shared, Some(&test.schema))
+            .expect("A's database");
         let instance = instances_on(&database);
         let a = instance();
         let subject = SubjectValues::default();
@@ -2113,8 +2121,8 @@ mod tests {
     }
 
     /// An `instance_uid` another Host's array lists, and no binding row holds, is answered as that
-    /// Host's while the release before the bindings' table may still run beside this one: it binds
-    /// by the arrays alone.
+    /// Host's, as the release before the bindings' table, which bound by the arrays alone, left
+    /// it.
     /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
     #[test]
     fn an_instance_uid_only_an_array_lists_is_that_hosts() {
@@ -2195,7 +2203,9 @@ mod tests {
         let Some(test) = TestDatabase::named() else {
             return;
         };
-        let database = test.open();
+        // Both instances share the database, as two instances beside each other do.
+        let database = Database::open_in(&test.config(), Exclusive::Shared, Some(&test.schema))
+            .expect("A's database");
         let instance = instances_on(&database);
         let a = instance();
         let (b, _runtime) = follower(&test);

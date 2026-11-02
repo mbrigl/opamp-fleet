@@ -2,10 +2,11 @@
 //! itself at startup, each recorded in `fleet_schema` with the oldest Server version that
 //! understands the schema it leaves.
 //!
-//! A migration only adds — tables, columns with defaults, indexes — so the release before a change
-//! runs on the schema after it. A column or table is removed only by a release after the one that
-//! stopped using it. The Server creates tables, indexes and `fleet_schema`, and nothing else: the
-//! database, the role, its rights and its extensions are the operator's.
+//! A migration only adds — tables, columns with defaults, indexes. A column or table is removed
+//! only by a release after the one that stopped using it. Each migration names the oldest Server
+//! that understands the schema it leaves, and a Server older than any of them refuses the schema.
+//! The Server creates tables, indexes and `fleet_schema`, and nothing else: the database, the role,
+//! its rights and its extensions are the operator's.
 
 use std::cmp::Ordering;
 
@@ -68,63 +69,60 @@ pub const MIGRATIONS: &[Migration] = &[
         oldest_server: "0.6.1",
         sql: PACKAGE_FLOORS,
     },
-    // A table only added; the release before it never reads it.
+    // Migrations 3 to 10 are the schema of 0.8.0, the release in which several instances share
+    // a database, and name it. A Server of 0.7.1 holds no lease, keeps its audit record in files
+    // and leaves the revocation list's version where it was, so it refuses the schema they leave
+    // rather than serve beside the instances of 0.8.0
+    // (ADR-draft-the-servers-state-and-its-stores clause 22).
+    //
+    // A table only added.
     Migration {
         version: 3,
-        oldest_server: "0.6.1",
+        oldest_server: "0.8.0",
         sql: LEASES,
     },
-    // A table and an index only added, the table filled from the Hosts; the release before it
-    // keeps binding in the Hosts' arrays, which this release writes too and honours when it binds.
-    // What two releases side by side still leave open is ticket 11's.
+    // A table and an index only added, the table filled from the Hosts, whose arrays this release
+    // still writes too.
     Migration {
         version: 4,
-        oldest_server: "0.6.1",
+        oldest_server: "0.8.0",
         sql: HOST_BINDINGS,
     },
-    // Two tables only added, filled from the Deployments' columns; the release before it keeps
-    // reading those columns, which this release writes too, from the rows. What the release
-    // before writes into them while both run is ticket 11's.
+    // Two tables only added, filled from the Deployments' columns, which this release still
+    // writes too, from the rows.
     Migration {
         version: 5,
-        oldest_server: "0.6.1",
+        oldest_server: "0.8.0",
         sql: DEPLOYMENT_MEMBERS,
     },
-    // A table only added; the release before it never reads it, and its revocations and lifts
-    // leave the version where it was, so a Gateway's `ETag` from an instance of this release may
-    // be answered `304` over a list the release before changed. What two releases side by side
-    // leave open is ticket 11's.
+    // A table only added.
     Migration {
         version: 6,
-        oldest_server: "0.6.1",
+        oldest_server: "0.8.0",
         sql: REVOCATION_LIST_VERSION,
     },
-    // Tables only added; the release before it never reads them and keeps its audit record in
-    // files. What two releases side by side leave open is ticket 11's.
+    // Tables only added.
     Migration {
         version: 7,
-        oldest_server: "0.6.1",
+        oldest_server: "0.8.0",
         sql: AUDIT_CHAINS,
     },
-    // Two columns only added, with defaults; the release before it neither reads nor writes them,
-    // so its Agents read as disconnected on the instances of this release.
+    // Two columns only added, with defaults.
     Migration {
         version: 8,
-        oldest_server: "0.6.1",
+        oldest_server: "0.8.0",
         sql: AGENT_PRESENCE,
     },
-    // Two columns only added, with defaults; the release before it neither reads nor writes them,
-    // and names no holder, so it takes no Agent.
+    // Two columns only added, with defaults.
     Migration {
         version: 9,
-        oldest_server: "0.6.1",
+        oldest_server: "0.8.0",
         sql: TAKES,
     },
-    // A column only added, with a default, and an index; the release before it neither reads nor
-    // prunes by it, and its inserts take the default.
+    // A column only added, with a default, and an index.
     Migration {
         version: 10,
-        oldest_server: "0.6.1",
+        oldest_server: "0.8.0",
         sql: AUDIT_RECORDED_AT,
     },
 ];
@@ -314,7 +312,7 @@ CREATE INDEX certificates_predecessor ON certificates (predecessor_issuer, prede
 /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
 /// clause 19): its Packages keyed by Agent type, so it holds at most one of each, and its
 /// Configurations by name. They are filled from the `packages` and `configurations` columns of
-/// `deployments`, which stay, written from these rows, for the release before.
+/// `deployments`, which stay and are written from these rows.
 const DEPLOYMENT_MEMBERS: &str = r"
 CREATE TABLE deployment_packages (
     deployment text NOT NULL REFERENCES deployments (name) ON DELETE CASCADE,

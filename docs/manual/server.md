@@ -490,9 +490,11 @@ within about half a minute.
 
 The role needs the right to create tables in its default schema: at every start the Server applies
 the migrations of its schema the database has not yet seen, in one transaction, and records them in
-the table `fleet_schema`. A migration only adds, so the Server before an upgrade runs on the schema
-after it. A database whose schema needs a newer Server stops the start, naming both versions, and is
-left unchanged. The Server creates tables and indexes, and nothing else: the database, the role,
+the table `fleet_schema`. A migration only adds, and each names the oldest Server that understands
+the schema it leaves. A database whose schema needs a newer Server stops the start, naming both
+versions, and is left unchanged. A Server of 0.7.1 is refused that way once this release has started
+on its database: back the database up before the upgrade, since going back to 0.7.1 afterwards
+means restoring it. The Server creates tables and indexes, and nothing else: the database, the role,
 its rights and extensions, replication and backups are the operator's.
 
 Every Server on PostgreSQL is an instance: before it opens either listener it takes a lease in the
@@ -846,9 +848,12 @@ instance that carries an Agent, two cases do not inherit yet:
 
 Every instance on one database runs one release. To upgrade, stop every instance, then start each
 again on the new release; the first to start migrates the schema, and instances that start together
-wait for it. Two releases side by side, for an upgrade without a stop, are not built yet. Nor has
-any load been proven on several instances: how many Agents they carry and how long a failover of a
-large fleet takes are not yet measured.
+wait for it. Stopping the old ones first is yours: an orchestrator's rolling update, which starts a
+new instance before it stops an old one, does not fit. Where the Server can tell, it refuses the
+wrong order: an instance that shares the database starts, and migrates, only once no Server holds
+the database alone, as a Server of 0.7.1 does while it runs. Two releases side by side, for an
+upgrade without a stop, are not built yet. Nor has any load been proven on several instances: how
+many Agents they carry and how long a failover of a large fleet takes are not yet measured.
 
 ## Upgrading to one data directory
 
