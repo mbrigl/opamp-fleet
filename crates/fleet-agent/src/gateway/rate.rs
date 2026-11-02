@@ -3,7 +3,7 @@
 //! Every downstream report, enrolment request and package download takes one token from the bucket
 //! of the host that sent it before the Gateway does anything else with it. A bucket holds `burst`
 //! tokens and gains `messages_per_sec` of them a second, and a new one starts full, as the Server
-//! sizes a host's (ADR-0012 clause 22). The key is the host the downstream certificate speaks as —
+//! sizes a host's (ADR-0045 clause 22). The key is the host the downstream certificate speaks as —
 //! the one it names, else the one derived from its issuer and serial (ADR-0015 clause 15) — or, for
 //! an enrolling peer, its address, an IPv6 one by its /64. The buckets live in memory, in one table
 //! bounded at the Gateway's total of bindings, and a full one forgets the bucket used least
@@ -24,12 +24,12 @@ use crate::config::GatewayRateLimitConfig;
 pub const MAX_BUCKETS: usize = super::cache::MAX_BINDINGS;
 
 /// What a report or an enrolment request past the limit is told, as the Server tells it
-/// (ADR-0012 clause 25).
+/// (ADR-0045 clause 25).
 pub const THROTTLED: &str = "too many messages arrive from this sender — retry later";
 
 /// How long a sender told [`THROTTLED`] waits before it asks again: the Server's `RETRY_AFTER`,
-/// for a report or an enrolment request (ADR-0012 clause 25) and as the `Retry-After` of a
-/// download (ADR-0012 clause 26).
+/// for a report or an enrolment request (ADR-0045 clause 25) and as the `Retry-After` of a
+/// download (ADR-0045 clause 26).
 pub const RETRY_AFTER: Duration = Duration::from_secs(30);
 
 /// How long one host's refusals are counted before the next line says how many there were.
@@ -195,7 +195,7 @@ impl HostRate {
 }
 
 /// The answer to a report or an enrolment request past the limit, as the Server gives it
-/// (ADR-0012 clauses 25 and 27): its own `instance_uid`, so it reaches the Agent that sent it,
+/// (ADR-0045 clauses 25 and 27): its own `instance_uid`, so it reaches the Agent that sent it,
 /// `Unavailable` and when to retry. It claims none of the Server's capabilities, which the
 /// Gateway does not speak for.
 #[must_use]

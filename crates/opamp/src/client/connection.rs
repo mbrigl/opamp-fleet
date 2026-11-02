@@ -337,7 +337,7 @@ mod tests {
         assert!(Scheme::of("h/v1/opamp").is_err());
     }
 
-    /// Verifies: ADR-0008, ADR-0012
+    /// Verifies: ADR-0008, ADR-0045
     #[test]
     fn plaintext_is_refused_off_the_loopback_literals() {
         let allowed = |endpoint| connection(endpoint, Some("Bearer t")).scheme();
@@ -366,7 +366,7 @@ mod tests {
             .is_err());
     }
 
-    /// Verifies: ADR-0008, ADR-0012
+    /// Verifies: ADR-0008, ADR-0045
     #[tokio::test]
     async fn plaintext_off_the_loopback_is_refused_before_connecting() {
         let refused = connection("ws://192.0.2.1:9/v1/opamp", None);

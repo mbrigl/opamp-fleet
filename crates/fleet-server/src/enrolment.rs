@@ -1,11 +1,11 @@
-//! Enrolment: how a host gets its first client certificate (ADR-0021 clause 17, ADR-0029 clause 8
+//! Enrolment: how a host gets its first client certificate (ADR-0038 clause 17, ADR-0044 clause 8
 //! and ADR-0022 clauses 9 and 10).
 //!
 //! A host enrols with a bootstrap certificate from a CA of its own. Such a connection is admitted
 //! only while an operator holds an **enrolment window** open, and the certificate signing request
 //! it sends waits in a **pending queue** until an operator approves or rejects it. The window's end
 //! and the queue — an approved request with its certificate included — are persisted through the
-//! [`EnrolmentStore`] port before the act that changes them is answered (ADR-0029 clause 8), so a
+//! [`EnrolmentStore`] port before the act that changes them is answered (ADR-0044 clause 8), so a
 //! restart keeps an open window open until its end and keeps its requests; a window whose end has
 //! passed is closed when it is loaded. When the window closes, every pending request expires.
 //!
@@ -43,7 +43,7 @@ pub struct Request {
     /// The SHA-256 fingerprint of the requested public key, hex — the key of the queue, and what the
     /// Client logs so an operator can match a request to a host.
     pub key_fingerprint: String,
-    /// The `instance_uid` of the message that carried it, for the register (ADR-0029 clause 9).
+    /// The `instance_uid` of the message that carried it, for the register (ADR-0044 clause 9).
     pub instance_uid: Vec<u8>,
 }
 
@@ -130,7 +130,7 @@ pub enum DecisionError {
     Subject(String),
     /// The CA could not sign the request.
     Sign(String),
-    /// The decision could not be persisted (ADR-0029 clause 8); the request still waits.
+    /// The decision could not be persisted (ADR-0044 clause 8); the request still waits.
     Store(String),
 }
 
@@ -139,7 +139,7 @@ pub enum DecisionError {
 pub enum WindowError {
     /// The duration is outside 1 to [`MAX_WINDOW_SECS`] seconds — a `400`.
     Invalid(String),
-    /// The window could not be persisted (ADR-0029 clause 8); it is as it was.
+    /// The window could not be persisted (ADR-0044 clause 8); it is as it was.
     Store(String),
 }
 
@@ -152,7 +152,7 @@ pub enum Decision {
     Rejected,
 }
 
-/// The window and its requests as they persist (ADR-0029 clause 8): what an [`EnrolmentStore`]
+/// The window and its requests as they persist (ADR-0044 clause 8): what an [`EnrolmentStore`]
 /// keeps, and all it keeps.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -194,7 +194,7 @@ pub enum Took {
     Closed,
 }
 
-/// The enrolment's port (ADR-0009, ADR-0029): where the window and its queue persist. The
+/// The enrolment's port (ADR-0009, ADR-0044): where the window and its queue persist. The
 /// filesystem adapter ([`FsEnrolmentStore`](crate::fs::FsEnrolmentStore)) keeps them in
 /// `enrolment.json`. Each act is one write that decides from what is stored, so the queue's bounds
 /// hold for every instance on one database
@@ -310,7 +310,7 @@ pub trait EnrolmentStore: Send + Sync {
 
     /// Withdraws every waiting request whose bootstrap certificate is `serial` under one of
     /// `issuers`, and answers how many: what the revocation of a bootstrap certificate withdraws in
-    /// the queue every instance shares (ADR-0021 clause 28).
+    /// the queue every instance shares (ADR-0038 clause 28).
     ///
     /// # Errors
     /// Returns an error when the store cannot be read or written.
@@ -480,7 +480,7 @@ pub struct Enrolment {
     /// Where the window and its queue persist; `None` keeps them in memory, as a test does.
     store: Option<Box<dyn EnrolmentStore>>,
     changes: watch::Sender<u64>,
-    /// Where a window that runs out records the requests that expired with it (ADR-0023).
+    /// Where a window that runs out records the requests that expired with it (ADR-0039).
     audit: std::sync::OnceLock<Arc<dyn crate::audit::Audit>>,
 }
 
@@ -498,7 +498,7 @@ impl Enrolment {
         }
     }
 
-    /// Restores the window and its queue from `store` (ADR-0029 clause 8), and persists through it
+    /// Restores the window and its queue from `store` (ADR-0044 clause 8), and persists through it
     /// from here on. A window whose end has passed while the Server was down is closed, and its
     /// requests expire with it.
     ///
@@ -701,11 +701,11 @@ impl Enrolment {
     /// [`DecisionError::Subject`] when its subject cannot be carried into the host certificate
     /// (ADR-0015 clause 23), and [`DecisionError::Sign`] when the CA refuses the request.
     /// Answers what was signed, and the `instance_uid` the request arrived under, for the register.
-    /// `record` keeps what was signed before the host can collect it (ADR-0029 clause 9); a
+    /// `record` keeps what was signed before the host can collect it (ADR-0044 clause 9); a
     /// failure there leaves the request pending.
     ///
     /// The bootstrap certificate the request came with is checked against `revoked` under the same
-    /// lock that signs, so a revocation that lands before the approval always wins (ADR-0021
+    /// lock that signs, so a revocation that lands before the approval always wins (ADR-0038
     /// clause 28); such a request is withdrawn and answered [`DecisionError::Revoked`].
     pub fn approve(
         &self,
@@ -743,7 +743,7 @@ impl Enrolment {
             Ok(Decision::Approved(signed.pem))
         };
         // Persisted before it is answered, the certificate included, so a restart before the host
-        // collects it hands it over all the same (ADR-0029 clause 8). The store signs only a
+        // collects it hands it over all the same (ADR-0044 clause 8). The store signs only a
         // request that still waits there, and holds it meanwhile: one another instance decided or
         // withdrew is gone, and nothing is signed for it.
         let approval = match &self.store {
@@ -829,7 +829,7 @@ impl Enrolment {
     }
 
     /// Withdraws every waiting request whose bootstrap certificate `revoked` names, and answers how
-    /// many: a revoked certificate opens nothing, a request it carried included (ADR-0021
+    /// many: a revoked certificate opens nothing, a request it carried included (ADR-0038
     /// clause 28). A decided request is left: an approved one was signed and recorded already, and
     /// dropping it would revoke nothing — the connection of this certificate is refused, and only
     /// one holding the same key can collect it.
@@ -857,7 +857,7 @@ impl Enrolment {
 
     /// Withdraws every waiting request whose bootstrap certificate is `serial` under one of
     /// `issuers`, held here or by another instance in the store, and answers how many: what the
-    /// revocation of a bootstrap certificate does to the queue (ADR-0021 clause 28).
+    /// revocation of a bootstrap certificate does to the queue (ADR-0038 clause 28).
     pub fn withdraw_revoked(&self, issuers: &[String], serial: &str) -> usize {
         let named =
             |bootstrap: &CertId| bootstrap.serial == serial && issuers.contains(&bootstrap.issuer);
@@ -1143,7 +1143,7 @@ pub(crate) mod tests {
 
     /// An approved enrolment survives a restart: the window stays open until its end, a waiting
     /// request still waits, and the approved one hands its host the certificate it was issued.
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0044
     #[test]
     fn an_approved_enrolment_survives_a_restart() {
         let clock = Arc::new(Manual(AtomicU64::new(1_000_000)));
@@ -1187,7 +1187,7 @@ pub(crate) mod tests {
 
     /// A window whose end passed while the Server was down is closed when it is loaded, and its
     /// requests — an approved one included — expire with it.
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0044
     #[test]
     fn a_window_whose_end_passed_while_down_is_closed_on_load() {
         let clock = Arc::new(Manual(AtomicU64::new(1_000_000)));
@@ -1220,7 +1220,7 @@ pub(crate) mod tests {
 
     /// An act whose result cannot be persisted is not taken: the window stays as it was, and a
     /// decision leaves the request waiting.
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0044
     #[test]
     fn an_act_that_cannot_be_persisted_changes_nothing() {
         // It holds what it wrote, as every store does: an act decides from what is stored.
@@ -1263,7 +1263,7 @@ pub(crate) mod tests {
         assert!(!enrolment.is_open(), "closed all the same");
     }
 
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0038
     #[test]
     fn the_window_is_closed_by_default_and_bounded() {
         let (enrolment, clock) = enrolment();
@@ -1280,7 +1280,7 @@ pub(crate) mod tests {
         assert!(!enrolment.is_open(), "the window closes on its own");
     }
 
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0038
     #[test]
     fn a_request_waits_for_an_operator_and_is_answered_once_decided() {
         let (enrolment, _) = enrolment();
@@ -1320,7 +1320,7 @@ pub(crate) mod tests {
         assert_eq!(enrolment.reject("unknown"), Err(DecisionError::NotFound));
     }
 
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0038
     #[test]
     fn closing_the_window_expires_every_request() {
         let (enrolment, clock) = enrolment();
@@ -1337,7 +1337,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0038
     #[test]
     fn the_queue_is_bounded() {
         let (enrolment, _) = enrolment();
@@ -1448,7 +1448,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0038
     #[test]
     fn a_request_whose_bootstrap_certificate_is_revoked_is_withdrawn_unsigned() {
         let (enrolment, _clock) = enrolment();
@@ -1513,7 +1513,7 @@ pub(crate) mod tests {
         assert_eq!(enrolment.pending().len(), 1, "the request still waits");
     }
 
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0038
     #[test]
     fn withdrawing_takes_only_the_waiting_requests_of_a_revoked_certificate() {
         let (enrolment, _clock) = enrolment();

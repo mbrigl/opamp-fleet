@@ -1,4 +1,4 @@
-//! Renewal before expiry, end to end (ADR-0021 clauses 8 and 10): the real Server signs with a CA
+//! Renewal before expiry, end to end (ADR-0038 clauses 8 and 10): the real Server signs with a CA
 //! whose certificates live seconds, the real Client renews at two thirds of each life. The
 //! measure H6 of `docs/HARDENING.md` shortened the default life on the strength of this: a fleet
 //! renews before its certificates run out, without anyone's help.
@@ -85,7 +85,7 @@ fn issued(state_dir: &Path) -> Option<(Vec<u8>, time::OffsetDateTime, Option<Str
 /// Server throughout — on a main thread no larger than Windows gives it, which the daemon once
 /// overflowed the moment it applied the offered connection settings. The connection presents no certificate here, so the host that every
 /// generation carries on is the renewal proof's doing (ADR-0015 clause 18).
-/// Verifies: ADR-0021
+/// Verifies: ADR-0038
 #[tokio::test]
 async fn a_client_renews_each_certificate_before_it_expires() {
     const LIFE: u64 = 9;

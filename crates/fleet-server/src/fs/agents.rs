@@ -1,4 +1,4 @@
-//! The Agent-record store on the filesystem (ADR-0024): the default adapter behind
+//! The Agent-record store on the filesystem (ADR-0043): the default adapter behind
 //! [`AgentStore`](crate::agent_store::AgentStore).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -15,10 +15,10 @@ use crate::configs::Pinned;
 use crate::fleet::{Assignment, Transport};
 use crate::packages::PackageId;
 
-/// The default adapter (ADR-0024, ADR-0029): one JSON file per Agent under `<data_dir>/agents/`,
+/// The default adapter (ADR-0043, ADR-0044): one JSON file per Agent under `<data_dir>/agents/`,
 /// owner-only — temp file plus atomic rename, loud failure on a file that does not parse or a name
 /// that is not an Instance UID. A rollout's revisions go to `<data_dir>/configurations/` first
-/// (ADR-0029 clause 2), and the integrity queries are answered from the assignments this adapter
+/// (ADR-0044 clause 2), and the integrity queries are answered from the assignments this adapter
 /// last read or wrote.
 pub struct FsAgentStore {
     dir: PathBuf,
@@ -29,7 +29,7 @@ pub struct FsAgentStore {
 
 /// The on-disk envelope — **this adapter's format, not the port's**. Scalars and the
 /// effective-config text stay readable; the wire-typed fields are protobuf bytes base64-inline,
-/// the one encoding whose compatibility rules the Baseline already defines (ADR-0011, ADR-0024).
+/// the one encoding whose compatibility rules the Baseline already defines (ADR-0011, ADR-0043).
 #[derive(Serialize, Deserialize)]
 struct Envelope {
     /// The envelope shape, so a future change can migrate deliberately.
@@ -56,10 +56,10 @@ struct Envelope {
     /// What the last rollout released to this Agent (ADR-0026 clause 6). Absent means nothing was.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     assignment: Option<AssignmentMeta>,
-    /// The operator's labels (ADR-0024 clause 21). Absent means none.
+    /// The operator's labels (ADR-0043 clause 21). Absent means none.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     labels: BTreeMap<String, String>,
-    /// The Host the Agent last arrived over (ADR-0024 clause 16). Absent means none.
+    /// The Host the Agent last arrived over (ADR-0043 clause 16). Absent means none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     host: Option<String>,
 }
@@ -76,7 +76,7 @@ struct AssignmentMeta {
     configurations: BTreeMap<String, String>,
 }
 
-/// Version 4 carries the Agent's labels and the Host it last arrived over (ADR-0024 clauses 16 and 21) beside ADR-0026's assignment shape, and there is **no reader for an earlier version**: an
+/// Version 4 carries the Agent's labels and the Host it last arrived over (ADR-0043 clauses 16 and 21) beside ADR-0026's assignment shape, and there is **no reader for an earlier version**: an
 /// envelope this Server did not write is named rather than guessed at.
 const ENVELOPE_VERSION: u32 = 4;
 
@@ -131,9 +131,9 @@ impl Envelope {
             return Err(format!(
                 "envelope version {} is not the understood {ENVELOPE_VERSION} — this Server reads \
                  no other record format: an Agent record carries its labels and the Host it \
-                 arrived over (ADR-0024), and an assignment is one release per Agent, its \
+                 arrived over (ADR-0043), and an assignment is one release per Agent, its \
                  Package and Configurations together (ADR-0026). A data directory an older \
-                 Server wrote is moved by `server migrate` (ADR-0029)",
+                 Server wrote is moved by `server migrate` (ADR-0044)",
                 self.version
             ));
         }
@@ -177,8 +177,8 @@ impl Envelope {
 
 impl FsAgentStore {
     /// Opens the store in the data directory `root`, creating `agents/` owner-only — reported
-    /// effective configurations may hold credentials (ADR-0024), the same reasoning that guards
-    /// every other store (ADR-0029 clause 1).
+    /// effective configurations may hold credentials (ADR-0043), the same reasoning that guards
+    /// every other store (ADR-0044 clause 1).
     pub fn open(root: &std::path::Path) -> Result<Self, String> {
         let dir = root.join(super::AGENTS);
         let configurations = root.join(super::CONFIGURATIONS);
@@ -312,7 +312,7 @@ impl AgentStore for FsAgentStore {
     }
 
     /// The revisions first, then each record: a crash in between leaves revisions nothing
-    /// references, which the next load collects (ADR-0029 clause 2). A record that cannot be
+    /// references, which the next load collects (ADR-0044 clause 2). A record that cannot be
     /// written puts every record this call already wrote back as it was, so a failure leaves the
     /// records as they were; one that cannot be put back stays as written, and so does what the
     /// store answers about it.
@@ -449,7 +449,7 @@ mod tests {
     /// An Agent's labels and the Host it arrived over are part of its record on disk, and a record
     /// written before they were — version 3 — fails the load naming the file and the reason,
     /// rather than being read as an Agent nobody labelled.
-    /// Verifies: ADR-0024
+    /// Verifies: ADR-0043
     #[test]
     fn labels_and_host_live_in_the_record_and_an_older_envelope_is_refused() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -475,12 +475,12 @@ mod tests {
             "names the file: {error}"
         );
         assert!(
-            error.contains("version 3") && error.contains("ADR-0024"),
+            error.contains("version 3") && error.contains("ADR-0043"),
             "says why: {error}"
         );
     }
 
-    /// Forgetting removes the file (ADR-0024 extended); removing the absent is not an error.
+    /// Forgetting removes the file (ADR-0043 extended); removing the absent is not an error.
     #[test]
     fn remove_deletes_and_tolerates_absence() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -494,7 +494,7 @@ mod tests {
 
     /// A release that fails part-way puts back what it wrote, a record that had no file before
     /// among them: that file is removed again, and what the store answers about pins with it.
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0044
     #[test]
     fn a_failed_release_removes_a_record_it_created() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -523,9 +523,9 @@ mod tests {
         assert!(restored.contains_key(&new) && !restored.contains_key(&old));
     }
 
-    /// The integrity questions are the store's (ADR-0029 clause 2): what the stored assignments
+    /// The integrity questions are the store's (ADR-0044 clause 2): what the stored assignments
     /// pin and which revisions they reference, kept as records are written, removed and loaded.
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0044
     #[test]
     fn the_store_answers_what_its_assignments_pin() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -589,7 +589,7 @@ mod tests {
     /// A rollout writes its revisions before the assignments that pin them, so one cut short in
     /// between leaves a revision nothing references and every record as it was. The next load
     /// accepts that state and collects the orphaned revision, from memory and from disk.
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0044
     #[test]
     fn a_rollout_cut_short_after_its_revisions_leaves_a_state_the_next_load_accepts() {
         use crate::configs::{revision_hash, ConfigBackend as _, Configuration, Revision};

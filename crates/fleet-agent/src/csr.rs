@@ -1,4 +1,4 @@
-//! Enrolment: the client certificate this Client asks the Server to issue (ADR-0021).
+//! Enrolment: the client certificate this Client asks the Server to issue (ADR-0038).
 //!
 //! The Baseline's CSR flow keeps the private key on the host. This module generates that key and
 //! the request over its public half, and takes in the certificate that comes back through the
@@ -56,7 +56,7 @@ pub fn request(config: &ClientConfig) -> Option<Vec<u8>> {
 }
 
 /// Stores an issued certificate beside the key it was requested for, putting it in force on the
-/// next connection (ADR-0021).
+/// next connection (ADR-0038).
 ///
 /// The certificate and its key are two files, so the swap runs in an order every step of which
 /// [`recover`] completes: the certificate is staged whole beside the pending key, then the key goes
@@ -223,7 +223,7 @@ fn renewal_due(cert_file: &Path) -> Result<bool, String> {
 fn generate(config: &ClientConfig) -> Result<Vec<u8>, String> {
     let key = KeyPair::generate().map_err(|e| format!("cannot generate a key: {e}"))?;
     // The subject says which Client this is, for a human reading a certificate — never for the
-    // Server to match on (ADR-0021): identity is `instance_uid`, and the Server may re-key it.
+    // Server to match on (ADR-0038): identity is `instance_uid`, and the Server may re-key it.
     let mut params = CertificateParams::new(vec![config.name.clone()])
         .map_err(|e| format!("cannot build a certificate request: {e}"))?;
     // The subject an operator reads in the enrolment queue (ADR-0022 clause 10); rcgen's default
@@ -357,7 +357,7 @@ mod tests {
 
     /// A fresh host asks, and the key is on disk before the request leaves — but the Client still
     /// presents nothing, because half an identity is not one.
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0038
     #[test]
     fn a_client_without_a_certificate_asks_and_keeps_its_key() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -376,7 +376,7 @@ mod tests {
     /// The private key is never on disk wider than its owner — set in the open call, so there is no
     /// window between a world-readable create and a later chmod for a local attacker to read it.
     #[cfg(unix)]
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0038
     #[test]
     fn the_private_key_is_written_owner_only() {
         use std::os::unix::fs::PermissionsExt;
@@ -398,7 +398,7 @@ mod tests {
     /// A state directory the request creates is owner-only, like every other one the Client
     /// creates for its secrets — the key in it is `0600`, and the directory listing is no wider.
     #[cfg(unix)]
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0038
     #[test]
     fn the_state_directory_a_request_creates_is_owner_only() {
         use std::os::unix::fs::PermissionsExt;
@@ -486,7 +486,7 @@ mod tests {
     /// certificate in force beside a key it does not belong to: from the certificate staged
     /// beside the pending key, and from the key put in force before the certificate, the next start
     /// completes the swap into the new pair.
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0038
     #[test]
     fn a_swap_cut_short_recovers_to_a_matching_pair() {
         // Staged, nothing renamed yet.
@@ -536,7 +536,7 @@ mod tests {
     /// A staged certificate is put in force only beside the key it certifies. Left staged after
     /// its key went into force, it outlives the next renewal's pending key — and is paired with the
     /// key in force, not with that one; a staged certificate that certifies neither is dropped.
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0038
     #[test]
     fn a_stale_staged_certificate_is_never_paired_with_another_key() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -575,7 +575,7 @@ mod tests {
 
     /// `accept` stopped at each of its steps — a directory standing where the step writes makes
     /// exactly that write fail — leaves a state `recover` turns into a matching pair.
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0038
     #[test]
     fn accept_cut_short_at_any_step_recovers_to_a_matching_pair() {
         for (blocked, completes) in [
@@ -602,7 +602,7 @@ mod tests {
     }
 
     /// What comes back is stored beside the key and is what the Client presents from then on.
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0038
     #[test]
     fn an_issued_certificate_becomes_the_identity() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -631,7 +631,7 @@ mod tests {
 
     /// A certificate the Client never asked for has no key to go with it, and is refused rather
     /// than written where the connection code would then try to present it.
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0038
     #[test]
     fn a_certificate_without_a_pending_key_is_refused() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -732,7 +732,7 @@ mod tests {
 
     /// The renewal window: a certificate two thirds through its life is asked for again, and the
     /// old one stays in force until the new one is verified.
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0038
     #[test]
     fn a_certificate_in_its_renewal_window_is_requested_again() {
         let dir = tempfile::tempdir().expect("tempdir");

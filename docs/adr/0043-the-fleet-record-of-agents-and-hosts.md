@@ -1,7 +1,7 @@
 # ADR-0043: The fleet record of Agents and Hosts
 
-- **Status:** 🟡 proposed
-- **Date:** 2026-10-27
+- **Status:** 🟢 accepted
+- **Date:** 2026-11-02
 - **Deciders:** Markus Brigl
 - **Applies to:** crates/fleet-server/src/fleet.rs, crates/fleet-server/src/agent_store.rs and its adapters, crates/fleet-server/src/labels.rs, the host register in crates/fleet-server/src/revocation.rs and its adapters, the /api/v1/agents and /api/v1/hosts routes of crates/fleet-server/src/api.rs, stale_after_secs and [database] presence_interval_secs in server.toml, the Hosts and Agents tabs of the bundled UI in crates/fleet-server/static/index.html, and every document that tells an operator what a Host is, when it ends, or how labels and Selectors work
 - **Supersedes:** [ADR-0024](0024-the-fleet-record-of-agents-and-hosts.md)

@@ -1,4 +1,4 @@
-//! How often an admitted peer may be heard on the Agent plane (ADR-0012).
+//! How often an admitted peer may be heard on the Agent plane (ADR-0045).
 //!
 //! Every message on `/v1/opamp` and every package download a member sends takes one token from a
 //! bucket. A bucket holds `burst` tokens and gains `messages_per_sec` of them a second, and a new
@@ -18,7 +18,7 @@ use fleet_core::rate::{Table, TOKEN};
 use crate::fleet::Clock;
 use crate::revocation::CertId;
 
-/// The `[agent_rate_limit]` values (ADR-0012 clause 22).
+/// The `[agent_rate_limit]` values (ADR-0045 clause 22).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
     pub messages_per_sec: u32,
@@ -126,7 +126,7 @@ pub struct AgentRate {
 
 impl AgentRate {
     /// The limit as a Server keeps it: the subjects and aggregates as many as the certificate
-    /// register holds, the Agents behind Gateways as many as the fleet holds (ADR-0012 clause 28).
+    /// register holds, the Agents behind Gateways as many as the fleet holds (ADR-0045 clause 28).
     #[must_use]
     pub fn new(limits: Limits, max_agents: usize, clock: Arc<dyn Clock>) -> Self {
         AgentRate::with_capacities(limits, crate::revocation::MAX_ISSUED, max_agents, clock)
@@ -300,7 +300,7 @@ mod tests {
             .count()
     }
 
-    /// Verifies: ADR-0012
+    /// Verifies: ADR-0045
     #[test]
     fn a_bucket_starts_full_and_refills_at_the_configured_rate() {
         let (rate, clock) = rate(16, 16);
@@ -494,7 +494,7 @@ mod tests {
         assert_eq!(rate.admit(&host("edge"), false, None), Err(Bucket::Host));
     }
 
-    /// Verifies: ADR-0012
+    /// Verifies: ADR-0045
     #[test]
     fn a_full_table_evicts_the_bucket_used_least_recently() {
         let (rate, _) = rate(2, 16);
@@ -515,7 +515,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0012
+    /// Verifies: ADR-0045
     #[test]
     fn both_tables_are_bounded() {
         let (rate, clock) = rate(4, 8);

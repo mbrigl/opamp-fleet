@@ -81,7 +81,7 @@ tag, a mutable reference accepted with its risk in
 
 **Admission is a fleet-wide trust boundary; within it the host is the only bound between Agents**
 ([ADR-0022](docs/adr/0022-bootstrap-certificates-and-enrolment.md) clause 11,
-[ADR-0021](docs/adr/0021-admission-by-client-certificate-and-revocation.md) clause 12, and
+[ADR-0038](docs/adr/0038-admission-by-client-certificate-and-revocation.md) clause 12, and
 [ADR-0015](docs/adr/0015-client-modes-and-the-gateway.md) clause 18). A peer reaches the OpAMP
 endpoint by proving *fleet membership* with a client certificate
 in the TLS handshake, the one proof the Agent plane admits by. The certificate also names the
@@ -117,7 +117,7 @@ partition's next rollout, and the fleet view shows such an Agent waiting before 
 **What this means for operators:** treat one fleet (one Server, one shared admission) as a single
 trust domain, mark only real Gateways as such (`PUT /api/v1/hosts/{host}/gateway`), and do not
 place mutually distrusting Agents behind one Gateway or in one fleet; isolate them by separate
-Server instance or network segment. The alternatives that were weighed are in ADR-0021.
+Server instance or network segment. The alternatives that were weighed are in ADR-0038.
 
 ## Supported versions
 

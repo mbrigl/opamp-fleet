@@ -1,4 +1,4 @@
-//! Package records in PostgreSQL (ADR-0029 clause 6): the PostgreSQL adapter behind
+//! Package records in PostgreSQL (ADR-0044 clause 6): the PostgreSQL adapter behind
 //! [`PackageBackend`](crate::packages::PackageBackend) — one row per Package and one per entry,
 //! each entry naming its artifact by hash, and each call one transaction on the rows it names
 //! (ADR-0041
@@ -559,14 +559,14 @@ mod tests {
         assert_eq!(loaded(&*open()), [shown(&signed)]);
     }
 
-    /// Verifies: G-19, ADR-0029
+    /// Verifies: G-19, ADR-0044
     #[test]
     fn the_package_port_contract_holds_on_the_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
         contract(&|| Box::new(FsPackageBackend::open(dir.path()).expect("open")));
     }
 
-    /// Verifies: G-19, ADR-0029
+    /// Verifies: G-19, ADR-0044
     #[test]
     fn the_package_port_contract_holds_on_postgres() {
         let Some(test) = TestDatabase::named() else {
@@ -600,7 +600,7 @@ mod tests {
         assert_eq!(loaded(store), [shown(&before)]);
     }
 
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0044
     #[test]
     fn a_package_put_is_whole_or_nothing_on_the_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -614,7 +614,7 @@ mod tests {
 
     /// One transaction per call, and a row that does not decode fails the load naming the
     /// Package.
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0044
     #[test]
     fn a_package_put_is_whole_or_nothing_and_a_bad_row_is_named_on_postgres() {
         let Some(test) = TestDatabase::named() else {

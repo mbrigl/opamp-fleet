@@ -690,7 +690,7 @@ const RELOAD_RETRY_FIRST: Duration = Duration::from_millis(250);
 /// The longest wait before a failed read is tried again.
 const RELOAD_RETRY_MAX: Duration = Duration::from_secs(10);
 
-/// The two planes as the binary builds them (ADR-0012): what each serves, its TLS and how many
+/// The two planes as the binary builds them (ADR-0045): what each serves, its TLS and how many
 /// connections it holds at most.
 pub struct Planes {
     /// The OpAMP endpoint and the package downloads.

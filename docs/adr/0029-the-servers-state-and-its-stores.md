@@ -1,7 +1,7 @@
 # ADR-0029: The Server's state lives under one data directory or in PostgreSQL and S3, one store per domain
 
-- **Status:** 🟢 accepted
-- **Date:** 2026-10-23
+- **Status:** ⚪ superseded by [ADR-0044](0044-the-servers-state-and-its-stores.md)
+- **Date:** 2026-11-02
 - **Deciders:** Markus Brigl
 - **Applies to:** every storage port in `crates/fleet-server/src/` (`agent_store.rs`, `configs.rs`, `deployments.rs`, `packages.rs`, `blobs.rs`, `bootstrap.rs`, `enrolment.rs`, `revocation.rs`, `audit.rs`) and every adapter under `crates/fleet-server/src/fs/`, `crates/fleet-server/src/postgres/` and `crates/fleet-server/src/s3.rs`, the embedded schema and its migrations, the wiring in `crates/fleet-server/src/lib.rs` and `crates/fleet-server/src/main.rs`, `data_dir` and the `[blobs]` and `[database]` sections of `server.toml` and their parsing in `crates/fleet-server/src/config.rs`, `config/server.toml`, the `server migrate` and `server migrate-to-postgres` commands, the `object_store`, `tokio-postgres`, `deadpool-postgres` and `tokio-postgres-rustls` dependencies in `Cargo.toml` and `deny.toml`, the S3 and PostgreSQL adapters' tests and the CI jobs that run them, the rustfs and postgres services in `observability/compose.yaml` and their forward into the Dev Container, `docs/ARCHITECTURE.md`, and every document that names where the Server keeps its state
 

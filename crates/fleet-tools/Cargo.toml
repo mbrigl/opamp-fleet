@@ -15,7 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 clap.workspace = true
-# The ring provider every binary installs at startup (ADR-0008, ADR-0012).
+# The ring provider every binary installs at startup (ADR-0008, ADR-0045).
 opamp = { workspace = true, features = ["client"] }
 # ADR-0008: the Client's own `archive` — its 7z Unix-mode convention, used when packing, and its
 # unpackers, used by the tests to open what these tools produce. Checking an artifact against the
@@ -47,7 +47,7 @@ time.workspace = true
 x509-parser.workspace = true
 # The paths the fragments name, quoted as TOML strings.
 toml.workspace = true
-# Listing releases and downloading artifacts. TLS is rustls/ring, as everywhere (ADR-0012) — the
+# Listing releases and downloading artifacts. TLS is rustls/ring, as everywhere (ADR-0045) — the
 # provider is installed at startup through the Client's own helper, since `rustls-no-provider`
 # refuses to build a client without one.
 reqwest.workspace = true
@@ -58,7 +58,7 @@ serde_json.workspace = true
 # one line per type rather than in hand-written checks over a `serde_json::Value`.
 serde.workspace = true
 # ADR-0014: the passwords and keys these tools read and write are held in buffers wiped on drop.
-# No TLS or crypto backend comes with it (ADR-0012).
+# No TLS or crypto backend comes with it (ADR-0045).
 zeroize.workspace = true
 
 [dev-dependencies]

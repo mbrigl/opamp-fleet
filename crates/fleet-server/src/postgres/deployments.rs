@@ -1,4 +1,4 @@
-//! Deployments in PostgreSQL (ADR-0029 clause 6): the PostgreSQL adapter behind
+//! Deployments in PostgreSQL (ADR-0044 clause 6): the PostgreSQL adapter behind
 //! [`DeploymentBackend`](crate::deployments::DeploymentBackend) — one row per Deployment and one
 //! per member, each call one transaction on the rows it names
 //! (ADR-0041
@@ -572,14 +572,14 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0044
     #[test]
     fn the_deployment_port_contract_holds_on_the_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
         contract(&|| Box::new(FsDeploymentBackend::open(dir.path()).expect("open")));
     }
 
-    /// Verifies: ADR-0029, ADR-0041
+    /// Verifies: ADR-0044, ADR-0041
     #[test]
     fn the_deployment_port_contract_holds_on_postgres() {
         let Some(test) = TestDatabase::named() else {
@@ -614,7 +614,7 @@ mod tests {
         assert_eq!(store.load().expect("load"), [before]);
     }
 
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0044
     #[test]
     fn a_write_that_fails_leaves_the_deployment_as_it_was_on_the_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -628,7 +628,7 @@ mod tests {
 
     /// The columns the release before migration 5 read are written last, from the rows: refusing
     /// that write refuses the whole change.
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0044
     #[test]
     fn a_write_that_fails_leaves_the_deployment_as_it_was_on_postgres() {
         let Some(test) = TestDatabase::named() else {
@@ -786,8 +786,8 @@ mod tests {
         );
     }
 
-    /// A row that does not decode fails the load naming it (ADR-0029 clause 6).
-    /// Verifies: ADR-0029
+    /// A row that does not decode fails the load naming it (ADR-0044 clause 6).
+    /// Verifies: ADR-0044
     #[test]
     fn a_deployment_row_that_does_not_decode_fails_the_load_naming_it() {
         let Some(test) = TestDatabase::named() else {

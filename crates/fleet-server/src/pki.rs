@@ -65,7 +65,7 @@ pub fn read_ending(file: &Path) -> Result<Ending, String> {
 }
 
 /// The certificates a running Server depends on (ADR-0032 clause 21): its own on each plane
-/// (ADR-0012), the client CA as both `[tls]` and `[client_ca]` name it, and the bootstrap CA. Each
+/// (ADR-0045), the client CA as both `[tls]` and `[client_ca]` name it, and the bootstrap CA. Each
 /// file once.
 #[must_use]
 pub fn depended_on(config: &ServerConfig) -> Vec<PathBuf> {
@@ -287,8 +287,8 @@ mod tests {
     }
 
     /// The Operator plane's own certificate is one the Server depends on, and a file both
-    /// sections name is watched once (ADR-0012 clause 13).
-    /// Verifies: ADR-0012
+    /// sections name is watched once (ADR-0045 clause 13).
+    /// Verifies: ADR-0045
     #[test]
     fn the_operator_planes_certificate_is_watched_once() {
         let config: ServerConfig = toml::from_str(

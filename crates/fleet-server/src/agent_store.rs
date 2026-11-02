@@ -1,9 +1,9 @@
-//! The Agent-record storage port (ADR-0024).
+//! The Agent-record storage port (ADR-0043).
 //!
 //! The fleet is loaded whole at startup and held in memory; at runtime the store receives writes
 //! and deletions for single Agents — `load`, `get`, `put`, `set_labels`, `set_restart_pending`,
 //! `remove`, `rekey` — and one operation for a rollout, which writes the revisions it pins and the
-//! assignments that pin them together (ADR-0029 clause 2). A report, a label change, a restart
+//! assignments that pin them together (ADR-0044 clause 2). A report, a label change, a restart
 //! request and a rollout each write their own part of a record, so on a store other Servers share
 //! the write of one never undoes another's
 //! (ADR-0043 clause 2). The integrity questions a deletion
@@ -50,16 +50,16 @@ pub struct PersistedAgent {
     /// The transport the last report arrived on — informational, never a routing key (ADR-0015).
     pub transport: Transport,
     pub last_seen_ms: u64,
-    /// A queued restart is operator intent and survives like any other (ADR-0024).
+    /// A queued restart is operator intent and survives like any other (ADR-0043).
     pub restart_pending: bool,
     /// What the operator's last rollout released to this Agent (ADR-0026 clause 6): the
     /// Deployment, the Package pinned, and each Configuration's pinned revision. `None` — nothing
     /// has been rolled out.
     pub assignment: Option<crate::fleet::Assignment>,
-    /// The operator's labels on this Agent (ADR-0024 clause 21): part of its record, so they follow
+    /// The operator's labels on this Agent (ADR-0043 clause 21): part of its record, so they follow
     /// a re-key and leave with a forget.
     pub labels: BTreeMap<String, String>,
-    /// The Host the Agent last arrived over (ADR-0024 clause 16) — its own on a direct connection,
+    /// The Host the Agent last arrived over (ADR-0043 clause 16) — its own on a direct connection,
     /// the Gateway's behind one; `None` without `[client_ca]`. It grants nothing.
     pub host: Option<String>,
 }
@@ -67,7 +67,7 @@ pub struct PersistedAgent {
 impl PersistedAgent {
     /// A digest over the *durable* content — everything except `last_seen_ms` and `sequence_num`,
     /// which move on every report. This is what the caller's dirty check compares, so the common
-    /// heartbeat, which changes nothing else, reaches no adapter at all (ADR-0024).
+    /// heartbeat, which changes nothing else, reaches no adapter at all (ADR-0043).
     ///
     /// It is computed from the record itself, never from an adapter's format (ADR-0009): each
     /// field length-prefixed so neighbours cannot run together, the wire-typed ones in their
@@ -214,7 +214,7 @@ impl Pin<'_> {
     }
 }
 
-/// The storage port (ADR-0024, ADR-0029): the only thing the fleet logic knows about persistence. A
+/// The storage port (ADR-0043, ADR-0044): the only thing the fleet logic knows about persistence. A
 /// database or an external store is a new implementation of these operations plus one wiring
 /// line — the rest of the Server is, by construction, unaffected.
 pub trait AgentStore: Send + Sync {
@@ -303,7 +303,7 @@ pub trait AgentStore: Send + Sync {
     /// exists, and creates none: what the fleet writes of an Agent whose record it created or read.
     /// Answers whether there was a record. On a shared store none means another Server forgot the
     /// Agent, and writing it again would undo that and pass the bound of
-    /// [`create_within`](Self::create_within) (ADR-0024 clause 14). A store whose one Server is its
+    /// [`create_within`](Self::create_within) (ADR-0043 clause 14). A store whose one Server is its
     /// only writer writes the record whole.
     ///
     /// # Errors
@@ -337,7 +337,7 @@ pub trait AgentStore: Send + Sync {
 
     /// Creates the record of an Agent first heard of, unless the store holds `max_records` records
     /// already. A shared store counts them where they are stored, in the step that creates it, so
-    /// the bound holds for every Server on it, however many create at once (ADR-0021 clause 12).
+    /// the bound holds for every Server on it, however many create at once (ADR-0038 clause 12).
     /// A record stored already is answered as it is stored, written nothing, and passes no bound.
     /// A store whose one Server holds every record bounds them in memory, and creates it.
     ///
@@ -376,7 +376,7 @@ pub trait AgentStore: Send + Sync {
     fn set_restart_pending(&self, uid: &InstanceUid, pending: bool)
         -> Result<Option<bool>, String>;
 
-    /// Forgets one record (ADR-0024); removing what is already absent is not an error.
+    /// Forgets one record (ADR-0043); removing what is already absent is not an error.
     fn remove(&self, uid: &InstanceUid) -> Result<(), String>;
 
     /// Writes the presence of the Agents `holder` carries, one batch, in the order of their
@@ -479,7 +479,7 @@ pub trait AgentStore: Send + Sync {
         self.remove(old)
     }
 
-    /// A rollout (ADR-0029 clause 2): the revisions it pins, each added to its Configuration's
+    /// A rollout (ADR-0044 clause 2): the revisions it pins, each added to its Configuration's
     /// retained revisions by its hash and no other revision touched, and the records carrying the
     /// assignments that pin them, as one operation. A database adapter holds each pinned
     /// Configuration's row against a collection until it commits, so no other instance collects a

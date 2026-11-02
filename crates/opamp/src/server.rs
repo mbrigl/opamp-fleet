@@ -367,7 +367,7 @@ async fn serve_socket<H: Handler, S>(
 {
     let handler = &endpoint.handler;
     let limit = endpoint.limit;
-    // A listener that holds its connections to a floor (ADR-0012 clause 18) is judged once a window.
+    // A listener that holds its connections to a floor (ADR-0045 clause 18) is judged once a window.
     let mut check = messages.as_ref().map(|messages| {
         let mut check = tokio::time::interval_at(
             tokio::time::Instant::now() + messages.window(),

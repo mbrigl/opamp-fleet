@@ -20,7 +20,7 @@ pub struct Floor {
     pub signature: Vec<u8>,
 }
 
-/// The floors' store (ADR-0029): the filesystem adapter keeps them in
+/// The floors' store (ADR-0044): the filesystem adapter keeps them in
 /// `<data_dir>/package-floors.json` ([`FsFloorStore`](crate::fs::FsFloorStore)), the PostgreSQL
 /// adapter in `package_floors`. Each write is persisted before the act that made it is answered.
 pub trait FloorStore: Send + Sync {

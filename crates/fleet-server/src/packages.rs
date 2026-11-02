@@ -225,7 +225,7 @@ impl fmt::Display for PackageId {
 /// there is no Selector here and no kind flag: an Agent's Deployment holds one Package for its
 /// type, and that is the whole of the decision.
 ///
-/// Artifacts stay in the blob store, named by their hash (ADR-0029), and are streamed to whoever
+/// Artifacts stay in the blob store, named by their hash (ADR-0044), and are streamed to whoever
 /// asks — a program weighs hundreds of megabytes, and a fleet server holding every one of them in
 /// memory, plus a copy per download, is the shape this deliberately avoids.
 #[derive(Clone)]
@@ -398,9 +398,9 @@ impl PackageSummary {
     }
 }
 
-/// The package store's port (ADR-0009, ADR-0029): where Packages persist — each one's identity
+/// The package store's port (ADR-0009, ADR-0044): where Packages persist — each one's identity
 /// and entries, every entry naming its artifact by the hash of its bytes. The bytes are the
-/// [`BlobStore`]'s. It speaks in parts (ADR-0029 clause 2): a Package's entries are written and
+/// [`BlobStore`]'s. It speaks in parts (ADR-0044 clause 2): a Package's entries are written and
 /// removed by platform, and no call writes an entry it does not name. The filesystem adapter
 /// ([`FsPackageBackend`](crate::fs::FsPackageBackend)) is what the composition root wires.
 pub trait PackageBackend: Send + Sync {
@@ -504,7 +504,7 @@ struct Life {
     deleting: HashSet<String>,
 }
 
-/// The package store (ADR-0027, ADR-0029): every Package, held in memory for the control loop to
+/// The package store (ADR-0027, ADR-0044): every Package, held in memory for the control loop to
 /// read, its metadata persisted through a [`PackageBackend`] and its artifacts through a
 /// [`BlobStore`].
 pub struct PackageStore {
@@ -526,7 +526,7 @@ pub struct PackageStore {
 
 impl PackageStore {
     /// Opens the store on `backend` and `blobs`, loading every persisted Package. Every blob is
-    /// read once (and the filesystem adapter hashes it again on the way, ADR-0029 clause 13); an
+    /// read once (and the filesystem adapter hashes it again on the way, ADR-0044 clause 13); an
     /// entry naming a blob that is not stored, or of another size, fails the open, and a blob no
     /// entry names is deleted, as are the staging objects of every lease that is not live. The
     /// blobs are listed, the Packages read and the sweep made under the blob store's lock, held
@@ -584,7 +584,7 @@ impl PackageStore {
             life: Mutex::new(Life::default()),
             key: None,
         };
-        // A blob no entry names is deleted at startup (ADR-0029 clause 13): an upload whose entry
+        // A blob no entry names is deleted at startup (ADR-0044 clause 13): an upload whose entry
         // was never written, or an entry whose deletion stopped short of its blob.
         for sha256 in stored.keys() {
             if !referenced(&sets, sha256) {
@@ -662,7 +662,7 @@ impl PackageStore {
         self.sets.read().expect("sets lock").is_empty()
     }
 
-    /// The total bytes of the stored blobs (ADR-0029 clause 13): bytes two entries share count
+    /// The total bytes of the stored blobs (ADR-0044 clause 13): bytes two entries share count
     /// once. An upload still in flight is deliberately not counted — it is not yet an artifact,
     /// and the per-upload limit already bounds it.
     pub fn total_bytes(&self) -> u64 {
@@ -901,7 +901,7 @@ impl PackageStore {
         // Under the lock of the writes, as every write of a Package is: the store must hold what
         // memory holds, in the order it changed. Not under `sets`: the backend asks the blob
         // store, which may take as long as the store answers. A PostgreSQL call is bounded
-        // (ADR-0029 clause 24).
+        // (ADR-0044 clause 24).
         let _writes = self.writes.lock().expect("writes lock");
         if !self.sets.read().expect("sets lock").contains_key(id) {
             return Err(format!("no package set {id}"));
@@ -924,7 +924,7 @@ impl PackageStore {
     /// refuses this before calling here when the Package is assigned to an Agent (ADR-0026). The
     /// last entry taken away leaves an **empty Package**, kept: a Package being reassembled is a
     /// normal state, and deleting the Package is its own act. Its blob goes with the last entry
-    /// that names it (ADR-0029 clause 13).
+    /// that names it (ADR-0044 clause 13).
     pub fn delete_entry(&self, id: &PackageId, platform: &Platform) -> Result<bool, String> {
         let writes = self.writes.lock().expect("writes lock");
         let mut sets = self.sets.write().expect("sets lock");
@@ -1013,7 +1013,7 @@ impl PackageStore {
     }
 
     /// Chooses the blob `sha256` for deletion when no entry of `sets` names it and no upload
-    /// holds it (ADR-0029 clause 13); [`sweep`](Self::sweep) deletes it once the lock on `sets`
+    /// holds it (ADR-0044 clause 13); [`sweep`](Self::sweep) deletes it once the lock on `sets`
     /// is released. Decided under that lock, so no entry naming it can be recorded meanwhile.
     fn doom(&self, sets: &BTreeMap<PackageId, Package>, sha256: &str) -> Option<String> {
         if referenced(sets, sha256) {
@@ -1026,7 +1026,7 @@ impl PackageStore {
         Some(sha256.to_string())
     }
 
-    /// The sweep after an act (ADR-0029 clause 13): deletes the blobs [`doom`](Self::doom) chose
+    /// The sweep after an act (ADR-0044 clause 13): deletes the blobs [`doom`](Self::doom) chose
     /// that no stored entry names either, and the staging objects of every lease that is not
     /// live, under the blob store's lock held alone and with no lock on the Packages held
     /// (ADR-0044 clauses 14 and 16). What the backend stores is
@@ -2481,11 +2481,11 @@ mod tests {
         assert!(!store.delete_set(&set).expect("gone already"));
     }
 
-    /// The blobs under one entry's bytes (ADR-0029 clause 13): two entries with identical bytes
+    /// The blobs under one entry's bytes (ADR-0044 clause 13): two entries with identical bytes
     /// store one blob, counted once against the store's size; it stays while an entry names it and
     /// goes with the last one — replaced or deleted — and a blob no entry names is deleted when
     /// the store opens.
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0044
     #[test]
     fn identical_bytes_are_one_blob_that_goes_with_its_last_entry() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2542,8 +2542,8 @@ mod tests {
     }
 
     /// A corrupt artifact fails the reopen loudly, naming its blob — a corrupt distribution
-    /// artifact must never ship (ADR-0027 clause 8, ADR-0029 clause 13).
-    /// Verifies: ADR-0027, ADR-0029
+    /// artifact must never ship (ADR-0027 clause 8, ADR-0044 clause 13).
+    /// Verifies: ADR-0027, ADR-0044
     #[test]
     fn a_corrupt_artifact_fails_reopen() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2573,7 +2573,7 @@ mod tests {
     }
 
     /// The store's directories, each Package's metadata and each blob are owner-only (ADR-0027,
-    /// ADR-0029 clause 1).
+    /// ADR-0044 clause 1).
     /// Verifies: ADR-0027
     #[cfg(unix)]
     #[test]
@@ -2603,14 +2603,14 @@ mod tests {
     }
 
     /// There is no legacy reader: a store holding what an older layout wrote is **named at
-    /// startup**, never skipped (ADR-0029 clause 6). Skipping is the dangerous
+    /// startup**, never skipped (ADR-0044 clause 6). Skipping is the dangerous
     /// half — a store that merely looks empty offers nothing and says nothing about why, which an
     /// operator reads as "nothing uploaded yet".
     ///
     /// The shapes an older Server left behind are covered: a loose file, a
     /// `<name>@<version>@<type>/set.json` directory, and the `<type>@<version>/package.json`
-    /// directory of the layout before ADR-0029.
-    /// Verifies: ADR-0027, ADR-0029
+    /// directory of the layout before ADR-0044.
+    /// Verifies: ADR-0027, ADR-0044
     #[test]
     fn a_store_in_an_older_layout_refuses_to_open_and_names_what_is_in_the_way() {
         let older = |relative: &str, contents: &str| {
@@ -2974,8 +2974,8 @@ mod tests {
 
     /// No request to the blob store runs under the lock every offer and listing waits for: while
     /// an upload asks whether its blob is stored, and while a deletion deletes one, the Packages
-    /// are still read (ADR-0029 clause 13).
-    /// Verifies: ADR-0029
+    /// are still read (ADR-0044 clause 13).
+    /// Verifies: ADR-0044
     #[test]
     fn a_slow_blob_store_holds_no_reader_of_the_packages() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3020,8 +3020,8 @@ mod tests {
 
     /// An upload of bytes whose blob is being deleted — the last entry naming it went just
     /// before — is refused rather than recorded on a blob the deletion then takes; no entry ever
-    /// names a blob that is not stored (ADR-0029 clause 13).
-    /// Verifies: ADR-0029
+    /// names a blob that is not stored (ADR-0044 clause 13).
+    /// Verifies: ADR-0044
     #[test]
     fn an_upload_never_records_a_blob_a_deletion_takes() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3059,8 +3059,8 @@ mod tests {
 
     /// A store that cannot say whether it holds an uploaded blob fails the upload with its own
     /// error, and the blob stays: neither "removed while it was uploaded" nor a deletion on a
-    /// guess (ADR-0029 clause 13).
-    /// Verifies: ADR-0029
+    /// guess (ADR-0044 clause 13).
+    /// Verifies: ADR-0044
     #[test]
     fn a_store_that_cannot_be_asked_fails_the_upload_and_keeps_the_blob() {
         let dir = tempfile::tempdir().expect("tempdir");

@@ -250,7 +250,7 @@ fn words_after<'w>(text: &'w str, prefix: &str) -> Vec<&'w str> {
         .collect()
 }
 
-/// What every release publishes, as the `publish` job's globs name it (ADR-0034 clause 5).
+/// What every release publishes, as the `publish` job's globs name it (ADR-0040 clause 5).
 const PUBLISHED: [&str; 6] = [
     "*.tar.gz",
     "*.deb",
@@ -260,7 +260,7 @@ const PUBLISHED: [&str; 6] = [
     "SHA256SUMS",
 ];
 
-// Verifies: ADR-0034
+// Verifies: ADR-0040
 #[test]
 fn only_the_publish_job_may_attest() {
     let workflow = workflow();
@@ -273,7 +273,7 @@ fn only_the_publish_job_may_attest() {
 
     let publish = job(&workflow, "publish");
     let permissions = permissions(publish);
-    // `packages: write` pushes the image's attestation and tags the image (ADR-0034 clause 10).
+    // `packages: write` pushes the image's attestation and tags the image (ADR-0040 clause 10).
     for grant in [
         "id-token: write",
         "attestations: write",
@@ -345,7 +345,7 @@ fn only_the_publish_job_may_attest() {
     );
 }
 
-// Verifies: ADR-0034
+// Verifies: ADR-0040
 #[test]
 fn the_publish_job_attests_and_verifies_every_asset_before_it_publishes() {
     let workflow = workflow();
@@ -410,7 +410,7 @@ fn the_publish_job_attests_and_verifies_every_asset_before_it_publishes() {
     assert_eq!(published, PUBLISHED, "{release}");
 }
 
-// Verifies: ADR-0034
+// Verifies: ADR-0040
 #[test]
 fn the_sbom_job_writes_one_sbom_per_program_and_target_with_a_pinned_tool() {
     let workflow = workflow();
@@ -498,7 +498,7 @@ fn the_sbom_job_writes_one_sbom_per_program_and_target_with_a_pinned_tool() {
     }
 }
 
-// Verifies: ADR-0034
+// Verifies: ADR-0040
 #[test]
 fn the_notes_say_how_to_verify() {
     let workflow = workflow();
@@ -678,7 +678,7 @@ fn the_containerfile_copies_the_release_binary_onto_a_pinned_distroless_base_and
     );
 }
 
-// Verifies: ADR-0034
+// Verifies: ADR-0040
 #[test]
 fn both_linux_rows_build_the_server_and_assert_its_version() {
     let workflow = workflow();
@@ -733,7 +733,7 @@ fn both_linux_rows_build_the_server_and_assert_its_version() {
     assert!(!upload.contains(".sha256"), "{upload}");
 }
 
-// Verifies: ADR-0034
+// Verifies: ADR-0040
 #[test]
 fn the_sbom_job_describes_the_server_for_both_linux_targets() {
     let workflow = workflow();
@@ -754,7 +754,7 @@ fn the_sbom_job_describes_the_server_for_both_linux_targets() {
     assert_eq!(linux, 2, "{write}");
 }
 
-// Verifies: ADR-0034
+// Verifies: ADR-0040
 #[test]
 fn the_image_job_builds_checks_and_pushes_by_digest_alone() {
     let workflow = workflow();
@@ -890,7 +890,7 @@ fn the_image_job_builds_checks_and_pushes_by_digest_alone() {
     }
 }
 
-// Verifies: ADR-0034
+// Verifies: ADR-0040
 #[test]
 fn the_publish_job_attests_and_verifies_the_image_before_it_tags_it() {
     let workflow = workflow();
@@ -951,7 +951,7 @@ fn the_publish_job_attests_and_verifies_the_image_before_it_tags_it() {
     assert!(order.is_sorted(), "{order:?}");
 }
 
-// Verifies: ADR-0034
+// Verifies: ADR-0040
 #[test]
 fn the_notes_name_the_image_by_its_digest_and_say_how_to_verify_it() {
     let workflow = workflow();

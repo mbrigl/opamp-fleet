@@ -119,7 +119,7 @@ fn report(uid: &[u8], sequence_num: u64) -> AgentToServer {
     }
 }
 
-/// The workspace builds reqwest without a TLS provider of its own (ADR-0012); install the one every
+/// The workspace builds reqwest without a TLS provider of its own (ADR-0045); install the one every
 /// binary installs, once, even though these exchanges are plaintext.
 fn client() -> reqwest::Client {
     let _ = rustls::crypto::ring::default_provider().install_default();

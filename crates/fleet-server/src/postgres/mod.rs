@@ -1,4 +1,4 @@
-//! The Server's records in one PostgreSQL database (ADR-0029): the connection every PostgreSQL
+//! The Server's records in one PostgreSQL database (ADR-0044): the connection every PostgreSQL
 //! adapter shares, the exclusive lock of an instance that must be alone on it, the leases every
 //! instance holds, the notifications they share, and the schema the Server applies itself
 //! (ADR-0041).
@@ -52,7 +52,7 @@ const WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How long one call — every round trip of its transaction, the wait for a connection included —
 /// may take before it fails. The Server's callers hold their own locks while a record is written
-/// (ADR-0024 clause 4), so a database that stops answering holds them this long at most. The
+/// (ADR-0043 clause 4), so a database that stops answering holds them this long at most. The
 /// database's own timeouts below end a statement it is still working on; this one ends a call
 /// whose database, or the network to it, does not answer at all.
 pub(crate) const CALL_TIMEOUT: Duration = Duration::from_secs(15);
@@ -78,7 +78,7 @@ const KEEPALIVES_INTERVAL: Duration = Duration::from_secs(5);
 const KEEPALIVES_RETRIES: u32 = 3;
 
 /// The connections the pool holds at most. The Server writes one record at a time per act, and
-/// the in-memory state answers every read (ADR-0029 clause 3), so a few suffice.
+/// the in-memory state answers every read (ADR-0044 clause 3), so a few suffice.
 const POOL_SIZE: usize = 8;
 
 /// The name the Server's connections carry in `pg_stat_activity`.
@@ -154,7 +154,7 @@ enum Tls {
 
 impl Database {
     /// Connects to the database `config` names, takes the exclusive lock when `exclusive` says
-    /// this instance must be alone, and brings its schema up to date (ADR-0029 clauses 22 to 24).
+    /// this instance must be alone, and brings its schema up to date (ADR-0044 clauses 22 to 24).
     ///
     /// # Errors
     /// Returns an error naming the key when the password or CA file cannot be read, naming the host
@@ -346,7 +346,7 @@ impl Database {
         self.lost.load(Ordering::SeqCst)
     }
 
-    /// Applies `migrations` in one transaction (ADR-0029 clause 22).
+    /// Applies `migrations` in one transaction (ADR-0044 clause 22).
     ///
     /// # Errors
     /// Returns an error naming the database when the schema needs a newer Server, when this
@@ -698,7 +698,7 @@ const MIGRATION_LOCK: &str =
 /// Why every call is refused once the lock's connection has ended.
 fn lost_lock(name: &str) -> String {
     format!(
-        "this Server lost its lock on the {name} — another instance may hold it now (ADR-0029 \
+        "this Server lost its lock on the {name} — another instance may hold it now (ADR-0044 \
          clause 23), so this one writes nothing more; restart it once the database answers"
     )
 }
@@ -725,7 +725,7 @@ async fn bounded<T>(
 }
 
 /// A pooled connection, or why there is none: a database lost while the Server runs fails the
-/// calls that need it (ADR-0029 clause 24).
+/// calls that need it (ADR-0044 clause 24).
 ///
 /// # Errors
 /// Returns an error when no connection can be had within the pool's timeouts.
@@ -763,7 +763,7 @@ fn new_origin() -> Result<String, String> {
     Ok(hex::encode(bytes))
 }
 
-/// The connection's settings, every one from `[database.postgres]` (ADR-0029 clause 24) — nothing
+/// The connection's settings, every one from `[database.postgres]` (ADR-0044 clause 24) — nothing
 /// from the environment, and nothing from a connection string. `schema`, when named, is the only
 /// schema the connection sees.
 fn pg_config(
@@ -795,7 +795,7 @@ fn pg_config(
     pg
 }
 
-/// The TLS client of ADR-0029 clause 24: TLS 1.3 on *ring* alone, the database's certificate
+/// The TLS client of ADR-0044 clause 24: TLS 1.3 on *ring* alone, the database's certificate
 /// verified against the public roots, or against the roots of `ca_file` alone when it names one,
 /// and its host name checked by rustls. `None` — plaintext — only where `tls = false`, which the
 /// configuration allows on a loopback IP literal alone.
@@ -909,7 +909,7 @@ pub(crate) fn unsigned(value: i64) -> u64 {
 
 #[cfg(test)]
 pub(crate) mod testing {
-    //! The database the PostgreSQL tests run against (ADR-0029 clause 25): the one the
+    //! The database the PostgreSQL tests run against (ADR-0044 clause 25): the one the
     //! `FLEET_TEST_POSTGRES_*` variables name, never one the tests start. Each test works in a
     //! schema of its own and drops it afterwards.
 
@@ -1251,9 +1251,9 @@ mod tests {
 
     /// `PGHOST`, `PGSSLMODE` and their kin, set in the Server's environment, change neither the
     /// database nor whether plaintext is allowed: the connection is built from
-    /// `[database.postgres]` alone (ADR-0029 clause 24). The environment is the real one of a child
+    /// `[database.postgres]` alone (ADR-0044 clause 24). The environment is the real one of a child
     /// process.
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0044
     #[test]
     fn pg_variables_change_neither_the_database_nor_plaintext() {
         let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
@@ -1307,7 +1307,7 @@ mod tests {
     }
 
     /// Without TLS only where `tls = false` says so; a CA file is read as roots and nothing else.
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0044
     #[test]
     fn the_connection_requires_tls_unless_the_configuration_waives_it() {
         let pg = pg_config(&config("127.0.0.1", false), "secret", Some("s"));
@@ -1331,7 +1331,7 @@ mod tests {
     /// The password comes from its file, which its owner and group alone may read; one that
     /// others may read or its group may write fails startup naming the key, before any
     /// connection is made.
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0044
     #[cfg(unix)]
     #[test]
     fn a_password_file_others_may_read_fails_startup_naming_it() {
@@ -1366,7 +1366,7 @@ mod tests {
     }
 
     /// A database that cannot be reached fails startup naming the host and the database.
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0044
     #[test]
     fn an_unreachable_database_fails_startup_naming_it() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1410,8 +1410,8 @@ mod tests {
     }
 
     /// A database that takes the connection and never answers fails startup within the bound of
-    /// one call, naming it, rather than holding the Server forever (ADR-0029 clause 24).
-    /// Verifies: ADR-0029
+    /// one call, naming it, rather than holding the Server forever (ADR-0044 clause 24).
+    /// Verifies: ADR-0044
     #[test]
     fn a_database_that_never_answers_fails_startup_within_the_bound() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1475,8 +1475,8 @@ mod tests {
 
     /// A database that stops answering while the Server runs fails the one call that needs it
     /// within that call's bound, and the call after it as fast; the Server is held no longer
-    /// (ADR-0029 clause 24). The database is reached through a proxy that is frozen mid-run.
-    /// Verifies: ADR-0029
+    /// (ADR-0044 clause 24). The database is reached through a proxy that is frozen mid-run.
+    /// Verifies: ADR-0044
     #[test]
     fn a_database_that_stops_answering_fails_the_call_within_the_bound() {
         let Some(test) = TestDatabase::named() else {
@@ -1590,9 +1590,9 @@ mod tests {
     /// The connection is what libpq calls `verify-full`: a database whose certificate a root of
     /// `ca_file` signed but that does not name `host`, or that names it but no root of
     /// `ca_file` signed, is refused before a password is sent; one that a root signed for `host`
-    /// is accepted (ADR-0029 clause 24). Run against a listener that speaks the start of the
+    /// is accepted (ADR-0044 clause 24). Run against a listener that speaks the start of the
     /// protocol, so it needs no database.
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0044
     #[test]
     fn the_database_certificate_is_verified_against_its_root_and_its_host_name() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1667,10 +1667,10 @@ mod tests {
     }
 
     /// A Server whose lock's connection ends while it runs notices: it logs why and refuses every
-    /// call from then on, rather than writing on while a second Server may start (ADR-0029
+    /// call from then on, rather than writing on while a second Server may start (ADR-0044
     /// clause 23). The session is ended from the database's side, as a restart or an operator
     /// would end it.
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0044
     #[test]
     fn a_server_that_loses_its_lock_logs_it_and_writes_nothing_more() {
         let Some(test) = TestDatabase::named() else {
@@ -1716,7 +1716,7 @@ mod tests {
     /// A second instance that must be alone, against a database one already holds alone, fails
     /// startup naming the database and the key that makes it alone; once the first is gone, the
     /// lock is free again.
-    /// Verifies: ADR-0029, ADR-0041
+    /// Verifies: ADR-0044, ADR-0041
     #[test]
     fn a_second_instance_that_must_be_alone_fails_startup_naming_it() {
         let Some(test) = TestDatabase::named() else {
@@ -1756,7 +1756,7 @@ mod tests {
     /// The schema is applied at startup and recorded; a database one migration behind is migrated
     /// at startup; a database whose schema names an oldest Server above this one fails startup
     /// naming both versions and is left unchanged.
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0044
     #[test]
     fn the_server_applies_its_schema_and_refuses_a_newer_one() {
         let Some(test) = TestDatabase::named() else {
@@ -1928,7 +1928,7 @@ mod tests {
     }
 
     /// The whole schema applies on an empty database, and every table it names is there.
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0044
     #[test]
     fn the_embedded_schema_applies_on_an_empty_database() {
         let Some(test) = TestDatabase::named() else {

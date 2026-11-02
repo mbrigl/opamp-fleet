@@ -1,4 +1,4 @@
-//! The enrolment window and its queue in PostgreSQL (ADR-0029 clause 8): the PostgreSQL adapter
+//! The enrolment window and its queue in PostgreSQL (ADR-0044 clause 8): the PostgreSQL adapter
 //! behind [`EnrolmentStore`](crate::enrolment::EnrolmentStore) — the window's end in one row, each
 //! request in a row of its own. Each act is one transaction on the rows it names, written before
 //! it is answered; taking a request in holds the queue against every other taker while it counts,
@@ -586,7 +586,7 @@ mod tests {
         assert_eq!(open().load().expect("load"), Some(Persisted::default()));
     }
 
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0044
     #[test]
     fn the_enrolment_acts_hold_on_the_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -738,14 +738,14 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0044
     #[test]
     fn the_enrolment_approvals_hold_on_the_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
         approvals(&|| Box::new(FsEnrolmentStore::open(dir.path())));
     }
 
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0044
     #[test]
     fn the_enrolment_approvals_hold_on_postgres() {
         let Some(test) = TestDatabase::named() else {
@@ -818,8 +818,8 @@ mod tests {
 
     /// A request whose bootstrap certificate another instance revoked is withdrawn when it is
     /// approved, and nothing is signed, whatever the approving instance holds in memory
-    /// (ADR-0021 clause 28).
-    /// Verifies: ADR-0021
+    /// (ADR-0038 clause 28).
+    /// Verifies: ADR-0038
     #[test]
     fn an_approval_whose_bootstrap_certificate_the_list_names_signs_nothing() {
         let Some(test) = TestDatabase::named() else {
@@ -981,7 +981,7 @@ mod tests {
 
     /// Closing or ending the window is one transaction: a deletion of its requests that fails
     /// leaves the window open and its requests as they were.
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0044
     #[test]
     fn closing_or_ending_the_window_leaves_nothing_of_itself_when_it_fails() {
         let Some(test) = TestDatabase::named() else {
@@ -1018,7 +1018,7 @@ mod tests {
         assert_eq!(store.load().expect("load"), before);
     }
 
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0044
     #[test]
     fn an_enrolment_take_that_fails_leaves_nothing_of_itself_on_the_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1030,7 +1030,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0044
     #[test]
     fn an_enrolment_take_that_fails_leaves_nothing_of_itself_on_postgres() {
         let Some(test) = TestDatabase::named() else {
@@ -1043,14 +1043,14 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0044
     #[test]
     fn the_enrolment_port_contract_holds_on_the_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
         contract(&|| Box::new(FsEnrolmentStore::open(dir.path())));
     }
 
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0044
     #[test]
     fn the_enrolment_port_contract_holds_on_postgres() {
         let Some(test) = TestDatabase::named() else {
@@ -1073,7 +1073,7 @@ mod tests {
         assert_eq!(store.load().expect("load"), Some(before));
     }
 
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0044
     #[test]
     fn an_enrolment_save_that_fails_part_way_leaves_nothing_of_itself_on_the_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1085,7 +1085,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0044
     #[test]
     fn an_enrolment_save_that_fails_part_way_leaves_nothing_of_itself_on_postgres() {
         let Some(test) = TestDatabase::named() else {

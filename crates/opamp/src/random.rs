@@ -1,5 +1,5 @@
 //! The randomness both ends draw their spread from: the reconnect jitter of the Client, and the
-//! `Retry-After` and closing instants of a Server that sheds load (ADR-0012).
+//! `Retry-After` and closing instants of a Server that sheds load (ADR-0045).
 
 /// A uniform draw over `[0, bound)`, from the system's randomness — `ring` is already linked for
 /// package signature verification, so this needs no new dependency for a handful of jitter bits.

@@ -225,7 +225,7 @@ pub(crate) struct Written {
 }
 
 impl Written {
-    /// Emits the `tracing` copy of the line (ADR-0023 clause 6).
+    /// Emits the `tracing` copy of the line (ADR-0039 clause 6).
     pub(crate) fn emit(&self) {
         crate::audit_log::emit(self.seq, self.event, "recorded", &self.line);
     }

@@ -1,5 +1,5 @@
-//! The register, the revocation list and the Hosts on the filesystem (ADR-0021, ADR-0024,
-//! ADR-0029): the default adapter behind [`LedgerStore`](crate::revocation::LedgerStore).
+//! The register, the revocation list and the Hosts on the filesystem (ADR-0038, ADR-0043,
+//! ADR-0044): the default adapter behind [`LedgerStore`](crate::revocation::LedgerStore).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -88,7 +88,7 @@ impl FsLedgerStore {
     }
 
     /// The list as persisted, without the credential entries a list may still hold: the Agent
-    /// plane admits by client certificate alone, so there is no credential to revoke (ADR-0021
+    /// plane admits by client certificate alone, so there is no credential to revoke (ADR-0038
     /// clause 29). They are dropped with one log line, and the list is written back without them.
     fn certificate_revocations(&self, bytes: &[u8]) -> Result<Vec<Revocation>, String> {
         let parse =
@@ -212,7 +212,7 @@ impl LedgerStore for FsLedgerStore {
 
     /// Answers from the Hosts as last written, which the next write of the Hosts carries the
     /// binding into: another Host speaking for `instance_uid` holds it, unless it is marked as a
-    /// Gateway. A Gateway's Host is bound none (ADR-0024 clause 16), but its file may list
+    /// Gateway. A Gateway's Host is bound none (ADR-0043 clause 16), but its file may list
     /// `instance_uid`s a release before this one kept there, and no migration rewrites the files.
     fn bind(&self, instance_uid: &str, host: &str) -> Result<Bound, String> {
         let written = self.written_hosts.lock().expect("hosts lock");
@@ -285,7 +285,7 @@ mod tests {
     use super::*;
     use crate::revocation::{Facts, Revoked};
 
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0038
     #[test]
     fn the_ledger_survives_a_reopen() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -332,7 +332,7 @@ mod tests {
     /// Each Host is a file of its own, written when it changes and removed when it goes; a name
     /// no Host maps to is escaped, and a file whose name disagrees with what it holds — or one
     /// the layout does not name — fails the load naming it.
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0044
     #[test]
     fn each_host_is_a_file_of_its_own_and_its_name_must_match() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -385,7 +385,7 @@ mod tests {
         }
     }
 
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0038
     #[test]
     fn a_persisted_credential_entry_is_dropped_on_load() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -442,7 +442,7 @@ mod tests {
 
     /// A Host file written before a Host had a valid until loads without one, and one written now
     /// keeps it across a reopen.
-    /// Verifies: ADR-0024
+    /// Verifies: ADR-0043
     #[test]
     fn a_host_file_without_a_valid_until_still_loads() {
         let dir = tempfile::tempdir().expect("tempdir");

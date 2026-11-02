@@ -1,9 +1,9 @@
 //! Entry point: load the configuration from `server.toml` and the environment (ADR-0030), bind the
-//! two listeners (plain or TLS) — the Agent plane and the Operator plane (ADR-0012) — and serve
+//! two listeners (plain or TLS) — the Agent plane and the Operator plane (ADR-0045) — and serve
 //! both until interrupted.
 //!
 //! Both planes are served the same way whether or not TLS is configured, so that what bounds a
-//! connection before it becomes a request holds on all four surfaces (ADR-0012). Only the acceptor
+//! connection before it becomes a request holds on all four surfaces (ADR-0045). Only the acceptor
 //! differs.
 
 use std::net::SocketAddr;
@@ -28,7 +28,7 @@ fn usage() -> ! {
     std::process::exit(2);
 }
 
-/// `server audit-verify <dir>` (ADR-0023 clause 3): walks the audit record's files in order and
+/// `server audit-verify <dir>` (ADR-0039 clause 3): walks the audit record's files in order and
 /// names the first entry whose `prev` does not match the entry before it. `server audit-verify
 /// --config <server.toml> [--archive <dir>]` walks every chain of the record in the database
 /// instead, lists the open ones, and checks the archive a move from files left
@@ -161,7 +161,7 @@ fn pki(mut args: impl Iterator<Item = String>) -> ! {
     std::process::exit(pki::exit_code(&endings, now));
 }
 
-/// `server migrate --config-dir <old> --packages-dir <old> --data-dir <new>` (ADR-0029 clause 26):
+/// `server migrate --config-dir <old> --packages-dir <old> --data-dir <new>` (ADR-0044 clause 26):
 /// moves the state an older Server kept under `config_dir` and `packages_dir` into a new, empty
 /// `data_dir`, copying, so the old directories stay as the backup. It is run while the Server is
 /// stopped — a Server still writing the old directories would be copied half-way — and that is the
@@ -346,7 +346,7 @@ fn blobs_to_s3(mut args: impl Iterator<Item = String>) -> ! {
 type Hasher = fn(&str) -> Result<String, String>;
 
 /// The hash `server hash-credential` makes for a scheme: Basic, for an operator's password in
-/// `[rest.auth]`, and nothing else — the Agent plane has no credential (ADR-0021 clause 21).
+/// `[rest.auth]`, and nothing else — the Agent plane has no credential (ADR-0038 clause 21).
 fn hasher(scheme: Option<&str>) -> Option<Hasher> {
     match scheme {
         Some("--basic") => Some(fleet_server::credentials::hash_basic),
@@ -354,7 +354,7 @@ fn hasher(scheme: Option<&str>) -> Option<Hasher> {
     }
 }
 
-/// `server hash-credential --basic` (ADR-0021 clause 21): reads the password from standard input —
+/// `server hash-credential --basic` (ADR-0038 clause 21): reads the password from standard input —
 /// without echo on a terminal — and prints the entry `server.toml` keeps instead of it.
 fn hash_credential(scheme: Option<String>) -> ! {
     let Some(hash) = hasher(scheme.as_deref()) else {
@@ -506,13 +506,13 @@ async fn main() {
         ))
         .init();
 
-    // One TLS provider for the whole process (ADR-0012): ring, never a system library.
+    // One TLS provider for the whole process (ADR-0045): ring, never a system library.
     opamp::tls::install_ring_provider();
 
     let Layered { config, origin, .. } = load_config(parse_args());
 
     // The TLS material first: a Server that cannot serve it does not start, and admission needs
-    // to know which CA issued what (ADR-0012, ADR-0021).
+    // to know which CA issued what (ADR-0045, ADR-0038).
     let planes = match config
         .tls
         .as_ref()
@@ -548,8 +548,8 @@ async fn main() {
     } else {
         None
     };
-    // Where the records live (ADR-0029): the data directory, its layout created owner-only and
-    // checked before any store opens (ADR-0029), and with PostgreSQL the database, its lock taken
+    // Where the records live (ADR-0044): the data directory, its layout created owner-only and
+    // checked before any store opens (ADR-0044), and with PostgreSQL the database, its lock taken
     // and its schema applied.
     let records = match fleet_server::Records::open(&config) {
         Ok(records) => records,
@@ -562,8 +562,8 @@ async fn main() {
         info!(database = %database.name(), "keeping the records in PostgreSQL");
     }
     let clock: Arc<dyn fleet_server::fleet::Clock> = Arc::new(fleet_server::clock::SystemClock);
-    // ADR-0021: closed until an operator opens it; the window and its queue survive a restart
-    // (ADR-0029 clause 8).
+    // ADR-0038: closed until an operator opens it; the window and its queue survive a restart
+    // (ADR-0044 clause 8).
     let enrolment = match config.enrolment.as_ref().map(|section| {
         info!("hosts with a bootstrap certificate may enrol while an operator opens the window");
         fleet_server::enrolment::Enrolment::open_on(clock.clone(), records.enrolment()).map(
@@ -595,7 +595,7 @@ async fn main() {
     {
         Ok(ca) => {
             if let Some(ca) = &ca {
-                // ADR-0021.
+                // ADR-0038.
                 info!(
                     validity_days = ca.validity_days(),
                     "signing client certificates for Agents that ask"
@@ -637,7 +637,7 @@ async fn main() {
     // (ADR-0032 clause 21).
     let watched = fleet_server::pki::loaded(&fleet_server::pki::depended_on(&config));
     if let Some(notice) = uploaded_artifacts_notice(client_ca.is_some()) {
-        // ADR-0024 clause 16.
+        // ADR-0043 clause 16.
         info!("{notice}");
     }
     let telemetry_offer = config
@@ -649,7 +649,7 @@ async fn main() {
         // ADR-0016.
         info!("offering the fleet somewhere to send its own telemetry");
     }
-    // What the client CA signed and what is revoked (ADR-0021), kept beside the fleet's records.
+    // What the client CA signed and what is revoked (ADR-0038), kept beside the fleet's records.
     let revocations = match records.ledger().and_then(|store| {
         fleet_server::revocation::Revocations::open(store, clock.clone(), planes.3.clone())
     }) {
@@ -767,7 +767,7 @@ async fn main() {
         staging.stage_under(lease.held());
         clean_staging_on_takeover(staging, lease.takeovers());
     }
-    // The audit record (ADR-0023), opened before anything is decided: one chain in files, or on
+    // The audit record (ADR-0039), opened before anything is decided: one chain in files, or on
     // PostgreSQL the chain of each lease
     // (ADR-0042).
     let started = match (&records, &lease) {
@@ -860,7 +860,7 @@ async fn main() {
         }
     });
     if let Some(warning) = config.rate_limit_warning() {
-        // ADR-0012 clause 23.
+        // ADR-0045 clause 23.
         warn!("{warning}");
     }
     let agent_rate = Arc::new(fleet_server::agent_rate::AgentRate::new(
@@ -893,10 +893,10 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    // The certificate is the whole of admission (ADR-0021): the configuration was refused at load
+    // The certificate is the whole of admission (ADR-0038): the configuration was refused at load
     // without the client CA.
     info!("the OpAMP endpoint admits by client certificate");
-    // Two planes, two listeners (ADR-0012): Agents reach the OpAMP endpoint and the package
+    // Two planes, two listeners (ADR-0045): Agents reach the OpAMP endpoint and the package
     // downloads their offers point at; operators reach the REST API, its docs, and the UI.
     let (agent_tls, operator_tls, issuers, _) = planes;
     let agents = fleet_server::agent_app(
@@ -928,8 +928,8 @@ async fn main() {
         }
     };
     if operator_auth.is_some() {
-        // ADR-0021. Both planes serve TLS, so the password never crosses a network in clear
-        // (ADR-0012).
+        // ADR-0038. Both planes serve TLS, so the password never crosses a network in clear
+        // (ADR-0045).
         info!("the REST API and the UI require authentication");
     }
     let operators = fleet_server::operator_app(state.clone(), operator_auth);
@@ -957,7 +957,7 @@ async fn main() {
     info!(listen = %config.listen, "serving the OpAMP endpoint and package downloads over TLS");
     info!(listen = %config.rest.listen, "serving the REST API, the API docs, and the UI over TLS");
     // One signal, both planes: the interrupt is watched once, and both planes drain together
-    // within a bounded window (ADR-0012).
+    // within a bounded window (ADR-0045).
     let served = fleet_server::instance::serve(
         fleet_server::instance::Planes {
             agents,
@@ -977,7 +977,7 @@ async fn main() {
     if let Err(e) = &served {
         error!("{e}");
     }
-    // The graceful-shutdown flush (ADR-0024): every record's current timestamp and sequence
+    // The graceful-shutdown flush (ADR-0043): every record's current timestamp and sequence
     // number, so the ordinary restart restores a fleet without gaps or false silence.
     state.flush_agents();
     // And the presence of every Agent, its sessions ended by the drain, before the lease goes
@@ -995,7 +995,7 @@ async fn main() {
         }
     }
     // What is still queued for the audit record is written before the process, and the writer
-    // thread with it, ends (ADR-0023); on PostgreSQL the chain is closed then, and the lease
+    // thread with it, ends (ADR-0039); on PostgreSQL the chain is closed then, and the lease
     // released only once it is, so that a chain left open is closed by the instance that takes
     // over the lapsed lease (clause 3 of
     // ADR-0042).
@@ -1075,7 +1075,7 @@ fn shutdown_signal() -> impl std::future::Future<Output = ()> {
     }
 }
 
-/// What a Server that signs no CSRs says once at startup (ADR-0024 clause 16): its hosts hold the
+/// What a Server that signs no CSRs says once at startup (ADR-0043 clause 16): its hosts hold the
 /// certificates an operator provisioned, and only one that names its host is served an uploaded
 /// artifact.
 fn uploaded_artifacts_notice(signs_csrs: bool) -> Option<String> {
@@ -1094,7 +1094,7 @@ mod tests {
 
     /// `hash-credential` makes an operator's Basic entry and nothing else: the Agent plane has no
     /// credential to hash.
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0038
     #[test]
     fn hash_credential_hashes_a_basic_password_alone() {
         let basic = hasher(Some("--basic")).expect("--basic is a scheme");

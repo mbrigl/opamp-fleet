@@ -208,7 +208,7 @@ fn set_url(server: &TestServer, agent_type: &str, version: &str) -> String {
     )
 }
 
-/// The artifact download of one Set — on the **Agent plane** (ADR-0012), which is where the
+/// The artifact download of one Set — on the **Agent plane** (ADR-0045), which is where the
 /// `download_url` in an offer points and the one `/api/v1` route the Operator plane does not serve.
 fn download_url(server: &TestServer, agent_type: &str, version: &str) -> String {
     format!(
@@ -422,10 +422,10 @@ async fn the_act_names_the_version_it_releases() {
     assert_eq!(served.as_ref(), b"old-binary");
 }
 
-/// ADR-0012: the offered `download_url` is a path the Client resolves against **its own OpAMP
+/// ADR-0045: the offered `download_url` is a path the Client resolves against **its own OpAMP
 /// endpoint**, so the artifact has to be served by the listener the Agents already talk to — not by
 /// the Operator plane, which is where authentication is going and where no Agent will ever look.
-/// Verifies: ADR-0027, ADR-0012
+/// Verifies: ADR-0027, ADR-0045
 #[tokio::test]
 async fn the_artifact_is_served_where_the_agents_are_and_not_on_the_operator_plane() {
     let (server, _scratch) = spawn_with_packages().await;
@@ -1203,7 +1203,7 @@ async fn a_set_says_how_many_agents_it_reaches() {
     assert_eq!(reach(&server, "2.0.0").await, 0);
 }
 
-/// ADR-0024 reaches packages, not just Configurations — which is the case it exists for. A binary
+/// ADR-0043 reaches packages, not just Configurations — which is the case it exists for. A binary
 /// rollout starts on the hosts an operator moved into the canary channel, and moving one in needs no
 /// access to that host.
 /// Verifies: ADR-0027
@@ -2595,8 +2595,8 @@ fn staged_uploads(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
 }
 
 /// An upload that stops arriving is answered `408` and leaves nothing staged behind: the floor
-/// on every body holds on the Operator plane's longest route too (ADR-0012 clause 18).
-/// Verifies: ADR-0012
+/// on every body holds on the Operator plane's longest route too (ADR-0045 clause 18).
+/// Verifies: ADR-0045
 #[tokio::test]
 async fn an_upload_that_stops_is_answered_408_and_leaves_nothing_staged() {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -2733,7 +2733,7 @@ async fn two_uploads_of_one_entry_at_once_do_not_share_a_staging_file() {
     let answer = String::from_utf8_lossy(&answer);
     assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
 
-    // The blobs: the second upload's went with the entry the first one replaced (ADR-0029).
+    // The blobs: the second upload's went with the entry the first one replaced (ADR-0044).
     let stored: Vec<_> = std::fs::read_dir(dir.path().join("packages/blobs"))
         .expect("blobs")
         .map(|entry| entry.expect("entry").path())
@@ -2842,7 +2842,7 @@ async fn an_upload_in_progress_counts_against_the_ceiling_and_a_cancelled_one_le
 /// A member over its rate is answered `429` with `Retry-After: 30` and not served the artifact;
 /// once its bucket refills the download is served again, and the refusals counted no failure
 /// toward the failed-admission throttle, which here backs off after a single one.
-/// Verifies: ADR-0012
+/// Verifies: ADR-0045
 #[tokio::test]
 async fn a_download_past_the_limit_is_answered_429_after_thirty_seconds() {
     opamp::tls::install_ring_provider();

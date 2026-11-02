@@ -1,6 +1,6 @@
 //! The REST API v1 — the Server's integration contract (ADR-0008, ADR-0025) — and the bundled
 //! rudimentary UI. Both belong to the Operator plane and are served on its own listener
-//! (ADR-0012); the one exception, the Agent-facing artifact download, is [`download_router`].
+//! (ADR-0045); the one exception, the Agent-facing artifact download, is [`download_router`].
 //!
 //! The OpenAPI document is generated code-first with `utoipa`: the same annotations that register
 //! a route describe it, so contract and behaviour cannot drift. Any external portal generates a
@@ -51,14 +51,14 @@ use crate::packages::{PackageId, PackageSummary, Platform, SignatureState};
                                               thing rolled out (ADR-0027, ADR-0026)"),
         (name = "enrolment", description = "How a host gets its first certificate: a window an \
                                             operator opens, and requests an operator decides \
-                                            (ADR-0021)"),
+                                            (ADR-0038)"),
         (name = "revocation", description = "What the client CA signed, and the certificates the \
-                                             Server no longer admits (ADR-0021)")
+                                             Server no longer admits (ADR-0038)")
     )
 )]
 struct ApiDoc;
 
-/// The Operator plane's credential check (ADR-0021), precomputed from `[rest.auth]`. Basic only,
+/// The Operator plane's credential check (ADR-0038), precomputed from `[rest.auth]`. Basic only,
 /// and it guards the whole plane — the API, its document, the docs page, and the UI — because a
 /// browser answers a Basic challenge by itself, which is what spares the rudimentary UI a login
 /// page and a session.
@@ -75,14 +75,14 @@ impl OperatorAuth {
         Ok(OperatorAuth(Arc::new(auth.credentials()?), None, None))
     }
 
-    /// Records refused sign-ins in `audit` (ADR-0023 clause 1).
+    /// Records refused sign-ins in `audit` (ADR-0039 clause 1).
     #[must_use]
     pub fn with_audit(mut self, audit: Option<Arc<dyn crate::audit::Audit>>) -> Self {
         self.2 = audit;
         self
     }
 
-    /// Counts this plane's failures in a table of its own (ADR-0021 clause 19).
+    /// Counts this plane's failures in a table of its own (ADR-0038 clause 19).
     #[must_use]
     pub fn with_throttle(mut self, throttle: Arc<crate::throttle::Throttle>) -> Self {
         self.1 = Some(throttle);
@@ -91,7 +91,7 @@ impl OperatorAuth {
 }
 
 /// Records every mutating act on the Operator plane, before it runs and once it has run; an act
-/// that cannot be recorded is not run (ADR-0023 clauses 1 and 5).
+/// that cannot be recorded is not run (ADR-0039 clauses 1 and 5).
 async fn record_act(
     State(audit): State<Arc<dyn crate::audit::Audit>>,
     request: Request,
@@ -165,7 +165,7 @@ async fn authenticate(
         }
     }
     // The attempt counts before the password is hashed, so attempts sent at once cannot all pass
-    // the back-off check first (ADR-0021 clause 2).
+    // the back-off check first (ADR-0038 clause 2).
     let _attempt = match (&auth.1, peer) {
         (Some(throttle), Some(peer)) => match throttle.begin(peer) {
             Some(attempt) => Some(attempt),
@@ -265,7 +265,7 @@ pub fn router(state: Arc<AppState>, auth: Option<OperatorAuth>) -> Router {
                 std::future::ready(body.into_response())
             }),
         )
-        // The interactive API docs (ADR-0012): a Redoc page rendering /api/v1/openapi.json, with
+        // The interactive API docs (ADR-0045): a Redoc page rendering /api/v1/openapi.json, with
         // Redoc vendored and served from this same origin so the docs work offline.
         .route("/api/v1/docs", get(docs))
         .route("/api/v1/docs/redoc.js", get(redoc_js))
@@ -276,14 +276,14 @@ pub fn router(state: Arc<AppState>, auth: Option<OperatorAuth>) -> Router {
         .route("/shiki.js", get(shiki_js))
         .with_state(state.clone());
     // Inside the guard, so an act is recorded only once it is authenticated, and named by the
-    // operator who made it (ADR-0023 clause 1).
+    // operator who made it (ADR-0039 clause 1).
     let router = match state.audit().cloned() {
         Some(audit) => router.layer(middleware::from_fn_with_state(audit, record_act)),
         None => router,
     };
     let router = match auth {
         // Outside every route, so the guard covers every route on this listener — including the
-        // UI and the API docs, which are as much of the plane as `/api/v1` is (ADR-0021).
+        // UI and the API docs, which are as much of the plane as `/api/v1` is (ADR-0038).
         Some(auth) => router.layer(middleware::from_fn_with_state(Arc::new(auth), authenticate)),
         None => router,
     };
@@ -325,7 +325,7 @@ static CONTENT_SECURITY_POLICY: std::sync::LazyLock<header::HeaderValue> =
 
 /// The response headers of the Operator plane: its policy, no framing, no content sniffing, no
 /// referrer, no cached `/api/v1` answer, and HSTS. The plane serves TLS on every address
-/// (ADR-0012), so a browser that once reached it by name never tries `http://` for it again,
+/// (ADR-0045), so a browser that once reached it by name never tries `http://` for it again,
 /// where an active attacker could answer and ask for the Basic credentials; browsers ignore the
 /// header for an IP address. It names no subdomains: what else runs on the plane's domain is not
 /// the plane's to bind.
@@ -363,7 +363,7 @@ async fn security_headers(request: Request, next: Next) -> Response {
 }
 
 /// The one route of `/api/v1` that is not the operator's: the artifact bytes an Agent downloads.
-/// It is served on the **Agent plane** (ADR-0012), because that is the audience — the
+/// It is served on the **Agent plane** (ADR-0045), because that is the audience — the
 /// `download_url` in a package offer is a path the Client resolves against its own OpAMP endpoint
 /// (ADR-0027), so this listener is where the offer already points. It keeps its `/api/v1` path,
 /// which every offered Package's `download_url` names.
@@ -413,7 +413,7 @@ fn stylesheet(css: &'static str) -> Response {
     ([(header::CONTENT_TYPE, "text/css; charset=utf-8")], css).into_response()
 }
 
-/// The API docs page: renders the OpenAPI document with the vendored Redoc bundle (ADR-0012).
+/// The API docs page: renders the OpenAPI document with the vendored Redoc bundle (ADR-0045).
 async fn docs() -> Html<&'static str> {
     Html(include_str!("../static/docs.html"))
 }
@@ -476,7 +476,7 @@ fn agent_response(state: &AppState, uid: &InstanceUid) -> Response {
 /// scripts from setting it, so a value other than `same-origin` (the bundled UI) or `none` (a
 /// user-initiated load) marks a cross-site caller, which is refused. A non-browser client — `curl`,
 /// a portal — sends no such header and is unaffected, which is why this needs no token and no change
-/// to any API client. It is not authentication (that is a separate decision, ADR-0021); it only
+/// to any API client. It is not authentication (that is a separate decision, ADR-0038); it only
 /// keeps a browser from being turned into a confused deputy.
 ///
 /// A browser without Fetch Metadata still sends `Origin` on a `POST`, so without `Sec-Fetch-Site`
@@ -637,7 +637,7 @@ struct AgentResponse {
     in_sync: bool,
     sequence_num: u64,
     last_seen_ms: u64,
-    /// Nothing has been heard from this Agent for longer than its staleness budget (ADR-0024).
+    /// Nothing has been heard from this Agent for longer than its staleness budget (ADR-0043).
     ///
     /// Beside [`connected`](Self::connected), never instead of it: that one says a connection
     /// carrying this Agent is open — behind a Gateway, the *Gateway's* — and this one says whether
@@ -647,18 +647,18 @@ struct AgentResponse {
     /// Only an Agent declaring `ReportsHeartbeat` can be stale: that capability is the promise that
     /// makes silence mean something. Derived on read, never stored.
     stale: bool,
-    /// The operator's labels on this Agent (ADR-0024) — matched by Selectors exactly like a
+    /// The operator's labels on this Agent (ADR-0043) — matched by Selectors exactly like a
     /// reported attribute, but set here rather than in `supervisor.toml` on the host, so moving a host
     /// between rollout channels is an API call instead of an edit and a restart.
     labels: BTreeMap<String, String>,
     /// Labels this Agent's own reports shadow: set, matching nothing, and therefore doing nothing.
     ///
-    /// Reported attributes always win (ADR-0024) — they decide which artifact fits this machine.
+    /// Reported attributes always win (ADR-0043) — they decide which artifact fits this machine.
     /// A collision is refused when the label is set, so this fills only when an Agent *starts*
     /// reporting a key that was labelled earlier. Shown rather than dropped in silence.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     shadowed_labels: Vec<String>,
-    /// The labels of this Agent's Client Agent, which hold for it below its own (ADR-0024
+    /// The labels of this Agent's Client Agent, which hold for it below its own (ADR-0043
     /// clause 19); empty for the Client Agent itself, for an Agent whose Client the Server cannot
     /// tell, and for an ambiguous one.
     inherited_labels: BTreeMap<String, String>,
@@ -666,16 +666,16 @@ struct AgentResponse {
     /// when the Server cannot tell.
     client_agent: String,
     /// The group this Agent's Client is recognised in holds more than one Client Agent, so it
-    /// inherits nothing (ADR-0024 clause 19).
+    /// inherits nothing (ADR-0043 clause 19).
     ambiguous: bool,
-    /// The Host this Agent last arrived over (ADR-0024 clause 16), or empty. Behind a Gateway, the
+    /// The Host this Agent last arrived over (ADR-0043 clause 16), or empty. Behind a Gateway, the
     /// Gateway's.
     host: String,
     /// The `fleet.host.*` values Selectors match on this Agent, from the certificate of the Host it
-    /// arrived over directly (ADR-0024 clause 18); empty behind a Gateway.
+    /// arrived over directly (ADR-0043 clause 18); empty behind a Gateway.
     host_attributes: BTreeMap<String, String>,
     /// Reported attributes in the Server's `fleet.` space, left out of what Selectors match
-    /// (ADR-0024 clause 20).
+    /// (ADR-0043 clause 20).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     ignored_attributes: Vec<String>,
 }
@@ -875,7 +875,7 @@ async fn restart_agent(
     }
 }
 
-/// The labels to put on an Agent (ADR-0024). The whole set, replacing what was there.
+/// The labels to put on an Agent (ADR-0043). The whole set, replacing what was there.
 #[derive(Deserialize, ToSchema)]
 struct LabelsBody {
     /// Equality pairs a Selector can match, exactly like a reported attribute — `rollout: canary`
@@ -891,7 +891,7 @@ struct LabelsBody {
     tag = "fleet",
     params(("instance_uid" = String, Path, description = "The Agent's Instance UID")),
     request_body = LabelsBody,
-    description = "Replace this Agent's labels (ADR-0024). A label is an operator's \
+    description = "Replace this Agent's labels (ADR-0043). A label is an operator's \
                    key/value pair that joins what a Deployment's Selector matches, so a rollout \
                    channel is a Server-side decision instead of an edit to supervisor.toml on the \
                    host. An empty map clears them. The labels of a Client's own Agent hold for the \
@@ -990,17 +990,17 @@ async fn rollout_to_agent(
 ///
 /// Reaches no host: nothing is stopped, nothing is uninstalled, and no certificate is revoked —
 /// a certificate is the host's, not the Agent's. Its `instance_uid` is released from the Host it
-/// was bound to (ADR-0024 clause 10). A Client that is still running reappears on its next report.
+/// was bound to (ADR-0043 clause 10). A Client that is still running reappears on its next report.
 #[utoipa::path(
     delete,
     path = "/api/v1/agents/{instance_uid}",
     tag = "fleet",
     params(("instance_uid" = String, Path, description = "The Agent's Instance UID")),
     description = "Forget this Agent: the Server drops what it knows and the row leaves the fleet \
-                   view (ADR-0024). Nothing happens on the host — no process is stopped, nothing \
+                   view (ADR-0043). Nothing happens on the host — no process is stopped, nothing \
                    is uninstalled, and no certificate is revoked, because a certificate here \
                    proves fleet membership and its host rather than one Agent's identity. The \
-                   Instance UID is released from the Host it was bound to (ADR-0024), so its \
+                   Instance UID is released from the Host it was bound to (ADR-0043), so its \
                    next report binds it to the host whose certificate carries that report. A \
                    Client still configured for this Server therefore comes back on its next \
                    report. Refused while the \
@@ -2099,7 +2099,7 @@ enum Chunk {
     End,
 }
 
-/// The upload as the blob store reads it (ADR-0029 clause 13): the request's chunks, handed over a
+/// The upload as the blob store reads it (ADR-0044 clause 13): the request's chunks, handed over a
 /// channel to the thread the store reads on. A channel that closes before [`Chunk::End`] is a
 /// failed stream — a refused, cut-off or cancelled upload — so the store keeps nothing of it.
 struct ChunkReader {
@@ -2377,7 +2377,7 @@ async fn get_deployment(State(state): State<Arc<AppState>>, Path(name): Path<Str
 /// belongs to at most one Deployment, so an empty Selector would collide with every other channel the
 /// moment a second one exists — and it is what a forgotten field looks like. Channels are a partition
 /// over an attribute every Agent carries (`channel = "stable"`), set at provisioning or as a Server
-/// label (ADR-0024), because a Selector is equality and cannot express "not".
+/// label (ADR-0043), because a Selector is equality and cannot express "not".
 #[utoipa::path(
     put,
     path = "/api/v1/deployments/{name}",
@@ -2663,7 +2663,7 @@ fn deployment_response(state: &AppState, deployment: Deployment) -> Response {
     Json(DeploymentView::of(deployment, reach)).into_response()
 }
 
-/// The enrolment window as the API answers with it (ADR-0029 clause 8).
+/// The enrolment window as the API answers with it (ADR-0044 clause 8).
 #[derive(Serialize, ToSchema)]
 struct EnrolmentWindow {
     /// Whether a host with a bootstrap certificate may enrol now.
@@ -2771,7 +2771,7 @@ struct IssuedBootstrap {
     certificate_pem: String,
 }
 
-/// A bootstrap certificate on record (ADR-0029 clause 11).
+/// A bootstrap certificate on record (ADR-0044 clause 11).
 #[derive(Serialize, ToSchema)]
 struct BootstrapView {
     serial: String,
@@ -2781,7 +2781,7 @@ struct BootstrapView {
     issued_ms: u64,
     not_after_ms: u64,
     revoked: bool,
-    /// Whether its PKCS#12 file can be downloaded (ADR-0029 clause 11).
+    /// Whether its PKCS#12 file can be downloaded (ADR-0044 clause 11).
     p12: bool,
 }
 
@@ -2875,7 +2875,7 @@ async fn issue_bootstrap_certificate(
     };
     match issued {
         Ok(pair) => {
-            // The key leaves only once the issuance is on the record (ADR-0023): a refused record
+            // The key leaves only once the issuance is on the record (ADR-0039): a refused record
             // leaves a listed, revocable entry and no key in anyone's hands.
             if let Some(audit) = state.audit() {
                 let recorded = audit.record(
@@ -2930,7 +2930,7 @@ async fn issue_bootstrap_certificate(
 }
 
 /// The PKCS#12 file of a bootstrap certificate, as often as it is asked,
-/// until the certificate ends or is revoked (ADR-0029 clause 11). Each download is on the record.
+/// until the certificate ends or is revoked (ADR-0044 clause 11). Each download is on the record.
 #[utoipa::path(
     get,
     path = "/api/v1/bootstrap-certificates/{serial}/p12",
@@ -3091,7 +3091,7 @@ async fn get_enrolment_window(State(state): State<Arc<AppState>>) -> Response {
 }
 
 /// Opens the enrolment window for a bounded time, or moves its end. It is closed by default, and
-/// persisted before this answers, so a Server restart keeps it open until its end (ADR-0029).
+/// persisted before this answers, so a Server restart keeps it open until its end (ADR-0044).
 #[utoipa::path(
     post,
     path = "/api/v1/enrolment/window",
@@ -3303,7 +3303,7 @@ async fn reject_enrolment(
     }
 }
 
-/// One certificate the client CA signed (ADR-0029 clause 9).
+/// One certificate the client CA signed (ADR-0044 clause 9).
 #[derive(Serialize, ToSchema)]
 struct CertificateView {
     /// `client` — the CA that signed it, as a revocation names it.
@@ -3327,12 +3327,12 @@ struct CertificateView {
     host: Option<String>,
 }
 
-/// A Host: what a client certificate's host id names (ADR-0022 clause 11, ADR-0024).
+/// A Host: what a client certificate's host id names (ADR-0022 clause 11, ADR-0043).
 #[derive(Serialize, ToSchema)]
 struct HostView {
     host: String,
     /// What it is shown by: the `host.name` its Client Agent reports, else the host id. Shown
-    /// only; it decides nothing (ADR-0024 clause 24).
+    /// only; it decides nothing (ADR-0043 clause 24).
     name: String,
     /// A Gateway speaks for any Agent; any other host only for those it reported first.
     gateway: bool,
@@ -3340,19 +3340,19 @@ struct HostView {
     instance_uids: Vec<String>,
     /// How many valid certificates it holds — at most three.
     certificates: usize,
-    /// The subject values of the client certificate it was issued (ADR-0024 clause 15), which the
+    /// The subject values of the client certificate it was issued (ADR-0043 clause 15), which the
     /// Agents arriving over it directly carry as `fleet.host.*`.
     subject: HostSubject,
     /// When its enrolment was approved, in milliseconds since the Unix epoch; absent for a Host a
     /// provisioned certificate made at its first report.
     #[serde(skip_serializing_if = "Option::is_none")]
     approved_ms: Option<u64>,
-    /// The Agents whose record names it as the Host they last arrived over (ADR-0024 clause 16) —
+    /// The Agents whose record names it as the Host they last arrived over (ADR-0043 clause 16) —
     /// for a Gateway, the Agents behind it.
     agents: Vec<HostAgent>,
 }
 
-/// The subject values a Host carries (ADR-0024 clause 15), or a bootstrap certificate carries into
+/// The subject values a Host carries (ADR-0043 clause 15), or a bootstrap certificate carries into
 /// the host certificate an approval issues (ADR-0015 clause 23); an empty one is absent from the
 /// certificate.
 #[derive(Serialize, ToSchema)]
@@ -3384,7 +3384,7 @@ impl From<crate::revocation::SubjectValues> for HostSubject {
     }
 }
 
-/// One Agent under the Host it arrived over (ADR-0024 clause 24).
+/// One Agent under the Host it arrived over (ADR-0043 clause 24).
 #[derive(Serialize, ToSchema)]
 struct HostAgent {
     instance_uid: String,
@@ -3423,14 +3423,14 @@ struct CertificateRef {
     serial: String,
 }
 
-/// What to revoke: a certificate (ADR-0021 clause 27).
+/// What to revoke: a certificate (ADR-0038 clause 27).
 #[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 struct RevokeRequest {
     certificate: CertificateRef,
 }
 
-/// One revocation (ADR-0021 clause 30).
+/// One revocation (ADR-0038 clause 30).
 #[derive(Serialize, ToSchema)]
 struct RevocationView {
     /// What `DELETE` names.
@@ -3455,7 +3455,7 @@ impl RevocationView {
     }
 }
 
-/// Records what an operator act did, beside the act itself (ADR-0023 clause 1). The act was
+/// Records what an operator act did, beside the act itself (ADR-0039 clause 1). The act was
 /// already recorded before it ran, so a detail that cannot be recorded changes nothing.
 fn note(state: &AppState, entry: crate::audit::Entry) {
     if let Some(audit) = state.audit() {
@@ -3529,7 +3529,7 @@ async fn list_certificates(State(state): State<Arc<AppState>>) -> Response {
     path = "/api/v1/hosts",
     tag = "revocation",
     responses(
-        (status = 200, description = "Every Host, by host id, with its subject values and the Agents that arrived over it (ADR-0024)", body = Vec<HostView>),
+        (status = 200, description = "Every Host, by host id, with its subject values and the Agents that arrived over it (ADR-0043)", body = Vec<HostView>),
         (status = 404, description = "Revocation is not configured", body = ErrorBody),
         (status = 500, description = "The fleet cannot be read from the store", body = ErrorBody)
     )
@@ -3640,7 +3640,7 @@ async fn list_revocations(State(state): State<Arc<AppState>>) -> Response {
 
 /// Revokes a certificate, and every renewal of it. Every session it admitted ends at once, and no
 /// new one is admitted. There is no credential to revoke: the Agent plane admits by client
-/// certificate alone (ADR-0021 clause 29).
+/// certificate alone (ADR-0038 clause 29).
 #[utoipa::path(
     post,
     path = "/api/v1/revocations",
@@ -3681,7 +3681,7 @@ async fn revoke(
     match outcome {
         Ok(entry) => {
             info!(revocation = %entry.id, "revoked");
-            // A revoked bootstrap certificate's PKCS#12 file goes before the answer (ADR-0029
+            // A revoked bootstrap certificate's PKCS#12 file goes before the answer (ADR-0044
             // clause 11); the download refuses it either way.
             let crate::revocation::Revoked::Certificate {
                 authority,
@@ -3690,7 +3690,7 @@ async fn revoke(
             } = &entry.revoked;
             let mut withdrawn = 0;
             if authority == "bootstrap" {
-                // The requests it carried wait no longer, on every instance (ADR-0021 clause 28);
+                // The requests it carried wait no longer, on every instance (ADR-0038 clause 28);
                 // approving one is refused either way.
                 withdrawn = state
                     .enrolment()

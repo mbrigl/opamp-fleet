@@ -117,7 +117,7 @@ The version is `[workspace.package] version` in [`Cargo.toml`](Cargo.toml), so b
 reviewed commit. The `Release` workflow makes the `version/*` tag from it, then builds and publishes
 the Client's archive and native packages per platform, the operator tool, an SBOM beside each,
 `SHA256SUMS`, and the Server's image `ghcr.io/mbrigl/opamp-fleet-server:<version>`, every one
-attested (ADR-0033, ADR-0034). Started with `dry_run`, the default, it builds everything and
+attested (ADR-0033, ADR-0040). Started with `dry_run`, the default, it builds everything and
 publishes nothing. How an operator checks a download is in
 [the manual](docs/manual/tools.md#getting-it), and the image in
 [the Server's manual](docs/manual/server.md#in-a-container).
@@ -352,7 +352,7 @@ configured once by a maintainer and worth re-checking after a repository move or
 - after the first release that pushes the Server's image, set the package
   **`opamp-fleet-server`** on `ghcr.io` to **public** and linked to this repository: a package a
   workflow publishes for the first time is private, and operators pull the image without an account
-  ([ADR-0034](docs/adr/0034-releases-attestations-and-the-server-image.md)).
+  ([ADR-0040](docs/adr/0040-releases-attestations-and-the-server-image.md)).
 
 [`scripts/sensor-repo-settings.sh`](scripts/sensor-repo-settings.sh) reads these settings
 through `gh` and reports each one that differs from this list. It runs on a human's

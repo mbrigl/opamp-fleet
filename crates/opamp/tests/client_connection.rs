@@ -249,7 +249,7 @@ async fn a_run_carries_the_session_over_the_transport_the_scheme_names() {
 /// A server that speaks TLS 1.2 alone never completes the handshake with this client, on either
 /// transport: the client offers TLS 1.3 and nothing older. The server is built from the full ring
 /// provider, so the refusal is the client's.
-/// Verifies: ADR-0012, Q-3
+/// Verifies: ADR-0045, Q-3
 #[tokio::test]
 async fn a_tls12_only_server_fails_the_handshake() {
     opamp::tls::install_ring_provider();

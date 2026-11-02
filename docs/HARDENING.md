@@ -38,16 +38,16 @@ speaking*, and so *what its host may receive from the Server*, is authentication
 Stated first so the list below is not read as a list of absences. On this link the project already
 has:
 
-- TLS on both transports, on both ends, with a private CA supported on the Client (ADR-0012).
-- **One proof on the Agent plane, required in the handshake** (ADR-0021,
+- TLS on both transports, on both ends, with a private CA supported on the Client (ADR-0045).
+- **One proof on the Agent plane, required in the handshake** (ADR-0038,
   `transport::Admission`): a client certificate the client CA issued, valid and not revoked. No
   configuration admits a peer without one. The plane has no credential: `server.toml` refuses an
   `[auth]` section and a credential key in `[connection_offer]` at startup, and `/v1/opamp` and the
   download route read no `Authorization` header. The Client sends none, and nothing in
   `supervisor.toml` admits a host; its only secret on the Agent plane is its private key.
 - Basic authentication over the **whole** Operator plane, the UI included (`[rest.auth]`,
-  ADR-0021), required beyond the loopback, on a listener that is loopback until an operator
-  publishes it (ADR-0012). A verification that succeeded is remembered by the SHA-256 of the
+  ADR-0038), required beyond the loopback, on a listener that is loopback until an operator
+  publishes it (ADR-0045). A verification that succeeded is remembered by the SHA-256 of the
   header and compared in constant time (`credentials.rs`).
 - Client certificates the Server issues itself through the Baseline's CSR flow, with the Agent
   keeping its private key — and with the request's `basicConstraints`, `keyUsage`,
@@ -58,11 +58,11 @@ has:
   operator approves for a host of its own (ADR-0015).
 - Message size limits enforced in both directions on both transports, and at the Supervisor
   Endpoint.
-- **TLS 1.3 alone, on every connection of both ends** (ADR-0008, ADR-0012): the process-wide
+- **TLS 1.3 alone, on every connection of both ends** (ADR-0008, ADR-0045): the process-wide
   provider carries the three TLS 1.3 suites and no other, every configuration pins TLS 1.3, and a
   peer offering only TLS 1.2 fails the handshake. Plaintext is accepted on `127.0.0.1` and `::1`
   alone and refused at startup anywhere else.
-- **A certificate in the handshake, and enrolment by approval** (ADR-0021, ADR-0015): every
+- **A certificate in the handshake, and enrolment by approval** (ADR-0038, ADR-0015): every
   Agent presents a client certificate the Agent plane and every Gateway ask for in the TLS
   handshake. A fresh host enrols with a bootstrap certificate from a CA of its own, only inside an
   operator-opened window, and only once an operator approves its request, which proves the
@@ -75,41 +75,41 @@ has:
   that carries no signature, and every download hop is held to `https://` and the Client's own
   Server origin before a request is sent. Every artifact is uploaded: the Server sends no request
   for a package anywhere and holds no source credential.
-- **A connection cap per plane and bounded HTTP/2** (ADR-0012): `max_connections` closes a
+- **A connection cap per plane and bounded HTTP/2** (ADR-0045): `max_connections` closes a
   connection past the cap on accept, before any handshake, while the held ones keep working; HTTP/2
   allows 100 concurrent streams per connection and drops a peer that leaves a ping unanswered.
-- **Connection setup bounded on both of the Server's planes** (ADR-0012): a peer has 30 seconds to
+- **Connection setup bounded on both of the Server's planes** (ADR-0045): a peer has 30 seconds to
   send its request line and headers, and 10 seconds to complete the TLS handshake, before it is hung
   up on — enforced below every other limit in this list, because it applies before a request exists
   and therefore before Admission ever runs.
 - Package content hashed and Ed25519-verified always, with no unsigned posture: without a
   verification key, or for an offer without a signature, nothing is downloaded. Archive members are
   validated before anything is written.
-- **Revocation that ends sessions** (ADR-0021): the Server keeps a persisted
+- **Revocation that ends sessions** (ADR-0038): the Server keeps a persisted
   list of revoked certificates, by issuing CA and serial — at most 20 octets, as RFC 5280 allows,
   so the list stays within what a Gateway reads — and extended along every renewal it signed.
   Admission refuses them on both transports and on the
   download, a revocation closes exactly the WebSocket sessions it concerns with `1008`, every
   session ends when the certificate that admitted it expires, and a kept-alive connection is
   refused on both transports and on the download once its certificate has expired.
-- **A Gateway refuses what the Server revoked** (ADR-0015, ADR-0021): a host marked as a Gateway
+- **A Gateway refuses what the Server revoked** (ADR-0015, ADR-0038): a host marked as a Gateway
   fetches the revoked certificates of the client CA every 30 s and refuses them downstream, closing
   the sessions they hold with `1008`; while it holds no list younger than 300 s it admits nobody.
   It forwards no `Authorization` upstream, and every upstream connection carries its own
   certificate alone. A Gateway that trusts the bootstrap CA lets a peer of it relay one plain-HTTP
   enrolment request and nothing else — no WebSocket, no binding, no offer, no download — and the
   Server checks the request's proof against its own bootstrap CA and revocation list (ADR-0015).
-- **A CSR's claim to an `instance_uid` is checked** (ADR-0021): a CSR naming any
+- **A CSR's claim to an `instance_uid` is checked** (ADR-0038): a CSR naming any
   `instance_uid` but its sender's is answered `BadRequest` before it is signed or queued — the
   Baseline's conditional MUST.
 - **A certificate names its host, and a host speaks only for its own Agents** (ADR-0022 clause 11,
-  ADR-0021 clause 12, and ADR-0015 clause 18): the Server puts a host of its own in every
+  ADR-0038 clause 12, and ADR-0015 clause 18): the Server puts a host of its own in every
   certificate it signs; an
   `instance_uid` first reported with one host's certificate is not spoken for by another's — such a
   reporter is re-keyed — and a host holds at most three valid certificates. A renewal proves the
   certificate it renews with that certificate's key, so it keeps its host and chain through a
   Gateway too. An operator marks a Gateway, whose certificate then speaks for any Agent.
-- **Key material and configuration readable by their owner alone** (ADR-0021 clause 7, ADR-0019
+- **Key material and configuration readable by their owner alone** (ADR-0038 clause 7, ADR-0019
   clause 25): on Unix the private key, the stored connection settings and `supervisor.toml` are
   written `0600` in `0700` directories, a state directory `0710` that the process account's group
   only passes through where one is registered (ADR-0037). On Windows a system-scope install gives
@@ -205,15 +205,15 @@ has:
   name lies in a directory only root writes, each step acting on the name and following no link.
   A test holds the modules these steps run in to no path-based write, removal, rename or mode
   change outside a justified list (`privileged_steps_follow_no_link.rs`).
-- **No credential in `server.toml` authenticates on its own** (ADR-0021 clause 21): an operator's
+- **No credential in `server.toml` authenticates on its own** (ADR-0038 clause 21): an operator's
   Basic password is kept as an Argon2id hash of at least the OWASP minimum, and a value in clear is
   refused at startup without being echoed. The Server offers no credential (ADR-0013).
-- **An audit record of every security decision** (ADR-0023): admissions and refusals, enrolment,
+- **An audit record of every security decision** (ADR-0039): admissions and refusals, enrolment,
   issuance, revocation, operator acts and package outcomes, one hash-chained line each; no
   admission without its record, refusals aggregated per peer before they are queued and kept to
   half the queue so they cannot crowd out any other record, and no `Authorization` value in any
   line, not even as a hash.
-- **Certificates live 30 days by default** (ADR-0021 clause 8) and are renewed at two thirds of
+- **Certificates live 30 days by default** (ADR-0038 clause 8) and are renewed at two thirds of
   that; a test with lives of seconds watches three generations each replace the one before it
   expires (`certificate_renewal_e2e.rs`). A soak on real hosts before a rollout is the operator's.
 - **An offered move to another TLS endpoint needs the Client's own CA file** (ADR-0013 clause 5),
@@ -249,20 +249,20 @@ The list above is per mechanism; this is the same state per **surface**, since a
 one listener and not on its neighbour is the failure mode worth seeing at a glance. ✅ in force,
 ⚠️ partial, ❌ absent.
 
-- **Every listener below that serves OpAMP or the REST API** (`opamp::server::listen`, ADR-0012
+- **Every listener below that serves OpAMP or the REST API** (`opamp::server::listen`, ADR-0045
   clause 18): ✅ a body or WebSocket message that has begun delivers 64 KiB in every 60 s or is cut
   off — `408`, or a `1008` close — while nothing has a deadline and an idle connection is left
   alone.
-- **Agent plane** — `127.0.0.1:4320` until an operator publishes it (ADR-0012).
+- **Agent plane** — `127.0.0.1:4320` until an operator publishes it (ADR-0045).
   - ✅ TLS handshake ≤ 10 s · ✅ headers ≤ 30 s (HTTP/1) · ✅ message size, in both directions ·
     ✅ gzip bounded *after* decompression · ✅ Admission by client certificate
   - ✅ connections capped (`max_connections`) · ✅ HTTP/2 streams and pings bounded
   - ✅ failed admissions throttled per address · ✅ admitted members rate-limited per host, and
-    per Agent within a Gateway's aggregate (ADR-0012), an enrolment through a Gateway per bootstrap
+    per Agent within a Gateway's aggregate (ADR-0045), an enrolment through a Gateway per bootstrap
     certificate (ADR-0015)
-- **Operator plane** — `127.0.0.1:4321` until an operator publishes it (ADR-0012).
+- **Operator plane** — `127.0.0.1:4321` until an operator publishes it (ADR-0045).
   - ✅ TLS handshake ≤ 10 s · ✅ headers ≤ 30 s · ✅ Basic over the whole plane, required beyond the
-    loopback (ADR-0021) ·
+    loopback (ADR-0038) ·
     ✅ Fetch-Metadata CSRF guard on the body-less `POST` routes, by `Origin` where a browser sends
     no Fetch Metadata
   - ✅ a Content-Security-Policy that names the UI's inline scripts by hash and forbids framing ·
@@ -314,7 +314,7 @@ which a revoked certificate still works**, **shrink the surface that sits beside
 
 **Status of each measure below:** 🔴 not taken · 🟡 partly in force · 🟢 in force. Nothing is 🟢 here by
 construction: a measure that reaches it moves up into [What already holds](#what-already-holds), the
-way the connection-setup bound did when ADR-0012 took it. The ✅/⚠️/❌ marks in that section are the
+way the connection-setup bound did when ADR-0045 took it. The ✅/⚠️/❌ marks in that section are the
 same three states seen per *surface* rather than per measure.
 
 ## Post-quantum cryptography
@@ -337,15 +337,15 @@ build and the supply chain; a larger ClientHello on every connection; and ML-DSA
 several kilobytes where an Ed25519 one is 64 bytes, in every package entry and every floor, whose
 formats and bounds are sized for Ed25519 today.
 **To work out:** the TLS provider — ring offers no ML-KEM and no ML-DSA, rustls offers the hybrid
-key exchange with aws-lc-rs, which [ADR-0012](adr/0012-tls-1-3-two-planes-and-bounded-input.md)
+key exchange with aws-lc-rs, which [ADR-0045](adr/0045-tls-1-3-two-planes-and-bounded-input.md)
 rejects and `deny.toml` bans, and a pure-Rust ML-KEM in a key-exchange group built here would be
 unaudited; how a Client that knows only Ed25519 keeps verifying a package and a floor while the
 signature grows; where the Client's second verification key lives; and what has to be true before
 the certificates move — ML-DSA in TLS 1.3 as a standard, issuance through rcgen, verification in
 the other OpAMP implementations, and a browser on the Operator plane. It would supersede
-ADR-0012 (the TLS provider), [ADR-0027](adr/0027-packages-signatures-and-delivery.md) (the package
+ADR-0045 (the TLS provider), [ADR-0027](adr/0027-packages-signatures-and-delivery.md) (the package
 signature), [ADR-0028](adr/0028-package-versions-high-water-mark-and-floor.md) (the floor's
-signature) and [ADR-0029](adr/0029-the-servers-state-and-its-stores.md) (its stores' TLS without
+signature) and [ADR-0044](adr/0044-the-servers-state-and-its-stores.md) (its stores' TLS without
 aws-lc-rs), and touch [ADR-0018](adr/0018-the-client-updates-itself-from-a-signed-package.md),
 whose self-update rests on the package signature.
 

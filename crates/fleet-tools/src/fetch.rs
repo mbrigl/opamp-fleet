@@ -61,7 +61,7 @@ pub struct Args {
     #[arg(long, default_value = ".")]
     out_dir: PathBuf,
     /// Upload to this Server when the artifacts are ready, e.g. `https://127.0.0.1:4321`. The
-    /// Operator plane serves TLS 1.3 only (ADR-0012).
+    /// Operator plane serves TLS 1.3 only (ADR-0045).
     #[arg(long, value_name = "URL")]
     server: Option<String>,
     /// The CA certificate (PEM) the Server's certificate chains to, such as the `server-ca.pem`
@@ -111,7 +111,7 @@ impl AgentKind {
             },
             // This repository's own releases. The Client is an Agent like any other (ADR-0018), so
             // the artifact that updates it is fetched the way every other agent's is — and by
-            // ADR-0034 it is named and packed like one too, which is what makes that possible.
+            // ADR-0040 it is named and packed like one too, which is what makes that possible.
             AgentKind::Supervisor => Source {
                 service_name: "supervisor",
                 repo: "mbrigl/opamp-fleet",
@@ -728,7 +728,7 @@ const SUPERVISOR_PLATFORMS: [(&str, &str); 5] = [
 ];
 
 /// This fleet's own Client, as its release publishes it: one `.tar.gz` per platform named
-/// `supervisor_<version>_<os>_<arch>` (ADR-0034), holding the binary under the name it is installed
+/// `supervisor_<version>_<os>_<arch>` (ADR-0040), holding the binary under the name it is installed
 /// as. Nothing is repacked — the artifact *is* the package, which is the point of packing the
 /// release with this project's own packer.
 ///
@@ -1421,7 +1421,7 @@ fn server_http(cacert: Option<&Path>) -> Result<reqwest::Client, String> {
 
 fn client_builder() -> reqwest::ClientBuilder {
     reqwest::Client::builder()
-        // TLS 1.3 alone, as every connection of this project (ADR-0012).
+        // TLS 1.3 alone, as every connection of this project (ADR-0045).
         .tls_version_min(reqwest::tls::Version::TLS_1_3)
         // Release hosts redirect to their CDN, so redirects are followed — but never to http.
         .redirect(reqwest::redirect::Policy::custom(|attempt| {
@@ -1702,7 +1702,7 @@ mod tests {
 
     /// The release also carries the operator tool's archives, named like the Client's
     /// (ADR-0032 clause 3); they are selected by stem, never by version and platform alone, so none
-    /// of them becomes the `supervisor` Package's entry for its platform (ADR-0034 clause 5).
+    /// of them becomes the `supervisor` Package's entry for its platform (ADR-0040 clause 5).
     // Verifies: ADR-0032
     #[test]
     fn the_supervisor_passes_over_the_operator_tools_archives() {
@@ -1717,7 +1717,7 @@ mod tests {
         assert_eq!(names, ["supervisor_1.2.3_linux_amd64.tar.gz"]);
     }
 
-    /// This project's own release is fetched like any other agent's (ADR-0034): the `.tar.gz` per
+    /// This project's own release is fetched like any other agent's (ADR-0040): the `.tar.gz` per
     /// platform is the package, the installers beside it are not, and the one `SHA256SUMS` the
     /// publish job writes is what every artifact is verified against.
     #[test]
@@ -2213,7 +2213,7 @@ mod tests {
     async fn a_refusal_lost_with_the_upload_is_asked_for_again() {
         use std::io::Write;
 
-        // What `main` does before anything builds a client (ADR-0012).
+        // What `main` does before anything builds a client (ADR-0045).
         opamp::tls::install_ring_provider();
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -2425,7 +2425,7 @@ mod tests {
     /// signed: with it the Server is trusted, and without it the same Server is refused for the
     /// reason the operator would otherwise meet — a certificate no system root vouches for.
     ///
-    /// Verifies: ADR-0012
+    /// Verifies: ADR-0045
     #[tokio::test]
     async fn a_server_signed_by_the_named_ca_is_trusted_and_only_then() {
         use rcgen::{BasicConstraints, CertificateParams, IsCa, Issuer, KeyPair};

@@ -1,5 +1,5 @@
 //! The filesystem adapters of the Server's stores (ADR-0009), the one data directory they share
-//! (ADR-0029), and the moves every one of them makes: a directory only its owner can enter, a file
+//! (ADR-0044), and the moves every one of them makes: a directory only its owner can enter, a file
 //! only its owner can read, replaced in one step, so a crash mid-write leaves the old document
 //! rather than half a new one.
 //!
@@ -75,9 +75,9 @@ pub const DIRECTORIES: [&str; 9] = [
     AUDIT,
 ];
 
-/// Opens the data directory (ADR-0029): creates it and every directory of the layout owner-only —
+/// Opens the data directory (ADR-0044): creates it and every directory of the layout owner-only —
 /// `blobs/` only with the filesystem blob store, `filesystem_blobs`: beside a bucket it is the
-/// place artifacts are copied from, never written to (ADR-0029 clause 19) — and refuses one that
+/// place artifacts are copied from, never written to (ADR-0044 clause 19) — and refuses one that
 /// holds anything the layout does not name. What lies inside each directory is its store's to
 /// check, when the store opens.
 ///
@@ -277,7 +277,7 @@ pub fn create_private_dir(dir: &Path) -> Result<(), String> {
 }
 
 /// Replaces `path` with `bytes` by writing `<path>.tmp` beside it, owner-only (`0600`) on Unix, and
-/// renaming it into place (ADR-0029 clause 1). The mode is set in the open call rather than after
+/// renaming it into place (ADR-0044 clause 1). The mode is set in the open call rather than after
 /// the write, so the content is never briefly readable by another local user, and the rename
 /// carries the mode with it.
 pub fn replace(path: &Path, bytes: &[u8]) -> Result<(), String> {
@@ -288,7 +288,7 @@ pub fn replace(path: &Path, bytes: &[u8]) -> Result<(), String> {
 /// [`replace`], and durable: the content reaches the disk before the rename makes it the document,
 /// and on Unix the rename reaches it before this returns, so a power loss leaves the old document
 /// or the new one, never an empty file or a revocation lost after it was answered. For a record
-/// that answers a security decision (ADR-0029 clause 1).
+/// that answers a security decision (ADR-0044 clause 1).
 pub fn replace_owner_only(path: &Path, bytes: &[u8]) -> Result<(), String> {
     write_temp(path, bytes, true)?;
     rename_into_place(&temp_of(path), path)?;
@@ -410,7 +410,7 @@ mod tests {
     /// A Server on an empty `data_dir` lays out every directory of ADR-0028 clause 23, each
     /// owner-only; a file or directory the layout does not name fails the open naming its path,
     /// and a temporary file a crash left beside a document is removed instead.
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0044
     #[test]
     fn the_data_directory_has_one_layout_and_no_other() {
         let dir = tempfile::tempdir().expect("tempdir");

@@ -1,7 +1,7 @@
 name: Release
 
 # Builds the Client for every target it ships on and publishes one `.tar.gz` per target
-# (ADR-0034, the container and the artifact name included), and the operator tool `opamp-fleetctl`
+# (ADR-0040, the container and the artifact name included), and the operator tool `opamp-fleetctl`
 # for Linux and macOS beside it (ADR-0032).
 #
 # The version comes from `[workspace.package] version` in Cargo.toml and this workflow creates the
@@ -16,12 +16,12 @@ name: Release
 #
 # Every published asset is a subject of one build-provenance attestation, made and verified in
 # `publish` before the release exists, and each shipped program has a CycloneDX SBOM per target
-# beside its archive (ADR-0034).
+# beside its archive (ADR-0040).
 #
 # The Server ships as a multi-architecture image, `ghcr.io/mbrigl/opamp-fleet-server:<version>`,
 # built from packaging/container/Containerfile by copying the Server binaries the Linux rows built
 # and checked. `image` pushes it untagged; `publish` attests it, verifies it, and only then tags it
-# with the version (ADR-0034).
+# with the version (ADR-0040).
 
 on:
   workflow_dispatch:
@@ -53,7 +53,7 @@ env:
   ARTIFACT: supervisor
   # The operator tool's program and the stem of its archives (ADR-0032 clause 3).
   OPERATOR_TOOL: opamp-fleetctl
-  # The Server's image, tagged with the exact version and nothing else (ADR-0034 clause 18).
+  # The Server's image, tagged with the exact version and nothing else (ADR-0040 clause 18).
   IMAGE: ghcr.io/mbrigl/opamp-fleet-server
 
 jobs:
@@ -195,7 +195,7 @@ jobs:
           # operator must type into `?version=` for a self-update to pass its probe.
           echo "full=$full" >> "$GITHUB_OUTPUT"
 
-  # ADR-0034 clause 7: one CycloneDX SBOM per shipped program and target, from the
+  # ADR-0040 clause 7: one CycloneDX SBOM per shipped program and target, from the
   # lockfile the build uses — the Server's for each architecture of its image.
   # A job of its own: the dependency graph of a target needs no runner of that target, and the tool
   # is installed once. It runs on a dry run too, with the top-level read-only token, no kept
@@ -269,7 +269,7 @@ jobs:
           - { target: aarch64-unknown-linux-gnu, runner: ubuntu-24.04-arm, os: linux, arch: arm64, suffix: "", native: true, operator_tool: true }
           - { target: aarch64-apple-darwin, runner: macos-latest, os: darwin, arch: arm64, suffix: "", native: true, operator_tool: true }
           # Cross-compiled from the arm64 runner, which Apple's toolchain does natively — steadier
-          # than depending on an Intel macOS runner label (ADR-0034). Nothing here can run it, so
+          # than depending on an Intel macOS runner label (ADR-0040). Nothing here can run it, so
           # the version assertions below are skipped for this one row.
           - { target: x86_64-apple-darwin, runner: macos-latest, os: darwin, arch: amd64, suffix: "", native: false, operator_tool: true }
           # No operator tool for Windows: it would need its own way to keep a key readable by its
@@ -295,7 +295,7 @@ jobs:
       - name: Build the operator tool
         if: matrix.operator_tool
         run: cargo build --release -p fleet-tools --bin opamp-fleetctl --target ${{ matrix.target }} --locked
-      # A target build: the Server, which ships in the image and nowhere else (ADR-0034 clause 14).
+      # A target build: the Server, which ships in the image and nowhere else (ADR-0040 clause 14).
       - name: Build the Server
         if: matrix.os == 'linux'
         run: cargo build --release -p fleet-server --bin server --target ${{ matrix.target }} --locked
@@ -343,11 +343,11 @@ jobs:
         run: |
           # `_` between the four fields, because two of them contain `-`: the name grammar is
           # `[a-z0-9-]` (ADR-0019) and a prerelease version spells itself with a hyphen, so a
-          # hyphen-separated name does not parse back (ADR-0034).
+          # hyphen-separated name does not parse back (ADR-0040).
           name="${ARTIFACT}_${{ needs.version.outputs.version }}_${{ matrix.os }}_${{ matrix.arch }}.tar.gz"
           # The packer names the single member after the program — `supervisor`, which is
           # what a Client looks for in a package it is offered — and prints the SHA-256 on stdout.
-          # The *file* is named after the Set (ADR-0034); the member inside it is the product.
+          # The *file* is named after the Set (ADR-0040); the member inside it is the product.
           sha=$(./target/release/opamp-fleetctl${{ matrix.suffix }} package pack \
             --format tar.gz \
             --out "$name" \
@@ -355,7 +355,7 @@ jobs:
           echo "$sha  $name" > "$name.sha256"
           echo "name=$name" >> "$GITHUB_OUTPUT"
           # Every artifact of this row shares these four fields; only the extension differs
-          # (ADR-0034 clause 3).
+          # (ADR-0040 clause 3).
           echo "STEM=${name%.tar.gz}" >> "$GITHUB_ENV"
 
       # ---- ADR-0032: the operator tool, one archive per target, named like the Client's. ----
@@ -495,7 +495,7 @@ jobs:
           # `error` is guarding here.
           if-no-files-found: error
 
-  # ADR-0034 clause 19: the Server's image, built from the two binaries the Linux rows built and
+  # ADR-0040 clause 19: the Server's image, built from the two binaries the Linux rows built and
   # checked, by the Containerfile, which runs nothing — so neither platform needs emulation. The
   # `amd64` image is checked here, on its own architecture; the `arm64` binary's version was
   # asserted on its native runner, and the image copies it unchanged. A dry run stops after the
@@ -523,7 +523,7 @@ jobs:
           path: image
           merge-multiple: true
       # A builder of its own: the default `docker` driver neither builds for two platforms at once
-      # nor pushes an index by digest. Its BuildKit image is pinned by version and digest (ADR-0034
+      # nor pushes an index by digest. Its BuildKit image is pinned by version and digest (ADR-0040
       # clause 19), the release `buildx-stable-1` named when it was set; Dependabot does not read an
       # image out of a shell step, so a new one arrives by a reviewed commit.
       - name: Build the image
@@ -628,11 +628,11 @@ jobs:
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
   publish:
-    # A dry run builds and packs everything and stops here, so it attests nothing (ADR-0034).
+    # A dry run builds and packs everything and stops here, so it attests nothing (ADR-0040).
     if: needs.version.outputs.publish == 'true'
     needs: [version, build, sbom, image]
     runs-on: ubuntu-latest
-    # The only job that may attest (ADR-0034 clause 10). It checks out no code
+    # The only job that may attest (ADR-0040 clause 10). It checks out no code
     # and builds nothing; its only actions are download-artifact and attest, and every other step,
     # the registry login and the tagging included, is shell and gh.
     permissions:
@@ -658,7 +658,7 @@ jobs:
           cat *.sha256 | sort -k2 > SHA256SUMS
           rm -f *.sha256
           ls -l
-      # ADR-0034: one SLSA build-provenance attestation over every published asset, SHA256SUMS
+      # ADR-0040: one SLSA build-provenance attestation over every published asset, SHA256SUMS
       # included, its digests computed from the files themselves.
       - name: Attest the assets
         uses: actions/attest@v4
@@ -675,8 +675,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: printf '%s' "$GH_TOKEN" | docker login ghcr.io --username '${{ github.actor }}' --password-stdin
-      # ADR-0034 clause 9: the image's own attestation, over the index digest `image` pushed, stored
-      # in the registry beside it. No storage record: that needs a permission ADR-0034 does not grant,
+      # ADR-0040 clause 9: the image's own attestation, over the index digest `image` pushed, stored
+      # in the registry beside it. No storage record: that needs a permission ADR-0040 does not grant,
       # and GitHub keeps one for organisation-owned repositories alone.
       - name: Attest the image
         uses: actions/attest@v4
@@ -685,7 +685,7 @@ jobs:
           subject-digest: ${{ needs.image.outputs.digest }}
           push-to-registry: true
           create-storage-record: false
-      # Nothing is published that does not verify as an operator will verify it (ADR-0034 clause 12).
+      # Nothing is published that does not verify as an operator will verify it (ADR-0040 clause 12).
       - name: Every asset verifies
         env:
           GH_TOKEN: ${{ github.token }}
@@ -708,7 +708,7 @@ jobs:
             --signer-workflow "${{ github.repository }}/.github/workflows/release.yml" \
             --deny-self-hosted-runners > /dev/null
           echo "verified ${IMAGE}@${{ needs.image.outputs.digest }}"
-      # ADR-0034 clauses 18 and 19: the exact version, and only after the attestation verified. A single
+      # ADR-0040 clauses 18 and 19: the exact version, and only after the attestation verified. A single
       # index as the source is copied as it is, so the tag names the attested digest — checked below.
       - name: Tag the image
         run: |
@@ -735,7 +735,7 @@ jobs:
           \`${{ needs.version.outputs.version }}\`, for \`linux/amd64\` and \`linux/arm64\`.
 
           The assets come in five kinds, and picking the wrong one is the only way to get this wrong
-          (ADR-0019, ADR-0032, ADR-0034):
+          (ADR-0019, ADR-0032, ADR-0040):
 
           | you want to | take |
           |---|---|
@@ -771,7 +771,7 @@ jobs:
 
           The Server ships as an image and nowhere else: the binary the release built and checked for
           this version, on \`gcr.io/distroless/cc-debian13:nonroot\`, with no shell, running as UID
-          and GID 65532 (ADR-0034). Deploy it by its digest, not by its tag:
+          and GID 65532 (ADR-0040). Deploy it by its digest, not by its tag:
 
           \`\`\`console
           docker run -d --name opamp-fleet-server \\
@@ -795,7 +795,7 @@ jobs:
 
           Every asset is a subject of one build-provenance attestation, made by this repository's
           release workflow on a GitHub-hosted runner and recorded in the public Sigstore log
-          (ADR-0034). Verify \`SHA256SUMS\` with the GitHub CLI, then every file you downloaded
+          (ADR-0040). Verify \`SHA256SUMS\` with the GitHub CLI, then every file you downloaded
           against it:
 
           \`\`\`console
@@ -871,7 +871,7 @@ jobs:
           Upload **all** of them into **one** Package, identified by the Agent type \`supervisor\` and
           this release's version, with one entry per platform. The Server offers each Agent the entry
           built for the machine it reported (ADR-0027), so a mixed fleet updates from one Package.
-          Each file is named \`<name>_<version>_<os>_<arch>.tar.gz\` (ADR-0034), and the last two
+          Each file is named \`<name>_<version>_<os>_<arch>.tar.gz\` (ADR-0040), and the last two
           fields are exactly the pair an Agent reports as \`os.type\` and \`host.arch\`, so the upload
           reads them out of the name. Then put the Package in a Deployment, sign every entry with your
           package signing key, and roll it out; nothing reaches the fleet before that last call

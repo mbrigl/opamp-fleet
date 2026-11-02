@@ -1,4 +1,4 @@
-//! The Server's schema (ADR-0029 clause 22): embedded as numbered migrations, applied by the Server
+//! The Server's schema (ADR-0044 clause 22): embedded as numbered migrations, applied by the Server
 //! itself at startup, each recorded in `fleet_schema` with the oldest Server version that
 //! understands the schema it leaves.
 //!
@@ -128,7 +128,7 @@ pub const MIGRATIONS: &[Migration] = &[
 ];
 
 /// The first schema: one table per kind of record, the parts of a record that are many in tables of
-/// their own (ADR-0029 clauses 4 to 6, 9 to 11 and 21). Unsigned integers are kept as `bigint` with
+/// their own (ADR-0044 clauses 4 to 6, 9 to 11 and 21). Unsigned integers are kept as `bigint` with
 /// their bits unchanged, so every value round-trips.
 ///
 /// PostgreSQL's `text` and `jsonb` refuse a NUL character, which a file keeps. Text an Agent or a
@@ -283,7 +283,7 @@ CREATE TABLE leases (
 /// no two Hosts hold one
 /// (ADR-0041
 /// clause 19). It is filled from the arrays of the Hosts not marked as Gateways, as a Gateway's
-/// Host is bound none (ADR-0024 clause 16); an `instance_uid` two such Hosts' arrays hold fails the
+/// Host is bound none (ADR-0043 clause 16); an `instance_uid` two such Hosts' arrays hold fails the
 /// migration, naming it and the Hosts, and changes nothing, for the operator to decide. A renewal's
 /// walk down its chain finds an entry's renewals by the index on the predecessor.
 const HOST_BINDINGS: &str = r"
@@ -514,7 +514,7 @@ mod tests {
 
     /// The migrations are numbered from 1 without a gap, and none names a Server newer than this
     /// one — a build that refused its own schema would never start.
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0044
     #[test]
     fn the_migrations_are_numbered_and_this_server_understands_them() {
         for (index, migration) in MIGRATIONS.iter().enumerate() {
@@ -539,9 +539,9 @@ mod tests {
         assert_eq!(compare("not-a-version", "99.0.0"), Ordering::Greater);
     }
 
-    /// A migration only adds (ADR-0029 clause 22): nothing in the embedded schema drops, renames or
+    /// A migration only adds (ADR-0044 clause 22): nothing in the embedded schema drops, renames or
     /// alters a column away, and every table it creates is one [`TABLES`] knows.
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0044
     #[test]
     fn a_migration_only_adds() {
         for migration in MIGRATIONS {

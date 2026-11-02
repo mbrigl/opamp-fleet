@@ -1,4 +1,4 @@
-//! Agent records in PostgreSQL (ADR-0029 clauses 4 and 21): the PostgreSQL adapter behind
+//! Agent records in PostgreSQL (ADR-0044 clauses 4 and 21): the PostgreSQL adapter behind
 //! [`AgentStore`](crate::agent_store::AgentStore) — one row per Agent, its scalars as columns, the
 //! wire-typed fields as their protobuf bytes, its labels, and its assignment's Configurations in
 //! rows of their own. A rollout's revisions and assignments commit together or not at all. Each
@@ -795,7 +795,7 @@ impl AgentStore for PgAgentStore {
     }
 
     /// One transaction: the revisions and the assignments that pin them commit together or not at
-    /// all (ADR-0029 clause 21). Each record's assignment is written alone, in the order of the
+    /// all (ADR-0044 clause 21). Each record's assignment is written alone, in the order of the
     /// `instance_uid`, so two releases over the same Agents lock their rows in one order; a record
     /// forgotten meanwhile is written nothing. The row of each Package an assignment pins is held
     /// `FOR KEY SHARE` until the commit, as each pinned Configuration's is, so a write to the
@@ -923,7 +923,7 @@ const COLUMNS: &str = "instance_uid, sequence_num, capabilities, transport, last
      deployment, package_agent_type, package_version";
 
 /// A wire-typed field as its protobuf bytes, the encoding whose compatibility rules the Baseline
-/// already governs (ADR-0029 clause 4).
+/// already governs (ADR-0044 clause 4).
 fn encode<M: Message>(message: Option<&M>) -> Option<Vec<u8>> {
     message.map(Message::encode_to_vec)
 }
@@ -937,7 +937,7 @@ fn decode<M: Message + Default>(bytes: Option<Vec<u8>>, what: &str) -> Result<Op
 }
 
 /// Every Agent record. A row that does not decode fails, naming its `instance_uid`
-/// (ADR-0029 clause 4).
+/// (ADR-0044 clause 4).
 pub(crate) async fn read_all(
     client: &impl GenericClient,
 ) -> Result<HashMap<InstanceUid, PersistedAgent>, String> {
@@ -1621,7 +1621,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0044
     #[test]
     fn the_agent_port_contract_holds_on_the_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1636,7 +1636,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0044
     #[test]
     fn the_agent_port_contract_holds_on_postgres() {
         let Some(test) = TestDatabase::named() else {
@@ -1892,7 +1892,7 @@ mod tests {
     }
 
     /// A rollout whose last record cannot be written leaves none of its assignments behind, on
-    /// either store, and what the store answers about pins stays as it was (ADR-0029 clause 21):
+    /// either store, and what the store answers about pins stays as it was (ADR-0044 clause 21):
     /// the records already written are put back, or never committed. `refuse(uid)` makes the
     /// write of that Agent's record fail; `mend` takes that away. Answers the retained revisions
     /// the store holds afterwards, which the caller judges: none with PostgreSQL, at most one
@@ -1945,7 +1945,7 @@ mod tests {
             .collect()
     }
 
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0044
     #[test]
     fn a_rollout_that_fails_leaves_no_assignment_on_the_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1965,7 +1965,7 @@ mod tests {
     }
 
     /// With PostgreSQL the revisions and the assignments commit together or not at all.
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0044
     #[test]
     fn a_rollout_that_fails_leaves_neither_revisions_nor_assignments_on_postgres() {
         let Some(test) = TestDatabase::named() else {
@@ -2573,7 +2573,7 @@ mod tests {
     /// A row that does not decode fails the read that meets it, naming its `instance_uid`: the
     /// load, the query, the query of it and the read of it. Opening the adapter, which reads the
     /// assignments alone, does not meet it (ADR-0044 clause 4).
-    /// Verifies: ADR-0029, ADR-0044
+    /// Verifies: ADR-0044, ADR-0044
     #[test]
     fn an_agent_row_that_does_not_decode_fails_the_read_that_meets_it_naming_it() {
         let Some(test) = TestDatabase::named() else {

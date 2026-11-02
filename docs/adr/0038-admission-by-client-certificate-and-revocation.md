@@ -1,7 +1,7 @@
 # ADR-0038: Admission by a client certificate alone, a guarded Operator plane, and a revocation list that follows renewal
 
-- **Status:** 🟡 proposed
-- **Date:** 2026-10-27
+- **Status:** 🟢 accepted
+- **Date:** 2026-11-02
 - **Deciders:** Markus Brigl
 - **Applies to:** Admission on `/v1/opamp`, the package download route and `/v1/gateway/revocations` in `crates/fleet-server/src/transport.rs`, `tls.rs` and `ca.rs`, the Operator plane's credential and guard in `crates/fleet-server/src/credentials.rs` and `api.rs`, admission throttling in `crates/fleet-server/src/throttle.rs`, the WebSocket session loop and the close frame `crates/opamp/src/server.rs` sends, the serial numbers `crates/fleet-server/src/ca.rs` assigns, the revocation list in `crates/fleet-server/src/revocation.rs` and `crates/fleet-server/src/fs/revocation.rs`, the `/api/v1/revocations` route, the reading of a CSR in `crates/fleet-server/src/ca.rs` and its handling in `crates/fleet-server/src/fleet.rs`, the Client's identity, CSR and renewal in `crates/fleet-agent/src/config.rs`, `tls.rs` and `csr.rs`, the identity it presents on a download in `crates/fleet-agent/src/packages.rs`, the `[tls]`, `[client_ca]`, `[enrolment]`, `[admission_throttle]` and `[rest.auth]` sections of `server.toml`, the `[tls]` section of `supervisor.toml`, an `[auth]` section in either file, and the Server's `hash-credential` command in `crates/fleet-server/src/main.rs`
 - **Supersedes:** [ADR-0021](0021-admission-by-client-certificate-and-revocation.md)

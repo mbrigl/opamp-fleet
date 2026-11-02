@@ -1,7 +1,7 @@
 //! One Agent's state machine: builds `AgentToServer` reports and reacts to `ServerToAgent`
 //! replies.
 //!
-//! Transport-agnostic on purpose (ADR-0012): the WebSocket and plain-HTTP loops feed the same
+//! Transport-agnostic on purpose (ADR-0045): the WebSocket and plain-HTTP loops feed the same
 //! state machine, so transport is carriage, never semantics. The [`Engine`](crate::engine)
 //! carries n of these over one connection (ADR-0015, ADR-0017) — a Supervisor-backed Agent and
 //! the self-Agent fallback are the same state machine.
@@ -592,7 +592,7 @@ impl AgentState {
         }
     }
 
-    /// Queues a certificate signing request for the next report (ADR-0021).
+    /// Queues a certificate signing request for the next report (ADR-0038).
     pub fn request_certificate(&mut self, csr: Vec<u8>) {
         self.protocol.request_certificate(csr);
     }

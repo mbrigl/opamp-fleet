@@ -1,7 +1,7 @@
 //! The configuration file the questionnaire writes and edits — `service install --interactive`
 //! and `service config` (ADR-0019).
 //!
-//! A release artifact is the bare binary (ADR-0034), so a fresh host has nothing to copy from, and
+//! A release artifact is the bare binary (ADR-0040), so a fresh host has nothing to copy from, and
 //! [`ClientConfig::load`](crate::config::ClientConfig::load) answers a missing file with the
 //! development defaults — a service that installs, starts, dials `127.0.0.1`, and manages nothing.
 //! This module is the way out of that state: it asks the handful of questions a fresh host cannot
@@ -206,13 +206,13 @@ impl Beside {
 /// that is right on a fresh host, and is written as a comment rather than as a value (ADR-0022).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Answers {
-    /// The Server's OpAMP endpoint; its scheme selects the transport (ADR-0012).
+    /// The Server's OpAMP endpoint; its scheme selects the transport (ADR-0045).
     pub endpoint: String,
     /// The operator's name for this Client, reported as `service.instance.name` (ADR-0016) — which
     /// of the fleet's Clients this is. Not its `service.name`: that is the Agent *type*, the
     /// constant `supervisor` (ADR-0019), the same on every host and nothing to ask about.
     pub name: String,
-    /// The CA that signed the Server's certificate, for a `wss://` / `https://` endpoint (ADR-0012).
+    /// The CA that signed the Server's certificate, for a `wss://` / `https://` endpoint (ADR-0045).
     /// The questionnaire always asks for it there; `None` for a loopback `ws://` / `http://`
     /// endpoint, or where no question was put — a packaged install.
     pub ca_file: Option<PathBuf>,
@@ -235,7 +235,7 @@ pub enum BootstrapFiles {
     Pkcs12(PathBuf),
 }
 
-/// The bootstrap identity (ADR-0021) the Client enrols with. Asked for only while the Client is
+/// The bootstrap identity (ADR-0038) the Client enrols with. Asked for only while the Client is
 /// not enrolled, and never copied or written into the file: the questionnaire's enrolment presents
 /// it once, to obtain the certificate the Server issues (ADR-0022 clause 16).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -653,7 +653,7 @@ pub fn ask(
         None
     };
 
-    // The bootstrap identity (ADR-0021) a host not yet enrolled enrols with: a PEM certificate and
+    // The bootstrap identity (ADR-0038) a host not yet enrolled enrols with: a PEM certificate and
     // its key, or a PKCS#12 file and its password (ADR-0022 clause 16). There is no answer without
     // one, and no question asks for a credential (ADR-0022) — the password opens a file on this
     // host and is sent nowhere. An enrolled host renews what it was issued and is not asked.

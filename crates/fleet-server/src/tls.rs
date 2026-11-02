@@ -1,4 +1,4 @@
-//! The listeners' TLS material (ADR-0012, ADR-0021), read from the files `[tls]`,
+//! The listeners' TLS material (ADR-0045, ADR-0038), read from the files `[tls]`,
 //! `[rest.tls]` and `[enrolment]` name and handed to `opamp`'s listener (ADR-0008).
 //!
 //! What is the Server's here is which material and why. The Agent plane requires a client
@@ -22,7 +22,7 @@ pub struct PlaneTls {
     pub agent: ServerTls,
     pub operator: ServerTls,
     pub issuers: Issuers,
-    /// The CAs whose certificates can be revoked (ADR-0021 clause 27).
+    /// The CAs whose certificates can be revoked (ADR-0038 clause 27).
     pub authorities: Vec<Authority>,
 }
 
@@ -39,7 +39,7 @@ pub struct Issuers {
     bootstrap: Vec<Ca>,
 }
 
-/// What the certificate a connection carries makes it (ADR-0021).
+/// What the certificate a connection carries makes it (ADR-0038).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Peer {
     /// A certificate from the client CA: a member of the fleet.
@@ -135,7 +135,7 @@ pub fn enrolling(certificate: &[u8]) -> Peer {
 }
 
 /// The material both planes serve with: `[tls]`'s on the Agent plane, and on the Operator plane
-/// `operator`'s — `[rest.tls]` — or, without it, `[tls]`'s as well (ADR-0012).
+/// `operator`'s — `[rest.tls]` — or, without it, `[tls]`'s as well (ADR-0045).
 ///
 /// # Errors
 /// Returns an error naming the file that cannot be read or holds nothing usable, or a `[rest.tls]`
@@ -195,7 +195,7 @@ pub fn server_tls(
     })
 }
 
-/// The `[rest.tls]` pair, read and checked as `[tls]`'s is (ADR-0012 clause 11). The key is
+/// The `[rest.tls]` pair, read and checked as `[tls]`'s is (ADR-0045 clause 11). The key is
 /// matched against the certificate here rather than when the plane is built, so the refusal
 /// names both files.
 fn operator_identity(operator: &RestTlsConfig) -> Result<Identity, String> {
@@ -336,9 +336,9 @@ mod tests {
 
     /// A `[rest.tls]` pair is checked at startup as `[tls]`'s is: a key that does not match its
     /// certificate, or a key file that cannot be read, refuses the start, and the message names
-    /// the files (ADR-0012 clause 11). A matching pair is what the Operator plane serves, while the
+    /// the files (ADR-0045 clause 11). A matching pair is what the Operator plane serves, while the
     /// Agent plane keeps `[tls]`'s.
-    /// Verifies: ADR-0012
+    /// Verifies: ADR-0045
     #[test]
     fn a_rest_tls_pair_is_checked_at_startup_and_served_on_the_operator_plane_alone() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -406,8 +406,8 @@ mod tests {
 
     /// A bootstrap certificate issued through an intermediate is still no member: with a bootstrap
     /// CA configured, membership is a certificate issued directly by the client CA, and nothing
-    /// else (ADR-0021 clause 17).
-    /// Verifies: ADR-0021
+    /// else (ADR-0038 clause 17).
+    /// Verifies: ADR-0038
     #[test]
     fn a_certificate_not_issued_by_the_client_ca_only_enrols() {
         let (client_der, client_subject, client_key) = ca("client CA", None);
@@ -442,8 +442,8 @@ mod tests {
 
     /// An intermediate below the bootstrap CA that copies the client CA's name issues nothing a
     /// member holds: membership is what the client CA's key signed, not a name an issuer can
-    /// take (ADR-0021 clause 17).
-    /// Verifies: ADR-0021
+    /// take (ADR-0038 clause 17).
+    /// Verifies: ADR-0038
     #[test]
     fn an_intermediate_named_like_the_client_ca_only_enrols() {
         let (client_der, _, client_key) = ca("client CA", None);
