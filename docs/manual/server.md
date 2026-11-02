@@ -421,9 +421,11 @@ once, with every instance stopped:
 ### `[database]`
 
 Optional. Where the Server keeps its records: one file per record under `data_dir`, the default, or
-one PostgreSQL database. Both are supported in production. Either way the Server loads every record
-at startup and answers from memory; the database is the durable copy, written before an act is
-answered, and only this Server writes to it while it runs.
+one PostgreSQL database. Both are supported in production. On files the Server loads every record
+at startup and answers from memory. On PostgreSQL it loads no Agent at startup: it keeps in memory
+the Agents connected to it, each read at its first report, and reads the fleet the API lists from
+the database. Either way the store is the durable copy, written before an act is answered, and only
+this Server writes to it while it runs.
 
 ```toml
 [database]

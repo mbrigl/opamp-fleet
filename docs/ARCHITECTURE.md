@@ -392,9 +392,12 @@ its queue), `package-floors.json` (the floor of each Agent type) and `audit/`
 With `[database] store = "postgres"` the records are rows of one PostgreSQL database instead, and
 `data_dir` keeps, with the filesystem blob store, `blobs/` and an archived `audit/`; with the blobs
 in S3 too there is no `data_dir`, and an instance keeps nothing on its disk
-([ADR-draft-the-servers-state-and-its-stores](adr/draft-the-servers-state-and-its-stores.md));
-the Server still loads every record at startup and answers from memory.
-A restart restores the fleet from them and shows each Agent disconnected until it reports; an
+([ADR-draft-the-servers-state-and-its-stores](adr/draft-the-servers-state-and-its-stores.md)).
+On files the Server loads every record at startup and answers from memory; on PostgreSQL an
+instance holds only the Agents connected to it, each read at its first report, and the Operator
+plane reads the fleet from the database.
+A restart on files restores the fleet from them and shows each Agent disconnected until it
+reports; an
 installation an older Server wrote is moved there once by `server migrate`. The Client keeps its
 state
 under `state_dir`: the issued certificate and key, the connection settings the Server offered,
