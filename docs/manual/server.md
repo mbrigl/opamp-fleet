@@ -11,6 +11,8 @@ a service.
 - [Running it](#running-it)
 - [Configuration reference](#configuration-reference)
 - [Where the Server keeps its state](#where-the-server-keeps-its-state)
+- [Moving the records into PostgreSQL](#moving-the-records-into-postgresql)
+- [Several instances](#several-instances)
 - [Upgrading to one data directory](#upgrading-to-one-data-directory)
 - [Mutual TLS: proving who is on the connection](#mutual-tls-proving-who-is-on-the-connection)
 - [Enrolment: a new host, approved by an operator](#enrolment-a-new-host-approved-by-an-operator)
@@ -418,9 +420,14 @@ That copy at startup is the filesystem record store's. A Server on PostgreSQL an
 `data_dir`, so a Server already on PostgreSQL with the filesystem blob store moves its artifacts
 once, with every instance stopped:
 
-1. Change `server.toml` to how the Server will start: `[blobs] store = "s3"` with its `[blobs.s3]`
+1. Start this release once on the old `server.toml`, the one that names `data_dir`, and stop it.
+   That start brings the schema up to this release, which `blobs-to-s3` needs, and links the
+   audit files under `data_dir/audit/` as the archive of the record
+   ([The audit record on PostgreSQL](#the-audit-record-on-postgresql)); a start without
+   `data_dir` would never link them.
+2. Change `server.toml` to how the Server will start: `[blobs] store = "s3"` with its `[blobs.s3]`
    section, and no `data_dir`.
-2. Upload the artifacts from the old directory:
+3. Upload the artifacts from the old directory:
 
    ```sh
    server blobs-to-s3 --data-dir /var/lib/opamp-fleet/fleet-data \
@@ -433,7 +440,7 @@ once, with every instance stopped:
    names that the bucket lacks, hashed as above, then checks that the bucket holds the artifact of
    every entry, and fails naming an entry whose artifact it does not hold. It only reads the
    directory, and a second run uploads nothing again.
-3. Start the Server. The old directory is no longer read; removing it is yours.
+4. Start the Server. The old directory is no longer read; removing it is yours.
 
 ### `[database]`
 
@@ -441,8 +448,8 @@ Optional. Where the Server keeps its records: one file per record under `data_di
 one PostgreSQL database. Both are supported in production. On files the Server loads every record
 at startup and answers from memory. On PostgreSQL it loads no Agent at startup: it keeps in memory
 the Agents connected to it, each read at its first report, and reads the fleet the API lists from
-the database. Either way the store is the durable copy, written before an act is answered, and only
-this Server writes to it while it runs.
+the database. Either way the store is the durable copy, written before an act is answered. Several
+instances may share one database: see [Several instances](#several-instances).
 
 ```toml
 [database]
@@ -721,8 +728,127 @@ server migrate-to-postgres --from /var/lib/opamp-fleet/fleet-data \
   tables and the new `data_dir` empty.
 
 Then set `data_dir` to the new directory and `[database] store = "postgres"`, and start the
-Server. With S3, remove `data_dir` from `server.toml` instead, if it names one. Moving records back
-from PostgreSQL to files is not provided.
+Server. With S3 there is no new `data_dir`: the `server.toml` the copy reads names none, as a
+Server on PostgreSQL and S3 refuses one. Moving records back from PostgreSQL to files is not
+provided.
+
+## Several instances
+
+Several Server instances serve one fleet when they share one PostgreSQL database and one S3
+bucket. Each holds a lease in the database ([`[database]`](#database)), every change one instance
+makes is decided in the database and reaches every other, the instance an Agent connected to last
+carries it, and no instance keeps anything on its disk. Each instance needs:
+
+- `[database] store = "postgres"` and `[blobs] store = "s3"`, with the same database, role, bucket
+  and prefix as the others, and no `data_dir`, in the file or the environment;
+- no CA key in a file: no `[client_ca]` and no `[enrolment] bootstrap_ca_key_file`. With either,
+  an instance runs alone
+  ([A CA key in a file means a standby](#a-ca-key-in-a-file-means-a-standby));
+- the same `server.toml` as the others, so that `max_agents` and the rest agree, and the same
+  `[tls]` certificate, which names the address the Clients connect to.
+
+In front of the Agent plane, that address is a TCP load balancer that passes the TLS connection
+through unopened, since the client certificate in its handshake is what admits an Agent, and keeps
+the peer's address, on which the [admission throttle](#repeated-failures-are-throttled) keys. It
+probes each instance with a TCP connection to the port `listen` names, `4320` by default: an
+instance without a lease has closed its listeners and is sent no Agent. The Operator plane of any
+instance shows the whole fleet and acts on it.
+
+### What a failover does
+
+- **An instance stops in order** (`SIGTERM`). It closes both listeners at once and ends its
+  WebSocket sessions spread over `drain_secs`. Then it writes where its Agents are, closes its
+  audit chain and releases its lease, and every other instance reads its Agents as disconnected at
+  once. Each WebSocket Client reconnects after a delay drawn over 30 seconds, a plain-HTTP Client
+  at its next poll, and the balancer sends it to another instance, which takes the Agent at its
+  first report.
+- **An instance ends without stopping**, killed or its host gone. Its connections break and its
+  Agents reconnect elsewhere in the same way. Its lease stays live until `lease_secs` after its last
+  renewal, and until then an Agent that has not reconnected still reads as connected through it.
+  At the first renewal after that, another instance takes the lapsed lease over: it logs
+  `took over the lease of an instance that is gone` with `taken_over=<instance id>`, closes that
+  lease's audit chain with `reason` `lease_lapsed`, and deletes that lease's staging objects in
+  the bucket.
+- **An instance loses the database.** Once it cannot renew before its lease lapses, it ends every
+  session it carries and closes both listeners, so the balancer sends it no Agent. When the
+  database answers again, it takes a new lease under a new instance id and opens them again.
+
+A request in flight on an instance that ends without stopping is not answered: read through
+another instance whether it took effect before making it again.
+
+### A CA key in a file means a standby
+
+An instance whose configuration names `[client_ca]` or `[enrolment] bootstrap_ca_key_file`, or
+keeps its artifacts as files, runs alone: it holds the database's lock, and a second instance
+started against the same database stops, naming the key, and exits non-zero. Failover is then a
+standby on another host: an instance with the same `server.toml`, started again until it starts —
+by its service manager's restart, or by hand. It starts once the database has ended the session of
+the instance before it: at once when that process ends, and for a host that is gone, once the
+database notices the lost connection. It then takes over that instance's lease, closes its audit
+chain, and the Agents reconnect to it.
+
+- **Let the service manager keep trying.** A refused start exits within a second, and systemd
+  stops restarting a unit that fails five times in ten seconds. Give the standby's unit
+  `StartLimitIntervalSec=0` under `[Unit]` and `RestartSec=5` under `[Service]`, beside the
+  `Restart=on-failure` of
+  [the unit in the setup](setup.md#2-configure-and-start-the-server). An orchestrator that waits
+  longer between restarts after each failed one delays the takeover as long.
+- **Bound how long the database takes to notice a host that is gone.** The database keeps the
+  session of a host that vanished until its TCP keepalives give up, by the operating system's
+  defaults about two hours. Set the database's `tcp_keepalives_idle`, `tcp_keepalives_interval`
+  and `tcp_keepalives_count`, or `tcp_user_timeout`, to the wait you accept, such as 30 seconds
+  idle, 10 seconds apart, 3 probes.
+
+To run instances side by side, take the CA keys off the Server: without `[client_ca]` the Server
+signs no certificate and takes no enrolment, and every host holds a certificate your own PKI
+issues, naming its host as [`[client_ca]`](#client_ca) describes.
+
+### Labels on several instances
+
+The fleet view, the reach counts and what a rollout releases are read from the database, and
+there every Agent inherits the labels of its Client Agent as on one Server. In the memory of the
+instance that carries an Agent, two cases do not inherit yet:
+
+- **An Agent behind a Gateway** whose Client Agent another instance carries does not inherit that
+  Client Agent's labels.
+- **A Client Agent bound to its Host** on one instance just before another instance first places a
+  fellow Agent of that Host is inherited there only once that group is placed again: when the
+  Client Agent's labels change, an Agent of the group is forgotten, the Agent's report changes, or
+  the instance has missed a notification and reads again.
+
+### From one Server on files to two instances
+
+1. **Run this release** on the one Server, on files.
+2. **Make the stores.** A PostgreSQL database and a role that may create tables in its default
+   schema, and a bucket with the lifecycle rule of [`[blobs]`](#blobs), both reachable from each
+   instance's host. Their replication and backups are yours.
+3. **Choose the CA's place.** With a CA key in a file, the second instance is a
+   [standby](#a-ca-key-in-a-file-means-a-standby); for two that serve at once, issue the hosts'
+   certificates outside the Server first.
+4. **Write the `server.toml` the instances start with**: `[database] store = "postgres"` with its
+   `[database.postgres]` section, `[blobs] store = "s3"` with its `[blobs.s3]` section, no
+   `data_dir`, and no `[audit] max_file_bytes` or `keep_files`, which are the filesystem store's.
+5. **Stop the Server and copy its records** with `server migrate-to-postgres --from <data_dir>
+   --config <server.toml>`, as in
+   [Moving the records into PostgreSQL](#moving-the-records-into-postgresql).
+   It uploads the artifacts into the bucket, and the old `data_dir` stays as the backup and as the
+   archive of the audit record. A Server already on PostgreSQL with its artifacts as files first
+   starts this release once on its old `server.toml`, with `data_dir`, and stops, then moves them
+   with `server blobs-to-s3` instead ([`[blobs]`](#blobs)).
+6. **Start the first instance**, and check the record with `server audit-verify --config
+   <server.toml> --archive <data_dir>/audit`.
+7. **Put the balancer in front** under the address the Clients connect to. To give them a new one,
+   offer it with `[connection_offer] endpoint`
+   ([Moving the fleet](#moving-the-fleet-connection-settings)).
+8. **Start the second instance** on another host, with the same `server.toml`.
+
+### Upgrading the instances
+
+Every instance on one database runs one release. To upgrade, stop every instance, then start each
+again on the new release; the first to start migrates the schema, and instances that start together
+wait for it. Two releases side by side, for an upgrade without a stop, are not built yet. Nor has
+any load been proven on several instances: how many Agents they carry and how long a failover of a
+large fleet takes are not yet measured.
 
 ## Upgrading to one data directory
 
@@ -1930,7 +2056,9 @@ ring whatever its Client is labelled. The Server tells a Client's Agents apart b
 arrived over. Behind a Gateway it groups them by the `host.id` they report, or by `host.name`
 where they report no `host.id`. Where such a group holds more than one Client Agent — two Clients
 on one machine behind one Gateway — no Agent of it inherits anything, and the fleet view marks them
-as ambiguous. The Agents tab shows inherited labels on each Agent, marked as such.
+as ambiguous. The Agents tab shows inherited labels on each Agent, marked as such. On several
+instances, two cases do not inherit yet in an instance's memory: see
+[Labels on several instances](#labels-on-several-instances).
 
 **What a Selector matches** is each Agent's effective description, the same for every Deployment.
 For each key it takes the first source that has it:

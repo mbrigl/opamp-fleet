@@ -225,7 +225,7 @@ jobs:
   # ADR-0019: the client carries platform-specific service paths (the Windows SCM shim, launchd
   # semantics) that a Linux-only lint never compiles. Keep them honest: clippy and tests on the
   # real platforms. Actual service registration still needs the manual smoke checklist
-  # (README.md → "Running as an OS service") — CI runners cannot exercise systemd/launchd/SCM.
+  # (README.md → "The service smoke test") — CI runners cannot exercise systemd/launchd/SCM.
   #
   # Both are required status checks (README.md → "Repository settings"), like every job of this
   # workflow, so these two are plain jobs without a 'name:' or a matrix: a ruleset names a check

@@ -62,7 +62,7 @@ impl Drop for Registered {
     }
 }
 
-/// Runs the real CLI, the way the README's checklist tells an operator to. Driving the binary
+/// Runs the real CLI, the way the manual tells an operator to. Driving the binary
 /// rather than the library is the point here: `service install` also stages the versioned layout,
 /// and an operator's mistake would be in that command line.
 fn client(args: &[&str], config: &Path) -> Result<String, String> {
@@ -256,7 +256,7 @@ fn the_installed_service_starts_comes_back_from_a_crash_and_stays_down_after_a_s
     );
 
     // launchd does not auto-start after an install (a known ADR-0019 gap), so every platform is
-    // started explicitly — which is also what the README's checklist tells an operator to do.
+    // started explicitly — which is also what the manual tells an operator to do.
     client(&["service", "start"], &config).expect("start the service");
     wait_for(
         "the service to report running",
