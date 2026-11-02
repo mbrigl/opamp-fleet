@@ -1,5 +1,5 @@
-# The Server's image (ADR-0034): the binary the release built and checked, on a distroless glibc
-# base, and nothing else.
+# The Server's image (ADR-draft-releases-attestations-and-the-server-image): the binary the
+# release built and checked, on a distroless glibc base, and nothing else.
 #
 # No `RUN`: the image copies a binary that already exists, so a multi-architecture build needs no
 # emulation and the image holds exactly the bytes the release tested for its version and described
@@ -37,8 +37,11 @@ COPY --chmod=0755 server-linux-${TARGETARCH} /usr/local/bin/server
 # Numeric, so nothing is looked up. Both planes listen above 1024, so no capability is needed.
 USER 65532:65532
 
-# The data directory. `WORKDIR` after `USER` creates it owned by 65532, which no `RUN` could do
-# here; a volume mounted on it starts with that owner.
+# The place for a data directory. `WORKDIR` after `USER` creates it owned by 65532, which no `RUN`
+# could do here; a volume mounted on it starts with that owner. The image names no data directory: a
+# Server on PostgreSQL and S3 keeps nothing on its disk, and one that keeps state there is given
+# `data_dir = "/var/lib/opamp-fleet"` by its operator. Given none, it falls back to `fleet-data`
+# under `/`, cannot write it, and stops naming `data_dir`.
 WORKDIR /var/lib/opamp-fleet
 VOLUME /var/lib/opamp-fleet
 # The working directory the Server runs in is `/`, which 65532 cannot write: the `server.toml` it
@@ -48,8 +51,7 @@ WORKDIR /
 # Everything else, certificates, keys and every secret included, is mounted as a file and named
 # through the environment (ADR-0030). Off the loopback the Server refuses to start without TLS and
 # without `[rest.auth]`, so this image started with nothing mounted names what is missing and stops.
-ENV FLEET_SERVER__DATA_DIR=/var/lib/opamp-fleet \
-    FLEET_SERVER__LISTEN=0.0.0.0:4320 \
+ENV FLEET_SERVER__LISTEN=0.0.0.0:4320 \
     FLEET_SERVER__REST__LISTEN=0.0.0.0:4321
 
 # The Agent plane and the Operator plane. No HEALTHCHECK: there is no shell to run one and no health

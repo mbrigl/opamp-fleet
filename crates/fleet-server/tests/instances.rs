@@ -344,9 +344,9 @@ impl Instance {
         let floors = Arc::new(PackageFloors::open(records.floors()).expect("floors"));
         let enrolment =
             Arc::new(Enrolment::open_on(clock.clone(), records.enrolment()).expect("enrolment"));
-        let packages = fleet_server::packages::PackageStore::open_on(
+        let (packages, _) = fleet_server::packages::PackageStore::open_on(
             &records,
-            dir.path(),
+            Some(dir.path()),
             &toml::from_str::<fleet_server::config::BlobsConfig>("").expect("blobs"),
         )
         .expect("packages");
