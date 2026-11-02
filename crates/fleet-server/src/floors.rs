@@ -30,17 +30,50 @@ pub trait FloorStore: Send + Sync {
     /// Returns an error naming what cannot be read.
     fn load(&self) -> Result<BTreeMap<String, Floor>, String>;
 
-    /// Stores `floor` for `agent_type`, replacing the one stored.
+    /// Stores `floor` for `agent_type` unless its version orders below the one stored, deciding
+    /// from what the store holds, as another instance may have raised it since this one read it
+    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// clause 19).
     ///
     /// # Errors
     /// Returns an error when the floor cannot be persisted; the store is then as it was.
-    fn put(&self, agent_type: &str, floor: &Floor) -> Result<(), String>;
+    fn put(&self, agent_type: &str, floor: &Floor) -> Result<Put, String>;
 
-    /// Removes the floor of `agent_type`; content when there is none.
+    /// Removes the floor of `agent_type`: `false` when there is none.
     ///
     /// # Errors
     /// Returns an error when the removal cannot be persisted; the store is then as it was.
-    fn remove(&self, agent_type: &str) -> Result<(), String>;
+    fn remove(&self, agent_type: &str) -> Result<bool, String>;
+}
+
+/// What the store found when it was asked to store a floor.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Put {
+    /// The floor is stored.
+    Stored,
+    /// The floor stored orders above the one asked for; it is this one, kept.
+    Lower(Floor),
+}
+
+/// Stores `floor` in floors a store holds whole, by the rule of [`FloorStore::put`]: SemVer
+/// precedence, compared here, as a database does not order SemVer.
+pub(crate) fn put_into(
+    floors: &mut BTreeMap<String, Floor>,
+    agent_type: &str,
+    floor: &Floor,
+) -> Put {
+    if let Some(stored) = floors.get(agent_type) {
+        if below(&floor.version, &stored.version) {
+            return Put::Lower(stored.clone());
+        }
+    }
+    floors.insert(agent_type.to_string(), floor.clone());
+    Put::Stored
+}
+
+/// Whether `version` orders below `stored` by SemVer precedence.
+pub(crate) fn below(version: &str, stored: &str) -> bool {
+    fleet_core::version::precedence(version, stored) == Some(std::cmp::Ordering::Less)
 }
 
 /// Why a floor was not stored.
@@ -142,23 +175,28 @@ impl PackageFloors {
             )));
         }
         let mut floors = self.floors.lock().expect("floors lock");
-        if let Some(stored) = floors.get(agent_type) {
-            if fleet_core::version::precedence(version, &stored.version)
-                == Some(std::cmp::Ordering::Less)
-            {
-                return Err(FloorError::Lower(stored.version.clone()));
-            }
-        }
         let floor = Floor {
             version: version.to_string(),
             signature,
         };
-        self.store
+        // The store decides, not what this instance holds: another may have raised the floor, or
+        // removed it, since this one read it.
+        match self
+            .store
             .put(agent_type, &floor)
-            .map_err(FloorError::Store)?;
-        let state = self.state(agent_type, &floor);
-        floors.insert(agent_type.to_string(), floor);
-        Ok(state)
+            .map_err(FloorError::Store)?
+        {
+            Put::Stored => {
+                let state = self.state(agent_type, &floor);
+                floors.insert(agent_type.to_string(), floor);
+                Ok(state)
+            }
+            Put::Lower(stored) => {
+                let version = stored.version.clone();
+                floors.insert(agent_type.to_string(), stored);
+                Err(FloorError::Lower(version))
+            }
+        }
     }
 
     /// Removes the floor of `agent_type`: `Ok(false)` when there is none. It only stops serving
@@ -168,12 +206,9 @@ impl PackageFloors {
     /// Returns an error when the removal could not be persisted; the floor is then kept.
     pub fn remove(&self, agent_type: &str) -> Result<bool, String> {
         let mut floors = self.floors.lock().expect("floors lock");
-        if !floors.contains_key(agent_type) {
-            return Ok(false);
-        }
-        self.store.remove(agent_type)?;
+        let removed = self.store.remove(agent_type)?;
         floors.remove(agent_type);
-        Ok(true)
+        Ok(removed)
     }
 }
 
@@ -189,16 +224,15 @@ pub(crate) mod tests {
         fn load(&self) -> Result<BTreeMap<String, Floor>, String> {
             Ok(self.0.lock().expect("lock").clone())
         }
-        fn put(&self, agent_type: &str, floor: &Floor) -> Result<(), String> {
-            self.0
-                .lock()
-                .expect("lock")
-                .insert(agent_type.to_string(), floor.clone());
-            Ok(())
+        fn put(&self, agent_type: &str, floor: &Floor) -> Result<Put, String> {
+            Ok(put_into(
+                &mut self.0.lock().expect("lock"),
+                agent_type,
+                floor,
+            ))
         }
-        fn remove(&self, agent_type: &str) -> Result<(), String> {
-            self.0.lock().expect("lock").remove(agent_type);
-            Ok(())
+        fn remove(&self, agent_type: &str) -> Result<bool, String> {
+            Ok(self.0.lock().expect("lock").remove(agent_type).is_some())
         }
     }
 

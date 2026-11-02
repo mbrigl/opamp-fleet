@@ -134,6 +134,7 @@ impl Records {
         super::ledger::write_revocations(client, &revocations).await?;
         for (host, entry) in &self.ledger.hosts {
             super::ledger::write_host(client, host, entry).await?;
+            super::ledger::write_bindings(client, host, entry).await?;
         }
         for (entry, file) in &self.bootstrap {
             super::bootstrap::write(client, entry, file.as_deref()).await?;
@@ -511,15 +512,18 @@ mod tests {
         };
         ledger.put_issued(&issued).expect("issued");
         ledger
-            .save_revocations(&[Revocation {
-                id: "r1".into(),
-                revoked: Revoked::Certificate {
-                    authority: "client".into(),
-                    issuers: vec![issued.facts.id.issuer.clone()],
-                    serial: "0b".into(),
+            .add_revocation(
+                &Revocation {
+                    id: "r1".into(),
+                    revoked: Revoked::Certificate {
+                        authority: "client".into(),
+                        issuers: vec![issued.facts.id.issuer.clone()],
+                        serial: "0b".into(),
+                    },
+                    revoked_ms: 2,
                 },
-                revoked_ms: 2,
-            }])
+                1,
+            )
             .expect("revocations");
         ledger
             .save_hosts(&BTreeMap::from([(
