@@ -613,11 +613,45 @@ pub struct AppState {
     forgotten: Mutex<HashMap<ConnId, Vec<InstanceUid>>>,
 }
 
-/// What the last presence batch wrote: the holder it named, and each Agent's presence.
+/// What the last presence batch wrote: the holder it named, each Agent's presence, and the count of
+/// takes the store last answered for each Agent under that holder, which a disconnect is written
+/// only under.
 #[derive(Default)]
 struct PresenceWritten {
     holder: Option<String>,
     agents: HashMap<InstanceUid, Presence>,
+    takes: HashMap<InstanceUid, u64>,
+}
+
+impl PresenceWritten {
+    /// Starts over under `holder`, where it names another.
+    fn under(&mut self, holder: &str) {
+        if self.holder.as_deref() != Some(holder) {
+            self.holder = Some(holder.to_string());
+            self.agents.clear();
+            self.takes.clear();
+        }
+    }
+
+    /// Keeps `take` as the count of takes of `uid` a batch answered, unless a greater one was
+    /// kept: a batch's answer that arrives after a later take's never replaces it.
+    fn answered(&mut self, uid: InstanceUid, take: u64) {
+        let kept = self.takes.entry(uid).or_insert(take);
+        *kept = (*kept).max(take);
+    }
+
+    /// Keeps `take` as the count of takes of `uid` a take answered, whatever was kept: the take
+    /// holds the fleet lock, so its answer is the latest, also where the record was forgotten and
+    /// created again with a count that starts over.
+    fn taken(&mut self, uid: InstanceUid, take: u64) {
+        self.takes.insert(uid, take);
+    }
+
+    /// Forgets what was written of `uid`, which left what this instance holds.
+    fn remove(&mut self, uid: &InstanceUid) {
+        self.agents.remove(uid);
+        self.takes.remove(uid);
+    }
 }
 
 impl AppState {
@@ -1908,6 +1942,10 @@ impl AppState {
             self.unpersist(uid);
         }
         let removed = fleet.remove(uid);
+        self.presence_written
+            .lock()
+            .expect("presence lock")
+            .remove(uid);
         // Its `instance_uid` leaves the Host it was bound to: whichever host reports it next binds
         // it (ADR-0024 clause 10).
         if let Some(revocations) = &self.revocations {
@@ -2095,6 +2133,10 @@ impl AppState {
         };
         self.end_session(uid, &record);
         self.written.lock().expect("written lock").remove(uid);
+        self.presence_written
+            .lock()
+            .expect("presence lock")
+            .remove(uid);
         self.unplace(fleet, uid, record.placement.group.clone());
         info!(agent = %uid, "dropped an agent forgotten through another instance");
     }
@@ -2121,13 +2163,12 @@ impl AppState {
     /// # Errors
     /// Returns an error when the batch cannot be written.
     pub fn write_presence(&self, holder: &str) -> Result<usize, String> {
-        let batch: Vec<(InstanceUid, Presence)> = {
+        let batch: Vec<(InstanceUid, Presence, Option<u64>)> = {
             let fleet = self.fleet.lock().expect("fleet lock");
             let mut written = self.presence_written.lock().expect("presence lock");
-            if written.holder.as_deref() != Some(holder) {
-                written.agents.clear();
-            }
+            written.under(holder);
             written.agents.retain(|uid, _| fleet.contains_key(uid));
+            written.takes.retain(|uid, _| fleet.contains_key(uid));
             let mut batch: Vec<_> = fleet
                 .iter()
                 .map(|(uid, record)| (*uid, record.presence()))
@@ -2135,28 +2176,35 @@ impl AppState {
                     Some(written) => written != presence,
                     None => presence.connected,
                 })
+                .map(|(uid, presence)| (uid, presence, written.takes.get(&uid).copied()))
                 .collect();
-            batch.sort_by_key(|(uid, _)| uid.0);
+            batch.sort_by_key(|(uid, ..)| uid.0);
             batch
         };
         if batch.is_empty() {
             return Ok(0);
         }
-        self.agent_store.write_presence(holder, &batch)?;
+        let takes = self.agent_store.write_presence(holder, &batch)?;
         let mut written = self.presence_written.lock().expect("presence lock");
-        if written.holder.as_deref() != Some(holder) {
-            written.holder = Some(holder.to_string());
-            written.agents.clear();
+        written.under(holder);
+        written
+            .agents
+            .extend(batch.iter().map(|(uid, presence, _)| (*uid, *presence)));
+        for (uid, take) in takes {
+            written.answered(uid, take);
         }
-        written.agents.extend(batch.iter().copied());
         Ok(batch.len())
     }
 
-    /// On a shared store, writes at once that `uid` is connected here, naming this instance as its
+    /// On a shared store, takes `uid` at once as connected here, naming this instance as its
     /// holder, so that no other instance forgets it as not connected while the next batch is due
-    /// (ADR-draft-the-fleet-record-of-agents-and-hosts clause 11): one write per connect, never
-    /// per heartbeat. Without a lease nothing is written. One that fails is logged, and the next
-    /// batch writes it.
+    /// (ADR-draft-the-fleet-record-of-agents-and-hosts clause 11), and so that an instance that
+    /// carried it before stops carrying it
+    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// clause 8): one write per connect, never per heartbeat. A take that makes the Agent's holder
+    /// change more than ten times within a minute is logged as a likely duplicate. Without a lease
+    /// nothing is written. One that fails is logged, and the next batch writes it, where no other
+    /// instance took the Agent meanwhile.
     fn write_connected(&self, uid: &InstanceUid, presence: Presence) {
         if !self.agent_store.is_shared() {
             return;
@@ -2164,19 +2212,92 @@ impl AppState {
         let Some(holder) = self.lease.get().and_then(|lease| lease.borrow().clone()) else {
             return;
         };
-        if let Err(e) = self
-            .agent_store
-            .write_presence(&holder, &[(*uid, presence)])
-        {
-            warn!(agent = %uid, error = %e, "cannot write that the agent is connected here");
-            return;
-        }
+        let take = match self.agent_store.take(uid, &holder, presence.last_seen_ms) {
+            Ok(Some(taken)) => {
+                if let Some(from) = &taken.from {
+                    debug!(agent = %uid, from = %from, "took the agent from another instance");
+                }
+                if taken.likely_duplicate {
+                    warn!(
+                        agent = %uid,
+                        "the agent's holder changed more than ten times within a minute; \
+                         likely a duplicate instance_uid on two connections"
+                    );
+                }
+                taken.take
+            }
+            // Forgotten through another instance: this exchange's write finds no record, and
+            // drops it.
+            Ok(None) => return,
+            Err(e) => {
+                warn!(agent = %uid, error = %e, "cannot write that the agent is connected here");
+                return;
+            }
+        };
         let mut written = self.presence_written.lock().expect("presence lock");
-        if written.holder.as_deref() != Some(holder.as_str()) {
-            written.holder = Some(holder);
-            written.agents.clear();
-        }
+        written.under(&holder);
         written.agents.insert(*uid, presence);
+        written.taken(*uid, take);
+    }
+
+    /// Stops carrying each Agent of `uids`, every one this instance carries where `None`, whose
+    /// stored presence no longer names this instance as its holder: another instance took it
+    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// clause 8). It is held as on a closed connection, and its disconnect is not written, since
+    /// the row is the other instance's. An Agent the row still names is kept, so of two instances
+    /// that take one Agent at once only the one the row does not name stops carrying it. The
+    /// holders are read once without the fleet lock, and those that differ again under it, which
+    /// every take of this instance holds, so a take made here since the first read is seen. On a
+    /// store that keeps no presence, or without a lease, nothing is read.
+    ///
+    /// # Errors
+    /// Returns an error when the holders cannot be read; what is held is then kept.
+    pub fn release_taken(&self, uids: Option<&HashSet<InstanceUid>>) -> Result<(), String> {
+        if !self.agent_store.is_shared() {
+            return Ok(());
+        }
+        let Some(holder) = self.lease.get().and_then(|lease| lease.borrow().clone()) else {
+            return Ok(());
+        };
+        let carried = |fleet: &HashMap<InstanceUid, AgentRecord>| -> Vec<InstanceUid> {
+            fleet
+                .iter()
+                .filter(|(uid, record)| {
+                    record.connected && uids.is_none_or(|uids| uids.contains(uid))
+                })
+                .map(|(uid, _)| *uid)
+                .collect()
+        };
+        let named_elsewhere = |stored: HashMap<InstanceUid, Option<String>>| -> Vec<InstanceUid> {
+            stored
+                .into_iter()
+                .filter(|(_, stored)| stored.as_deref() != Some(holder.as_str()))
+                .map(|(uid, _)| uid)
+                .collect()
+        };
+        let held = carried(&self.fleet.lock().expect("fleet lock"));
+        if held.is_empty() {
+            return Ok(());
+        }
+        let differing = named_elsewhere(self.agent_store.holders(&held)?);
+        if differing.is_empty() {
+            return Ok(());
+        }
+        let mut fleet = self.fleet.lock().expect("fleet lock");
+        let taken = named_elsewhere(self.agent_store.holders(&differing)?);
+        let mut written = self.presence_written.lock().expect("presence lock");
+        for uid in taken {
+            let Some(record) = fleet.get_mut(&uid).filter(|record| record.connected) else {
+                continue;
+            };
+            record.connected = false;
+            record.owner = None;
+            if written.holder.as_deref() == Some(holder.as_str()) {
+                written.agents.insert(uid, record.presence());
+            }
+            debug!(agent = %uid, "another instance took the agent; this one no longer carries it");
+        }
+        Ok(())
     }
 
     /// The Agents forgotten while connection `conn` carried them, taken once: its loop ends their
@@ -2209,18 +2330,28 @@ impl AppState {
     /// others it holds what it loaded, and another instance carries them
     /// (ADR-draft-the-fleet-record-of-agents-and-hosts clause 2). Of those, only the ones no other
     /// instance holds the connection of: an Agent heard here that moved to another instance keeps
-    /// what that instance wrote of it.
+    /// what that instance wrote of it. Whether one moved is told by the count of takes this
+    /// instance was last answered, never by comparing its clock with another's.
     pub fn flush_agents(&self) {
         let fleet = self.fleet.lock().expect("fleet lock");
-        let mut written = self.written.lock().expect("written lock");
         let shared = self.agent_store.is_shared();
         let holder = self.lease.get().and_then(|lease| lease.borrow().clone());
+        let takes = {
+            let presence = self.presence_written.lock().expect("presence lock");
+            if presence.holder.is_some() && presence.holder == holder {
+                presence.takes.clone()
+            } else {
+                HashMap::new()
+            }
+        };
+        let mut written = self.written.lock().expect("written lock");
         for (uid, record) in fleet.iter().filter(|(_, record)| record.heard || !shared) {
             let persisted = record.to_persisted();
             match self.agent_store.write_report_unless_held_elsewhere(
                 uid,
                 &persisted,
                 holder.as_deref(),
+                takes.get(uid).copied(),
             ) {
                 Ok(true) => {
                     written.insert(*uid, persisted.durable_digest());
@@ -2345,6 +2476,10 @@ impl AppState {
                         fleet.insert(new_uid, record);
                         self.unplace(&mut fleet, &uid, group);
                         self.written.lock().expect("written lock").remove(&uid);
+                        self.presence_written
+                            .lock()
+                            .expect("presence lock")
+                            .remove(&uid);
                     }
                     info!(old = %uid, new = %new_uid, "assigned a server-generated instance_uid");
                     identification = Some(AgentIdentification {
@@ -6275,7 +6410,7 @@ mod tests {
     }
 
     /// One presence batch as it reached the store.
-    type Batch = Vec<(InstanceUid, Presence)>;
+    type Batch = Vec<(InstanceUid, Presence, Option<u64>)>;
 
     impl AgentStore for Counted {
         fn load(&self) -> Result<HashMap<InstanceUid, PersistedAgent>, String> {
@@ -6305,13 +6440,13 @@ mod tests {
         fn write_presence(
             &self,
             _holder: &str,
-            presence: &[(InstanceUid, Presence)],
-        ) -> Result<(), String> {
+            presence: &[(InstanceUid, Presence, Option<u64>)],
+        ) -> Result<HashMap<InstanceUid, u64>, String> {
             self.batches
                 .lock()
                 .expect("batches lock")
                 .push(presence.to_vec());
-            Ok(())
+            Ok(HashMap::new())
         }
         fn release(
             &self,
@@ -6375,9 +6510,9 @@ mod tests {
             let batches = batches.lock().expect("batches");
             let mut ordered = uids.clone();
             ordered.sort_by_key(|uid| uid.0);
-            let batch: Vec<InstanceUid> = batches[0].iter().map(|(uid, _)| *uid).collect();
+            let batch: Vec<InstanceUid> = batches[0].iter().map(|(uid, ..)| *uid).collect();
             assert_eq!(batch, ordered, "in the order of the instance_uid");
-            assert!(batches[0].iter().all(|(_, presence)| presence.connected));
+            assert!(batches[0].iter().all(|(_, presence, _)| presence.connected));
         }
 
         for beat in 2..=4u64 {
@@ -6409,7 +6544,7 @@ mod tests {
             let last = batches.last().expect("a batch");
             assert!(last
                 .iter()
-                .all(|(_, presence)| presence.last_seen_ms == now.load(Ordering::SeqCst)));
+                .all(|(_, presence, _)| presence.last_seen_ms == now.load(Ordering::SeqCst)));
         }
         assert_eq!(state.write_presence("a"), Ok(0), "nothing moved");
 
@@ -6425,6 +6560,27 @@ mod tests {
             Ok(999),
             "a new holder writes every connected one"
         );
+    }
+
+    /// The count of takes a batch answers for an Agent never lowers the one kept, so a batch's
+    /// answer that arrives after a later take's keeps the take's; a take's answer replaces it, also
+    /// a lower one, as a record forgotten and created again counts from the start; a new holder
+    /// starts over.
+    /// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts
+    #[test]
+    fn the_count_of_takes_kept_for_an_agent_never_moves_back() {
+        let uid = InstanceUid([1; 16]);
+        let mut written = PresenceWritten::default();
+        written.under("a");
+        written.answered(uid, 3);
+        written.answered(uid, 2);
+        assert_eq!(written.takes.get(&uid), Some(&3), "the later take's");
+        written.answered(uid, 4);
+        assert_eq!(written.takes.get(&uid), Some(&4));
+        written.taken(uid, 1);
+        assert_eq!(written.takes.get(&uid), Some(&1), "a take's answer");
+        written.under("b");
+        assert!(written.takes.is_empty(), "a new holder starts over");
     }
 
     /// The first presence batch of an instance writes the Agents it carries, not the fleet it
@@ -6470,6 +6626,7 @@ mod tests {
         gets: Arc<AtomicU64>,
         batched_gets: Arc<AtomicU64>,
         failing_rekeys: Arc<std::sync::atomic::AtomicBool>,
+        after_holders: Arc<Mutex<Option<Act>>>,
     }
 
     /// What [`Hooked`] runs once after a read.
@@ -6484,6 +6641,7 @@ mod tests {
                 gets: Arc::new(AtomicU64::new(0)),
                 batched_gets: Arc::new(AtomicU64::new(0)),
                 failing_rekeys: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                after_holders: Arc::new(Mutex::new(None)),
             }
         }
     }
@@ -6529,9 +6687,10 @@ mod tests {
             uid: &InstanceUid,
             record: &PersistedAgent,
             holder: Option<&str>,
+            take: Option<u64>,
         ) -> Result<bool, String> {
             self.inner
-                .write_report_unless_held_elsewhere(uid, record, holder)
+                .write_report_unless_held_elsewhere(uid, record, holder, take)
         }
         fn create_within(
             &self,
@@ -6561,8 +6720,8 @@ mod tests {
         fn write_presence(
             &self,
             holder: &str,
-            presence: &[(InstanceUid, Presence)],
-        ) -> Result<(), String> {
+            presence: &[(InstanceUid, Presence, Option<u64>)],
+        ) -> Result<HashMap<InstanceUid, u64>, String> {
             self.inner.write_presence(holder, presence)
         }
         fn remove_if_silent(
@@ -6571,6 +6730,25 @@ mod tests {
             silent_before_ms: u64,
         ) -> Result<Option<bool>, String> {
             self.inner.remove_if_silent(uid, silent_before_ms)
+        }
+        fn take(
+            &self,
+            uid: &InstanceUid,
+            holder: &str,
+            last_seen_ms: u64,
+        ) -> Result<Option<crate::agent_store::Taken>, String> {
+            self.inner.take(uid, holder, last_seen_ms)
+        }
+        fn holders(
+            &self,
+            uids: &[InstanceUid],
+        ) -> Result<HashMap<InstanceUid, Option<String>>, String> {
+            let holders = self.inner.holders(uids);
+            let after = self.after_holders.lock().expect("hook lock").take();
+            if let Some(after) = after {
+                after();
+            }
+            holders
         }
         fn rekey(
             &self,
@@ -6631,6 +6809,113 @@ mod tests {
             subject_values: crate::revocation::SubjectValues::default(),
             not_after_ms: u64::MAX,
         }
+    }
+
+    /// What an instance wrote of an Agent's presence, the count of takes among it, leaves with the
+    /// Agent wherever it leaves what the instance holds: when it is forgotten here, when it was
+    /// forgotten through another instance, and under its old identity when it is re-keyed.
+    /// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts
+    #[test]
+    fn what_was_written_of_an_agents_presence_leaves_with_it() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let on = |lease: &str| {
+            let state = on_postgres(
+                &database,
+                Box::new(crate::postgres::agents::PgAgentStore::new(database.clone())),
+            );
+            state.serve_under(tokio::sync::watch::channel(Some(lease.to_string())).1);
+            state
+        };
+        let (a, b) = (
+            on("00000000-0000-7000-8000-00000000000a"),
+            on("00000000-0000-7000-8000-00000000000b"),
+        );
+        let kept = |state: &AppState, uid: &InstanceUid| {
+            let written = state.presence_written.lock().expect("presence lock");
+            (
+                written.agents.contains_key(uid),
+                written.takes.contains_key(uid),
+            )
+        };
+        let (forgotten, elsewhere, rekeyed) = (
+            InstanceUid([0x71; 16]),
+            InstanceUid([0x72; 16]),
+            InstanceUid([0x73; 16]),
+        );
+        for (conn, uid) in (1..).zip([forgotten, elsewhere, rekeyed]) {
+            a.process(report(&uid, 1), Transport::WebSocket, Some(conn));
+            assert_eq!(kept(&a, &uid), (true, true), "taken");
+        }
+
+        a.mark_disconnected(&[forgotten], 1);
+        a.mark_disconnected(&[elsewhere], 2);
+        assert!(a.forget_agent(&forgotten).is_ok(), "forget here");
+        assert_eq!(kept(&a, &forgotten), (false, false), "forgotten here");
+
+        assert!(b.forget_agent(&elsewhere).is_ok(), "forget through B");
+        // A report that changes the record finds it gone.
+        let mut changed = report(&elsewhere, 3);
+        changed.health = Some(opamp::proto::ComponentHealth {
+            healthy: true,
+            ..Default::default()
+        });
+        a.process(changed, Transport::WebSocket, Some(2));
+        assert_eq!(
+            kept(&a, &elsewhere),
+            (false, false),
+            "forgotten through another instance"
+        );
+
+        let mut rekey = report(&rekeyed, 2);
+        rekey.flags = AgentToServerFlags::RequestInstanceUid as u64;
+        a.process(rekey, Transport::WebSocket, Some(3));
+        assert_eq!(kept(&a, &rekeyed), (false, false), "re-keyed");
+    }
+
+    /// An instance that heard another took an Agent reads the holder again under the fleet lock
+    /// before it stops carrying it: a take of its own made between its first read and the lock, by
+    /// the Agent's new connection here, keeps the Agent carried.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    #[test]
+    fn an_agent_taken_back_here_between_the_two_reads_of_its_holder_stays_carried() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let hooked = Hooked::new(Box::new(crate::postgres::agents::PgAgentStore::new(
+            database.clone(),
+        )));
+        let after_holders = hooked.after_holders.clone();
+        let a = Arc::new(on_postgres(&database, Box::new(hooked)));
+        a.serve_under(
+            tokio::sync::watch::channel(Some("00000000-0000-7000-8000-00000000000a".to_string())).1,
+        );
+        let b = on_postgres(
+            &database,
+            Box::new(crate::postgres::agents::PgAgentStore::new(database.clone())),
+        );
+        b.serve_under(
+            tokio::sync::watch::channel(Some("00000000-0000-7000-8000-00000000000b".to_string())).1,
+        );
+        let uid = InstanceUid([0x74; 16]);
+        a.process(report(&uid, 1), Transport::WebSocket, Some(7));
+        b.process(report(&uid, 2), Transport::WebSocket, Some(9));
+        // Between A's first read of the holder and its fleet lock, the Agent's old connection to A
+        // closes and it connects to A again, which takes it back.
+        let again = a.clone();
+        *after_holders.lock().expect("hook lock") = Some(Box::new(move || {
+            again.mark_disconnected(&[uid], 7);
+            again.process(report(&uid, 3), Transport::WebSocket, Some(8));
+        }));
+        a.release_taken(None).expect("release");
+        assert!(
+            after_holders.lock().expect("hook lock").is_none(),
+            "the take came between the reads"
+        );
+        assert!(view(&a, &uid).connected, "still carried");
     }
 
     /// On PostgreSQL a first report here whose read of the stored record failed goes on from the

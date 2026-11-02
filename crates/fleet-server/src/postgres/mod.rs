@@ -694,6 +694,62 @@ pub(crate) mod testing {
     pub(crate) struct TestDatabase {
         pub(crate) config: PostgresConfig,
         pub(crate) schema: String,
+        /// Released once the schema is dropped.
+        _slot: Slot,
+    }
+
+    /// How many test threads work in a schema at once. A test's databases, listening connections
+    /// and racers hold several connections, and the test database, like CI's, admits 100 (three of
+    /// them reserved), so the tests the harness would otherwise run at once, one per core, beside
+    /// another suite on the same database, can exhaust it or wait out its `lock_timeout`.
+    const SCHEMAS_AT_ONCE: usize = 8;
+
+    /// The places taken, and the wake-up of a test that waits for one.
+    static SLOTS: (std::sync::Mutex<usize>, std::sync::Condvar) =
+        (std::sync::Mutex::new(0), std::sync::Condvar::new());
+
+    std::thread_local! {
+        /// The schemas this thread works in: a test that opens a second one keeps its place
+        /// rather than wait for another, which could wait for ever.
+        static HELD: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    /// One of the [`SCHEMAS_AT_ONCE`] places a test thread works in, held until the schema that
+    /// took it is dropped; a further schema of the same thread takes none.
+    struct Slot {
+        took: bool,
+    }
+
+    impl Slot {
+        /// Waits until fewer than [`SCHEMAS_AT_ONCE`] test threads work in a schema, and takes a
+        /// place, unless this thread holds one.
+        fn take() -> Slot {
+            let took = HELD.get() == 0;
+            if took {
+                let (taken, freed) = &SLOTS;
+                let mut taken = freed
+                    .wait_while(taken.lock().expect("slots"), |taken| {
+                        *taken >= SCHEMAS_AT_ONCE
+                    })
+                    .expect("slots");
+                *taken += 1;
+            }
+            HELD.set(HELD.get() + 1);
+            Slot { took }
+        }
+    }
+
+    impl Drop for Slot {
+        fn drop(&mut self) {
+            HELD.set(HELD.get().saturating_sub(1));
+            if self.took {
+                let (taken, freed) = &SLOTS;
+                *taken
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) -= 1;
+                freed.notify_one();
+            }
+        }
     }
 
     impl TestDatabase {
@@ -733,6 +789,7 @@ pub(crate) mod testing {
             let test = TestDatabase {
                 config,
                 schema: format!("fleet_test_{}", hex::encode(random)),
+                _slot: Slot::take(),
             };
             test.admin(&format!("CREATE SCHEMA {}", test.schema));
             Some(test)

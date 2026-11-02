@@ -34,6 +34,45 @@ const TIMES: LeaseTimes = LeaseTimes {
 struct Schema {
     config: PostgresConfig,
     name: String,
+    /// Released once the schema is dropped, after this test's instances closed their connections.
+    _slot: Slot,
+}
+
+/// How many tests work in a schema at once. Each runs instances whose pools, listening
+/// connections and leases hold up to eight connections together, and the test database, like
+/// CI's, admits 100 (three of them reserved), so the tests the harness would otherwise run at
+/// once, one per core, can exhaust it.
+const SCHEMAS_AT_ONCE: usize = 8;
+
+/// One of the [`SCHEMAS_AT_ONCE`] places a test works in, held until it is dropped.
+struct Slot;
+
+/// The places taken, and the wake-up of a test that waits for one.
+static SLOTS: (std::sync::Mutex<usize>, std::sync::Condvar) =
+    (std::sync::Mutex::new(0), std::sync::Condvar::new());
+
+impl Slot {
+    /// Waits until fewer than [`SCHEMAS_AT_ONCE`] tests work in a schema, and takes a place.
+    fn take() -> Slot {
+        let (taken, freed) = &SLOTS;
+        let mut taken = freed
+            .wait_while(taken.lock().expect("slots"), |taken| {
+                *taken >= SCHEMAS_AT_ONCE
+            })
+            .expect("slots");
+        *taken += 1;
+        Slot
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        let (taken, freed) = &SLOTS;
+        *taken
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) -= 1;
+        freed.notify_one();
+    }
 }
 
 impl Schema {
@@ -70,6 +109,7 @@ impl Schema {
         let schema = Schema {
             config,
             name: format!("fleet_test_{}", hex::encode(random)),
+            _slot: Slot::take(),
         };
         schema.sql(&format!("CREATE SCHEMA {}", schema.name));
         Some(schema)
@@ -224,6 +264,8 @@ struct Instance {
     floors: Arc<PackageFloors>,
     enrolment: Arc<Enrolment>,
     following: fleet_server::instance::Following,
+    /// The admission throttle of the Agent plane, where it was started with one.
+    throttle: Option<Arc<fleet_server::throttle::Throttle>>,
     database: Arc<Database>,
     held: fleet_server::instance::Held,
     stop: Option<tokio::sync::oneshot::Sender<()>>,
@@ -239,7 +281,18 @@ impl Instance {
     /// [`start`](Self::start), taking up nothing another instance commits until
     /// [`follow`](Self::follow) is called: what it hears is held back until then.
     async fn start_deaf(pki: &Pki, schema: &Schema, config: PostgresConfig) -> Self {
-        Self::start_with(pki, schema, config, true, false).await
+        Self::start_with(pki, schema, config, true, false, None).await
+    }
+
+    /// [`start`](Self::start), its Agent plane's admission counted by a throttle of `limits`, as
+    /// the binary wires one.
+    async fn start_throttled(
+        pki: &Pki,
+        schema: &Schema,
+        config: PostgresConfig,
+        limits: fleet_server::throttle::Limits,
+    ) -> Self {
+        Self::start_with(pki, schema, config, true, true, Some(limits)).await
     }
 
     /// Starts taking up what other instances commit, for an instance started deaf.
@@ -256,17 +309,18 @@ impl Instance {
         config: PostgresConfig,
         renewals: bool,
     ) -> Self {
-        Self::start_with(pki, schema, config, renewals, true).await
+        Self::start_with(pki, schema, config, renewals, true, None).await
     }
 
     /// [`start_following`](Self::start_following), following other instances where `follows`
-    /// says so.
+    /// says so, and its admission throttled where `throttle` names limits.
     async fn start_with(
         pki: &Pki,
         schema: &Schema,
         config: PostgresConfig,
         renewals: bool,
         follows: bool,
+        throttle: Option<fleet_server::throttle::Limits>,
     ) -> Self {
         opamp::tls::install_ring_provider();
         let dir = tempfile::tempdir().expect("tempdir");
@@ -323,11 +377,14 @@ impl Instance {
         ))
         .expect("tls config");
         let planes = fleet_server::tls::server_tls(&tls, None, None).expect("server material");
-        let agents = fleet_server::agent_app(
-            state.clone(),
-            fleet_server::transport::Admission::new(true)
-                .with_revocations(Some(revocations.clone())),
-        );
+        let throttle = throttle
+            .map(|limits| Arc::new(fleet_server::throttle::Throttle::new(limits, clock.clone())));
+        let mut admission = fleet_server::transport::Admission::new(true)
+            .with_revocations(Some(revocations.clone()));
+        if let Some(throttle) = &throttle {
+            admission = admission.with_throttle(throttle.clone());
+        }
+        let agents = fleet_server::agent_app(state.clone(), admission);
         let operators = fleet_server::operator_app(state.clone(), None);
 
         let lease = {
@@ -381,6 +438,7 @@ impl Instance {
             floors,
             enrolment,
             following,
+            throttle,
             database,
             held,
             stop: Some(stop),
@@ -2437,7 +2495,8 @@ fn the_shutdown_flush_leaves_an_agent_that_moved_to_another_instance_as_that_one
 }
 
 /// The shutdown flush of A leaves an Agent A heard from, that moved to B since and disconnected
-/// there, as B wrote it: no instance holds it any more, and B heard it last.
+/// there, as B wrote it: no instance holds it any more, and B took it after A did, though B's
+/// clock runs behind A's.
 /// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts
 #[test]
 fn the_shutdown_flush_leaves_an_agent_that_moved_away_and_disconnected_as_last_written() {
@@ -2472,9 +2531,9 @@ fn the_shutdown_flush_leaves_an_agent_that_moved_away_and_disconnected_as_last_w
     b.process(report(2, false, false), Transport::WebSocket, Some(9));
     b.process(report(3, false, true), Transport::WebSocket, Some(9));
     b.write_presence(lease_b).expect("B's batch");
-    // B heard it after A did.
+    // B's clock runs a minute behind A's.
     schema.sql(&format!(
-        "UPDATE agents SET last_seen_ms = last_seen_ms + 1000 WHERE instance_uid = '{uid}'"
+        "UPDATE agents SET last_seen_ms = last_seen_ms - 60000 WHERE instance_uid = '{uid}'"
     ));
     let stored = || {
         schema.query(&format!(
@@ -2486,6 +2545,262 @@ fn the_shutdown_flush_leaves_an_agent_that_moved_away_and_disconnected_as_last_w
 
     a.flush_agents();
     assert_eq!(stored(), ["none 2"], "what B wrote stays");
+}
+
+/// A's presence batch writes the disconnect of an Agent A took back from B, whose clock runs
+/// ahead of A's: the row still holds the count of takes A was answered, whatever `last_seen_ms` B
+/// stamped it with.
+/// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts, ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+#[test]
+fn a_disconnect_is_written_after_an_instance_whose_clock_runs_ahead_held_the_agent() {
+    use fleet_server::fleet::{AppState, Transport};
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let uid = InstanceUid([0x85; 16]);
+    let report = |sequence_num: u64, goodbye: bool| AgentToServer {
+        instance_uid: uid.as_bytes().to_vec(),
+        sequence_num,
+        capabilities: AgentCapabilities::ReportsStatus as u64,
+        agent_disconnect: goodbye.then(opamp::proto::AgentDisconnect::default),
+        ..Default::default()
+    };
+    let (lease_a, lease_b) = (
+        "00000000-0000-7000-8000-00000000000a",
+        "00000000-0000-7000-8000-00000000000b",
+    );
+    let [a, b] = [lease_a, lease_b].map(|lease| {
+        let state = AppState::on(&records(&schema)).expect("state");
+        state.serve_under(tokio::sync::watch::channel(Some(lease.to_string())).1);
+        state
+    });
+    a.process(report(1, false), Transport::WebSocket, Some(7));
+    b.process(report(2, false), Transport::WebSocket, Some(9));
+    // B's clock runs a minute and a half ahead of A's.
+    schema.sql(&format!(
+        "UPDATE agents SET last_seen_ms = last_seen_ms + 90000 WHERE instance_uid = '{uid}'"
+    ));
+    // A's first connection closes; the Agent reconnects to A, which takes it back, and says
+    // goodbye.
+    a.mark_disconnected(&[uid], 7);
+    a.process(report(3, false), Transport::WebSocket, Some(8));
+    a.process(report(4, true), Transport::WebSocket, Some(8));
+    a.write_presence(lease_a).expect("A's batch");
+    assert_eq!(
+        schema.query(&format!(
+            "SELECT coalesce(holder::text, 'none') || ' ' || connected FROM agents \
+             WHERE instance_uid = '{uid}'"
+        )),
+        ["none false"]
+    );
+}
+
+/// A presence batch that names A anew, over an Agent B took and disconnected, counts as a take:
+/// A's disconnect is written under the count it answered, the shutdown flush of B, which took the
+/// Agent before, leaves what A wrote, and that of A, which disconnected the Agent last, writes it.
+/// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts, ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+#[test]
+fn a_batch_that_names_its_instance_anew_counts_as_a_take() {
+    use fleet_server::fleet::{AppState, Transport};
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let uid = InstanceUid([0x86; 16]);
+    let report = |sequence_num: u64, healthy: bool, goodbye: bool| AgentToServer {
+        instance_uid: uid.as_bytes().to_vec(),
+        sequence_num,
+        capabilities: AgentCapabilities::ReportsStatus as u64
+            | AgentCapabilities::ReportsHealth as u64,
+        health: Some(opamp::proto::ComponentHealth {
+            healthy,
+            ..Default::default()
+        }),
+        agent_disconnect: goodbye.then(opamp::proto::AgentDisconnect::default),
+        ..Default::default()
+    };
+    let (lease_a, lease_b) = (
+        "00000000-0000-7000-8000-00000000000a",
+        "00000000-0000-7000-8000-00000000000b",
+    );
+    let a = AppState::on(&records(&schema)).expect("state");
+    let b = AppState::on(&records(&schema)).expect("state");
+    b.serve_under(tokio::sync::watch::channel(Some(lease_b.to_string())).1);
+    // A, still without a lease, takes nothing at the connecting report.
+    a.process(report(1, true, false), Transport::WebSocket, Some(7));
+    b.process(report(2, false, false), Transport::WebSocket, Some(9));
+    b.process(report(3, false, true), Transport::WebSocket, Some(9));
+    b.write_presence(lease_b).expect("B's batch");
+    a.serve_under(tokio::sync::watch::channel(Some(lease_a.to_string())).1);
+    a.write_presence(lease_a).expect("A's batch");
+    let stored = || {
+        schema.query(&format!(
+            "SELECT coalesce(holder::text, 'none') || ' ' || connected || ' ' || sequence_num \
+             FROM agents WHERE instance_uid = '{uid}'"
+        ))
+    };
+    assert_eq!(stored(), [format!("{lease_a} true 2")]);
+    a.process(report(4, false, true), Transport::WebSocket, Some(7));
+    a.write_presence(lease_a).expect("A's disconnect");
+    assert_eq!(stored(), ["none false 4"], "the disconnect is written");
+
+    b.flush_agents();
+    assert_eq!(stored(), ["none false 4"], "what A wrote stays");
+    schema.sql(&format!(
+        "UPDATE agents SET sequence_num = 0 WHERE instance_uid = '{uid}'"
+    ));
+    a.flush_agents();
+    assert_eq!(stored(), ["none false 4"], "A's flush writes it");
+}
+
+/// An Agent forgotten after A took it several times, which connects to A again before A's next
+/// batch and says goodbye, is written disconnected: the record created again counts its takes from
+/// the start, and A keeps the count that take answered, not the greater one from before.
+/// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts
+#[test]
+fn the_goodbye_of_an_agent_forgotten_and_connected_again_is_written() {
+    use fleet_server::fleet::{AppState, Transport};
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let uid = InstanceUid([0x87; 16]);
+    let report = |sequence_num: u64, goodbye: bool| AgentToServer {
+        instance_uid: uid.as_bytes().to_vec(),
+        sequence_num,
+        capabilities: AgentCapabilities::ReportsStatus as u64,
+        agent_disconnect: goodbye.then(opamp::proto::AgentDisconnect::default),
+        ..Default::default()
+    };
+    let lease = "00000000-0000-7000-8000-00000000000a";
+    let a = AppState::on(&records(&schema)).expect("state");
+    a.serve_under(tokio::sync::watch::channel(Some(lease.to_string())).1);
+    let stored = || {
+        schema.query(&format!(
+            "SELECT coalesce(holder::text, 'none') || ' ' || connected || ' ' || takes \
+             FROM agents WHERE instance_uid = '{uid}'"
+        ))
+    };
+    a.process(report(1, false), Transport::WebSocket, Some(7));
+    a.mark_disconnected(&[uid], 7);
+    a.process(report(2, false), Transport::WebSocket, Some(8));
+    a.process(report(3, true), Transport::WebSocket, Some(8));
+    a.write_presence(lease).expect("A's batch");
+    assert_eq!(stored(), ["none false 2"]);
+    assert!(a.forget_agent(&uid).is_ok(), "forgotten");
+    assert!(stored().is_empty());
+
+    a.process(report(1, false), Transport::WebSocket, Some(9));
+    a.process(report(2, true), Transport::WebSocket, Some(9));
+    a.write_presence(lease).expect("A's batch");
+    assert_eq!(stored(), ["none false 1"], "the goodbye is written");
+}
+
+/// An Agent forgotten through B while A still holds it, created again through B and then
+/// connected to A, has its goodbye written by A: A keeps the count its take answered, though it
+/// counted more takes of the record before it was forgotten.
+/// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts
+#[test]
+fn the_goodbye_of_an_agent_forgotten_through_another_instance_is_written_where_it_connects_again() {
+    use fleet_server::fleet::{AppState, Transport};
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let uid = InstanceUid([0x89; 16]);
+    let report = |sequence_num: u64, goodbye: bool| AgentToServer {
+        instance_uid: uid.as_bytes().to_vec(),
+        sequence_num,
+        capabilities: AgentCapabilities::ReportsStatus as u64,
+        agent_disconnect: goodbye.then(opamp::proto::AgentDisconnect::default),
+        ..Default::default()
+    };
+    let (lease_a, lease_b) = (
+        "00000000-0000-7000-8000-00000000000a",
+        "00000000-0000-7000-8000-00000000000b",
+    );
+    let [a, b] = [lease_a, lease_b].map(|lease| {
+        let state = AppState::on(&records(&schema)).expect("state");
+        state.serve_under(tokio::sync::watch::channel(Some(lease.to_string())).1);
+        state
+    });
+    let stored = || {
+        schema.query(&format!(
+            "SELECT coalesce(holder::text, 'none') || ' ' || connected || ' ' || takes \
+             FROM agents WHERE instance_uid = '{uid}'"
+        ))
+    };
+    // A takes the Agent three times, and writes its goodbye.
+    for (conn, sequence_num) in [(7, 1), (8, 2), (9, 3)] {
+        a.process(
+            report(sequence_num, false),
+            Transport::WebSocket,
+            Some(conn),
+        );
+        a.mark_disconnected(&[uid], conn);
+    }
+    a.write_presence(lease_a).expect("A's batch");
+    assert_eq!(stored(), ["none false 3"]);
+    // B forgets it; A has not heard. The Agent comes back through B, then moves to A.
+    assert!(b.forget_agent(&uid).is_ok(), "forgotten through B");
+    b.process(report(1, false), Transport::WebSocket, Some(5));
+    a.process(report(2, false), Transport::WebSocket, Some(10));
+    assert_eq!(stored(), [format!("{lease_a} true 2")]);
+    a.process(report(3, true), Transport::WebSocket, Some(10));
+    a.write_presence(lease_a).expect("A's batch");
+    assert_eq!(stored(), ["none false 2"], "the goodbye is written");
+}
+
+/// The take that commits last holds the Agent, and the instance it displaced takes it back at
+/// the Agent's next report: A's take for the Agent's old connection commits after B's for its
+/// new one, B stops carrying it on hearing of the take, A writes the disconnect when the old
+/// connection closes, and the Agent's next report on B makes B its holder again.
+/// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+#[test]
+fn an_instance_displaced_by_a_take_that_commits_later_takes_the_agent_back_at_its_next_report() {
+    use fleet_server::fleet::{AppState, Transport};
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let uid = InstanceUid([0x88; 16]);
+    let report = |sequence_num: u64| AgentToServer {
+        instance_uid: uid.as_bytes().to_vec(),
+        sequence_num,
+        capabilities: AgentCapabilities::ReportsStatus as u64,
+        ..Default::default()
+    };
+    let (lease_a, lease_b) = (
+        "00000000-0000-7000-8000-00000000000a",
+        "00000000-0000-7000-8000-00000000000b",
+    );
+    let [a, b] = [lease_a, lease_b].map(|lease| {
+        let state = AppState::on(&records(&schema)).expect("state");
+        state.serve_under(tokio::sync::watch::channel(Some(lease.to_string())).1);
+        state
+    });
+    let stored = || {
+        schema.query(&format!(
+            "SELECT coalesce(holder::text, 'none') || ' ' || connected FROM agents \
+             WHERE instance_uid = '{uid}'"
+        ))
+    };
+    let carried = |state: &AppState| {
+        state
+            .snapshot()
+            .into_iter()
+            .find(|view| view.instance_uid == uid.to_string())
+            .is_some_and(|view| view.connected)
+    };
+    // B takes the Agent on its new connection; A's take for the old one commits after it.
+    b.process(report(2), Transport::WebSocket, Some(9));
+    a.process(report(1), Transport::WebSocket, Some(7));
+    assert_eq!(stored(), [format!("{lease_a} true")]);
+    b.release_taken(None).expect("B hears of the take");
+    assert!(!carried(&b), "B stops carrying it");
+    a.mark_disconnected(&[uid], 7);
+    a.write_presence(lease_a).expect("A's batch");
+    assert_eq!(stored(), ["none false"]);
+
+    b.process(report(3), Transport::WebSocket, Some(9));
+    assert_eq!(stored(), [format!("{lease_b} true")], "B holds it again");
+    assert!(carried(&b), "and carries it");
 }
 
 /// An Agent that has just connected to A is not forgotten through B before A's next presence
@@ -2519,4 +2834,472 @@ async fn an_agent_just_connected_is_not_forgotten_through_another_instance() {
         matches!(forgotten, Err(ForgetError::StillReporting)),
         "B sees A holds it"
     );
+}
+
+/// An Agent carried by A whose connection moves to B is held by B: B takes it and announces it, A
+/// reads the holder again and stops carrying it, though its old connection has not closed yet.
+/// When that connection closes and A writes its next batch, the row still names B as the holder,
+/// connected, and B still carries it.
+/// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_agent_whose_connection_moves_is_held_by_the_new_instance_and_no_longer_by_the_old() {
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let a = Instance::start(&pki, &schema, schema.config_on(schema.config.port)).await;
+    let b = Instance::start(&pki, &schema, schema.config_on(schema.config.port)).await;
+    let (a_id, b_id) = (
+        a.instance_id().expect("a lease"),
+        b.instance_id().expect("a lease"),
+    );
+    let (cert, key) = pki.issue("edge-01");
+    let uid = InstanceUid([0x95; 16]);
+    let attributes: Attributes<'_> = (&[("service.name", "otelcol")], &[]);
+    let presence = || {
+        schema.query(&format!(
+            "SELECT holder::text || ' ' || connected FROM agents WHERE instance_uid = '{uid}'"
+        ))
+    };
+    let mut on_a = websocket(&a, &pki, &cert, &key).await;
+    report_as(&mut on_a, uid, 1, 0, attributes, true).await;
+    assert_eq!(presence(), [format!("{a_id} true")]);
+
+    let mut on_b = websocket(&b, &pki, &cert, &key).await;
+    report_as(&mut on_b, uid, 2, 0, attributes, true).await;
+    assert_eq!(presence(), [format!("{b_id} true")], "B took it");
+    assert!(
+        eventually(Duration::from_secs(10), || {
+            view_of(&a, uid).is_some_and(|view| !view.connected)
+        })
+        .await,
+        "A stops carrying it"
+    );
+
+    drop(on_a);
+    let state = a.state.clone();
+    let holder = a_id.clone();
+    tokio::task::spawn_blocking(move || state.write_presence(&holder))
+        .await
+        .expect("batch")
+        .expect("A's batch");
+    assert_eq!(presence(), [format!("{b_id} true")], "A's batch leaves it");
+    assert!(view_of(&b, uid).is_some_and(|view| view.connected));
+    report_as(&mut on_b, uid, 3, 0, attributes, true).await;
+    assert_eq!(presence(), [format!("{b_id} true")]);
+}
+
+/// Of two instances that take one Agent at once, each hearing of the other's take only after its
+/// own, only the one the row no longer names stops carrying it: each reads the holder again
+/// rather than drop the Agent on hearing of a take.
+/// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+#[test]
+fn of_two_instances_that_take_one_agent_at_once_only_the_one_the_row_names_carries_it() {
+    use fleet_server::fleet::{AppState, Transport};
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let uid = InstanceUid([0x96; 16]);
+    let report = |sequence_num: u64| AgentToServer {
+        instance_uid: uid.as_bytes().to_vec(),
+        sequence_num,
+        capabilities: AgentCapabilities::ReportsStatus as u64,
+        ..Default::default()
+    };
+    let (lease_a, lease_b) = (
+        "00000000-0000-7000-8000-00000000000a",
+        "00000000-0000-7000-8000-00000000000b",
+    );
+    let [a, b] = [lease_a, lease_b].map(|lease| {
+        let state = AppState::on(&records(&schema)).expect("state");
+        state.serve_under(tokio::sync::watch::channel(Some(lease.to_string())).1);
+        state
+    });
+    a.process(report(1), Transport::WebSocket, Some(7));
+    b.process(report(2), Transport::WebSocket, Some(9));
+    let named = std::collections::HashSet::from([uid]);
+    a.release_taken(Some(&named)).expect("A hears of B's take");
+    b.release_taken(Some(&named)).expect("B hears of A's take");
+    let carried = |state: &AppState| {
+        state
+            .snapshot()
+            .into_iter()
+            .any(|view| view.instance_uid == uid.to_string() && view.connected)
+    };
+    assert!(!carried(&a), "the row names B");
+    assert!(carried(&b), "B keeps it");
+}
+
+/// An Agent whose holder changes eleven times within a minute, as two connections of one
+/// `instance_uid` on two instances take it in turn, is logged as a likely duplicate once, when
+/// the eleventh change lands, and not before.
+/// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+#[test]
+fn an_agent_whose_holder_changes_eleven_times_in_a_minute_is_logged_once_as_a_likely_duplicate() {
+    use fleet_server::fleet::{AppState, Transport};
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let uid = InstanceUid([0x97; 16]);
+    let report = |sequence_num: u64| AgentToServer {
+        instance_uid: uid.as_bytes().to_vec(),
+        sequence_num,
+        capabilities: AgentCapabilities::ReportsStatus as u64,
+        ..Default::default()
+    };
+    let [a, b] = [
+        "00000000-0000-7000-8000-00000000000a",
+        "00000000-0000-7000-8000-00000000000b",
+    ]
+    .map(|lease| {
+        let state = AppState::on(&records(&schema)).expect("state");
+        state.serve_under(tokio::sync::watch::channel(Some(lease.to_string())).1);
+        state
+    });
+    let lines = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let writer = lines.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(move || Collect(writer.clone()))
+        .finish();
+    let named = std::collections::HashSet::from([uid]);
+    let likely = || {
+        String::from_utf8_lossy(&lines.lock().expect("lines"))
+            .lines()
+            .filter(|line| line.contains("likely a duplicate") && line.contains(&uid.to_string()))
+            .count()
+    };
+    tracing::subscriber::with_default(subscriber, || {
+        a.process(report(1), Transport::WebSocket, Some(7));
+        let mut sequence_num = 1;
+        for change in 1..=11 {
+            // The instance the row no longer names hears of the take, and the duplicate's next
+            // report on the other connection takes it back.
+            let (from, to, conn) = if change % 2 == 1 {
+                (&a, &b, 9)
+            } else {
+                (&b, &a, 7)
+            };
+            sequence_num += 1;
+            to.release_taken(Some(&named)).expect("hears of the take");
+            to.process(report(sequence_num), Transport::WebSocket, Some(conn));
+            from.release_taken(Some(&named)).expect("hears of the take");
+            assert_eq!(likely(), usize::from(change == 11), "after change {change}");
+        }
+    });
+}
+
+/// A log line sink for a test's own subscriber.
+#[derive(Clone)]
+struct Collect(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for Collect {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().expect("lines").extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// A layer-4 balancer in front of the Agent plane: each new connection goes, its bytes unread, to
+/// the target the test names, or to the next target that takes it when that one does not.
+struct Balancer {
+    address: SocketAddr,
+    target: Arc<std::sync::Mutex<usize>>,
+}
+
+impl Balancer {
+    async fn to(targets: Vec<SocketAddr>) -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let address = listener.local_addr().expect("addr");
+        let target = Arc::new(std::sync::Mutex::new(0usize));
+        let chosen = target.clone();
+        tokio::spawn(async move {
+            while let Ok((mut inbound, _)) = listener.accept().await {
+                let first = *chosen.lock().expect("target");
+                let targets = targets.clone();
+                tokio::spawn(async move {
+                    for i in 0..targets.len() {
+                        let to = targets[(first + i) % targets.len()];
+                        if let Ok(mut outbound) = tokio::net::TcpStream::connect(to).await {
+                            let _ =
+                                tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        Balancer { address, target }
+    }
+
+    /// Sends the next connections to target `index`.
+    fn send_to(&self, index: usize) {
+        *self.target.lock().expect("target") = index;
+    }
+}
+
+/// Signs a Gateway's certificate for a Host, registers it through `instance` and marks the Host
+/// as a Gateway; the files go into `dir`, with the CA's.
+fn mark_gateway(instance: &Instance, pki: &Pki, dir: &std::path::Path) {
+    let path = |file: &str| dir.join(file).display().to_string();
+    std::fs::write(dir.join("ca.pem"), &pki.ca_pem).expect("write");
+    std::fs::write(dir.join("ca-key.pem"), &pki.ca_key_pem).expect("write");
+    let signer = fleet_server::ca::ClientCa::from_config(
+        &toml::from_str::<fleet_server::config::ClientCaConfig>(&format!(
+            "cert_file = {:?}\nkey_file = {:?}\n",
+            path("ca.pem"),
+            path("ca-key.pem"),
+        ))
+        .expect("client_ca config"),
+    )
+    .expect("client ca");
+    let key = KeyPair::generate().expect("key");
+    let csr = CertificateParams::new(vec!["gateway".to_string()])
+        .expect("params")
+        .serialize_request(&key)
+        .expect("csr")
+        .pem()
+        .expect("pem");
+    let signed = signer
+        .sign(
+            &csr,
+            "gateway-host",
+            &fleet_server::revocation::SubjectValues::default(),
+        )
+        .expect("sign");
+    let host = signed.facts.host.clone().expect("a host");
+    instance
+        .revocations
+        .record(signed.facts, &[7; 16], None)
+        .expect("register");
+    assert!(instance.revocations.set_gateway(&host, true).expect("mark"));
+    std::fs::write(dir.join("gateway.pem"), &signed.pem).expect("write");
+    std::fs::write(dir.join("gateway-key.pem"), key.serialize_pem()).expect("write");
+}
+
+/// A Gateway with the certificate [`mark_gateway`] wrote into `dir`, its pool reaching the Agent
+/// plane through `balancer`, its downstream listener on a port of its own.
+async fn gateway(
+    pki: &Pki,
+    balancer: &Balancer,
+    dir: &std::path::Path,
+) -> (SocketAddr, tokio::sync::watch::Sender<bool>) {
+    let path = |file: &str| dir.join(file).display().to_string();
+    let (listener_cert, listener_key) = pki.issue("127.0.0.1");
+    std::fs::write(dir.join("listener.pem"), listener_cert).expect("write");
+    std::fs::write(dir.join("listener-key.pem"), listener_key).expect("write");
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let downstream = listener.local_addr().expect("addr");
+    let config: fleet_agent::config::ClientConfig = toml::from_str(&format!(
+        r#"
+        endpoint = "wss://localhost:{port}/v1/opamp"
+        state_dir = {state:?}
+        [tls]
+        ca_file = {ca:?}
+        cert_file = {cert:?}
+        key_file = {key:?}
+        [gateway]
+        listen = "{downstream}"
+        upstream_connections = 4
+        [gateway.tls]
+        cert_file = {listener:?}
+        key_file = {listener_key:?}
+        client_ca_file = {ca:?}
+        "#,
+        port = balancer.address.port(),
+        state = path("state"),
+        ca = path("ca.pem"),
+        cert = path("gateway.pem"),
+        key = path("gateway-key.pem"),
+        listener = path("listener.pem"),
+        listener_key = path("listener-key.pem"),
+    ))
+    .expect("gateway config");
+    let (stop, shutdown) = fleet_agent::shutdown::shutdown_channel();
+    tokio::spawn(async move {
+        fleet_agent::gateway::run_on(Arc::new(config), listener, shutdown)
+            .await
+            .expect("gateway");
+    });
+    assert!(
+        eventually(Duration::from_secs(5), || Instance::takes_connections(
+            downstream
+        ))
+        .await
+    );
+    (downstream, stop)
+}
+
+/// A WebSocket to the Gateway at `downstream`, presenting `cert`.
+async fn behind(downstream: SocketAddr, pki: &Pki, cert: &str, key: &str) -> Socket {
+    let config = opamp::tls::client_builder()
+        .with_root_certificates(opamp::tls::root_store(pki.ca_pem.as_bytes()).expect("roots"))
+        .with_client_auth_cert(
+            opamp::tls::certificates(cert.as_bytes()).expect("cert"),
+            opamp::tls::private_key(key.as_bytes()).expect("key"),
+        )
+        .expect("client auth");
+    tokio_tungstenite::connect_async_tls_with_config(
+        format!("wss://{downstream}/v1/opamp"),
+        None,
+        false,
+        Some(tokio_tungstenite::Connector::Rustls(Arc::new(config))),
+    )
+    .await
+    .map(|(socket, _)| socket)
+    .expect("admitted by the gateway")
+}
+
+/// One report of `uid` until one is answered, each waited for a second, as an Agent's heartbeat
+/// sends the next: a report the Gateway wrote to a connection the instance was closing is lost.
+/// Answers the reply, and the sequence number it bore.
+async fn reported(
+    session: &mut Socket,
+    uid: InstanceUid,
+    sequence_num: &mut u64,
+) -> opamp::proto::ServerToAgent {
+    use futures_util::SinkExt;
+    use tokio_tungstenite::tungstenite::Message as Ws;
+    for _ in 0..20 {
+        *sequence_num += 1;
+        let report = AgentToServer {
+            instance_uid: uid.as_bytes().to_vec(),
+            sequence_num: *sequence_num,
+            capabilities: AgentCapabilities::ReportsStatus as u64,
+            ..Default::default()
+        };
+        let framed = opamp::frame::encode_within(&report, usize::MAX).expect("frame");
+        session.send(Ws::Binary(framed.into())).await.expect("send");
+        if let Some(reply) = next_message(session, Duration::from_secs(1)).await {
+            return reply;
+        }
+    }
+    panic!("no report of {uid} was answered");
+}
+
+/// A Gateway whose pool connections reach A and B through a balancer keeps each downstream
+/// Agent on one instance while its pool connection lives: its holder never changes. When A
+/// stops, each downstream Agent A held is taken over by B once, at its next report, and stays
+/// connected to the Gateway; B refuses none of the pool's connections, and the Gateway goes on
+/// admitting downstream peers.
+/// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it, ADR-0015
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_gateway_keeps_its_agents_on_one_instance_and_moves_those_of_a_stopped_one_once() {
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let mut a = Instance::start(&pki, &schema, schema.config_on(schema.config.port)).await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    // B is started once the Gateway's Host is marked, so it reads the mark at its start.
+    mark_gateway(&a, &pki, dir.path());
+    // A single failed admission would put the Gateway's address into back-off on B.
+    let b = Instance::start_throttled(
+        &pki,
+        &schema,
+        schema.config_on(schema.config.port),
+        fleet_server::throttle::Limits {
+            max_failures: 1,
+            ..fleet_server::throttle::Limits::default()
+        },
+    )
+    .await;
+    let balancer = Balancer::to(vec![a.agent, b.agent]).await;
+    let (downstream, _stop) = gateway(&pki, &balancer, dir.path()).await;
+    let (a_id, b_id) = (
+        a.instance_id().expect("a lease"),
+        b.instance_id().expect("a lease"),
+    );
+    let uids: Vec<InstanceUid> = (1..=4u8).map(|n| InstanceUid([0xa0 + n; 16])).collect();
+    let mut sessions = Vec::new();
+    let mut sequence = [0u64; 4];
+    // Each of the first four Agents opens a pool connection of its own: two to A, two to B.
+    for (i, uid) in uids.iter().enumerate() {
+        balancer.send_to(i / 2);
+        let (cert, key) = pki.issue(&format!("edge-{i}"));
+        let mut session = behind(downstream, &pki, &cert, &key).await;
+        reported(&mut session, *uid, &mut sequence[i]).await;
+        sessions.push(session);
+    }
+    let presence = |uid: InstanceUid| {
+        schema.query(&format!(
+            "SELECT holder::text || ' ' || cardinality(holder_changes) FROM agents \
+             WHERE instance_uid = '{uid}'"
+        ))
+    };
+    let holders: Vec<Vec<String>> = uids.iter().map(|uid| presence(*uid)).collect();
+    assert_eq!(
+        holders,
+        [
+            [format!("{a_id} 0")],
+            [format!("{a_id} 0")],
+            [format!("{b_id} 0")],
+            [format!("{b_id} 0")]
+        ],
+        "two on each instance"
+    );
+    // In another order each round, so a pool that placed each report anew would move some.
+    for round in 1..=3 {
+        for k in 0..uids.len() {
+            let i = (k + round) % uids.len();
+            reported(&mut sessions[i], uids[i], &mut sequence[i]).await;
+        }
+    }
+    let unchanged: Vec<Vec<String>> = uids.iter().map(|uid| presence(*uid)).collect();
+    assert_eq!(unchanged, holders, "no holder changed while the pool lives");
+
+    // A stops: its listener closes, its sessions end, and its lease is released.
+    balancer.send_to(1);
+    let _ = a.stop.take().expect("running").send(());
+    assert!(
+        eventually(Duration::from_secs(15), || schema.query(&format!(
+            "SELECT count(*) FROM leases WHERE instance_id = '{a_id}'"
+        )) == ["0"])
+        .await,
+        "A released its lease"
+    );
+    for (i, uid) in uids.iter().enumerate() {
+        let reply = reported(&mut sessions[i], *uid, &mut sequence[i]).await;
+        assert!(reply.error_response.is_none(), "{:?}", reply.error_response);
+    }
+    for (i, uid) in uids.iter().enumerate() {
+        reported(&mut sessions[i], *uid, &mut sequence[i]).await;
+    }
+    let moved: Vec<Vec<String>> = uids.iter().map(|uid| presence(*uid)).collect();
+    assert_eq!(
+        moved,
+        [
+            [format!("{b_id} 1")],
+            [format!("{b_id} 1")],
+            [format!("{b_id} 0")],
+            [format!("{b_id} 0")]
+        ],
+        "A's Agents taken over by B once each, B's left"
+    );
+    assert!(uids
+        .iter()
+        .all(|uid| view_of(&b, *uid).is_some_and(|view| view.connected)));
+    let throttle = b.throttle.as_ref().expect("B's throttle");
+    let gateway_address: std::net::IpAddr = "127.0.0.1".parse().expect("address");
+    assert_eq!(
+        throttle.retry_after(gateway_address),
+        None,
+        "B's throttle holds the Gateway's address in no back-off"
+    );
+    assert!(
+        throttle.begin(gateway_address).is_some(),
+        "B's throttle counted no failure of the Gateway's"
+    );
+
+    // The Gateway goes on admitting a new downstream peer.
+    let (cert, key) = pki.issue("edge-late");
+    let mut late = behind(downstream, &pki, &cert, &key).await;
+    let mut late_sequence = 0;
+    reported(&mut late, InstanceUid([0xaf; 16]), &mut late_sequence).await;
 }

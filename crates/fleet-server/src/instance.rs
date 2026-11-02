@@ -30,7 +30,7 @@ use crate::fleet::AppState;
 use crate::postgres::lease::Taken;
 use crate::postgres::notify::{
     Heard, Notice, ASSIGNMENT, CERTIFICATE, CONFIGURATION, DEPLOYMENT, ENROLMENT, FLOOR, FORGOTTEN,
-    HOST, LABELS, PACKAGE, RESTART, REVOCATION, WINDOW,
+    HOST, LABELS, PACKAGE, RESTART, REVOCATION, TAKEN, WINDOW,
 };
 use crate::postgres::Database;
 
@@ -369,7 +369,8 @@ fn lock_lost(held: &watch::Sender<Option<String>>, instance_id: &str) {
 /// read again
 /// (clause 12); an Agent's assignment, labels, restart request or forgetting has its record read
 /// again, its connection offered what it was released or sent the restart, its group placed again,
-/// or the Agent dropped. Every time the listening connection is made, since what
+/// or the Agent dropped; an Agent taken by another instance has its holder read again, and is no
+/// longer carried here where the row names this instance no more. Every time the listening connection is made, since what
 /// was committed before it was not heard, and for a kind this instance does not know, everything is
 /// read again. What this instance announced itself is never heard: it holds what it committed.
 /// What is heard while a read runs is taken up by one read after it, and a read that fails is tried
@@ -433,6 +434,11 @@ pub fn follow(
             Agents::Named(uids) if uids.is_empty() => {}
             Agents::Named(uids) => state.take_up_agents(Some(uids))?,
             Agents::All => state.take_up_agents(None)?,
+        }
+        match &due.holders {
+            Agents::Named(uids) if uids.is_empty() => {}
+            Agents::Named(uids) => state.release_taken(Some(uids))?,
+            Agents::All => state.release_taken(None)?,
         }
         // Counted once the whole read is done, so a read counted has taken up everything it was
         // due.
@@ -516,6 +522,26 @@ enum Agents {
     All,
 }
 
+impl Agents {
+    /// The Agent a notification names, every Agent where it names none that reads.
+    fn of(id: &str) -> Agents {
+        match InstanceUid::parse(id) {
+            Some(uid) => Agents::Named(HashSet::from([uid])),
+            None => Agents::All,
+        }
+    }
+
+    fn and(self, other: Agents) -> Agents {
+        match (self, other) {
+            (Agents::Named(mut uids), Agents::Named(more)) => {
+                uids.extend(more);
+                Agents::Named(uids)
+            }
+            _ => Agents::All,
+        }
+    }
+}
+
 impl Default for Agents {
     fn default() -> Self {
         Agents::Named(HashSet::new())
@@ -532,6 +558,8 @@ struct Due {
     deployments: bool,
     packages: bool,
     agents: Agents,
+    /// The Agents whose holder is read again, as another instance took them.
+    holders: Agents,
 }
 
 impl Due {
@@ -544,6 +572,7 @@ impl Due {
         deployments: true,
         packages: true,
         agents: Agents::All,
+        holders: Agents::All,
     };
 
     /// What `what` calls for.
@@ -577,10 +606,11 @@ impl Due {
                 ..Due::default()
             },
             ASSIGNMENT | LABELS | RESTART | FORGOTTEN => Due {
-                agents: match InstanceUid::parse(&notice.id) {
-                    Some(uid) => Agents::Named(HashSet::from([uid])),
-                    None => Agents::All,
-                },
+                agents: Agents::of(&notice.id),
+                ..Due::default()
+            },
+            TAKEN => Due {
+                holders: Agents::of(&notice.id),
                 ..Due::default()
             },
             _ => Due::EVERYTHING,
@@ -595,13 +625,8 @@ impl Due {
             configurations: self.configurations || other.configurations,
             deployments: self.deployments || other.deployments,
             packages: self.packages || other.packages,
-            agents: match (self.agents, other.agents) {
-                (Agents::Named(mut uids), Agents::Named(more)) => {
-                    uids.extend(more);
-                    Agents::Named(uids)
-                }
-                _ => Agents::All,
-            },
+            agents: self.agents.and(other.agents),
+            holders: self.holders.and(other.holders),
         }
     }
 }
@@ -957,14 +982,15 @@ mod tests {
         fn write_presence(
             &self,
             _holder: &str,
-            _presence: &[(InstanceUid, crate::agent_store::Presence)],
-        ) -> Result<(), String> {
+            _presence: &[(InstanceUid, crate::agent_store::Presence, Option<u64>)],
+        ) -> Result<std::collections::HashMap<InstanceUid, u64>, String> {
             let _ = self.begun.send(());
             self.gate
                 .lock()
                 .expect("gate lock")
                 .recv()
-                .map_err(|e| e.to_string())
+                .map_err(|e| e.to_string())?;
+            Ok(std::collections::HashMap::new())
         }
         fn release(
             &self,
@@ -1242,6 +1268,19 @@ mod tests {
                 ..Due::default()
             }],
             "an assignment that names no Agent has every record read again"
+        );
+        assert_eq!(
+            reads_for(vec![
+                Heard::Notified(Notice::new("taken", &one.to_string())),
+                Heard::Notified(Notice::new("labels", &two.to_string())),
+            ])
+            .await,
+            vec![Due {
+                agents: Agents::Named(HashSet::from([two])),
+                holders: Agents::Named(HashSet::from([one])),
+                ..Due::default()
+            }],
+            "a take has the holder of the Agent it names read again, and nothing else"
         );
         assert_eq!(
             reads_for(vec![notified("floor"), notified("revocation")]).await,
