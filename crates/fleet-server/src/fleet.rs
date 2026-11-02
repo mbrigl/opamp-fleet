@@ -5992,7 +5992,10 @@ mod tests {
         }
         fn hold_blobs(&self) -> Result<crate::blobs::BlobHold, String> {
             if self.armed.load(std::sync::atomic::Ordering::SeqCst) {
-                if let Some(reached) = self.reached.lock().expect("reached").take() {
+                // Taken out first: the guard of `reached` is not held through the wait, so a
+                // second sweep passes the gate.
+                let reached = self.reached.lock().expect("reached").take();
+                if let Some(reached) = reached {
                     reached.send(()).expect("reached");
                     self.go.lock().expect("go").recv().expect("go");
                 }
@@ -6055,6 +6058,71 @@ mod tests {
         );
         go.send(()).expect("go on");
         assert_eq!(deleting.join().expect("the deletion"), Ok(true));
+    }
+
+    /// An entry's deletion sweeps once it has let go of every lock of the Package store: while
+    /// its sweep waits for the blob store's lock, the deletion of another Package, which takes
+    /// the fleet lock and then the store's, goes on, and so does every act behind the fleet lock.
+    /// Verifies: ADR-draft-the-servers-state-and-its-stores
+    #[test]
+    fn an_entry_deletion_sweeps_once_it_lets_the_store_go() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let packages = dir.path().join("packages");
+        let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (reached, reaches) = std::sync::mpsc::channel();
+        let (go, goes) = std::sync::mpsc::channel();
+        let store = PackageStore::with_backend(
+            Box::new(HeldSweeps {
+                inner: crate::fs::FsPackageBackend::open(&packages).expect("backend"),
+                armed: armed.clone(),
+                reached: Mutex::new(Some(reached)),
+                go: Mutex::new(goes),
+            }),
+            Box::new(crate::fs::FsBlobStore::open(&packages).expect("blobs")),
+        )
+        .expect("store");
+        let (first, second) = (
+            PackageId::new("otelcol", "1.0.0").expect("id"),
+            PackageId::new("otelcol", "2.0.0").expect("id"),
+        );
+        for (id, bytes) in [(&first, b"v1"), (&second, b"v2")] {
+            store.create(id).expect("create");
+            store
+                .put_entry(id, &linux(), bytes.to_vec())
+                .expect("entry");
+        }
+        let state = Arc::new(
+            AppState::new(dir.path().join("configs"))
+                .expect("state")
+                .with_packages(Some(
+                    PackageOffering::new(&packages, store).expect("offering"),
+                )),
+        );
+        armed.store(true, std::sync::atomic::Ordering::SeqCst);
+        let deleting = std::thread::spawn({
+            let (state, id) = (state.clone(), first.clone());
+            move || state.delete_package_entry(&id, &linux())
+        });
+        reaches
+            .recv()
+            .expect("the entry deletion's sweep waits for the lock");
+        let (acted, acts) = std::sync::mpsc::channel();
+        std::thread::spawn({
+            let (state, id) = (state.clone(), second.clone());
+            move || {
+                let deleted = state.delete_package_set(&id);
+                let other = state.delete_configuration("none").map_err(|_| ());
+                let _ = acted.send((deleted, other));
+            }
+        });
+        assert_eq!(
+            acts.recv_timeout(std::time::Duration::from_secs(30)),
+            Ok((Ok(true), Ok(false))),
+            "another Package's deletion and an act under the fleet lock go on while the sweep \
+             waits"
+        );
+        go.send(()).expect("go on");
+        assert_eq!(deleting.join().expect("the entry deletion"), Ok(true));
     }
 
     /// Nothing an assignment pins can be deleted — a Configuration, a Package, a Deployment — and

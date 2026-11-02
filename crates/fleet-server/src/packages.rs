@@ -926,7 +926,7 @@ impl PackageStore {
     /// normal state, and deleting the Package is its own act. Its blob goes with the last entry
     /// that names it (ADR-0029 clause 13).
     pub fn delete_entry(&self, id: &PackageId, platform: &Platform) -> Result<bool, String> {
-        let _writes = self.writes.lock().expect("writes lock");
+        let writes = self.writes.lock().expect("writes lock");
         let mut sets = self.sets.write().expect("sets lock");
         let Some(set) = sets.get_mut(id) else {
             return Ok(false);
@@ -938,6 +938,9 @@ impl PackageStore {
         let removed = set.entries.remove(platform).expect("checked above");
         let doomed = self.doom(&sets, &hex::encode(removed.content_hash));
         drop(sets);
+        // The sweep may wait for the blob store's lock: under no lock of this store's, which
+        // every other write of a Package, and the fleet lock behind one, waits for.
+        drop(writes);
         self.sweep(doomed);
         Ok(true)
     }

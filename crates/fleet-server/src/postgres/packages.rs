@@ -60,8 +60,8 @@ impl PackageBackend for PgPackageBackend {
 
     /// The entry's row alone, inserted or replaced, while no stored assignment pins the Package
     /// ([`hold_unassigned`]). The transaction takes the blob store's lock shared first, and asks
-    /// `stored` under it: a sweep holds the lock alone, so none runs between the answer and the
-    /// commit, and none deletes the blob the entry names
+    /// `stored` under it before it locks the Package's row: a sweep holds the lock alone, so none
+    /// runs between the answer and the commit, and none deletes the blob the entry names
     /// (ADR-draft-the-servers-state-and-its-stores clause 14). The lock goes with the
     /// transaction, its session's end included, which writes no entry.
     fn put_entry(&self, id: &PackageId, entry: &Entry, stored: Stored) -> Result<(), String> {
@@ -76,15 +76,17 @@ impl PackageBackend for PgPackageBackend {
                 )
                 .await
                 .map_err(|e| format!("{} — upload the artifact again", blob_lock_refused(e)))?;
-            if !hold_unassigned(&*transaction, &id, |id, _| assigned(id)).await? {
-                return Err(format!("no package set {id}"));
-            }
-            // The blob store is asked off the database's runtime, as its calls block.
+            // The blob store is asked off the database's runtime, as its calls block, and before
+            // the Package's row is locked, so no act on the row waits for the bucket: the shared
+            // lock already keeps every sweep out until the commit.
             if !tokio::task::spawn_blocking(move || stored())
                 .await
                 .map_err(|e| format!("the check for the artifact ended: {e}"))??
             {
                 return Err(REMOVED_WHILE_UPLOADED.to_string());
+            }
+            if !hold_unassigned(&*transaction, &id, |id, _| assigned(id)).await? {
+                return Err(format!("no package set {id}"));
             }
             transaction
                 .execute(
