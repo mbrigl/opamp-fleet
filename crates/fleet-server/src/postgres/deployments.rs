@@ -732,12 +732,7 @@ mod tests {
              CREATE TRIGGER fleet_test_wait BEFORE INSERT ON deployment_packages \
              FOR EACH ROW EXECUTE FUNCTION fleet_test_wait();",
         );
-        let sessions = |condition: &str| {
-            test.rows(&format!(
-                "SELECT 1 FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND {condition}"
-            ))
-            .len()
-        };
+        let sessions = |condition: &str| test.sessions(condition);
         let at_gate =
             || sessions("wait_event = 'PgSleep' AND query LIKE 'INSERT INTO deployment_packages%'");
         let until = |what: &str, done: &dyn Fn() -> bool| {

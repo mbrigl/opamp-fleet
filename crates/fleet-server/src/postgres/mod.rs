@@ -1154,6 +1154,20 @@ pub(crate) mod testing {
                 .expect("open the test database shared")
         }
 
+        /// How many sessions other than the asking one meet `condition`, a condition on
+        /// `pg_stat_activity`, among those that hold or wait for a lock on a table of this schema.
+        /// The tests share one database, so a session of another test's schema, such as one held
+        /// at a gate of its own in the same statement, counts for none of this test's waits.
+        pub(crate) fn sessions(&self, condition: &str) -> usize {
+            self.rows(&format!(
+                "SELECT 1 FROM pg_stat_activity WHERE pid <> pg_backend_pid() \
+                 AND pid IN (SELECT l.pid FROM pg_locks l JOIN pg_class c ON c.oid = l.relation \
+                 WHERE l.database = (SELECT oid FROM pg_database WHERE datname = current_database()) \
+                 AND c.relnamespace = current_schema()::regnamespace) AND ({condition})"
+            ))
+            .len()
+        }
+
         /// The first column of the first row `query` answers, once it answers one; a test fails
         /// after 30 seconds without.
         pub(crate) fn once(&self, query: &str) -> String {
@@ -1958,5 +1972,43 @@ mod tests {
         let mut expected: Vec<String> = schema::TABLES.iter().map(ToString::to_string).collect();
         expected.sort();
         assert_eq!(tables, expected);
+    }
+
+    /// A test counts the sessions of its own schema only: one of another test's schema, waiting
+    /// while it holds a lock on a table there, counts for none of this test's waits. The tests
+    /// that gate a write and wait for the other side to wait share one database, and a session
+    /// of another schema in the same statement would otherwise open the gate early.
+    #[test]
+    fn a_session_of_another_schema_counts_for_none_of_this_schemas_sessions() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let other = TestDatabase::named().expect("a second schema");
+        let key = 4_711_000_151;
+        other.sql("CREATE TABLE fleet_test_held (n integer)");
+        let gate = test.gate(key);
+        std::thread::scope(|scope| {
+            let parked = scope.spawn(|| {
+                other.sql(&format!(
+                    "BEGIN; LOCK TABLE fleet_test_held IN ACCESS SHARE MODE; \
+                     SELECT pg_advisory_lock_shared({key}); COMMIT;"
+                ));
+            });
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
+            while other.sessions("wait_event_type = 'Lock'") != 1 {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the other schema's session waits"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert_eq!(
+                test.sessions("wait_event_type = 'Lock'"),
+                0,
+                "a session of another schema is none of this one's"
+            );
+            gate.open();
+            parked.join().expect("the other schema's session");
+        });
     }
 }
