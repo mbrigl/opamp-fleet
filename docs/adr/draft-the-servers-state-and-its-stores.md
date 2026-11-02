@@ -282,12 +282,17 @@ and configured in the Server's configuration alone, and move an old layout by an
       to the next day. A chain that is open and whose lease no instance holds is pruned once it is
       closed. Before it deletes, an instance records in its own chain one `audit.pruned` for each
       chain it prunes, naming it as `pruned_chain` with the last removed `seq` as `last_seq` and
-      that entry's hash as `last_hash`, and deletes only once they are written. It deletes from
-      every chain of one prune in one transaction, so a prune that stops part-way deletes nothing,
-      and within it in batches of a bounded number of entries, so no statement outgrows the
-      statement timeout every connection of the Server holds. "Days" are periods of 24 hours,
-      whatever the database's time zone. A prune that does not end within five minutes is rolled
-      back whole and tried again at the next start or day.
+      that entry's hash as `last_hash`, and deletes only once they are written. "Days" are periods
+      of 24 hours, whatever the database's time zone.
+    - A prune runs in rounds. A round removes at most 100 000 entries across the chains it
+      prunes, taking each chain's run from its start, and records its own `audit.pruned` entries
+      before it deletes; the next round follows right away, until no entry is that old, so a
+      backlog drains over as many rounds as it needs. A round deletes from every chain in one
+      transaction, so one that stops part-way deletes nothing and every round leaves a record that
+      verifies, and within it in batches of a bounded number of entries, so no statement outgrows
+      the statement timeout every connection of the Server holds. A round that does not end
+      within five minutes is rolled back whole; the prune then stops, and the next start or day
+      goes on from where the last round that ended left the record.
     - An `audit.pruned` is an entry like any other and is pruned in its turn. Where an entry an
       instance removes is an `audit.pruned` whose link is still needed, the instance records that
       link again in a new `audit.pruned`. A link is still needed when the chain it names begins
