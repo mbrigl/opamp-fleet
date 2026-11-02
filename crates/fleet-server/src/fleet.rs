@@ -984,6 +984,7 @@ impl AppState {
         signed: &Signed,
         instance_uid: &[u8],
         predecessor: Option<CertId>,
+        bootstrap: Option<&CertId>,
     ) -> Result<(), String> {
         self.audited(
             Entry::new("issuance.signed", "issued")
@@ -1013,12 +1014,22 @@ impl AppState {
                     predecessor.as_ref().map(|id| id.serial.clone()),
                 ),
         )?;
-        match &self.revocations {
-            Some(revocations) => revocations
-                .record(signed.facts.clone(), instance_uid, predecessor)
-                .map_err(|e| format!("cannot record the issued certificate: {e}")),
-            None => Ok(()),
-        }
+        let recorded = match (&self.revocations, bootstrap) {
+            (Some(revocations), Some(bootstrap)) => {
+                revocations.record_approved(signed.facts.clone(), instance_uid, bootstrap)
+            }
+            (Some(revocations), None) => {
+                revocations.record(signed.facts.clone(), instance_uid, predecessor)
+            }
+            (None, _) => return Ok(()),
+        };
+        recorded.map_err(|e| {
+            if e == crate::revocation::BOOTSTRAP_REVOKED {
+                e
+            } else {
+                format!("cannot record the issued certificate: {e}")
+            }
+        })
     }
 
     /// What a CSR renews, the host the new certificate is for (ADR-0015 clause 18), and the
@@ -1121,7 +1132,16 @@ impl AppState {
             id,
             signer,
             &host,
-            &|signed, instance_uid| self.record_issued(signed, instance_uid, None),
+            &|signed, instance_uid, bootstrap| {
+                self.record_issued(signed, instance_uid, None, Some(bootstrap))
+                    .map_err(|e| {
+                        if e == crate::revocation::BOOTSTRAP_REVOKED {
+                            DecisionError::Revoked
+                        } else {
+                            DecisionError::Sign(e)
+                        }
+                    })
+            },
             &revoked,
         )
     }
@@ -2121,7 +2141,7 @@ impl AppState {
                         }) {
                         Err(e) => Ok(Err(e)),
                         Ok((signed, predecessor)) => self
-                            .record_issued(&signed, &sender, predecessor)
+                            .record_issued(&signed, &sender, predecessor, None)
                             .map(|()| Ok(signed)),
                     },
                 };

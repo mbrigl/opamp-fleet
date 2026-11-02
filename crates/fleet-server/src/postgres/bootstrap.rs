@@ -86,6 +86,40 @@ impl BootstrapStore for PgBootstrapStore {
         })
     }
 
+    /// The record is held against every other issuer while it counts the valid certificates and
+    /// writes the new one, so two instances at the bound issue one between them.
+    fn put_within(
+        &self,
+        entry: &Entry,
+        file: &[u8],
+        max: usize,
+        now_ms: u64,
+    ) -> Result<bool, String> {
+        let (entry, file) = (entry.clone(), file.to_vec());
+        self.database.run(move |pool| async move {
+            let mut client = client(&pool).await?;
+            let transaction = client.transaction().await.map_err(sql)?;
+            transaction
+                .batch_execute("LOCK TABLE bootstrap_certificates IN SHARE ROW EXCLUSIVE MODE")
+                .await
+                .map_err(sql)?;
+            let valid: i64 = transaction
+                .query_one(
+                    "SELECT count(*) FROM bootstrap_certificates WHERE not_after_ms > $1",
+                    &[&signed(now_ms)],
+                )
+                .await
+                .map_err(sql)?
+                .get(0);
+            if usize::try_from(valid).unwrap_or(usize::MAX) >= max {
+                return Ok(false);
+            }
+            write(&*transaction, &entry, Some(&file)).await?;
+            transaction.commit().await.map_err(sql)?;
+            Ok(true)
+        })
+    }
+
     fn remove(&self, id: &CertId) -> Result<(), String> {
         self.on_row(
             "DELETE FROM bootstrap_certificates WHERE issuer = $1 AND id_serial = $2",
@@ -234,6 +268,90 @@ mod tests {
 
     /// The port's contract on either store: an issuance keeps the entry and its file together, an
     /// entry written again keeps its file, the file goes alone or with its entry.
+    /// An issuance within the bound on either store: it is written while fewer certificates than
+    /// the bound are valid at the time it names, an ended one counts nothing, and one at the bound
+    /// writes nothing.
+    fn within(store: &dyn BootstrapStore) {
+        let valid = |serial: &str| Entry {
+            not_after_ms: 1_000,
+            ..entry(serial, true)
+        };
+        assert_eq!(store.put_within(&valid("a"), b"a", 2, 10), Ok(true));
+        assert_eq!(store.put_within(&entry("e0", true), b"e", 2, 10), Ok(true));
+        assert_eq!(store.put_within(&valid("b"), b"b", 2, 10), Ok(true));
+        assert_eq!(store.put_within(&valid("c"), b"c", 2, 10), Ok(false));
+        assert_eq!(store.load().expect("load").len(), 3);
+        assert_eq!(
+            store.p12(&valid("c").id),
+            Ok(None),
+            "nothing kept at the bound"
+        );
+    }
+
+    /// Verifies: ADR-0029
+    #[test]
+    fn an_issuance_within_the_bound_holds_on_the_filesystem() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        within(&FsBootstrapStore::open(dir.path()).expect("open"));
+    }
+
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    #[test]
+    fn an_issuance_within_the_bound_holds_on_postgres() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        within(&PgBootstrapStore::new(test.open()));
+    }
+
+    /// Two instances issue a bootstrap certificate each with one place left on record, behind a
+    /// barrier, and exactly one is kept.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    #[test]
+    fn two_issuers_at_the_bound_keep_one_certificate_between_them() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let stores = [
+            PgBootstrapStore::new(database.clone()),
+            PgBootstrapStore::new(database.clone()),
+        ];
+        const ROUNDS: usize = 20;
+        for round in 0..ROUNDS {
+            let barrier = std::sync::Barrier::new(2);
+            let kept: Vec<bool> = std::thread::scope(|scope| {
+                let racers: Vec<_> = stores
+                    .iter()
+                    .enumerate()
+                    .map(|(racer, store)| {
+                        let barrier = &barrier;
+                        scope.spawn(move || {
+                            let issued = Entry {
+                                not_after_ms: 1_000,
+                                ..entry(&format!("{round:02x}{racer:02x}"), true)
+                            };
+                            barrier.wait();
+                            store
+                                .put_within(&issued, b"p12", round + 1, 10)
+                                .expect("issue")
+                        })
+                    })
+                    .collect();
+                racers
+                    .into_iter()
+                    .map(|r| r.join().expect("racer"))
+                    .collect()
+            });
+            assert_eq!(
+                kept.iter().filter(|k| **k).count(),
+                1,
+                "round {round}: {kept:?}"
+            );
+        }
+        assert_eq!(stores[0].load().expect("load").len(), ROUNDS);
+    }
+
     fn contract(open: &dyn Fn() -> Box<dyn BootstrapStore>) {
         let store = open();
         assert!(store.load().expect("empty").is_empty());
