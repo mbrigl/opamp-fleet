@@ -45,6 +45,71 @@ pub trait BlobStore: Send + Sync {
     /// # Errors
     /// Returns an error when the store cannot be listed.
     fn list(&self) -> Result<Vec<(String, u64)>, String>;
+
+    /// Deletes what uploads that were cut off left behind, of every writer that is no longer live
+    /// (ADR-draft-the-servers-state-and-its-stores clause 16), and answers how many objects it
+    /// deleted: what every sweep runs, under the blob store's lock. A store that stages no upload
+    /// apart from its blobs, or whose one Server cleans up only at startup, deletes nothing here,
+    /// which the default does.
+    ///
+    /// # Errors
+    /// Returns an error when the leftovers cannot be listed or deleted.
+    fn clean_staging(&self) -> Result<usize, String> {
+        Ok(0)
+    }
+}
+
+/// A hold on the blob store's lock
+/// (ADR-draft-the-servers-state-and-its-stores clause 14), released when it is dropped. A store
+/// that is its one Server's alone holds nothing.
+pub struct BlobHold {
+    #[allow(dead_code)]
+    held: Option<Box<dyn Send>>,
+    /// Set once the lock is gone while the hold lives, as when its session ended.
+    lost: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// The `statement_timeout` and `lock_timeout` of the hold's session, where it has one.
+    #[cfg(test)]
+    pub(crate) settings: Option<(String, String)>,
+}
+
+impl BlobHold {
+    /// A hold on nothing: what a store with no other writer answers.
+    #[must_use]
+    pub fn none() -> Self {
+        BlobHold {
+            held: None,
+            lost: None,
+            #[cfg(test)]
+            settings: None,
+        }
+    }
+
+    /// A hold that `held` keeps until it is dropped, `lost` set once the lock is gone before.
+    #[must_use]
+    pub fn of(held: Box<dyn Send>, lost: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Self {
+        BlobHold {
+            held: Some(held),
+            lost: Some(lost),
+            #[cfg(test)]
+            settings: None,
+        }
+    }
+
+    /// The hold, its session's settings noted: what the tests read the wait from.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn with_settings(mut self, settings: (String, String)) -> Self {
+        self.settings = Some(settings);
+        self
+    }
+
+    /// Whether the lock is gone while the hold lives.
+    #[must_use]
+    pub fn lost(&self) -> bool {
+        self.lost
+            .as_ref()
+            .is_some_and(|lost| lost.load(std::sync::atomic::Ordering::SeqCst))
+    }
 }
 
 /// Whether `value` is a blob's name: 64 lowercase hex characters. Nothing else names a blob, so

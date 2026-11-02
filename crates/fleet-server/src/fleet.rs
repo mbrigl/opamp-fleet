@@ -25,7 +25,7 @@ use tracing::{debug, info, warn};
 
 use crate::agent_store::{AgentStore, Creation, PersistedAgent, Pin, Presence};
 use crate::audit::{Audit, Entry};
-use crate::configs::{ConfigBackend, ConfigStore, Configuration, DesiredConfig, Revision};
+use crate::configs::{ConfigBackend, ConfigStore, Configuration, DesiredConfig, Removal, Revision};
 use crate::deployments::{self, deployment_for, Deployment, DeploymentError, DeploymentStore};
 use crate::enrolment::{DecisionError, Enrolment};
 use crate::labels::{LabelError, Sources};
@@ -2320,18 +2320,28 @@ impl AppState {
     /// a Deployment without it first, or forgotten. A deleted Configuration leaves every Deployment
     /// that held it.
     ///
-    /// The fleet lock is held across the check and the delete, so a rollout cannot pin it in
-    /// between.
+    /// The fleet lock is held across the check and the delete, so a rollout of this Server cannot
+    /// pin it in between. A store that other Servers write too counts the stored assignments again
+    /// in the act that deletes (ADR-draft-the-servers-state-and-its-stores clause 2), so a pin
+    /// written through another instance refuses it as well.
     pub fn delete_configuration(&self, name: &str) -> Result<bool, DeleteError> {
         let fleet = self.fleet.lock().expect("fleet lock");
-        let pinning = self.agent_store.pinning(Pin::Configuration(name));
-        if pinning > 0 {
-            return Err(DeleteError::Pinned(format!(
+        let pinned = |pinning: usize| {
+            DeleteError::Pinned(format!(
                 "configuration {name:?} is pinned by the assignment of {pinning} Agent(s) — roll \
                  them out through a Deployment without it, or forget them, before deleting it"
-            )));
+            ))
+        };
+        let pinning = self.agent_store.pinning(Pin::Configuration(name));
+        if pinning > 0 {
+            return Err(pinned(pinning));
         }
-        let deleted = self.configs.delete(name).map_err(DeleteError::Storage)?;
+        // The store decides again from what it stores: another instance may have pinned it.
+        let deleted = match self.configs.delete(name).map_err(DeleteError::Storage)? {
+            Removal::Removed => true,
+            Removal::Absent => false,
+            Removal::Pinned(pinning) => return Err(pinned(pinning)),
+        };
         if deleted {
             if let Some(store) = self.deployment_store() {
                 let left = store
@@ -3521,7 +3531,9 @@ impl AppState {
 
     /// Whether any Agent's assignment references this Package — the gate that makes an assigned
     /// Package's bytes immutable (ADR-0026 clause 13). The Agent store answers it (ADR-0029
-    /// clause 2); the fleet lock keeps a rollout from pinning it meanwhile.
+    /// clause 2); the fleet lock keeps a rollout of this Server from pinning it meanwhile. A
+    /// store that other Servers write too refuses the write again from the stored assignments, in
+    /// the act that writes.
     fn package_set_assigned(&self, id: &PackageId) -> bool {
         let _fleet = self.fleet.lock().expect("fleet lock");
         self.agent_store.pinning(Pin::Package(id)) > 0
@@ -3561,16 +3573,16 @@ impl AppState {
     /// So the operator ends that first, by an act that says so: rolling those Agents out through
     /// another Deployment, or forgetting them.
     ///
-    /// The fleet lock is held across the check and the delete, so a rollout cannot assign through
-    /// the channel in between.
+    /// The fleet lock is held across the check and the delete, so a rollout of this Server cannot
+    /// assign through the channel in between; a store that other Servers write too counts the
+    /// stored assignments again in the act that deletes.
     pub fn delete_deployment(&self, name: &str) -> Result<bool, DeploymentError> {
         let store = self.deployment_store().ok_or(DeploymentError::NotFound)?;
         let fleet = self.fleet.lock().expect("fleet lock");
         let pinning = self.agent_store.pinning(Pin::Deployment(name));
         if pinning > 0 {
-            return Err(DeploymentError::Conflict(format!(
-                "deployment {name:?} is pinned by the assignment of {pinning} Agent(s) — roll them \
-                 out through another deployment, or forget them, before deleting it"
+            return Err(DeploymentError::Conflict(deployments::pinned(
+                name, pinning,
             )));
         }
         let deleted = store.delete(name)?;
@@ -3584,10 +3596,7 @@ impl AppState {
     /// The refusal every write to an assigned Package answers with (ADR-0026 clause 13).
     fn refuse_if_assigned(&self, id: &PackageId) -> Result<(), String> {
         if self.package_set_assigned(id) {
-            return Err(format!(
-                "set {id} is assigned to an Agent and its entries are immutable — create the \
-                 next version as a new set and roll that out"
-            ));
+            return Err(crate::packages::assigned(id));
         }
         Ok(())
     }
@@ -3677,28 +3686,39 @@ impl AppState {
     /// deletion must not change what a running Agent receives. A deleted Package leaves every
     /// Deployment that held it. Nothing is uninstalled either way (ADR-0027).
     ///
-    /// The fleet lock is held across the check and the delete, so a rollout cannot pin it in
-    /// between.
+    /// The fleet lock is held across the check and the delete, so a rollout of this Server cannot
+    /// pin it in between; a store that other Servers write too counts the stored assignments again
+    /// in the act that deletes.
     pub fn delete_package_set(&self, id: &PackageId) -> Result<bool, String> {
         let fleet = self.fleet.lock().expect("fleet lock");
         let pinning = self.agent_store.pinning(Pin::Package(id));
         if pinning > 0 {
-            return Err(format!(
-                "package {id} is pinned by the assignment of {pinning} Agent(s) — roll them out \
-                 through a Deployment without it, or forget them, before deleting it"
-            ));
+            return Err(crate::packages::pinned(id, pinning));
         }
-        let deleted = self.package_store()?.delete_set(id)?;
-        if deleted {
-            if let Some(store) = self.deployment_store() {
-                let left = store.drop_package(id).map_err(|e| e.to_string())?;
-                if !left.is_empty() {
-                    info!(set = %id, deployments = ?left, "package left the deployments that held it");
-                }
+        let packages = self.package_store()?;
+        let sweep = packages.remove_set(id)?;
+        let deleted = sweep.is_some();
+        let dropped = if deleted {
+            self.deployment_store()
+                .map(|store| store.drop_package(id).map_err(|e| e.to_string()))
+                .transpose()
+        } else {
+            Ok(None)
+        };
+        drop(fleet);
+        // The sweep may wait for the blob store's lock, which another instance holds as long as it
+        // sweeps: not under the fleet lock, which every act of this Server waits for.
+        if let Some(sweep) = sweep {
+            packages.sweep_after(sweep);
+        }
+        if let Some(left) = dropped? {
+            if !left.is_empty() {
+                info!(set = %id, deployments = ?left, "package left the deployments that held it");
             }
+        }
+        if deleted {
             info!(set = %id, "package set deleted");
         }
-        drop(fleet);
         Ok(deleted)
     }
 
@@ -6354,6 +6374,180 @@ mod tests {
         assert!(state.snapshot()[0].assigned_deployment.is_empty());
     }
 
+    /// A Package backend on files whose sweeps, once armed, wait at a gate for the blob store's
+    /// lock, as a sweep on PostgreSQL waits for another instance's.
+    struct HeldSweeps {
+        inner: crate::fs::FsPackageBackend,
+        armed: Arc<std::sync::atomic::AtomicBool>,
+        reached: Mutex<Option<std::sync::mpsc::Sender<()>>>,
+        go: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl crate::packages::PackageBackend for HeldSweeps {
+        fn load(&self) -> Result<Vec<crate::packages::Package>, String> {
+            self.inner.load()
+        }
+        fn create(&self, id: &PackageId) -> Result<(), String> {
+            self.inner.create(id)
+        }
+        fn put_entry(
+            &self,
+            id: &PackageId,
+            entry: &crate::packages::Entry,
+            stored: crate::packages::Stored,
+        ) -> Result<(), String> {
+            self.inner.put_entry(id, entry, stored)
+        }
+        fn sign(
+            &self,
+            id: &PackageId,
+            platform: &Platform,
+            content_hash: &[u8],
+            signature: Option<&[u8]>,
+        ) -> Result<crate::packages::Signed, String> {
+            self.inner.sign(id, platform, content_hash, signature)
+        }
+        fn remove_entry(&self, id: &PackageId, platform: &Platform) -> Result<(), String> {
+            self.inner.remove_entry(id, platform)
+        }
+        fn remove(&self, id: &PackageId) -> Result<(), String> {
+            self.inner.remove(id)
+        }
+        fn hold_blobs(&self) -> Result<crate::blobs::BlobHold, String> {
+            if self.armed.load(std::sync::atomic::Ordering::SeqCst) {
+                // Taken out first: the guard of `reached` is not held through the wait, so a
+                // second sweep passes the gate.
+                let reached = self.reached.lock().expect("reached").take();
+                if let Some(reached) = reached {
+                    reached.send(()).expect("reached");
+                    self.go.lock().expect("go").recv().expect("go");
+                }
+            }
+            Ok(crate::blobs::BlobHold::none())
+        }
+    }
+
+    /// The deletion of a Package sweeps its blobs once it has let the fleet lock go: while the
+    /// sweep waits for the blob store's lock, every other act of the fleet goes on.
+    /// Verifies: ADR-draft-the-servers-state-and-its-stores
+    #[test]
+    fn a_package_deletion_sweeps_once_it_lets_the_fleet_lock_go() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let packages = dir.path().join("packages");
+        let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (reached, reaches) = std::sync::mpsc::channel();
+        let (go, goes) = std::sync::mpsc::channel();
+        let store = PackageStore::with_backend(
+            Box::new(HeldSweeps {
+                inner: crate::fs::FsPackageBackend::open(&packages).expect("backend"),
+                armed: armed.clone(),
+                reached: Mutex::new(Some(reached)),
+                go: Mutex::new(goes),
+            }),
+            Box::new(crate::fs::FsBlobStore::open(&packages).expect("blobs")),
+        )
+        .expect("store");
+        let id = PackageId::new("otelcol", "1.0.0").expect("id");
+        store.create(&id).expect("create");
+        store
+            .put_entry(&id, &linux(), b"v1".to_vec())
+            .expect("entry");
+        let state = Arc::new(
+            AppState::new(dir.path().join("configs"))
+                .expect("state")
+                .with_packages(Some(
+                    PackageOffering::new(&packages, store).expect("offering"),
+                )),
+        );
+        armed.store(true, std::sync::atomic::Ordering::SeqCst);
+        let deleting = std::thread::spawn({
+            let (state, id) = (state.clone(), id.clone());
+            move || state.delete_package_set(&id)
+        });
+        reaches
+            .recv()
+            .expect("the deletion's sweep waits for the lock");
+        let (acted, acts) = std::sync::mpsc::channel();
+        std::thread::spawn({
+            let state = state.clone();
+            move || {
+                let _ = acted.send(state.delete_configuration("none").map_err(|_| ()));
+            }
+        });
+        assert_eq!(
+            acts.recv_timeout(std::time::Duration::from_secs(30)),
+            Ok(Ok(false)),
+            "an act under the fleet lock goes on while the sweep waits"
+        );
+        go.send(()).expect("go on");
+        assert_eq!(deleting.join().expect("the deletion"), Ok(true));
+    }
+
+    /// An entry's deletion sweeps once it has let go of every lock of the Package store: while
+    /// its sweep waits for the blob store's lock, the deletion of another Package, which takes
+    /// the fleet lock and then the store's, goes on, and so does every act behind the fleet lock.
+    /// Verifies: ADR-draft-the-servers-state-and-its-stores
+    #[test]
+    fn an_entry_deletion_sweeps_once_it_lets_the_store_go() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let packages = dir.path().join("packages");
+        let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (reached, reaches) = std::sync::mpsc::channel();
+        let (go, goes) = std::sync::mpsc::channel();
+        let store = PackageStore::with_backend(
+            Box::new(HeldSweeps {
+                inner: crate::fs::FsPackageBackend::open(&packages).expect("backend"),
+                armed: armed.clone(),
+                reached: Mutex::new(Some(reached)),
+                go: Mutex::new(goes),
+            }),
+            Box::new(crate::fs::FsBlobStore::open(&packages).expect("blobs")),
+        )
+        .expect("store");
+        let (first, second) = (
+            PackageId::new("otelcol", "1.0.0").expect("id"),
+            PackageId::new("otelcol", "2.0.0").expect("id"),
+        );
+        for (id, bytes) in [(&first, b"v1"), (&second, b"v2")] {
+            store.create(id).expect("create");
+            store
+                .put_entry(id, &linux(), bytes.to_vec())
+                .expect("entry");
+        }
+        let state = Arc::new(
+            AppState::new(dir.path().join("configs"))
+                .expect("state")
+                .with_packages(Some(
+                    PackageOffering::new(&packages, store).expect("offering"),
+                )),
+        );
+        armed.store(true, std::sync::atomic::Ordering::SeqCst);
+        let deleting = std::thread::spawn({
+            let (state, id) = (state.clone(), first.clone());
+            move || state.delete_package_entry(&id, &linux())
+        });
+        reaches
+            .recv()
+            .expect("the entry deletion's sweep waits for the lock");
+        let (acted, acts) = std::sync::mpsc::channel();
+        std::thread::spawn({
+            let (state, id) = (state.clone(), second.clone());
+            move || {
+                let deleted = state.delete_package_set(&id);
+                let other = state.delete_configuration("none").map_err(|_| ());
+                let _ = acted.send((deleted, other));
+            }
+        });
+        assert_eq!(
+            acts.recv_timeout(std::time::Duration::from_secs(30)),
+            Ok((Ok(true), Ok(false))),
+            "another Package's deletion and an act under the fleet lock go on while the sweep \
+             waits"
+        );
+        go.send(()).expect("go on");
+        assert_eq!(deleting.join().expect("the entry deletion"), Ok(true));
+    }
+
     /// Nothing an assignment pins can be deleted — a Configuration, a Package, a Deployment — and
     /// the refusal says how many Agents pin it. After a press without it the deletion succeeds,
     /// and a deleted Configuration or Package leaves every Deployment that held it.
@@ -7513,6 +7707,8 @@ mod tests {
             return;
         };
         let database = test.open();
+        // A rollout releases through a stored Deployment.
+        test.store_deployments(&["stable"]);
         let body = |text: &str| crate::configs::Revision {
             body: text.to_string(),
             role: String::new(),

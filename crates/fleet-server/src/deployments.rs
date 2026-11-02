@@ -286,9 +286,25 @@ pub trait DeploymentBackend: Send + Sync {
     /// are stored afterwards.
     fn drop_member(&self, member: &Member) -> Result<Vec<Deployment>, String>;
 
-    /// Deletes one Deployment, its members with it; removing what is already absent is not an
-    /// error.
-    fn remove(&self, name: &str) -> Result<(), String>;
+    /// Deletes one Deployment, its members with it, unless a stored assignment names it (ADR-0026
+    /// clause 12); removing what is already absent is not an error. A database adapter counts the
+    /// assignments in the transaction that deletes, holding the Deployment's row against every
+    /// rollout through it, and refuses with a `Conflict` naming [`pinned`]; the filesystem
+    /// adapter, whose one Server asked its Agent store first, deletes.
+    ///
+    /// # Errors
+    /// `Conflict` when a stored assignment names it, or `Storage`.
+    fn remove(&self, name: &str) -> Result<(), DeploymentError>;
+}
+
+/// The refusal of the deletion of a Deployment the assignments of `pinning` Agents name (ADR-0026
+/// clause 12).
+#[must_use]
+pub fn pinned(name: &str, pinning: usize) -> String {
+    format!(
+        "deployment {name:?} is pinned by the assignment of {pinning} Agent(s) — roll them out \
+         through another deployment, or forget them, before deleting it"
+    )
 }
 
 /// The Deployments (ADR-0027), held in memory and persisted through a [`DeploymentBackend`].
@@ -464,12 +480,11 @@ impl DeploymentStore {
     /// store's — the fleet refuses the delete while an assignment does.
     pub fn delete(&self, name: &str) -> Result<bool, DeploymentError> {
         let mut deployments = self.deployments.write().expect("deployments lock");
-        if deployments.remove(name).is_none() {
+        if !deployments.contains_key(name) {
             return Ok(false);
         }
-        self.backend
-            .remove(name)
-            .map_err(DeploymentError::Storage)?;
+        self.backend.remove(name)?;
+        deployments.remove(name);
         Ok(true)
     }
 
@@ -537,7 +552,7 @@ pub(crate) mod tests {
                 .collect())
         }
 
-        fn remove(&self, name: &str) -> Result<(), String> {
+        fn remove(&self, name: &str) -> Result<(), DeploymentError> {
             self.0.lock().expect("memory").remove(name);
             Ok(())
         }

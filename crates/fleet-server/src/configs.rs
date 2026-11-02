@@ -207,8 +207,23 @@ pub trait ConfigBackend: Send + Sync {
         referenced: &BTreeSet<String>,
     ) -> Result<BTreeMap<String, Revision>, String>;
 
-    /// Deletes one Configuration, its retained revisions with it.
-    fn remove(&self, name: &str) -> Result<(), String>;
+    /// Deletes one Configuration, its retained revisions with it, unless a stored assignment pins
+    /// it (ADR-0026 clause 12). A database adapter counts the assignments in the transaction that
+    /// deletes, holding the Configuration's row against every rollout that pins one of its
+    /// revisions, so a pin written through another instance refuses it; the filesystem adapter,
+    /// whose one Server asked its Agent store first, deletes.
+    fn remove(&self, name: &str) -> Result<Removal, String>;
+}
+
+/// What the deletion of a Configuration found ([`ConfigStore::delete`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Removal {
+    /// It was stored, and is deleted.
+    Removed,
+    /// None of that name is stored.
+    Absent,
+    /// The assignments of this many Agents pin it, and it is kept.
+    Pinned(usize),
 }
 
 /// The Configuration store: every Configuration and its retained revisions (ADR-0026). The
@@ -375,16 +390,23 @@ impl ConfigStore {
         Ok(())
     }
 
-    /// Deletes a Configuration — the saved revision and every retained one; `Ok(false)` when none
-    /// of that name exists. The caller refuses the deletion while an assignment pins it
-    /// (ADR-0026 clause 12).
-    pub fn delete(&self, name: &str) -> Result<bool, String> {
+    /// Deletes a Configuration — the saved revision and every retained one — unless a stored
+    /// assignment pins it (ADR-0026 clause 12), which the backend decides in the act that deletes:
+    /// another instance may have pinned it since this one read it. The caller refuses it first
+    /// while an assignment it holds pins it.
+    ///
+    /// # Errors
+    /// Returns an error when the backend cannot be written.
+    pub fn delete(&self, name: &str) -> Result<Removal, String> {
         let mut configs = self.configs.write().expect("configs lock");
-        if configs.remove(name).is_none() {
-            return Ok(false);
+        if !configs.contains_key(name) {
+            return Ok(Removal::Absent);
         }
-        self.backend.remove(name)?;
-        Ok(true)
+        let removal = self.backend.remove(name)?;
+        if !matches!(removal, Removal::Pinned(_)) {
+            configs.remove(name);
+        }
+        Ok(removal)
     }
 
     /// The candidates a Deployment holding `names` offers one Agent (ADR-0026 clause 9): each of
@@ -514,9 +536,11 @@ pub(crate) mod tests {
             Ok(config.retained.clone())
         }
 
-        fn remove(&self, name: &str) -> Result<(), String> {
-            self.0.lock().expect("memory").remove(name);
-            Ok(())
+        fn remove(&self, name: &str) -> Result<Removal, String> {
+            Ok(match self.0.lock().expect("memory").remove(name) {
+                Some(_) => Removal::Removed,
+                None => Removal::Absent,
+            })
         }
     }
 
@@ -767,10 +791,13 @@ pub(crate) mod tests {
                 .is_empty(),
             "a never-assigned Configuration retains nothing across the reopen"
         );
-        assert!(reopened.delete("base").expect("delete"));
-        assert!(!reopened
-            .delete("base")
-            .expect("second delete finds nothing"));
+        assert_eq!(reopened.delete("base").expect("delete"), Removal::Removed);
+        assert_eq!(
+            reopened
+                .delete("base")
+                .expect("second delete finds nothing"),
+            Removal::Absent
+        );
         assert_eq!(
             ConfigStore::open(Box::new(memory.clone()))
                 .expect("open")
