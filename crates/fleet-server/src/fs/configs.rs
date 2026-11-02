@@ -177,7 +177,7 @@ mod tests {
         let store = open(dir.path()).expect("open");
         let agents = crate::fs::FsAgentStore::open(dir.path()).expect("agents");
         let assignments = put_released(&store, "base", revision("receivers: {}\n"), |pinned| {
-            agents.release(pinned, &[])
+            agents.release(pinned, &[]).map(drop)
         });
         store
             .put_saved("other", revision("exporters: {}\n"))

@@ -204,6 +204,22 @@ impl FsAgentStore {
         self.dir.join(format!("{uid}.json"))
     }
 
+    /// The record of `uid` as on disk, `None` when there is no file.
+    fn read(&self, uid: &InstanceUid) -> Result<Option<PersistedAgent>, String> {
+        let path = self.path(uid);
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
+        };
+        let envelope: Envelope = serde_json::from_str(&text)
+            .map_err(|e| format!("cannot parse {}: {e}", path.display()))?;
+        envelope
+            .into_record()
+            .map(Some)
+            .map_err(|e| format!("cannot restore {}: {e}", path.display()))
+    }
+
     /// Puts the records a failed release wrote back as they were — the bytes, or no file — last
     /// first. One that cannot be put back stays as written, and so does what the store answers
     /// about it.
@@ -248,12 +264,45 @@ impl AgentStore for FsAgentStore {
         Ok(records)
     }
 
+    fn get(&self, uid: &InstanceUid) -> Result<Option<PersistedAgent>, String> {
+        self.read(uid)
+    }
+
+    /// The whole file: this store's one Server is its only writer, and holds the whole record.
     fn put(&self, uid: &InstanceUid, record: &PersistedAgent) -> Result<(), String> {
         let json =
             serde_json::to_vec_pretty(&Envelope::from_record(record)).expect("agent serialize");
         super::replace(&self.path(uid), &json)?;
         self.stored(uid, record.assignment.as_ref());
         Ok(())
+    }
+
+    fn set_labels(
+        &self,
+        uid: &InstanceUid,
+        labels: &BTreeMap<String, String>,
+    ) -> Result<bool, String> {
+        let Some(mut record) = self.read(uid)? else {
+            return Ok(false);
+        };
+        record.labels.clone_from(labels);
+        self.put(uid, &record)?;
+        Ok(true)
+    }
+
+    fn set_restart_pending(
+        &self,
+        uid: &InstanceUid,
+        pending: bool,
+    ) -> Result<Option<bool>, String> {
+        let Some(mut record) = self.read(uid)? else {
+            return Ok(None);
+        };
+        let was = std::mem::replace(&mut record.restart_pending, pending);
+        if was != pending {
+            self.put(uid, &record)?;
+        }
+        Ok(Some(was))
     }
 
     fn remove(&self, uid: &InstanceUid) -> Result<(), String> {
@@ -271,7 +320,7 @@ impl AgentStore for FsAgentStore {
         &self,
         revisions: &[Pinned],
         agents: &[(InstanceUid, PersistedAgent)],
-    ) -> Result<(), String> {
+    ) -> Result<Vec<InstanceUid>, String> {
         for pinned in revisions {
             super::configs::retain(&self.configurations, pinned)?;
         }
@@ -298,7 +347,7 @@ impl AgentStore for FsAgentStore {
                 }
             }
         }
-        Ok(())
+        Ok(written.into_iter().map(|(uid, ..)| uid).collect())
     }
 
     fn pinning(&self, pin: Pin<'_>) -> usize {
@@ -441,6 +490,25 @@ mod tests {
         store.remove(&uid).expect("remove");
         assert!(store.load().expect("load").is_empty());
         store.remove(&uid).expect("removing the absent is fine");
+    }
+
+    /// A release that fails part-way puts back what it wrote, a record that had no file before
+    /// among them: that file is removed again, and what the store answers about pins with it.
+    /// Verifies: ADR-0029
+    #[test]
+    fn a_failed_release_removes_a_record_it_created() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = FsAgentStore::open(dir.path()).expect("open");
+        let (absent, refused) = (InstanceUid::default(), InstanceUid::default());
+        store.put(&refused, &record()).expect("put");
+        let path = |uid: &InstanceUid| dir.path().join(format!("agents/{uid}.json"));
+        crate::fs::testing::refuse(&path(&refused));
+        store
+            .release(&[], &[(absent, record()), (refused, record())])
+            .expect_err("the second record cannot be written");
+        crate::fs::testing::mend(&path(&refused));
+        assert!(!path(&absent).exists(), "no file, as before");
+        assert_eq!(store.pinning(Pin::Deployment("stable")), 1);
     }
 
     /// The identity reassignment: the record follows the Agent, the old key leaves the store.

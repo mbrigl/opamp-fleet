@@ -819,6 +819,36 @@ pub(crate) mod testing {
             )
         }
 
+        /// Holds the advisory lock `key` on a session of its own until the [`Gate`] is opened or
+        /// dropped: a trigger that takes it holds another connection's write open, mid-transaction,
+        /// for as long as the test needs, with no timing.
+        pub(crate) fn gate(&self, key: i64) -> Gate {
+            let (pg, tls) = self.admin_connection();
+            let (open, opened) = std::sync::mpsc::channel::<()>();
+            let (held, holds) = std::sync::mpsc::channel::<()>();
+            let thread = std::thread::spawn(move || {
+                Bridge::new("records-test-gate")
+                    .expect("runtime")
+                    .run(async move {
+                        let client = connect(&pg, &tls).await?;
+                        client
+                            .execute("SELECT pg_advisory_lock($1)", &[&key])
+                            .await
+                            .map_err(sql)?;
+                        let _ = held.send(());
+                        let _ = tokio::task::spawn_blocking(move || opened.recv()).await;
+                        drop(client);
+                        Ok::<_, String>(())
+                    })
+                    .expect("the gate");
+            });
+            holds.recv().expect("the gate is held");
+            Gate {
+                open,
+                thread: Some(thread),
+            }
+        }
+
         fn admin(&self, statements: &str) {
             let (pg, tls) = self.admin_connection();
             let statements = statements.to_string();
@@ -829,6 +859,32 @@ pub(crate) mod testing {
                     client.batch_execute(&statements).await.map_err(sql)
                 })
                 .expect("run on the test database");
+        }
+    }
+
+    /// An advisory lock a test holds; see [`TestDatabase::gate`].
+    pub(crate) struct Gate {
+        open: std::sync::mpsc::Sender<()>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl Gate {
+        /// Lets go of the lock, and returns once its session ended.
+        pub(crate) fn open(mut self) {
+            self.release();
+        }
+
+        fn release(&mut self) {
+            let _ = self.open.send(());
+            if let Some(thread) = self.thread.take() {
+                thread.join().expect("the gate's thread");
+            }
+        }
+    }
+
+    impl Drop for Gate {
+        fn drop(&mut self) {
+            self.release();
         }
     }
 

@@ -224,6 +224,7 @@ struct Instance {
     floors: Arc<PackageFloors>,
     enrolment: Arc<Enrolment>,
     following: fleet_server::instance::Following,
+    database: Arc<Database>,
     held: fleet_server::instance::Held,
     stop: Option<tokio::sync::oneshot::Sender<()>>,
     _dir: tempfile::TempDir,
@@ -235,6 +236,17 @@ impl Instance {
         Self::start_following(pki, schema, config, true).await
     }
 
+    /// [`start`](Self::start), taking up nothing another instance commits until
+    /// [`follow`](Self::follow) is called: what it hears is held back until then.
+    async fn start_deaf(pki: &Pki, schema: &Schema, config: PostgresConfig) -> Self {
+        Self::start_with(pki, schema, config, true, false).await
+    }
+
+    /// Starts taking up what other instances commit, for an instance started deaf.
+    fn follow(&mut self) {
+        self.following = fleet_server::instance::follow(&self.database, self.state.clone(), None);
+    }
+
     /// [`start`](Self::start), its lease renewals compared with the list's version only where
     /// `renewals` says so: a test of what a notification, or the connection made again, does
     /// alone turns the comparison off.
@@ -243,6 +255,18 @@ impl Instance {
         schema: &Schema,
         config: PostgresConfig,
         renewals: bool,
+    ) -> Self {
+        Self::start_with(pki, schema, config, renewals, true).await
+    }
+
+    /// [`start_following`](Self::start_following), following other instances where `follows`
+    /// says so.
+    async fn start_with(
+        pki: &Pki,
+        schema: &Schema,
+        config: PostgresConfig,
+        renewals: bool,
+        follows: bool,
     ) -> Self {
         opamp::tls::install_ring_provider();
         let dir = tempfile::tempdir().expect("tempdir");
@@ -310,11 +334,16 @@ impl Instance {
             let database = database.clone();
             fleet_server::instance::Lease::take(database, TIMES, "test-host").expect("lease")
         };
-        let following = fleet_server::instance::follow(
-            &database,
-            state.clone(),
-            renewals.then(|| lease.list_versions()),
-        );
+        state.serve_under(lease.held());
+        let following = if follows {
+            fleet_server::instance::follow(
+                &database,
+                state.clone(),
+                renewals.then(|| lease.list_versions()),
+            )
+        } else {
+            fleet_server::instance::Following::default()
+        };
         let state_kept = state.clone();
         let agent_listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let operator_listener = TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -352,6 +381,7 @@ impl Instance {
             floors,
             enrolment,
             following,
+            database,
             held,
             stop: Some(stop),
             _dir: dir,
@@ -789,9 +819,16 @@ fn two_revisions_rolled_out_at_once_on_two_instances_are_both_kept() {
                     at_once.wait();
                     configs.put_saved("base", revision(&body)).expect("save");
                     let names = std::collections::BTreeSet::from(["base".to_string()]);
+                    // The Agent reported before it is released to: a release writes the
+                    // assignment of a record that is stored.
+                    let uid = InstanceUid::default();
+                    let reported = fleet_server::agent_store::PersistedAgent {
+                        assignment: None,
+                        ..released("base", "")
+                    };
+                    agents.put(&uid, &reported).expect("report");
                     configs
                         .pin(&names, |hashes, pinned| {
-                            let uid = InstanceUid::default();
                             agents.release(pinned, &[(uid, released("base", &hashes["base"]))])
                         })
                         .expect("roll out");
@@ -1766,4 +1803,720 @@ async fn a_running_instance_closes_the_chain_of_one_killed_at_its_renewal() {
             "SELECT 1 FROM leases WHERE instance_id = '{dead}'"
         ))
         .is_empty());
+}
+
+/// The attributes an Agent describes itself by: the identifying ones, then the others.
+type Attributes<'a> = (&'a [(&'a str, &'a str)], &'a [(&'a str, &'a str)]);
+
+/// One report of `uid` on `session`, its reply awaited: its capabilities, the attributes it
+/// describes itself by, the second set non-identifying, and whether it is healthy.
+async fn report_as(
+    session: &mut Socket,
+    uid: InstanceUid,
+    sequence_num: u64,
+    capabilities: u64,
+    attributes: Attributes<'_>,
+    healthy: bool,
+) -> opamp::proto::ServerToAgent {
+    use futures_util::SinkExt;
+    use opamp::proto::{AgentDescription, AnyValue, ComponentHealth, KeyValue};
+    use tokio_tungstenite::tungstenite::Message as Ws;
+    let pairs = |pairs: &[(&str, &str)]| {
+        pairs
+            .iter()
+            .map(|(key, value)| KeyValue {
+                key: (*key).to_string(),
+                value: Some(AnyValue {
+                    value: Some(opamp::proto::any_value::Value::StringValue(
+                        (*value).to_string(),
+                    )),
+                }),
+            })
+            .collect()
+    };
+    let report = AgentToServer {
+        instance_uid: uid.as_bytes().to_vec(),
+        sequence_num,
+        capabilities: AgentCapabilities::ReportsStatus as u64
+            | AgentCapabilities::ReportsHealth as u64
+            | capabilities,
+        agent_description: Some(AgentDescription {
+            identifying_attributes: pairs(attributes.0),
+            non_identifying_attributes: pairs(attributes.1),
+        }),
+        health: Some(ComponentHealth {
+            healthy,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let framed = opamp::frame::encode_within(&report, usize::MAX).expect("frame");
+    session.send(Ws::Binary(framed.into())).await.expect("send");
+    next_message(session, Duration::from_secs(5))
+        .await
+        .expect("an answer to the report")
+}
+
+/// The view `instance` holds of `uid`.
+fn view_of(instance: &Instance, uid: InstanceUid) -> Option<fleet_server::fleet::AgentView> {
+    instance
+        .state
+        .snapshot()
+        .into_iter()
+        .find(|view| view.instance_uid == uid.to_string())
+}
+
+/// Labels set through B on a Client Agent A carries stay as B set them when A writes the Agent's
+/// next report before it heard of them, since A's write is of what a report decides alone; A then
+/// takes them up, and a later change through B reaches A's view within one second.
+/// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts, ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn labels_set_through_one_instance_stay_and_reach_the_instance_that_carries_the_agent() {
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    // B starts before the Agent first reports, so it knows it from the database alone.
+    let b = Instance::start(&pki, &schema, schema.config_on(schema.config.port)).await;
+    let mut a = Instance::start_deaf(&pki, &schema, schema.config_on(schema.config.port)).await;
+    let (cert, key) = pki.issue("edge-01");
+    let client = InstanceUid([0x11; 16]);
+    let client_attributes: Attributes<'_> = (
+        &[("service.name", "fleet-agent")],
+        &[("supervisor.kind.otelcol", "true")],
+    );
+    let mut client_session = websocket(&a, &pki, &cert, &key).await;
+    report_as(&mut client_session, client, 1, 0, client_attributes, true).await;
+    let labels = |uid: InstanceUid| {
+        schema.query(&format!(
+            "SELECT labels::text FROM agents WHERE instance_uid = '{uid}'"
+        ))
+    };
+
+    let on_b = b.state.clone();
+    let set = move |tier: &'static str| {
+        let on_b = on_b.clone();
+        async move {
+            tokio::task::spawn_blocking(move || {
+                on_b.set_labels(
+                    &client,
+                    std::collections::BTreeMap::from([("tier".to_string(), tier.to_string())]),
+                )
+            })
+            .await
+            .expect("set labels")
+        }
+    };
+    assert!(
+        set("edge").await.is_ok(),
+        "B sets the labels of an Agent it never held"
+    );
+    // A has not heard of them, and writes the Client Agent's next report, which changes its health.
+    report_as(&mut client_session, client, 2, 0, client_attributes, false).await;
+    assert_eq!(
+        labels(client),
+        [r#"{"tier":"edge"}"#],
+        "the labels stay as B set them"
+    );
+    assert!(
+        view_of(&a, client).is_some_and(|view| view.labels.is_empty()),
+        "A had not heard of them"
+    );
+
+    a.follow();
+    let holds = |tier: &str| {
+        view_of(&a, client)
+            .is_some_and(|view| view.labels.get("tier").map(String::as_str) == Some(tier))
+    };
+    assert!(
+        eventually(Duration::from_secs(10), || holds("edge")).await,
+        "A took the labels up once it followed"
+    );
+    assert!(set("core").await.is_ok());
+    assert!(
+        eventually(Duration::from_secs(1), || holds("core")).await,
+        "A took the change up within one second"
+    );
+}
+
+/// A restart requested through B for an Agent A carries stays queued when A writes the Agent's
+/// next report before it heard of it; A then takes it up and sends the restart, which clears it,
+/// and a request made after that is queued again and sent within one second.
+/// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts, ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restart_requested_through_one_instance_stays_until_the_carrying_instance_sends_it() {
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let b = Instance::start(&pki, &schema, schema.config_on(schema.config.port)).await;
+    let mut a = Instance::start_deaf(&pki, &schema, schema.config_on(schema.config.port)).await;
+    let (cert, key) = pki.issue("edge-01");
+    let uid = InstanceUid([0x21; 16]);
+    let restartable = AgentCapabilities::AcceptsRestartCommand as u64;
+    let attributes: Attributes<'_> = (&[("service.name", "otelcol")], &[]);
+    let mut session = websocket(&a, &pki, &cert, &key).await;
+    report_as(&mut session, uid, 1, restartable, attributes, true).await;
+    let queued = || {
+        schema.query(&format!(
+            "SELECT restart_pending::text FROM agents WHERE instance_uid = '{uid}'"
+        ))
+    };
+    let request = || {
+        let on_b = b.state.clone();
+        async move {
+            tokio::task::spawn_blocking(move || on_b.request_restart(&uid).is_ok())
+                .await
+                .expect("request")
+        }
+    };
+    let is_restart = |message: &opamp::proto::ServerToAgent| {
+        message
+            .command
+            .as_ref()
+            .is_some_and(|command| command.r#type == opamp::proto::CommandType::Restart as i32)
+    };
+
+    assert!(
+        request().await,
+        "B queues the restart of an Agent it never held"
+    );
+    let answer = report_as(&mut session, uid, 2, restartable, attributes, false).await;
+    assert!(!is_restart(&answer), "A had not heard of it");
+    assert_eq!(queued(), ["true"], "the request stays queued");
+
+    a.follow();
+    let sent = next_message(&mut session, Duration::from_secs(10))
+        .await
+        .expect("A sends the restart once it follows");
+    assert!(is_restart(&sent), "{sent:?}");
+    assert_eq!(queued(), ["false"], "sending it cleared it");
+
+    assert!(request().await, "a later request");
+    let sent = next_message(&mut session, Duration::from_secs(1))
+        .await
+        .expect("A sends the later restart within one second");
+    assert!(is_restart(&sent), "{sent:?}");
+    assert_eq!(queued(), ["false"]);
+}
+
+/// The ceiling on Agent records holds for the fleet: with room for one, an Agent first heard of
+/// through B is refused once A stored another, and the one A stored keeps reporting through B.
+/// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it, ADR-0021
+#[test]
+fn the_ceiling_on_agent_records_holds_across_instances() {
+    use fleet_server::fleet::{AppState, Transport};
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let [a, b] = [(); 2].map(|()| {
+        AppState::on(&records(&schema))
+            .expect("state")
+            .with_max_agents(1)
+    });
+    let report = |uid: InstanceUid| AgentToServer {
+        instance_uid: uid.as_bytes().to_vec(),
+        sequence_num: 1,
+        capabilities: AgentCapabilities::ReportsStatus as u64,
+        ..Default::default()
+    };
+    let (first, second) = (InstanceUid([0x31; 16]), InstanceUid([0x32; 16]));
+    let refused = |processed: fleet_server::fleet::Processed| {
+        processed
+            .reply
+            .error_response
+            .is_some_and(|error| error.error_message.contains("ceiling"))
+    };
+    assert!(!refused(a.process(report(first), Transport::Http, None)));
+    assert!(
+        refused(b.process(report(second), Transport::Http, None)),
+        "B counts what A stored"
+    );
+    assert!(
+        !refused(b.process(report(first), Transport::Http, None)),
+        "a stored Agent passes no ceiling"
+    );
+    assert_eq!(
+        schema.query("SELECT instance_uid FROM agents"),
+        [first.to_string()]
+    );
+}
+
+/// An Agent carried by A that went quiet is forgotten through B, which decides from the presence
+/// A wrote: refused while it reports, forgotten once it is silent past the budget, and A then ends
+/// its session within one second.
+/// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts, ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_agent_forgotten_through_one_instance_has_its_session_ended_by_the_one_that_carries_it()
+{
+    use fleet_server::fleet::ForgetError;
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let b = Instance::start(&pki, &schema, schema.config_on(schema.config.port)).await;
+    let a = Instance::start(&pki, &schema, schema.config_on(schema.config.port)).await;
+    let (cert, key) = pki.issue("edge-01");
+    let uid = InstanceUid([0x41; 16]);
+    let attributes: Attributes<'_> = (&[("service.name", "otelcol")], &[]);
+    let mut session = websocket(&a, &pki, &cert, &key).await;
+    report_as(&mut session, uid, 1, 0, attributes, true).await;
+    let (on_a, holder) = (a.state.clone(), a.instance_id().expect("a lease"));
+    tokio::task::spawn_blocking(move || on_a.write_presence(&holder))
+        .await
+        .expect("batch")
+        .expect("A writes the presence");
+    let forget = || {
+        let on_b = b.state.clone();
+        async move {
+            tokio::task::spawn_blocking(move || on_b.forget_agent(&uid))
+                .await
+                .expect("forget")
+        }
+    };
+
+    assert!(
+        matches!(forget().await, Err(ForgetError::StillReporting)),
+        "B sees A holds it, and that it reports"
+    );
+    // The Agent went quiet two minutes ago, past any budget; A's presence is as it last wrote it.
+    schema.sql(&format!(
+        "UPDATE agents SET last_seen_ms = last_seen_ms - 120000 WHERE instance_uid = '{uid}'"
+    ));
+    assert!(forget().await.is_ok(), "B forgets an Agent it never held");
+    assert_eq!(
+        closed_within(&mut session, Duration::from_secs(1)).await,
+        Some((1000, "forgotten".to_string())),
+        "A ends its session within one second"
+    );
+    assert!(view_of(&a, uid).is_none(), "and holds it no more");
+}
+
+/// An Agent forgotten through B stays forgotten when A, which holds it and has not heard of it
+/// yet, writes its next report or flushes at shutdown: A writes nothing of it again, neither the
+/// record nor the labels it held, and drops the Agent it reported for and ends its session.
+/// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts, ADR-0024
+#[test]
+fn an_agent_forgotten_through_one_instance_is_not_written_again_by_another() {
+    use fleet_server::fleet::{AppState, Transport};
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let [a, b] = [(); 2].map(|()| AppState::on(&records(&schema)).expect("state"));
+    let (reporting, flushed) = (InstanceUid([0x51; 16]), InstanceUid([0x52; 16]));
+    let report = |uid: InstanceUid, sequence_num: u64, healthy: bool| AgentToServer {
+        instance_uid: uid.as_bytes().to_vec(),
+        sequence_num,
+        capabilities: AgentCapabilities::ReportsStatus as u64
+            | AgentCapabilities::ReportsHealth as u64,
+        health: Some(opamp::proto::ComponentHealth {
+            healthy,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    for (conn, uid) in [(7, reporting), (8, flushed)] {
+        a.process(report(uid, 1, true), Transport::WebSocket, Some(conn));
+    }
+    assert!(b
+        .set_labels(
+            &reporting,
+            std::collections::BTreeMap::from([("tier".to_string(), "edge".to_string())]),
+        )
+        .is_ok());
+    // No presence is stored for either, and B decides from what is stored.
+    for uid in [reporting, flushed] {
+        assert!(b.forget_agent(&uid).is_ok(), "B forgets {uid}");
+    }
+
+    // A has not heard of it, and the next report changed its health.
+    let answered = a.process(report(reporting, 2, false), Transport::WebSocket, Some(7));
+    assert_eq!(answered.uid, None, "A carries it no more");
+    a.flush_agents();
+    assert!(
+        schema.query("SELECT instance_uid FROM agents").is_empty(),
+        "neither is written again"
+    );
+    assert_eq!(a.take_forgotten(7), [reporting], "its session ends");
+    assert!(a
+        .snapshot()
+        .iter()
+        .all(|view| view.instance_uid != reporting.to_string()));
+}
+
+/// An Agent that asks for a new identity keeps its stored record under the new key, labels set
+/// through another instance included, and the instance that carries it keeps carrying it: the
+/// record moves in the store as it is stored, and is not dropped as one forgotten.
+/// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts
+#[test]
+fn an_agent_rekeyed_at_its_request_keeps_its_stored_record() {
+    use fleet_server::fleet::{AppState, Transport};
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let [a, b] = [(); 2].map(|()| AppState::on(&records(&schema)).expect("state"));
+    let uid = InstanceUid([0x53; 16]);
+    let report = |flags: u64, sequence_num: u64| AgentToServer {
+        instance_uid: uid.as_bytes().to_vec(),
+        sequence_num,
+        capabilities: AgentCapabilities::ReportsStatus as u64,
+        flags,
+        ..Default::default()
+    };
+    a.process(report(0, 1), Transport::WebSocket, Some(7));
+    assert!(b
+        .set_labels(
+            &uid,
+            std::collections::BTreeMap::from([("tier".to_string(), "edge".to_string())]),
+        )
+        .is_ok());
+    let rekeyed = a
+        .process(
+            report(
+                opamp::proto::AgentToServerFlags::RequestInstanceUid as u64,
+                2,
+            ),
+            Transport::WebSocket,
+            Some(7),
+        )
+        .uid
+        .expect("carried under its new identity");
+    assert_ne!(rekeyed, uid);
+    assert_eq!(
+        schema.query("SELECT instance_uid FROM agents"),
+        [rekeyed.to_string()]
+    );
+    assert_eq!(
+        schema.query("SELECT labels::text FROM agents"),
+        [r#"{"tier":"edge"}"#],
+        "the labels B set stay"
+    );
+    assert!(a
+        .snapshot()
+        .iter()
+        .any(|view| view.instance_uid == rekeyed.to_string()));
+}
+
+/// An Agent rekeyed at its request through A is dropped under its old identity by B, which
+/// loaded it: the move announces the old identity forgotten, so B holds no record of it under a
+/// name no store keeps.
+/// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts, ADR-0024
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_agent_rekeyed_through_one_instance_is_dropped_under_its_old_identity_by_another() {
+    use fleet_server::fleet::{AppState, Transport};
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let a = Arc::new(AppState::on(&records(&schema)).expect("state"));
+    let uid = InstanceUid([0x54; 16]);
+    let report = move |flags: u64, sequence_num: u64| AgentToServer {
+        instance_uid: uid.as_bytes().to_vec(),
+        sequence_num,
+        capabilities: AgentCapabilities::ReportsStatus as u64,
+        flags,
+        ..Default::default()
+    };
+    let on_a = a.clone();
+    tokio::task::spawn_blocking(move || on_a.process(report(0, 1), Transport::WebSocket, Some(7)))
+        .await
+        .expect("report");
+    // B loads the record at startup, and listens before A moves it.
+    let b = Instance::start(&pki, &schema, schema.config_on(schema.config.port)).await;
+    assert!(b.has_read(1).await, "B follows");
+    assert!(view_of(&b, uid).is_some(), "B loaded it");
+
+    let on_a = a.clone();
+    let rekeyed = tokio::task::spawn_blocking(move || {
+        on_a.process(
+            report(
+                opamp::proto::AgentToServerFlags::RequestInstanceUid as u64,
+                2,
+            ),
+            Transport::WebSocket,
+            Some(7),
+        )
+        .uid
+    })
+    .await
+    .expect("rekey")
+    .expect("carried under its new identity");
+    assert_ne!(rekeyed, uid);
+    assert!(
+        eventually(Duration::from_secs(10), || view_of(&b, uid).is_none()).await,
+        "B drops the old identity"
+    );
+}
+
+/// A rollout on A to Agents forgotten through B meanwhile, before A heard of it, releases to the
+/// others alone: the press counts only the Agents it wrote an assignment for, a rollout to one
+/// forgotten Agent answers that it is unknown, and A holds neither any more.
+/// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts, ADR-0026
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_rollout_counts_only_the_agents_it_released_to() {
+    use fleet_server::fleet::{AppState, RolloutError, Transport};
+    use opamp::proto::{AgentDescription, AnyValue, KeyValue};
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let a = Instance::start_deaf(&pki, &schema, schema.config_on(schema.config.port)).await;
+    let b = AppState::on(&records(&schema)).expect("state");
+    let (kept, forgotten, named) = (
+        InstanceUid([0x71; 16]),
+        InstanceUid([0x72; 16]),
+        InstanceUid([0x73; 16]),
+    );
+    let report = |uid: InstanceUid| AgentToServer {
+        instance_uid: uid.as_bytes().to_vec(),
+        sequence_num: 1,
+        capabilities: AgentCapabilities::ReportsStatus as u64
+            | AgentCapabilities::AcceptsRemoteConfig as u64,
+        agent_description: Some(AgentDescription {
+            identifying_attributes: vec![KeyValue {
+                key: "service.name".to_string(),
+                value: Some(AnyValue {
+                    value: Some(opamp::proto::any_value::Value::StringValue(
+                        "otelcol".to_string(),
+                    )),
+                }),
+            }],
+            non_identifying_attributes: Vec::new(),
+        }),
+        ..Default::default()
+    };
+    let on_a = a.state.clone();
+    let (to_one, released) = tokio::task::spawn_blocking(move || {
+        for uid in [kept, forgotten, named] {
+            on_a.process(report(uid), Transport::Http, None);
+        }
+        on_a.save_configuration(
+            "collector",
+            fleet_server::configs::Revision {
+                body: "receivers: {}".to_string(),
+                role: String::new(),
+                service_name: "otelcol".to_string(),
+            },
+        )
+        .expect("save");
+        on_a.deployment_store()
+            .expect("deployments")
+            .put(
+                "stable",
+                std::collections::BTreeMap::from([(
+                    "service.name".to_string(),
+                    "otelcol".to_string(),
+                )]),
+            )
+            .expect("deployment");
+        on_a.put_deployment_configuration("stable", "collector")
+            .expect("hold it");
+        // Silent past any budget, and forgotten through B.
+        schema.sql("UPDATE agents SET last_seen_ms = last_seen_ms - 120000");
+        for uid in [forgotten, named] {
+            assert!(b.forget_agent(&uid).is_ok(), "B forgets {uid}");
+        }
+        let to_one = on_a.rollout_to_agent(&named, None);
+        (
+            to_one,
+            on_a.rollout_deployment("stable")
+                .map_err(|e| format!("{e:?}")),
+        )
+    })
+    .await
+    .expect("roll out");
+    assert_eq!(released, Ok(1), "only the Agent still stored is counted");
+    assert!(matches!(to_one, Err(RolloutError::UnknownAgent)));
+    for uid in [forgotten, named] {
+        assert!(view_of(&a, uid).is_none(), "A holds {uid} no more");
+    }
+    assert!(view_of(&a, kept).is_some_and(|view| view.assigned_deployment == "stable"));
+}
+
+/// The shutdown flush of A writes only the Agents A heard from: an Agent B carries, which A
+/// only loaded, keeps what B wrote of it, and an Agent A heard from keeps a `last_seen_ms`
+/// another instance wrote later.
+/// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts
+#[test]
+fn the_shutdown_flush_writes_only_the_agents_this_instance_heard_from() {
+    use fleet_server::fleet::{AppState, Transport};
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let (carried_by_b, heard_by_a) = (InstanceUid([0x81; 16]), InstanceUid([0x82; 16]));
+    let report = |uid: InstanceUid, sequence_num: u64, healthy: bool| AgentToServer {
+        instance_uid: uid.as_bytes().to_vec(),
+        sequence_num,
+        capabilities: AgentCapabilities::ReportsStatus as u64
+            | AgentCapabilities::ReportsHealth as u64,
+        health: Some(opamp::proto::ComponentHealth {
+            healthy,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let b = AppState::on(&records(&schema)).expect("state");
+    b.process(report(carried_by_b, 1, true), Transport::Http, None);
+    // A loads the record at startup, and B writes the Agent's next report.
+    let a = AppState::on(&records(&schema)).expect("state");
+    b.process(report(carried_by_b, 2, false), Transport::Http, None);
+    a.process(report(heard_by_a, 1, true), Transport::Http, None);
+    // Another instance wrote a later presence of the Agent A heard from.
+    schema.sql(&format!(
+        "UPDATE agents SET last_seen_ms = last_seen_ms + 600000 WHERE instance_uid = '{heard_by_a}'"
+    ));
+    let column = |column: &str, uid: InstanceUid| {
+        schema.query(&format!(
+            "SELECT {column}::text FROM agents WHERE instance_uid = '{uid}'"
+        ))
+    };
+    let (sequence, last_seen) = (
+        column("sequence_num", carried_by_b),
+        column("last_seen_ms", heard_by_a),
+    );
+
+    a.flush_agents();
+    assert_eq!(
+        column("sequence_num", carried_by_b),
+        sequence,
+        "what B wrote stays"
+    );
+    assert_eq!(
+        column("last_seen_ms", heard_by_a),
+        last_seen,
+        "last_seen_ms does not move back"
+    );
+}
+
+/// The shutdown flush of A leaves an Agent A heard from, and that has moved to B since, as B
+/// wrote it: B holds its connection, so A writes nothing of it.
+/// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts
+#[test]
+fn the_shutdown_flush_leaves_an_agent_that_moved_to_another_instance_as_that_one_wrote_it() {
+    use fleet_server::fleet::{AppState, Transport};
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let uid = InstanceUid([0x83; 16]);
+    let report = |sequence_num: u64, healthy: bool| AgentToServer {
+        instance_uid: uid.as_bytes().to_vec(),
+        sequence_num,
+        capabilities: AgentCapabilities::ReportsStatus as u64
+            | AgentCapabilities::ReportsHealth as u64,
+        health: Some(opamp::proto::ComponentHealth {
+            healthy,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let [a, b] = [
+        "00000000-0000-7000-8000-00000000000a",
+        "00000000-0000-7000-8000-00000000000b",
+    ]
+    .map(|lease| {
+        let state = AppState::on(&records(&schema)).expect("state");
+        state.serve_under(tokio::sync::watch::channel(Some(lease.to_string())).1);
+        state
+    });
+    a.process(report(1, true), Transport::WebSocket, Some(7));
+    // The Agent reconnects to B, which writes that it holds it, and its next report.
+    b.process(report(2, false), Transport::WebSocket, Some(9));
+    let stored = || {
+        schema.query(&format!(
+            "SELECT holder::text || ' ' || sequence_num FROM agents WHERE instance_uid = '{uid}'"
+        ))
+    };
+    assert_eq!(stored(), ["00000000-0000-7000-8000-00000000000b 2"]);
+
+    a.flush_agents();
+    assert_eq!(
+        stored(),
+        ["00000000-0000-7000-8000-00000000000b 2"],
+        "what B wrote stays"
+    );
+}
+
+/// The shutdown flush of A leaves an Agent A heard from, that moved to B since and disconnected
+/// there, as B wrote it: no instance holds it any more, and B heard it last.
+/// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts
+#[test]
+fn the_shutdown_flush_leaves_an_agent_that_moved_away_and_disconnected_as_last_written() {
+    use fleet_server::fleet::{AppState, Transport};
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let uid = InstanceUid([0x84; 16]);
+    let report = |sequence_num: u64, healthy: bool, goodbye: bool| AgentToServer {
+        instance_uid: uid.as_bytes().to_vec(),
+        sequence_num,
+        capabilities: AgentCapabilities::ReportsStatus as u64
+            | AgentCapabilities::ReportsHealth as u64,
+        health: Some(opamp::proto::ComponentHealth {
+            healthy,
+            ..Default::default()
+        }),
+        agent_disconnect: goodbye.then(opamp::proto::AgentDisconnect::default),
+        ..Default::default()
+    };
+    let (lease_a, lease_b) = (
+        "00000000-0000-7000-8000-00000000000a",
+        "00000000-0000-7000-8000-00000000000b",
+    );
+    let [a, b] = [lease_a, lease_b].map(|lease| {
+        let state = AppState::on(&records(&schema)).expect("state");
+        state.serve_under(tokio::sync::watch::channel(Some(lease.to_string())).1);
+        state
+    });
+    a.process(report(1, true, false), Transport::WebSocket, Some(7));
+    // The Agent reconnects to B, reports there, and says goodbye; B writes the disconnect.
+    b.process(report(2, false, false), Transport::WebSocket, Some(9));
+    b.process(report(3, false, true), Transport::WebSocket, Some(9));
+    b.write_presence(lease_b).expect("B's batch");
+    // B heard it after A did.
+    schema.sql(&format!(
+        "UPDATE agents SET last_seen_ms = last_seen_ms + 1000 WHERE instance_uid = '{uid}'"
+    ));
+    let stored = || {
+        schema.query(&format!(
+            "SELECT coalesce(holder::text, 'none') || ' ' || sequence_num FROM agents \
+             WHERE instance_uid = '{uid}'"
+        ))
+    };
+    assert_eq!(stored(), ["none 2"]);
+
+    a.flush_agents();
+    assert_eq!(stored(), ["none 2"], "what B wrote stays");
+}
+
+/// An Agent that has just connected to A is not forgotten through B before A's next presence
+/// batch: the report that connects it writes that A holds it, at once.
+/// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_agent_just_connected_is_not_forgotten_through_another_instance() {
+    use fleet_server::fleet::{AppState, ForgetError};
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let a = Instance::start(&pki, &schema, schema.config_on(schema.config.port)).await;
+    let b = Arc::new(AppState::on(&records(&schema)).expect("state"));
+    let (cert, key) = pki.issue("edge-01");
+    let uid = InstanceUid([0x91; 16]);
+    let attributes: Attributes<'_> = (&[("service.name", "otelcol")], &[]);
+    let mut session = websocket(&a, &pki, &cert, &key).await;
+    report_as(&mut session, uid, 1, 0, attributes, true).await;
+    assert_eq!(
+        schema.query(&format!(
+            "SELECT holder::text FROM agents WHERE instance_uid = '{uid}' AND connected"
+        )),
+        [a.instance_id().expect("a lease")],
+        "A wrote that it holds the Agent"
+    );
+    let forgotten = tokio::task::spawn_blocking(move || b.forget_agent(&uid))
+        .await
+        .expect("forget");
+    assert!(
+        matches!(forgotten, Err(ForgetError::StillReporting)),
+        "B sees A holds it"
+    );
 }

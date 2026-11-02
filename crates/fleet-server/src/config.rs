@@ -452,6 +452,9 @@ pub struct DatabaseConfig {
     /// How long after its last renewal a lease lapses, in seconds, at least three renewals;
     /// PostgreSQL only.
     pub lease_secs: Option<u64>,
+    /// How often an instance writes the presence of the Agents it carries, in seconds, from 10 to
+    /// 60; PostgreSQL only (ADR-draft-the-fleet-record-of-agents-and-hosts clause 4).
+    pub presence_interval_secs: Option<u64>,
 }
 
 impl Default for DatabaseConfig {
@@ -461,6 +464,7 @@ impl Default for DatabaseConfig {
             postgres: None,
             lease_renew_secs: None,
             lease_secs: None,
+            presence_interval_secs: None,
         }
     }
 }
@@ -471,6 +475,9 @@ const DEFAULT_LEASE_RENEW_SECS: u64 = 10;
 const DEFAULT_LEASE_SECS: u64 = 30;
 /// The longest renewal interval and lease: an hour, far past any that serves a fleet.
 const MAX_LEASE_SECS: u64 = 3600;
+/// How often an instance writes the presence of its Agents, by default, and the bounds of it.
+const DEFAULT_PRESENCE_INTERVAL_SECS: u64 = 30;
+const PRESENCE_INTERVAL_SECS: std::ops::RangeInclusive<u64> = 10..=60;
 
 /// The lease every instance on PostgreSQL holds while it serves
 /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
@@ -505,6 +512,18 @@ impl DatabaseConfig {
         }
     }
 
+    /// How often an instance writes the presence of the Agents it carries, the default where the key
+    /// is not set; `None` on the filesystem store, which keeps no presence.
+    #[must_use]
+    pub fn presence_interval(&self) -> Option<std::time::Duration> {
+        (self.store == "postgres").then(|| {
+            std::time::Duration::from_secs(
+                self.presence_interval_secs
+                    .unwrap_or(DEFAULT_PRESENCE_INTERVAL_SECS),
+            )
+        })
+    }
+
     /// The lease keys: PostgreSQL alone has a lease, so with the filesystem store each one set
     /// fails startup naming it; with PostgreSQL a renewal is at least a second and a lease holds at
     /// least three of them.
@@ -513,11 +532,13 @@ impl DatabaseConfig {
             for (key, value) in [
                 ("lease_renew_secs", self.lease_renew_secs),
                 ("lease_secs", self.lease_secs),
+                ("presence_interval_secs", self.presence_interval_secs),
             ] {
                 if value.is_some() {
                     return Err(format!(
-                        "[database] {key} is set but [database] store is \"fs\" — a lease is \
-                         what an instance on PostgreSQL holds; remove {key}"
+                        "[database] {key} is set but [database] store is \"fs\" — a lease and \
+                         the presence it writes are what an instance on PostgreSQL holds; remove \
+                         {key}"
                     ));
                 }
             }
@@ -533,6 +554,15 @@ impl DatabaseConfig {
             return Err(format!(
                 "[database] lease_secs must be at most {MAX_LEASE_SECS}"
             ));
+        }
+        if let Some(seconds) = self.presence_interval_secs {
+            if !PRESENCE_INTERVAL_SECS.contains(&seconds) {
+                return Err(format!(
+                    "[database] presence_interval_secs must be from {} to {}, not {seconds}",
+                    PRESENCE_INTERVAL_SECS.start(),
+                    PRESENCE_INTERVAL_SECS.end()
+                ));
+            }
         }
         if lapse < renew.saturating_mul(3) {
             return Err(format!(
@@ -3029,10 +3059,11 @@ mod tests {
         );
     }
 
-    /// The lease keys belong to PostgreSQL: with the filesystem store each one set fails startup
-    /// naming it; with PostgreSQL they default to 10 and 30 seconds, and a lease shorter than three
-    /// renewals, or a renewal of zero, fails naming the key.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// The lease keys and the presence interval belong to PostgreSQL: with the filesystem store
+    /// each one set fails startup naming it; with PostgreSQL they default to 10, 30 and 30 seconds,
+    /// and a lease shorter than three renewals, a renewal of zero, or a presence interval outside 10
+    /// to 60 seconds fails naming the key.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it, ADR-draft-the-fleet-record-of-agents-and-hosts
     #[test]
     fn the_lease_keys_apply_to_postgresql_alone() {
         let load = |database: &str| {
@@ -3057,6 +3088,24 @@ mod tests {
         let config = load(&with("lease_renew_secs = 2\nlease_secs = 6\n")).expect("set");
         assert_eq!(config.database.lease().renew.as_secs(), 2);
         assert_eq!(config.database.lease().lapse.as_secs(), 6);
+        let presence = |keys: &str| {
+            load(&with(keys))
+                .expect("set")
+                .database
+                .presence_interval()
+                .map(|interval| interval.as_secs())
+        };
+        assert_eq!(presence(""), Some(30), "the default");
+        assert_eq!(presence("presence_interval_secs = 10\n"), Some(10));
+        assert_eq!(presence("presence_interval_secs = 60\n"), Some(60));
+        assert_eq!(
+            load("[database]\nstore = \"fs\"\n")
+                .expect("files")
+                .database
+                .presence_interval(),
+            None,
+            "the filesystem keeps no presence"
+        );
 
         for (database, named) in [
             (
@@ -3066,6 +3115,18 @@ mod tests {
             (
                 "[database]\nlease_renew_secs = 10\n".to_string(),
                 "[database] lease_renew_secs",
+            ),
+            (
+                "[database]\npresence_interval_secs = 30\n".to_string(),
+                "[database] presence_interval_secs",
+            ),
+            (
+                with("presence_interval_secs = 9\n"),
+                "presence_interval_secs",
+            ),
+            (
+                with("presence_interval_secs = 61\n"),
+                "presence_interval_secs",
             ),
             (with("lease_renew_secs = 0\n"), "lease_renew_secs"),
             (

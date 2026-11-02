@@ -83,6 +83,34 @@ once its tag exists.
   **What to do:** nothing to upgrade. On a `409` that says an entry has changed, read the Package
   again and sign the bytes it holds.
 
+- **Forgetting an Agent ends its session, and with PostgreSQL any instance may forget it**
+  ([ADR-draft-the-fleet-record-of-agents-and-hosts](docs/adr/draft-the-fleet-record-of-agents-and-hosts.md)).
+  A WebSocket that carried only the forgotten Agent is closed with code `1000` and the reason
+  `forgotten`; one that carries other Agents too stays open. With PostgreSQL each instance writes
+  where the Agents it carries are connected, and which instance holds them, in one batch every
+  `[database] presence_interval_secs` (default 30, from 10 to 60), and a heartbeat reaches the
+  database at most once per batch; the report that connects an Agent writes it at once.
+  Forgetting through any instance is decided from that stored presence, and the staleness budget
+  adds the interval. `max_agents` bounds the Agent records in the database, for all instances
+  together. Migration 8 adds two columns to the Agents' table.
+  **What to do:** with PostgreSQL, set `max_agents` alike on every instance. Set
+  `presence_interval_secs` only with PostgreSQL: with the filesystem store it fails startup.
+
+- **With PostgreSQL, an Agent's report, its labels, a restart request and a rollout each write
+  their own columns of its record**
+  ([ADR-draft-the-fleet-record-of-agents-and-hosts](docs/adr/draft-the-fleet-record-of-agents-and-hosts.md)).
+  The Server instance that carries an Agent writes only what a report decides, so labels, a
+  restart or a release made through another instance on the same database stay, and that
+  instance takes them up from the database at once; a restart is sent once, by the instance that
+  clears it. A rollout writes its Agents in the order of their `instance_uid`, so two rollouts
+  over the same Agents on two instances never deadlock. An Agent an instance has not held is read
+  from the database at its first report there. With the filesystem store too, a label change and a
+  restart request are written to the Agent's record before they are answered: a request that cannot
+  be written is answered `500`, where it was logged and answered as done; an Agent whose record has
+  no file yet, because its first write failed, is answered `404` until its next report writes it;
+  and a queued restart whose record cannot be read is sent once it can.
+  **What to do:** nothing.
+
 - **The UI colours as TOML only the Client's own configuration**
   ([ADR-0031](docs/adr/0031-the-ui-colours-configurations-with-shiki.md)). The core's UI chooses a
   grammar for `otelcol*`, the Client's own type and `fluent-bit` alone. An Agent of the one other

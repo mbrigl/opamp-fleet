@@ -46,6 +46,10 @@ invent.
 - **Lease** — a Server instance's claim, renewed in the database, that it is alive and may serve.
   An instance opens its listeners only while it holds a lease it can prove, and a lease that is not
   renewed lapses.
+- **Holder** — the Server instance that holds the connection an Agent is carried on, named in the
+  Agent's stored presence by the instance id of its lease. A holder without a live lease holds no
+  connection, and the Agent reads as disconnected.
+  _Avoid:_ owner (the owning connection is one WebSocket, inside one instance).
 - **Client** — this project's client deployable: the process an operator installs on a machine to
   place it under management. One Client process runs in one or more **Client Modes** and may present
   itself to the Server as several **Agents**. It is the OpAMP Client in the protocol's sense.

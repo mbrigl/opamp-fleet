@@ -59,6 +59,15 @@ pub const PACKAGE: &str = "package";
 /// The kind an Agent's assignment changed by a rollout is announced as, by its `instance_uid`.
 pub const ASSIGNMENT: &str = "assignment";
 
+/// The kind an Agent's labels set is announced as, by its `instance_uid`.
+pub const LABELS: &str = "labels";
+
+/// The kind a restart requested for an Agent is announced as, by its `instance_uid`.
+pub const RESTART: &str = "restart";
+
+/// The kind an Agent forgotten is announced as, by its `instance_uid`.
+pub const FORGOTTEN: &str = "forgotten";
+
 /// How long a listener waits before it connects again after its connection ended.
 const RECONNECT: Duration = Duration::from_secs(1);
 
