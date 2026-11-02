@@ -41,6 +41,15 @@ listen = "127.0.0.1:4320"
 # limit for a fleet larger than this.
 max_connections = 10000
 
+# The new Agent-plane connections taken a second. Past it, a connection is answered 503 with a
+# Retry-After of 1 to 30 seconds, so a fleet that comes back at once is spread. 0 is refused.
+max_new_connections_per_sec = 200
+
+# How long a stop (SIGTERM) spreads the closing of the WebSocket sessions over, in seconds, from 0 to
+# 300; what is still open 2 seconds later is cut. 0 closes them all at once. Give a container's stop
+# timeout more than this.
+drain_secs = 20
+
 # Where the Server keeps ALL of its state, one directory per domain, created owner-only (0700) when
 # missing, every file in it 0600. The layout is fixed; anything else in it stops the Server, named:
 #

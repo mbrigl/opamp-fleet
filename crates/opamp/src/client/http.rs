@@ -265,8 +265,7 @@ impl std::fmt::Display for Exchange {
 /// the caller then waits the Baseline's *"minimum recommended retry interval"* of 30 seconds — which
 /// for a Server that is overloaded is the conservative reading of a header it sent to be given room.
 fn retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
-    let value = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;
-    value.trim().parse::<u64>().ok().map(Duration::from_secs)
+    super::retry_after_seconds(headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?)
 }
 
 /// Reads a response body, refusing one that grows past `limit`.

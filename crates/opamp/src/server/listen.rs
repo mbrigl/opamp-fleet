@@ -72,7 +72,14 @@ pub struct Handle {
     server: axum_server::Handle<SocketAddr>,
     /// `None` while serving; once shutting down, the deadline — `None` for a drain without one.
     shutdown: Arc<tokio::sync::watch::Sender<Option<Option<Instant>>>>,
+    /// Until when the WebSocket sessions are told to close, each at an instant of its own drawn
+    /// over the window; `None` tells them all at once.
+    spread: Arc<std::sync::Mutex<Option<Instant>>>,
 }
+
+/// What a spread drain leaves after its window for the last sessions' close frames, before what is
+/// still open is cut.
+pub const SPREAD_GRACE: Duration = Duration::from_secs(2);
 
 impl Default for Handle {
     fn default() -> Self {
@@ -87,6 +94,7 @@ impl Handle {
         Handle {
             server: axum_server::Handle::new(),
             shutdown: Arc::new(tokio::sync::watch::channel(None).0),
+            spread: Arc::default(),
         }
     }
 
@@ -97,6 +105,18 @@ impl Handle {
         self.shutdown
             .send_replace(Some(duration.map(|d| Instant::now() + d)));
         self.server.graceful_shutdown(duration);
+    }
+
+    /// Stops accepting at once and tells each WebSocket session to close at an instant drawn
+    /// uniformly over `over`
+    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// clause 3), so the
+    /// peers come back spread rather than all at once; what is still open [`SPREAD_GRACE`] after
+    /// the window is cut. A window of zero tells them all at once.
+    pub fn drain_spread(&self, over: Duration) {
+        *self.spread.lock().expect("spread lock") =
+            (!over.is_zero()).then(|| Instant::now() + over);
+        self.graceful_shutdown(Some(over + SPREAD_GRACE));
     }
 
     /// Stops accepting and cuts everything open at once.
@@ -122,6 +142,11 @@ impl Handle {
 #[derive(Clone)]
 pub(crate) struct Sessions {
     shutdown: tokio::sync::watch::Receiver<Option<Option<Instant>>>,
+    spread: Arc<std::sync::Mutex<Option<Instant>>>,
+    /// This session's instant to close in a spread drain, drawn once: the loop that waits for it
+    /// asks again after every message, and a draw each time would put it off for as long as the
+    /// peer keeps sending.
+    turn: Option<Instant>,
     tasks: Arc<std::sync::Mutex<tokio::task::JoinSet<()>>>,
 }
 
@@ -134,9 +159,20 @@ impl Sessions {
         tasks.spawn(session);
     }
 
-    /// Resolves once the listener is shutting down.
+    /// Resolves once the listener is shutting down and this session's turn to close has come: at
+    /// once, or at an instant drawn over the window of a spread drain.
     pub(crate) async fn closing(&mut self) {
         let _ = self.shutdown.wait_for(Option::is_some).await;
+        let turn = *self.turn.get_or_insert_with(|| {
+            let now = Instant::now();
+            let until = *self.spread.lock().expect("spread lock");
+            until.map_or(now, |until| {
+                let window = until.saturating_duration_since(now);
+                let nanos = u64::try_from(window.as_nanos()).unwrap_or(u64::MAX);
+                now + Duration::from_nanos(crate::random::below(nanos))
+            })
+        });
+        tokio::time::sleep_until(turn).await;
     }
 }
 
@@ -224,6 +260,7 @@ pub struct Listener {
     header_read_timeout: Duration,
     max_connections: usize,
     pace: (Duration, u64),
+    max_new_per_sec: Option<u32>,
 }
 
 impl Listener {
@@ -237,6 +274,7 @@ impl Listener {
             header_read_timeout: HEADER_READ_TIMEOUT,
             pace: (PACE_WINDOW, MIN_PACE_BYTES),
             max_connections: DEFAULT_MAX_CONNECTIONS,
+            max_new_per_sec: None,
         }
     }
 
@@ -272,6 +310,18 @@ impl Listener {
         self
     }
 
+    /// Takes at most `rate` new connections a second
+    /// (ADR-draft-tls-1-3-two-planes-and-bounded-input clause 4). A connection past it is served
+    /// nothing but `503` with a `Retry-After` of whole seconds drawn from 1 to 30, so a fleet that
+    /// comes back at once is spread rather than turned away together; the connections already
+    /// held keep working. Without it, a listener takes new connections as fast as they come; a rate
+    /// of `0` throttles every one, which an application refuses before it gets here.
+    #[must_use]
+    pub fn with_max_new_connections_per_sec(mut self, rate: u32) -> Self {
+        self.max_new_per_sec = Some(rate);
+        self
+    }
+
     /// Serves `router` until the handle shuts the listener down. Every request carries the peer's
     /// address as `ConnectInfo<SocketAddr>` and the handshake's [`PeerCertificate`].
     ///
@@ -293,9 +343,11 @@ impl Listener {
         // The runtime polls the listener; a blocking one would stall the worker it accepts on.
         self.listener.set_nonblocking(true)?;
         let server = axum_server::from_tcp(self.listener)?.handle(self.handle.server.clone());
-        let slots = Slots::new(self.max_connections, self.pace);
+        let slots = Slots::new(self.max_connections, self.pace, self.max_new_per_sec);
         let sessions = Sessions {
             shutdown: self.handle.shutdown.subscribe(),
+            spread: self.handle.spread.clone(),
+            turn: None,
             tasks: Arc::default(),
         };
         let router = router
@@ -308,10 +360,21 @@ impl Listener {
                     .await
             }
             Some(config) => {
-                let acceptor = RustlsAcceptor::new(RustlsConfig::from_config(config))
-                    .handshake_timeout(TLS_HANDSHAKE_TIMEOUT);
+                let acceptor = |config: Arc<ServerConfig>| {
+                    RustlsAcceptor::new(RustlsConfig::from_config(config))
+                        .handshake_timeout(TLS_HANDSHAKE_TIMEOUT)
+                };
+                // A connection past the rate is offered HTTP/1.1 alone: HTTP/2 has no
+                // `Connection: close`, and a pooled HTTP/2 connection would be answered `503` for
+                // as long as it lived.
+                let mut throttled = (*config).clone();
+                throttled.alpn_protocols = vec![b"http/1.1".to_vec()];
                 bounded(
-                    server.acceptor(Tls(acceptor, slots)),
+                    server.acceptor(Tls {
+                        served: acceptor(config),
+                        throttled: acceptor(Arc::new(throttled)),
+                        slots,
+                    }),
                     self.header_read_timeout,
                 )
                 .serve(router.into_make_service())
@@ -358,21 +421,63 @@ fn bounded<A>(
     server
 }
 
-/// The connections a listener holds, against its cap.
+/// The connections a listener holds, against its cap, and the new ones it takes a second.
 #[derive(Clone)]
 struct Slots {
     held: Arc<AtomicUsize>,
     max: usize,
     pace: (Duration, u64),
+    new: Option<Arc<std::sync::Mutex<Bucket>>>,
+}
+
+/// The new connections a listener may still take: `rate` a second, at most `rate` at once.
+struct Bucket {
+    rate: f64,
+    tokens: f64,
+    at: Instant,
+}
+
+impl Bucket {
+    fn new(rate: u32) -> Self {
+        Bucket {
+            rate: f64::from(rate),
+            tokens: f64::from(rate),
+            at: Instant::now(),
+        }
+    }
+
+    /// Whether one more new connection is taken now.
+    fn take(&mut self, now: Instant) -> bool {
+        let elapsed = now.saturating_duration_since(self.at).as_secs_f64();
+        self.tokens = (self.tokens + elapsed * self.rate).min(self.rate);
+        self.at = now;
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 impl Slots {
-    fn new(max: usize, pace: (Duration, u64)) -> Self {
+    fn new(max: usize, pace: (Duration, u64), max_new_per_sec: Option<u32>) -> Self {
         Slots {
             held: Arc::new(AtomicUsize::new(0)),
             max,
             pace,
+            new: max_new_per_sec.map(|rate| Arc::new(std::sync::Mutex::new(Bucket::new(rate)))),
         }
+    }
+
+    /// Whether a new connection is within the rate; always, without one.
+    fn within_rate(&self) -> bool {
+        self.new.as_ref().is_none_or(|bucket| {
+            bucket
+                .lock()
+                .expect("new connections lock")
+                .take(Instant::now())
+        })
     }
 
     /// One slot for `stream`, or `None` when the listener is full and the stream is to be closed.
@@ -456,6 +561,21 @@ impl AsyncWrite for Counted {
     }
 }
 
+/// What a connection past the rate of new ones is served: `503` to every request, with a
+/// `Retry-After` drawn from 1 to 30 seconds, and the connection closed after it.
+fn throttled() -> Router {
+    Router::new().fallback(|| async {
+        let seconds = 1 + crate::random::below(30);
+        (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            [
+                (axum::http::header::RETRY_AFTER, seconds.to_string()),
+                (axum::http::header::CONNECTION, "close".to_string()),
+            ],
+        )
+    })
+}
+
 /// The per-connection extensions, attached to the router that serves the connection. The router is
 /// what `into_make_service` hands an acceptor, and `Router::layer` attaches an extension without a
 /// direct dependency on `tower`.
@@ -484,15 +604,29 @@ impl Accept<TcpStream, Router> for Plain {
 
     fn accept(&self, stream: TcpStream, service: Router) -> Self::Future {
         let peer = stream.peer_addr().ok();
+        // A connection the cap closes takes no place in the rate.
         std::future::ready(match self.0.take(stream) {
-            Some(stream) => Ok((stream, with_connection(service, peer, None, self.0.pace()))),
+            Some(stream) => {
+                let service = if self.0.within_rate() {
+                    service
+                } else {
+                    throttled()
+                };
+                Ok((stream, with_connection(service, peer, None, self.0.pace())))
+            }
             None => Err(full()),
         })
     }
 }
 
 #[derive(Clone)]
-struct Tls(RustlsAcceptor, Slots);
+struct Tls {
+    /// What a connection within the rate is served over.
+    served: RustlsAcceptor,
+    /// What a connection past it is served over: HTTP/1.1 alone.
+    throttled: RustlsAcceptor,
+    slots: Slots,
+}
 
 impl Accept<TcpStream, Router> for Tls {
     type Stream = <RustlsAcceptor as Accept<Counted, Router>>::Stream;
@@ -500,11 +634,18 @@ impl Accept<TcpStream, Router> for Tls {
     type Future = Pin<Box<dyn Future<Output = io::Result<(Self::Stream, Router)>> + Send>>;
 
     fn accept(&self, stream: TcpStream, service: Router) -> Self::Future {
-        let inner = self.0.clone();
         let peer = stream.peer_addr().ok();
         // The slot is taken before the handshake: a peer that never completes one still counts.
-        let counted = self.1.take(stream);
-        let pace = self.1.pace();
+        let counted = self.slots.take(stream);
+        // So is its place in the rate of new connections, unless the cap closes it; one past the
+        // rate completes the handshake and is answered `503`, so the peer learns when to come back.
+        let within = counted.is_some() && self.slots.within_rate();
+        let (inner, service) = if within {
+            (self.served.clone(), service)
+        } else {
+            (self.throttled.clone(), throttled())
+        };
+        let pace = self.slots.pace();
         Box::pin(async move {
             let stream = counted.ok_or_else(full)?;
             let (stream, service) = inner.accept(stream, service).await?;
@@ -517,5 +658,27 @@ impl Accept<TcpStream, Router> for Tls {
                 .and_then(|chain| chain.first().cloned());
             Ok((stream, with_connection(service, peer, certificate, pace)))
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A bucket of 200 a second takes exactly 200 new connections at one instant and refuses the
+    /// rest, then takes 10 more after 50 ms: the rate, without the timing of a real listener.
+    /// Verifies: ADR-draft-tls-1-3-two-planes-and-bounded-input
+    #[test]
+    fn the_bucket_takes_its_rate_and_refills_at_it() {
+        let mut bucket = Bucket::new(200);
+        let now = Instant::now();
+        let taken = (0..300).filter(|_| bucket.take(now)).count();
+        assert_eq!(taken, 200);
+        let later = now + Duration::from_millis(50);
+        let refilled = (0..300).filter(|_| bucket.take(later)).count();
+        assert_eq!(refilled, 10);
+        // It never holds more than a second's worth.
+        let much_later = later + Duration::from_secs(60);
+        assert_eq!((0..300).filter(|_| bucket.take(much_later)).count(), 200);
     }
 }

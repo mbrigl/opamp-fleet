@@ -103,3 +103,13 @@ pub trait StopSignal {
     /// Resolves once a stop is requested, and at once on every call after that.
     fn requested(&mut self) -> impl Future<Output = ()> + Send;
 }
+
+/// A `Retry-After` value in delta-seconds, the form a Server that throttles sends; an HTTP date or
+/// anything else unparsable is `None`, and the caller falls back to its own wait.
+pub(crate) fn retry_after_seconds(value: &str) -> Option<std::time::Duration> {
+    value
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .map(std::time::Duration::from_secs)
+}

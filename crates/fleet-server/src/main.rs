@@ -698,12 +698,13 @@ async fn main() {
     // drains them together within a bounded window (ADR-0012).
     let handle = Handle::new();
     let signalled = shutdown_signal();
+    let drain_secs = config.drain_secs;
     tokio::spawn({
         let handle = handle.clone();
         async move {
             signalled.await;
-            info!("shutting down");
-            listen::shut_down(&handle);
+            info!(drain_secs, "shutting down");
+            listen::shut_down(&handle, std::time::Duration::from_secs(drain_secs));
         }
     });
 
@@ -716,6 +717,7 @@ async fn main() {
             config.max_connections,
             handle.clone()
         )
+        .with_max_new_connections_per_sec(config.max_new_connections_per_sec)
         .serve(agents),
         listen::plane(
             operator_listener,

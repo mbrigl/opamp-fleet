@@ -287,6 +287,124 @@ async fn connections_past_the_cap_are_refused_while_established_ones_keep_workin
     assert_eq!(text, "certificate=false peer=127.0.0.1");
 }
 
+/// Past its rate of new connections a listener answers `503` with a `Retry-After` from 1 to 30
+/// seconds and closes the connection: of 30 new connections at a rate of 20, about 20 are served
+/// and the rest are told when to come back. The exact count is the bucket's own unit test; this
+/// one is small enough to fit any listen queue.
+/// Verifies: ADR-draft-tls-1-3-two-planes-and-bounded-input
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn new_connections_past_the_rate_are_answered_503_with_a_spread_retry_after() {
+    let (listener, port) = bind();
+    spawn(Listener::new(listener, Handle::new()).with_max_new_connections_per_sec(20));
+    let attempts = (0..30).map(|_| async move {
+        let mut stream = TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("connect");
+        stream
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .expect("request");
+        let mut answer = Vec::new();
+        // A connection that is served stays open for another request; the first answer is enough.
+        let _ = tokio::time::timeout(Duration::from_secs(2), stream.read_to_end(&mut answer)).await;
+        String::from_utf8_lossy(&answer).to_string()
+    });
+    let started = std::time::Instant::now();
+    let answers = futures_util::future::join_all(attempts).await;
+    let elapsed = started.elapsed();
+    let served = answers
+        .iter()
+        .filter(|a| a.starts_with("HTTP/1.1 200"))
+        .count();
+    let refused: Vec<&String> = answers
+        .iter()
+        .filter(|a| a.starts_with("HTTP/1.1 503"))
+        .collect();
+    assert_eq!(served + refused.len(), 30, "{answers:?}");
+    assert!(served >= 20, "{served} served in {elapsed:?}");
+    assert!(!refused.is_empty(), "{served} served in {elapsed:?}");
+    for answer in refused {
+        let lower = answer.to_ascii_lowercase();
+        let after: u64 = lower
+            .lines()
+            .find_map(|line| line.strip_prefix("retry-after: "))
+            .unwrap_or_else(|| panic!("no Retry-After: {answer}"))
+            .trim()
+            .parse()
+            .expect("whole seconds");
+        assert!((1..=30).contains(&after), "{after}");
+        assert!(lower.contains("connection: close"), "{answer}");
+    }
+}
+
+/// Over TLS, a connection past the rate completes its handshake and is answered `503` with a
+/// `Retry-After`, over HTTP/1.1 alone, so its connection closes after the answer; one within the
+/// rate is offered HTTP/2 as before.
+/// Verifies: ADR-draft-tls-1-3-two-planes-and-bounded-input
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_tls_connection_past_the_rate_is_answered_503_over_http_1_1() {
+    use std::io::{Read as _, Write as _};
+    let pki = Pki::new();
+    opamp::tls::install_ring_provider();
+    let tls = ServerTls {
+        identity: pki.issue("localhost"),
+        client_auth: ClientAuth::None,
+    }
+    .rustls_config()
+    .expect("server config");
+    let (listener, port) = bind();
+    spawn(
+        Listener::new(listener, Handle::new())
+            .with_tls(tls)
+            .with_max_new_connections_per_sec(1),
+    );
+    let ca = pki.ca_pem.clone();
+    let connect = move || {
+        let mut config = opamp::tls::client_builder()
+            .with_root_certificates(opamp::tls::root_store(ca.as_bytes()).expect("roots"))
+            .with_no_client_auth();
+        config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+        let mut tls = rustls::ClientConnection::new(
+            std::sync::Arc::new(config),
+            "localhost".try_into().expect("name"),
+        )
+        .expect("client");
+        let mut tcp = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect");
+        while tls.is_handshaking() {
+            tls.complete_io(&mut tcp).expect("handshake");
+        }
+        let alpn = tls.alpn_protocol().map(<[u8]>::to_vec);
+        let mut stream = rustls::Stream::new(&mut tls, &mut tcp);
+        let mut answer = Vec::new();
+        if alpn.as_deref() == Some(b"http/1.1".as_slice()) {
+            stream
+                .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                .expect("request");
+            let _ = stream.read_to_end(&mut answer);
+        }
+        (alpn, String::from_utf8_lossy(&answer).to_string())
+    };
+    let (first, second) = tokio::task::spawn_blocking(move || (connect(), connect()))
+        .await
+        .expect("the client's thread");
+    assert_eq!(
+        first.0.as_deref(),
+        Some(b"h2".as_slice()),
+        "within the rate"
+    );
+    assert_eq!(
+        second.0.as_deref(),
+        Some(b"http/1.1".as_slice()),
+        "past the rate"
+    );
+    assert!(second.1.starts_with("HTTP/1.1 503"), "{}", second.1);
+    assert!(
+        second.1.to_ascii_lowercase().contains("retry-after: "),
+        "{}",
+        second.1
+    );
+}
+
 /// A listener without TLS on an address other than the loopback literals is refused before it
 /// accepts anything: plaintext is for the loopback alone.
 /// Verifies: ADR-0012, Q-1
@@ -693,4 +811,87 @@ async fn a_drain_cuts_a_stuck_websocket_session_at_its_deadline() {
         "the stuck session outlived serve"
     );
     assert!(started.elapsed() >= drain, "cut before its deadline");
+}
+
+/// A spread drain closes each WebSocket session with `1001` at an instant of its own over the
+/// window, so the peers do not all come back at once; a session that keeps sending closes at its
+/// instant all the same, and `serve` returns within the window and its grace.
+///
+/// Verifies: ADR-draft-tls-1-3-two-planes-and-bounded-input
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_spread_drain_closes_the_sessions_over_its_window() {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    let (listener, port) = bind();
+    let router = opamp::server::router(
+        std::sync::Arc::new(Silent),
+        opamp::server::Settings::new(1 << 20),
+    );
+    let handle = Handle::new();
+    let serving = tokio::spawn(Listener::new(listener, handle.clone()).serve(router));
+
+    let mut sockets = Vec::new();
+    for _ in 0..60 {
+        let (socket, _) =
+            tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/v1/opamp"))
+                .await
+                .expect("connect");
+        sockets.push(socket);
+    }
+    let window = Duration::from_secs(2);
+    let started = std::time::Instant::now();
+    handle.drain_spread(window);
+    let closes = sockets
+        .into_iter()
+        .enumerate()
+        .map(|(i, mut socket)| async move {
+            let report = opamp::frame::encode_within(
+                &opamp::proto::AgentToServer {
+                    instance_uid: vec![7; 16],
+                    ..Default::default()
+                },
+                1 << 20,
+            )
+            .expect("encode");
+            loop {
+                // The first of them keeps sending, as a busy peer would.
+                if i == 0 {
+                    let _ = socket.send(Message::Binary(report.clone().into())).await;
+                }
+                match tokio::time::timeout(Duration::from_millis(50), socket.next()).await {
+                    Err(_) => continue,
+                    Ok(Some(Ok(Message::Close(Some(frame))))) => {
+                        return (u16::from(frame.code), started.elapsed());
+                    }
+                    Ok(Some(Ok(_))) => continue,
+                    Ok(other) => panic!("ended without a close frame: {other:?}"),
+                }
+            }
+        });
+    let closed = futures_util::future::join_all(closes).await;
+    assert!(closed.iter().all(|(code, _)| *code == 1001), "{closed:?}");
+    let first = closed.iter().map(|(_, at)| *at).min().expect("sessions");
+    let last = closed.iter().map(|(_, at)| *at).max().expect("sessions");
+    assert!(
+        last < window + opamp::server::listen::SPREAD_GRACE,
+        "{last:?}"
+    );
+    assert!(
+        last - first >= window / 2,
+        "the closes were not spread: {first:?} to {last:?}"
+    );
+    let within_first_tenth = closed.iter().filter(|(_, at)| *at < window / 10).count();
+    assert!(
+        within_first_tenth < 30,
+        "{within_first_tenth} of 60 closed at once"
+    );
+    tokio::time::timeout(
+        window + opamp::server::listen::SPREAD_GRACE + Duration::from_secs(2),
+        serving,
+    )
+    .await
+    .expect("serve returns after the window and its grace")
+    .expect("the serve task")
+    .expect("serve");
 }

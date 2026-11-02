@@ -35,6 +35,8 @@ pub mod attributes;
 pub mod client;
 pub mod endpoint;
 pub mod frame;
+#[cfg(any(feature = "client", feature = "server"))]
+mod random;
 #[cfg(feature = "server")]
 #[cfg_attr(docsrs, doc(cfg(feature = "server")))]
 pub mod server;
