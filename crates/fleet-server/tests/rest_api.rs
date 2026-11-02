@@ -725,7 +725,7 @@ async fn the_openapi_document_describes_the_contract() {
         "no package route still carries a name segment: {:?}",
         paths.keys().collect::<Vec<_>>()
     );
-    // Forgetting an Agent is part of the contract a portal generates against (ADR-0024), and the
+    // Forgetting an Agent is part of the contract a portal generates against (ADR-0043), and the
     // description is where the "reaches no host" caveat has to be readable.
     let forget = &paths["/api/v1/agents/{instance_uid}"]["delete"];
     assert!(forget.is_object(), "DELETE on an Agent is described");
@@ -834,7 +834,7 @@ async fn configurations_survive_a_server_restart() {
     assert_eq!(restored[0].saved.body, "receivers: {}\n");
 }
 
-/// ADR-0024. The gate, over the wire: an Agent that just reported is doing its job, and forgetting
+/// ADR-0043. The gate, over the wire: an Agent that just reported is doing its job, and forgetting
 /// it would have its configuration offered again — which restarts a Managed Process.
 #[tokio::test]
 async fn forgetting_an_agent_that_is_still_reporting_is_refused() {
@@ -864,10 +864,10 @@ async fn forgetting_an_agent_that_is_still_reporting_is_refused() {
     );
 }
 
-/// ADR-0024, points 11 and 11: forgetting drops the record and reaches no host, so a Client that is
+/// ADR-0043, points 11 and 11: forgetting drops the record and reaches no host, so a Client that is
 /// still running simply comes back — and the Server, which now knows nothing about it, asks for
 /// full state exactly as it does for any Agent it has never seen.
-// Verifies: ADR-0024
+// Verifies: ADR-0043
 #[tokio::test]
 async fn a_silent_agent_is_forgotten_and_returns_as_a_stranger() {
     // A zero budget makes the Agent silent the moment the clock ticks past its last report; the
@@ -934,7 +934,7 @@ async fn forgetting_what_is_not_there_is_reported() {
 /// page can fire them without a preflight. Fetch Metadata refuses the cross-site ones — a browser
 /// stamps `Sec-Fetch-Site` and cannot let a page forge it — while same-origin and non-browser
 /// callers pass. The guard runs before the handler, so it decides regardless of the target.
-/// Verifies: ADR-0021
+/// Verifies: ADR-0038
 #[tokio::test]
 async fn a_cross_site_state_changing_post_is_refused() {
     let server = spawn().await;
@@ -994,7 +994,7 @@ async fn a_cross_site_state_changing_post_is_refused() {
 /// A browser that sends no Fetch Metadata still sends `Origin` on a `POST`. An `Origin` that is
 /// not the plane's own marks a cross-site caller and is refused, while the plane's own origin and
 /// a caller with neither header pass the guard.
-/// Verifies: ADR-0021
+/// Verifies: ADR-0038
 #[tokio::test]
 async fn a_post_from_a_foreign_origin_without_fetch_metadata_is_refused() {
     let server = spawn().await;
@@ -1439,7 +1439,7 @@ async fn report(
         .expect("decode")
 }
 
-/// ADR-0024, and the whole point of it: a rollout ring becomes a Server-side decision. The Agent
+/// ADR-0043, and the whole point of it: a rollout ring becomes a Server-side decision. The Agent
 /// reports nothing about `rollout`, so before the label the canary Deployment cannot claim it —
 /// and moving it into the ring is one API call rather than an edit and a restart on that host.
 #[tokio::test]
@@ -1496,9 +1496,9 @@ async fn a_label_moves_an_agent_into_a_rollout_ring() {
         .is_empty());
 }
 
-/// The crux (ADR-0024 clause 20): reported attributes decide which artifact fits a machine, so a
+/// The crux (ADR-0043 clause 20): reported attributes decide which artifact fits a machine, so a
 /// label may not restate one. Refused where it is written, naming the key — not quietly ignored.
-// Verifies: ADR-0024
+// Verifies: ADR-0043
 #[tokio::test]
 async fn a_label_may_not_restate_what_the_agent_reports() {
     let server = spawn().await;
@@ -1641,9 +1641,9 @@ async fn the_view_carries_the_held_configuration_and_a_refusal_with_its_reason()
     );
 }
 
-/// Labels are part of the Agent's record (ADR-0024 clause 21): forgetting an Agent removes them
+/// Labels are part of the Agent's record (ADR-0043 clause 21): forgetting an Agent removes them
 /// with it, and an Agent that comes back starts unlabelled.
-/// Verifies: ADR-0024
+/// Verifies: ADR-0043
 #[tokio::test]
 async fn forgetting_an_agent_removes_its_labels() {
     let server = support::spawn_with_stale_after(std::time::Duration::ZERO).await;
@@ -1683,7 +1683,7 @@ async fn forgetting_an_agent_removes_its_labels() {
 
 /// `fleet.*` is the Server's own: a label in it is refused `400`, naming the key, and nothing is
 /// stored.
-/// Verifies: ADR-0024
+/// Verifies: ADR-0043
 #[tokio::test]
 async fn a_label_in_the_fleet_space_is_refused() {
     let server = spawn().await;
@@ -1908,7 +1908,7 @@ async fn the_ui_asks_for_a_bootstrap_password_of_8_to_128_characters() {
 /// The bundled UI's Hosts tab reads what `GET /api/v1/hosts` serves and acts on a row through the
 /// Gateway and revocation routes, and the Agents tab marks inherited labels — the fields the page
 /// reads are the ones the API documents.
-/// Verifies: ADR-0024
+/// Verifies: ADR-0043
 #[tokio::test]
 async fn the_ui_lists_hosts_and_marks_inherited_labels() {
     let server = spawn().await;
@@ -2190,7 +2190,7 @@ async fn the_ui_and_the_enrolment_api_share_their_names() {
 /// in the browser — so a cross-site page must not be able to fire it. Both enrolment decisions are
 /// body-less `POST`s behind the same Fetch Metadata guard as `restart`, which answers before the
 /// handler, whether or not enrolment is configured.
-/// Verifies: ADR-0021
+/// Verifies: ADR-0038
 #[tokio::test]
 async fn a_cross_site_enrolment_decision_is_refused() {
     let server = spawn().await;

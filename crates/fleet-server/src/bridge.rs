@@ -1,4 +1,4 @@
-//! A synchronous port over an asynchronous client (ADR-0029): the bridge the S3
+//! A synchronous port over an asynchronous client (ADR-0044): the bridge the S3
 //! blob store and the PostgreSQL record store share.
 //!
 //! The ports are synchronous and the clients are not. An adapter owns a small Tokio runtime of its
@@ -52,6 +52,20 @@ impl Bridge {
         receiver
             .recv()
             .expect("a task of the adapter's runtime runs to its end")
+    }
+}
+
+impl Bridge {
+    /// Starts `future` on the adapter's runtime and leaves it running there: work that lasts as
+    /// long as the adapter, such as a connection that listens.
+    pub fn spawn<F>(&self, future: F)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        self.runtime
+            .as_ref()
+            .expect("the runtime lives as long as the bridge")
+            .spawn(future);
     }
 }
 

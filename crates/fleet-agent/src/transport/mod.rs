@@ -1,4 +1,4 @@
-//! The Client's upstream connection (ADR-0012, ADR-0008). The connection itself — the transport,
+//! The Client's upstream connection (ADR-0045, ADR-0008). The connection itself — the transport,
 //! its TLS, backoff, heartbeat, framing, limits, throttling, the goodbye — is `opamp::client`'s.
 //! What is the Client's is which material it is built from, in [`connection`], and [`Upstream`]:
 //! the session over the [`Engine`], with the flows that follow a reply.
@@ -154,7 +154,7 @@ async fn flush_owed<S: ReportSink>(engine: &mut Engine, sink: &mut S) -> Result<
 /// 1. A connection-settings offer (ADR-0013) — verified OpAMP settings end the
 ///    connection; an offer applied in place owes its acknowledgement now.
 /// 2. Ask for a certificate, now that the Server's capabilities are known and an offered
-///    certificate is in force (ADR-0021).
+///    certificate is in force (ADR-0038).
 /// 3. The floors are fetched when they are due — at the first reply, once an hour, and within the
 ///    minute before an offer is decided — and a queued download below its floor is refused
 ///    (ADR-0028 clause 17). Offered packages are downloaded and verified (ADR-0027).
@@ -406,7 +406,7 @@ pub async fn process_connection_offer(
             return OfferOutcome::Applied;
         }
         // The issued certificate is stored only now, after connecting with it proved it works — the
-        // old one stays in force until here (ADR-0021).
+        // old one stays in force until here (ADR-0038).
         if let Some(certificate) = &settings.certificate {
             if let Err(e) = crate::csr::accept(&config.state_dir, &certificate.cert) {
                 tracing::warn!(error = %e, "cannot store the issued certificate");
@@ -453,7 +453,7 @@ pub async fn process_connection_offer(
 }
 
 /// The upstream connection `supervisor.toml` describes, with the client identity in force
-/// (ADR-0021).
+/// (ADR-0038).
 ///
 /// # Errors
 /// Returns an error when a TLS file cannot be read.
@@ -464,7 +464,7 @@ pub fn connection(config: &ClientConfig) -> Result<Connection, String> {
 /// The same connection with other TLS material — a candidate certificate under test.
 ///
 /// It carries no `Authorization`: the Server admits by the client certificate alone, and this
-/// Client sends no credential upstream (ADR-0021 clause 3).
+/// Client sends no credential upstream (ADR-0038 clause 3).
 #[must_use]
 pub fn connection_with(config: &ClientConfig, tls: ClientTls) -> Connection {
     Connection {

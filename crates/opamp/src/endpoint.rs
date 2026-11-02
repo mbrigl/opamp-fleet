@@ -233,7 +233,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0008, ADR-0012
+    /// Verifies: ADR-0008, ADR-0045
     #[test]
     fn only_the_loopback_literals_are_loopback() {
         for host in ["127.0.0.1", "::1", "[::1]"] {

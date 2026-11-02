@@ -11,6 +11,8 @@ a service.
 - [Running it](#running-it)
 - [Configuration reference](#configuration-reference)
 - [Where the Server keeps its state](#where-the-server-keeps-its-state)
+- [Moving the records into PostgreSQL](#moving-the-records-into-postgresql)
+- [Several instances](#several-instances)
 - [Upgrading to one data directory](#upgrading-to-one-data-directory)
 - [Mutual TLS: proving who is on the connection](#mutual-tls-proving-who-is-on-the-connection)
 - [Enrolment: a new host, approved by an operator](#enrolment-a-new-host-approved-by-an-operator)
@@ -62,8 +64,11 @@ the `RUST_LOG` environment variable (default `info`); everything else is in the 
 and the `FLEET_SERVER__…` variables over it. `server pki status` reads the same configuration, from
 the same places.
 
-Stopping the Server is `SIGTERM`/`Ctrl-C`. Configurations and packages are persisted to disk, so a
-restart resumes with the same fleet state; Agents reconnect on their own.
+Stopping the Server is `SIGTERM`/`Ctrl-C`. Both listeners close at once, and the WebSocket sessions
+are closed spread over `drain_secs` (default 20 seconds), so their Agents do not all reconnect in
+the same instant; what is still open 2 seconds later is cut, and then the fleet's records are
+written. Configurations and packages are persisted to disk, so a restart resumes with the same
+fleet state; Agents reconnect on their own, each after a delay drawn over 30 seconds.
 
 The Server refuses to start without `[tls]` and `[tls] client_ca_file`, and the refusal names what
 is missing. It also refuses an `[auth]` section, and a credential key in `[connection_offer]`: the
@@ -138,10 +143,10 @@ not in it and are named by the `org.opencontainers.image.base.digest` annotation
 |---|---|
 | Entrypoint | `/usr/local/bin/server`; arguments after the image name are the Server's, such as `--config` |
 | User | UID and GID `65532`, numeric; no capability is needed, both ports are above 1024 |
-| Data directory | `/var/lib/opamp-fleet`, a volume owned by `65532` |
+| Data directory | none is set; `/var/lib/opamp-fleet` is a volume owned by `65532`, for a Server that keeps state on its disk to be given as `data_dir` |
 | Working directory | `/`, which `65532` cannot write, so the `server.toml` read without `--config` is never one on the volume |
 | Ports | `4320` (Agent plane) and `4321` (Operator plane) |
-| Environment it sets | `FLEET_SERVER__DATA_DIR=/var/lib/opamp-fleet`, `FLEET_SERVER__LISTEN=0.0.0.0:4320`, `FLEET_SERVER__REST__LISTEN=0.0.0.0:4321`, and nothing else |
+| Environment it sets | `FLEET_SERVER__LISTEN=0.0.0.0:4320`, `FLEET_SERVER__REST__LISTEN=0.0.0.0:4321`, and nothing else |
 | Configuration, certificates, keys, secrets | none; you mount them as files |
 
 Because both planes listen off the loopback inside the container, the Server requires `[tls]` and
@@ -151,14 +156,26 @@ certificates, the keys and every password or credential file read-only, and name
 configuration. The image works with a read-only root filesystem; the Server
 writes under its data directory alone.
 
+A Server on PostgreSQL and S3 keeps nothing on its disk: give it no `data_dir` and no volume, and
+any instance can take another's place. A Server that keeps state on its disk — on the filesystem
+record store, or with the filesystem blob store — needs `data_dir = "/var/lib/opamp-fleet"`, in
+`server.toml` or as `FLEET_SERVER__DATA_DIR`, and the volume there. Given none, it falls back to
+`fleet-data` under `/`, which `65532` cannot write, and stops naming `data_dir`; it never writes
+outside the volume.
+
 ```console
-$ docker run -d --name opamp-fleet-server --read-only \
+$ docker run -d --name opamp-fleet-server --read-only --stop-timeout 30 \
     -p 4320:4320 -p 4321:4321 \
+    -e FLEET_SERVER__DATA_DIR=/var/lib/opamp-fleet \
     -v opamp-fleet-data:/var/lib/opamp-fleet \
     -v /etc/opamp-fleet:/etc/opamp-fleet:ro \
     ghcr.io/mbrigl/opamp-fleet-server@sha256:<digest> \
     --config /etc/opamp-fleet/server.toml
 ```
+
+`--stop-timeout 30` gives a stop more than `drain_secs` (20 seconds by default) and the 2 seconds
+after it. Docker's own default of 10 seconds ends the Server with `SIGKILL` before it has written
+the fleet's records; an orchestrator's grace period needs the same room.
 
 A bind mount for the data directory must be writable by UID `65532`. There is no `HEALTHCHECK` —
 the image has no shell to run one and the Server has no health endpoint — so probe a TCP connection
@@ -220,12 +237,14 @@ configures the Server.
 |---|---|---|
 | `listen` | `"127.0.0.1:4320"` | The **Agent plane**, as `address:port`: the OpAMP endpoint and the package downloads. `4320` is the protocol's default port. Serve the fleet with `"0.0.0.0:4320"`. |
 | `max_connections` | `10000` | The connections the Agent plane holds at once. A connection past it is closed on accept. Raise it together with the process's file-descriptor limit for a larger fleet. `0` is refused at startup. |
+| `max_new_connections_per_sec` | `200` | The new Agent-plane connections taken a second, each a full TLS handshake and admission. A connection past it completes its handshake and is answered `503` with a `Retry-After` of 1 to 30 seconds, then closed. `0` is refused at startup. |
+| `drain_secs` | `20` | How long a stop spreads the closing of the WebSocket sessions over, from `0` to `300`; `0` closes them all at once. What is still open 2 seconds after it is cut. An orchestrator's stop timeout must be longer, or the fleet's records are not written. |
 | `data_dir` | `"fleet-data"` | Where the Server keeps **all** of its state, one directory per domain: see [Where the Server keeps its state](#where-the-server-keeps-its-state). Created owner-only when missing. `config_dir` and `packages_dir` are gone: a file naming either fails startup and names `server migrate` ([Upgrading to one data directory](#upgrading-to-one-data-directory)). |
 | `max_message_size_bytes` | `67108864` (64 MiB) | The largest OpAMP message accepted or sent, in either direction and on either transport. The protocol requires a limit and recommends this value; a fleet of status reports needs far less. An oversized HTTP request is answered `413`, an oversized WebSocket message closes the connection with `1009`. A request or message that has begun and delivers less than 64 KiB in a minute is answered `408`, or closes its connection with `1008`. |
 | `max_package_size_bytes` | `1073741824` (1 GiB) | The largest artifact the package-upload route accepts. A package is a program, not a message — an `otelcol-contrib` binary is a few hundred megabytes — so this bound is far larger, and it applies to that one route. The upload has no deadline, but like every request body it must deliver 64 KiB in each minute once it has begun, or it is answered `408`. |
 | `max_total_package_bytes` | `17179869184` (16 GiB) | The total size of all stored artifacts before a new upload is refused `507`. Where `max_package_size_bytes` bounds one artifact, this bounds the whole store, so no caller fills the disk by uploading many artifacts under distinct names. Identical bytes are stored once and counted once. `0` is refused at startup. |
-| `max_agents` | `100000` | The most Agent records the fleet holds at once. A report bearing a **new** `instance_uid` past this ceiling is answered `Unavailable` rather than admitted, so an admitted peer minting fresh self-asserted UIDs cannot exhaust memory and disk; Agents already known keep reporting. The defence against an anonymous flood is [admission](#authentication) by client certificate; this is the backstop behind it. `0` is refused at startup. |
-| `stale_after_secs` | `90` | How long an Agent that declares `ReportsHeartbeat` may be silent before the fleet view marks it **stale**. Ignored when `[connection_offer]` names a heartbeat interval — then the budget is three of those. Only heartbeating Agents can go stale: one that promised no periodic report is never late. |
+| `max_agents` | `100000` | The most Agent records the fleet holds at once. A report bearing a **new** `instance_uid` past this ceiling is answered `Unavailable` rather than admitted, so an admitted peer minting fresh self-asserted UIDs cannot exhaust memory and disk; Agents already known keep reporting. With PostgreSQL it bounds the records in the database, counted as each is created, so it holds for all instances together; set it alike on each. The defence against an anonymous flood is [admission](#authentication) by client certificate; this is the backstop behind it. `0` is refused at startup. |
+| `stale_after_secs` | `90` | How long an Agent that declares `ReportsHeartbeat` may be silent before the fleet view marks it **stale**. Ignored when `[connection_offer]` names a heartbeat interval — then the budget is three of those. With PostgreSQL the budget adds `[database] presence_interval_secs`. Only heartbeating Agents can go stale: one that promised no periodic report is never late. |
 
 ### `[rest]`
 
@@ -319,7 +338,7 @@ secret_access_key_file = "/run/secrets/s3-secret-access-key"
 | `s3.endpoint` | — | Required with `"s3"`. The store's URL, `https://`. `http://` is accepted to `127.0.0.1` or `::1` alone; any other fails startup naming the key. |
 | `s3.bucket` | — | Required with `"s3"`. The bucket. The Server does not create it: one that does not exist or cannot be listed fails startup, naming it and the error. |
 | `s3.region` | — | Required with `"s3"`. The region the requests are signed for; a store without regions takes any, such as `us-east-1`. |
-| `s3.prefix` | empty | Where in the bucket the Server's keys live: empty, or ending in `/`. Artifacts are kept at `<prefix>blobs/<sha256>`, an upload in progress at `<prefix>staging/<random>`. Letters, digits, space and `- _ . / ! ' ( ) & $ @ = ; : + ,` only: any other character, which the S3 client would percent-encode, fails startup naming the key. |
+| `s3.prefix` | empty | Where in the bucket the Server's keys live: empty, or ending in `/`. Artifacts are kept at `<prefix>blobs/<sha256>`, an upload in progress at `<prefix>staging/<lease>/<random>`. Letters, digits, space and `- _ . / ! ' ( ) & $ @ = ; : + ,` only: any other character, which the S3 client would percent-encode, fails startup naming the key. |
 | `s3.ca_file` | unset | One PEM root for a store whose certificate no public root signs. |
 | `s3.access_key_id` | unset | The key ID of a static key pair. Set together with `secret_access_key_file` or not at all; one without the other fails startup naming both. |
 | `s3.secret_access_key_file` | unset | The file holding that key pair's secret, readable by the Server's account and at most its group (`0600`, or `0640`/`0440` as an orchestrator mounts a secret for a group); one others can read, or its group can write, fails startup naming the key. The secret is never written into `server.toml`. |
@@ -339,12 +358,55 @@ included, or between two pieces of a download, which therefore runs as long as b
 A request that failed is tried again at most twice, and not once a minute has passed since the
 first attempt. A store that stops answering fails the act that needs it, as a failed write does.
 
-In the bucket, a key under `<prefix>staging/` is an interrupted upload and is deleted at startup;
-any other key under `<prefix>` that is not `blobs/<sha256>` fails startup naming it. At startup the
-Server lists the bucket for each artifact's size and downloads nothing: unlike the filesystem
-store, it does not hash the artifacts again. An object altered in the bucket is served, and the
-Client's own hash and signature checks refuse it. The bucket, its credentials, policies, retention
-and backups are the operator's.
+In the bucket, an upload in progress lives under `<prefix>staging/<lease>/`, `<lease>` being the
+lease of the instance that writes it, or `fs` on the filesystem record store. Those of a lease that
+is no longer live are interrupted uploads. An instance deletes them with every sweep of the
+artifacts no entry names: when it starts, and after an entry is replaced or deleted, a Package
+deleted, or an upload fails. It deletes them also whenever it takes over a lapsed lease, and never
+those of a live one. What a lease released at an orderly shutdown left therefore goes with the next
+sweep on any instance; it costs storage only until then. On the filesystem record store, every
+staging object goes at startup. Any other key under `<prefix>` that is not `blobs/<sha256>` fails
+startup naming it.
+
+At startup the Server lists the bucket for each artifact's size and downloads nothing: unlike the
+filesystem store, it does not hash the artifacts again. An object altered in the bucket is served,
+and the Client's own hash and signature checks refuse it. The bucket, its credentials, policies,
+retention and backups are the operator's.
+
+On PostgreSQL every sweep and cleanup of the artifacts takes an advisory lock, so one instance
+deletes at a time. It decides from the entries the database stores, so it keeps an artifact that an
+entry written through another instance names. An upload takes the same lock shared in the
+transaction that writes its entry, and checks there that its artifact is stored, so no sweep runs
+between the check and the commit; an upload whose artifact a sweep deleted first is refused:
+upload it again. An upload waits for the lock up to 5 seconds, a sweep up to 60. Each sweep in
+progress holds the lock on a database session of its own, beside the pool's eight, which the
+database's `max_connections` must allow for. The lock is taken on PostgreSQL with the filesystem
+blob store too, where the instance is alone and it decides nothing. A start whose sweep cannot have
+the lock fails, naming the lock; a sweep after an act logs it, and what it would have deleted stays
+until the next start.
+
+An instance that stops while an upload streams leaves the parts of an unfinished multipart upload,
+which are not objects: the Server neither lists nor deletes them. Expire them with a lifecycle rule
+on the bucket that aborts incomplete multipart uploads under `<prefix>staging/`, for example after a
+day:
+
+```json
+{
+  "Rules": [
+    {
+      "ID": "abort-incomplete-multipart-uploads",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "<prefix>staging/" },
+      "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 1 }
+    }
+  ]
+}
+```
+
+```sh
+aws s3api put-bucket-lifecycle-configuration --bucket <bucket> \
+    --lifecycle-configuration file://lifecycle.json
+```
 
 **Switching to `"s3"`** copies what is missing: at the first start with `"s3"`, every artifact a
 Package entry names that the bucket lacks is read from `data_dir/blobs/`, hashed — a file whose
@@ -354,12 +416,40 @@ bucket holds every artifact is yours. A large `data_dir/blobs/` makes that first
 its upload. Nothing is copied back: switching from `"s3"` to `"fs"`, an entry whose artifact
 `data_dir/blobs/` lacks fails the start, naming the entry.
 
+That copy at startup is the filesystem record store's. A Server on PostgreSQL and S3 has no
+`data_dir`, so a Server already on PostgreSQL with the filesystem blob store moves its artifacts
+once, with every instance stopped:
+
+1. Start this release once on the old `server.toml`, the one that names `data_dir`, and stop it.
+   That start brings the schema up to this release, which `blobs-to-s3` needs, and links the
+   audit files under `data_dir/audit/` as the archive of the record
+   ([The audit record on PostgreSQL](#the-audit-record-on-postgresql)); a start without
+   `data_dir` would never link them.
+2. Change `server.toml` to how the Server will start: `[blobs] store = "s3"` with its `[blobs.s3]`
+   section, and no `data_dir`.
+3. Upload the artifacts from the old directory:
+
+   ```sh
+   server blobs-to-s3 --data-dir /var/lib/opamp-fleet/fleet-data \
+       --config /etc/opamp-fleet/server.toml
+   ```
+
+   It refuses while any instance holds a live lease, and holds the bucket's sweep lock for its whole
+   run: an instance started meanwhile fails its start, naming the lock. It uploads every artifact a
+   Package entry
+   names that the bucket lacks, hashed as above, then checks that the bucket holds the artifact of
+   every entry, and fails naming an entry whose artifact it does not hold. It only reads the
+   directory, and a second run uploads nothing again.
+4. Start the Server. The old directory is no longer read; removing it is yours.
+
 ### `[database]`
 
 Optional. Where the Server keeps its records: one file per record under `data_dir`, the default, or
-one PostgreSQL database. Both are supported in production. Either way the Server loads every record
-at startup and answers from memory; the database is the durable copy, written before an act is
-answered, and only this Server writes to it while it runs.
+one PostgreSQL database. Both are supported in production. On files the Server loads every record
+at startup and answers from memory. On PostgreSQL it loads no Agent at startup: it keeps in memory
+the Agents connected to it, each read at its first report, and reads the fleet the API lists from
+the database. Either way the store is the durable copy, written before an act is answered. Several
+instances may share one database: see [Several instances](#several-instances).
 
 ```toml
 [database]
@@ -376,6 +466,9 @@ password_file = "/run/secrets/fleet-db-password"
 | Key | Default | Meaning |
 |---|---|---|
 | `store` | `"fs"` | `"fs"` or `"postgres"`. Any other value fails startup naming the key; so do `"postgres"` without a `[database.postgres]` section and a `[database.postgres]` section beside `"fs"`. |
+| `lease_renew_secs` | `10` | With `"postgres"` alone: how often an instance renews its lease, from 1 to 3600. Set with `"fs"`, it fails startup naming it. |
+| `lease_secs` | `30` | With `"postgres"` alone: how long after its last renewal a lease lapses, at least three renewals and at most 3600. Set with `"fs"`, it fails startup naming it. |
+| `presence_interval_secs` | `30` | With `"postgres"` alone: how often an instance writes, in one batch, where each Agent it carries is connected and when it was last heard from, from 10 to 60. The report that connects an Agent to an instance writes it at once, so no other instance forgets an Agent that has just connected. A heartbeat reaches the database at most once per interval and Agent, so the staleness budget grows by this interval. Set with `"fs"`, it fails startup naming it. |
 | `postgres.host` | — | Required with `"postgres"`. The database's host name or IP address — what its certificate must name. |
 | `postgres.port` | `5432` | Its port. |
 | `postgres.dbname` | — | Required with `"postgres"`. The database. The Server does not create it. |
@@ -397,21 +490,45 @@ within about half a minute.
 
 The role needs the right to create tables in its default schema: at every start the Server applies
 the migrations of its schema the database has not yet seen, in one transaction, and records them in
-the table `fleet_schema`. A migration only adds, so the Server before an upgrade runs on the schema
-after it. A database whose schema needs a newer Server stops the start, naming both versions, and is
-left unchanged. The Server creates tables and indexes, and nothing else: the database, the role,
+the table `fleet_schema`. A migration only adds, and each names the oldest Server that understands
+the schema it leaves. A database whose schema needs a newer Server stops the start, naming both
+versions, and is left unchanged. A Server of 0.7.1 is refused that way once this release has started
+on its database: back the database up before the upgrade, since going back to 0.7.1 afterwards
+means restoring it. The Server creates tables and indexes, and nothing else: the database, the role,
 its rights and extensions, replication and backups are the operator's.
 
-One Server per database schema: the Server holds a lock on the schema it works in — its role's
-default — while it runs, and a second one started against the same database and schema stops,
-naming the database. The lock lives on a connection of its own; when that
-connection ends while the Server runs — the database restarted, the session was ended, the host
-is gone — the lock is gone with it, and the Server logs an error naming the database and refuses
-every write from then on, so it never writes beside a second Server. Restart it once the database
-answers.
+Every Server on PostgreSQL is an instance: before it opens either listener it takes a lease in the
+database under an instance id of its own, renews it every `lease_renew_secs`, and keeps its
+listeners open only while it can prove it. One that cannot renew before its lease lapses ends every
+session, closes both listeners, and takes a new lease under a new instance id once the database
+answers again.
 
-With `"postgres"`, `data_dir` holds the audit record (`audit/`) and, with the filesystem blob
-store, the artifacts (`blobs/`), and nothing else. A record of the filesystem store found there —
+Each line an instance logs begins with `instance_id=<id>`, so the logs of several instances say
+which one acted. The instance makes its id as soon as its configuration names PostgreSQL, before
+it opens the database, and takes its first lease under it; between a lost lease and the next, the
+lines name the lost one. Only the lines logged before the configuration is read name none, since
+the store is not known yet. The take, the failed renewal, the loss and the release of a lease name
+the instance id as a field of their own, `instance_id`, and so does a takeover, beside
+`taken_over`, the instance id of each lease that had lapsed or whose instance is gone. A new lease
+after a lost one names the lost id as `lost`, and if its take removed the instance's own lapsed
+lease, names that as `lapsed` rather than as a takeover. On the filesystem store the log names no
+instance.
+
+An instance whose blobs are files (`[blobs] store = "fs"`) or whose CA key is a file (`[client_ca]
+key_file`, `[enrolment] bootstrap_ca_key_file`) must be alone on its database schema: it holds a
+lock on the schema it works in — its role's default — while it runs, and a second instance started
+against the same database and schema stops, naming the key that makes it alone. The lock lives on
+a connection of its own; when that connection ends while the Server runs — the database
+restarted, the session was ended, the host is gone — the lock is gone with it, and the Server logs
+an error naming the database, ends every session, refuses every write from then on, and exits.
+Restart it once the database answers. With the blobs in S3 and no CA key in a file, any number of
+instances share one database.
+
+With `"postgres"` and the filesystem blob store, `data_dir` holds the artifacts (`blobs/`), and an
+`audit/` a Server wrote there before as the archive, and nothing else; the audit record is in the
+database. With `"postgres"` and [`[blobs] store = "s3"`](#blobs) the Server keeps nothing on its
+disk: it creates no data directory, and a `data_dir` in the file or the environment stops the start,
+naming the key. A record of the filesystem store found there —
 `agents/`, `configurations/`, `revocations.json` and the rest — stops the start, naming it and
 `server migrate-to-postgres`. A backup takes the database and `data_dir` together.
 
@@ -530,8 +647,8 @@ endpoint = "wss://fleet.example:4320/v1/opamp"
 ## Where the Server keeps its state
 
 Everything the Server knows survives a restart under one directory, `data_dir`, in a fixed layout —
-or, with [`[database]`](#database) `store = "postgres"`, in the database, with only `audit/` and
-`blobs/` left under `data_dir`. With the filesystem store the layout is:
+or, with [`[database]`](#database) `store = "postgres"`, in the database, with only `blobs/`, and
+an archived `audit/`, left under `data_dir`. With the filesystem store the layout is:
 
 | Path | One file per | Holds |
 |---|---|---|
@@ -580,21 +697,174 @@ server migrate-to-postgres --from /var/lib/opamp-fleet/fleet-data \
 
 - It refuses a database that holds any of the Server's tables, and a `--data-dir` that is not
   empty, and checks the database before it creates anything.
+- With an S3 bucket in [`[blobs]`](#blobs) it takes no `--data-dir`, as a Server on PostgreSQL and
+  S3 keeps nothing on its disk, and refuses one, naming the flag:
+
+  ```sh
+  server migrate-to-postgres --from /var/lib/opamp-fleet/fleet-data \
+      --config /etc/opamp-fleet/server.toml
+  ```
 - It reads every record of the old `data_dir` as a Server's start would, so a record a start would
   refuse stops the copy, naming it, before anything is written into the database. It only reads
-  the old `data_dir`: what a start would repair there — a missing directory, a leftover temporary
-  file, a mode — it leaves as it is.
-- It copies `audit/` and, with the filesystem blob store, `blobs/` into the new `data_dir` byte
-  for byte, so the audit chain still verifies; then it applies the schema and writes every record
-  in one transaction.
+  the old `data_dir`, in place: what a start would repair there — a missing directory, a leftover
+  temporary file, a mode — it leaves as it is, and it copies no record elsewhere to read it, so the
+  private keys in it are not written a second time.
+- With the filesystem blob store it copies `blobs/` into the new `data_dir` byte for byte. With S3
+  it uploads into the bucket every artifact of the old `blobs/` that a Package entry names and the
+  bucket lacks, hashed as the switch to `"s3"` hashes it: a file whose content does not match its
+  name stops the copy, naming it, and so does an entry whose artifact neither holds. Then it
+  applies the schema and writes every record in one transaction. What it uploaded stays in the
+  bucket when the copy fails, and a second run finds it there.
+- It copies no audit entry. The old `audit/` stays where it is as the closed archive, which no
+  Server writes to again, and the copy records the `seq` and the hash of its last entry: the first
+  audit chain in the database names that entry as its `predecessor`, and
+  `server audit-verify --config <server.toml> --archive <old data_dir>/audit` checks the link.
+  Keep the archive as long as you keep the record; deleting it is yours. An archive whose chain
+  breaks, or that ends in a torn line a crash left, stops the copy, naming the file: cut the torn
+  line from it, keeping a copy, so the record ends on its last whole entry. A torn line that a
+  start on the filesystem store already followed with `audit.chain_broken` holds, and needs
+  nothing; a repair that names no `last_whole` is reported as a repair without a link (see
+  [the audit record](#the-audit-record)).
 - It copies rather than moves: the old `data_dir` stays as the backup. It prints what it copied,
   and exits non-zero when it could not copy all of it, leaving the database without the Server's
   tables and the new `data_dir` empty.
 
 Then set `data_dir` to the new directory and `[database] store = "postgres"`, and start the
-Server. With an S3 bucket in [`[blobs]`](#blobs), start once with `"s3"` on the old `data_dir`
-before the copy, so the bucket holds every artifact. Moving records back from PostgreSQL to files
-is not provided.
+Server. With S3 there is no new `data_dir`: the `server.toml` the copy reads names none, as a
+Server on PostgreSQL and S3 refuses one. Moving records back from PostgreSQL to files is not
+provided.
+
+## Several instances
+
+Several Server instances serve one fleet when they share one PostgreSQL database and one S3
+bucket. Each holds a lease in the database ([`[database]`](#database)), every change one instance
+makes is decided in the database and reaches every other, the instance an Agent connected to last
+carries it, and no instance keeps anything on its disk. Each instance needs:
+
+- `[database] store = "postgres"` and `[blobs] store = "s3"`, with the same database, role, bucket
+  and prefix as the others, and no `data_dir`, in the file or the environment;
+- no CA key in a file: no `[client_ca]` and no `[enrolment] bootstrap_ca_key_file`. With either,
+  an instance runs alone
+  ([A CA key in a file means a standby](#a-ca-key-in-a-file-means-a-standby));
+- the same `server.toml` as the others, so that `max_agents` and the rest agree, and the same
+  `[tls]` certificate, which names the address the Clients connect to.
+
+In front of the Agent plane, that address is a TCP load balancer that passes the TLS connection
+through unopened, since the client certificate in its handshake is what admits an Agent, and keeps
+the peer's address, on which the [admission throttle](#repeated-failures-are-throttled) keys. It
+probes each instance with a TCP connection to the port `listen` names, `4320` by default: an
+instance without a lease has closed its listeners and is sent no Agent. The Operator plane of any
+instance shows the whole fleet and acts on it.
+
+### What a failover does
+
+- **An instance stops in order** (`SIGTERM`). It closes both listeners at once and ends its
+  WebSocket sessions spread over `drain_secs`. Then it writes where its Agents are, closes its
+  audit chain and releases its lease, and every other instance reads its Agents as disconnected at
+  once. Each WebSocket Client reconnects after a delay drawn over 30 seconds, a plain-HTTP Client
+  at its next poll, and the balancer sends it to another instance, which takes the Agent at its
+  first report.
+- **An instance ends without stopping**, killed or its host gone. Its connections break and its
+  Agents reconnect elsewhere in the same way. Its lease stays live until `lease_secs` after its last
+  renewal, and until then an Agent that has not reconnected still reads as connected through it.
+  At the first renewal after that, another instance takes the lapsed lease over: it logs
+  `took over the lease of an instance that is gone` with `taken_over=<instance id>`, closes that
+  lease's audit chain with `reason` `lease_lapsed`, and deletes that lease's staging objects in
+  the bucket.
+- **An instance loses the database.** Once it cannot renew before its lease lapses, it ends every
+  session it carries and closes both listeners, so the balancer sends it no Agent. When the
+  database answers again, it takes a new lease under a new instance id and opens them again.
+
+A request in flight on an instance that ends without stopping is not answered: read through
+another instance whether it took effect before making it again.
+
+### A CA key in a file means a standby
+
+An instance whose configuration names `[client_ca]` or `[enrolment] bootstrap_ca_key_file`, or
+keeps its artifacts as files, runs alone: it holds the database's lock, and a second instance
+started against the same database stops, naming the key, and exits non-zero. Failover is then a
+standby on another host: an instance with the same `server.toml`, started again until it starts —
+by its service manager's restart, or by hand. It starts once the database has ended the session of
+the instance before it: at once when that process ends, and for a host that is gone, once the
+database notices the lost connection. It then takes over that instance's lease, closes its audit
+chain, and the Agents reconnect to it.
+
+- **Let the service manager keep trying.** A refused start exits within a second, and systemd
+  stops restarting a unit that fails five times in ten seconds. Give the standby's unit
+  `StartLimitIntervalSec=0` under `[Unit]` and `RestartSec=5` under `[Service]`, beside the
+  `Restart=on-failure` of
+  [the unit in the setup](setup.md#2-configure-and-start-the-server). An orchestrator that waits
+  longer between restarts after each failed one delays the takeover as long.
+- **Bound how long the database takes to notice a host that is gone.** The database keeps the
+  session of a host that vanished until its TCP keepalives give up, by the operating system's
+  defaults about two hours. Set the database's `tcp_keepalives_idle`, `tcp_keepalives_interval`
+  and `tcp_keepalives_count`, or `tcp_user_timeout`, to the wait you accept, such as 30 seconds
+  idle, 10 seconds apart, 3 probes.
+
+To run instances side by side, take the CA keys off the Server: without `[client_ca]` the Server
+signs no certificate and takes no enrolment, and every host holds a certificate your own PKI
+issues, naming its host as [`[client_ca]`](#client_ca) describes.
+
+### Labels on several instances
+
+The fleet view, the reach counts and what a rollout releases are read from the database, and
+there every Agent inherits the labels of its Client Agent as on one Server. In the memory of the
+instance that carries an Agent, two cases do not inherit yet:
+
+- **An Agent behind a Gateway** whose Client Agent another instance carries does not inherit that
+  Client Agent's labels.
+- **A Client Agent bound to its Host** on one instance just before another instance first places a
+  fellow Agent of that Host is inherited there only once that group is placed again: when the
+  Client Agent's labels change, an Agent of the group is forgotten, the Agent's report changes, or
+  the instance has missed a notification and reads again.
+
+### An approval whose commit fails
+
+An approval signs the host's certificate and records it in the register and the audit record
+before its decision commits. When that commit fails, on a lost connection to the database, a
+timeout, or a commit elsewhere on the database server that holds the notification lock for more
+than five seconds, the approval answers `500` and the request still waits. Approving it again
+signs a second certificate for the same key. The first is never handed to the host, so no one
+holds it, but it stays in the register as valid, beside a Host with no binding. When the audit
+record shows two `issuance.signed` entries with one `key_fingerprint`, revoke the first by its
+serial.
+
+### From one Server on files to two instances
+
+1. **Run this release** on the one Server, on files.
+2. **Make the stores.** A PostgreSQL database and a role that may create tables in its default
+   schema, and a bucket with the lifecycle rule of [`[blobs]`](#blobs), both reachable from each
+   instance's host. Their replication and backups are yours.
+3. **Choose the CA's place.** With a CA key in a file, the second instance is a
+   [standby](#a-ca-key-in-a-file-means-a-standby); for two that serve at once, issue the hosts'
+   certificates outside the Server first.
+4. **Write the `server.toml` the instances start with**: `[database] store = "postgres"` with its
+   `[database.postgres]` section, `[blobs] store = "s3"` with its `[blobs.s3]` section, no
+   `data_dir`, and no `[audit] max_file_bytes` or `keep_files`, which are the filesystem store's.
+5. **Stop the Server and copy its records** with `server migrate-to-postgres --from <data_dir>
+   --config <server.toml>`, as in
+   [Moving the records into PostgreSQL](#moving-the-records-into-postgresql).
+   It uploads the artifacts into the bucket, and the old `data_dir` stays as the backup and as the
+   archive of the audit record. A Server already on PostgreSQL with its artifacts as files first
+   starts this release once on its old `server.toml`, with `data_dir`, and stops, then moves them
+   with `server blobs-to-s3` instead ([`[blobs]`](#blobs)).
+6. **Start the first instance**, and check the record with `server audit-verify --config
+   <server.toml> --archive <data_dir>/audit`.
+7. **Put the balancer in front** under the address the Clients connect to. To give them a new one,
+   offer it with `[connection_offer] endpoint`
+   ([Moving the fleet](#moving-the-fleet-connection-settings)).
+8. **Start the second instance** on another host, with the same `server.toml`.
+
+### Upgrading the instances
+
+Every instance on one database runs one release. To upgrade, stop every instance, then start each
+again on the new release; the first to start migrates the schema, and instances that start together
+wait for it. Stopping the old ones first is yours: an orchestrator's rolling update, which starts a
+new instance before it stops an old one, does not fit. Where the Server can tell, it refuses the
+wrong order: an instance that shares the database starts, and migrates, only once no Server holds
+the database alone, as a Server of 0.7.1 does while it runs. Two releases side by side, for an
+upgrade without a stop, are not built yet. Nor has any load been proven on several instances: how
+many Agents they carry and how long a failover of a large fleet takes are not yet measured.
 
 ## Upgrading to one data directory
 
@@ -926,7 +1196,8 @@ carries it shows *not issued here*. Only a revoked certificate is deleted; a val
 nothing is deleted and the answer is `503`.
 
 When issuing, the Server holds at most 10 000 valid ones, revoked ones included until they end or
-are deleted, and answers a request beyond that `409`. It answers `409` too while it holds no
+are deleted, counted over every instance on one database, and answers a request beyond that
+`409`. It answers `409` too while it holds no
 `bootstrap_ca_key_file` or once the bootstrap CA has ended, `503` while the audit record cannot be
 written, since no key is handed out unrecorded, and `400` for a subject attribute it does not know,
 a value out of bounds,
@@ -955,7 +1226,8 @@ whose certificate its host has not collected included; that host enrols again in
 **While it is open, an enrolling host may send a certificate request and nothing else.** The
 Server creates no Agent record for it and offers it nothing but the issued certificate. The request
 waits in a queue of at most 1024, of which the requests of one bootstrap certificate hold at most
-`max_pending_per_bootstrap`, 256 by default. A request beyond either bound is answered
+`max_pending_per_bootstrap`, 256 by default; with several instances on one database both bounds
+count the queue they share. A request beyond either bound is answered
 `Unavailable` and the host retries later; one beyond its bootstrap certificate's share is recorded
 in the audit as `enrolment.refused` with `reason` `bootstrap_share` and the certificate's serial,
 once per certificate and window. A re-sent request that already waits is never refused. The Client
@@ -1113,7 +1385,8 @@ host not marked — answers every downstream peer `503` and closes their session
 
 ## The audit record
 
-Every security decision leaves one line in `data_dir/audit/`: each admission and refusal on the
+Every security decision leaves one entry in the audit record — in `data_dir/audit/` on the
+filesystem store, in the database on PostgreSQL: each admission and refusal on the
 Agent plane, each refused operator sign-in, each enrolment request, approval and rejection, each
 certificate issued, each revocation and the session it ended, each request for the Gateways'
 revocation list from a host not marked as a Gateway, each download a host may not fetch, each
@@ -1132,16 +1405,99 @@ $ server audit-verify /var/lib/opamp-fleet-server/audit
 ```
 
 Each line carries the SHA-256 of the line before it, so a line edited or removed afterwards breaks
-the chain where it happened; `audit-verify` names the first entry that does not follow. Against an
-intruder on the Server host that only helps with a copy taken before, so ship the directory off the
-host. The record also goes to the Server's log under the target `audit`.
+the chain where it happened; `audit-verify` names the first entry that does not follow. A crash
+mid-write leaves a torn last line; the next start keeps it and first writes `audit.chain_broken`,
+which chains on from it and names as `last_whole` the hash of the last whole entry before it. A
+crash during that repair leaves a second torn line, and the start after it writes one
+`audit.chain_broken` for both, linked to the last whole entry before them. `audit-verify` takes such
+a repair as holding when `last_whole` matches. A torn line still at the end, one no
+`audit.chain_broken` follows, a `last_whole` that names another entry, and a line with bytes that
+are not UTF-8 anywhere but in a character cut short at its end fail. A repair of one torn line that
+names no `last_whole` holds, and `audit-verify` names it as a repair without a link: the entries
+before it are not bound by those after it, so check them against a copy taken earlier. Against an
+intruder on the Server host the chain only helps with a copy taken before, so ship the directory off
+the host. The record also goes to the Server's log under the target `audit`.
 
 The Server never takes a decision it cannot record: when the record cannot be written — a full
 disk, a failed device — it admits no Agent and runs no operator act, answering `503`, until it
 can. A certificate request in that time is answered `Unavailable` with a time to retry, and the
 Agent asks again. Refusals past ten a second from one address are counted into one line, not
 dropped.
-`[audit] max_file_bytes` (64 MiB) and `keep_files` (16) bound the space it takes.
+`[audit] max_file_bytes` (64 MiB) and `keep_files` (16) bound the space it takes on the filesystem
+store, and `[audit] retain_days` (365, at least 1) how far back it goes on PostgreSQL. Each key
+applies to its own store alone: one set for the other store stops the Server at startup, naming
+the key.
+
+### The audit record on PostgreSQL
+
+On PostgreSQL the record is one chain per lease: each instance opens a chain of its own with each
+lease it takes, named by the lease's instance id, and every entry names its chain. Its first entry
+is `audit.chain_opened` with the host. An orderly shutdown closes the chain with
+`audit.chain_closed`, `reason` `shutdown`, before the lease is released; when it cannot, the lease
+is left to lapse. An instance that takes over a lapsed lease — at its own start, or at any
+renewal — closes that lease's chain with `reason` `lease_lapsed` and `closed_by` its own chain, and
+from then on the database refuses the dead chain an entry. Decisions an instance queued under a
+lease that lapsed before they were written go into the chain of its next lease, each with
+`taken_under` naming the old chain; none is lost. Several chains are therefore no gap: there is at
+least one per start.
+
+```console
+$ server audit-verify --config /etc/opamp-fleet/server.toml \
+    --archive /var/lib/opamp-fleet/fleet-data/audit
+chain 6c1e…-9b0a on fleet-1: 812 entries, closed
+chain 0d93…-41f2 on fleet-2: 5113 entries, open — its last entry is 5113 admission.admitted at 2026-11-01T09:12:44Z
+the archive /var/lib/opamp-fleet/fleet-data/audit holds, and ends on entry 2047, the predecessor chain 6c1e…-9b0a names
+2 chains, 1 open: the record holds
+```
+
+`audit-verify --config` reads the database with the Server's own credentials and changes nothing. It
+walks every chain in `seq` order, lists each open one with its last entry — the chain of a lease
+that is held, or of one that lapsed and no instance has taken over yet — and names the chain and the
+first entry that fails, exiting non-zero: an entry altered or removed, entries missing from the end
+of a closed chain, or an entry after its close. Without `--archive` it reports the predecessor as
+not checked; an archive the database records that no chain names fails, and so does a chain that
+names a predecessor while the database records no archive. Removing a whole chain together with its
+record is not detected by the database itself. Nor is a cut made with pruning: whoever can write to
+the database can append one `audit.pruned` with a correct hash to an open chain and delete the head
+of any chain up to the entry it names, young entries included, and the record still holds. Only an
+`audit.pruned` in a chain that itself holds links another or carries the predecessor on. A record
+that holds shows that what is left is linked, not that nothing younger than `retain_days` was
+removed; the signed chain heads, once they land, detect both.
+
+The record goes back `[audit] retain_days` (365 by default, at most 36 500). At its start and once a
+day after, each instance removes from its own chain the entries the database stored more than that
+many days ago, as far as every entry from the chain's start is that old; one instance at a time,
+whichever holds the prune lock, does the same for every closed chain, and another that finds the
+lock held leaves them to the next day. A chain that is still open because no instance took over its
+lapsed lease is pruned once it is closed. Before anything goes, the instance writes an
+`audit.pruned` into its own chain for each chain it prunes, naming it as `pruned_chain` with the
+`seq` and hash of the last entry removed (`last_seq`, `last_hash`); `audit-verify --config` checks
+that what is left of each chain begins right after that entry. A closed chain with no entries left
+keeps its record, listed as `0 entries, closed`, and its closing hash must be one an `audit.pruned`
+names. An `audit.pruned` is pruned in its turn: the prune that removes one records the links still
+needed again, and carries on the archive's predecessor once the first chain's `audit.chain_opened`
+is gone. A prune runs in rounds of at most 100 000 entries, one right after the other until nothing
+old is left, so a large record, such as the first prune after an upgrade, drains in one go. Each
+round deletes from all its chains in one transaction, in batches of a few thousand entries, and
+writes its own `audit.pruned` entries first, so a round that stops part-way deletes nothing and the
+record verifies after every round. A round that does not end within five minutes is rolled back, the
+prune stops with `cannot prune the audit record` in the log, and the next start or day goes on from
+there. A day is 24 hours, whatever the database's time zone. Upgrade all instances together: a
+Server of a release before this one does not know `audit.pruned`, and its `audit-verify --config`
+reports every pruned chain as broken.
+
+A Server that was on PostgreSQL before this release kept its audit record in files under
+`data_dir/audit/`. At its first start, before the database holds any chain or archive, it records
+the last entry of those files as the archive, as `server migrate-to-postgres` does, and the first
+chain names it as its `predecessor`: check the link with `--archive <data_dir>/audit`. An empty or
+missing `audit/` records nothing, and an instance without a `data_dir` has nothing to link. An
+`audit/` whose chain breaks or that ends in a torn line stops the start, naming the file. Once the
+database holds a chain, no start reads `audit/` again.
+
+So when you upgrade, start the Server that holds the old `data_dir` first, and alone, and only
+then the other instances. Whichever instance takes the first lease links its own `audit/`: one on
+a new host, or one without a `data_dir`, links nothing, and the old record is then never named; a
+copied or restored `data_dir` links the copy.
 
 ## Configurations: what the fleet runs
 
@@ -1631,7 +1987,7 @@ when [`[rest.auth]`](#the-operator-plane-restauth) is configured, needs Basic cr
 | `PUT /api/v1/packages/{agent_type}/{version}` | Create a Package. The body has no writable field — `{}`. **Distributes nothing**. The version is SemVer 2.0.0: any other is answered `400`, naming it — `1.19.0` for upstream's `1.19`. |
 | `GET /api/v1/packages/{agent_type}/{version}` | One Package. |
 | `PUT /api/v1/packages/{agent_type}/{version}/entries/{os}/{arch}` | Upload one platform's artifact (the raw body); new bytes remove the entry's signature. `409` while the Package is rolled out to an Agent. The signature is written through the entry's signature route. |
-| `PUT` / `DELETE /api/v1/packages/{agent_type}/{version}/entries/{os}/{arch}/signature` | Record or remove that entry's Ed25519 signature. Body: `{"signature": "<hex>"}`. `404` for an entry that does not exist, `400` for an empty or malformed signature, `409` while the Package is rolled out to an Agent. The answer is the Package, with the entry's `signature_state`. |
+| `PUT` / `DELETE /api/v1/packages/{agent_type}/{version}/entries/{os}/{arch}/signature` | Record or remove that entry's Ed25519 signature. Body: `{"signature": "<hex>"}`. `404` for an entry that does not exist, `400` for an empty or malformed signature, `409` while the Package is rolled out to an Agent, and `409` when another Server instance has replaced or removed the entry since this one read it: nothing is written, the Package read again through the same instance shows what the entry holds now, and the signature for those bytes is accepted. The answer is the Package, with the entry's `signature_state`. |
 | `DELETE /api/v1/packages/{agent_type}/{version}/entries/{os}/{arch}` | Remove one entry. `409` while the Package is rolled out to an Agent. |
 | `DELETE /api/v1/packages/{agent_type}/{version}` | Remove the Package, and take it out of every Deployment that holds it. `409` while an Agent's assignment pins it, saying how many. Uninstalls nothing. |
 | `GET /api/v1/packages/{agent_type}/{version}/file?os=…&arch=…` | The artifact bytes — where an offered `download_url` points. **The one route on the Agent plane** (`:4320`), and never guarded by `[rest.auth]`: it is not in the OpenAPI document for the same reason. It requires a client certificate from the client CA in the handshake; a bootstrap certificate is answered `401`. It serves only an artifact offered to an Agent the host speaks for, and answers every other request `404`, as for an artifact that does not exist. |
@@ -1647,8 +2003,8 @@ when [`[rest.auth]`](#the-operator-plane-restauth) is configured, needs Basic cr
 | `POST /api/v1/deployments/{name}/rollout` | Roll it out to every Agent it claims and would move — its Packages and Configurations in one release, the moment a rollout starts. Agents another Deployment also claims are skipped and reported as conflicts. `409` while the channel holds no Package and no Configuration, and `409` naming each Package and platform while any entry of a Package it holds lacks a signature. |
 | `GET` / `POST` / `DELETE /api/v1/enrolment/window` | Read, open or close the enrolment window — see [Enrolment](#enrolment-a-new-host-approved-by-an-operator). `POST` body: `{"open_for_secs": n}`, 1 to 86400. `404` while `[enrolment]` is not configured. |
 | `GET /api/v1/enrolments` | The pending enrolment requests, oldest first, each with its `id` — the fingerprint the enrolling Client logs. |
-| `POST /api/v1/enrolments/{id}/approve` | Sign that request and hand the host its certificate. `404` for an unknown or expired id. |
-| `POST /api/v1/enrolments/{id}/reject` | Refuse that request and close its connection. `404` for an unknown or expired id. |
+| `POST /api/v1/enrolments/{id}/approve` | Sign that request and hand the host its certificate. `404` for an unknown or expired id. `409` while another instance is deciding that request; asked again once it is decided, `404`. |
+| `POST /api/v1/enrolments/{id}/reject` | Refuse that request and close its connection. `404` for an unknown or expired id. `409` while another instance is deciding that request; asked again once it is decided, `404`. |
 | `GET` / `POST /api/v1/bootstrap-certificates` | List the valid bootstrap certificates the Server issued, or issue one — see [Bootstrap certificates](#bootstrap-certificates-issued-by-the-server). `POST` body: `{"subject": {…}, "validity_days": n, "password": "…"}`, `subject.organization`, `subject.organizational_unit` and `password` required (`400` naming the one missing); the answer carries the certificate and never its key, which is in the PKCS#12 file. `409` without `[enrolment] bootstrap_ca_key_file`. |
 
 The package routes answer `404` while package delivery is not configured on this Server.
@@ -1716,7 +2072,9 @@ ring whatever its Client is labelled. The Server tells a Client's Agents apart b
 arrived over. Behind a Gateway it groups them by the `host.id` they report, or by `host.name`
 where they report no `host.id`. Where such a group holds more than one Client Agent — two Clients
 on one machine behind one Gateway — no Agent of it inherits anything, and the fleet view marks them
-as ambiguous. The Agents tab shows inherited labels on each Agent, marked as such.
+as ambiguous. The Agents tab shows inherited labels on each Agent, marked as such. On several
+instances, two cases do not inherit yet in an instance's memory: see
+[Labels on several instances](#labels-on-several-instances).
 
 **What a Selector matches** is each Agent's effective description, the same for every Deployment.
 For each key it takes the first source that has it:
@@ -1756,6 +2114,12 @@ staleness budget. That is not caution for its own sake: the record holds the has
 Server not to re-offer what an Agent already has, so forgetting a live Agent has its configuration
 sent again, and a Managed Process restarts whenever a configuration arrives. Stop the agent first,
 or wait for it to fall silent. An Agent that is already disconnected can be forgotten at once.
+
+An Agent that went quiet on a connection still open, as behind a Gateway, has its session ended:
+a WebSocket that carried it alone is closed with code `1000` and the reason `forgotten`, and one
+that carries other Agents too, as a Gateway's does, stays open for them. With PostgreSQL any
+instance may forget it: the instance decides from the presence stored in the database, and the
+instance that carries the Agent ends its session within a second.
 
 The same applies to one that comes back later: it is offered its configuration, its connection
 settings, and its packages afresh. The packages cost nothing — the Client re-installs nothing whose
@@ -1965,13 +2329,16 @@ Each plane is bounded before a request is parsed:
 - **A connection cap per plane**: `max_connections` (default 10 000) for the Agent plane and
   `[rest] max_connections` (default 256) for the Operator plane. A connection past the cap is
   closed on accept, before the TLS handshake, while the ones already held keep working.
+- **A rate of new connections** on the Agent plane: `max_new_connections_per_sec` (default 200).
+  A connection past it is answered `503` with a `Retry-After` drawn from 1 to 30 seconds, over
+  HTTP/1.1 so the connection closes after the answer.
 - **The TLS handshake** must complete within 10 seconds, and a peer has 30 seconds to send its
   HTTP/1 request headers.
 - **HTTP/2** allows 100 concurrent streams per connection. A keep-alive ping goes out every 30
   seconds, and a peer that leaves one unanswered for 20 seconds is dropped.
 
-Only the caps are keys, because they depend on the size of the fleet. The other bounds are the
-same in every deployment.
+Only the caps and the rate are keys, because they depend on the size of the fleet. The other bounds
+are the same in every deployment.
 
 ## The fleet's own telemetry
 

@@ -423,7 +423,7 @@
       </section>
       </div>
 
-      <!-- Hosts (ADR-0024): what a client certificate names — one Client installation connecting
+      <!-- Hosts (ADR-0043): what a client certificate names — one Client installation connecting
            directly, a Gateway included. One table of Hosts; the current one shows its Agents
            beneath it, grouped by their Client Agent. Nothing on a Host is edited: the Gateway mark
            and the revocation of its certificates are per-row presses, and labels stay on the
@@ -666,16 +666,16 @@
       };
 
       function statusPill(a) {
-        // Two facts, not one (ADR-0024): the pill says whether a connection is open — behind a
+        // Two facts, not one (ADR-0043): the pill says whether a connection is open — behind a
         // Gateway, the Gateway's — and "Stale" beside it says the Agent itself stopped talking.
         // Disconnected is soft red, not gray: a link that is down is a finding, not an absence —
-        // but soft, because behind a Gateway it can be routine (ADR-0024); FAILED keeps the
+        // but soft, because behind a Gateway it can be routine (ADR-0043); FAILED keeps the
         // stronger reading as the one hard error in the row.
         //
         // The badge carries a ✕: a disconnected row is where forgetting is usually decided, so
         // the remedy rides on the diagnosis. A shortcut, not the rule — the details keep the
         // forget chip for *every* Agent, because whether one may be forgotten is a question about
-        // silence and not about this flag (ADR-0024): an Agent behind a Gateway reads Connected
+        // silence and not about this flag (ADR-0043): an Agent behind a Gateway reads Connected
         // however dead its host is, and must stay forgettable.
         const base = a.connected
           ? `<span class="pill solid-green"><span class="dot"></span>Connected</span>`
@@ -684,7 +684,7 @@
           ? `${base}<span class="pill amber" title="nothing heard for longer than this Agent's heartbeat budget">Stale</span>`
           : base;
       }
-      // The third fact beside the two the Status pill carries (ADR-0024): Connected says a
+      // The third fact beside the two the Status pill carries (ADR-0043): Connected says a
       // connection is open, Stale says the Agent stopped talking — and this pill says whether
       // what the connection carries is actually running. A Supervisor whose Managed Process
       // will not start is exactly the case that needs the split: its row reads Connected,
@@ -753,8 +753,8 @@
         return `<span class="${cls}" title="${esc(entries.join("\n"))}">${esc(key)}: ${esc(entries[0])}<span class="chip-count">+${entries.length - 1}</span></span>`;
       }
       // Everything about an agent that is a set rather than a value: reported attributes, the
-      // operator's labels (ADR-0024), the per-row actions, and its package pills. Not named
-      // `labels` — that word means the 🏷 chips alone (ADR-0024), and a row headed with it
+      // operator's labels (ADR-0043), the per-row actions, and its package pills. Not named
+      // `labels` — that word means the 🏷 chips alone (ADR-0043), and a row headed with it
       // reads as if a package status were one.
       function details(a) {
         const chips = [];
@@ -784,17 +784,17 @@
         if (caps.includes("AcceptsRestartCommand")) {
           chips.push(`<span class="chip clickable restart-btn" data-uid="${esc(a.instance_uid)}" title="Restart the managed process">⟳ restart</span>`);
         }
-        // Offered on every row rather than pre-filtered (ADR-0024): whether an Agent may be
+        // Offered on every row rather than pre-filtered (ADR-0043): whether an Agent may be
         // forgotten is a question about silence, which this view does not carry. The Server holds
         // the rule and says no with a reason — one place to be right instead of two to drift.
         chips.push(`<span class="chip clickable forget-btn" data-uid="${esc(a.instance_uid)}" title="Forget this Agent: the Server drops what it knows and the row goes away. Nothing happens on the host — a Client that is still running comes back.">✕ forget</span>`);
-        // The operator's labels (ADR-0024): matched by Selectors exactly like a reported attribute,
+        // The operator's labels (ADR-0043): matched by Selectors exactly like a reported attribute,
         // which is what makes a rollout channel a Server-side decision instead of an edit on the host.
         for (const [key, value] of Object.entries(a.labels || {})) {
           const dead = (a.shadowed_labels || []).includes(key);
           chips.push(`<span class="chip${dead ? " " : " selected"}" title="${dead ? "the Agent reports this attribute itself, so the label matches nothing" : "a label: Selectors match it like a reported attribute"}">${dead ? "⚠ " : "🏷 "}${esc(key)}=${esc(value)}</span>`);
         }
-        // Its Client Agent's labels hold for it below its own (ADR-0024 clause 19): set on the Client
+        // Its Client Agent's labels hold for it below its own (ADR-0043 clause 19): set on the Client
         // Agent's row, marked here as inherited, and dimmed where its own label or a report wins.
         const own = a.labels || {};
         const reported = { ...(a.identifying_attributes || {}), ...(a.non_identifying_attributes || {}) };
@@ -805,7 +805,7 @@
         if (a.ambiguous) {
           chips.push(`<span class="pill amber" title="more than one client agent arrives over this host for this machine, so no agent of it inherits labels">client: ambiguous</span>`);
         }
-        // The values of the host's certificate (ADR-0024 clause 18): matched by selectors, and no
+        // The values of the host's certificate (ADR-0043 clause 18): matched by selectors, and no
         // agent can report them.
         for (const [key, value] of Object.entries(a.host_attributes || {})) {
           chips.push(`<span class="chip" title="from the certificate of host ${esc(a.host)} — selectors match it, and no agent can claim it">🔒 ${esc(key)}=${esc(value)}</span>`);
@@ -890,7 +890,7 @@
         if (!filterText) return true;
         // Labels are searched beside the reported attributes, in the same `key=value` spelling:
         // the filter promises "or label", and a rollout channel is exactly what an operator narrows
-        // the fleet by (ADR-0024).
+        // the fleet by (ADR-0043).
         const attrs = Object.entries(a.non_identifying_attributes || {}).concat(Object.entries(a.identifying_attributes || {}))
           .concat(Object.entries(a.labels || {}))
           .concat(Object.entries(a.inherited_labels || {}))
@@ -1737,7 +1737,7 @@
       const KNOWN_ARCH = new Set(["amd64", "arm64", ...Object.keys(ARCH_ALIASES)]);
 
       // What an artifact's file name already says. A release is `<name><sep><version><sep><os>`
-      // `<sep><arch>.7z` (ADR-0034), and the last two fields are exactly the platform
+      // `<sep><arch>.7z` (ADR-0040), and the last two fields are exactly the platform
       // pair an entry is keyed by (ADR-0027) — so naming the file answers the fields. The platform
       // is found by matching the known tokens at the end, not by splitting: `linux-x86_64` must
       // not come apart at its own underscore. A tail the vocabulary does not know returns null
@@ -2148,7 +2148,7 @@
       // queue that could never fill.
       let enrolments = [];
       let enrolmentsShown = null;
-      // The bootstrap certificates on record (ADR-0029 clause 11). A request names the one it carries
+      // The bootstrap certificates on record (ADR-0044 clause 11). A request names the one it carries
       // by serial, since the record keeps the key's fingerprint and the request the certificate's.
       let boots = [];
       let bootsShown = null;
@@ -2439,7 +2439,7 @@
         await refreshEnrolments();
       });
 
-      // Hosts (ADR-0024): the table and, for the current Host, its Agents grouped by their Client
+      // Hosts (ADR-0043): the table and, for the current Host, its Agents grouped by their Client
       // Agent. The certificates and the revocation list come from their own routes, so a row shows
       // which of a Host's certificates are still valid, and when each ends.
       let hosts = [];
@@ -2491,7 +2491,7 @@
         const client = a.client ? ` <span class="pill violet">client</span>` : "";
         return `<strong>${esc(hostAgentName(a))}</strong>${client} <span class="sub">${esc(a.service_name)} · ${esc(a.instance_uid)}</span> ${status}`;
       }
-      // Grouped as the Server places the agents (ADR-0024 clause 19): under their client agent, the
+      // Grouped as the Server places the agents (ADR-0043 clause 19): under their client agent, the
       // ones whose client cannot be told apart under the machine they report. Presentation only.
       function renderHostDetail() {
         const h = hosts.find((x) => x.host === currentHost);

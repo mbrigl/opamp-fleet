@@ -1,9 +1,9 @@
 //! Entry point: load the configuration from `server.toml` and the environment (ADR-0030), bind the
-//! two listeners (plain or TLS) — the Agent plane and the Operator plane (ADR-0012) — and serve
+//! two listeners (plain or TLS) — the Agent plane and the Operator plane (ADR-0045) — and serve
 //! both until interrupted.
 //!
 //! Both planes are served the same way whether or not TLS is configured, so that what bounds a
-//! connection before it becomes a request holds on all four surfaces (ADR-0012). Only the acceptor
+//! connection before it becomes a request holds on all four surfaces (ADR-0045). Only the acceptor
 //! differs.
 
 use std::net::SocketAddr;
@@ -12,8 +12,6 @@ use std::sync::Arc;
 
 use fleet_server::config::{Layered, ServerConfig};
 use fleet_server::fleet::AppState;
-use fleet_server::listen;
-use opamp::server::listen::Handle;
 use tracing::{error, info, warn};
 
 fn usage() -> ! {
@@ -21,47 +19,79 @@ fn usage() -> ! {
         "Usage: server [--config <server.toml>] [--version]\n       \
          server hash-credential --basic   (reads the password from standard input)\n       \
          server audit-verify <data_dir>/audit\n       \
+         server audit-verify --config <server.toml> [--archive <old data_dir>/audit]\n       \
          server pki status [--config <server.toml>]\n       \
          server migrate --config-dir <old> --packages-dir <old> --data-dir <new>\n       \
-         server migrate-to-postgres --from <data_dir> --data-dir <new> [--config <server.toml>]"
+         server migrate-to-postgres --from <data_dir> [--data-dir <new>] [--config <server.toml>]\n       \
+         server blobs-to-s3 --data-dir <data_dir> [--config <server.toml>]"
     );
     std::process::exit(2);
 }
 
-/// `server audit-verify <dir>` (ADR-0023 clause 3): walks the audit record's files in order and
-/// names the first entry whose `prev` does not match the entry before it.
-fn audit_verify(dir: Option<String>) -> ! {
-    let Some(dir) = dir else { usage() };
-    let files = match fleet_server::fs::audit_files(std::path::Path::new(&dir)) {
-        Ok(files) => files,
+/// `server audit-verify <dir>` (ADR-0039 clause 3): walks the audit record's files in order and
+/// names the first entry whose `prev` does not match the entry before it. `server audit-verify
+/// --config <server.toml> [--archive <dir>]` walks every chain of the record in the database
+/// instead, lists the open ones, and checks the archive a move from files left
+/// (ADR-0042 clauses 5 and 6).
+fn audit_verify(mut args: impl Iterator<Item = String>) -> ! {
+    let Some(first) = args.next() else { usage() };
+    if first != "--config" && first != "--archive" {
+        audit_verify_files(&first);
+    }
+    let (mut config, mut archive) = (None, None);
+    let mut flag = Some(first);
+    while let Some(name) = flag {
+        let slot = match name.as_str() {
+            "--config" => &mut config,
+            "--archive" => &mut archive,
+            _ => usage(),
+        };
+        match args.next() {
+            Some(path) if slot.is_none() => *slot = Some(PathBuf::from(path)),
+            _ => usage(),
+        }
+        flag = args.next();
+    }
+    let Some(config) = config else { usage() };
+    let config = load_config(Some(config)).config;
+    let Some(database) = config.database.postgres() else {
+        eprintln!(
+            "the configuration names no database — with [database] store = \"fs\" verify the \
+             files: server audit-verify <data_dir>/audit"
+        );
+        std::process::exit(1);
+    };
+    match fleet_server::postgres::audit::verify_on(database, archive.as_deref()) {
+        Ok(verified) => {
+            for line in &verified.lines {
+                println!("{line}");
+            }
+            std::process::exit(i32::from(verified.failed));
+        }
         Err(e) => {
             eprintln!("{e}");
             std::process::exit(1);
         }
-    };
-    let mut texts = Vec::new();
-    for file in &files {
-        match std::fs::read_to_string(file) {
-            Ok(text) => texts.push((file.display().to_string(), text)),
-            Err(e) => {
-                eprintln!("cannot read {}: {e}", file.display());
-                std::process::exit(1);
-            }
-        }
     }
-    let lines = texts.iter().flat_map(|(name, text)| {
-        text.lines()
-            .enumerate()
-            .filter(|(_, line)| !line.trim().is_empty())
-            .map(move |(index, line)| (format!("{name}:{}", index + 1), line))
-    });
-    match fleet_server::audit_log::verify(lines) {
-        Ok(count) => {
-            println!("{count} entries in {} files, the chain holds", files.len());
+}
+
+/// `server audit-verify <dir>`: the files of the filesystem store, or an archive. A repair without
+/// a link is named, and the chain still holds.
+fn audit_verify_files(dir: &str) -> ! {
+    match fleet_server::fs::verify_audit(std::path::Path::new(dir)) {
+        Ok((files, Ok(held))) => {
+            for line in held.unlinked_lines() {
+                println!("{line}");
+            }
+            println!("{} entries in {files} files, the chain holds", held.entries);
             std::process::exit(0);
         }
-        Err(e) => {
+        Ok((_, Err(e))) => {
             eprintln!("the chain breaks at {e}");
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("{e}");
             std::process::exit(1);
         }
     }
@@ -131,7 +161,7 @@ fn pki(mut args: impl Iterator<Item = String>) -> ! {
     std::process::exit(pki::exit_code(&endings, now));
 }
 
-/// `server migrate --config-dir <old> --packages-dir <old> --data-dir <new>` (ADR-0029 clause 26):
+/// `server migrate --config-dir <old> --packages-dir <old> --data-dir <new>` (ADR-0044 clause 26):
 /// moves the state an older Server kept under `config_dir` and `packages_dir` into a new, empty
 /// `data_dir`, copying, so the old directories stay as the backup. It is run while the Server is
 /// stopped — a Server still writing the old directories would be copied half-way — and that is the
@@ -183,12 +213,15 @@ fn migrate(mut args: impl Iterator<Item = String>) -> ! {
     }
 }
 
-/// `server migrate-to-postgres --from <data_dir> --data-dir <new> [--config <server.toml>]`
-/// (ADR-0029 clause 27): copies the records of `data_dir` into the database the configuration
-/// names, and its audit record and filesystem blobs into a new, empty `data_dir`, leaving the old
-/// one as the backup. It is run while the Server is stopped; it takes the database's lock, so a
-/// Server still running against it stops the copy. Prints what it copied, and exits non-zero when
-/// it could not copy all of it, leaving the database without the Server's tables.
+/// `server migrate-to-postgres --from <data_dir> [--data-dir <new>] [--config <server.toml>]`
+/// (ADR-0044 clause 27): copies the records of `data_dir` into
+/// the database the configuration names, leaving the old directory as the backup and its audit
+/// record as the archive the first chain links to. With the filesystem blob store the blobs go into
+/// a new, empty `data_dir`; with S3 there is none, `--data-dir` is refused, and the blobs the
+/// Package entries reference are uploaded into the bucket. It is run while the Server is stopped;
+/// it takes the database's lock, so a Server still running against it stops the copy. Prints what
+/// it copied, and exits non-zero when it could not copy all of it, leaving the database without
+/// the Server's tables.
 fn migrate_to_postgres(mut args: impl Iterator<Item = String>) -> ! {
     let (mut from, mut data_dir, mut config) = (None, None, None);
     while let Some(flag) = args.next() {
@@ -203,9 +236,7 @@ fn migrate_to_postgres(mut args: impl Iterator<Item = String>) -> ! {
             _ => usage(),
         }
     }
-    let (Some(from), Some(data_dir)) = (from, data_dir) else {
-        usage()
-    };
+    let Some(from) = from else { usage() };
     let config = load_config(config).config;
     let Some(database) = config.database.postgres() else {
         eprintln!(
@@ -214,22 +245,93 @@ fn migrate_to_postgres(mut args: impl Iterator<Item = String>) -> ! {
         );
         std::process::exit(1);
     };
-    match fleet_server::postgres::import::run(
-        &from,
-        &data_dir,
-        database,
-        config.blobs.s3().is_none(),
-    ) {
+    let (blobs, done) = match (config.blobs.s3(), &data_dir) {
+        (Some(_), Some(_)) => {
+            eprintln!(
+                "--data-dir: with [blobs] store = \"s3\" the copy takes none, as a Server on \
+                 PostgreSQL and S3 keeps nothing on its disk — the blobs go into the bucket; copy \
+                 again without it"
+            );
+            std::process::exit(1);
+        }
+        (Some(bucket), None) => (
+            fleet_server::postgres::import::Blobs::Bucket(bucket),
+            format!(
+                "copied into the database {} and the bucket {} — remove data_dir from \
+                 server.toml if it names one, keep [database] store = \"postgres\" and [blobs] \
+                 store = \"s3\", and start the Server; {} stays as the backup",
+                database.dbname,
+                bucket.bucket,
+                from.display()
+            ),
+        ),
+        (None, Some(data_dir)) => (
+            fleet_server::postgres::import::Blobs::Files(data_dir),
+            format!(
+                "copied into the database {} and into {} — set data_dir to it in server.toml, \
+                 keep [database] store = \"postgres\", and start the Server; {} stays as the \
+                 backup",
+                database.dbname,
+                data_dir.display(),
+                from.display()
+            ),
+        ),
+        (None, None) => usage(),
+    };
+    match fleet_server::postgres::import::run(&from, blobs, database) {
+        Ok(report) => {
+            for line in &report.lines {
+                println!("{line}");
+            }
+            println!("{done}");
+            std::process::exit(0);
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// `server blobs-to-s3 --data-dir <data_dir> [--config <server.toml>]`
+/// (ADR-0044 clause 19): uploads the artifacts of a Server
+/// already on PostgreSQL with the filesystem blob store into the bucket the configuration names,
+/// once, while no instance runs. The configuration is the one the Server will start with: the
+/// database, the bucket, and no `data_dir`. Prints what it uploaded, and exits non-zero when an
+/// entry's artifact is missing from the bucket afterwards.
+fn blobs_to_s3(mut args: impl Iterator<Item = String>) -> ! {
+    let (mut data_dir, mut config) = (None, None);
+    while let Some(flag) = args.next() {
+        let slot = match flag.as_str() {
+            "--data-dir" => &mut data_dir,
+            "--config" => &mut config,
+            _ => usage(),
+        };
+        match args.next() {
+            Some(path) if slot.is_none() => *slot = Some(PathBuf::from(path)),
+            _ => usage(),
+        }
+    }
+    let Some(data_dir) = data_dir else { usage() };
+    let config = load_config(config).config;
+    let (Some(database), Some(bucket)) = (config.database.postgres(), config.blobs.s3()) else {
+        eprintln!(
+            "the configuration names no database or no bucket — set [database] store = \
+             \"postgres\" and [blobs] store = \"s3\" as the Server will start, then run again"
+        );
+        std::process::exit(1);
+    };
+    match fleet_server::postgres::import::blobs_to_s3(&data_dir, database, bucket) {
         Ok(report) => {
             for line in &report.lines {
                 println!("{line}");
             }
             println!(
-                "copied into the database {} and into {} — set data_dir to it in server.toml, keep [database] \
-                 store = \"postgres\", and start the Server; {} stays as the backup",
+                "the bucket {} holds every artifact the database {} names — start the Server; {} \
+                 is no longer read, and removing it is yours",
+                bucket.bucket,
                 database.dbname,
-                data_dir.display(),
-                from.display()
+                data_dir.display()
             );
             std::process::exit(0);
         }
@@ -244,7 +346,7 @@ fn migrate_to_postgres(mut args: impl Iterator<Item = String>) -> ! {
 type Hasher = fn(&str) -> Result<String, String>;
 
 /// The hash `server hash-credential` makes for a scheme: Basic, for an operator's password in
-/// `[rest.auth]`, and nothing else — the Agent plane has no credential (ADR-0021 clause 21).
+/// `[rest.auth]`, and nothing else — the Agent plane has no credential (ADR-0038 clause 21).
 fn hasher(scheme: Option<&str>) -> Option<Hasher> {
     match scheme {
         Some("--basic") => Some(fleet_server::credentials::hash_basic),
@@ -252,7 +354,7 @@ fn hasher(scheme: Option<&str>) -> Option<Hasher> {
     }
 }
 
-/// `server hash-credential --basic` (ADR-0021 clause 21): reads the password from standard input —
+/// `server hash-credential --basic` (ADR-0038 clause 21): reads the password from standard input —
 /// without echo on a terminal — and prints the entry `server.toml` keeps instead of it.
 fn hash_credential(scheme: Option<String>) -> ! {
     let Some(hash) = hasher(scheme.as_deref()) else {
@@ -348,10 +450,11 @@ fn parse_args() -> Option<PathBuf> {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "hash-credential" => hash_credential(args.next()),
-            "audit-verify" => audit_verify(args.next()),
+            "audit-verify" => audit_verify(args),
             "pki" => pki(args),
             "migrate" => migrate(args),
             "migrate-to-postgres" => migrate_to_postgres(args),
+            "blobs-to-s3" => blobs_to_s3(args),
             "--config" => match args.next() {
                 Some(path) => config = Some(PathBuf::from(path)),
                 None => usage(),
@@ -388,21 +491,28 @@ fn bind(address: SocketAddr, plane: &str) -> std::net::TcpListener {
 #[tokio::main]
 async fn main() {
     // The log goes to stderr, so that stdout carries only what a command prints as its result.
+    // On PostgreSQL each line names the instance id of the lease the instance holds (clause 1 of
+    // ADR-0041).
+    let logged = fleet_server::instance::LoggedId::default();
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
+        .event_format(fleet_server::instance::NamesInstance::new(
+            tracing_subscriber::fmt::format(),
+            logged.clone(),
+        ))
         .init();
 
-    // One TLS provider for the whole process (ADR-0012): ring, never a system library.
+    // One TLS provider for the whole process (ADR-0045): ring, never a system library.
     opamp::tls::install_ring_provider();
 
     let Layered { config, origin, .. } = load_config(parse_args());
 
     // The TLS material first: a Server that cannot serve it does not start, and admission needs
-    // to know which CA issued what (ADR-0012, ADR-0021).
+    // to know which CA issued what (ADR-0045, ADR-0038).
     let planes = match config
         .tls
         .as_ref()
@@ -421,8 +531,25 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    // Where the records live (ADR-0029): the data directory, its layout created owner-only and
-    // checked before any store opens (ADR-0029), and with PostgreSQL the database, its lock taken
+    // On PostgreSQL the instance id is made as soon as the store is known, so that every line
+    // from here on names it, and the first lease is taken under it (clause 1 of
+    // ADR-0041).
+    let instance_id = if config.database.postgres().is_some() {
+        match fleet_server::postgres::lease::new_instance_id() {
+            Ok(id) => {
+                logged.name(id.clone());
+                Some(id)
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        None
+    };
+    // Where the records live (ADR-0044): the data directory, its layout created owner-only and
+    // checked before any store opens (ADR-0044), and with PostgreSQL the database, its lock taken
     // and its schema applied.
     let records = match fleet_server::Records::open(&config) {
         Ok(records) => records,
@@ -435,8 +562,8 @@ async fn main() {
         info!(database = %database.name(), "keeping the records in PostgreSQL");
     }
     let clock: Arc<dyn fleet_server::fleet::Clock> = Arc::new(fleet_server::clock::SystemClock);
-    // ADR-0021: closed until an operator opens it; the window and its queue survive a restart
-    // (ADR-0029 clause 8).
+    // ADR-0038: closed until an operator opens it; the window and its queue survive a restart
+    // (ADR-0044 clause 8).
     let enrolment = match config.enrolment.as_ref().map(|section| {
         info!("hosts with a bootstrap certificate may enrol while an operator opens the window");
         fleet_server::enrolment::Enrolment::open_on(clock.clone(), records.enrolment()).map(
@@ -468,7 +595,7 @@ async fn main() {
     {
         Ok(ca) => {
             if let Some(ca) = &ca {
-                // ADR-0021.
+                // ADR-0038.
                 info!(
                     validity_days = ca.validity_days(),
                     "signing client certificates for Agents that ask"
@@ -510,7 +637,7 @@ async fn main() {
     // (ADR-0032 clause 21).
     let watched = fleet_server::pki::loaded(&fleet_server::pki::depended_on(&config));
     if let Some(notice) = uploaded_artifacts_notice(client_ca.is_some()) {
-        // ADR-0024 clause 16.
+        // ADR-0043 clause 16.
         info!("{notice}");
     }
     let telemetry_offer = config
@@ -522,37 +649,7 @@ async fn main() {
         // ADR-0016.
         info!("offering the fleet somewhere to send its own telemetry");
     }
-    let packages = config
-        .packages
-        .verification_key()
-        .and_then(|key| {
-            if key.is_some() {
-                // ADR-0027.
-                info!("checking package signatures against [packages] verification_key");
-            }
-            fleet_server::packages::PackageStore::open_on(&records, &config.data_dir, &config.blobs)
-                .map(|store| {
-                    store.with_verifier(key.map(|key| {
-                        Box::new(fleet_server::config::Ed25519Verifier::new(key))
-                            as Box<dyn fleet_server::packages::SignatureVerifier>
-                    }))
-                })
-        })
-        .and_then(|store| {
-            if !store.is_empty() {
-                // ADR-0027.
-                info!("offering software packages to the fleet");
-            }
-            fleet_server::fleet::PackageOffering::on(&records, store)
-        });
-    let packages = match packages {
-        Ok(offering) => Some(offering),
-        Err(e) => {
-            eprintln!("{e}");
-            std::process::exit(1);
-        }
-    };
-    // What the client CA signed and what is revoked (ADR-0021), kept beside the fleet's records.
+    // What the client CA signed and what is revoked (ADR-0038), kept beside the fleet's records.
     let revocations = match records.ledger().and_then(|store| {
         fleet_server::revocation::Revocations::open(store, clock.clone(), planes.3.clone())
     }) {
@@ -578,14 +675,126 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    // The audit record (ADR-0023), opened before anything is decided.
-    let audit_log = match fleet_server::fs::FsAuditStore::open(&config.data_dir).and_then(|store| {
-        fleet_server::audit_log::AuditLog::start(
-            Box::new(store),
-            config.audit.limits(),
-            clock.clone(),
-        )
-    }) {
+    // The package store before the lease, so that a bucket that fails startup leaves no lease
+    // and no audit chain behind. Its startup cleanup needs no lease of this instance: it lists the
+    // staging keys before it asks which leases are live
+    // (ADR-0044 clause 16).
+    let packages = config
+        .packages
+        .verification_key()
+        .and_then(|key| {
+            if key.is_some() {
+                // ADR-0027.
+                info!("checking package signatures against [packages] verification_key");
+            }
+            fleet_server::packages::PackageStore::open_on(
+                &records,
+                config.data_dir(),
+                &config.blobs,
+            )
+            .map(|(store, staging)| {
+                (
+                    store.with_verifier(key.map(|key| {
+                        Box::new(fleet_server::config::Ed25519Verifier::new(key))
+                            as Box<dyn fleet_server::packages::SignatureVerifier>
+                    })),
+                    staging,
+                )
+            })
+        })
+        .and_then(|(store, staging)| {
+            if !store.is_empty() {
+                // ADR-0027.
+                info!("offering software packages to the fleet");
+            }
+            fleet_server::fleet::PackageOffering::on(&records, store)
+                .map(|offering| (offering, staging))
+        });
+    let (packages, staging) = match packages {
+        Ok((offering, staging)) => (Some(offering), staging),
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
+    // With PostgreSQL, a lease before anything is decided and before either listener opens
+    // (clauses 1 to 3 of
+    // ADR-0041):
+    // the audit chain is the lease's.
+    let lease = match &records {
+        fleet_server::Records::Postgres(database) => {
+            // The audit files a Server on PostgreSQL kept before its record moved into the
+            // database stay as the archive, which the first chain names (clause 6 of
+            // ADR-0042).
+            // Only while the database holds no chain: a later start never reads them.
+            // With S3 too there is no data directory, and no archive to offer.
+            if let Some(data_dir) = config.data_dir() {
+                let archive = data_dir.join(fleet_server::fs::AUDIT);
+                if let Err(e) = fleet_server::postgres::audit::offer_archive_in(database, &archive)
+                {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                }
+            }
+            let made = instance_id.clone().map_or_else(
+                fleet_server::postgres::lease::new_instance_id,
+                Ok::<String, String>,
+            );
+            match made.and_then(|id| {
+                fleet_server::instance::Lease::take_as(
+                    database.clone(),
+                    config.database.lease(),
+                    &host_name(),
+                    id,
+                )
+            }) {
+                Ok(lease) => {
+                    logged.follow(lease.held());
+                    Some(lease)
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        fleet_server::Records::Files(_) => None,
+    };
+    // On the bucket, this instance's uploads are staged under its lease, and whenever it takes over
+    // a lapsed lease, the uploads that lease left go
+    // (ADR-0044 clause 16).
+    if let (Some(staging), Some(lease)) = (staging, &lease) {
+        staging.stage_under(lease.held());
+        clean_staging_on_takeover(staging, lease.takeovers());
+    }
+    // The audit record (ADR-0039), opened before anything is decided: one chain in files, or on
+    // PostgreSQL the chain of each lease
+    // (ADR-0042).
+    let started = match (&records, &lease) {
+        (fleet_server::Records::Postgres(database), Some(lease)) => {
+            fleet_server::audit_log::AuditLog::start_under(
+                Box::new(fleet_server::postgres::audit::PgAuditStore::new(
+                    database.clone(),
+                    lease.held(),
+                )),
+                config.audit.limits(),
+                clock.clone(),
+                lease.held(),
+            )
+        }
+        _ => config
+            .data_dir()
+            .ok_or_else(|| "the audit record in files needs data_dir".to_string())
+            .and_then(fleet_server::fs::FsAuditStore::open)
+            .and_then(|store| {
+                fleet_server::audit_log::AuditLog::start(
+                    Box::new(store),
+                    config.audit.limits(),
+                    clock.clone(),
+                )
+            }),
+    };
+    let audit_log = match started {
         Ok(audit) => Arc::new(audit),
         Err(e) => {
             eprintln!("{e}");
@@ -593,6 +802,38 @@ async fn main() {
         }
     };
     let audit: Arc<dyn fleet_server::audit::Audit> = audit_log.clone();
+    // On PostgreSQL the record goes back `[audit] retain_days`: pruned at startup and once a day
+    // after (ADR-0044 clause 12).
+    if let (fleet_server::Records::Postgres(database), Some(lease)) = (&records, &lease) {
+        let (database, audit, held) = (database.clone(), audit_log.clone(), lease.held());
+        let retain_days = config.audit.retain_days();
+        tokio::spawn(async move {
+            let mut daily = tokio::time::interval(std::time::Duration::from_secs(24 * 60 * 60));
+            loop {
+                daily.tick().await;
+                let (database, audit) = (database.clone(), audit.clone());
+                let own = held.borrow().clone();
+                let pruned = tokio::task::spawn_blocking(move || {
+                    fleet_server::postgres::audit_prune::prune(&database, audit, own, retain_days)
+                })
+                .await;
+                match pruned {
+                    Ok(Ok(rounds)) => tracing::info!(
+                        rounds = rounds.len(),
+                        chains = rounds.iter().map(|round| round.chains.len()).sum::<usize>(),
+                        carried = rounds
+                            .iter()
+                            .map(|round| round.carried.len())
+                            .sum::<usize>(),
+                        closed_chains = rounds.iter().any(|round| round.closed_chains),
+                        "pruned the audit record to {retain_days} days"
+                    ),
+                    Ok(Err(e)) => tracing::warn!(error = %e, "cannot prune the audit record"),
+                    Err(e) => tracing::warn!(error = %e, "the audit record's prune stopped"),
+                }
+            }
+        });
+    }
     if let Some(enrolment) = &enrolment {
         enrolment.set_audit(audit.clone());
     }
@@ -619,7 +860,7 @@ async fn main() {
         }
     });
     if let Some(warning) = config.rate_limit_warning() {
-        // ADR-0012 clause 23.
+        // ADR-0045 clause 23.
         warn!("{warning}");
     }
     let agent_rate = Arc::new(fleet_server::agent_rate::AgentRate::new(
@@ -644,24 +885,25 @@ async fn main() {
                 .with_max_package_size(config.max_package_size_bytes)
                 .with_max_total_package_bytes(config.max_total_package_bytes)
                 .with_stale_after(std::time::Duration::from_secs(config.stale_after_secs))
-                .with_max_agents(config.max_agents),
+                .with_max_agents(config.max_agents)
+                .with_presence_interval(config.database.presence_interval().unwrap_or_default()),
         ),
         Err(e) => {
             eprintln!("{e}");
             std::process::exit(1);
         }
     };
-    // The certificate is the whole of admission (ADR-0021): the configuration was refused at load
+    // The certificate is the whole of admission (ADR-0038): the configuration was refused at load
     // without the client CA.
     info!("the OpAMP endpoint admits by client certificate");
-    // Two planes, two listeners (ADR-0012): Agents reach the OpAMP endpoint and the package
+    // Two planes, two listeners (ADR-0045): Agents reach the OpAMP endpoint and the package
     // downloads their offers point at; operators reach the REST API, its docs, and the UI.
     let (agent_tls, operator_tls, issuers, _) = planes;
     let agents = fleet_server::agent_app(
         state.clone(),
         fleet_server::transport::Admission::new(true)
             .with_enrolment(issuers, enrolment)
-            .with_revocations(Some(revocations))
+            .with_revocations(Some(revocations.clone()))
             .with_audit(Some(audit.clone()))
             .with_throttle(Arc::new(fleet_server::throttle::Throttle::new(
                 limits,
@@ -686,57 +928,125 @@ async fn main() {
         }
     };
     if operator_auth.is_some() {
-        // ADR-0021. Both planes serve TLS, so the password never crosses a network in clear
-        // (ADR-0012).
+        // ADR-0038. Both planes serve TLS, so the password never crosses a network in clear
+        // (ADR-0045).
         info!("the REST API and the UI require authentication");
     }
     let operators = fleet_server::operator_app(state.clone(), operator_auth);
 
+    // The revocations, and every other change, of the other instances followed (clauses 9 to 11
+    // of ADR-0041),
+    // and the presence of the Agents this instance carries written in batches under its lease
+    // (ADR-0043 clause 4).
+    let presence = match (&lease, &records) {
+        (Some(lease), fleet_server::Records::Postgres(database)) => {
+            state.serve_under(lease.held());
+            let presence = config.database.presence_interval().map(|interval| {
+                fleet_server::instance::write_presence(state.clone(), lease.held(), interval)
+            });
+            fleet_server::instance::follow(database, state.clone(), Some(lease.list_versions()));
+            presence
+        }
+        _ => None,
+    };
+    // The handlers are installed before either plane is bound and logged as served, so a stop
+    // sent as soon as the log says so drains the planes rather than ending the process.
+    let shutdown = shutdown_signal();
     let agent_listener = bind(config.listen, "the Agent plane");
     let operator_listener = bind(config.rest.listen, "the Operator plane");
-    // One signal, both planes: the interrupt is watched once, and the handle both servers hold
-    // drains them together within a bounded window (ADR-0012).
-    let handle = Handle::new();
-    let signalled = shutdown_signal();
-    tokio::spawn({
-        let handle = handle.clone();
-        async move {
-            signalled.await;
-            info!("shutting down");
-            listen::shut_down(&handle);
-        }
-    });
-
     info!(listen = %config.listen, "serving the OpAMP endpoint and package downloads over TLS");
     info!(listen = %config.rest.listen, "serving the REST API, the API docs, and the UI over TLS");
-    let (agents, operators) = tokio::join!(
-        listen::plane(
-            agent_listener,
-            Some(agent_tls),
-            config.max_connections,
-            handle.clone()
-        )
-        .serve(agents),
-        listen::plane(
-            operator_listener,
-            Some(operator_tls),
-            config.rest.max_connections,
-            handle
-        )
-        .serve(operators),
-    );
-    agents.expect("serve the Agent plane");
-    operators.expect("serve the Operator plane");
-    // The graceful-shutdown flush (ADR-0024): every record's current timestamp and sequence
+    // One signal, both planes: the interrupt is watched once, and both planes drain together
+    // within a bounded window (ADR-0045).
+    let served = fleet_server::instance::serve(
+        fleet_server::instance::Planes {
+            agents,
+            operators,
+            agent_tls,
+            operator_tls,
+            agent_max_connections: config.max_connections,
+            agent_max_new_connections_per_sec: config.max_new_connections_per_sec,
+            operator_max_connections: config.rest.max_connections,
+            drain: std::time::Duration::from_secs(config.drain_secs),
+        },
+        (agent_listener, operator_listener),
+        lease.as_ref().map(fleet_server::instance::Lease::held),
+        shutdown,
+    )
+    .await;
+    if let Err(e) = &served {
+        error!("{e}");
+    }
+    // The graceful-shutdown flush (ADR-0043): every record's current timestamp and sequence
     // number, so the ordinary restart restores a fleet without gaps or false silence.
     state.flush_agents();
+    // And the presence of every Agent, its sessions ended by the drain, before the lease goes
+    // (ADR-0041
+    // clause 3): once the periodic batches stopped, so none commits after it.
+    if let Some(presence) = presence {
+        presence.stop().await;
+    }
+    if let Some(holder) = lease
+        .as_ref()
+        .and_then(|lease| lease.held().borrow().clone())
+    {
+        if let Err(e) = state.write_presence(&holder) {
+            warn!(error = %e, "could not write the presence of the agents before the lease goes");
+        }
+    }
     // What is still queued for the audit record is written before the process, and the writer
-    // thread with it, ends (ADR-0023).
-    if !audit_log.drain(std::time::Duration::from_secs(5)) {
+    // thread with it, ends (ADR-0039); on PostgreSQL the chain is closed then, and the lease
+    // released only once it is, so that a chain left open is closed by the instance that takes
+    // over the lapsed lease (clause 3 of
+    // ADR-0042).
+    let closed = audit_log.close(std::time::Duration::from_secs(5));
+    if let Some(lease) = lease {
+        if closed {
+            lease.release().await;
+        } else {
+            error!(
+                "the audit chain could not be written out and closed before shutdown; the lease \
+                 is left to lapse, so the instance that takes it over closes the chain"
+            );
+        }
+    } else if !closed {
         error!(
             "the audit record could not be written out before shutdown; its last entries are lost"
         );
     }
+    // A plane that could not be served is a failure a service manager restarts on.
+    if served.is_err() {
+        std::process::exit(1);
+    }
+}
+
+/// Runs `staging` again each time `takeovers` changes, off the async threads, as its calls to the
+/// bucket block. A cleanup that fails is logged; the next takeover, or the next start, tries again.
+fn clean_staging_on_takeover(
+    staging: fleet_server::s3::StagingCleanup,
+    mut takeovers: tokio::sync::watch::Receiver<u64>,
+) {
+    tokio::spawn(async move {
+        while takeovers.changed().await.is_ok() {
+            let staging = staging.clone();
+            let ran = tokio::task::spawn_blocking(move || staging.run())
+                .await
+                .unwrap_or_else(|e| Err(e.to_string()));
+            if let Err(e) = ran {
+                warn!(error = %e, "could not delete the staging objects of a lapsed lease");
+            }
+        }
+    });
+}
+
+/// The name of the host the Server runs on, which its lease records: the kernel's on Linux, where
+/// the Server ships, and the `HOSTNAME` variable elsewhere.
+fn host_name() -> String {
+    std::fs::read_to_string("/proc/sys/kernel/hostname")
+        .ok()
+        .or_else(|| std::env::var("HOSTNAME").ok())
+        .map(|name| name.trim().to_string())
+        .unwrap_or_default()
 }
 
 /// The shutdown signal: `SIGTERM`, which a service manager sends on stop, or `SIGINT` from a
@@ -765,7 +1075,7 @@ fn shutdown_signal() -> impl std::future::Future<Output = ()> {
     }
 }
 
-/// What a Server that signs no CSRs says once at startup (ADR-0024 clause 16): its hosts hold the
+/// What a Server that signs no CSRs says once at startup (ADR-0043 clause 16): its hosts hold the
 /// certificates an operator provisioned, and only one that names its host is served an uploaded
 /// artifact.
 fn uploaded_artifacts_notice(signs_csrs: bool) -> Option<String> {
@@ -784,7 +1094,7 @@ mod tests {
 
     /// `hash-credential` makes an operator's Basic entry and nothing else: the Agent plane has no
     /// credential to hash.
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0038
     #[test]
     fn hash_credential_hashes_a_basic_password_alone() {
         let basic = hasher(Some("--basic")).expect("--basic is a scheme");

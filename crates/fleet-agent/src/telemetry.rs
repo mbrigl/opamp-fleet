@@ -293,7 +293,7 @@ impl Telemetry {
     /// Puts the offered destinations in force, replacing whatever was running.
     ///
     /// Returns the destinations it refused, if any, so the caller can report them rather than drop
-    /// them silently — the same honesty the OpAMP settings get (ADR-0021).
+    /// them silently — the same honesty the OpAMP settings get (ADR-0038).
     pub fn apply(
         &self,
         settings: &ConnectionSettingsOffers,
@@ -562,7 +562,7 @@ fn check(settings: &TelemetryConnectionSettings, field: &str) -> Result<(), Stri
     }
     // An offered certificate *is* honoured (ADR-0016 clause 33) — but only its `cert`, paired with
     // the key this Client already holds. A `private_key` in the offer is a key the Server generated
-    // for us, and ADR-0021's rule is that this Client's private key never leaves its host and is
+    // for us, and ADR-0038's rule is that this Client's private key never leaves its host and is
     // never handed to it: that is the whole point of asking for a certificate through a CSR.
     // Refused by name rather than quietly ignored, so a Server issuing pairs learns why nothing
     // happened.
@@ -645,7 +645,7 @@ impl std::fmt::Debug for RuntimeBoundClient {
 /// the fleet identity is for the Server, not for a telemetry destination (ADR-0016) — and it
 /// follows no redirect, so a destination cannot steer the export to another host or to plaintext.
 ///
-/// The certificate machinery is ADR-0021's, reused as-is (ADR-0016 clause 33): the offered `cert`
+/// The certificate machinery is ADR-0038's, reused as-is (ADR-0016 clause 33): the offered `cert`
 /// is paired with the key already on disk — the one the CSR was made for — because that key is what
 /// proves the certificate belongs to this host, and it never travels.
 ///
@@ -947,7 +947,7 @@ mod tests {
     }
 
     /// The same two fields refused on the OpAMP settings are refused here, and for the same
-    /// reasons — named, not dropped in silence (ADR-0021, ADR-0016).
+    /// reasons — named, not dropped in silence (ADR-0038, ADR-0016).
     /// Verifies: ADR-0016
     #[test]
     fn offered_tls_settings_are_refused_by_name() {
@@ -969,7 +969,7 @@ mod tests {
         assert!(!telemetry.reporting());
     }
 
-    /// ADR-0016 clause 33: the offered `certificate` is *honoured*, not refused — the ADR-0021
+    /// ADR-0016 clause 33: the offered `certificate` is *honoured*, not refused — the ADR-0038
     /// machinery is reused as-is, which means the offered `cert` is paired with the key this Client
     /// already generated for its CSR. With that key present, an offer naming a certificate builds
     /// an exporter that presents it.
@@ -1046,7 +1046,7 @@ mod tests {
         assert!(!telemetry.reporting());
     }
 
-    /// But a private key *in the offer* is refused by name. ADR-0021's rule is that this Client's
+    /// But a private key *in the offer* is refused by name. ADR-0038's rule is that this Client's
     /// private key never leaves its host and is never handed to it — which is the whole reason the
     /// certificate is obtained through a CSR.
     /// Verifies: ADR-0016

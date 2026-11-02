@@ -680,7 +680,7 @@ impl Handler for Forwarding {
 
     /// An unreadable report is dropped, never answered: the Gateway invents nothing (ADR-0015). A
     /// plain-HTTP exchange still needs a response, and it says why. It takes the host's token as
-    /// the Server counts one (ADR-0012 clause 24); past the limit it is answered as the Server
+    /// the Server counts one (ADR-0045 clause 24); past the limit it is answered as the Server
     /// answers it, naming no Agent, and not logged one by one (ADR-0035 clause 4).
     fn on_unreadable(&self, downstream: &mut Downstream, error: &Unreadable) -> Reply {
         if !self.rate.admit(&downstream.bucket) {

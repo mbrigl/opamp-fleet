@@ -11,7 +11,7 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClientConfig {
-    /// The Server's OpAMP endpoint. The URL scheme selects the transport (ADR-0012):
+    /// The Server's OpAMP endpoint. The URL scheme selects the transport (ADR-0045):
     /// `ws://` / `wss://` is the WebSocket transport, `http://` / `https://` the polling one.
     #[serde(default = "default_endpoint")]
     pub endpoint: String,
@@ -57,7 +57,7 @@ pub struct ClientConfig {
     /// Optional TLS trust override for `wss://` / `https://` endpoints.
     pub tls: Option<TlsConfig>,
     /// An `[auth]` section a file written for an earlier version still holds. The Client sends
-    /// no credential (ADR-0021 clause 3): the section is read only so that it does not fail the
+    /// no credential (ADR-0038 clause 3): the section is read only so that it does not fail the
     /// load — whatever keys it has — and nothing in it is kept. Its presence is what
     /// [`leftover_auth_notice`](Self::leftover_auth_notice) reports, once, at startup.
     #[serde(default, rename = "auth")]
@@ -540,7 +540,7 @@ fn take_integer(table: &mut toml::Table, key: &str) -> Result<Option<i64>, Strin
 
 /// Keys whose values are secrets: `[packages]`'s `archive_key`, and the `bearer_token` and
 /// `password` a leftover `[auth]` section may still hold — the Client ignores the section
-/// (ADR-0021 clause 3), but the file's text is reported as it stands, so its values stay masked.
+/// (ADR-0038 clause 3), but the file's text is reported as it stands, so its values stay masked.
 /// Paths and public keys are not on the list — a path locates a secret, it is not one, and the
 /// `verification_key` is the *public* half of the signing pair.
 pub(crate) const SECRET_KEYS: &[&str] = &["bearer_token", "password", "archive_key"];
@@ -771,7 +771,7 @@ pub struct GatewayConfig {
 }
 
 /// The `[gateway.rate_limit]` section (ADR-0035 clause 3): the bucket of each downstream host,
-/// sized as the Server sizes a host's (ADR-0012 clause 22). Both keys have a default, and neither
+/// sized as the Server sizes a host's (ADR-0045 clause 22). Both keys have a default, and neither
 /// is `0`: no value switches the limit off.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -880,7 +880,7 @@ pub struct TlsConfig {
     /// PEM CA bundle that *replaces* the built-in webpki roots — the self-signed-deployment case.
     /// Optional, so a `[tls]` section can carry a client identity alone and keep the public roots.
     pub ca_file: Option<PathBuf>,
-    /// PEM client certificate chain this Client presents (ADR-0021), for a fleet whose Server
+    /// PEM client certificate chain this Client presents (ADR-0038), for a fleet whose Server
     /// demands mutual TLS. Together with [`key_file`](Self::key_file), and useless without it.
     ///
     /// This is the operator-provisioned identity, including the **bootstrap certificate** a host
@@ -904,7 +904,7 @@ impl TlsConfig {
     }
 }
 
-/// The transport the endpoint's scheme selects (ADR-0012).
+/// The transport the endpoint's scheme selects (ADR-0045).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransportKind {
     WebSocket,
@@ -913,7 +913,7 @@ pub enum TransportKind {
 
 fn default_endpoint() -> String {
     // The Baseline's default port and path, over TLS: the Agent plane serves nothing else
-    // (ADR-0012).
+    // (ADR-0045).
     "wss://127.0.0.1:4320/v1/opamp".to_string()
 }
 
@@ -1040,7 +1040,7 @@ impl ClientConfig {
                 )
             })?;
         }
-        // Plaintext is for the loopback alone, and refused rather than warned about (ADR-0012).
+        // Plaintext is for the loopback alone, and refused rather than warned about (ADR-0045).
         config
             .transport()
             .map_err(|e| format!("{}: {e}", path.display()))?;
@@ -1125,7 +1125,7 @@ impl ClientConfig {
         self.package_key.as_deref()
     }
 
-    /// The CA bundle that replaces the built-in roots, when one is configured (ADR-0012).
+    /// The CA bundle that replaces the built-in roots, when one is configured (ADR-0045).
     pub fn ca_file(&self) -> Option<&Path> {
         self.tls.as_ref()?.ca_file.as_deref()
     }
@@ -1228,7 +1228,7 @@ impl ClientConfig {
         self.attributes.clone()
     }
 
-    /// The one startup notice a leftover `[auth]` section earns (ADR-0021 clause 3), or `None`
+    /// The one startup notice a leftover `[auth]` section earns (ADR-0038 clause 3), or `None`
     /// when the file has none. The section is ignored and nothing from it is sent; it is not a
     /// reason to refuse the file, since a Client the Server updated must keep connecting.
     #[must_use]
@@ -1240,7 +1240,7 @@ impl ClientConfig {
     }
 
     /// The transport the endpoint names, held to the specification's rule: `wss://` or `https://`,
-    /// and `ws://` or `http://` only to `127.0.0.1` or `::1` (ADR-0012).
+    /// and `ws://` or `http://` only to `127.0.0.1` or `::1` (ADR-0045).
     pub fn transport(&self) -> Result<TransportKind, String> {
         opamp::endpoint::check_url(&self.endpoint).map_err(|e| format!("endpoint {e}"))?;
         match self.endpoint.split("://").next() {
@@ -1889,7 +1889,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0012
+    /// Verifies: ADR-0045
     #[test]
     fn scheme_selects_the_transport() {
         for (endpoint, kind) in [
@@ -1906,7 +1906,7 @@ mod tests {
         }
     }
 
-    /// Verifies: ADR-0012
+    /// Verifies: ADR-0045
     #[test]
     fn the_default_endpoint_is_wss_on_the_loopback() {
         assert_eq!(
@@ -1915,7 +1915,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0012, Q-1
+    /// Verifies: ADR-0045, Q-1
     #[test]
     fn a_plaintext_endpoint_off_the_loopback_is_refused_at_startup() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1932,7 +1932,7 @@ mod tests {
         ClientConfig::load(&path).expect("plaintext on a loopback literal loads");
     }
 
-    /// Verifies: ADR-0012, ADR-0008
+    /// Verifies: ADR-0045, ADR-0008
     #[test]
     fn rejects_an_unknown_scheme_and_unknown_keys() {
         let cfg = ClientConfig {
@@ -2235,7 +2235,7 @@ mod tests {
     /// took then. It loads — a Client the Server updated must keep connecting — the notice names
     /// the section, and nothing from it reaches the connection: no `Authorization` value, and the
     /// effective configuration reported upstream carries none of its secrets.
-    /// Verifies: ADR-0021, ADR-0019, ADR-0022
+    /// Verifies: ADR-0038, ADR-0019, ADR-0022
     #[test]
     fn a_leftover_auth_section_is_ignored_with_a_notice() {
         let dir = tempfile::tempdir().expect("tempdir");

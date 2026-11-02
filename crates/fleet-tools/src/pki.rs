@@ -4,7 +4,7 @@
 //! CA — the Server's certificate and the package signing key; `server-cert` makes another server certificate, for the
 //! Server or a Gateway; `bootstrap-ca` makes a new bootstrap CA to replace the Server's; `status`
 //! says when the server CA in the offline directory ends. None of them makes a host certificate,
-//! which a host obtains through enrolment alone (ADR-0021), nor a bootstrap certificate, which
+//! which a host obtains through enrolment alone (ADR-0038), nor a bootstrap certificate, which
 //! the Server issues (ADR-0032). The Server binary makes no CA and no server certificate; it reads
 //! its own certificates' ends with its own `pki status`, by the same rule, [`fleet_core::ending`].
 

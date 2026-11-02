@@ -20,7 +20,7 @@ out. Both ends hold secrets in memory:
   Operator plane Basic login before it is verified, and the PostgreSQL password and the S3 secret
   access key `read_secret_file` reads from `[database.postgres] password_file` and
   `[blobs.s3] secret_access_key_file`
-  ([ADR-0029](0029-the-servers-state-and-its-stores.md));
+  ([ADR-0044](0044-the-servers-state-and-its-stores.md));
 - the Supervisor Endpoint token ([ADR-0015](0015-client-modes-and-the-gateway.md));
 - the passwords and keys `opamp-fleetctl` reads and writes.
 
@@ -64,7 +64,7 @@ buffer from the moment it is read or made until it is dropped.
    ([ADR-0008](0008-five-crates-on-tokio-and-axum.md) clause 11) with its default `alloc` feature
    and no derive, and named by `fleet-core`, `fleet-agent`, `fleet-server` and `fleet-tools` where
    they hold a secret. It pulls no TLS or crypto backend, so the rule of
-   [ADR-0012](0012-tls-1-3-two-planes-and-bounded-input.md) on the TLS and crypto backend holds.
+   [ADR-0045](0045-tls-1-3-two-planes-and-bounded-input.md) on the TLS and crypto backend holds.
 2. **`Zeroizing` is the whole mechanism.** A secret is a `Zeroizing<Vec<u8>>` or a
    `Zeroizing<String>`, or a struct field of that type; no type of this project's own wraps it. A
    function that hands a secret on returns it so, and a borrow (`&[u8]`, `&str`) passes it to a

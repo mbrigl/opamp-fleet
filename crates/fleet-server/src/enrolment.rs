@@ -1,11 +1,11 @@
-//! Enrolment: how a host gets its first client certificate (ADR-0021 clause 17, ADR-0029 clause 8
+//! Enrolment: how a host gets its first client certificate (ADR-0038 clause 17, ADR-0044 clause 8
 //! and ADR-0022 clauses 9 and 10).
 //!
 //! A host enrols with a bootstrap certificate from a CA of its own. Such a connection is admitted
 //! only while an operator holds an **enrolment window** open, and the certificate signing request
 //! it sends waits in a **pending queue** until an operator approves or rejects it. The window's end
 //! and the queue — an approved request with its certificate included — are persisted through the
-//! [`EnrolmentStore`] port before the act that changes them is answered (ADR-0029 clause 8), so a
+//! [`EnrolmentStore`] port before the act that changes them is answered (ADR-0044 clause 8), so a
 //! restart keeps an open window open until its end and keeps its requests; a window whose end has
 //! passed is closed when it is loaded. When the window closes, every pending request expires.
 //!
@@ -43,7 +43,7 @@ pub struct Request {
     /// The SHA-256 fingerprint of the requested public key, hex — the key of the queue, and what the
     /// Client logs so an operator can match a request to a host.
     pub key_fingerprint: String,
-    /// The `instance_uid` of the message that carried it, for the register (ADR-0029 clause 9).
+    /// The `instance_uid` of the message that carried it, for the register (ADR-0044 clause 9).
     pub instance_uid: Vec<u8>,
 }
 
@@ -79,8 +79,40 @@ pub struct Pending {
     pub requester: Requester,
 }
 
-/// Keeps what was signed, and the `instance_uid` it was asked under, before a host can collect it.
-pub type Record<'a> = dyn Fn(&Signed, &[u8]) -> Result<(), String> + 'a;
+/// Keeps what was signed, the `instance_uid` it was asked under and the bootstrap certificate the
+/// request came with, before a host can collect it. A revoked bootstrap certificate is answered
+/// [`DecisionError::Revoked`].
+pub type Record<'a> = dyn Fn(&Signed, &[u8], &CertId) -> Result<(), DecisionError> + 'a;
+
+/// What an approval comes to in the store.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Approval {
+    /// The request waited, was signed and recorded, and is approved with this decision now.
+    Approved(Decision),
+    /// The store holds the request no longer waiting: another instance decided or withdrew it,
+    /// or its window closed. Nothing was signed.
+    NotWaiting,
+    /// The list names the bootstrap certificate the request came with; the request is withdrawn
+    /// and nothing was signed.
+    Revoked,
+    /// Signing or recording refused it; the request still waits.
+    Refused(DecisionError),
+    /// Another instance holds the request while it decides it, for longer than a wait for a lock
+    /// lasts. Nothing was signed here, and the request may still wait.
+    Deciding,
+}
+
+/// What a rejection comes to in the store.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Decided {
+    /// The request waited and is decided now.
+    Written,
+    /// The store holds the request no longer waiting, or not at all.
+    NotWaiting,
+    /// Another instance holds the request while it decides it, for longer than a wait for a lock
+    /// lasts; nothing was written.
+    Deciding,
+}
 
 /// What a submitted request comes to.
 #[derive(Debug, PartialEq, Eq)]
@@ -113,8 +145,11 @@ pub enum DecisionError {
     Subject(String),
     /// The CA could not sign the request.
     Sign(String),
-    /// The decision could not be persisted (ADR-0029 clause 8); the request still waits.
+    /// The decision could not be persisted (ADR-0044 clause 8); the request still waits.
     Store(String),
+    /// Another instance is deciding the request at this moment — a `409`. Nothing was decided
+    /// here; asked again, the request is found decided, or still waiting.
+    Deciding,
 }
 
 /// Why the window could not be opened.
@@ -122,35 +157,36 @@ pub enum DecisionError {
 pub enum WindowError {
     /// The duration is outside 1 to [`MAX_WINDOW_SECS`] seconds — a `400`.
     Invalid(String),
-    /// The window could not be persisted (ADR-0029 clause 8); it is as it was.
+    /// The window could not be persisted (ADR-0044 clause 8); it is as it was.
     Store(String),
 }
 
+/// An operator's decision on a request, as it persists.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
-enum Decision {
+pub enum Decision {
     /// The issued certificate, PEM, waiting for its host to collect it.
     Approved(String),
     Rejected,
 }
 
-/// The window and its requests as they persist (ADR-0029 clause 8): what an [`EnrolmentStore`]
+/// The window and its requests as they persist (ADR-0044 clause 8): what an [`EnrolmentStore`]
 /// keeps, and all it keeps.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Persisted {
     /// When the open window closes; absent while it is closed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    window_until_ms: Option<u64>,
+    pub(crate) window_until_ms: Option<u64>,
     #[serde(default)]
-    requests: Vec<PersistedRequest>,
+    pub(crate) requests: Vec<PersistedRequest>,
 }
 
 /// One request as it persists.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct PersistedRequest {
-    id: String,
+pub struct PersistedRequest {
+    pub(crate) id: String,
     arrived_ms: u64,
     key_fingerprint: String,
     requester: Requester,
@@ -158,12 +194,31 @@ struct PersistedRequest {
     /// The `instance_uid` the request arrived under, hex.
     instance_uid: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    decision: Option<Decision>,
+    pub(crate) decision: Option<Decision>,
 }
 
-/// The enrolment's port (ADR-0009, ADR-0029): where the window and its queue persist. The
+/// What a request comes to in the store.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Took {
+    /// Taken into the queue.
+    Added,
+    /// Held already, as the store has it: waiting or decided.
+    Held(Box<PersistedRequest>),
+    /// The queue holds as many requests as it may.
+    Full,
+    /// The request's bootstrap certificate holds its share of the queue (ADR-0022).
+    OverShare,
+    /// No window is open.
+    Closed,
+}
+
+/// The enrolment's port (ADR-0009, ADR-0044): where the window and its queue persist. The
 /// filesystem adapter ([`FsEnrolmentStore`](crate::fs::FsEnrolmentStore)) keeps them in
-/// `enrolment.json`.
+/// `enrolment.json`. Each act is one write that decides from what is stored, so the queue's bounds
+/// hold for every instance on one database
+/// (ADR-0041
+/// clause 19). The acts' bodies here read and write the whole, for a store that is its only
+/// writer; a store that is shared answers each in one transaction of its own.
 pub trait EnrolmentStore: Send + Sync {
     /// What was persisted last, `None` when nothing was.
     ///
@@ -171,11 +226,177 @@ pub trait EnrolmentStore: Send + Sync {
     /// Returns an error when it exists but cannot be read.
     fn load(&self) -> Result<Option<Persisted>, String>;
 
-    /// Persists the window and its requests, before the act that changed them is answered.
+    /// Replaces the window and its requests whole: what an import and a test write.
     ///
     /// # Errors
     /// Returns an error when it cannot be written.
     fn save(&self, persisted: &Persisted) -> Result<(), String>;
+
+    /// Takes `request` into the queue while a window is open at `now_ms`, unless the queue holds
+    /// `max` requests or `max_per_bootstrap` of its bootstrap certificate, both counted in what is
+    /// stored. A request held already is answered as it stands, and counts nothing.
+    ///
+    /// # Errors
+    /// Returns an error when the store cannot be read or written; nothing is then taken in.
+    fn take(
+        &self,
+        request: &PersistedRequest,
+        now_ms: u64,
+        max: usize,
+        max_per_bootstrap: usize,
+    ) -> Result<Took, String> {
+        let mut persisted = self.load()?.unwrap_or_default();
+        if persisted
+            .window_until_ms
+            .is_none_or(|until| now_ms >= until)
+        {
+            return Ok(Took::Closed);
+        }
+        if let Some(held) = persisted.requests.iter().find(|r| r.id == request.id) {
+            return Ok(Took::Held(Box::new(held.clone())));
+        }
+        if persisted.requests.len() >= max {
+            return Ok(Took::Full);
+        }
+        let bootstrap = &request.requester.bootstrap;
+        let share = persisted
+            .requests
+            .iter()
+            .filter(|r| r.requester.bootstrap == *bootstrap)
+            .count();
+        if share >= max_per_bootstrap {
+            return Ok(Took::OverShare);
+        }
+        persisted.requests.push(request.clone());
+        self.save(&persisted)?;
+        Ok(Took::Added)
+    }
+
+    /// Decides the waiting request `id`, and answers whether it was decided now: a request the
+    /// store does not hold, or holds decided already, is left as it is, and so is one another
+    /// instance holds while it decides it.
+    ///
+    /// # Errors
+    /// Returns an error when the store cannot be read or written; nothing is then decided.
+    fn decide(&self, id: &str, decision: &Decision) -> Result<Decided, String> {
+        let mut persisted = self.load()?.unwrap_or_default();
+        let Some(request) = persisted
+            .requests
+            .iter_mut()
+            .find(|r| r.id == id && r.decision.is_none())
+        else {
+            return Ok(Decided::NotWaiting);
+        };
+        request.decision = Some(decision.clone());
+        self.save(&persisted)?;
+        Ok(Decided::Written)
+    }
+
+    /// Approves the waiting request `id`: `sign` signs and records it while the request is held,
+    /// and its answer is written as the request's decision. A request the store holds no longer
+    /// waiting is answered [`Approval::NotWaiting`] before anything is signed, so of two instances
+    /// approving one request one signs and records it and the other nothing
+    /// (ADR-0041
+    /// clause 19). A store other instances share also refuses a request whose bootstrap
+    /// certificate, `bootstrap`, the list names, and withdraws it; a store that is its only writer
+    /// leaves that to the list in memory. Such a store answers [`Approval::Deciding`] for a
+    /// request another instance holds while it decides it, longer than a wait for a lock lasts.
+    ///
+    /// # Errors
+    /// Returns an error when the store cannot be read or written; nothing is then decided.
+    fn approve(
+        &self,
+        id: &str,
+        bootstrap: &CertId,
+        sign: &mut dyn FnMut() -> Result<Decision, DecisionError>,
+    ) -> Result<Approval, String> {
+        let _ = bootstrap;
+        let mut persisted = self.load()?.unwrap_or_default();
+        let Some(request) = persisted
+            .requests
+            .iter_mut()
+            .find(|r| r.id == id && r.decision.is_none())
+        else {
+            return Ok(Approval::NotWaiting);
+        };
+        let decision = match sign() {
+            Ok(decision) => decision,
+            Err(e) => return Ok(Approval::Refused(e)),
+        };
+        request.decision = Some(decision.clone());
+        self.save(&persisted)?;
+        Ok(Approval::Approved(decision))
+    }
+
+    /// Withdraws every waiting request whose bootstrap certificate is `serial` under one of
+    /// `issuers`, and answers how many: what the revocation of a bootstrap certificate withdraws in
+    /// the queue every instance shares (ADR-0038 clause 28).
+    ///
+    /// # Errors
+    /// Returns an error when the store cannot be read or written.
+    fn withdraw_bootstrap(&self, issuers: &[String], serial: &str) -> Result<usize, String> {
+        let Some(mut persisted) = self.load()? else {
+            return Ok(0);
+        };
+        let before = persisted.requests.len();
+        persisted.requests.retain(|r| {
+            let bootstrap = &r.requester.bootstrap;
+            r.decision.is_some()
+                || bootstrap.serial != serial
+                || !issuers.contains(&bootstrap.issuer)
+        });
+        let withdrawn = before - persisted.requests.len();
+        if withdrawn > 0 {
+            self.save(&persisted)?;
+        }
+        Ok(withdrawn)
+    }
+
+    /// Withdraws the requests `ids` names while they wait; a decided one is kept.
+    ///
+    /// # Errors
+    /// Returns an error when the store cannot be read or written.
+    fn withdraw(&self, ids: &[String]) -> Result<(), String> {
+        let Some(mut persisted) = self.load()? else {
+            return Ok(());
+        };
+        persisted
+            .requests
+            .retain(|r| r.decision.is_some() || !ids.contains(&r.id));
+        self.save(&persisted)
+    }
+
+    /// Opens the window, or moves its end, to `until_ms`; its requests stay.
+    ///
+    /// # Errors
+    /// Returns an error when the store cannot be read or written.
+    fn open_window(&self, until_ms: u64) -> Result<(), String> {
+        let mut persisted = self.load()?.unwrap_or_default();
+        persisted.window_until_ms = Some(until_ms);
+        self.save(&persisted)
+    }
+
+    /// Closes the window, and every request expires with it.
+    ///
+    /// # Errors
+    /// Returns an error when the store cannot be written.
+    fn close_window(&self) -> Result<(), String> {
+        self.save(&Persisted::default())
+    }
+
+    /// Closes the window that ends at `until_ms`, its requests with it, and answers whether it did:
+    /// a window stored with another end was moved by another act and stays open.
+    ///
+    /// # Errors
+    /// Returns an error when the store cannot be read or written.
+    fn end_window(&self, until_ms: u64) -> Result<bool, String> {
+        let persisted = self.load()?.unwrap_or_default();
+        if persisted.window_until_ms != Some(until_ms) {
+            return Ok(false);
+        }
+        self.save(&Persisted::default())?;
+        Ok(true)
+    }
 }
 
 #[derive(Clone)]
@@ -196,51 +417,77 @@ struct State {
     over_share: std::collections::BTreeSet<CertId>,
 }
 
-impl State {
-    fn persisted(&self) -> Persisted {
-        Persisted {
-            window_until_ms: self.window_until_ms,
-            requests: self
-                .entries
-                .values()
-                .map(|entry| PersistedRequest {
-                    id: entry.pending.id.clone(),
-                    arrived_ms: entry.pending.arrived_ms,
-                    key_fingerprint: entry.pending.key_fingerprint.clone(),
-                    requester: entry.pending.requester.clone(),
-                    csr_pem: entry.csr_pem.clone(),
-                    instance_uid: hex::encode(&entry.instance_uid),
-                    decision: entry.decision.clone(),
-                })
-                .collect(),
+impl Entry {
+    /// The entry as it persists.
+    fn persisted(&self) -> PersistedRequest {
+        PersistedRequest {
+            id: self.pending.id.clone(),
+            arrived_ms: self.pending.arrived_ms,
+            key_fingerprint: self.pending.key_fingerprint.clone(),
+            requester: self.pending.requester.clone(),
+            csr_pem: self.csr_pem.clone(),
+            instance_uid: hex::encode(&self.instance_uid),
+            decision: self.decision.clone(),
         }
+    }
+
+    /// The entry a persisted request restores.
+    fn restored(request: PersistedRequest) -> Result<Self, String> {
+        let instance_uid = hex::decode(&request.instance_uid)
+            .map_err(|e| format!("request {:?}: invalid instance_uid: {e}", request.id))?;
+        Ok(Entry {
+            pending: Pending {
+                id: request.id,
+                arrived_ms: request.arrived_ms,
+                key_fingerprint: request.key_fingerprint,
+                requester: request.requester,
+            },
+            csr_pem: request.csr_pem,
+            instance_uid,
+            decision: request.decision,
+        })
+    }
+}
+
+impl State {
+    /// What taking `entry` in comes to in memory alone, as [`EnrolmentStore::take`] decides it.
+    fn took(&self, entry: &Entry, max: usize, max_per_bootstrap: usize) -> Took {
+        if self.entries.len() >= max {
+            return Took::Full;
+        }
+        // A re-sent request has its entry and was answered before; only a new one is counted
+        // against its bootstrap certificate's share (ADR-0022).
+        let share = self
+            .entries
+            .values()
+            .filter(|held| held.pending.requester.bootstrap == entry.pending.requester.bootstrap)
+            .count();
+        if share >= max_per_bootstrap {
+            return Took::OverShare;
+        }
+        Took::Added
     }
 
     fn restored(persisted: Persisted) -> Result<Self, String> {
         let mut entries = BTreeMap::new();
         for request in persisted.requests {
-            let instance_uid = hex::decode(&request.instance_uid)
-                .map_err(|e| format!("request {:?}: invalid instance_uid: {e}", request.id))?;
-            entries.insert(
-                request.id.clone(),
-                Entry {
-                    pending: Pending {
-                        id: request.id,
-                        arrived_ms: request.arrived_ms,
-                        key_fingerprint: request.key_fingerprint,
-                        requester: request.requester,
-                    },
-                    csr_pem: request.csr_pem,
-                    instance_uid,
-                    decision: request.decision,
-                },
-            );
+            let entry = Entry::restored(request)?;
+            entries.insert(entry.pending.id.clone(), entry);
         }
         Ok(State {
             window_until_ms: persisted.window_until_ms,
             entries,
             over_share: std::collections::BTreeSet::new(),
         })
+    }
+}
+
+/// What a request held already comes to.
+fn answer(decision: Option<&Decision>) -> Submitted {
+    match decision {
+        None => Submitted::Waiting,
+        Some(Decision::Approved(cert)) => Submitted::Issued(cert.clone()),
+        Some(Decision::Rejected) => Submitted::Rejected,
     }
 }
 
@@ -253,7 +500,7 @@ pub struct Enrolment {
     /// Where the window and its queue persist; `None` keeps them in memory, as a test does.
     store: Option<Box<dyn EnrolmentStore>>,
     changes: watch::Sender<u64>,
-    /// Where a window that runs out records the requests that expired with it (ADR-0023).
+    /// Where a window that runs out records the requests that expired with it (ADR-0039).
     audit: std::sync::OnceLock<Arc<dyn crate::audit::Audit>>,
 }
 
@@ -271,7 +518,7 @@ impl Enrolment {
         }
     }
 
-    /// Restores the window and its queue from `store` (ADR-0029 clause 8), and persists through it
+    /// Restores the window and its queue from `store` (ADR-0044 clause 8), and persists through it
     /// from here on. A window whose end has passed while the Server was down is closed, and its
     /// requests expire with it.
     ///
@@ -285,10 +532,14 @@ impl Enrolment {
         };
         let ended = state
             .window_until_ms
-            .is_some_and(|until| clock.now_ms() >= until);
-        if ended || (state.window_until_ms.is_none() && !state.entries.is_empty()) {
+            .filter(|until| clock.now_ms() >= *until);
+        if let Some(until) = ended {
+            // Only the window that ended: another instance may have opened it again meanwhile.
             state = State::default();
-            store.save(&state.persisted())?;
+            store.end_window(until)?;
+        } else if state.window_until_ms.is_none() && !state.entries.is_empty() {
+            state = State::default();
+            store.close_window()?;
         }
         Ok(Enrolment {
             clock,
@@ -308,17 +559,20 @@ impl Enrolment {
         self
     }
 
-    /// Persists `state`, when a store is armed.
-    fn save(&self, state: &State) -> Result<(), String> {
+    /// Runs `act` on the store, when one is armed.
+    fn on_store(
+        &self,
+        act: impl FnOnce(&dyn EnrolmentStore) -> Result<(), String>,
+    ) -> Result<(), String> {
         match &self.store {
-            Some(store) => store.save(&state.persisted()),
+            Some(store) => act(&**store),
             None => Ok(()),
         }
     }
 
-    /// Persists `state` where nothing waits on the answer, logging a failure.
-    fn save_logged(&self, state: &State) {
-        if let Err(e) = self.save(state) {
+    /// Runs `act` on the store where nothing waits on the answer, logging a failure.
+    fn on_store_logged(&self, act: impl FnOnce(&dyn EnrolmentStore) -> Result<(), String>) {
+        if let Err(e) = self.on_store(act) {
             tracing::warn!(error = %e, "cannot persist the enrolment window and its requests");
         }
     }
@@ -342,10 +596,9 @@ impl Enrolment {
         }
         let until = self.clock.now_ms() + secs * 1000;
         let mut state = self.state.lock().expect("enrolment lock");
-        let mut opened = state.clone();
-        opened.window_until_ms = Some(until);
-        self.save(&opened).map_err(WindowError::Store)?;
-        *state = opened;
+        self.on_store(|store| store.open_window(until))
+            .map_err(WindowError::Store)?;
+        state.window_until_ms = Some(until);
         drop(state);
         self.changed();
         Ok(until)
@@ -362,7 +615,7 @@ impl Enrolment {
         state.window_until_ms = None;
         state.entries.clear();
         state.over_share.clear();
-        let saved = self.save(&state);
+        let saved = self.on_store(|store| store.close_window());
         drop(state);
         self.changed();
         saved
@@ -379,59 +632,71 @@ impl Enrolment {
         self.window().is_some()
     }
 
-    /// Takes in a request, or answers it once it has been decided.
+    /// Takes in a request, or answers it once it has been decided. With a store armed the queue's
+    /// bounds are counted in what is stored, so they hold for every instance on one database; a
+    /// request another instance took in is answered as the store holds it.
     pub fn submit(&self, request: Request, requester: Requester) -> Submitted {
         let mut state = self.state.lock().expect("enrolment lock");
         if self.expire(&mut state).is_none() {
             return Submitted::Closed;
         }
         if let Some(entry) = state.entries.get(&request.key_fingerprint) {
-            return match &entry.decision {
-                None => Submitted::Waiting,
-                Some(Decision::Approved(cert)) => Submitted::Issued(cert.clone()),
-                Some(Decision::Rejected) => Submitted::Rejected,
-            };
-        }
-        if state.entries.len() >= MAX_PENDING {
-            return Submitted::Full;
-        }
-        // A re-sent request has its entry and was answered above; only a new one is counted
-        // against its bootstrap certificate's share (ADR-0022).
-        let held = state
-            .entries
-            .values()
-            .filter(|entry| entry.pending.requester.bootstrap == requester.bootstrap)
-            .count();
-        if held >= self.max_per_bootstrap {
-            let first = state.over_share.insert(requester.bootstrap.clone());
-            return Submitted::OverShare { first };
+            return answer(entry.decision.as_ref());
         }
         let id = request.key_fingerprint.clone();
-        let key = id.clone();
-        let pending = Pending {
-            id: id.clone(),
-            arrived_ms: self.clock.now_ms(),
-            key_fingerprint: request.key_fingerprint,
-            requester,
-        };
-        state.entries.insert(
-            id,
-            Entry {
-                pending,
-                csr_pem: request.csr_pem,
-                instance_uid: request.instance_uid,
-                decision: None,
+        let bootstrap = requester.bootstrap.clone();
+        let entry = Entry {
+            pending: Pending {
+                id: id.clone(),
+                arrived_ms: self.clock.now_ms(),
+                key_fingerprint: request.key_fingerprint,
+                requester,
             },
-        );
-        if let Err(e) = self.save(&state) {
-            // Not taken in: the host is told to come back, as it is for a full queue.
-            tracing::warn!(error = %e, "cannot persist an enrolment request");
-            state.entries.remove(&key);
-            return Submitted::Full;
+            csr_pem: request.csr_pem,
+            instance_uid: request.instance_uid,
+            decision: None,
+        };
+        let took = match &self.store {
+            Some(store) => store.take(
+                &entry.persisted(),
+                self.clock.now_ms(),
+                MAX_PENDING,
+                self.max_per_bootstrap,
+            ),
+            None => Ok(state.took(&entry, MAX_PENDING, self.max_per_bootstrap)),
+        };
+        let took = match took {
+            Ok(took) => took,
+            Err(e) => {
+                // Not taken in: the host is told to come back, as it is for a full queue.
+                tracing::warn!(error = %e, "cannot persist an enrolment request");
+                return Submitted::Full;
+            }
+        };
+        match took {
+            Took::Added => {
+                state.entries.insert(id, entry);
+                drop(state);
+                self.changed();
+                Submitted::Waiting
+            }
+            Took::Held(held) => match Entry::restored(*held) {
+                Ok(held) => {
+                    let answered = answer(held.decision.as_ref());
+                    state.entries.insert(id, held);
+                    answered
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "an enrolment request the store holds does not read");
+                    Submitted::Full
+                }
+            },
+            Took::Full => Submitted::Full,
+            Took::OverShare => Submitted::OverShare {
+                first: state.over_share.insert(bootstrap),
+            },
+            Took::Closed => Submitted::Closed,
         }
-        drop(state);
-        self.changed();
-        Submitted::Waiting
     }
 
     /// The requests waiting for an operator, oldest first.
@@ -456,11 +721,11 @@ impl Enrolment {
     /// [`DecisionError::Subject`] when its subject cannot be carried into the host certificate
     /// (ADR-0015 clause 23), and [`DecisionError::Sign`] when the CA refuses the request.
     /// Answers what was signed, and the `instance_uid` the request arrived under, for the register.
-    /// `record` keeps what was signed before the host can collect it (ADR-0029 clause 9); a
+    /// `record` keeps what was signed before the host can collect it (ADR-0044 clause 9); a
     /// failure there leaves the request pending.
     ///
     /// The bootstrap certificate the request came with is checked against `revoked` under the same
-    /// lock that signs, so a revocation that lands before the approval always wins (ADR-0021
+    /// lock that signs, so a revocation that lands before the approval always wins (ADR-0038
     /// clause 28); such a request is withdrawn and answered [`DecisionError::Revoked`].
     pub fn approve(
         &self,
@@ -474,15 +739,12 @@ impl Enrolment {
         self.expire(&mut state);
         let entry = state
             .entries
-            .get_mut(id)
+            .get(id)
             .filter(|entry| entry.decision.is_none())
             .ok_or(DecisionError::NotFound)?;
-        if revoked(&entry.pending.requester.bootstrap) {
-            state.entries.remove(id);
-            self.save_logged(&state);
-            drop(state);
-            self.changed();
-            return Err(DecisionError::Revoked);
+        let bootstrap = entry.pending.requester.bootstrap.clone();
+        if revoked(&bootstrap) {
+            return Err(self.withdrawn(state, id));
         }
         // The bootstrap certificate's values, under the rules they were issued by, and never the
         // request's (ADR-0022 clause 11 and ADR-0015 clause 23).
@@ -492,21 +754,82 @@ impl Enrolment {
                      certificate: {e}"
             ))
         })?;
-        let signed = signer
-            .sign(&entry.csr_pem, host, &subject)
-            .map_err(DecisionError::Sign)?;
-        record(&signed, &entry.instance_uid).map_err(DecisionError::Sign)?;
-        entry.decision = Some(Decision::Approved(signed.pem));
+        let (csr_pem, instance_uid) = (entry.csr_pem.clone(), entry.instance_uid.clone());
+        let mut sign = || -> Result<Decision, DecisionError> {
+            let signed = signer
+                .sign(&csr_pem, host, &subject)
+                .map_err(DecisionError::Sign)?;
+            record(&signed, &instance_uid, &bootstrap)?;
+            Ok(Decision::Approved(signed.pem))
+        };
         // Persisted before it is answered, the certificate included, so a restart before the host
-        // collects it hands it over all the same (ADR-0029 clause 8).
-        if let Err(e) = self.save(&state) {
-            if let Some(entry) = state.entries.get_mut(id) {
-                entry.decision = None;
+        // collects it hands it over all the same (ADR-0044 clause 8). The store signs only a
+        // request that still waits there, and holds it meanwhile: one another instance decided or
+        // withdrew is gone, and nothing is signed for it.
+        let approval = match &self.store {
+            Some(store) => store
+                .approve(id, &bootstrap, &mut sign)
+                .map_err(DecisionError::Store)?,
+            None => match sign() {
+                Ok(decision) => Approval::Approved(decision),
+                Err(e) => Approval::Refused(e),
+            },
+        };
+        match approval {
+            Approval::Approved(decision) => {
+                if let Some(entry) = state.entries.get_mut(id) {
+                    entry.decision = Some(decision);
+                }
+                drop(state);
+                self.changed();
+                Ok(())
             }
-            return Err(DecisionError::Store(e));
+            Approval::NotWaiting => {
+                state.entries.remove(id);
+                Err(DecisionError::NotFound)
+            }
+            Approval::Revoked | Approval::Refused(DecisionError::Revoked) => {
+                Err(self.withdrawn(state, id))
+            }
+            Approval::Refused(e) => Err(e),
+            Approval::Deciding => Err(DecisionError::Deciding),
         }
+    }
+
+    /// Withdraws the waiting request `id`, whose bootstrap certificate is revoked, and answers
+    /// [`DecisionError::Revoked`].
+    fn withdrawn(&self, mut state: std::sync::MutexGuard<'_, State>, id: &str) -> DecisionError {
+        state.entries.remove(id);
+        let ids = [id.to_string()];
+        self.on_store_logged(|store| store.withdraw(&ids));
         drop(state);
         self.changed();
+        DecisionError::Revoked
+    }
+
+    /// Writes `decision` on the waiting request `id`, then holds it in memory. A request the store
+    /// no longer holds waiting is dropped from memory and answered [`DecisionError::NotFound`].
+    fn decided(
+        &self,
+        state: &mut State,
+        id: &str,
+        decision: Decision,
+    ) -> Result<(), DecisionError> {
+        let decided = match &self.store {
+            Some(store) => store.decide(id, &decision).map_err(DecisionError::Store)?,
+            None => Decided::Written,
+        };
+        match decided {
+            Decided::Written => {}
+            Decided::NotWaiting => {
+                state.entries.remove(id);
+                return Err(DecisionError::NotFound);
+            }
+            Decided::Deciding => return Err(DecisionError::Deciding),
+        }
+        if let Some(entry) = state.entries.get_mut(id) {
+            entry.decision = Some(decision);
+        }
         Ok(())
     }
 
@@ -517,40 +840,73 @@ impl Enrolment {
     pub fn reject(&self, id: &str) -> Result<(), DecisionError> {
         let mut state = self.state.lock().expect("enrolment lock");
         self.expire(&mut state);
-        let entry = state
+        if !state
             .entries
-            .get_mut(id)
-            .filter(|entry| entry.decision.is_none())
-            .ok_or(DecisionError::NotFound)?;
-        entry.decision = Some(Decision::Rejected);
-        if let Err(e) = self.save(&state) {
-            if let Some(entry) = state.entries.get_mut(id) {
-                entry.decision = None;
-            }
-            return Err(DecisionError::Store(e));
+            .get(id)
+            .is_some_and(|entry| entry.decision.is_none())
+        {
+            return Err(DecisionError::NotFound);
         }
+        self.decided(&mut state, id, Decision::Rejected)?;
         drop(state);
         self.changed();
         Ok(())
     }
 
     /// Withdraws every waiting request whose bootstrap certificate `revoked` names, and answers how
-    /// many: a revoked certificate opens nothing, a request it carried included (ADR-0021
+    /// many: a revoked certificate opens nothing, a request it carried included (ADR-0038
     /// clause 28). A decided request is left: an approved one was signed and recorded already, and
     /// dropping it would revoke nothing — the connection of this certificate is refused, and only
     /// one holding the same key can collect it.
     pub fn withdraw(&self, revoked: &dyn Fn(&CertId) -> bool) -> usize {
         let mut state = self.state.lock().expect("enrolment lock");
-        let before = state.entries.len();
-        state.entries.retain(|_, entry| {
-            entry.decision.is_some() || !revoked(&entry.pending.requester.bootstrap)
-        });
-        let withdrawn = before - state.entries.len();
+        let ids: Vec<String> = state
+            .entries
+            .values()
+            .filter(|entry| entry.decision.is_none() && revoked(&entry.pending.requester.bootstrap))
+            .map(|entry| entry.pending.id.clone())
+            .collect();
+        for id in &ids {
+            state.entries.remove(id);
+        }
+        let withdrawn = ids.len();
         if withdrawn > 0 {
-            self.save_logged(&state);
+            self.on_store_logged(|store| store.withdraw(&ids));
         }
         drop(state);
         if withdrawn > 0 {
+            self.changed();
+        }
+        withdrawn
+    }
+
+    /// Withdraws every waiting request whose bootstrap certificate is `serial` under one of
+    /// `issuers`, held here or by another instance in the store, and answers how many: what the
+    /// revocation of a bootstrap certificate does to the queue (ADR-0038 clause 28).
+    pub fn withdraw_revoked(&self, issuers: &[String], serial: &str) -> usize {
+        let named =
+            |bootstrap: &CertId| bootstrap.serial == serial && issuers.contains(&bootstrap.issuer);
+        let mut state = self.state.lock().expect("enrolment lock");
+        let ids: Vec<String> = state
+            .entries
+            .values()
+            .filter(|entry| entry.decision.is_none() && named(&entry.pending.requester.bootstrap))
+            .map(|entry| entry.pending.id.clone())
+            .collect();
+        for id in &ids {
+            state.entries.remove(id);
+        }
+        let withdrawn = match &self.store {
+            Some(store) => store
+                .withdraw_bootstrap(issuers, serial)
+                .unwrap_or_else(|e| {
+                    tracing::warn!(error = %e, "cannot withdraw the requests of a revoked bootstrap certificate");
+                    ids.len()
+                }),
+            None => ids.len(),
+        };
+        drop(state);
+        if withdrawn > 0 || !ids.is_empty() {
             self.changed();
         }
         withdrawn
@@ -566,6 +922,33 @@ impl Enrolment {
                 .and_then(|entry| entry.decision.as_ref()),
             Some(Decision::Rejected)
         )
+    }
+
+    /// Reads the window and its queue again from the store, as another instance changed them
+    /// (ADR-0041
+    /// clauses 9 and 10), and wakes every connection waiting on them, so a request another instance
+    /// approved is handed to the connection that asked. It reads under the lock, so no act of this
+    /// instance's own lands between the read and the swap; the queue is bounded, so the read is
+    /// short. Without a store there is nothing to read.
+    ///
+    /// # Errors
+    /// Returns an error when the store cannot be read; what is held is then kept.
+    pub fn reload(&self) -> Result<(), String> {
+        let Some(store) = &self.store else {
+            return Ok(());
+        };
+        let mut state = self.state.lock().expect("enrolment lock");
+        let mut fresh = match store.load()? {
+            Some(persisted) => State::restored(persisted)?,
+            None => State::default(),
+        };
+        if fresh.window_until_ms == state.window_until_ms {
+            fresh.over_share = std::mem::take(&mut state.over_share);
+        }
+        *state = fresh;
+        drop(state);
+        self.changed();
+        Ok(())
     }
 
     /// Fires whenever the window or a request changes, for the connections waiting on them.
@@ -588,8 +971,16 @@ impl Enrolment {
             .filter(|entry| entry.decision.is_none())
             .count();
         state.entries.clear();
-        self.save_logged(state);
-        if let Some(audit) = self.audit.get() {
+        // Another instance may have moved the window's end meanwhile: then it did not run out,
+        // and nothing expired with it.
+        let ended = match &self.store {
+            Some(store) => store.end_window(until).unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "cannot persist the enrolment window and its requests");
+                true
+            }),
+            None => true,
+        };
+        if let Some(audit) = self.audit.get().filter(|_| ended) {
             audit.refusal(
                 crate::audit::Entry::new("enrolment.window", "expired")
                     .with("until_ms", until)
@@ -610,7 +1001,7 @@ pub(crate) mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    struct Manual(AtomicU64);
+    pub(crate) struct Manual(pub(crate) AtomicU64);
 
     impl Clock for Manual {
         fn now_ms(&self) -> u64 {
@@ -618,7 +1009,7 @@ pub(crate) mod tests {
         }
     }
 
-    struct Echo;
+    pub(crate) struct Echo;
 
     impl CertificateSigner for Echo {
         fn sign(
@@ -665,7 +1056,7 @@ pub(crate) mod tests {
         (Enrolment::new(clock.clone()), clock)
     }
 
-    fn request(key: &str) -> Request {
+    pub(crate) fn request(key: &str) -> Request {
         Request {
             csr_pem: format!("csr-{key}"),
             subject: "CN=edge-01".to_string(),
@@ -682,6 +1073,81 @@ pub(crate) mod tests {
             bootstrap: CertId::new(b"bootstrap CA", "b5"),
             peer: None,
             gateway: None,
+        }
+    }
+
+    /// Two instances on one store answer a request as the store holds it: one the other approved
+    /// is handed out with its certificate, and one the other decided or withdrew is not found,
+    /// however the first held it, and signs nothing.
+    /// Verifies: ADR-0041
+    #[test]
+    fn two_instances_on_one_store_answer_a_request_as_the_store_holds_it() {
+        let clock = Arc::new(Manual(AtomicU64::new(1_000_000)));
+        let store = Memory::default();
+        let a = Enrolment::open_on(clock.clone(), Box::new(store.clone())).expect("open A");
+        a.open(600).expect("window");
+        let b = Enrolment::open_on(clock.clone(), Box::new(store.clone())).expect("open B");
+        let recorded = std::cell::Cell::new(0);
+        let record = |_: &Signed, _: &[u8], _: &CertId| {
+            recorded.set(recorded.get() + 1);
+            Ok(())
+        };
+
+        assert_eq!(a.submit(request("k1"), requester()), Submitted::Waiting);
+        a.approve("k1", &Echo, "host", &record, &|_| false)
+            .expect("approve on A");
+        assert_eq!(
+            b.submit(request("k1"), requester()),
+            Submitted::Issued("issued for csr-k1".to_string()),
+            "B hands out what A approved"
+        );
+
+        for (key, decide) in [("k2", "reject"), ("k3", "approve"), ("k4", "withdraw")] {
+            assert_eq!(a.submit(request(key), requester()), Submitted::Waiting);
+            assert_eq!(
+                b.submit(request(key), requester()),
+                Submitted::Waiting,
+                "B holds {key} waiting, as the store has it"
+            );
+            match decide {
+                "reject" => a.reject(key).expect("reject on A"),
+                "approve" => a
+                    .approve(key, &Echo, "host", &record, &|_| false)
+                    .expect("approve on A"),
+                _ => {
+                    let bootstrap = requester().bootstrap;
+                    assert_eq!(
+                        a.withdraw_revoked(&[bootstrap.issuer], &bootstrap.serial),
+                        1
+                    );
+                }
+            }
+            let before = recorded.get();
+            assert_eq!(
+                b.reject(key),
+                Err(DecisionError::NotFound),
+                "{key}: {decide}"
+            );
+            assert_eq!(
+                b.submit(request(key), requester()),
+                match decide {
+                    "reject" => Submitted::Rejected,
+                    "approve" => Submitted::Issued(format!("issued for csr-{key}")),
+                    _ => Submitted::Waiting,
+                },
+                "{key}: B answers as the store holds it"
+            );
+            if decide == "approve" {
+                assert_eq!(
+                    b.approve(key, &Echo, "host", &record, &|_| false),
+                    Err(DecisionError::NotFound)
+                );
+            }
+            assert_eq!(
+                recorded.get(),
+                before,
+                "{key}: B signed and recorded nothing"
+            );
         }
     }
 
@@ -702,7 +1168,7 @@ pub(crate) mod tests {
 
     /// An approved enrolment survives a restart: the window stays open until its end, a waiting
     /// request still waits, and the approved one hands its host the certificate it was issued.
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0044
     #[test]
     fn an_approved_enrolment_survives_a_restart() {
         let clock = Arc::new(Manual(AtomicU64::new(1_000_000)));
@@ -715,7 +1181,7 @@ pub(crate) mod tests {
             enrolment.submit(request("b"), requester());
             enrolment.submit(request("c"), requester());
             enrolment
-                .approve("a", &Echo, "host", &|_, _| Ok(()), &|_| false)
+                .approve("a", &Echo, "host", &|_, _, _| Ok(()), &|_| false)
                 .expect("approve");
             enrolment.reject("c").expect("reject");
             until
@@ -740,13 +1206,13 @@ pub(crate) mod tests {
         );
         assert!(restarted.is_rejected("c"));
         restarted
-            .approve("b", &Echo, "host", &|_, _| Ok(()), &|_| false)
+            .approve("b", &Echo, "host", &|_, _, _| Ok(()), &|_| false)
             .expect("the waiting request can still be approved");
     }
 
     /// A window whose end passed while the Server was down is closed when it is loaded, and its
     /// requests — an approved one included — expire with it.
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0044
     #[test]
     fn a_window_whose_end_passed_while_down_is_closed_on_load() {
         let clock = Arc::new(Manual(AtomicU64::new(1_000_000)));
@@ -757,7 +1223,7 @@ pub(crate) mod tests {
             enrolment.open(60).expect("open the window");
             enrolment.submit(request("a"), requester());
             enrolment
-                .approve("a", &Echo, "host", &|_, _| Ok(()), &|_| false)
+                .approve("a", &Echo, "host", &|_, _, _| Ok(()), &|_| false)
                 .expect("approve");
         }
         clock.0.fetch_add(61_000, Ordering::SeqCst);
@@ -779,20 +1245,21 @@ pub(crate) mod tests {
 
     /// An act whose result cannot be persisted is not taken: the window stays as it was, and a
     /// decision leaves the request waiting.
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0044
     #[test]
     fn an_act_that_cannot_be_persisted_changes_nothing() {
+        // It holds what it wrote, as every store does: an act decides from what is stored.
         #[derive(Clone, Default)]
-        struct Failing(Arc<std::sync::atomic::AtomicBool>);
+        struct Failing(Arc<std::sync::atomic::AtomicBool>, Memory);
         impl EnrolmentStore for Failing {
             fn load(&self) -> Result<Option<Persisted>, String> {
-                Ok(None)
+                self.1.load()
             }
-            fn save(&self, _: &Persisted) -> Result<(), String> {
+            fn save(&self, persisted: &Persisted) -> Result<(), String> {
                 if self.0.load(Ordering::SeqCst) {
                     Err("the disk is full".to_string())
                 } else {
-                    Ok(())
+                    self.1.save(persisted)
                 }
             }
         }
@@ -809,7 +1276,7 @@ pub(crate) mod tests {
             "a request that cannot be kept is not taken in"
         );
         assert!(matches!(
-            enrolment.approve("a", &Echo, "host", &|_, _| Ok(()), &|_| false),
+            enrolment.approve("a", &Echo, "host", &|_, _, _| Ok(()), &|_| false),
             Err(DecisionError::Store(_))
         ));
         assert!(matches!(
@@ -821,7 +1288,46 @@ pub(crate) mod tests {
         assert!(!enrolment.is_open(), "closed all the same");
     }
 
-    /// Verifies: ADR-0021
+    /// A decision on a request another instance is deciding at this moment is answered so, and
+    /// decides nothing: the request still waits here, to be decided once asked again.
+    /// Verifies: ADR-0041
+    #[test]
+    fn a_decision_on_a_request_another_instance_is_deciding_is_answered_so() {
+        #[derive(Clone, Default)]
+        struct Deciding(Memory);
+        impl EnrolmentStore for Deciding {
+            fn load(&self) -> Result<Option<Persisted>, String> {
+                self.0.load()
+            }
+            fn save(&self, persisted: &Persisted) -> Result<(), String> {
+                self.0.save(persisted)
+            }
+            fn decide(&self, _: &str, _: &Decision) -> Result<Decided, String> {
+                Ok(Decided::Deciding)
+            }
+            fn approve(
+                &self,
+                _: &str,
+                _: &CertId,
+                _: &mut dyn FnMut() -> Result<Decision, DecisionError>,
+            ) -> Result<Approval, String> {
+                Ok(Approval::Deciding)
+            }
+        }
+        let clock = Arc::new(Manual(AtomicU64::new(1_000_000)));
+        let enrolment = Enrolment::open_on(clock, Box::new(Deciding::default())).expect("open");
+        enrolment.open(600).expect("open the window");
+        enrolment.submit(request("a"), requester());
+        assert_eq!(
+            enrolment.approve("a", &Echo, "host", &|_, _, _| Ok(()), &|_| false),
+            Err(DecisionError::Deciding)
+        );
+        assert_eq!(enrolment.reject("a"), Err(DecisionError::Deciding));
+        assert_eq!(enrolment.pending().len(), 1, "the request still waits here");
+        assert!(!enrolment.is_rejected("a"));
+    }
+
+    /// Verifies: ADR-0038
     #[test]
     fn the_window_is_closed_by_default_and_bounded() {
         let (enrolment, clock) = enrolment();
@@ -838,7 +1344,7 @@ pub(crate) mod tests {
         assert!(!enrolment.is_open(), "the window closes on its own");
     }
 
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0038
     #[test]
     fn a_request_waits_for_an_operator_and_is_answered_once_decided() {
         let (enrolment, _) = enrolment();
@@ -854,7 +1360,7 @@ pub(crate) mod tests {
         );
         assert_eq!(enrolment.pending().len(), 1);
         enrolment
-            .approve("a", &Echo, "host", &|_, _| Ok(()), &|_| false)
+            .approve("a", &Echo, "host", &|_, _, _| Ok(()), &|_| false)
             .expect("approve");
         assert_eq!(
             enrolment.submit(request("a"), requester()),
@@ -865,7 +1371,7 @@ pub(crate) mod tests {
             "a decided request is no longer pending"
         );
         assert_eq!(
-            enrolment.approve("a", &Echo, "host", &|_, _| Ok(()), &|_| false),
+            enrolment.approve("a", &Echo, "host", &|_, _, _| Ok(()), &|_| false),
             Err(DecisionError::NotFound)
         );
 
@@ -878,7 +1384,7 @@ pub(crate) mod tests {
         assert_eq!(enrolment.reject("unknown"), Err(DecisionError::NotFound));
     }
 
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0038
     #[test]
     fn closing_the_window_expires_every_request() {
         let (enrolment, clock) = enrolment();
@@ -890,12 +1396,12 @@ pub(crate) mod tests {
         enrolment.submit(request("b"), requester());
         clock.0.fetch_add(61_000, Ordering::SeqCst);
         assert_eq!(
-            enrolment.approve("b", &Echo, "host", &|_, _| Ok(()), &|_| false),
+            enrolment.approve("b", &Echo, "host", &|_, _, _| Ok(()), &|_| false),
             Err(DecisionError::NotFound)
         );
     }
 
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0038
     #[test]
     fn the_queue_is_bounded() {
         let (enrolment, _) = enrolment();
@@ -1006,7 +1512,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0038
     #[test]
     fn a_request_whose_bootstrap_certificate_is_revoked_is_withdrawn_unsigned() {
         let (enrolment, _clock) = enrolment();
@@ -1015,12 +1521,12 @@ pub(crate) mod tests {
         let bootstrap = requester().bootstrap;
         let revoked = |id: &CertId| *id == bootstrap;
         assert_eq!(
-            enrolment.approve("a", &Never, "host", &|_, _| Ok(()), &revoked),
+            enrolment.approve("a", &Never, "host", &|_, _, _| Ok(()), &revoked),
             Err(DecisionError::Revoked)
         );
         assert!(enrolment.pending().is_empty(), "the request is withdrawn");
         assert_eq!(
-            enrolment.approve("a", &Never, "host", &|_, _| Ok(()), &revoked),
+            enrolment.approve("a", &Never, "host", &|_, _, _| Ok(()), &revoked),
             Err(DecisionError::NotFound),
             "a second approval finds nothing to sign"
         );
@@ -1049,7 +1555,7 @@ pub(crate) mod tests {
                 "good",
                 &Echo,
                 "host",
-                &|issued, _| {
+                &|issued, _, _| {
                     *signed.borrow_mut() = Some(issued.facts.subject_values.clone());
                     Ok(())
                 },
@@ -1063,7 +1569,7 @@ pub(crate) mod tests {
             ..requester()
         };
         enrolment.submit(request("bad"), malformed);
-        let refused = enrolment.approve("bad", &Never, "host", &|_, _| Ok(()), &|_| false);
+        let refused = enrolment.approve("bad", &Never, "host", &|_, _, _| Ok(()), &|_| false);
         assert!(
             matches!(&refused, Err(DecisionError::Subject(e)) if e.contains("organizational_unit")),
             "{refused:?}"
@@ -1071,7 +1577,7 @@ pub(crate) mod tests {
         assert_eq!(enrolment.pending().len(), 1, "the request still waits");
     }
 
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0038
     #[test]
     fn withdrawing_takes_only_the_waiting_requests_of_a_revoked_certificate() {
         let (enrolment, _clock) = enrolment();
@@ -1084,7 +1590,9 @@ pub(crate) mod tests {
         enrolment.submit(request("revoked-decided"), requester());
         enrolment.submit(request("other"), other);
         enrolment
-            .approve("revoked-decided", &Echo, "host", &|_, _| Ok(()), &|_| false)
+            .approve("revoked-decided", &Echo, "host", &|_, _, _| Ok(()), &|_| {
+                false
+            })
             .expect("approve");
         let bootstrap = requester().bootstrap;
         assert_eq!(enrolment.withdraw(&|id| *id == bootstrap), 1);

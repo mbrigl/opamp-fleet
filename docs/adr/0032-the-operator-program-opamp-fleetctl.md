@@ -9,8 +9,8 @@
 
 An Agent proves fleet membership with a client certificate in the TLS handshake and nothing else,
 and the Server presents a certificate of its own on both planes
-([ADR-0021](0021-admission-by-client-certificate-and-revocation.md),
-[ADR-0012](0012-tls-1-3-two-planes-and-bounded-input.md)). That takes three certificate
+([ADR-0038](0038-admission-by-client-certificate-and-revocation.md),
+[ADR-0045](0045-tls-1-3-two-planes-and-bounded-input.md)). That takes three certificate
 authorities, each with one job: a server CA that signs the Server's certificate and a Gateway's
 downstream certificate, the client CA the Server signs every host's certificate with, and a
 bootstrap CA that signs the certificates a new host enrols with
@@ -63,7 +63,7 @@ The forces:
   client checks a server certificate's names against its subject alternative names
   (RFC 9525 section 2), and the Server tells an enrolment connection from a member's by its
   issuer, names a host by the SAN URI it puts in and decides a renewal by its proof
-  ([ADR-0021](0021-admission-by-client-certificate-and-revocation.md),
+  ([ADR-0038](0038-admission-by-client-certificate-and-revocation.md),
   [ADR-0015](0015-client-modes-and-the-gateway.md)). The subject is free to say what an auditor
   needs, and the name an operator wants there is that of their own installation, which no build
   constant knows.
@@ -83,7 +83,7 @@ The forces:
   with `npm install -g fleetctl` and from its GitHub releases. Two `fleetctl` on one `PATH` cannot
   both be found, and a search for either finds the other.
 - **The release is a contract too.** It is one workflow run from one version
-  ([ADR-0034](0034-releases-attestations-and-the-server-image.md)), and every row of its build
+  ([ADR-0040](0040-releases-attestations-and-the-server-image.md)), and every row of its build
   matrix already builds the packer for the runner it runs on, Windows included, because the
   Client's archives are packed by it.
 - **Some places want a PEM pair while only a `bootstrap.p12` is at hand:** a host whose install is
@@ -132,7 +132,7 @@ step of setting up or running a fleet needs `openssl` or another external tool.
 
 3. **One archive per target, named like the Client's.**
    `opamp-fleetctl_<version>_<os>_<arch>.tar.gz`, by the asset-name grammar and the platform
-   tokens of [ADR-0034](0034-releases-attestations-and-the-server-image.md), packed by
+   tokens of [ADR-0040](0040-releases-attestations-and-the-server-image.md), packed by
    `opamp-fleetctl package pack --format tar.gz` with the one member `opamp-fleetctl` and its
    executable mode. No `.deb`, `.rpm` or `.msi` carries it. The four archives are assets of the
    release beside the Client's and are covered by the same `SHA256SUMS`.
@@ -162,7 +162,7 @@ step of setting up or running a fleet needs `openssl` or another external tool.
    `server pki status` says when those of the Server host end. The Server's command runs and exits
    like `hash-credential` and `audit-verify`, before the Server starts serving. The Server binary
    carries no code that makes a CA or a server certificate. It signs host certificates
-   ([ADR-0021](0021-admission-by-client-certificate-and-revocation.md)) and bootstrap
+   ([ADR-0038](0038-admission-by-client-certificate-and-revocation.md)) and bootstrap
    certificates ([ADR-0022](0022-bootstrap-certificates-and-enrolment.md)). When a certificate
    counts as ending (clause 21) is one rule in `fleet-core`, plain date arithmetic, so both
    commands and the running Server judge alike, and each program reads the certificate itself.
@@ -192,7 +192,7 @@ step of setting up or running a fleet needs `openssl` or another external tool.
 9. **The CAs are told apart by role and sign no CA.** The three CAs are `CN=<product> Server CA`,
    `CN=<product> Client CA` and `CN=<product> Bootstrap CA` (clause 17), so the bootstrap CA never
    shares a subject with the client CA
-   ([ADR-0021](0021-admission-by-client-certificate-and-revocation.md)). Each CA certificate is
+   ([ADR-0038](0038-admission-by-client-certificate-and-revocation.md)). Each CA certificate is
    `CA:TRUE` with a path length of 0, `keyCertSign` and `cRLSign`.
 
 10. **A server certificate names what is dialled in its SAN and its role in its subject.**
@@ -225,7 +225,7 @@ step of setting up or running a fleet needs `openssl` or another external tool.
     certificate ends no later than the server CA that signs it, and one asked to outlive it is cut
     to the CA's end with a notice. Bootstrap certificates live as clause 14 states. Host
     certificates are the running Server's, signed for `[client_ca] validity_days` as
-    [ADR-0021](0021-admission-by-client-certificate-and-revocation.md) states.
+    [ADR-0038](0038-admission-by-client-certificate-and-revocation.md) states.
 
 14. **A bootstrap certificate lives 10 days by default, at most 90, never past its CA.**
     `validity_days` of the issuing request runs from 1 to 90, and anything else is answered `400`.
@@ -273,7 +273,7 @@ step of setting up or running a fleet needs `openssl` or another external tool.
     whole life is shorter than 90 days, within the last third of it — is *ending*: it is logged as
     a warning naming the file, its subject and the date, and recorded in the audit as
     `pki.expiring`; one that has ended is logged as an error and recorded as `pki.expired`
-    ([ADR-0023](0023-an-append-only-audit-record.md)). Neither stops the Server: the hosts it
+    ([ADR-0039](0039-an-append-only-audit-record.md)). Neither stops the Server: the hosts it
     serves decide for themselves, and a Server that refuses to start cannot be told to renew.
 
 22. **`pki status` says when each certificate ends.** `server pki status --config <server.toml>`
@@ -352,7 +352,7 @@ revocation lists or OCSP; ACME and certificates from a public CA, which the Serv
 are; a `pki` command on the Client binary; the Server's `pki status` on Windows or macOS, where the
 Server does not run; the operator tool on Windows; native packages, Homebrew, `npm` or any other
 installer; provenance of the release's assets
-([ADR-0034](0034-releases-attestations-and-the-server-image.md)); commands that drive the running
+([ADR-0040](0040-releases-attestations-and-the-server-image.md)); commands that drive the running
 fleet through the Operator plane beyond the upload `package fetch` makes; writing the extracted
 key encrypted, extracting files other than the bootstrap form, and making a PKCS#12 file with the
 tool; the file modes the repack keeps, including group- and world-writable bits a tree may carry,
@@ -425,7 +425,7 @@ origin, which the hash of what was downloaded settles.
   side channel, and a route would let the operator credential alone mint a member.
 - **Limit every signature of the running Server to its CA's end, and refuse renewals under an
   ended CA.** It belongs with how the Server signs
-  ([ADR-0021](0021-admission-by-client-certificate-and-revocation.md)); this decision warns
+  ([ADR-0038](0038-admission-by-client-certificate-and-revocation.md)); this decision warns
   instead (clauses 21 and 22).
 - **Encrypt the offline CA keys with a passphrase.** It needs an encryption crate beyond clause 5
   and a prompt the commands must handle; kept out of scope, not ruled out.
@@ -452,7 +452,7 @@ origin, which the hash of what was downloaded settles.
   protected at rest. But the Client's install reads the pair in the clear
   ([ADR-0019](0019-the-installed-service-and-its-state.md)), and neither `rustls` nor `rcgen`
   reads an encrypted key. Owner-only permissions are what every other key is given
-  ([ADR-0021](0021-admission-by-client-certificate-and-revocation.md)).
+  ([ADR-0038](0038-admission-by-client-certificate-and-revocation.md)).
 - **`p12-extract` writes the certificate only.** The key never leaves the file. Not chosen: the
   operator asked for the key, and the PEM pair is a form the Client takes.
 - **Read any PKCS#12 file (other schemes, several certificates).** This is more general, but needs
@@ -544,16 +544,16 @@ origin, which the hash of what was downloaded settles.
   from Debian packages leaves links pointing at files no tree carries. Whether any of them is
   absolute is not verified.
 - This project's own requirements:
-  [ADR-0021](0021-admission-by-client-certificate-and-revocation.md) on admission, the client CA
+  [ADR-0038](0038-admission-by-client-certificate-and-revocation.md) on admission, the client CA
   and how the Server signs;
   [ADR-0022](0022-bootstrap-certificates-and-enrolment.md) on the bootstrap CA, the crates
   issuance adds, the `bootstrap.p12` file and its reader;
-  [ADR-0012](0012-tls-1-3-two-planes-and-bounded-input.md) on the planes;
+  [ADR-0045](0045-tls-1-3-two-planes-and-bounded-input.md) on the planes;
   `docs/SPECIFICATION.md` on how an Agent obtains its certificate;
   [ADR-0027](0027-packages-signatures-and-delivery.md) on why a package is signed by a key the
   operator holds and what a tree package may carry;
   [ADR-0019](0019-the-installed-service-and-its-state.md) on the member a package artifact
-  carries; [ADR-0034](0034-releases-attestations-and-the-server-image.md) on the release, its
+  carries; [ADR-0040](0040-releases-attestations-and-the-server-image.md) on the release, its
   naming and its assets.
 
 ## Consequences

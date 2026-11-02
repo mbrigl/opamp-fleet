@@ -937,7 +937,7 @@ fn our_client_against_go_tls_server(scheme: &str) {
     );
 }
 
-// Verifies: ADR-0011, ADR-0012, ADR-0021
+// Verifies: ADR-0011, ADR-0045, ADR-0038
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "needs a Go toolchain; run with --ignored in the interop job"]
 async fn opamp_go_client_against_our_tls_and_admission() {
@@ -945,7 +945,7 @@ async fn opamp_go_client_against_our_tls_and_admission() {
     go_client_against_our_tls_server("https").await;
 }
 
-// Verifies: ADR-0011, ADR-0012, ADR-0021
+// Verifies: ADR-0011, ADR-0045, ADR-0038
 #[test]
 #[ignore = "needs a Go toolchain; run with --ignored in the interop job"]
 fn our_client_against_opamp_go_server_requiring_a_client_certificate() {

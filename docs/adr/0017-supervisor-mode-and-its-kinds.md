@@ -303,7 +303,7 @@ remote configuration and run only on what the operator placed on the host.
     wrapped kind's program key, `program_path`, `service_name`, `endpoint_port` and the three
     timing keys; `command`'s `working_dir` and `reload_signal`; and `[supervisor.attributes]`,
     since a Server Label tags one Agent among several
-    ([ADR-0024](0024-the-fleet-record-of-agents-and-hosts.md)) while the Client-wide
+    ([ADR-0043](0043-the-fleet-record-of-agents-and-hosts.md)) while the Client-wide
     `[attributes]` describe the host. A configuration a freshly self-updated version refuses is
     that update's failed attempt: a run resolves the update in flight even when the file does not
     load, so the host returns to the version that could read it

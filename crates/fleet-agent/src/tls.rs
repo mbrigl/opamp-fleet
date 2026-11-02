@@ -1,4 +1,4 @@
-//! Which TLS material the Client uses (ADR-0012, ADR-0021), read from disk and handed to `opamp` as
+//! Which TLS material the Client uses (ADR-0045, ADR-0038), read from disk and handed to `opamp` as
 //! [`ClientTls`] (ADR-0008).
 //!
 //! The decisions are the Client's: an optional CA file that *replaces* the built-in roots, and the
@@ -14,13 +14,13 @@ use zeroize::Zeroizing;
 use crate::config::ClientConfig;
 
 /// The Server-issued client certificate, in the state directory beside the connection settings —
-/// it belongs to the Client's one upstream connection, not to any single Agent (ADR-0021).
+/// it belongs to the Client's one upstream connection, not to any single Agent (ADR-0038).
 pub const ISSUED_CERT_FILE: &str = "client-cert.pem";
 /// The private key of [`ISSUED_CERT_FILE`]. Generated on this host and never sent anywhere: what
 /// leaves is a CSR over its public half.
 pub const ISSUED_KEY_FILE: &str = "client-key.pem";
 /// The key a request in flight asks to be certified, kept apart from [`ISSUED_KEY_FILE`] so the
-/// certificate in force keeps its own key until the new one is proved (ADR-0021 clause 10).
+/// certificate in force keeps its own key until the new one is proved (ADR-0038 clause 10).
 pub const PENDING_KEY_FILE: &str = "client-key.pending.pem";
 /// An issued certificate staged beside [`PENDING_KEY_FILE`] while the two are put in force, so a
 /// swap cut short is completed at the next start rather than leaving a mismatched pair.
@@ -38,7 +38,7 @@ pub fn client_tls(config: &ClientConfig) -> Result<ClientTls, String> {
 }
 
 /// The same, for a **candidate** identity: an offered certificate is proved by connecting with it
-/// before it is stored (ADR-0013's MUST, applied to the certificate in ADR-0021), so the
+/// before it is stored (ADR-0013's MUST, applied to the certificate in ADR-0038), so the
 /// certificate under test comes from the offer while its key is the pending one on disk.
 ///
 /// # Errors

@@ -145,7 +145,7 @@ impl Pool {
     /// Opens one upstream connection and starts its reader and writer tasks.
     async fn open(&self, uid: InstanceUid) -> Result<mpsc::Sender<Vec<u8>>, String> {
         // This Gateway's own identity, and no `Authorization`: a downstream peer's is never
-        // forwarded, and nothing is sent in its place (ADR-0015 clause 11, ADR-0021).
+        // forwarded, and nothing is sent in its place (ADR-0015 clause 11, ADR-0038).
         let mut upstream = crate::transport::connection(&self.config)?;
         upstream.max_message_size = self.limit;
         let socket = upstream.connect_websocket().await?;

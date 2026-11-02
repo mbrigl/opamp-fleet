@@ -306,7 +306,7 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
 
     // Tagging *one* Agent among several is the fleet's job now: one label, keyed by the Agent's
     // uid, matched by the same Selectors — and it takes effect without touching the host's file
-    // (ADR-0024, ADR-0017).
+    // (ADR-0043, ADR-0017).
     let uid = opamp::uid::InstanceUid::parse(&stub.instance_uid).expect("the uid the Server holds");
     assert!(state
         .set_labels(&uid, [("role".to_string(), "edge".to_string())].into())

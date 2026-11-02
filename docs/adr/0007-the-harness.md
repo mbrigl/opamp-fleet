@@ -29,7 +29,7 @@ What the repository shows:
 - `AGENTS.md` is the rule file, written for no vendor. The only agent configuration in the tree is
   Claude Code's under `.claude/`, whose `CLAUDE.md` points to `AGENTS.md` and whose `skills/` holds
   one pointer per skill into `.agents/skills/`.
-- The `Deciders` lines of ADR-0007 to ADR-0034 name Markus Brigl. Those of the template ADRs
+- The `Deciders` lines of ADR-0007 to ADR-0040 name Markus Brigl. Those of the template ADRs
   ADR-0001 to ADR-0006 name the NUC maintainer and Markus Brigl, who took them up for the project.
 - [`AGENTS.md` §5](../../AGENTS.md#5-quality-bar--definition-of-done) requires a review in a fresh
   context before a change is handed off, through the `review` skill, and never by the session that

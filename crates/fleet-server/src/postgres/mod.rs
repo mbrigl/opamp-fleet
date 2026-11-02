@@ -1,6 +1,7 @@
-//! The Server's records in one PostgreSQL database (ADR-0029): the connection every PostgreSQL
-//! adapter shares, the lock that keeps one Server per database, and the schema the Server applies
-//! itself.
+//! The Server's records in one PostgreSQL database (ADR-0044): the connection every PostgreSQL
+//! adapter shares, the exclusive lock of an instance that must be alone on it, the leases every
+//! instance holds, the notifications they share, and the schema the Server applies itself
+//! (ADR-0041).
 //!
 //! The connection is TLS 1.3 on the *ring*-only client of `opamp::tls`, the database's
 //! certificate verified against the public roots or the root `ca_file` names and its host name
@@ -14,13 +15,17 @@
 //! a channel for its work there.
 
 pub mod agents;
+pub mod audit;
+pub mod audit_prune;
 pub mod bootstrap;
 pub mod configs;
 pub mod deployments;
 pub mod enrolment;
 pub mod floors;
 pub mod import;
+pub mod lease;
 pub mod ledger;
+pub mod notify;
 pub mod packages;
 pub mod schema;
 
@@ -47,7 +52,7 @@ const WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How long one call — every round trip of its transaction, the wait for a connection included —
 /// may take before it fails. The Server's callers hold their own locks while a record is written
-/// (ADR-0024 clause 4), so a database that stops answering holds them this long at most. The
+/// (ADR-0043 clause 4), so a database that stops answering holds them this long at most. The
 /// database's own timeouts below end a statement it is still working on; this one ends a call
 /// whose database, or the network to it, does not answer at all.
 pub(crate) const CALL_TIMEOUT: Duration = Duration::from_secs(15);
@@ -73,21 +78,47 @@ const KEEPALIVES_INTERVAL: Duration = Duration::from_secs(5);
 const KEEPALIVES_RETRIES: u32 = 3;
 
 /// The connections the pool holds at most. The Server writes one record at a time per act, and
-/// the in-memory state answers every read (ADR-0029 clause 3), so a few suffice.
+/// the in-memory state answers every read (ADR-0044 clause 3), so a few suffice.
 const POOL_SIZE: usize = 8;
 
 /// The name the Server's connections carry in `pg_stat_activity`.
 const APPLICATION_NAME: &str = "opamp-fleet-server";
 
-/// One database, reached through a pool, held by this Server alone while it runs.
+/// Whether an instance must be the only one on its database, and why.
+///
+/// An instance whose blobs or CA keys are files must be alone
+/// (ADR-0041
+/// clause 2): what it keeps on its own disk no other instance can reach.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Exclusive {
+    /// Alone, because of the key this names, such as `[blobs] store = "fs"`.
+    Alone(String),
+    /// One of any number of instances.
+    Shared,
+}
+
+impl Exclusive {
+    /// Whether this instance must be alone.
+    #[must_use]
+    pub fn alone(&self) -> bool {
+        matches!(self, Exclusive::Alone(_))
+    }
+}
+
+/// One database, reached through a pool.
 pub struct Database {
     pool: Pool,
-    /// The connection that holds the session-level advisory lock (ADR-0029 clause 23), open for as
-    /// long as the Server runs.
-    _lock: tokio_postgres::Client,
+    /// The connection that holds the exclusive lock of an instance that must be alone, open for as
+    /// long as the instance runs; none for an instance that shares the database.
+    _lock: Option<tokio_postgres::Client>,
     /// The server process of that connection, as `pg_stat_activity` names it.
     #[cfg_attr(not(test), allow(dead_code))]
-    lock_pid: i32,
+    lock_pid: Option<i32>,
+    /// Whether this instance must be alone, and why.
+    exclusive: Exclusive,
+    /// The connection's settings and TLS, for the connection that listens for notifications.
+    pg: tokio_postgres::Config,
+    tls: Tls,
     /// Set once the lock's connection has ended: from then on another Server may hold the
     /// database, and this one refuses every call ([`run_within`](Self::run_within)).
     lost: Arc<AtomicBool>,
@@ -95,8 +126,21 @@ pub struct Database {
     closing: Arc<AtomicBool>,
     /// `database <dbname> on <host>:<port>`, what every error names.
     name: String,
+    /// What the notifications this instance sends name as their sender: random, one per open
+    /// database, so two instances in one process are two origins.
+    origin: String,
+    /// The end of the file record under `data_dir/audit/` this Server kept before its record moved
+    /// into the database, which the first chain names as its predecessor
+    /// ([`offer_archive`](Self::offer_archive)).
+    archive: std::sync::Mutex<Option<(u64, String)>>,
     /// What one call may take ([`CALL_TIMEOUT`]).
     bound: Duration,
+    /// How long a sweep waits for the blob store's lock, in milliseconds ([`SWEEP_WAIT`]).
+    sweep_wait: std::sync::atomic::AtomicU64,
+    /// How many holds on the blob store's lock lost it with their session, and how many of their
+    /// sessions ended at all.
+    holds_lost: Arc<std::sync::atomic::AtomicUsize>,
+    holds_ended: Arc<std::sync::atomic::AtomicUsize>,
     /// Dropped last: the connections' tasks run on it.
     bridge: Bridge,
 }
@@ -109,24 +153,29 @@ enum Tls {
 }
 
 impl Database {
-    /// Connects to the database `config` names, takes its lock and brings its schema up to date
-    /// (ADR-0029 clauses 22 to 24).
+    /// Connects to the database `config` names, takes the exclusive lock when `exclusive` says
+    /// this instance must be alone, and brings its schema up to date (ADR-0044 clauses 22 to 24).
     ///
     /// # Errors
     /// Returns an error naming the key when the password or CA file cannot be read, naming the host
-    /// and the database when it cannot be reached or another Server holds it, and naming both
-    /// versions when its schema needs a newer Server.
-    pub fn open(config: &PostgresConfig) -> Result<Arc<Self>, String> {
-        Self::open_in(config, None)
+    /// and the database when it cannot be reached or another instance holds it alone, and naming
+    /// both versions when its schema needs a newer Server.
+    pub fn open(config: &PostgresConfig, exclusive: Exclusive) -> Result<Arc<Self>, String> {
+        Self::open_in(config, exclusive, None)
     }
 
     /// [`open`](Self::open), in the schema `schema` rather than the role's default: what the tests
-    /// work in, one schema each.
-    pub(crate) fn open_in(
+    /// work in, one schema each, the integration tests of several instances among them.
+    ///
+    /// # Errors
+    /// As [`open`](Self::open).
+    #[doc(hidden)]
+    pub fn open_in(
         config: &PostgresConfig,
+        exclusive: Exclusive,
         schema: Option<&str>,
     ) -> Result<Arc<Self>, String> {
-        let database = Self::connect(config, schema)?;
+        let database = Self::connect_as(config, schema, CALL_TIMEOUT, exclusive)?;
         let applied = database.apply_schema(schema::MIGRATIONS)?;
         if !applied.versions.is_empty() {
             tracing::info!(
@@ -138,7 +187,8 @@ impl Database {
         Ok(Arc::new(database))
     }
 
-    /// Connects and takes the lock, and touches nothing else.
+    /// Connects and takes the exclusive lock, and touches nothing else: what `server
+    /// migrate-to-postgres` copies under, while no Server runs.
     ///
     /// # Errors
     /// As [`open`](Self::open), the schema aside.
@@ -153,6 +203,21 @@ impl Database {
         schema: Option<&str>,
         bound: Duration,
     ) -> Result<Self, String> {
+        Self::connect_as(
+            config,
+            schema,
+            bound,
+            Exclusive::Alone("server migrate-to-postgres".to_string()),
+        )
+    }
+
+    /// Connects, and takes the exclusive lock when `exclusive` says this instance must be alone.
+    pub(crate) fn connect_as(
+        config: &PostgresConfig,
+        schema: Option<&str>,
+        bound: Duration,
+        exclusive: Exclusive,
+    ) -> Result<Self, String> {
         let name = format!(
             "database {} on {}:{}",
             config.dbname, config.host, config.port
@@ -164,51 +229,68 @@ impl Database {
         let tls = tls(config)?;
         // `tokio-postgres` copies the password into its own `Config`; the one read is wiped when it
         // is dropped (ADR-0014 clauses 3 and 4).
-        let pg = pg_config(config, &password, schema);
+        let origin = new_origin()?;
+        let mut pg = pg_config(config, &password, schema);
+        // Every connection names this instance as the origin of what it announces
+        // (`notify::ORIGIN_SETTING`), the listening one included, so its own are passed over.
+        let options = format!(
+            "{} -c {}={origin}",
+            pg.get_options().unwrap_or_default(),
+            notify::ORIGIN_SETTING
+        );
+        pg.options(options);
         let bridge = Bridge::new("records-postgres")?;
         let (lost, closing) = (
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
         );
-        let lock = bridge
-            .run({
-                let (pg, tls) = (pg.clone(), tls.clone());
-                let watch = LockWatch {
-                    name: name.clone(),
-                    lost: lost.clone(),
-                    closing: closing.clone(),
-                };
-                bounded(bound, async move {
-                    let client = connect_watched(&pg, &tls, watch).await?;
-                    let row = client
-                        .query_one(
-                            "SELECT pg_try_advisory_lock(hashtextextended('opamp-fleet-server:' \
-                             || coalesce(current_schema(), ''), 0)), pg_backend_pid()",
-                            &[],
-                        )
-                        .await
-                        .map_err(sql)?;
-                    Ok::<_, String>((client, row.get::<_, bool>(0), row.get::<_, i32>(1)))
-                })
-            })
-            .map_err(|e| format!("cannot reach the {name}: {e}"))?;
-        let (lock, held, lock_pid) = lock;
-        if !held {
-            return Err(format!(
-                "another Server holds the {name} — one Server per database; stop the other one \
-                 first"
-            ));
-        }
-        let manager = match tls {
+        let (lock, lock_pid) = match &exclusive {
+            Exclusive::Shared => (None, None),
+            Exclusive::Alone(because) => {
+                let (lock, held, pid) = bridge
+                    .run({
+                        let (pg, tls) = (pg.clone(), tls.clone());
+                        let watch = LockWatch {
+                            name: name.clone(),
+                            lost: lost.clone(),
+                            closing: closing.clone(),
+                        };
+                        bounded(bound, async move {
+                            let client = connect_watched(&pg, &tls, watch).await?;
+                            let row = client
+                                .query_one(
+                                    &format!(
+                                        "SELECT pg_try_advisory_lock({EXCLUSIVE_LOCK}), \
+                                         pg_backend_pid()"
+                                    ),
+                                    &[],
+                                )
+                                .await
+                                .map_err(sql)?;
+                            Ok::<_, String>((client, row.get::<_, bool>(0), row.get::<_, i32>(1)))
+                        })
+                    })
+                    .map_err(|e| format!("cannot reach the {name}: {e}"))?;
+                if !held {
+                    return Err(format!(
+                        "another instance holds the {name} alone, and this one must be alone too \
+                         because of {because} — one instance per database while either keeps its \
+                         blobs or its CA keys as files; stop the other one first"
+                    ));
+                }
+                (Some(lock), Some(pid))
+            }
+        };
+        let manager = match tls.clone() {
             Tls::Rustls(tls) => Manager::from_config(
-                pg,
+                pg.clone(),
                 tls,
                 ManagerConfig {
                     recycling_method: RecyclingMethod::Fast,
                 },
             ),
             Tls::Plain => Manager::from_config(
-                pg,
+                pg.clone(),
                 NoTls,
                 ManagerConfig {
                     recycling_method: RecyclingMethod::Fast,
@@ -227,10 +309,20 @@ impl Database {
             pool,
             _lock: lock,
             lock_pid,
+            exclusive,
+            pg,
+            tls,
             lost,
             closing,
             name,
+            origin,
+            archive: std::sync::Mutex::new(None),
             bound,
+            holds_lost: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            holds_ended: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            sweep_wait: std::sync::atomic::AtomicU64::new(
+                u64::try_from(SWEEP_WAIT.as_millis()).unwrap_or(u64::MAX),
+            ),
             bridge,
         })
     }
@@ -241,19 +333,60 @@ impl Database {
         &self.name
     }
 
-    /// Applies `migrations` in one transaction (ADR-0029 clause 22).
+    /// Whether this instance must be alone on the database, and why.
+    #[must_use]
+    pub fn exclusive(&self) -> &Exclusive {
+        &self.exclusive
+    }
+
+    /// Whether the exclusive lock of an instance that must be alone has been lost: from then on
+    /// every call is refused. Never, for an instance that shares the database.
+    #[must_use]
+    pub fn lock_lost(&self) -> bool {
+        self.lost.load(Ordering::SeqCst)
+    }
+
+    /// Applies `migrations` in one transaction (ADR-0044 clause 22).
     ///
     /// # Errors
-    /// Returns an error naming the database when the schema needs a newer Server or a statement
-    /// fails; the transaction is then rolled back and the database left as it was.
+    /// Returns an error naming the database when the schema needs a newer Server, when this
+    /// instance shares the database and another Server holds it alone, or when a statement fails;
+    /// the transaction is then rolled back and the database left as it was.
     pub(crate) fn apply_schema(
         &self,
         migrations: &'static [schema::Migration],
     ) -> Result<schema::Applied, String> {
         let ours = schema::server_version();
+        let shared = matches!(self.exclusive, Exclusive::Shared);
         self.run(move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
+            // Instances that start together migrate one after the other.
+            transaction
+                .execute(
+                    &format!("SELECT pg_advisory_xact_lock({MIGRATION_LOCK})"),
+                    &[],
+                )
+                .await
+                .map_err(sql)?;
+            // A Server that holds the database alone checked its schema at its own start and
+            // would serve on in the one migrated beside it: a Server of 0.7.1 holds this lock for
+            // its whole run. Shared and held to the commit, the lock keeps such a Server from
+            // starting meanwhile, and lets instances that share the database pass each other.
+            // An instance that must be alone holds it already, on a connection of its own.
+            if shared {
+                let free: bool = transaction
+                    .query_one(
+                        &format!("SELECT pg_try_advisory_xact_lock_shared({EXCLUSIVE_LOCK})"),
+                        &[],
+                    )
+                    .await
+                    .map_err(sql)?
+                    .get(0);
+                if !free {
+                    return Err(HELD_ALONE_BEFORE_MIGRATING.to_string());
+                }
+            }
             let applied = schema::apply(&*transaction, migrations, ours).await?;
             transaction.commit().await.map_err(sql)?;
             Ok(applied)
@@ -279,6 +412,20 @@ impl Database {
                 .map_err(sql)?;
             Ok(rows.iter().map(|row| row.get(0)).collect())
         })
+    }
+
+    /// Offers `end`, the `seq` and the hash of the last entry of the audit files a Server on
+    /// PostgreSQL wrote under `data_dir/audit/` before its record moved into the database, as the
+    /// archive: the take that opens the first chain the database holds records it, unless an
+    /// archive is recorded already, and the chain names it as its predecessor
+    /// (ADR-0042 clause 6).
+    pub fn offer_archive(&self, end: Option<(u64, String)>) {
+        *self.archive.lock().expect("archive lock") = end;
+    }
+
+    /// What [`offer_archive`](Self::offer_archive) offered.
+    pub(crate) fn archive_offered(&self) -> Option<(u64, String)> {
+        self.archive.lock().expect("archive lock").clone()
     }
 
     /// Runs `work` on the database's runtime with the pool, and waits for it at most
@@ -338,16 +485,220 @@ impl Database {
     }
 }
 
+impl Database {
+    /// Holds [`BLOB_LOCK`] alone on a connection of its own until the hold is dropped, which
+    /// closes the connection: what a sweep, a staging cleanup and `server blobs-to-s3` hold,
+    /// waiting up to [`SWEEP_WAIT`] for it. An upload takes it shared in its entry's transaction
+    /// instead. The hold's connection runs on this database's runtime, so the lock is let go,
+    /// too, once the database is dropped: the caller keeps it for as long as it holds.
+    ///
+    /// # Errors
+    /// Returns an error naming the lock when it is not had within the wait, and naming the
+    /// database when it cannot be reached.
+    pub fn hold_blobs(&self) -> Result<crate::blobs::BlobHold, String> {
+        let wait = Duration::from_millis(self.sweep_wait.load(Ordering::SeqCst));
+        self.hold_blobs_within(wait)
+    }
+
+    /// How many holds on the blob store's lock lost it with their session, and how many sessions
+    /// of a hold ended at all: what a test waits for.
+    #[cfg(test)]
+    pub(crate) fn holds_lost(&self) -> (usize, usize) {
+        (
+            self.holds_lost.load(Ordering::SeqCst),
+            self.holds_ended.load(Ordering::SeqCst),
+        )
+    }
+
+    /// Has every sweep wait `wait` for the blob store's lock rather than [`SWEEP_WAIT`]: what the
+    /// tests of a lock held elsewhere wait for.
+    #[cfg(test)]
+    pub(crate) fn wait_for_sweeps(&self, wait: Duration) {
+        self.sweep_wait.store(
+            u64::try_from(wait.as_millis()).unwrap_or(u64::MAX),
+            Ordering::SeqCst,
+        );
+    }
+
+    /// [`hold_blobs`](Self::hold_blobs), waiting `wait`.
+    pub(crate) fn hold_blobs_within(
+        &self,
+        wait: Duration,
+    ) -> Result<crate::blobs::BlobHold, String> {
+        let (pg, tls) = (self.pg.clone(), self.tls.clone());
+        let watch = Watch {
+            holding: Arc::new(AtomicBool::new(false)),
+            lost: Arc::new(AtomicBool::new(false)),
+            counted: self.holds_lost.clone(),
+            ended: self.holds_ended.clone(),
+        };
+        let (holding, lost) = (watch.holding.clone(), watch.lost.clone());
+        let held = self.run_within(self.bound.saturating_add(wait), move |_pool| async move {
+            let client = lock_session(&pg, &tls, wait, watch).await?;
+            client
+                .execute(&format!("SELECT pg_advisory_lock({BLOB_LOCK})"), &[])
+                .await
+                .map_err(blob_lock_refused)?;
+            // Held from here on: a session that ends now loses the lock, and is logged.
+            holding.store(true, Ordering::SeqCst);
+            #[cfg(test)]
+            let settings = {
+                let show = |name: &'static str| {
+                    let client = &client;
+                    async move {
+                        client
+                            .query_one(&format!("SHOW {name}"), &[])
+                            .await
+                            .map(|row| row.get::<_, String>(0))
+                            .map_err(sql)
+                    }
+                };
+                (
+                    show("statement_timeout").await?,
+                    show("lock_timeout").await?,
+                )
+            };
+            Ok(LockHold {
+                holding,
+                client,
+                #[cfg(test)]
+                settings,
+            })
+        })?;
+        #[cfg(test)]
+        let settings = held.settings.clone();
+        let hold = crate::blobs::BlobHold::of(Box::new(held), lost);
+        #[cfg(test)]
+        let hold = hold.with_settings(settings);
+        Ok(hold)
+    }
+}
+
+/// Why the blob store's lock was not had, naming it.
+pub(crate) fn blob_lock_refused(error: tokio_postgres::Error) -> String {
+    format!(
+        "{BLOB_LOCK_NAME} is not to be had — another instance sweeps the blobs or records an \
+         upload, or `server blobs-to-s3` runs: {}",
+        sql(error)
+    )
+}
+
+/// A hold on the blob store's lock: its session, and whether it still holds the lock.
+struct LockHold {
+    holding: Arc<AtomicBool>,
+    #[allow(dead_code)]
+    client: tokio_postgres::Client,
+    /// The session's `statement_timeout` and `lock_timeout` once it had the lock.
+    #[cfg(test)]
+    settings: (String, String),
+}
+
+impl Drop for LockHold {
+    fn drop(&mut self) {
+        // Let go on purpose: the session's end that follows loses nothing.
+        self.holding.store(false, Ordering::SeqCst);
+    }
+}
+
+/// What watches the session of a hold on the blob store's lock.
+struct Watch {
+    /// Set once the session has the lock, and cleared when the hold lets it go.
+    holding: Arc<AtomicBool>,
+    /// Set when the session ends while it holds the lock.
+    lost: Arc<AtomicBool>,
+    /// The database's counts of holds lost and of sessions ended.
+    counted: Arc<std::sync::atomic::AtomicUsize>,
+    ended: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Watch {
+    /// The session has ended: a loss when it held the lock, which is logged; nothing when it never
+    /// had it or let it go.
+    fn ended(&self, result: Result<(), tokio_postgres::Error>) {
+        if self.holding.load(Ordering::SeqCst) {
+            self.lost.store(true, Ordering::SeqCst);
+            self.counted.fetch_add(1, Ordering::SeqCst);
+            tracing::warn!(
+                error = ?result.err().map(sql),
+                "the session that held {BLOB_LOCK_NAME} ended while it was held: the lock is gone, \
+                 and a sweep of another instance may run beside what this one does"
+            );
+        }
+        self.ended.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// The session a sweep's hold on the blob store's lock is taken on, outside the pool. It waits the
+/// whole of `wait` for the lock: its `lock_timeout` is `wait`, and its `statement_timeout`, which
+/// would end the wait at the pool's 10 seconds first, a little more. `watch` learns when it ends.
+async fn lock_session(
+    pg: &tokio_postgres::Config,
+    tls: &Tls,
+    wait: Duration,
+    watch: Watch,
+) -> Result<tokio_postgres::Client, String> {
+    let client = match tls {
+        Tls::Rustls(tls) => {
+            let (client, connection) = pg.connect(tls.clone()).await.map_err(sql)?;
+            tokio::spawn(async move { watch.ended(connection.await) });
+            client
+        }
+        Tls::Plain => {
+            let (client, connection) = pg.connect(NoTls).await.map_err(sql)?;
+            tokio::spawn(async move { watch.ended(connection.await) });
+            client
+        }
+    };
+    let millis = wait.as_millis();
+    client
+        .batch_execute(&format!(
+            "SET lock_timeout = {millis}; SET statement_timeout = {}",
+            millis.saturating_add(5_000)
+        ))
+        .await
+        .map_err(sql)?;
+    Ok(client)
+}
+
 impl Drop for Database {
     fn drop(&mut self) {
         self.closing.store(true, Ordering::SeqCst);
     }
 }
 
+/// The exclusive lock, by the key its schema gives it: the key Servers up to 0.7 hold, so such a
+/// Server and an instance that must be alone keep each other out.
+pub(crate) const EXCLUSIVE_LOCK: &str =
+    "hashtextextended('opamp-fleet-server:' || coalesce(current_schema(), ''), 0)";
+
+/// Why an instance that shares the database neither migrates nor starts while another Server
+/// holds it alone (ADR-0044 clause 22).
+const HELD_ALONE_BEFORE_MIGRATING: &str = "another Server holds the database alone — a Server of \
+     0.7.1 or earlier, or an instance that keeps its blobs as files ([blobs] store = \"fs\") or a \
+     CA key in a file ([client_ca] key_file, [enrolment] bootstrap_ca_key_file); stop it before \
+     this instance starts, which changed nothing in the database";
+
+/// The lock of the blob store (ADR-0044 clause 14), by the key
+/// its schema gives it: a sweep or a staging cleanup holds it alone, an upload shared in the
+/// transaction that checks its blob and writes its entry, and `server blobs-to-s3` alone for its
+/// run.
+pub(crate) const BLOB_LOCK: &str =
+    "hashtextextended('opamp-fleet-server-blobs:' || coalesce(current_schema(), ''), 0)";
+
+/// The name of [`BLOB_LOCK`] in what an operator reads.
+const BLOB_LOCK_NAME: &str = "the blob store's lock (opamp-fleet-server-blobs)";
+
+/// How long a sweep waits for [`BLOB_LOCK`]; an upload waits the session's `lock_timeout`.
+pub(crate) const SWEEP_WAIT: Duration = Duration::from_secs(60);
+
+/// The lock a migration of the schema holds for its transaction.
+const MIGRATION_LOCK: &str =
+    "hashtextextended('opamp-fleet-server-schema:' || coalesce(current_schema(), ''), 0)";
+
 /// Why every call is refused once the lock's connection has ended.
 fn lost_lock(name: &str) -> String {
     format!(
-        "this Server lost its lock on the {name} — another Server may hold it now (ADR-0029 \
+        "this Server lost its lock on the {name} — another instance may hold it now (ADR-0044 \
          clause 23), so this one writes nothing more; restart it once the database answers"
     )
 }
@@ -374,7 +725,7 @@ async fn bounded<T>(
 }
 
 /// A pooled connection, or why there is none: a database lost while the Server runs fails the
-/// calls that need it (ADR-0029 clause 24).
+/// calls that need it (ADR-0044 clause 24).
 ///
 /// # Errors
 /// Returns an error when no connection can be had within the pool's timeouts.
@@ -387,7 +738,16 @@ pub(crate) async fn client(pool: &Pool) -> Result<Object, String> {
 /// A database error as text: the server's own message where it sent one.
 pub(crate) fn sql(error: tokio_postgres::Error) -> String {
     match error.as_db_error() {
-        Some(db) => format!("{}: {} ({})", db.severity(), db.message(), db.code().code()),
+        // The detail names the row a constraint refused, such as the key two rows share.
+        Some(db) => match db.detail() {
+            Some(detail) => format!(
+                "{}: {} ({}): {detail}",
+                db.severity(),
+                db.message(),
+                db.code().code()
+            ),
+            None => format!("{}: {} ({})", db.severity(), db.message(), db.code().code()),
+        },
         None => match std::error::Error::source(&error) {
             Some(source) => format!("{error}: {source}"),
             None => error.to_string(),
@@ -395,7 +755,15 @@ pub(crate) fn sql(error: tokio_postgres::Error) -> String {
     }
 }
 
-/// The connection's settings, every one from `[database.postgres]` (ADR-0029 clause 24) — nothing
+/// A fresh origin for the notifications of one open database: 16 random bytes, hex.
+fn new_origin() -> Result<String, String> {
+    let mut bytes = [0u8; 16];
+    ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut bytes)
+        .map_err(|_| "no randomness for the origin of the notifications".to_string())?;
+    Ok(hex::encode(bytes))
+}
+
+/// The connection's settings, every one from `[database.postgres]` (ADR-0044 clause 24) — nothing
 /// from the environment, and nothing from a connection string. `schema`, when named, is the only
 /// schema the connection sees.
 fn pg_config(
@@ -427,7 +795,7 @@ fn pg_config(
     pg
 }
 
-/// The TLS client of ADR-0029 clause 24: TLS 1.3 on *ring* alone, the database's certificate
+/// The TLS client of ADR-0044 clause 24: TLS 1.3 on *ring* alone, the database's certificate
 /// verified against the public roots, or against the roots of `ca_file` alone when it names one,
 /// and its host name checked by rustls. `None` — plaintext — only where `tls = false`, which the
 /// configuration allows on a loopback IP literal alone.
@@ -541,7 +909,7 @@ pub(crate) fn unsigned(value: i64) -> u64 {
 
 #[cfg(test)]
 pub(crate) mod testing {
-    //! The database the PostgreSQL tests run against (ADR-0029 clause 25): the one the
+    //! The database the PostgreSQL tests run against (ADR-0044 clause 25): the one the
     //! `FLEET_TEST_POSTGRES_*` variables name, never one the tests start. Each test works in a
     //! schema of its own and drops it afterwards.
 
@@ -553,6 +921,62 @@ pub(crate) mod testing {
     pub(crate) struct TestDatabase {
         pub(crate) config: PostgresConfig,
         pub(crate) schema: String,
+        /// Released once the schema is dropped.
+        _slot: Slot,
+    }
+
+    /// How many test threads work in a schema at once. A test's databases, listening connections
+    /// and racers hold several connections, and the test database, like CI's, admits 100 (three of
+    /// them reserved), so the tests the harness would otherwise run at once, one per core, beside
+    /// another suite on the same database, can exhaust it or wait out its `lock_timeout`.
+    const SCHEMAS_AT_ONCE: usize = 8;
+
+    /// The places taken, and the wake-up of a test that waits for one.
+    static SLOTS: (std::sync::Mutex<usize>, std::sync::Condvar) =
+        (std::sync::Mutex::new(0), std::sync::Condvar::new());
+
+    std::thread_local! {
+        /// The schemas this thread works in: a test that opens a second one keeps its place
+        /// rather than wait for another, which could wait for ever.
+        static HELD: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    /// One of the [`SCHEMAS_AT_ONCE`] places a test thread works in, held until the schema that
+    /// took it is dropped; a further schema of the same thread takes none.
+    struct Slot {
+        took: bool,
+    }
+
+    impl Slot {
+        /// Waits until fewer than [`SCHEMAS_AT_ONCE`] test threads work in a schema, and takes a
+        /// place, unless this thread holds one.
+        fn take() -> Slot {
+            let took = HELD.get() == 0;
+            if took {
+                let (taken, freed) = &SLOTS;
+                let mut taken = freed
+                    .wait_while(taken.lock().expect("slots"), |taken| {
+                        *taken >= SCHEMAS_AT_ONCE
+                    })
+                    .expect("slots");
+                *taken += 1;
+            }
+            HELD.set(HELD.get() + 1);
+            Slot { took }
+        }
+    }
+
+    impl Drop for Slot {
+        fn drop(&mut self) {
+            HELD.set(HELD.get().saturating_sub(1));
+            if self.took {
+                let (taken, freed) = &SLOTS;
+                *taken
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) -= 1;
+                freed.notify_one();
+            }
+        }
     }
 
     impl TestDatabase {
@@ -592,6 +1016,7 @@ pub(crate) mod testing {
             let test = TestDatabase {
                 config,
                 schema: format!("fleet_test_{}", hex::encode(random)),
+                _slot: Slot::take(),
             };
             test.admin(&format!("CREATE SCHEMA {}", test.schema));
             Some(test)
@@ -612,7 +1037,12 @@ pub(crate) mod testing {
 
         /// A Server's database in this schema, its schema applied.
         pub(crate) fn open(&self) -> Arc<Database> {
-            Database::open_in(&self.config, Some(&self.schema)).expect("open the test database")
+            Database::open_in(
+                &self.config,
+                Exclusive::Alone("the test".to_string()),
+                Some(&self.schema),
+            )
+            .expect("open the test database")
         }
 
         /// Runs `statements` in this schema, past every adapter.
@@ -663,6 +1093,79 @@ pub(crate) mod testing {
                 .expect("query")
         }
 
+        /// Holds every write of an Agent's assignment open, mid-transaction, at a gate the test
+        /// opens: a rollout then holds what it holds until its commit for as long as the test
+        /// needs. Advisory locks span the database, every test's schema, so each test names a
+        /// `key` of its own.
+        pub(crate) fn hold_assignment_writes(&self, key: i64) -> Gate {
+            self.sql(&format!(
+                "CREATE FUNCTION fleet_test_hold() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN \
+                     PERFORM pg_advisory_lock_shared({key}); \
+                     PERFORM pg_advisory_unlock_shared({key}); RETURN NULL; END $$; \
+                 CREATE TRIGGER fleet_test_hold AFTER UPDATE OF deployment ON agents \
+                     FOR EACH ROW EXECUTE FUNCTION fleet_test_hold();"
+            ));
+            self.gate(key)
+        }
+
+        /// Stores an empty Deployment of each of `names`: what a rollout through it needs stored.
+        pub(crate) fn store_deployments(&self, names: &[&str]) {
+            for name in names {
+                self.sql(&format!(
+                    "INSERT INTO deployments (name, selector, packages, configurations) \
+                     VALUES ('{name}', '{{}}', '{{}}', '{{}}') ON CONFLICT DO NOTHING"
+                ));
+            }
+        }
+
+        /// Whether a session waits for the blob store's lock of this schema.
+        pub(crate) fn waits_for_the_blob_lock(&self) -> bool {
+            !self
+                .rows(&format!(
+                    "SELECT 1 FROM pg_locks, (SELECT {} AS key) k \
+                     WHERE locktype = 'advisory' AND NOT granted \
+                     AND classid = ((k.key >> 32) & 4294967295)::oid \
+                     AND objid = (k.key & 4294967295)::oid",
+                    super::BLOB_LOCK
+                ))
+                .is_empty()
+        }
+
+        /// Returns once no session holds this schema's exclusive lock. A handle that must be alone
+        /// lets go of it only when the database has ended its session, which happens after the
+        /// handle is dropped, not with it: what a test waits for before an instance that shares
+        /// the database opens, which the held lock would refuse.
+        pub(crate) fn wait_until_none_holds_it_alone(&self) {
+            self.once(&format!(
+                "SELECT 'free' WHERE NOT EXISTS (SELECT 1 FROM pg_locks, (SELECT {} AS key) k \
+                 WHERE locktype = 'advisory' AND granted AND mode = 'ExclusiveLock' \
+                 AND database = (SELECT oid FROM pg_database WHERE datname = current_database()) \
+                 AND classid = ((k.key >> 32) & 4294967295)::oid \
+                 AND objid = (k.key & 4294967295)::oid AND objsubid = 1)",
+                super::EXCLUSIVE_LOCK
+            ));
+        }
+
+        /// An instance's database that shares this schema, opened once no session holds the
+        /// schema alone ([`wait_until_none_holds_it_alone`](Self::wait_until_none_holds_it_alone)).
+        pub(crate) fn shared(&self) -> Arc<Database> {
+            self.wait_until_none_holds_it_alone();
+            Database::open_in(&self.config, Exclusive::Shared, Some(&self.schema))
+                .expect("open the test database shared")
+        }
+
+        /// The first column of the first row `query` answers, once it answers one; a test fails
+        /// after 30 seconds without.
+        pub(crate) fn once(&self, query: &str) -> String {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            loop {
+                if let Some(found) = self.rows(query).first().and_then(|row| row[0].clone()) {
+                    break found;
+                }
+                assert!(std::time::Instant::now() < deadline, "never: {query}");
+            }
+        }
+
         fn admin_connection(&self) -> (tokio_postgres::Config, Tls) {
             let password =
                 crate::config::read_secret_file("password_file", &self.config.password_file)
@@ -671,6 +1174,36 @@ pub(crate) mod testing {
                 pg_config(&self.config, &password, None),
                 tls(&self.config).expect("tls"),
             )
+        }
+
+        /// Holds the advisory lock `key` on a session of its own until the [`Gate`] is opened or
+        /// dropped: a trigger that takes it holds another connection's write open, mid-transaction,
+        /// for as long as the test needs, with no timing.
+        pub(crate) fn gate(&self, key: i64) -> Gate {
+            let (pg, tls) = self.admin_connection();
+            let (open, opened) = std::sync::mpsc::channel::<()>();
+            let (held, holds) = std::sync::mpsc::channel::<()>();
+            let thread = std::thread::spawn(move || {
+                Bridge::new("records-test-gate")
+                    .expect("runtime")
+                    .run(async move {
+                        let client = connect(&pg, &tls).await?;
+                        client
+                            .execute("SELECT pg_advisory_lock($1)", &[&key])
+                            .await
+                            .map_err(sql)?;
+                        let _ = held.send(());
+                        let _ = tokio::task::spawn_blocking(move || opened.recv()).await;
+                        drop(client);
+                        Ok::<_, String>(())
+                    })
+                    .expect("the gate");
+            });
+            holds.recv().expect("the gate is held");
+            Gate {
+                open,
+                thread: Some(thread),
+            }
         }
 
         fn admin(&self, statements: &str) {
@@ -683,6 +1216,32 @@ pub(crate) mod testing {
                     client.batch_execute(&statements).await.map_err(sql)
                 })
                 .expect("run on the test database");
+        }
+    }
+
+    /// An advisory lock a test holds; see [`TestDatabase::gate`].
+    pub(crate) struct Gate {
+        open: std::sync::mpsc::Sender<()>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl Gate {
+        /// Lets go of the lock, and returns once its session ended.
+        pub(crate) fn open(mut self) {
+            self.release();
+        }
+
+        fn release(&mut self) {
+            let _ = self.open.send(());
+            if let Some(thread) = self.thread.take() {
+                thread.join().expect("the gate's thread");
+            }
+        }
+    }
+
+    impl Drop for Gate {
+        fn drop(&mut self) {
+            self.release();
         }
     }
 
@@ -715,9 +1274,9 @@ mod tests {
 
     /// `PGHOST`, `PGSSLMODE` and their kin, set in the Server's environment, change neither the
     /// database nor whether plaintext is allowed: the connection is built from
-    /// `[database.postgres]` alone (ADR-0029 clause 24). The environment is the real one of a child
+    /// `[database.postgres]` alone (ADR-0044 clause 24). The environment is the real one of a child
     /// process.
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0044
     #[test]
     fn pg_variables_change_neither_the_database_nor_plaintext() {
         let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
@@ -771,7 +1330,7 @@ mod tests {
     }
 
     /// Without TLS only where `tls = false` says so; a CA file is read as roots and nothing else.
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0044
     #[test]
     fn the_connection_requires_tls_unless_the_configuration_waives_it() {
         let pg = pg_config(&config("127.0.0.1", false), "secret", Some("s"));
@@ -795,7 +1354,7 @@ mod tests {
     /// The password comes from its file, which its owner and group alone may read; one that
     /// others may read or its group may write fails startup naming the key, before any
     /// connection is made.
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0044
     #[cfg(unix)]
     #[test]
     fn a_password_file_others_may_read_fails_startup_naming_it() {
@@ -830,7 +1389,7 @@ mod tests {
     }
 
     /// A database that cannot be reached fails startup naming the host and the database.
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0044
     #[test]
     fn an_unreachable_database_fails_startup_naming_it() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -874,8 +1433,8 @@ mod tests {
     }
 
     /// A database that takes the connection and never answers fails startup within the bound of
-    /// one call, naming it, rather than holding the Server forever (ADR-0029 clause 24).
-    /// Verifies: ADR-0029
+    /// one call, naming it, rather than holding the Server forever (ADR-0044 clause 24).
+    /// Verifies: ADR-0044
     #[test]
     fn a_database_that_never_answers_fails_startup_within_the_bound() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -939,8 +1498,8 @@ mod tests {
 
     /// A database that stops answering while the Server runs fails the one call that needs it
     /// within that call's bound, and the call after it as fast; the Server is held no longer
-    /// (ADR-0029 clause 24). The database is reached through a proxy that is frozen mid-run.
-    /// Verifies: ADR-0029
+    /// (ADR-0044 clause 24). The database is reached through a proxy that is frozen mid-run.
+    /// Verifies: ADR-0044
     #[test]
     fn a_database_that_stops_answering_fails_the_call_within_the_bound() {
         let Some(test) = TestDatabase::named() else {
@@ -960,13 +1519,17 @@ mod tests {
                 }
             }
         });
+        // The schema is applied directly, so the bound under test is the call's alone.
+        Database::connect(&test.config(), Some(&test.schema))
+            .expect("connect directly")
+            .apply_schema(schema::MIGRATIONS)
+            .expect("schema");
         let mut through = test.config();
         through.port = port;
         let bound = Duration::from_secs(1);
         let database = Arc::new(
             Database::connect_within(&through, Some(&test.schema), bound).expect("connect"),
         );
-        database.apply_schema(schema::MIGRATIONS).expect("schema");
         let store = configs::PgConfigBackend::new(database.clone());
         crate::configs::ConfigBackend::load(&store).expect("answers while it answers");
 
@@ -1050,9 +1613,9 @@ mod tests {
     /// The connection is what libpq calls `verify-full`: a database whose certificate a root of
     /// `ca_file` signed but that does not name `host`, or that names it but no root of
     /// `ca_file` signed, is refused before a password is sent; one that a root signed for `host`
-    /// is accepted (ADR-0029 clause 24). Run against a listener that speaks the start of the
+    /// is accepted (ADR-0044 clause 24). Run against a listener that speaks the start of the
     /// protocol, so it needs no database.
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0044
     #[test]
     fn the_database_certificate_is_verified_against_its_root_and_its_host_name() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1127,10 +1690,10 @@ mod tests {
     }
 
     /// A Server whose lock's connection ends while it runs notices: it logs why and refuses every
-    /// call from then on, rather than writing on while a second Server may start (ADR-0029
+    /// call from then on, rather than writing on while a second Server may start (ADR-0044
     /// clause 23). The session is ended from the database's side, as a restart or an operator
     /// would end it.
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0044
     #[test]
     fn a_server_that_loses_its_lock_logs_it_and_writes_nothing_more() {
         let Some(test) = TestDatabase::named() else {
@@ -1143,7 +1706,9 @@ mod tests {
 
         test.sql(&format!(
             "SELECT pg_terminate_backend({})",
-            database.lock_pid
+            database
+                .lock_pid
+                .expect("an instance that must be alone holds the lock")
         ));
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         while !database.lost.load(Ordering::SeqCst) {
@@ -1171,28 +1736,38 @@ mod tests {
         }
     }
 
-    /// A second Server against the same database fails startup naming it; once the first is
-    /// gone, the lock is free again.
-    /// Verifies: ADR-0029
+    /// A second instance that must be alone, against a database one already holds alone, fails
+    /// startup naming the database and the key that makes it alone; once the first is gone, the
+    /// lock is free again.
+    /// Verifies: ADR-0044, ADR-0041
     #[test]
-    fn a_second_server_against_the_same_database_fails_startup_naming_it() {
+    fn a_second_instance_that_must_be_alone_fails_startup_naming_it() {
         let Some(test) = TestDatabase::named() else {
             return;
         };
         let first = test.open();
-        let err = Database::open_in(&test.config(), Some(&test.schema))
-            .map(|_| ())
-            .expect_err("held by the first");
+        let err = Database::open_in(
+            &test.config(),
+            Exclusive::Alone("the test".to_string()),
+            Some(&test.schema),
+        )
+        .map(|_| ())
+        .expect_err("held by the first");
         assert!(
             err.contains(&format!("database {}", test.config.dbname)),
             "{err}"
         );
-        assert!(err.contains("one Server per database"), "{err}");
+        assert!(err.contains("one instance per database"), "{err}");
+        assert!(err.contains("because of the test"), "{err}");
         drop(first);
         // The lock goes with its session, which the server notices when the connection closes.
         let mut reopened = None;
         for _ in 0..50 {
-            if let Ok(database) = Database::open_in(&test.config(), Some(&test.schema)) {
+            if let Ok(database) = Database::open_in(
+                &test.config(),
+                Exclusive::Alone("the test".to_string()),
+                Some(&test.schema),
+            ) {
                 reopened = Some(database);
                 break;
             }
@@ -1204,7 +1779,7 @@ mod tests {
     /// The schema is applied at startup and recorded; a database one migration behind is migrated
     /// at startup; a database whose schema names an oldest Server above this one fails startup
     /// naming both versions and is left unchanged.
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0044
     #[test]
     fn the_server_applies_its_schema_and_refuses_a_newer_one() {
         let Some(test) = TestDatabase::named() else {
@@ -1248,9 +1823,13 @@ mod tests {
 
         test.sql("INSERT INTO fleet_schema (version, oldest_server) VALUES (99, '999.0.0')");
         let before = test.rows("SELECT version, oldest_server FROM fleet_schema ORDER BY version");
-        let err = Database::open_in(&test.config(), Some(&test.schema))
-            .map(|_| ())
-            .expect_err("a newer schema");
+        let err = Database::open_in(
+            &test.config(),
+            Exclusive::Alone("the test".to_string()),
+            Some(&test.schema),
+        )
+        .map(|_| ())
+        .expect_err("a newer schema");
         assert!(err.contains("999.0.0"), "{err}");
         assert!(err.contains(schema::server_version()), "{err}");
         assert!(
@@ -1272,8 +1851,96 @@ mod tests {
         );
     }
 
+    /// A Server of 0.7.1 takes the schema of migrations 1 and 2, which it knows, and refuses the
+    /// schema once any migration of 0.8.0 is applied, naming 0.8.0 and changing nothing: it holds
+    /// no lease, so it must not serve beside the instances of 0.8.0
+    /// (ADR-0044 clause 22). It is asked through the check of
+    /// [`schema::apply`], which 0.7.1 runs as it stands here.
+    /// Verifies: ADR-0044
+    #[test]
+    fn a_server_of_0_7_1_refuses_the_schema_once_a_migration_of_0_8_0_is_applied() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = Database::connect(&test.config(), Some(&test.schema)).expect("connect");
+        for applied in 2..=schema::MIGRATIONS.len() {
+            let migrations = &schema::MIGRATIONS[..applied];
+            database
+                .apply_schema(migrations)
+                .expect("this Server applies them");
+            let before =
+                test.rows("SELECT version, oldest_server FROM fleet_schema ORDER BY version");
+            // 0.7.1's own list: migrations 1 and 2.
+            let answer = database.run(move |pool| async move {
+                let client = client(&pool).await?;
+                schema::apply(&**client, &schema::MIGRATIONS[..2], "0.7.1").await
+            });
+            if applied == 2 {
+                assert_eq!(
+                    answer
+                        .expect("0.7.1 runs on the schema it brought")
+                        .versions,
+                    Vec::<i32>::new()
+                );
+            } else {
+                let err = answer.expect_err("0.7.1 refuses the schema of 0.8.0");
+                assert!(
+                    err.contains("needs Server 0.8.0 or later, and this Server is 0.7.1"),
+                    "after migration {applied}: {err}"
+                );
+            }
+            assert_eq!(
+                test.rows("SELECT version, oldest_server FROM fleet_schema ORDER BY version"),
+                before,
+                "left unchanged"
+            );
+        }
+    }
+
+    /// An instance that shares the database neither migrates nor starts while another Server holds
+    /// the database alone, as a running Server of 0.7.1 does for its whole run under the same key:
+    /// that Server checked the schema only at its own start, and would serve on in a schema it
+    /// refuses (ADR-0044 clause 22). Once the lock is free, the
+    /// instance migrates and starts.
+    /// Verifies: ADR-0044
+    #[test]
+    fn a_shared_instance_migrates_nothing_while_a_server_holds_the_database_alone() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        // The Server of 0.7.1: the exclusive lock for its whole run, on the schema it brought.
+        let release_before =
+            Database::connect(&test.config(), Some(&test.schema)).expect("connect");
+        release_before
+            .apply_schema(&schema::MIGRATIONS[..2])
+            .expect("its schema");
+        let before = test.rows("SELECT version, oldest_server FROM fleet_schema ORDER BY version");
+        let err = Database::open_in(&test.config(), Exclusive::Shared, Some(&test.schema))
+            .map(|_| ())
+            .expect_err("held alone");
+        assert!(err.contains("holds the database alone"), "{err}");
+        assert!(err.contains("stop it before"), "{err}");
+        assert!(
+            err.contains(&format!("database {}", test.config.dbname)),
+            "{err}"
+        );
+        assert_eq!(
+            test.rows("SELECT version, oldest_server FROM fleet_schema ORDER BY version"),
+            before,
+            "nothing migrated"
+        );
+
+        drop(release_before);
+        let _opened = test.shared();
+        assert_eq!(
+            test.rows("SELECT count(*) FROM fleet_schema"),
+            [[Some(schema::MIGRATIONS.len().to_string())]],
+            "migrated once the lock was free"
+        );
+    }
+
     /// The whole schema applies on an empty database, and every table it names is there.
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0044
     #[test]
     fn the_embedded_schema_applies_on_an_empty_database() {
         let Some(test) = TestDatabase::named() else {

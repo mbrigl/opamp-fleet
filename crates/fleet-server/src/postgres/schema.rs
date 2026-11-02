@@ -1,11 +1,12 @@
-//! The Server's schema (ADR-0029 clause 22): embedded as numbered migrations, applied by the Server
+//! The Server's schema (ADR-0044 clause 22): embedded as numbered migrations, applied by the Server
 //! itself at startup, each recorded in `fleet_schema` with the oldest Server version that
 //! understands the schema it leaves.
 //!
-//! A migration only adds — tables, columns with defaults, indexes — so the release before a change
-//! runs on the schema after it. A column or table is removed only by a release after the one that
-//! stopped using it. The Server creates tables, indexes and `fleet_schema`, and nothing else: the
-//! database, the role, its rights and its extensions are the operator's.
+//! A migration only adds — tables, columns with defaults, indexes. A column or table is removed
+//! only by a release after the one that stopped using it. Each migration names the oldest Server
+//! that understands the schema it leaves, and a Server older than any of them refuses the schema.
+//! The Server creates tables, indexes and `fleet_schema`, and nothing else: the database, the role,
+//! its rights and its extensions are the operator's.
 
 use std::cmp::Ordering;
 
@@ -28,7 +29,7 @@ pub const SCHEMA_TABLE: &str = "fleet_schema";
 
 /// Every table the migrations create, so that a database holding any of them is recognised as one
 /// the Server already wrote ([`super::Database::server_tables`]).
-pub const TABLES: [&str; 15] = [
+pub const TABLES: [&str; 23] = [
     "configurations",
     "configuration_revisions",
     "deployments",
@@ -43,6 +44,14 @@ pub const TABLES: [&str; 15] = [
     "enrolment_window",
     "enrolment_requests",
     "package_floors",
+    "leases",
+    "host_bindings",
+    "deployment_packages",
+    "deployment_configurations",
+    "revocation_list_version",
+    "audit_chains",
+    "audit_entries",
+    "audit_archive",
     // Not tables of the records, but the Server's all the same.
     SCHEMA_TABLE,
 ];
@@ -60,10 +69,66 @@ pub const MIGRATIONS: &[Migration] = &[
         oldest_server: "0.6.1",
         sql: PACKAGE_FLOORS,
     },
+    // Migrations 3 to 10 are the schema of 0.8.0, the release in which several instances share
+    // a database, and name it. A Server of 0.7.1 holds no lease, keeps its audit record in files
+    // and leaves the revocation list's version where it was, so it refuses the schema they leave
+    // rather than serve beside the instances of 0.8.0
+    // (ADR-0044 clause 22).
+    //
+    // A table only added.
+    Migration {
+        version: 3,
+        oldest_server: "0.8.0",
+        sql: LEASES,
+    },
+    // A table and an index only added, the table filled from the Hosts, whose arrays this release
+    // still writes too.
+    Migration {
+        version: 4,
+        oldest_server: "0.8.0",
+        sql: HOST_BINDINGS,
+    },
+    // Two tables only added, filled from the Deployments' columns, which this release still
+    // writes too, from the rows.
+    Migration {
+        version: 5,
+        oldest_server: "0.8.0",
+        sql: DEPLOYMENT_MEMBERS,
+    },
+    // A table only added.
+    Migration {
+        version: 6,
+        oldest_server: "0.8.0",
+        sql: REVOCATION_LIST_VERSION,
+    },
+    // Tables only added.
+    Migration {
+        version: 7,
+        oldest_server: "0.8.0",
+        sql: AUDIT_CHAINS,
+    },
+    // Two columns only added, with defaults.
+    Migration {
+        version: 8,
+        oldest_server: "0.8.0",
+        sql: AGENT_PRESENCE,
+    },
+    // Two columns only added, with defaults.
+    Migration {
+        version: 9,
+        oldest_server: "0.8.0",
+        sql: TAKES,
+    },
+    // A column only added, with a default, and an index.
+    Migration {
+        version: 10,
+        oldest_server: "0.8.0",
+        sql: AUDIT_RECORDED_AT,
+    },
 ];
 
 /// The first schema: one table per kind of record, the parts of a record that are many in tables of
-/// their own (ADR-0029 clauses 4 to 6, 9 to 11 and 21). Unsigned integers are kept as `bigint` with
+/// their own (ADR-0044 clauses 4 to 6, 9 to 11 and 21). Unsigned integers are kept as `bigint` with
 /// their bits unchanged, so every value round-trips.
 ///
 /// PostgreSQL's `text` and `jsonb` refuse a NUL character, which a file keeps. Text an Agent or a
@@ -199,6 +264,145 @@ CREATE TABLE package_floors (
 );
 ";
 
+/// The lease of every instance on this database
+/// (ADR-0041
+/// clauses 1 to 3). The times are the database's own, so every instance reads the same clock. A
+/// lease whose `expires_at` has passed is lapsed, whatever its row still says.
+const LEASES: &str = r"
+CREATE TABLE leases (
+    instance_id uuid PRIMARY KEY,
+    host text NOT NULL,
+    must_be_alone boolean NOT NULL,
+    taken_at timestamptz NOT NULL,
+    renewed_at timestamptz NOT NULL,
+    expires_at timestamptz NOT NULL
+);
+";
+
+/// Which Host each `instance_uid` is bound to: one row per binding, the `instance_uid` its key, so
+/// no two Hosts hold one
+/// (ADR-0041
+/// clause 19). It is filled from the arrays of the Hosts not marked as Gateways, as a Gateway's
+/// Host is bound none (ADR-0043 clause 16); an `instance_uid` two such Hosts' arrays hold fails the
+/// migration, naming it and the Hosts, and changes nothing, for the operator to decide. A renewal's
+/// walk down its chain finds an entry's renewals by the index on the predecessor.
+const HOST_BINDINGS: &str = r"
+DO $$
+DECLARE taken record;
+BEGIN
+    SELECT uid, string_agg(host, ', ' ORDER BY host) AS holders INTO taken
+        FROM hosts, unnest(instance_uids) AS uid
+        WHERE NOT gateway
+        GROUP BY uid HAVING count(*) > 1 ORDER BY uid LIMIT 1;
+    IF FOUND THEN
+        RAISE EXCEPTION 'the instance_uid % is bound to the Hosts %; release it from all but one '
+            'before this release starts', taken.uid, taken.holders;
+    END IF;
+END $$;
+CREATE TABLE host_bindings (
+    instance_uid text PRIMARY KEY,
+    host text NOT NULL
+);
+INSERT INTO host_bindings (instance_uid, host)
+    SELECT uid, host FROM hosts, unnest(instance_uids) AS uid WHERE NOT gateway;
+CREATE INDEX certificates_predecessor ON certificates (predecessor_issuer, predecessor_serial);
+";
+
+/// The members of each Deployment, one row each
+/// (ADR-0041
+/// clause 19): its Packages keyed by Agent type, so it holds at most one of each, and its
+/// Configurations by name. They are filled from the `packages` and `configurations` columns of
+/// `deployments`, which stay and are written from these rows.
+const DEPLOYMENT_MEMBERS: &str = r"
+CREATE TABLE deployment_packages (
+    deployment text NOT NULL REFERENCES deployments (name) ON DELETE CASCADE,
+    agent_type text NOT NULL,
+    version text NOT NULL,
+    PRIMARY KEY (deployment, agent_type)
+);
+CREATE TABLE deployment_configurations (
+    deployment text NOT NULL REFERENCES deployments (name) ON DELETE CASCADE,
+    configuration text NOT NULL,
+    PRIMARY KEY (deployment, configuration)
+);
+INSERT INTO deployment_packages (deployment, agent_type, version)
+    SELECT name, package->>'agent_type', package->>'version'
+        FROM deployments, json_array_elements(packages) AS package;
+INSERT INTO deployment_configurations (deployment, configuration)
+    SELECT DISTINCT name, configuration FROM deployments, unnest(configurations) AS configuration;
+";
+
+/// The revocation list's one version
+/// (ADR-0044 clause 10): a counter in one row that the
+/// transaction of every revocation added or widened and every lift increments. It is the `ETag`
+/// of the Gateways' list on every instance, and what each lease renewal compares.
+const REVOCATION_LIST_VERSION: &str = r"
+CREATE TABLE revocation_list_version (
+    singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
+    version bigint NOT NULL
+);
+INSERT INTO revocation_list_version (singleton, version) VALUES (true, 0);
+";
+
+/// The audit record, one hash chain per lease
+/// (ADR-0042): a record per
+/// chain, named by the instance id of the lease that opened it, with the hash of its closing entry
+/// once it is closed; each entry as the line it was hashed as; and the end of the file record a
+/// move from files left as the archive, which the first chain names as its predecessor.
+const AUDIT_CHAINS: &str = r"
+CREATE TABLE audit_chains (
+    id uuid PRIMARY KEY,
+    host text NOT NULL,
+    opened_at timestamptz NOT NULL,
+    closed_at timestamptz,
+    closed_hash text
+);
+CREATE TABLE audit_entries (
+    chain uuid NOT NULL REFERENCES audit_chains (id),
+    seq bigint NOT NULL,
+    line text NOT NULL,
+    PRIMARY KEY (chain, seq)
+);
+CREATE TABLE audit_archive (
+    singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
+    seq bigint NOT NULL,
+    hash text NOT NULL
+);
+";
+
+/// Where each Agent is connected (ADR-0043 clause 3): whether
+/// a connection carries it, and the instance that holds that connection, by the id of its lease.
+/// Each instance writes them for the Agents it carries in batches
+/// (ADR-0043 clause 4); a holder without a live lease reads as
+/// disconnected, whatever `connected` says (clause 6).
+const AGENT_PRESENCE: &str = r"
+ALTER TABLE agents ADD COLUMN connected boolean NOT NULL DEFAULT false;
+ALTER TABLE agents ADD COLUMN holder uuid;
+";
+
+/// How each Agent was taken
+/// (ADR-0041
+/// clause 8): `takes` counts every take and every batch that names a holder anew, so an instance
+/// writes a disconnect only where the row still holds the count it was answered, with no clock
+/// compared; `holder_changes` holds when the holder changed, the latest eleven times, by the
+/// database's clock, which tells a likely duplicate whose connections instances take in turn.
+const TAKES: &str = r"
+ALTER TABLE agents ADD COLUMN takes bigint NOT NULL DEFAULT 0;
+ALTER TABLE agents ADD COLUMN holder_changes timestamptz[] NOT NULL DEFAULT '{}';
+";
+
+/// When each audit entry was stored, by the database's clock: what its age is reckoned from when the
+/// record is pruned (ADR-0044 clause 12). Entries stored before
+/// take the time their line carries, read as text so that a line that is no entry keeps the time of
+/// the migration rather than stopping it.
+const AUDIT_RECORDED_AT: &str = r#"
+ALTER TABLE audit_entries ADD COLUMN recorded_at timestamptz NOT NULL DEFAULT now();
+UPDATE audit_entries
+    SET recorded_at = substring(line FROM '"time":"([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z)"')::timestamptz
+    WHERE line ~ '"time":"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z"';
+CREATE INDEX audit_entries_recorded_at ON audit_entries (chain, recorded_at);
+"#;
+
 /// This Server's version, `MAJOR.MINOR.PATCH`: the base of the version it reports, so a
 /// development build understands the schema of the release it is heading for.
 #[must_use]
@@ -310,7 +514,7 @@ mod tests {
 
     /// The migrations are numbered from 1 without a gap, and none names a Server newer than this
     /// one — a build that refused its own schema would never start.
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0044
     #[test]
     fn the_migrations_are_numbered_and_this_server_understands_them() {
         for (index, migration) in MIGRATIONS.iter().enumerate() {
@@ -335,9 +539,9 @@ mod tests {
         assert_eq!(compare("not-a-version", "99.0.0"), Ordering::Greater);
     }
 
-    /// A migration only adds (ADR-0029 clause 22): nothing in the embedded schema drops, renames or
+    /// A migration only adds (ADR-0044 clause 22): nothing in the embedded schema drops, renames or
     /// alters a column away, and every table it creates is one [`TABLES`] knows.
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0044
     #[test]
     fn a_migration_only_adds() {
         for migration in MIGRATIONS {

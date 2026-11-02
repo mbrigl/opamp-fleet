@@ -83,13 +83,13 @@ make a REST API under `/api/v1`, described by an OpenAPI document generated code
    `utoipa-axum`: handlers and schemas are annotated where they live and routes registered once,
    so document and behaviour cannot drift. It is served at `/api/v1/openapi.json`. The API is
    served on the Operator plane
-   ([ADR-0012](0012-tls-1-3-two-planes-and-bounded-input.md)), behind its authentication
-   ([ADR-0021](0021-admission-by-client-certificate-and-revocation.md)), beside the rendered docs
+   ([ADR-0045](0045-tls-1-3-two-planes-and-bounded-input.md)), behind its authentication
+   ([ADR-0038](0038-admission-by-client-certificate-and-revocation.md)), beside the rendered docs
    page ([ADR-0008](0008-five-crates-on-tokio-and-axum.md)).
 
 **Out of scope:** what a Configuration holds, how it is aimed and released, its routes, and what
 deleting one does ([ADR-0026](0026-deployments-and-rollouts.md)); where Configurations are stored
-([ADR-0029](0029-the-servers-state-and-its-stores.md)); the meaning of a kind's own role values
+([ADR-0044](0044-the-servers-state-and-its-stores.md)); the meaning of a kind's own role values
 (each kind's own ADR); configuration history and audit.
 
 ## Alternatives considered

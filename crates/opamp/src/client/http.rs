@@ -265,8 +265,7 @@ impl std::fmt::Display for Exchange {
 /// the caller then waits the Baseline's *"minimum recommended retry interval"* of 30 seconds — which
 /// for a Server that is overloaded is the conservative reading of a header it sent to be given room.
 fn retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
-    let value = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;
-    value.trim().parse::<u64>().ok().map(Duration::from_secs)
+    super::retry_after_seconds(headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?)
 }
 
 /// Reads a response body, refusing one that grows past `limit`.
@@ -299,7 +298,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    /// The workspace builds reqwest without a TLS provider of its own (ADR-0012); install the one
+    /// The workspace builds reqwest without a TLS provider of its own (ADR-0045); install the one
     /// every binary installs, even though these exchanges are plaintext.
     fn install_ring_provider() {
         let _ = rustls::crypto::ring::default_provider().install_default();

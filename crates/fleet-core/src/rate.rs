@@ -1,5 +1,5 @@
 //! The token buckets a sender's messages are counted in, on the Server and on a Gateway alike
-//! (ADR-0012 clauses 22 and 28, ADR-0035).
+//! (ADR-0045 clauses 22 and 28, ADR-0035).
 //!
 //! A bucket holds `burst` tokens and gains `rate` of them a second, continuously, and a new one
 //! starts full. A table of them is bounded, and a full one forgets the bucket used least recently,
@@ -121,7 +121,7 @@ impl<K: Clone + Eq + Hash> Table<K> {
 mod tests {
     use super::*;
 
-    /// Verifies: ADR-0012, ADR-0035
+    /// Verifies: ADR-0045, ADR-0035
     #[test]
     fn a_bucket_starts_full_refills_continuously_and_holds_no_more_than_its_burst() {
         let mut table = Table::new(4);
@@ -137,7 +137,7 @@ mod tests {
         assert_eq!(passing(&mut table, 61_500), 3, "never more than the burst");
     }
 
-    /// Verifies: ADR-0012, ADR-0035
+    /// Verifies: ADR-0045, ADR-0035
     #[test]
     fn a_full_table_forgets_the_bucket_used_least_recently() {
         let mut table = Table::new(2);
@@ -157,7 +157,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0012, ADR-0035
+    /// Verifies: ADR-0045, ADR-0035
     #[test]
     fn an_ipv6_peer_is_counted_by_its_64_and_a_mapped_one_as_ipv4() {
         let key = |ip: &str| peer_key(ip.parse().expect("ip"));

@@ -1445,7 +1445,7 @@ fn store_unreadable() -> Response {
     (StatusCode::SERVICE_UNAVAILABLE, STORE_UNREADABLE).into_response()
 }
 
-/// The answer to a download past the host's rate limit, as the Server gives it (ADR-0012
+/// The answer to a download past the host's rate limit, as the Server gives it (ADR-0045
 /// clause 26, ADR-0035 clause 4).
 fn over_rate() -> Response {
     (

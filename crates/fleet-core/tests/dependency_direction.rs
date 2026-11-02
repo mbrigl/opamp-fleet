@@ -44,6 +44,8 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             ("server", Adapter),
             ("server::listen", Adapter),
             ("server::pace", Adapter),
+            // The system's randomness, with `ring`.
+            ("random", Adapter),
             ("tls", Adapter),
         ],
     ),
@@ -77,6 +79,9 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
         &[
             ("", Root),
             ("main", Root),
+            // What the binary runs as an instance: its lease, its planes and the revocations of
+            // the other instances, wired together.
+            ("instance", Root),
             ("agent_rate", Core),
             ("agent_store", Core),
             ("audit", Core),
@@ -119,8 +124,12 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             ("postgres::deployments", Adapter),
             ("postgres::enrolment", Adapter),
             ("postgres::floors", Adapter),
+            ("postgres::audit", Adapter),
+            ("postgres::audit_prune", Adapter),
             ("postgres::import", Adapter),
+            ("postgres::lease", Adapter),
             ("postgres::ledger", Adapter),
+            ("postgres::notify", Adapter),
             ("postgres::packages", Adapter),
             ("postgres::schema", Adapter),
             ("s3", Adapter),

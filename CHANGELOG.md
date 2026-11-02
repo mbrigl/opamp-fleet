@@ -14,7 +14,292 @@ once its tag exists.
 > rest — is not backfilled here; it is in the git log and in the ADRs. The first four releases were
 > all cut on 2026-08-09, so the dates below say less than the order does.
 
-## [0.7.1]
+## [0.8.0]
+
+### Added
+
+- **Several Server instances serve one fleet on one PostgreSQL database and one bucket**
+  ([ADR-0041](docs/adr/0041-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md)).
+  Every Server on PostgreSQL is an instance:
+  - **The lease.** Before it opens either listener, an instance takes a lease in the database
+    under an instance id of its own. It renews the lease every `[database] lease_renew_secs`
+    (default 10), and the lease lapses `lease_secs` (default 30) after its last renewal.
+  - **Losing the database.** An instance that cannot renew in time ends every session and closes
+    both listeners. Once the database answers again, it takes a new lease under a new id.
+  - **What is shared.** Every change one instance makes is decided in the database and reaches
+    every other: a revocation ends the session on the instance that carries it. The newest
+    connection takes an Agent. The enrolment queue and the bootstrap certificates are counted for
+    all instances together.
+  - **One enrolment request, two decisions.** Of two instances approving or rejecting one
+    request at once, one decides it. The other answers `404`, or `409` when it waited five
+    seconds and the first still holds the request, as on a slow database; asked again once
+    it is decided, it answers `404`.
+  - **The log.** Each line names `instance_id=<id>`.
+  - **A failover.** An instance that stops in order drains its sessions and releases its lease,
+    and its Agents reconnect to another. The lease of one that ends without stopping is taken
+    over once it lapses, and its audit chain is closed.
+
+  The bounds of this release:
+  - **Upgrade the instances together.** Stop every instance and start each on the new release;
+    two releases side by side are not supported yet.
+  - **No load is proven.** How many Agents several instances carry, and how long a failover of a
+    large fleet takes, are not yet measured.
+  - **A CA key in a file means a standby.** An instance whose configuration names `[client_ca]`
+    or `[enrolment] bootstrap_ca_key_file`, or that keeps its artifacts as files, runs alone. A
+    second instance started beside it stops, naming the key. Failover is then a standby, started
+    again until it starts: its service manager must keep restarting it, as systemd does with
+    `StartLimitIntervalSec=0` and `RestartSec=5`. It takes over once the database has ended the
+    first instance's session, which for a host that is gone the database's
+    `tcp_keepalives_idle`, `tcp_keepalives_interval` and `tcp_keepalives_count`, or
+    `tcp_user_timeout`, bound.
+  - **Two cases inherit labels only in the database.** The fleet view and the rollouts read the
+    database, where every Agent inherits its Client Agent's labels. The instance that carries an
+    Agent does not inherit them in its memory in two cases:
+    - an Agent behind a Gateway does not inherit the labels of a Client Agent another instance
+      carries;
+    - a Client Agent bound to its Host on one instance just before another instance first places
+      a fellow Agent of that Host is inherited there only once that group is placed again: at a
+      change of the Client Agent's labels, a forget, a change of the Agent's report, or a missed
+      notification.
+  - **An approval whose commit fails leaves its certificate recorded.** An approval signs the
+    certificate and records it in the register and the audit record before its decision
+    commits. When that commit fails, on a lost connection, a timeout, or a commit of another
+    database that holds the notification lock for more than five seconds, the request still
+    waits, and approving it again signs a second certificate for the same key. The first is
+    never handed to the host, so no one holds it; it stays in the register, valid, beside a Host
+    with no binding. Revoke it by its serial when the audit record shows two `issuance.signed`
+    entries with one `key_fingerprint`.
+
+  The Server adds the table `leases` at its first start (migration 3).
+  **What to do:** nothing to stay on one Server. To run several, follow
+  [the manual](docs/manual/server.md#several-instances), from one Server on files to two
+  instances.
+
+- **`server blobs-to-s3` moves the artifacts of a Server already on PostgreSQL into a bucket**
+  ([ADR-0044](docs/adr/0044-the-servers-state-and-its-stores.md)).
+  `server blobs-to-s3 --data-dir <data_dir> --config <server.toml>` takes the `server.toml` the
+  Server will start with: the bucket, and no `data_dir`. It then:
+  - refuses while any instance holds a live lease;
+  - uploads every artifact a Package entry names that the bucket lacks;
+  - checks that the bucket holds the artifact of every entry, and fails naming one it does not.
+
+  It only reads the directory, and does not bring the schema up to this release.
+  **What to do:** nothing to upgrade. To move the artifacts of a Server on PostgreSQL, start this
+  release once on the old `server.toml`, the one that names `data_dir`, and stop it. That start
+  migrates the schema and links the audit files under `data_dir/audit/` as the archive. Only then
+  change `server.toml` to S3 without `data_dir` and run `blobs-to-s3`, as
+  [the manual](docs/manual/server.md#blobs) shows.
+
+- **On PostgreSQL the audit record is kept for `[audit] retain_days`**
+  ([ADR-0044](docs/adr/0044-the-servers-state-and-its-stores.md)).
+  The key's default is 365 days, from 1 to 36 500.
+  - At its start and once a day, each instance prunes what the database stored longer ago than
+    that. It prunes its own chain, and, one instance at a time, the closed chains.
+  - Before it deletes anything, it writes an `audit.pruned` naming the last entry removed.
+    `server audit-verify --config` checks that what is left of each chain begins right after it.
+  - The Server adds the column `audit_entries.recorded_at` at its first start (migration 10),
+    filled from each entry's time.
+
+  **What to do:** set `retain_days` if a year is not what you keep. The first start after the
+  upgrade prunes what is older at once.
+
+### Changed
+
+- **A Server of 0.7.1 refuses a database this release has started on**
+  ([ADR-0044](docs/adr/0044-the-servers-state-and-its-stores.md)).
+  The migrations this release applies at its first start on PostgreSQL, 3 to 10, name 0.8.0 as the
+  oldest Server that understands the schema. A Server of 0.7.1 started on that database stops,
+  naming both versions, and changes nothing: it holds no lease, keeps its audit record in files
+  and leaves the revocation list's version where it was, so it must not serve beside an instance
+  of this release. An instance of this release that shares the database applies no migration and
+  stops, naming it, while a Server of 0.7.1 still runs on the database.
+  **What to do:** back up the database before the upgrade, and stop the 0.7.1 Server before the
+  first instance of this release starts; a rolling update that starts the new one first is
+  refused. A rollback to 0.7.1 after the upgrade needs the database restored from that backup.
+- **With PostgreSQL and S3, a `data_dir` fails startup, and the image names no data directory**
+  ([ADR-0044](docs/adr/0044-the-servers-state-and-its-stores.md),
+  [ADR-0040](docs/adr/0040-releases-attestations-and-the-server-image.md)).
+  - A Server on PostgreSQL and S3 keeps nothing on its disk. A `data_dir` named in `server.toml` or
+    as `FLEET_SERVER__DATA_DIR` stops the start, naming the key.
+  - `server migrate-to-postgres` with S3 takes no `--data-dir` and refuses one. It uploads the
+    artifacts into the bucket and reads the old `data_dir` in place, copying no record anywhere.
+  - The image no longer sets `FLEET_SERVER__DATA_DIR`. A Server in a container that keeps state
+    on its disk falls back to `fleet-data` under `/`, which it cannot write, and stops naming
+    `data_dir`.
+  - Uploads in progress are staged in the bucket under `<prefix>staging/<lease>/`.
+
+  **What to do:** on PostgreSQL and S3, remove `data_dir` from `server.toml` and from the
+  environment before the upgrade. In a container on the filesystem store, or with file blobs, set
+  `data_dir = "/var/lib/opamp-fleet"` or `FLEET_SERVER__DATA_DIR=/var/lib/opamp-fleet`. With S3,
+  add a lifecycle rule that aborts incomplete multipart uploads under `<prefix>staging/`, as
+  [the manual](docs/manual/server.md#blobs) shows.
+- **Each `[audit]` key applies to its own store**
+  ([ADR-0044](docs/adr/0044-the-servers-state-and-its-stores.md)).
+  `max_file_bytes` and `keep_files` apply to the filesystem store alone, and `retain_days` to
+  PostgreSQL alone. A key set for the other store stops the start, naming `[audit] <key>`.
+  **What to do:** on PostgreSQL, remove `[audit] max_file_bytes` and `keep_files` from
+  `server.toml` before the upgrade.
+- **With PostgreSQL, an `instance_uid` is bound to one Host by a row of its own**
+  ([ADR-0043](docs/adr/0043-the-fleet-record-of-agents-and-hosts.md)).
+  The Server adds the table `host_bindings` at its first start (migration 4), filled from the
+  Hosts, and still writes the Hosts' arrays.
+  - An `instance_uid` that two Hosts hold fails the migration with `the instance_uid <uid> is
+    bound to the Hosts <hosts>; release it from all but one before this release starts`, and
+    changes nothing.
+  - A report that would bind an `instance_uid` another Host holds is refused, naming that Host.
+
+  **What to do:** on such a failure, release that `instance_uid` from all but one Host, and start
+  again.
+- **On PostgreSQL the audit record is in the database, one hash chain per lease**
+  ([ADR-0042](docs/adr/0042-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance.md)).
+  Each instance opens a chain with each lease, closes it at an orderly shutdown, and closes the
+  chain of every lapsed lease it takes over; entries queued under a lease that lapsed land in the
+  next chain, marked `taken_under`. `server audit-verify --config <server.toml>` walks every
+  chain and lists the open ones. `server migrate-to-postgres` no longer copies `audit/` into the
+  new `data_dir`: the old one stays as the archive, the first chain names its last entry as
+  `predecessor`, and `audit-verify --archive <dir>` checks the link. The Server adds the tables
+  `audit_chains`, `audit_entries` and `audit_archive` at its first start (migration 7).
+  A Server already on PostgreSQL kept its record in `data_dir/audit/`: its first start records the
+  last entry there as the archive, which the first chain names the same way.
+  **What to do:** on PostgreSQL, verify with `server audit-verify --config` from now on, and keep
+  the files under `data_dir/audit/` as the archive of the record before the upgrade. Start the
+  Server that holds that `data_dir` first, and alone: only the start that opens the first chain
+  links the archive.
+
+- **With PostgreSQL, the revocation list has one version, and it is the Gateways' `ETag`**
+  ([ADR-0044](docs/adr/0044-the-servers-state-and-its-stores.md)).
+  Every revocation and every lift moves a counter in the database, in its own transaction, and
+  `GET /v1/gateway/revocations` answers `ETag: "list-<version>-<SHA-256 of the body>"`. Every
+  Server instance on one database therefore answers the same `ETag` for the same list, and each
+  renewal of an instance's lease compares the version with the one the instance holds. At its
+  first start the Server adds the table `revocation_list_version` (migration 6). With the
+  filesystem store the `ETag` is still the SHA-256 of the list.
+  **What to do:** nothing. A Gateway fetches the list once in full after the upgrade, because
+  the `ETag` it holds no longer matches.
+
+- **With PostgreSQL, a Configuration's revisions, a Package's entries and a Deployment's members are
+  written one row at a time**
+  ([ADR-0041](docs/adr/0041-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md)).
+  Every act writes the rows it names and decides from what is stored, so two Server instances on
+  one database that edit one Configuration, Package or Deployment at once keep both changes, and a
+  revision another instance's rollout pins is never collected. At its first start the Server adds
+  the tables `deployment_packages` and `deployment_configurations` (migration 5) and fills them from
+  the `packages` and `configurations` columns of `deployments`, which it keeps writing. A signature
+  written onto an entry another instance has replaced or removed since is answered `409`, naming the
+  entry; the Package read again through the same instance shows what it holds now. The filesystem
+  store is unchanged.
+  **What to do:** nothing to upgrade. On a `409` that says an entry has changed, read the Package
+  again and sign the bytes it holds.
+
+- **Forgetting an Agent ends its session, and with PostgreSQL any instance may forget it**
+  ([ADR-0043](docs/adr/0043-the-fleet-record-of-agents-and-hosts.md)).
+  A WebSocket that carried only the forgotten Agent is closed with code `1000` and the reason
+  `forgotten`; one that carries other Agents too stays open. With PostgreSQL each instance writes
+  where the Agents it carries are connected, and which instance holds them, in one batch every
+  `[database] presence_interval_secs` (default 30, from 10 to 60), and a heartbeat reaches the
+  database at most once per batch; the report that connects an Agent writes it at once.
+  Forgetting through any instance is decided from that stored presence, and the staleness budget
+  adds the interval. `max_agents` bounds the Agent records in the database, for all instances
+  together. Migration 8 adds two columns to the Agents' table.
+  **What to do:** with PostgreSQL, set `max_agents` alike on every instance. Set
+  `presence_interval_secs` only with PostgreSQL: with the filesystem store it fails startup.
+
+- **With PostgreSQL the newest connection takes an Agent, and an Agent two instances take in turn
+  is logged as a likely duplicate**
+  ([ADR-0041](docs/adr/0041-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md)).
+  The instance an Agent connects to names itself as the Agent's holder at once, and the instance
+  that held it before stops carrying it; a presence batch of that instance written afterwards no
+  longer names it again. Whether a disconnect is written depends no more on the instances' clocks
+  agreeing, and an Agent that reconnects within the same millisecond stays connected. An Agent
+  whose holder changes more than ten times within a minute is logged as a likely duplicate, with
+  the warning `the agent's holder changed more than ten times within a minute; likely a duplicate
+  instance_uid on two connections`. Migration 9 adds two columns to the Agents' table.
+  **What to do:** nothing. On that warning, look for two hosts that run an Agent with one
+  `instance_uid`, such as a cloned VM.
+
+- **With PostgreSQL, an Agent's report, its labels, a restart request and a rollout each write
+  their own columns of its record**
+  ([ADR-0043](docs/adr/0043-the-fleet-record-of-agents-and-hosts.md)).
+  The Server instance that carries an Agent writes only what a report decides, so labels, a
+  restart or a release made through another instance on the same database stay, and that
+  instance takes them up from the database at once; a restart is sent once, by the instance that
+  clears it. A rollout writes its Agents in the order of their `instance_uid`, so two rollouts
+  over the same Agents on two instances never deadlock. An Agent an instance has not held is read
+  from the database at its first report there. With the filesystem store too, a label change and a
+  restart request are written to the Agent's record before they are answered: a request that cannot
+  be written is answered `500`, where it was logged and answered as done; an Agent whose record has
+  no file yet, because its first write failed, is answered `404` until its next report writes it;
+  and a queued restart whose record cannot be read is sent once it can.
+  **What to do:** nothing.
+
+- **On PostgreSQL an instance loads no fleet, and the Operator plane reads it from the database**
+  ([ADR-0043](docs/adr/0043-the-fleet-record-of-agents-and-hosts.md)).
+  - An instance holds in memory the Agents connected to it, each read at its first report.
+  - The fleet list, an Agent's view, the Hosts, the reach counts, both rollout acts and the
+    download check read the records from the database, each Agent connected as its stored
+    presence says.
+  - A read that fails is answered `500`.
+
+  **What to do:** nothing.
+- **With PostgreSQL, what an assignment pins is decided in the transaction, under the blob store's
+  lock**
+  ([ADR-0044](docs/adr/0044-the-servers-state-and-its-stores.md)).
+  These acts count the assignments stored, under the row's lock:
+  - deleting a Configuration, a Package or a Deployment;
+  - every write to a Package.
+
+  So a revision or a Package another instance's rollout pins is refused `409` there. For the
+  blob store's lock:
+  - every sweep of unreferenced artifacts, and every cleanup of the staging objects, holds the
+    lock alone;
+  - an upload holds it shared until its entry commits, waiting at most 5 seconds;
+  - an upload whose artifact a sweep deleted first is refused: upload it again;
+  - a sweep waits at most 60 seconds, and a start whose sweep cannot have the lock fails, naming
+    it.
+
+  Each sweep in progress holds a database session of its own, beside the pool's eight.
+  **What to do:** let the database's `max_connections` allow, per instance, the pool's eight, its
+  listening connection, one per sweep, one for the audit prune, and, on an instance that runs
+  alone, its lock's.
+- **A stop spreads the closing of the sessions over `drain_secs`, and the Agent plane takes at most
+  `max_new_connections_per_sec` new connections**
+  ([ADR-0045](docs/adr/0045-tls-1-3-two-planes-and-bounded-input.md)).
+  - An orderly stop closes both listeners at once. It closes each WebSocket session at an instant
+    drawn over `drain_secs` (default 20, from 0 to 300) and cuts what is still open 2 seconds
+    later. This replaces the fixed ten-second drain.
+  - A new connection past `max_new_connections_per_sec` (default 200) is answered `503`, with a
+    `Retry-After` of 1 to 30 seconds.
+  - A Client's first reconnect after a lost WebSocket connection is drawn over 30 seconds.
+  - A Client refused with `429` or `503` waits the `Retry-After` it is given.
+
+  **What to do:** give the Server's stop more than `drain_secs` and 2 seconds, such as
+  `docker run --stop-timeout 30` or an orchestrator's grace period of 30 seconds. Shorter, it is
+  killed before it has written the fleet's records.
+
+### Fixed
+
+- **`server audit-verify <dir>` holds a record the Server repaired after a crash, and binds the
+  repair to the entries before it.** A crash mid-write leaves a torn last line, and the next start
+  follows it with `audit.chain_broken` chained on its hash
+  ([ADR-0039](docs/adr/0039-an-append-only-audit-record.md)).
+  `audit-verify` failed on that torn line as not an entry, and on a torn line cut inside a
+  character could not read the file at all. It now takes the repair as holding, and still fails a
+  torn line nothing follows. `audit.chain_broken` now also names as `last_whole` the hash of the
+  last whole entry before the torn line, and `audit-verify` fails a repair whose `last_whole`
+  does not match it, so the entries before a repair can no longer be replaced unseen. A repair
+  written before this release names no `last_whole`: `audit-verify` holds it and names it as a
+  repair without a link, since the entries before it are not bound by those after it. A crash
+  during the repair itself, which left two torn lines that `audit-verify` refused for good, is
+  now closed by one linked `audit.chain_broken` at the next start, and holds. A line with bytes
+  that are not UTF-8 anywhere but in a character cut short at its end fails, naming the line.
+  **What to do:** nothing. Where `audit-verify` names a repair without a link, compare the entries
+  before it against a copy taken earlier.
+
+- **A stop right after the Server starts drains it.** The Server installs its shutdown handlers
+  before it binds its listeners and logs its planes.
+  **What to do:** nothing.
+
+## [0.7.1] - 2026-10-31
 
 ### Added
 

@@ -16,7 +16,7 @@ The Dev Container is lean ([ADR-0004](0004-dev-container-runtime.md)), so a choi
 OpenSSL headers, cmake or node carries a real cost, and the UI is explicitly not the product.
 
 The floor on the pace of every request body and every WebSocket message
-([ADR-0012](0012-tls-1-3-two-planes-and-bounded-input.md), its pace floor) has to see a message's
+([ADR-0045](0045-tls-1-3-two-planes-and-bounded-input.md), its pace floor) has to see a message's
 data frames. Judged by the bytes a connection reads, a message that has begun stays open for ever
 while its peer sends a Ping between its fragments, which RFC 6455 allows, and every Ping looks like
 progress. axum's WebSocket hands over whole messages only.
@@ -87,7 +87,7 @@ configuration to a strict parse.
    runs with no feature, with `client` and with `server`. docs.rs builds with all features.
 
 4. **`opamp::tls` is the TLS both sides share,** compiled with either feature. It installs the
-   ring provider, never a system library ([ADR-0012](0012-tls-1-3-two-planes-and-bounded-input.md)).
+   ring provider, never a system library ([ADR-0045](0045-tls-1-3-two-planes-and-bounded-input.md)).
    It reads certificates and a private key from PEM bytes, and an empty result is an error. It
    carries an `Identity`, a certificate chain and its key as PEM. It opens no file. Every rustls
    configuration either side builds speaks TLS 1.3 alone, with the three TLS 1.3 suites of the ring
@@ -105,11 +105,11 @@ configuration to a strict parse.
    handshake and takes the connection through hyper's upgrade; `opamp` frames it with
    `tokio-tungstenite` over a reader that follows the frame headers as they arrive, so it knows
    whether a data message has begun and how much of it has come, apart from the control frames
-   between its fragments (the pace floor of ADR-0012).
+   between its fragments (the pace floor of ADR-0045).
 
 6. **The server listener.** `opamp::server::listen` builds the rustls `ServerConfig` from a
    certificate, a key and a client-certificate rule: none, optional or required against a CA. It
-   sets the ALPN protocols. `serve` runs a router on a bound listener with the bounds of ADR-0012:
+   sets the ALPN protocols. `serve` runs a router on a bound listener with the bounds of ADR-0045:
    a 30-second header read with the timer it needs, and a 10-second TLS handshake. It puts the
    verified peer certificate and the peer address into every request, on every listener it serves.
    A handle shuts listeners down, and one handle may drain several. How long a drain may take is
@@ -141,7 +141,7 @@ configuration to a strict parse.
    which files hold the material, which identity is in force, which credential is sent and when it
    rotates. It parses `server.toml` and `supervisor.toml`. It persists and merges connection
    settings (ADR-0013). It runs the CSR flow and the CA, and it decides admission
-   ([ADR-0021](0021-admission-by-client-certificate-and-revocation.md)). Its `AgentState` keeps the
+   ([ADR-0038](0038-admission-by-client-certificate-and-revocation.md)). Its `AgentState` keeps the
    Client's decisions over one protocol state machine. Its flows after a reply run in one order:
    connection settings, certificate, packages, the self-update restart, the Supervisor set
    ([ADR-0018](0018-the-client-updates-itself-from-a-signed-package.md)). Connection settings come
@@ -177,7 +177,7 @@ configuration to a strict parse.
     whose connection `opamp` takes over through hyper (clause 5), so axum's `ws` feature is off;
     the OpAMP endpoint of the Server, the Gateway and the Supervisor Endpoint is `opamp::server`'s,
     and so is the listener it is served on (clauses 5 and 6). Which listeners exist is
-    [ADR-0012](0012-tls-1-3-two-planes-and-bounded-input.md)'s.
+    [ADR-0045](0045-tls-1-3-two-planes-and-bounded-input.md)'s.
 
 14. **The bundled UI is static assets embedded in the Server binary.** Plain HTML, CSS and JS under
     `crates/fleet-server/static/`, embedded with `include_str!`; no frontend toolchain. The REST
@@ -255,13 +255,13 @@ configuration to a strict parse.
     an error naming it. The same holds for files a binary reads at startup to restore its state:
     one that does not parse fails startup rather than being skipped or silently defaulted.
 
-**Out of scope:** the CSR flow and the Server's CA, which stay in the application with ADR-0021;
+**Out of scope:** the CSR flow and the Server's CA, which stay in the application with ADR-0038;
 finer features, such as one per transport; a release routine for the crate; where the PEM material
 comes from on disk; how each binary finds its configuration file and whether its environment adds
 to it ([ADR-0030](0030-the-servers-configuration.md)); where an installed service looks for its
 configuration file on each OS
 ([ADR-0019](0019-the-installed-service-and-its-state.md)); the listener layout
-([ADR-0012](0012-tls-1-3-two-planes-and-bounded-input.md)); whether a release ships the operator
+([ADR-0045](0045-tls-1-3-two-planes-and-bounded-input.md)); whether a release ships the operator
 tools.
 
 ## Alternatives considered
@@ -332,7 +332,7 @@ tools.
   `tls_certs_only`, `identity` and `tls_backend_preconfigured`, with the stability warning on the
   last. Read 2026-10-03 in the vendored 0.13.5 source.
 - [`axum-server`](https://docs.rs/axum-server/0.7) `RustlsAcceptor::handshake_timeout` and
-  [`hyper-util`](https://docs.rs/hyper-util/0.1) `TokioTimer`, as ADR-0012 cites them.
+  [`hyper-util`](https://docs.rs/hyper-util/0.1) `TokioTimer`, as ADR-0045 cites them.
 - [`rustls-pki-types`](https://docs.rs/rustls-pki-types) `PemObject`, the PEM reader rustls
   itself uses.
 - hyper and tonic features, the sans-IO pattern, `quinn` over `quinn-proto`, and the Cargo book on

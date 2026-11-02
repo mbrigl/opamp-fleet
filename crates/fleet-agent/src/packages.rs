@@ -659,30 +659,36 @@ mod tests {
     }
 
     /// The waits of one download are bounded: a Server origin that keeps answering `503` makes the
-    /// download fail once the next wait would pass the bound.
+    /// download fail once the next wait would pass the bound. The waits are of seconds, so that the
+    /// requests between them, which count against the bound too, take a share of it only a defect
+    /// makes large.
     /// Verifies: ADR-0027
     #[tokio::test]
     async fn a_download_gives_up_once_its_waits_reach_the_bound() {
         let (server, count) = answering(vec![(503, Some("30")); 100]).await;
         let (origin, client) = origin_for(&format!("ws://{server}/v1/opamp"));
         let patience = Patience {
-            per_wait: std::time::Duration::from_millis(10),
-            total: std::time::Duration::from_millis(35),
+            per_wait: std::time::Duration::from_secs(1),
+            total: std::time::Duration::from_millis(3_500),
         };
-        let err = send_patiently(
-            &origin,
-            &client,
-            &format!("http://{server}/file"),
-            &[],
-            patience,
+        let err = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            send_patiently(
+                &origin,
+                &client,
+                &format!("http://{server}/file"),
+                &[],
+                patience,
+            ),
         )
         .await
+        .expect("the download kept asking past its 3.5 s bound")
         .expect_err("gave up");
         assert!(err.contains("longer than this Client waits"), "{err}");
         let requests = count.load(Ordering::SeqCst);
         assert!(
             (2..=4).contains(&requests),
-            "at most three waits of 10 ms fit in 35 ms: {requests}"
+            "at most three waits of 1 s fit in 3.5 s: {requests}"
         );
     }
 
@@ -712,7 +718,8 @@ mod tests {
     }
 
     /// The time the requests take counts against the bound, not only the waits: a slow origin
-    /// exhausts it although the waits alone would not.
+    /// exhausts it although the waits alone would not. Each request takes a second, so that what a
+    /// loaded host adds to it is small against the bound.
     /// Verifies: ADR-0027
     #[tokio::test]
     async fn request_time_counts_against_the_bound() {
@@ -724,7 +731,7 @@ mod tests {
                 let seen = seen.clone();
                 async move {
                     seen.fetch_add(1, Ordering::SeqCst);
-                    tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                     (
                         axum::http::StatusCode::SERVICE_UNAVAILABLE,
                         [(axum::http::header::RETRY_AFTER, "0")],
@@ -740,22 +747,26 @@ mod tests {
         let (origin, client) = origin_for(&format!("ws://{server}/v1/opamp"));
         let patience = Patience {
             per_wait: std::time::Duration::from_millis(1),
-            total: std::time::Duration::from_millis(150),
+            total: std::time::Duration::from_millis(2_500),
         };
-        let err = send_patiently(
-            &origin,
-            &client,
-            &format!("http://{server}/file"),
-            &[],
-            patience,
+        let err = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            send_patiently(
+                &origin,
+                &client,
+                &format!("http://{server}/file"),
+                &[],
+                patience,
+            ),
         )
         .await
+        .expect("the download kept asking past its 2.5 s bound")
         .expect_err("gave up");
         assert!(err.contains("longer than this Client waits"), "{err}");
         let requests = count.load(Ordering::SeqCst);
         assert!(
             (2..=3).contains(&requests),
-            "{requests} requests in 150 ms of 60 ms each"
+            "{requests} requests in 2.5 s of 1 s each"
         );
     }
 

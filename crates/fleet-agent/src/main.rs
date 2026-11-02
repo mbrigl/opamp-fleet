@@ -1,6 +1,6 @@
 //! Entry point: parse the CLI (ADR-0019) and hand off — `run` to the daemon runtime, the
 //! `service` verbs to the cross-platform lifecycle. The daemon loads `supervisor.toml`, restores the
-//! Agent's identity, and runs the transport the endpoint selects (ADR-0012) until stopped.
+//! Agent's identity, and runs the transport the endpoint selects (ADR-0045) until stopped.
 
 use std::path::{Path, PathBuf};
 
@@ -67,7 +67,7 @@ fn main() {
         )
         .init();
 
-    // One TLS provider for the whole process (ADR-0012): ring, never a system library.
+    // One TLS provider for the whole process (ADR-0045): ring, never a system library.
     opamp::tls::install_ring_provider();
 
     let cli::Parsed { cli, config_named } = cli::parse();

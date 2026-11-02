@@ -11,9 +11,9 @@ use opamp::uid::InstanceUid;
 
 #[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
 pub struct TestServer {
-    /// The Agent plane (ADR-0012): `/v1/opamp` and the package download.
+    /// The Agent plane (ADR-0045): `/v1/opamp` and the package download.
     pub addr: SocketAddr,
-    /// The Operator plane (ADR-0012): the REST API, its docs, and the UI — a second listener, as
+    /// The Operator plane (ADR-0045): the REST API, its docs, and the UI — a second listener, as
     /// in a real deployment, so a test that calls the wrong one finds out.
     pub rest_addr: SocketAddr,
     pub state: Arc<AppState>,
@@ -34,7 +34,7 @@ pub async fn spawn_with_limit(limit: usize) -> TestServer {
     spawn_full(None, limit, DEFAULT_STALE_AFTER).await
 }
 
-/// The same real router with a tightened staleness budget (ADR-0024), for the tests that need an
+/// The same real router with a tightened staleness budget (ADR-0043), for the tests that need an
 /// Agent to fall silent without waiting out the real one.
 #[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
 pub async fn spawn_with_stale_after(stale_after: std::time::Duration) -> TestServer {
@@ -93,7 +93,7 @@ async fn spawn_full(
     }
 }
 
-/// Serves the two planes on ephemeral ports, exactly as the binary serves them (ADR-0012), and
+/// Serves the two planes on ephemeral ports, exactly as the binary serves them (ADR-0045), and
 /// answers with the address of each. The Operator plane is open, as it is without `[rest.auth]`.
 #[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
 pub async fn serve(
@@ -103,7 +103,7 @@ pub async fn serve(
     serve_guarded(state, admission, None).await
 }
 
-/// The same two planes, with the Operator plane's credential check active (ADR-0021).
+/// The same two planes, with the Operator plane's credential check active (ADR-0038).
 #[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
 pub async fn serve_guarded(
     state: Arc<AppState>,
@@ -117,7 +117,7 @@ pub async fn serve_guarded(
         std::net::TcpListener::bind("127.0.0.1:0").expect("bind the Operator plane");
     let addr = agent_listener.local_addr().expect("local addr");
     let rest_addr = operator_listener.local_addr().expect("local addr");
-    // Through `listen::plane`, as the binary serves them (ADR-0012), so the whole suite runs
+    // Through `listen::plane`, as the binary serves them (ADR-0045), so the whole suite runs
     // against a Server whose connection setup is bounded the way a real one's is.
     let handle = opamp::server::listen::Handle::new();
     tokio::spawn(
@@ -288,7 +288,7 @@ pub async fn deploy(
     assert_eq!(response.status(), 200, "the deployment is rolled out");
 }
 
-/// A clock a test moves by hand, so a rate limit refills when the test says (ADR-0012).
+/// A clock a test moves by hand, so a rate limit refills when the test says (ADR-0045).
 #[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
 pub struct ManualClock(pub std::sync::atomic::AtomicU64);
 
@@ -312,7 +312,7 @@ impl ManualClock {
     }
 }
 
-/// The same real router with the Agent plane's rate limit armed (ADR-0012), its buckets on a clock
+/// The same real router with the Agent plane's rate limit armed (ADR-0045), its buckets on a clock
 /// the test moves.
 #[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
 pub async fn spawn_with_agent_rate(

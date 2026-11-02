@@ -1,7 +1,7 @@
 # ADR-0023: The Server keeps an append-only audit record of every security decision, each entry chained to the one before by its hash
 
-- **Status:** 🟢 accepted
-- **Date:** 2026-10-06
+- **Status:** ⚪ superseded by [ADR-0039](0039-an-append-only-audit-record.md)
+- **Date:** 2026-11-02
 - **Deciders:** Markus Brigl
 - **Applies to:** the audit port in `crates/fleet-server/src/audit.rs`, its writer in `crates/fleet-server/src/audit_log.rs` and its filesystem adapter in `crates/fleet-server/src/fs/audit.rs`, every place in `crates/fleet-server/src/` that admits or refuses a peer, issues or revokes a certificate, takes an operator's act or records a package outcome, the `server audit-verify` command, and the `[audit]` section of `server.toml`
 

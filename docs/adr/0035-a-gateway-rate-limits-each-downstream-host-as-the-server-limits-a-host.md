@@ -13,7 +13,7 @@ and the message's `instance_uid`, and the Gateway's aggregate, 500 messages a se
 10 000 by default
 ([ADR-0015](0015-client-modes-and-the-gateway.md) clause 26). A message that finds either bucket
 empty is answered `Unavailable` with `RetryInfo`
-([ADR-0012](0012-tls-1-3-two-planes-and-bounded-input.md) clause 25).
+([ADR-0045](0045-tls-1-3-two-planes-and-bounded-input.md) clause 25).
 
 The aggregate is shared by every host behind the Gateway, and the Server cannot tell them apart. A
 single host may speak for up to `max_carried_agents` `instance_uid`s (ADR-0015 clause 15). Each
@@ -46,14 +46,14 @@ as the Server does, without forwarding it.
 2. **What is counted.** Every `AgentToServer` message on the downstream `/v1/opamp`, over a
    WebSocket and over plain HTTP, a message there that cannot be decoded, every request on the
    downstream package download route, and an enrolling peer's request, as the Server counts them
-   (ADR-0012 clause 24). Each takes one token once the downstream handshake and the revocation
+   (ADR-0045 clause 24). Each takes one token once the downstream handshake and the revocation
    verdict have admitted it, and before the Gateway does anything else with it: before it reads a
    CSR, binds an `instance_uid`, touches the package cache or forwards anything upstream. The
    Gateway's own Supervisors and its upstream connection are not counted.
 
 3. **The bucket is set in `[gateway.rate_limit]`.** `messages_per_sec` (default `10`) is the
    tokens added per second, continuously, and `burst` (default `300`) the bucket's capacity, the
-   values the Server gives a host (ADR-0012 clause 22). A new bucket starts full. `0` for either
+   values the Server gives a host (ADR-0045 clause 22). A new bucket starts full. `0` for either
    key is refused at startup, naming the key. No value turns the limit off. Any other key of the
    section is refused, as in every section.
 
@@ -61,17 +61,17 @@ as the Server does, without forwarding it.
    enrolment request that finds no whole token is not forwarded and binds nothing. It is answered
    with a `ServerToAgent` that carries the message's own `instance_uid`, `error_response` of type
    `Unavailable` with an `error_message` saying that too many messages arrive, and `RetryInfo` of
-   30 seconds, the Server's own (ADR-0012 clauses 25 and 27); a message that cannot be decoded is
+   30 seconds, the Server's own (ADR-0045 clauses 25 and 27); a message that cannot be decoded is
    answered so without an `instance_uid`. The reply names no capabilities, since the Gateway does
    not speak for the Server, and a Client reads none from it. The WebSocket stays open. A download
-   past the limit is answered `429` with `Retry-After: 30`, and the artifact is not read (ADR-0012
+   past the limit is answered `429` with `Retry-After: 30`, and the artifact is not read (ADR-0045
    clause 26). What is refused is logged once per host per minute, with the host and how many were
    refused.
 
 5. **The buckets are bounded.** They live in memory, and nothing persists them. They hold at most
    1 000 000 entries, the Gateway's total of bindings (ADR-0015 clause 15). When the table is full,
    a new key evicts the bucket used least recently, which only grants tokens, never withholds them
-   (ADR-0012 clause 28).
+   (ADR-0045 clause 28).
 
 **Out of scope:** a bucket per `instance_uid` at the Gateway, which the Server keeps; a rate the
 Server tells the Gateway; a limit on the downstream fetch of the package floors; changing the
@@ -94,14 +94,14 @@ Server's aggregate.
 
 ## Sources / Prior art
 
-- This repository: [ADR-0012](0012-tls-1-3-two-planes-and-bounded-input.md)
+- This repository: [ADR-0045](0045-tls-1-3-two-planes-and-bounded-input.md)
   clauses 22 and 24 to 28 (the Server's buckets, their answers and their bound),
   [ADR-0015](0015-client-modes-and-the-gateway.md) clause 26 (their keys), clause 15 (the host a
   downstream certificate names, and the total of bindings) and clauses 20 to 25 (enrolment
   through a Gateway), `crates/fleet-server/src/agent_rate.rs`, `docs/HARDENING.md`.
 - The OpAMP specification, *Throttling*: a Server answers `UNAVAILABLE` with `RetryInfo`, and an
   Agent retries no sooner than it says. Recalled, not re-read for this record; the answer the
-  Gateway gives is ADR-0012's, which was.
+  Gateway gives is ADR-0045's, which was.
 
 ## Consequences
 

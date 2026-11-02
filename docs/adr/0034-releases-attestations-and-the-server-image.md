@@ -1,7 +1,7 @@
 # ADR-0034: Releases, attestations and the Server's image
 
-- **Status:** 🟢 accepted
-- **Date:** 2026-10-23
+- **Status:** ⚪ superseded by [ADR-0040](0040-releases-attestations-and-the-server-image.md)
+- **Date:** 2026-11-02
 - **Deciders:** Markus Brigl
 - **Applies to:** `.github/workflows/release.yml` (the `version`, `build`, `sbom`, `image` and `publish` jobs, their permissions, the assets published and the release notes), `packaging/container/Containerfile`, the image `ghcr.io/mbrigl/opamp-fleet-server`, `.github/dependabot.yml`, `crates/fleet-tools/tests/release_workflow.rs`, the names of every release asset, the fleet view's reading of an artifact's file name, and every document that tells an operator how to download, check or run a release asset or the Server's image (`README.md`, `docs/manual/`, `CHANGELOG.md`)
 

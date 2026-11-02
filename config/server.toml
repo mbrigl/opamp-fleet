@@ -41,6 +41,15 @@ listen = "127.0.0.1:4320"
 # limit for a fleet larger than this.
 max_connections = 10000
 
+# The new Agent-plane connections taken a second. Past it, a connection is answered 503 with a
+# Retry-After of 1 to 30 seconds, so a fleet that comes back at once is spread. 0 is refused.
+max_new_connections_per_sec = 200
+
+# How long a stop (SIGTERM) spreads the closing of the WebSocket sessions over, in seconds, from 0 to
+# 300; what is still open 2 seconds later is cut. 0 closes them all at once. Give a container's stop
+# timeout more than this.
+drain_secs = 20
+
 # Where the Server keeps ALL of its state, one directory per domain, created owner-only (0700) when
 # missing, every file in it 0600. The layout is fixed; anything else in it stops the Server, named:
 #
@@ -174,14 +183,21 @@ max_package_size_bytes = 1073741824
 # as listed above. "postgres" keeps them in one PostgreSQL database instead; data_dir then holds the
 # audit record and, with the filesystem blob store, the artifacts, and nothing else. The Server
 # creates no database and no role: the role needs the right to create tables, and the Server applies
-# its own schema at startup. One Server per database. The connection is TLS 1.3 with the database's
+# its own schema at startup. Each instance holds a lease in it while it serves; several share one
+# database when their blobs are in S3 and no CA key is a file, and otherwise one is alone on it.
+# The connection is TLS 1.3 with the database's
 # certificate and host name verified, against the public roots or ca_file; tls = false is accepted
 # for host = "127.0.0.1" or "::1" alone. The password comes from password_file, readable by its
 # owner and at most its group; no PG* variable changes the connection. An existing data_dir is copied
 # into the database once, while the Server is stopped, by
 #   server migrate-to-postgres --from <data_dir> --data-dir <new>
+# or, with [blobs] store = "s3", which takes no --data-dir and uploads the artifacts to the bucket,
+#   server migrate-to-postgres --from <data_dir>
 # [database]
 # store = "postgres"
+# lease_renew_secs = 10   # how often an instance renews its lease
+# lease_secs = 30         # how long after its last renewal the lease lapses: three renewals at least
+# presence_interval_secs = 30   # how often an instance writes where its Agents are connected: 10 to 60
 #
 # [database.postgres]
 # host = "db.example.org"
@@ -269,10 +285,13 @@ client_ca_file = "client-ca.pem"
 # enrolment, issuance, revocation, operator acts, package outcomes — in
 # <data_dir>/audit/, each line carrying the SHA-256 of the one before. Check it with
 #   server audit-verify <data_dir>/audit
-# A Server that cannot write it admits no one until it can. Bounded by size, never switched off.
+# A Server that cannot write it admits no one until it can. Never switched off: in files it is
+# bounded by size, on PostgreSQL by age. Each key applies to its own store alone; one set for the
+# other store stops the Server at startup, naming it.
 # [audit]
-# max_file_bytes = 67108864   # a file this large is closed and the next one started
-# keep_files = 16             # the oldest past this is deleted, its last hash recorded first
+# max_file_bytes = 67108864   # files: a file this large is closed and the next one started
+# keep_files = 16             # files: the oldest past this is deleted, its last hash recorded first
+# retain_days = 365           # PostgreSQL: entries older than this are pruned, 1 to 36500
 
 # Optional connection settings offered to the fleet: every Agent declaring
 # AcceptsOpAMPConnectionSettings is offered these, verifies them by actually connecting, and

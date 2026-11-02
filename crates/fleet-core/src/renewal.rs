@@ -55,7 +55,7 @@ pub fn decode(content: &[u8]) -> Option<(&[u8], &[u8])> {
 mod tests {
     use super::*;
 
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0038
     #[test]
     fn a_proof_round_trips_and_a_torn_one_does_not_parse() {
         let content = encode(b"cert", b"sig");
@@ -67,7 +67,7 @@ mod tests {
 
     /// A length prefix past what the content holds — the largest one included — does not parse,
     /// on any pointer width.
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0038
     #[test]
     fn a_length_past_the_content_does_not_parse() {
         let mut content = u32::MAX.to_be_bytes().to_vec();

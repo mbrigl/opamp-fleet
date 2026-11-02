@@ -42,8 +42,8 @@ The oracle meets three further facts:
 - **Plaintext runs alone check the endpoint as a test builds it, not as it ships.** They run on
   the loopback with an open admission, as the rest of the suite does. The shipped Server refuses
   plaintext beyond the loopback and admits by a client certificate in a TLS 1.3 handshake alone
-  ([ADR-0012](0012-tls-1-3-two-planes-and-bounded-input.md),
-  [ADR-0021](0021-admission-by-client-certificate-and-revocation.md)), and the Client presents one
+  ([ADR-0045](0045-tls-1-3-two-planes-and-bounded-input.md),
+  [ADR-0038](0038-admission-by-client-certificate-and-revocation.md)), and the Client presents one
   on both transports. Whether `opamp-go` can speak to that endpoint, and ours to an `opamp-go`
   Server that requires the same, is what every deployment depends on.
 - **Not everything the scenario list names is observable on both ends.** `opamp-go`'s plain-HTTP

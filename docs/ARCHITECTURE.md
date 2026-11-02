@@ -36,11 +36,11 @@ than anywhere else, and none beats one that has stopped being true.
 
 - **Operators** drive the fleet through the REST API on the Operator plane, guarded by
   `[rest.auth]` beyond the loopback; the bundled UI uses the same API
-  ([ADR-0021](adr/0021-admission-by-client-certificate-and-revocation.md)).
+  ([ADR-0038](adr/0038-admission-by-client-certificate-and-revocation.md)).
 - **Clients** reach the Agent plane over OpAMP — WebSocket or plain HTTP — admitted by the client
   certificate in the TLS 1.3 handshake alone
-  ([ADR-0012](adr/0012-tls-1-3-two-planes-and-bounded-input.md),
-  ADR-0021). A Client in Gateway Mode carries other Clients' Agents over its own upstream
+  ([ADR-0045](adr/0045-tls-1-3-two-planes-and-bounded-input.md),
+  ADR-0038). A Client in Gateway Mode carries other Clients' Agents over its own upstream
   connections and refuses what the Server revoked
   ([ADR-0015](adr/0015-client-modes-and-the-gateway.md)).
 - **Managed Processes** run on the Client's host under a Supervisor each; a Collector reports
@@ -108,7 +108,7 @@ no module.
 
 - **Server stores** — one port per domain in the core module it serves, shaped so a database or
   an object store could implement it, and speaking in domain types, never paths
-  ([ADR-0029](adr/0029-the-servers-state-and-its-stores.md)):
+  ([ADR-0044](adr/0044-the-servers-state-and-its-stores.md)):
   `AgentStore` in `agent_store`, which holds each Agent's labels in its record, writes a rollout's
   revisions and assignments as one operation, and answers what an assignment pins;
   `ConfigBackend` under the `ConfigStore` in `configs`; `DeploymentBackend` under the
@@ -116,21 +116,21 @@ no module.
   SHA-256) under the `PackageStore` in `packages`, the bytes in `data_dir` or, with
   `[blobs] store = "s3"`, in one bucket of an S3-compatible store through the adapter in `s3`, which
   bridges the synchronous port onto a runtime of its own (`bridge`)
-  ([ADR-0029](adr/0029-the-servers-state-and-its-stores.md)); `BootstrapStore` under the
+  ([ADR-0044](adr/0044-the-servers-state-and-its-stores.md)); `BootstrapStore` under the
   `BootstrapCertificates` in `bootstrap`; `EnrolmentStore` under the `Enrolment` in `enrolment`;
   `FloorStore` under the `PackageFloors` in `floors`, the floor the operator signed per Agent type
   ([ADR-0028](adr/0028-package-versions-high-water-mark-and-floor.md));
   `LedgerStore` in `revocation`; `AuditStore` in `audit_log`. The filesystem adapters are in `fs`,
   which also opens the data directory and refuses anything its layout does not name. With
-  `[database] store = "postgres"` every port but the blob and the audit port has its PostgreSQL
-  adapter in `postgres` instead (`postgres::agents`, `configs`, `deployments`, `packages`,
-  `ledger`, `bootstrap`, `enrolment`, `floors`), each call one transaction; `postgres` holds the
+  `[database] store = "postgres"` every port but the blob port has its PostgreSQL adapter in
+  `postgres` instead (`postgres::agents`, `configs`, `deployments`, `packages`, `ledger`,
+  `bootstrap`, `enrolment`, `floors`, `audit`), each call one transaction; `postgres` holds the
   connection
   they share — TLS 1.3 on *ring*, a pool on a `bridge` runtime of its own, the advisory lock that
   keeps one Server per database — and applies the schema embedded in `postgres::schema` as
   numbered migrations; `postgres::import` is `server migrate-to-postgres`, which copies a
   `data_dir` into the database offline
-  ([ADR-0029](adr/0029-the-servers-state-and-its-stores.md)). The core's
+  ([ADR-0044](adr/0044-the-servers-state-and-its-stores.md)). The core's
   constructors take the ports — `AppState::with_stores`, `PackageStore::with_backend`,
   `PackageOffering::with_deployments`, `BootstrapCertificates::open`, `Enrolment::open_on` — and
   `lib.rs` chooses the adapters by `[database]` in `Records`, which `AppState::on`,
@@ -143,15 +143,15 @@ no module.
   filesystem adapter in `fs::floors`, its PostgreSQL adapter in `postgres::floors`, and the one
   `contract` test there that runs on both stores. A new store copies its shape and its test
   ([ADR-0009](adr/0009-ports-and-adapters.md),
-  [ADR-0029](adr/0029-the-servers-state-and-its-stores.md)).
+  [ADR-0044](adr/0044-the-servers-state-and-its-stores.md)).
 - **Server listeners** — `tls` reads the `[tls]`, `[rest.tls]` and `[enrolment]` files into the
   material each plane serves with — the Agent plane requiring a client certificate in the
   handshake, the Operator plane asking for none and serving `[rest.tls]`'s certificate when the
   section is present
-  ([ADR-0012](adr/0012-tls-1-3-two-planes-and-bounded-input.md)) — and tells a member's certificate
+  ([ADR-0045](adr/0045-tls-1-3-two-planes-and-bounded-input.md)) — and tells a member's certificate
   from a bootstrap one by its
   issuer. `listen` serves both planes on one handle with one drain and a connection cap each
-  ([ADR-0012](adr/0012-tls-1-3-two-planes-and-bounded-input.md)).
+  ([ADR-0045](adr/0045-tls-1-3-two-planes-and-bounded-input.md)).
 - **Server admission** — `transport::Admission` requires the client certificate on every request
   to `/v1/opamp` and reads no `Authorization` header, admits a bootstrap certificate only while the
   enrolment window is open, and guards the package download with the same certificate. Behind
@@ -161,21 +161,32 @@ no module.
   modules hold the state behind it: `enrolment`, the operator-opened window and the queue of
   requests an operator approves through `api`, and `throttle`, the per-address back-off after
   repeated failures, which both planes use
-  ([ADR-0021](adr/0021-admission-by-client-certificate-and-revocation.md)). `revocation`
+  ([ADR-0038](adr/0038-admission-by-client-certificate-and-revocation.md)). `revocation`
   holds the register of issued certificates, the revocation list and the Hosts — each with the
   subject values of its certificate, its Gateway mark and the Agents bound to it — behind the
-  `LedgerStore` port ([ADR-0021](adr/0021-admission-by-client-certificate-and-revocation.md),
-  [ADR-0024](adr/0024-the-fleet-record-of-agents-and-hosts.md)).
+  `LedgerStore` port ([ADR-0038](adr/0038-admission-by-client-certificate-and-revocation.md),
+  [ADR-0043](adr/0043-the-fleet-record-of-agents-and-hosts.md)).
   `agent_rate` holds the token buckets that bound how often an admitted host, an Agent behind a
   marked Gateway, and the Gateway as a whole are heard, in the bounded tables of
   `fleet_core::rate`; `transport` takes a token for each
   message before the handler does anything else and for each download in the guard
-  ([ADR-0012](adr/0012-tls-1-3-two-planes-and-bounded-input.md)).
+  ([ADR-0045](adr/0045-tls-1-3-two-planes-and-bounded-input.md)).
 - **Audit record** — `audit` is the port every security decision is recorded through;
   `audit_log` chains the entries by hash and `fs::FsAuditStore` keeps them under
-  `data_dir/audit/` ([ADR-0023](adr/0023-an-append-only-audit-record.md)).
+  `data_dir/audit/` ([ADR-0039](adr/0039-an-append-only-audit-record.md)). On PostgreSQL
+  `postgres::audit::PgAuditStore` keeps one chain per lease; the lease's take opens it and closes
+  the chains of the lapsed leases it removes, as each renewal does, and an orderly shutdown closes
+  the instance's own
+  ([ADR-0042](adr/0042-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance.md)).
+  `postgres::audit_prune` bounds it by `[audit] retain_days`: a task `main` starts prunes at
+  startup and once a day, the instance's own chain always and the closed chains while it holds the
+  prune's advisory lock, recording each `audit.pruned` through the instance's writer and waiting
+  for it before it deletes, in rounds of a bounded number of entries, every chain of one round in
+  one transaction
+  ([ADR-0044](adr/0044-the-servers-state-and-its-stores.md)
+  clause 12).
 - **Server ports beyond storage** — `fleet` owns `CertificateSigner`, which the local CA in `ca`
-  implements for the CSR flow and the renewal proof (ADR-0021), and
+  implements for the CSR flow and the renewal proof (ADR-0038), and
   `Clock`, which `clock::SystemClock` implements. The `[connection_offer]` and
   `[telemetry_offer]` sections become the fleet's offers in `config`.
 - **Server configuration** — `config` builds one TOML document from the defaults, `server.toml`
@@ -317,7 +328,7 @@ of its Client Agent — the Agent reporting `supervisor.kind.*` in the same grou
 or behind a Gateway the machine the Agents report. It keeps that placement per group and places a
 group again when a report, a label, a forget or a Gateway mark changes it, so every Selector match
 reads the same description without a fleet-wide pass
-([ADR-0024](adr/0024-the-fleet-record-of-agents-and-hosts.md)).
+([ADR-0043](adr/0043-the-fleet-record-of-agents-and-hosts.md)).
 
 **A package reaches an Agent.** An operator uploads an artifact into `packages` and signs its
 entry there — `packages` checks the signature against `[packages] verification_key` when the
@@ -384,12 +395,16 @@ artifacts, named by SHA-256, unless a bucket keeps them), `agents/` (each Agent'
 inside), `hosts/`,
 `certificates/` (the register), `revocations.json`, `bootstrap/`, `enrolment.json` (the window and
 its queue), `package-floors.json` (the floor of each Agent type) and `audit/`
-([ADR-0029](adr/0029-the-servers-state-and-its-stores.md)).
+([ADR-0044](adr/0044-the-servers-state-and-its-stores.md)).
 With `[database] store = "postgres"` the records are rows of one PostgreSQL database instead, and
-`data_dir` keeps `audit/` and, with the filesystem blob store, `blobs/`
-([ADR-0029](adr/0029-the-servers-state-and-its-stores.md)); the Server still loads
-every record at startup and answers from memory.
-A restart restores the fleet from them and shows each Agent disconnected until it reports; an
+`data_dir` keeps, with the filesystem blob store, `blobs/` and an archived `audit/`; with the blobs
+in S3 too there is no `data_dir`, and an instance keeps nothing on its disk
+([ADR-0044](adr/0044-the-servers-state-and-its-stores.md)).
+On files the Server loads every record at startup and answers from memory; on PostgreSQL an
+instance holds only the Agents connected to it, each read at its first report, and the Operator
+plane reads the fleet from the database.
+A restart on files restores the fleet from them and shows each Agent disconnected until it
+reports; an
 installation an older Server wrote is moved there once by `server migrate`. The Client keeps its
 state
 under `state_dir`: the issued certificate and key, the connection settings the Server offered,

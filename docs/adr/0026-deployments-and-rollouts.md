@@ -84,7 +84,7 @@ Configuration, Package or Deployment that an assignment pins.
 3. **A Selector is equality, AND, over the effective description, and it aims a Deployment.**
    - It is a string-to-string map. An Agent matches when every pair equals a string-valued entry
      of its effective description, whose content
-     [ADR-0024](0024-the-fleet-record-of-agents-and-hosts.md) clause 18 states.
+     [ADR-0043](0043-the-fleet-record-of-agents-and-hosts.md) clause 18 states.
    - An array-valued attribute (`host.ip`) is displayed but never matched.
    - There are no set-based operators. They would extend the same field compatibly.
    - A Deployment's Selector is never empty
@@ -112,13 +112,13 @@ Configuration, Package or Deployment that an assignment pins.
      `PUT|DELETE …/configurations/{configuration}` holds or drops a Configuration; one the Server
      does not hold is `404`.
    - A Deployment is persisted through the store
-     [ADR-0029](0029-the-servers-state-and-its-stores.md) names: owner-only, one JSON file per
+     [ADR-0044](0044-the-servers-state-and-its-stores.md) names: owner-only, one JSON file per
      Deployment in the filesystem adapter, one row in the PostgreSQL adapter. A stored Deployment
      that does not parse, or whose name disagrees with its content, fails startup naming it.
      Saving distributes nothing.
 
 6. **The assignment is per Agent, persisted, and pins one release.**
-   - Each Agent's record ([ADR-0024](0024-the-fleet-record-of-agents-and-hosts.md)) stores what
+   - Each Agent's record ([ADR-0043](0043-the-fleet-record-of-agents-and-hosts.md)) stores what
      its last rollout released to it:
      - the Deployment it was released through;
      - the Package pinned, if any;
@@ -190,7 +190,7 @@ Configuration, Package or Deployment that an assignment pins.
     - Deleting a Configuration, a Package or a Deployment is refused (`409`) while any Agent's
       assignment names it. The message says how many Agents pin it.
     - The way to delete is to roll those Agents out through a Deployment without it, or to forget
-      them ([ADR-0024](0024-the-fleet-record-of-agents-and-hosts.md)).
+      them ([ADR-0043](0043-the-fleet-record-of-agents-and-hosts.md)).
     - A deleted Configuration or Package leaves every Deployment that held it.
     - Nothing recalls what an Agent installed: the protocol has no revert, and the Agent keeps
       running it. A rollout that drops a Configuration from an Agent's map and keeps another one
@@ -287,7 +287,7 @@ Configuration, Package or Deployment that an assignment pins.
 **Out of scope:** a fleet-wide base Configuration, and any "everyone" Deployment; releasing only
 a Deployment's Configurations or only its Packages; parameters and blocks in a Configuration
 (G-18, a decision of its own); where Deployments, Configurations and assignments are stored
-([ADR-0029](0029-the-servers-state-and-its-stores.md)); what a Package and its entries are
+([ADR-0044](0044-the-servers-state-and-its-stores.md)); what a Package and its entries are
 ([ADR-0027](0027-packages-signatures-and-delivery.md)); an opt-in convergence policy for Agents
 that appear later; a batched or paused progressive walk; an audit trail of who rolled out what
 (the operator plane has no per-operator identity); an operator override to re-install a version
@@ -361,7 +361,7 @@ the test holds back; a Server-driven downgrade.
   mode on the resource where the rule was asked for; an override is unavailable to the bulk act
   and the count. A downgrade, if wanted, is its own act.
 - **Persist a Deployment as JSON files of its own, outside the port
-  [ADR-0029](0029-the-servers-state-and-its-stores.md) puts every record behind.** A PostgreSQL
+  [ADR-0044](0044-the-servers-state-and-its-stores.md) puts every record behind.** A PostgreSQL
   deployment would then keep its Deployments on the host while every other record lives in the
   database. A Deployment is persisted through that store's port (clause 5).
 

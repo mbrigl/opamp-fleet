@@ -1,4 +1,4 @@
-//! `server migrate` (ADR-0029 clause 26): moves the state an older Server kept under `config_dir`
+//! `server migrate` (ADR-0044 clause 26): moves the state an older Server kept under `config_dir`
 //! and `packages_dir` into a new `data_dir`, once, while the Server is stopped.
 //!
 //! The Server reads no older layout; this is the one place that knows it, and it knows the layout
@@ -36,10 +36,10 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::bootstrap::{BootstrapStore as _, Entry as BootstrapEntry};
-use crate::configs::{ConfigBackend as _, Configuration};
+use crate::configs::Configuration;
 use crate::deployments::{Deployment, DeploymentBackend as _};
 use crate::fs;
-use crate::packages::{Entry, Package, PackageBackend as _, PackageId, Platform};
+use crate::packages::{Entry, Package, PackageId, Platform};
 use crate::revocation::{Host, Issued, LedgerStore as _};
 
 /// What a migration did, line by line, and whether all of the trust data made it.
@@ -146,7 +146,7 @@ fn carry_register(config_dir: &Path, data_dir: &Path, report: &mut Report) -> Re
     let list = old.join("revocations.json");
     if list.exists() {
         // Byte for byte: the Server reads the list as it always has, and drops a credential entry
-        // it may still hold on its first load (ADR-0021 clause 29).
+        // it may still hold on its first load (ADR-0038 clause 29).
         match copy_owner_only(&list, &data_dir.join(fs::REVOCATIONS)) {
             Ok(()) => report.line("carried: the revocation list"),
             Err(e) => report.failed(format!("the revocation list: {e}")),
@@ -242,23 +242,17 @@ fn carry_audit(config_dir: &Path, data_dir: &Path, report: &mut Report) -> Resul
             Err(e) => report.failed(format!("the audit file {}: {e}", path.display())),
         }
     }
-    let mut texts = Vec::new();
-    for file in fs::audit_files(&new)? {
-        let text = std::fs::read_to_string(&file)
-            .map_err(|e| format!("cannot read {}: {e}", file.display()))?;
-        texts.push((file.display().to_string(), text));
-    }
-    let lines = texts.iter().flat_map(|(name, text)| {
-        text.lines()
-            .enumerate()
-            .filter(|(_, line)| !line.trim().is_empty())
-            .map(move |(index, line)| (format!("{name}:{}", index + 1), line))
-    });
-    match crate::audit_log::verify(lines) {
-        Ok(count) => report.line(format!(
-            "carried: {} audit file(s), {count} entries, the chain holds",
-            copied.len()
-        )),
+    match fs::verify_audit(&new)?.1 {
+        Ok(held) => {
+            report.line(format!(
+                "carried: {} audit file(s), {} entries, the chain holds",
+                copied.len(),
+                held.entries
+            ));
+            for line in held.unlinked_lines() {
+                report.line(line);
+            }
+        }
         // Copied as they were: a break the old files hold is reported, not repaired.
         Err(e) => report.line(format!(
             "carried: {} audit file(s) as they were — the chain breaks at {e}",
@@ -1022,7 +1016,7 @@ mod tests {
     /// the artifacts with their signatures; it drops a referenced entry and lists every
     /// Configuration's old Selector, and a Configuration without an Agent type it lists and does
     /// not carry, leaving its file — and the new data directory opens as the Server opens it.
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0044
     #[test]
     fn migrate_carries_an_old_layout_into_a_data_directory() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -1160,7 +1154,7 @@ mod tests {
     }
 
     /// An entry its Deployments held different signatures for is carried unsigned and named.
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0044
     #[test]
     fn differing_signatures_leave_the_entry_unsigned_and_named() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -1185,7 +1179,7 @@ mod tests {
 
     /// A Package deleted before the migration but still named in a Deployment is not carried
     /// into that Deployment, and the report names it.
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0044
     #[test]
     fn a_deployment_naming_a_deleted_package_loses_that_name() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -1215,7 +1209,7 @@ mod tests {
     /// A Package whose metadata does not carry leaves every Deployment that named it, and an
     /// Agent's Package assignment through it is dropped with a line — though its directory still
     /// holds a `package.json`.
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0044
     #[test]
     fn a_package_that_does_not_carry_leaves_its_deployments_and_assignments() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -1258,7 +1252,7 @@ mod tests {
 
     /// An artifact whose bytes do not match its own entry's recorded hash is dropped, and the blob
     /// of those bytes stays when another carried entry holds the same bytes.
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0044
     #[test]
     fn a_mismatching_artifact_leaves_the_blob_another_entry_holds() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -1295,7 +1289,7 @@ mod tests {
 
     /// The migration writes into an empty data directory only, and trust data it cannot carry
     /// makes it fail.
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0044
     #[test]
     fn migrate_refuses_a_data_directory_that_is_not_empty_and_fails_on_lost_trust_data() {
         let root = tempfile::tempdir().expect("tempdir");

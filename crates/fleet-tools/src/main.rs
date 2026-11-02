@@ -44,7 +44,7 @@ enum Tree {
 
 fn main() -> ExitCode {
     // reqwest is built with `rustls-no-provider`, which refuses to construct a TLS client until a
-    // process-wide provider exists (ADR-0012).
+    // process-wide provider exists (ADR-0045).
     opamp::tls::install_ring_provider();
     let result = match Cli::parse().tree {
         Tree::Package(command) => package::run(command).map(|()| 0),

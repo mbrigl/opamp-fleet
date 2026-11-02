@@ -17,7 +17,7 @@
 //! **A Selector is never empty.** An empty one is the channel that collides with every other, and a
 //! forgotten field would quietly become the base for the whole fleet — the class of accident
 //! ADR-0026 exists to prevent. Channels are therefore a *partition*: a Selector cannot express
-//! "not", so disjoint channels come from membership, which is what ADR-0024's labels already are.
+//! "not", so disjoint channels come from membership, which is what ADR-0043's labels already are.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::RwLock;
@@ -170,7 +170,99 @@ pub fn deployment_for<'a>(
     }
 }
 
-/// The Deployment store's port (ADR-0009): where Deployments persist. The filesystem adapter
+/// One change to the members of one Deployment (ADR-0044 clause 2): it names the member it adds
+/// or removes, and no other member is written.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Change {
+    /// Adds a Package, or replaces the one held for its Agent type when `replace` is set; without
+    /// it a type already held by another Package is refused (ADR-0027 clause 25).
+    PutPackage { id: PackageId, replace: bool },
+    /// Removes a Package the Deployment holds; one it does not hold is `NotFound`.
+    RemovePackage(PackageId),
+    /// Puts a Configuration in; holding it already is the request arriving twice.
+    PutConfiguration(String),
+    /// Takes a Configuration out; one it does not hold is `Missing`.
+    RemoveConfiguration(String),
+}
+
+impl Change {
+    /// The change made to `deployment` as it is stored, or the refusal it meets there — the
+    /// decision every adapter that holds a whole Deployment makes, from what it read.
+    ///
+    /// # Errors
+    /// `TypeTaken`, `NotFound` or `Missing`, as each variant says.
+    pub fn apply(&self, deployment: &mut Deployment) -> Result<(), DeploymentError> {
+        match self {
+            Change::PutPackage { id, replace } => {
+                if !replace {
+                    if let Some(held) = deployment.packages.get(&id.agent_type) {
+                        if held != id {
+                            return Err(DeploymentError::TypeTaken {
+                                agent_type: id.agent_type.clone(),
+                                held: held.clone(),
+                            });
+                        }
+                    }
+                }
+                deployment
+                    .packages
+                    .insert(id.agent_type.clone(), id.clone());
+            }
+            Change::RemovePackage(id) => {
+                if deployment.packages.get(&id.agent_type) != Some(id) {
+                    return Err(DeploymentError::NotFound);
+                }
+                deployment.packages.remove(&id.agent_type);
+            }
+            Change::PutConfiguration(configuration) => {
+                deployment.configurations.insert(configuration.clone());
+            }
+            Change::RemoveConfiguration(configuration) => {
+                if !deployment.configurations.remove(configuration) {
+                    return Err(not_held(&deployment.name, configuration));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The refusal to take out a Configuration the Deployment `name` does not hold.
+pub(crate) fn not_held(name: &str, configuration: &str) -> DeploymentError {
+    DeploymentError::Missing(format!(
+        "deployment {name:?} does not hold configuration {configuration:?}"
+    ))
+}
+
+/// A member that every Deployment holding it gives up, because it was deleted (ADR-0026
+/// clause 12).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Member {
+    Configuration(String),
+    Package(PackageId),
+}
+
+impl Member {
+    /// Takes this member out of `deployment`; answers whether it held it.
+    pub fn drop_from(&self, deployment: &mut Deployment) -> bool {
+        match self {
+            Member::Configuration(configuration) => deployment.configurations.remove(configuration),
+            Member::Package(id) => {
+                if deployment.packages.get(&id.agent_type) == Some(id) {
+                    deployment.packages.remove(&id.agent_type);
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+    }
+}
+
+/// The Deployment store's port (ADR-0009, ADR-0044 clause 2): where Deployments persist. It speaks
+/// in parts: the Selector is written on its own, and a member is added or removed by its name — a
+/// Package by its Agent type, a Configuration by its name — with no other member written. Each
+/// call answers the Deployment as the store holds it afterwards. The filesystem adapter
 /// ([`FsDeploymentBackend`](crate::fs::FsDeploymentBackend)) is what the composition root wires.
 pub trait DeploymentBackend: Send + Sync {
     /// Every persisted Deployment, once, when the store opens. One that cannot be read fails the
@@ -178,11 +270,41 @@ pub trait DeploymentBackend: Send + Sync {
     /// offer nothing, and say neither (ADR-0008's principle).
     fn load(&self) -> Result<Vec<Deployment>, String>;
 
-    /// Creates or replaces one Deployment, in one step.
-    fn put(&self, deployment: &Deployment) -> Result<(), String>;
+    /// Creates a Deployment without members, or replaces the Selector of the one stored, in one
+    /// step; its members stay as they are.
+    fn save(&self, name: &str, selector: &BTreeMap<String, String>) -> Result<Deployment, String>;
 
-    /// Deletes one Deployment; removing what is already absent is not an error.
-    fn remove(&self, name: &str) -> Result<(), String>;
+    /// Makes one change to the members of the Deployment `name`, decided from what is stored: a
+    /// database adapter reads it in the change's own transaction, holding the Deployment's row.
+    ///
+    /// # Errors
+    /// `NotFound` when no Deployment of that name is stored, the refusal [`Change::apply`] names,
+    /// or `Storage`.
+    fn amend(&self, name: &str, change: &Change) -> Result<Deployment, DeploymentError>;
+
+    /// Takes `member` out of every Deployment that holds it, and answers those Deployments as they
+    /// are stored afterwards.
+    fn drop_member(&self, member: &Member) -> Result<Vec<Deployment>, String>;
+
+    /// Deletes one Deployment, its members with it, unless a stored assignment names it (ADR-0026
+    /// clause 12); removing what is already absent is not an error. A database adapter counts the
+    /// assignments in the transaction that deletes, holding the Deployment's row against every
+    /// rollout through it, and refuses with a `Conflict` naming [`pinned`]; the filesystem
+    /// adapter, whose one Server asked its Agent store first, deletes.
+    ///
+    /// # Errors
+    /// `Conflict` when a stored assignment names it, or `Storage`.
+    fn remove(&self, name: &str) -> Result<(), DeploymentError>;
+}
+
+/// The refusal of the deletion of a Deployment the assignments of `pinning` Agents name (ADR-0026
+/// clause 12).
+#[must_use]
+pub fn pinned(name: &str, pinning: usize) -> String {
+    format!(
+        "deployment {name:?} is pinned by the assignment of {pinning} Agent(s) — roll them out \
+         through another deployment, or forget them, before deleting it"
+    )
 }
 
 /// The Deployments (ADR-0027), held in memory and persisted through a [`DeploymentBackend`].
@@ -224,6 +346,25 @@ impl DeploymentStore {
             .cloned()
     }
 
+    /// Reads every Deployment again from the backend, as another instance wrote one or changed its
+    /// members
+    /// (ADR-0041
+    /// clause 12): what is held is dropped and what is stored taken in its place. It reads under
+    /// the lock, so no write of this instance's own lands between the read and the swap.
+    ///
+    /// # Errors
+    /// Returns an error when the backend cannot be read; what is held is then kept.
+    pub fn reload(&self) -> Result<(), String> {
+        let mut deployments = self.deployments.write().expect("deployments lock");
+        *deployments = self
+            .backend
+            .load()?
+            .into_iter()
+            .map(|deployment| (deployment.name.clone(), deployment))
+            .collect();
+        Ok(())
+    }
+
     /// A snapshot of the whole store, for one resolution pass.
     pub fn snapshot(&self) -> BTreeMap<String, Deployment> {
         self.deployments.read().expect("deployments lock").clone()
@@ -237,7 +378,8 @@ impl DeploymentStore {
     }
 
     /// Creates a Deployment or replaces its Selector. Distributes nothing: a Deployment reaches an
-    /// Agent only through a rollout act (ADR-0026), and this is the save.
+    /// Agent only through a rollout act (ADR-0026), and this is the save. Its members are the
+    /// store's, as it holds them.
     pub fn put(
         &self,
         name: &str,
@@ -247,47 +389,30 @@ impl DeploymentStore {
             .map_err(|e| DeploymentError::Invalid(format!("invalid name {name:?}: {e}")))?;
         check_selector(&selector).map_err(DeploymentError::Invalid)?;
         let mut deployments = self.deployments.write().expect("deployments lock");
-        let deployment = match deployments.get(name) {
-            Some(existing) => Deployment {
-                selector,
-                ..existing.clone()
-            },
-            None => Deployment {
-                name: name.to_string(),
-                selector,
-                packages: BTreeMap::new(),
-                configurations: BTreeSet::new(),
-            },
-        };
-        self.write(&deployment)?;
+        let deployment = self
+            .backend
+            .save(name, &selector)
+            .map_err(DeploymentError::Storage)?;
         deployments.insert(name.to_string(), deployment.clone());
         Ok(deployment)
     }
 
     /// Adds a Package to a Deployment, or replaces the one held for its Agent type when `replace`
-    /// is set. Without `replace`, a type already held is refused by name (ADR-0027 clause 25).
+    /// is set. Without `replace`, a type already held is refused by name (ADR-0027 clause 25),
+    /// decided from what the store holds.
     pub fn put_package(
         &self,
         name: &str,
         id: &PackageId,
         replace: bool,
     ) -> Result<Deployment, DeploymentError> {
-        self.amend(name, |deployment| {
-            if !replace {
-                if let Some(held) = deployment.packages.get(&id.agent_type) {
-                    if held != id {
-                        return Err(DeploymentError::TypeTaken {
-                            agent_type: id.agent_type.clone(),
-                            held: held.clone(),
-                        });
-                    }
-                }
-            }
-            deployment
-                .packages
-                .insert(id.agent_type.clone(), id.clone());
-            Ok(())
-        })
+        self.amend(
+            name,
+            &Change::PutPackage {
+                id: id.clone(),
+                replace,
+            },
+        )
     }
 
     /// Removes a Package from a Deployment.
@@ -296,13 +421,7 @@ impl DeploymentStore {
         name: &str,
         id: &PackageId,
     ) -> Result<Deployment, DeploymentError> {
-        self.amend(name, |deployment| {
-            if deployment.packages.get(&id.agent_type) != Some(id) {
-                return Err(DeploymentError::NotFound);
-            }
-            deployment.packages.remove(&id.agent_type);
-            Ok(())
-        })
+        self.amend(name, &Change::RemovePackage(id.clone()))
     }
 
     /// Puts a Configuration into a Deployment; holding it already is the request arriving twice.
@@ -312,10 +431,7 @@ impl DeploymentStore {
         name: &str,
         configuration: &str,
     ) -> Result<Deployment, DeploymentError> {
-        self.amend(name, |deployment| {
-            deployment.configurations.insert(configuration.to_string());
-            Ok(())
-        })
+        self.amend(name, &Change::PutConfiguration(configuration.to_string()))
     }
 
     /// Takes a Configuration out of a Deployment; one it does not hold is `Missing`.
@@ -324,88 +440,61 @@ impl DeploymentStore {
         name: &str,
         configuration: &str,
     ) -> Result<Deployment, DeploymentError> {
-        self.amend(name, |deployment| {
-            if !deployment.configurations.remove(configuration) {
-                return Err(DeploymentError::Missing(format!(
-                    "deployment {name:?} does not hold configuration {configuration:?}"
-                )));
-            }
-            Ok(())
-        })
+        self.amend(
+            name,
+            &Change::RemoveConfiguration(configuration.to_string()),
+        )
     }
 
     /// Takes a deleted Configuration out of every Deployment that held it (ADR-0026 clause 12),
     /// and answers which those were.
     pub fn drop_configuration(&self, configuration: &str) -> Result<Vec<String>, DeploymentError> {
-        self.drop_everywhere(|deployment| deployment.configurations.remove(configuration))
+        self.drop_everywhere(&Member::Configuration(configuration.to_string()))
     }
 
     /// Takes a deleted Package out of every Deployment that held it (ADR-0026 clause 12), and
     /// answers which those were.
     pub fn drop_package(&self, id: &PackageId) -> Result<Vec<String>, DeploymentError> {
-        self.drop_everywhere(|deployment| {
-            if deployment.packages.get(&id.agent_type) == Some(id) {
-                deployment.packages.remove(&id.agent_type);
-                true
-            } else {
-                false
-            }
-        })
+        self.drop_everywhere(&Member::Package(id.clone()))
     }
 
-    /// Applies `drop` to every Deployment and persists each one it changed.
-    fn drop_everywhere(
-        &self,
-        mut drop: impl FnMut(&mut Deployment) -> bool,
-    ) -> Result<Vec<String>, DeploymentError> {
+    /// Takes `member` out of every Deployment the store holds it in, and holds what the store
+    /// answers.
+    fn drop_everywhere(&self, member: &Member) -> Result<Vec<String>, DeploymentError> {
         let mut deployments = self.deployments.write().expect("deployments lock");
-        let mut changed = Vec::new();
-        for deployment in deployments.values_mut() {
-            let mut edited = deployment.clone();
-            if drop(&mut edited) {
-                self.write(&edited)?;
-                *deployment = edited;
-                changed.push(deployment.name.clone());
-            }
-        }
-        Ok(changed)
+        let changed = self
+            .backend
+            .drop_member(member)
+            .map_err(DeploymentError::Storage)?;
+        Ok(changed
+            .into_iter()
+            .map(|deployment| {
+                let name = deployment.name.clone();
+                deployments.insert(name.clone(), deployment);
+                name
+            })
+            .collect())
     }
 
     /// Deletes a Deployment. Whether anything still names it is the fleet's business, not the
     /// store's — the fleet refuses the delete while an assignment does.
     pub fn delete(&self, name: &str) -> Result<bool, DeploymentError> {
         let mut deployments = self.deployments.write().expect("deployments lock");
-        if deployments.remove(name).is_none() {
+        if !deployments.contains_key(name) {
             return Ok(false);
         }
-        self.backend
-            .remove(name)
-            .map_err(DeploymentError::Storage)?;
+        self.backend.remove(name)?;
+        deployments.remove(name);
         Ok(true)
     }
 
-    /// Reads one Deployment, lets `change` edit a copy, persists it, and swaps it in — the single
-    /// path every amendment goes through, so a refused edit never reaches the file or the map.
-    fn amend(
-        &self,
-        name: &str,
-        change: impl FnOnce(&mut Deployment) -> Result<(), DeploymentError>,
-    ) -> Result<Deployment, DeploymentError> {
+    /// Makes one change through the store and holds the Deployment it answers — the single path
+    /// every amendment goes through, so a refused change reaches neither the store nor the map.
+    fn amend(&self, name: &str, change: &Change) -> Result<Deployment, DeploymentError> {
         let mut deployments = self.deployments.write().expect("deployments lock");
-        let mut deployment = deployments
-            .get(name)
-            .ok_or(DeploymentError::NotFound)?
-            .clone();
-        change(&mut deployment)?;
-        self.write(&deployment)?;
+        let deployment = self.backend.amend(name, change)?;
         deployments.insert(name.to_string(), deployment.clone());
         Ok(deployment)
-    }
-
-    fn write(&self, deployment: &Deployment) -> Result<(), DeploymentError> {
-        self.backend
-            .put(deployment)
-            .map_err(DeploymentError::Storage)
     }
 }
 
@@ -424,15 +513,46 @@ pub(crate) mod tests {
             Ok(self.0.lock().expect("memory").values().cloned().collect())
         }
 
-        fn put(&self, deployment: &Deployment) -> Result<(), String> {
-            self.0
+        fn save(
+            &self,
+            name: &str,
+            selector: &BTreeMap<String, String>,
+        ) -> Result<Deployment, String> {
+            Ok(self
+                .0
                 .lock()
                 .expect("memory")
-                .insert(deployment.name.clone(), deployment.clone());
-            Ok(())
+                .entry(name.to_string())
+                .and_modify(|deployment| deployment.selector = selector.clone())
+                .or_insert_with(|| Deployment {
+                    name: name.to_string(),
+                    selector: selector.clone(),
+                    packages: BTreeMap::new(),
+                    configurations: BTreeSet::new(),
+                })
+                .clone())
         }
 
-        fn remove(&self, name: &str) -> Result<(), String> {
+        fn amend(&self, name: &str, change: &Change) -> Result<Deployment, DeploymentError> {
+            let mut memory = self.0.lock().expect("memory");
+            let stored = memory.get_mut(name).ok_or(DeploymentError::NotFound)?;
+            let mut deployment = stored.clone();
+            change.apply(&mut deployment)?;
+            *stored = deployment.clone();
+            Ok(deployment)
+        }
+
+        fn drop_member(&self, member: &Member) -> Result<Vec<Deployment>, String> {
+            Ok(self
+                .0
+                .lock()
+                .expect("memory")
+                .values_mut()
+                .filter_map(|deployment| member.drop_from(deployment).then(|| deployment.clone()))
+                .collect())
+        }
+
+        fn remove(&self, name: &str) -> Result<(), DeploymentError> {
             self.0.lock().expect("memory").remove(name);
             Ok(())
         }

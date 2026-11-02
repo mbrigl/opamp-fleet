@@ -7,6 +7,8 @@
 //! - `--touch <path>` — write a marker file, then keep running. The marker holds this run's
 //!   process id and every argument, one per line, so a test observes both *that* the stub ran
 //!   and *with what*; a restart rewrites it with a fresh pid.
+//! - `--log-pid <path>` — append a line `pid=<pid>` to a file, then keep running, so a test reads
+//!   every run's pid afterwards instead of sampling the marker while the runs come and go.
 //! - `--exit-code <n> --exit-after-ms <m>` — exit with code `n` after `m` milliseconds, for
 //!   crash-path tests. Without them the stub sleeps until it is killed.
 //! - `--ignore-hup` (Unix only) — ignore `SIGHUP`, the way a daemon that reloads on it survives
@@ -48,6 +50,18 @@ fn main() {
         let partial = format!("{path}.partial");
         std::fs::write(&partial, marker).expect("write the marker file");
         std::fs::rename(&partial, path).expect("move the marker file into place");
+    }
+
+    if let Some(path) = flag("--log-pid") {
+        use std::io::Write as _;
+        let mut log = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .expect("open the pid log");
+        // One write of one short line, so lines of runs that overlap do not interleave.
+        log.write_all(format!("pid={}\n", std::process::id()).as_bytes())
+            .expect("append to the pid log");
     }
 
     let exit_code: Option<i32> = flag("--exit-code").and_then(|v| v.parse().ok());
