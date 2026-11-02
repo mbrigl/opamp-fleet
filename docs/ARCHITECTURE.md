@@ -178,6 +178,13 @@ no module.
   the chains of the lapsed leases it removes, as each renewal does, and an orderly shutdown closes
   the instance's own
   ([ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance](adr/draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance.md)).
+  `postgres::audit_prune` bounds it by `[audit] retain_days`: a task `main` starts prunes at
+  startup and once a day, the instance's own chain always and the closed chains while it holds the
+  prune's advisory lock, recording each `audit.pruned` through the instance's writer and waiting
+  for it before it deletes, in rounds of a bounded number of entries, every chain of one round in
+  one transaction
+  ([ADR-draft-the-servers-state-and-its-stores](adr/draft-the-servers-state-and-its-stores.md)
+  clause 12).
 - **Server ports beyond storage** — `fleet` owns `CertificateSigner`, which the local CA in `ca`
   implements for the CSR flow and the renewal proof (ADR-0021), and
   `Clock`, which `clock::SystemClock` implements. The `[connection_offer]` and
