@@ -843,22 +843,15 @@ mod tests {
         );
         drop((records, state_packages, bootstrap));
 
-        // The lock goes with its session, which the server notices once the connection closes.
         let again = dir.path().join("again");
-        let mut err = String::new();
-        for _ in 0..50 {
-            err = run_in(
-                &old,
-                Blobs::Files(&again),
-                &test.config(),
-                Some(&test.schema),
-            )
-            .expect_err("the tables are there");
-            if !err.contains("one Server per database") {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
+        test.wait_until_none_holds_it_alone();
+        let err = run_in(
+            &old,
+            Blobs::Files(&again),
+            &test.config(),
+            Some(&test.schema),
+        )
+        .expect_err("the tables are there");
         assert!(err.contains("already holds the Server's tables"), "{err}");
         assert!(err.contains("agents"), "{err}");
         assert!(
@@ -1105,12 +1098,7 @@ mod tests {
         let short = std::time::Duration::from_millis(200);
         // An instance that shares the database, as one on PostgreSQL and S3 does: blobs-to-s3 is
         // alone on it all the same.
-        let instance = Database::open_in(
-            &test.config(),
-            super::super::Exclusive::Shared,
-            Some(&test.schema),
-        )
-        .expect("an instance's database");
+        let instance = test.shared();
 
         let held = instance.hold_blobs_within(short).expect("a sweep runs");
         let err = blobs_to_s3_in(
@@ -1252,20 +1240,8 @@ mod tests {
         let archive = old.join(fs::AUDIT);
         let tail = fs::audit_tail(&archive).expect("tail").expect("entries");
 
-        // The lock of the copy goes with its session; the first lease opens the first chain.
-        let mut database = None;
-        for _ in 0..50 {
-            if let Ok(opened) = Database::open_in(
-                &test.config(),
-                super::super::Exclusive::Shared,
-                Some(&test.schema),
-            ) {
-                database = Some(opened);
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-        let database = database.expect("the copy's lock was not released");
+        // The first lease opens the first chain.
+        let database = test.shared();
         let first = database
             .take_lease("host-a", std::time::Duration::from_secs(30))
             .expect("lease");

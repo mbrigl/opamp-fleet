@@ -1131,6 +1131,29 @@ pub(crate) mod testing {
                 .is_empty()
         }
 
+        /// Returns once no session holds this schema's exclusive lock. A handle that must be alone
+        /// lets go of it only when the database has ended its session, which happens after the
+        /// handle is dropped, not with it: what a test waits for before an instance that shares
+        /// the database opens, which the held lock would refuse.
+        pub(crate) fn wait_until_none_holds_it_alone(&self) {
+            self.once(&format!(
+                "SELECT 'free' WHERE NOT EXISTS (SELECT 1 FROM pg_locks, (SELECT {} AS key) k \
+                 WHERE locktype = 'advisory' AND granted AND mode = 'ExclusiveLock' \
+                 AND database = (SELECT oid FROM pg_database WHERE datname = current_database()) \
+                 AND classid = ((k.key >> 32) & 4294967295)::oid \
+                 AND objid = (k.key & 4294967295)::oid AND objsubid = 1)",
+                super::EXCLUSIVE_LOCK
+            ));
+        }
+
+        /// An instance's database that shares this schema, opened once no session holds the
+        /// schema alone ([`wait_until_none_holds_it_alone`](Self::wait_until_none_holds_it_alone)).
+        pub(crate) fn shared(&self) -> Arc<Database> {
+            self.wait_until_none_holds_it_alone();
+            Database::open_in(&self.config, Exclusive::Shared, Some(&self.schema))
+                .expect("open the test database shared")
+        }
+
         /// The first column of the first row `query` answers, once it answers one; a test fails
         /// after 30 seconds without.
         pub(crate) fn once(&self, query: &str) -> String {
@@ -1908,18 +1931,7 @@ mod tests {
         );
 
         drop(release_before);
-        // The lock goes with its session, which the server notices when the connection closes.
-        let mut opened = None;
-        for _ in 0..50 {
-            if let Ok(database) =
-                Database::open_in(&test.config(), Exclusive::Shared, Some(&test.schema))
-            {
-                opened = Some(database);
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        assert!(opened.is_some(), "the lock was not released");
+        let _opened = test.shared();
         assert_eq!(
             test.rows("SELECT count(*) FROM fleet_schema"),
             [[Some(schema::MIGRATIONS.len().to_string())]],

@@ -324,10 +324,6 @@ mod tests {
 
     const LAPSE: Duration = Duration::from_secs(30);
 
-    fn shared(test: &TestDatabase) -> std::sync::Arc<Database> {
-        Database::open_in(&test.config(), Exclusive::Shared, Some(&test.schema)).expect("shared")
-    }
-
     fn alone(test: &TestDatabase, because: &str) -> Result<std::sync::Arc<Database>, String> {
         Database::open_in(
             &test.config(),
@@ -353,7 +349,7 @@ mod tests {
         let Some(test) = TestDatabase::named() else {
             return;
         };
-        let (a, b) = (shared(&test), shared(&test));
+        let (a, b) = (test.shared(), test.shared());
         let first = a.take_lease("host-a", LAPSE).expect("a's lease");
         let second = b.take_lease("host-b", LAPSE).expect("b's lease");
         assert_ne!(first.instance_id, second.instance_id);
@@ -388,7 +384,7 @@ mod tests {
         let Some(test) = TestDatabase::named() else {
             return;
         };
-        let database = shared(&test);
+        let database = test.shared();
         let lapsed = database.take_lease("host-a", LAPSE).expect("a");
         let live = database.take_lease("host-b", LAPSE).expect("b");
         let released = database.take_lease("host-c", LAPSE).expect("c");
@@ -414,7 +410,7 @@ mod tests {
         let Some(test) = TestDatabase::named() else {
             return;
         };
-        let other = shared(&test);
+        let other = test.shared();
         let lease = other.take_lease("host-a", LAPSE).expect("lease");
         let lonely = alone(&test, "[blobs] store = \"fs\"").expect("the lock is free");
         let err = lonely
@@ -438,15 +434,10 @@ mod tests {
 
         // The process is gone and its lease still live: the lock went with its session.
         drop(lonely);
-        let mut taken = None;
-        for _ in 0..50 {
-            if let Ok(lease) = shared(&test).take_lease("host-c", LAPSE) {
-                taken = Some(lease);
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        let taken = taken.expect("the lock was not released");
+        let taken = test
+            .shared()
+            .take_lease("host-c", LAPSE)
+            .expect("the lock went with its session");
         assert_eq!(taken.taken_over, [held.instance_id]);
     }
 
@@ -458,7 +449,7 @@ mod tests {
         let Some(test) = TestDatabase::named() else {
             return;
         };
-        let (a, b, c) = (shared(&test), shared(&test), shared(&test));
+        let (a, b, c) = (test.shared(), test.shared(), test.shared());
         let lapsed = a.take_lease("host-a", LAPSE).expect("a's lease");
         let live = b.take_lease("host-b", LAPSE).expect("b's lease");
         test.sql(&format!(
@@ -522,7 +513,7 @@ mod tests {
                 "UPDATE leases SET expires_at = now() WHERE instance_id = '{id}'"
             ));
         };
-        let (a, b) = (shared(&test), shared(&test));
+        let (a, b) = (test.shared(), test.shared());
         let gone = a.take_lease("host-a", LAPSE).expect("a's lease");
         lapse(&gone.instance_id);
         let (taken, lines) = logged(|| {
