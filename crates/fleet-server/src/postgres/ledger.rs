@@ -22,6 +22,8 @@ pub struct PgLedgerStore {
     database: Arc<Database>,
     /// The Hosts as last committed.
     written_hosts: Mutex<BTreeMap<String, Host>>,
+    /// The list's version as this adapter's last write of the list left it.
+    list_version: Mutex<Option<u64>>,
 }
 
 impl PgLedgerStore {
@@ -31,15 +33,60 @@ impl PgLedgerStore {
         PgLedgerStore {
             database,
             written_hosts: Mutex::new(BTreeMap::new()),
+            list_version: Mutex::new(None),
         }
     }
 }
 
+impl PgLedgerStore {
+    /// Keeps the version a write of the list left, if it left one; never an older over a newer.
+    fn wrote_list(&self, version: Option<u64>) {
+        let mut held = self.list_version.lock().expect("list version lock");
+        *held = (*held).max(version);
+    }
+}
+
+/// Moves the list's version on, inside the caller's transaction, and answers the new one
+/// (ADR-draft-the-servers-state-and-its-stores clause 10). A revocation added or widened and a lift
+/// move it, the prune's removal of a revocation among them. A register entry the prune removes does
+/// not: it only takes expired certificates out of what the list resolves, and a Gateway that keeps
+/// refusing an expired certificate loses nothing. A register entry another instance adds is covered
+/// by the body's hash in the Gateways' `ETag`, not by the version.
+async fn bump_list_version(client: &impl GenericClient) -> Result<u64, String> {
+    let row = client
+        .query_one(
+            "UPDATE revocation_list_version SET version = version + 1 RETURNING version",
+            &[],
+        )
+        .await
+        .map_err(sql)?;
+    Ok(unsigned(row.get(0)))
+}
+
+/// The list's version as the database holds it now.
+pub(crate) async fn read_list_version(client: &impl GenericClient) -> Result<u64, String> {
+    let row = client
+        .query_one("SELECT version FROM revocation_list_version", &[])
+        .await
+        .map_err(sql)?;
+    Ok(unsigned(row.get(0)))
+}
+
 impl LedgerStore for PgLedgerStore {
     fn load(&self) -> Result<Ledger, String> {
+        // One snapshot, so the version read names exactly the list read with it.
         let ledger = self.database.run(|pool| async move {
-            let client = client(&pool).await?;
-            read_all(&**client).await
+            let mut client = client(&pool).await?;
+            let transaction = client
+                .build_transaction()
+                .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
+                .read_only(true)
+                .start()
+                .await
+                .map_err(sql)?;
+            let ledger = read_all(&*transaction).await?;
+            transaction.commit().await.map_err(sql)?;
+            Ok(ledger)
         })?;
         ledger
             .hosts
@@ -53,7 +100,7 @@ impl LedgerStore for PgLedgerStore {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
             write_issued(&*transaction, &issued).await?;
-            notify(&*transaction, CERTIFICATE).await?;
+            notify(&*transaction, CERTIFICATE, &issued.facts.id.serial).await?;
             transaction.commit().await.map_err(sql)
         })
     }
@@ -70,7 +117,7 @@ impl LedgerStore for PgLedgerStore {
                 )
                 .await
                 .map_err(sql)?;
-            notify(&*transaction, CERTIFICATE).await?;
+            notify(&*transaction, CERTIFICATE, &id.serial).await?;
             transaction.commit().await.map_err(sql)
         })
     }
@@ -138,10 +185,10 @@ impl LedgerStore for PgLedgerStore {
                 }
             }
             write_issued(&*transaction, &issued).await?;
-            notify(&*transaction, CERTIFICATE).await?;
+            notify(&*transaction, CERTIFICATE, &issued.facts.id.serial).await?;
             if let Some((host, entry)) = &mint {
                 if write_seen(&*transaction, host, entry).await? {
-                    notify(&*transaction, HOST).await?;
+                    notify(&*transaction, HOST, host).await?;
                 }
             }
             transaction.commit().await.map_err(sql)?;
@@ -155,7 +202,7 @@ impl LedgerStore for PgLedgerStore {
     fn add_revocation(&self, entry: &Revocation, bound: usize) -> Result<Added, String> {
         let entry = entry.clone();
         let bound = i64::try_from(bound).unwrap_or(i64::MAX);
-        self.database.run(move |pool| async move {
+        let (added, version) = self.database.run(move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
             transaction
@@ -179,7 +226,7 @@ impl LedgerStore for PgLedgerStore {
                     revoked_ms: unsigned(row.get(2)),
                 };
                 let Some(wider) = crate::revocation::widened(&held, &entry) else {
-                    return Ok(Added::Present(held));
+                    return Ok((Added::Present(held), None));
                 };
                 let revoked =
                     serde_json::to_value(&wider.revoked).expect("a revocation serializes");
@@ -190,9 +237,10 @@ impl LedgerStore for PgLedgerStore {
                     )
                     .await
                     .map_err(sql)?;
-                super::notify::notify(&*transaction, super::notify::REVOCATION).await?;
+                super::notify::notify(&*transaction, super::notify::REVOCATION, &wider.id).await?;
+                let version = bump_list_version(&*transaction).await?;
                 transaction.commit().await.map_err(sql)?;
-                return Ok(Added::Widened(wider));
+                return Ok((Added::Widened(wider), Some(version)));
             }
             let (count, last): (i64, Option<i32>) = {
                 let row = transaction
@@ -202,19 +250,23 @@ impl LedgerStore for PgLedgerStore {
                 (row.get(0), row.get(1))
             };
             if count >= bound {
-                return Ok(Added::Full);
+                return Ok((Added::Full, None));
             }
             let position = last.map_or(0, |last| last + 1);
+            let id = entry.id.clone();
             write_revocations(&*transaction, &[(position, entry)]).await?;
-            super::notify::notify(&*transaction, super::notify::REVOCATION).await?;
+            super::notify::notify(&*transaction, super::notify::REVOCATION, &id).await?;
+            let version = bump_list_version(&*transaction).await?;
             transaction.commit().await.map_err(sql)?;
-            Ok(Added::Added)
-        })
+            Ok((Added::Added, Some(version)))
+        })?;
+        self.wrote_list(version);
+        Ok(added)
     }
 
     fn remove_revocation(&self, id: &str) -> Result<bool, String> {
         let id = id.to_string();
-        self.database.run(move |pool| async move {
+        let version = self.database.run(move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
             let removed = transaction
@@ -222,12 +274,19 @@ impl LedgerStore for PgLedgerStore {
                 .await
                 .map_err(sql)?;
             if removed == 0 {
-                return Ok(false);
+                return Ok(None);
             }
-            super::notify::notify(&*transaction, super::notify::REVOCATION).await?;
+            super::notify::notify(&*transaction, super::notify::REVOCATION, &id).await?;
+            let version = bump_list_version(&*transaction).await?;
             transaction.commit().await.map_err(sql)?;
-            Ok(true)
-        })
+            Ok(Some(version))
+        })?;
+        self.wrote_list(version);
+        Ok(version.is_some())
+    }
+
+    fn list_version(&self) -> Option<u64> {
+        *self.list_version.lock().expect("list version lock")
     }
 
     fn bind(&self, instance_uid: &str, host: &str) -> Result<Bound, String> {
@@ -299,7 +358,7 @@ impl LedgerStore for PgLedgerStore {
                 append_to_array(&*transaction, &instance_uid, &host).await?;
             }
             if made || inserted > 0 {
-                notify(&*transaction, HOST).await?;
+                notify(&*transaction, HOST, &host).await?;
             }
             transaction.commit().await.map_err(sql)?;
             Ok(Bound::Bound)
@@ -313,7 +372,7 @@ impl LedgerStore for PgLedgerStore {
             let transaction = client.transaction().await.map_err(sql)?;
             let host = unbind_in(&*transaction, &instance_uid).await?;
             if host.is_some() {
-                notify(&*transaction, HOST).await?;
+                notify(&*transaction, HOST, host.as_deref().unwrap_or_default()).await?;
             }
             transaction.commit().await.map_err(sql)?;
             Ok(host)
@@ -349,7 +408,7 @@ impl LedgerStore for PgLedgerStore {
             if holder == host {
                 append_to_array(&*transaction, &new, &host).await?;
             }
-            notify(&*transaction, HOST).await?;
+            notify(&*transaction, HOST, &host).await?;
             transaction.commit().await.map_err(sql)?;
             let bound = if holder == host {
                 Bound::Bound
@@ -370,7 +429,7 @@ impl LedgerStore for PgLedgerStore {
                 .await
                 .map_err(sql)?;
             if removed > 0 {
-                notify(&*transaction, HOST).await?;
+                notify(&*transaction, HOST, &host).await?;
             }
             transaction.commit().await.map_err(sql)
         })
@@ -452,7 +511,7 @@ impl LedgerStore for PgLedgerStore {
                 }
             };
             if changed {
-                notify(&*transaction, HOST).await?;
+                notify(&*transaction, HOST, "").await?;
             }
             transaction.commit().await.map_err(sql)
         })
@@ -490,7 +549,7 @@ impl LedgerStore for PgLedgerStore {
             for (host, entry) in &changed {
                 write_host(&*transaction, host, entry).await?;
             }
-            notify(&*transaction, HOST).await?;
+            notify(&*transaction, HOST, "").await?;
             transaction.commit().await.map_err(sql)
         })?;
         hosts.clone_into(&mut written);
@@ -613,6 +672,8 @@ pub(crate) async fn write_bindings(
 
 /// The whole ledger. A row that does not decode fails, naming it.
 pub(crate) async fn read_all(client: &impl GenericClient) -> Result<Ledger, String> {
+    // The version names the list only when both are read in one snapshot, as `load` reads them.
+    let version = read_list_version(client).await?;
     let mut issued = Vec::new();
     for row in client
         .query(
@@ -732,6 +793,7 @@ pub(crate) async fn read_all(client: &impl GenericClient) -> Result<Ledger, Stri
         issued,
         revocations,
         hosts,
+        version: Some(version),
     })
 }
 
@@ -914,6 +976,7 @@ mod tests {
     use super::*;
     use crate::fs::FsLedgerStore;
     use crate::postgres::testing::TestDatabase;
+    use crate::postgres::Exclusive;
     use crate::revocation::{Revoked, SubjectValues};
 
     fn issued(serial: &str, predecessor: Option<&str>) -> Issued {
@@ -968,7 +1031,15 @@ mod tests {
     /// in place, a list at its bound takes no more, and Hosts saved again are exactly the new ones.
     fn contract(open: &dyn Fn() -> Box<dyn LedgerStore>) {
         let store = open();
-        assert_eq!(store.load().expect("empty"), Ledger::default());
+        // The list's version is the store's own, kept by one store and not by another; what the
+        // contract compares is what both hold.
+        assert_eq!(
+            Ledger {
+                version: None,
+                ..store.load().expect("empty")
+            },
+            Ledger::default()
+        );
         let (root, renewal) = (issued("0a", None), issued("0b", Some("0a")));
         store.put_issued(&root).expect("put");
         store.put_issued(&renewal).expect("put");
@@ -1735,6 +1806,170 @@ mod tests {
         }
     }
 
+    /// The list's one version moves with every revocation added or widened and every lift, in
+    /// their transactions, and with nothing else; an instance holds the version its own write left
+    /// only when no other instance wrote between, and none until it reads the list again
+    /// otherwise, so the version it serves never names a list it does not hold
+    /// (ADR-draft-the-servers-state-and-its-stores clause 10).
+    /// Verifies: ADR-draft-the-servers-state-and-its-stores
+    #[test]
+    fn the_list_version_moves_with_each_revocation_and_lift_and_names_only_the_list_held() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        struct Now;
+        impl crate::fleet::Clock for Now {
+            fn now_ms(&self) -> u64 {
+                1
+            }
+        }
+        let instance = || {
+            crate::revocation::Revocations::open(
+                Box::new(PgLedgerStore::new(database.clone())),
+                Arc::new(Now),
+                vec![crate::revocation::Authority {
+                    role: "client".into(),
+                    subject: CertId::new(b"ca", "00").issuer,
+                    name: "CN=ca".into(),
+                }],
+            )
+            .expect("open")
+        };
+        let stored = || -> u64 {
+            test.rows("SELECT version FROM revocation_list_version")[0][0]
+                .as_deref()
+                .expect("a version")
+                .parse()
+                .expect("a number")
+        };
+        let (a, b) = (instance(), instance());
+        assert_eq!((a.list_version(), stored()), (Some(0), 0));
+
+        a.revoke_certificate("client", "0a").expect("revoke");
+        assert_eq!((a.list_version(), stored()), (Some(1), 1));
+        a.revoke_certificate("client", "0a").expect("revoke again");
+        assert_eq!(
+            (a.list_version(), stored()),
+            (Some(1), 1),
+            "a revocation held already moves nothing, and keeps the version held"
+        );
+        a.record(issued("0c", None).facts, b"\x01", None)
+            .expect("a register entry");
+        assert_eq!(stored(), 1, "a register entry moves nothing");
+
+        b.revoke_certificate("client", "0b")
+            .expect("B revokes, holding version 0");
+        assert_eq!(stored(), 2);
+        assert_eq!(
+            b.list_version(),
+            None,
+            "B's list misses A's revocation, so it holds no version"
+        );
+        assert_eq!(
+            b.revoked_certificates_at("client").1,
+            None,
+            "and serves none with its list"
+        );
+        b.reload_ledger().expect("reload");
+        assert_eq!(b.list_version(), Some(2));
+
+        let lifted = b.list()[0].id.clone();
+        assert!(b.lift(&lifted).expect("lift"));
+        assert_eq!((b.list_version(), stored()), (Some(3), 3));
+        assert!(!b.lift(&lifted).expect("lift again"));
+        assert_eq!(
+            (b.list_version(), stored()),
+            (Some(3), 3),
+            "a lift of nothing moves nothing, and keeps the version held"
+        );
+    }
+
+    /// One version never names two Gateway bodies: when B registers a renewal and A revokes its
+    /// predecessor before A has taken up B's register entry, A's write moves the version by one,
+    /// but the list A resolves lacks the renewal. A's `ETag` before it reads the ledger again and
+    /// after differ, so a Gateway that fetched the first is answered in full by either instance
+    /// once both hold the renewal
+    /// (ADR-draft-admission-by-client-certificate-and-revocation clauses 28 and 34).
+    /// Verifies: ADR-draft-admission-by-client-certificate-and-revocation, ADR-draft-the-servers-state-and-its-stores
+    #[test]
+    fn one_list_version_never_names_two_gateway_bodies() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        struct Now;
+        impl crate::fleet::Clock for Now {
+            fn now_ms(&self) -> u64 {
+                1
+            }
+        }
+        let instance = || {
+            crate::revocation::Revocations::open(
+                Box::new(PgLedgerStore::new(database.clone())),
+                Arc::new(Now),
+                vec![crate::revocation::Authority {
+                    role: "client".into(),
+                    subject: CertId::new(b"ca", "00").issuer,
+                    name: "CN=ca".into(),
+                }],
+            )
+            .expect("open")
+        };
+        let a = instance();
+        a.record(issued("0a", None).facts, b"\x01", None)
+            .expect("enrol X");
+        let b = instance();
+        let mut renewal = issued("0b", Some("0a")).facts;
+        renewal.host = None;
+        b.record(renewal, b"\x01", Some(CertId::new(b"ca", "0a")))
+            .expect("B registers X', a renewal of X");
+
+        a.revoke_certificate("client", "0a")
+            .expect("A revokes X, not holding X'");
+        let (before, fetched) = crate::transport::gateway_list_of(&a);
+        assert!(
+            !before.contains(r#""serial":"b""#),
+            "A does not resolve X' yet: {before}"
+        );
+        a.reload_ledger().expect("A takes up X'");
+        let (after, etag) = crate::transport::gateway_list_of(&a);
+        assert!(
+            after.contains(r#""serial":"b""#),
+            "A resolves X' now: {after}"
+        );
+        assert_eq!(a.list_version(), Some(1), "one version, before and after");
+        assert_ne!(
+            fetched, etag,
+            "a Gateway holding the ETag of the list without X' is not answered 304"
+        );
+        b.reload_ledger().expect("B takes up the revocation");
+        assert_eq!(
+            crate::transport::gateway_list_of(&b).1,
+            etag,
+            "B answers the ETag A gives once both hold the same list"
+        );
+    }
+
+    /// Instance B, on a database handle of its own, so it hears what the instances on `database`
+    /// announce, following the notifications on the runtime it answers.
+    fn follower(
+        test: &TestDatabase,
+    ) -> (Arc<crate::revocation::Revocations>, tokio::runtime::Runtime) {
+        let database = Database::open_in(&test.config(), Exclusive::Shared, Some(&test.schema))
+            .expect("B's database");
+        let b = Arc::new(instances_on(&database)());
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        {
+            let _entered = runtime.enter();
+            let state = crate::fleet::AppState::on(&crate::Records::Postgres(database.clone()))
+                .expect("B's state")
+                .with_revocations(Some(b.clone()));
+            crate::instance::follow(&database, Arc::new(state), None);
+        }
+        (b, runtime)
+    }
+
     /// A release and a re-key hold for every instance, whatever the instance that makes them holds
     /// in memory: B never heard of A's bindings, and what it releases and moves is what a third
     /// instance finds stored; a Gateway's mark leaves its Host bound none in the store
@@ -1818,12 +2053,7 @@ mod tests {
             .expect("bind");
         a.check_report("h1", &subject, 1_000, b"\x02")
             .expect("bind");
-        let b = Arc::new(instance());
-        let runtime = tokio::runtime::Runtime::new().expect("runtime");
-        {
-            let _entered = runtime.enter();
-            crate::instance::follow_revocations(&database, b.clone());
-        }
+        let (b, _runtime) = follower(&test);
         let eventually = |condition: &dyn Fn() -> bool| {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
             while std::time::Instant::now() < deadline {
@@ -1968,12 +2198,7 @@ mod tests {
         let database = test.open();
         let instance = instances_on(&database);
         let a = instance();
-        let b = Arc::new(instance());
-        let runtime = tokio::runtime::Runtime::new().expect("runtime");
-        {
-            let _entered = runtime.enter();
-            crate::instance::follow_revocations(&database, b.clone());
-        }
+        let (b, _runtime) = follower(&test);
         let eventually = |condition: &dyn Fn() -> bool| {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
             while std::time::Instant::now() < deadline {

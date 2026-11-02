@@ -29,6 +29,17 @@ pub struct Taken {
     pub taken_over: Vec<String>,
 }
 
+/// A lease this instance renewed.
+#[derive(Clone, Copy, Debug)]
+pub struct Renewal {
+    /// When the request that renewed it was sent.
+    pub sent: Instant,
+    /// The revocation list's version as the database held it at the renewal
+    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// clause 10).
+    pub list_version: u64,
+}
+
 /// A new instance id: a random UUID (version 4), as text. The Server makes one at startup, before
 /// its first lease, so that its log names it from then on, and one for each new lease after a lost
 /// one.
@@ -173,8 +184,8 @@ impl Database {
     }
 
     /// Renews the lease of `instance_id` to lapse `lapse` after now, waiting at most `bound` for
-    /// the answer. Answers when the request was sent, or `None` when the lease is no longer live,
-    /// lapsed or taken over.
+    /// the answer. Answers when the request was sent and the revocation list's version, read in the
+    /// same statement, or `None` when the lease is no longer live, lapsed or taken over.
     ///
     /// # Errors
     /// Returns an error naming the database when it does not answer within `bound`.
@@ -183,22 +194,28 @@ impl Database {
         instance_id: &str,
         lapse: Duration,
         bound: Duration,
-    ) -> Result<Option<Instant>, String> {
+    ) -> Result<Option<Renewal>, String> {
         let id = instance_id.to_string();
         let sent = Instant::now();
-        let renewed = self.run_within(bound, move |pool| async move {
+        let (renewed, version) = self.run_within(bound, move |pool| async move {
             let client = client(&pool).await?;
-            client
-                .execute(
-                    "UPDATE leases SET renewed_at = now(), \
+            let row = client
+                .query_one(
+                    "WITH renewed AS (UPDATE leases SET renewed_at = now(), \
                      expires_at = now() + make_interval(secs => $2) \
-                     WHERE instance_id = $1::text::uuid AND expires_at > now()",
+                     WHERE instance_id = $1::text::uuid AND expires_at > now() RETURNING 1) \
+                     SELECT (SELECT count(*) FROM renewed), \
+                     (SELECT version FROM revocation_list_version)",
                     &[&id, &lapse.as_secs_f64()],
                 )
                 .await
-                .map_err(sql)
+                .map_err(sql)?;
+            Ok((row.get::<_, i64>(0), row.get::<_, i64>(1)))
         })?;
-        Ok((renewed == 1).then_some(sent))
+        Ok((renewed == 1).then_some(Renewal {
+            sent,
+            list_version: super::unsigned(version),
+        }))
     }
 
     /// Releases the lease of `instance_id`, at an orderly shutdown.

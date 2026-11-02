@@ -80,7 +80,7 @@ impl FloorStore for PgFloorStore {
                 write(&*transaction, &agent_type, &floor).await?;
                 break;
             }
-            super::notify::notify(&*transaction, super::notify::FLOOR).await?;
+            super::notify::notify(&*transaction, super::notify::FLOOR, &agent_type).await?;
             transaction.commit().await.map_err(sql)?;
             Ok(Put::Stored)
         })
@@ -101,7 +101,7 @@ impl FloorStore for PgFloorStore {
             if removed == 0 {
                 return Ok(false);
             }
-            super::notify::notify(&*transaction, super::notify::FLOOR).await?;
+            super::notify::notify(&*transaction, super::notify::FLOOR, &agent_type).await?;
             transaction.commit().await.map_err(sql)?;
             Ok(true)
         })

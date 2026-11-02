@@ -10,6 +10,7 @@ use opamp::uid::InstanceUid;
 use prost::Message;
 use tokio_postgres::GenericClient;
 
+use super::notify::{notify, ASSIGNMENT, CONFIGURATION};
 use super::{client, signed, sql, unsigned, Database};
 use crate::agent_store::{AgentStore, PersistedAgent, Pin};
 use crate::configs::Pinned;
@@ -74,6 +75,17 @@ impl AgentStore for PgAgentStore {
             .filter_map(|(uid, record)| Some((*uid, record.assignment.clone()?)))
             .collect();
         Ok(records)
+    }
+
+    fn get(&self, uid: &InstanceUid) -> Result<Option<PersistedAgent>, String> {
+        let key = uid.to_string();
+        let mut found = self.database.run(move |pool| async move {
+            let client = client(&pool).await?;
+            read(&**client, Some(&key)).await
+        })?;
+        let record = found.remove(uid);
+        self.stored([(uid, record.as_ref().and_then(|r| r.assignment.as_ref()))]);
+        Ok(record)
     }
 
     fn put(&self, uid: &InstanceUid, record: &PersistedAgent) -> Result<(), String> {
@@ -143,8 +155,16 @@ impl AgentStore for PgAgentStore {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
             super::configs::retain(&*transaction, &revisions).await?;
+            let pinned: BTreeSet<&str> = revisions
+                .iter()
+                .map(|pinned| pinned.configuration.as_str())
+                .collect();
+            for configuration in pinned {
+                notify(&*transaction, CONFIGURATION, configuration).await?;
+            }
             for (uid, record) in &records {
                 write(&*transaction, uid, record).await?;
+                notify(&*transaction, ASSIGNMENT, &uid.to_string()).await?;
             }
             transaction.commit().await.map_err(sql)
         })?;
@@ -200,11 +220,25 @@ fn decode<M: Message + Default>(bytes: Option<Vec<u8>>, what: &str) -> Result<Op
 pub(crate) async fn read_all(
     client: &impl GenericClient,
 ) -> Result<HashMap<InstanceUid, PersistedAgent>, String> {
+    read(client, None).await
+}
+
+/// The record of `only`, or of every Agent where it names none.
+async fn read(
+    client: &impl GenericClient,
+    only: Option<&str>,
+) -> Result<HashMap<InstanceUid, PersistedAgent>, String> {
+    let (filter, params): (&str, Vec<&(dyn tokio_postgres::types::ToSql + Sync)>) = match &only {
+        Some(uid) => (" WHERE instance_uid = $1", vec![uid]),
+        None => ("", Vec::new()),
+    };
     let mut released: HashMap<String, BTreeMap<String, String>> = HashMap::new();
     for row in client
         .query(
-            "SELECT instance_uid, configuration, revision FROM agent_assignment_configurations",
-            &[],
+            &format!(
+                "SELECT instance_uid, configuration, revision FROM agent_assignment_configurations{filter}"
+            ),
+            &params,
         )
         .await
         .map_err(sql)?
@@ -216,7 +250,7 @@ pub(crate) async fn read_all(
     }
     let mut records = HashMap::new();
     for row in client
-        .query(&format!("SELECT {COLUMNS} FROM agents"), &[])
+        .query(&format!("SELECT {COLUMNS} FROM agents{filter}"), &params)
         .await
         .map_err(sql)?
     {

@@ -616,6 +616,26 @@ impl PackageStore {
         blobs.values().sum()
     }
 
+    /// Reads every Package again from the backend, as another instance created, deleted or
+    /// changed one
+    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// clause 12): what is held is dropped and what is stored taken in its place. It reads under
+    /// the lock, so no write of this instance's own lands between the read and the swap. The blobs
+    /// are not read: they are the blob store's, which every instance shares.
+    ///
+    /// # Errors
+    /// Returns an error when the backend cannot be read; what is held is then kept.
+    pub fn reload(&self) -> Result<(), String> {
+        let mut sets = self.sets.write().expect("sets lock");
+        *sets = self
+            .backend
+            .load()?
+            .into_iter()
+            .map(|package| (package.id.clone(), package))
+            .collect();
+        Ok(())
+    }
+
     /// Creates a Package. **Saving never distributes** (ADR-0026), and there is nothing to update:
     /// a Package is its identity and its entries, so creating one that exists is the same request
     /// arriving twice.

@@ -253,6 +253,9 @@ pub struct Ledger {
     pub issued: Vec<Issued>,
     pub revocations: Vec<Revocation>,
     pub hosts: BTreeMap<String, Host>,
+    /// The list's one version, as the store holds it, where the store keeps one: PostgreSQL does
+    /// (ADR-draft-the-servers-state-and-its-stores clause 10), the filesystem does not.
+    pub version: Option<u64>,
 }
 
 /// The ledger's port (ADR-0009): where it is kept. A certificate is written on its own, so a
@@ -329,6 +332,12 @@ pub trait LedgerStore: Send + Sync {
     /// # Errors
     /// Returns an error when it cannot be written; the list is then as it was.
     fn add_revocation(&self, entry: &Revocation, bound: usize) -> Result<Added, String>;
+
+    /// The list's version as this store's last write of the list left it, where the store keeps
+    /// one; `None` on a store that keeps none, as the filesystem.
+    fn list_version(&self) -> Option<u64> {
+        None
+    }
 
     /// Removes the entry `id` from the list: `false` when the list holds none.
     ///
@@ -686,6 +695,9 @@ struct State {
     hosts: BTreeMap<String, Host>,
     /// Counts the changes to `hosts`.
     hosts_version: u64,
+    /// The list's version in the store, where it keeps one: as last read, or as this instance's
+    /// own last write left it.
+    list_version: Option<u64>,
     /// Which host each bound `instance_uid` belongs to, hex.
     owners: BTreeMap<String, String>,
     /// Every revoked certificate, once built: `None` after a change it has not caught up with.
@@ -725,6 +737,7 @@ impl State {
             owners: owners_of(&ledger.hosts),
             hosts: ledger.hosts,
             hosts_version: 0,
+            list_version: ledger.version,
             revoked: None,
             acts: 0,
             #[cfg(test)]
@@ -732,6 +745,15 @@ impl State {
         };
         state.take_up_register(ledger.issued);
         state
+    }
+
+    /// Takes up the version this instance's own write of the list left, `written`, when it follows
+    /// the one held: then no other instance wrote between, and the list held is the one the
+    /// version names. Otherwise the list held is not the one any version names, so none is held
+    /// until the list is read again: the `ETag` served meanwhile is the body's hash, which no
+    /// version matches, and the next notification or renewal reads the list again.
+    fn took_up_own_write(&mut self, written: Option<u64>) {
+        self.list_version = written.filter(|_| written == self.list_version.map(|held| held + 1));
     }
 
     /// Counts an act of this instance's own on the trust state: called under the lock the act's
@@ -1491,16 +1513,20 @@ impl Revocations {
             revoked,
             revoked_ms: self.clock.now_ms(),
         };
-        let entry = match self
+        let (entry, written) = match self
             .store
             .add_revocation(&entry, MAX_REVOCATIONS)
             .map_err(RevokeError::Store)?
         {
-            Added::Added => entry,
-            Added::Present(existing) => existing,
-            Added::Widened(wider) => wider,
+            Added::Added => (entry, true),
+            Added::Present(existing) => (existing, false),
+            Added::Widened(wider) => (wider, true),
             Added::Full => return Err(RevokeError::Full),
         };
+        // Only a write moves the version: one held already wrote nothing.
+        if written {
+            state.took_up_own_write(self.store.list_version());
+        }
         match state
             .revocations
             .iter_mut()
@@ -1536,6 +1562,9 @@ impl Revocations {
         state.acted();
         // The store decides: another instance may have added the entry, or lifted it.
         let lifted = self.store.remove_revocation(id)?;
+        if lifted {
+            state.took_up_own_write(self.store.list_version());
+        }
         let before = state.revocations.len();
         state.revocations.retain(|entry| entry.id != id);
         if state.revocations.len() != before {
@@ -1573,6 +1602,35 @@ impl Revocations {
             .filter(|id| issuers.contains(id.issuer.as_str()))
             .cloned()
             .collect()
+    }
+
+    /// [`revoked_certificates`](Self::revoked_certificates) of `role` and the version of the list
+    /// they were read from, both under one lock, so the version never names a list newer than the
+    /// one answered with it: what the Gateways' list is served as. The version is `None` where the
+    /// store keeps none.
+    #[must_use]
+    pub fn revoked_certificates_at(&self, role: &str) -> (BTreeSet<CertId>, Option<u64>) {
+        let issuers: BTreeSet<&str> = self
+            .authorities
+            .iter()
+            .filter(|authority| authority.role == role)
+            .map(|authority| authority.subject.as_str())
+            .collect();
+        let mut state = self.state.lock().expect("revocation lock");
+        let version = state.list_version;
+        let revoked = state
+            .revoked()
+            .iter()
+            .filter(|id| issuers.contains(id.issuer.as_str()))
+            .cloned()
+            .collect();
+        (revoked, version)
+    }
+
+    /// The list's version as this instance holds it, where the store keeps one.
+    #[must_use]
+    pub fn list_version(&self) -> Option<u64> {
+        self.state.lock().expect("revocation lock").list_version
     }
 
     /// Whether `host` is marked as a Gateway, and its subject values — what places an Agent that
@@ -1656,6 +1714,7 @@ impl Revocations {
     fn swap(&self, mut state: MutexGuard<'_, State>, (mut fresh, list): (State, Vec<Revocation>)) {
         fresh.hosts_version = state.hosts_version;
         fresh.acts = state.acts;
+        fresh.list_version = fresh.list_version.max(state.list_version);
         #[cfg(test)]
         {
             fresh.rebuilds = state.rebuilds;
@@ -1796,7 +1855,9 @@ impl Revocations {
             .map(|entry| entry.id.clone())
             .collect();
         for id in &dropped {
-            self.store.remove_revocation(id)?;
+            if self.store.remove_revocation(id)? {
+                state.took_up_own_write(self.store.list_version());
+            }
             state.revocations.retain(|entry| &entry.id != id);
             state.revoked = None;
         }

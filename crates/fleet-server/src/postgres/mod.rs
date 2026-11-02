@@ -124,6 +124,9 @@ pub struct Database {
     closing: Arc<AtomicBool>,
     /// `database <dbname> on <host>:<port>`, what every error names.
     name: String,
+    /// What the notifications this instance sends name as their sender: random, one per open
+    /// database, so two instances in one process are two origins.
+    origin: String,
     /// What one call may take ([`CALL_TIMEOUT`]).
     bound: Duration,
     /// Dropped last: the connections' tasks run on it.
@@ -214,7 +217,16 @@ impl Database {
         let tls = tls(config)?;
         // `tokio-postgres` copies the password into its own `Config`; the one read is wiped when it
         // is dropped (ADR-0014 clauses 3 and 4).
-        let pg = pg_config(config, &password, schema);
+        let origin = new_origin()?;
+        let mut pg = pg_config(config, &password, schema);
+        // Every connection names this instance as the origin of what it announces
+        // (`notify::ORIGIN_SETTING`), the listening one included, so its own are passed over.
+        let options = format!(
+            "{} -c {}={origin}",
+            pg.get_options().unwrap_or_default(),
+            notify::ORIGIN_SETTING
+        );
+        pg.options(options);
         let bridge = Bridge::new("records-postgres")?;
         let (lost, closing) = (
             Arc::new(AtomicBool::new(false)),
@@ -291,6 +303,7 @@ impl Database {
             lost,
             closing,
             name,
+            origin,
             bound,
             bridge,
         })
@@ -493,6 +506,14 @@ pub(crate) fn sql(error: tokio_postgres::Error) -> String {
             None => error.to_string(),
         },
     }
+}
+
+/// A fresh origin for the notifications of one open database: 16 random bytes, hex.
+fn new_origin() -> Result<String, String> {
+    let mut bytes = [0u8; 16];
+    ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut bytes)
+        .map_err(|_| "no randomness for the origin of the notifications".to_string())?;
+    Ok(hex::encode(bytes))
 }
 
 /// The connection's settings, every one from `[database.postgres]` (ADR-0029 clause 24) — nothing

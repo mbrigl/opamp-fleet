@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use tokio_postgres::GenericClient;
 
+use super::notify::{notify, PACKAGE};
 use super::{client, signed, sql, unsigned, Database};
 use crate::packages::{
     Entry, Package, PackageBackend, PackageId, Platform, Signed, ED25519_SIGNATURE_LEN,
@@ -38,8 +39,9 @@ impl PackageBackend for PgPackageBackend {
     fn create(&self, id: &PackageId) -> Result<(), String> {
         let id = id.clone();
         self.database.run(move |pool| async move {
-            let client = client(&pool).await?;
-            client
+            let mut client = client(&pool).await?;
+            let transaction = client.transaction().await.map_err(sql)?;
+            let created = transaction
                 .execute(
                     "INSERT INTO packages (agent_type, version) VALUES ($1, $2) \
                      ON CONFLICT DO NOTHING",
@@ -47,7 +49,10 @@ impl PackageBackend for PgPackageBackend {
                 )
                 .await
                 .map_err(sql)?;
-            Ok(())
+            if created > 0 {
+                notify(&*transaction, PACKAGE, &id.to_string()).await?;
+            }
+            transaction.commit().await.map_err(sql)
         })
     }
 
@@ -88,6 +93,7 @@ impl PackageBackend for PgPackageBackend {
                 )
                 .await
                 .map_err(sql)?;
+            notify(&*transaction, PACKAGE, &id.to_string()).await?;
             transaction.commit().await.map_err(sql)
         })
     }
@@ -123,6 +129,7 @@ impl PackageBackend for PgPackageBackend {
                 .await
                 .map_err(sql)?;
             let signed = if updated == 1 {
+                notify(&*transaction, PACKAGE, &id.to_string()).await?;
                 Signed::Written
             } else {
                 let stored = transaction
@@ -145,8 +152,9 @@ impl PackageBackend for PgPackageBackend {
     fn remove_entry(&self, id: &PackageId, platform: &Platform) -> Result<(), String> {
         let (id, platform) = (id.clone(), platform.clone());
         self.database.run(move |pool| async move {
-            let client = client(&pool).await?;
-            client
+            let mut client = client(&pool).await?;
+            let transaction = client.transaction().await.map_err(sql)?;
+            let removed = transaction
                 .execute(
                     "DELETE FROM package_entries WHERE agent_type = $1 AND version = $2 \
                      AND os = $3 AND arch = $4",
@@ -154,7 +162,10 @@ impl PackageBackend for PgPackageBackend {
                 )
                 .await
                 .map_err(sql)?;
-            Ok(())
+            if removed > 0 {
+                notify(&*transaction, PACKAGE, &id.to_string()).await?;
+            }
+            transaction.commit().await.map_err(sql)
         })
     }
 
@@ -171,6 +182,7 @@ impl PackageBackend for PgPackageBackend {
                 )
                 .await
                 .map_err(sql)?;
+            notify(&*transaction, PACKAGE, &id.to_string()).await?;
             transaction.commit().await.map_err(sql)
         })
     }

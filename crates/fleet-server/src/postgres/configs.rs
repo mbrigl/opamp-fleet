@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use tokio_postgres::GenericClient;
 
+use super::notify::{notify, CONFIGURATION};
 use super::{client, sql, Database};
 use crate::configs::{check_type, validate_name, ConfigBackend, Configuration, Pinned, Revision};
 
@@ -41,6 +42,7 @@ impl ConfigBackend for PgConfigBackend {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
             save(&*transaction, &name, &saved).await?;
+            notify(&*transaction, CONFIGURATION, &name).await?;
             transaction.commit().await.map_err(sql)
         })
     }
@@ -70,7 +72,7 @@ impl ConfigBackend for PgConfigBackend {
                 transaction.commit().await.map_err(sql)?;
                 return Ok(BTreeMap::new());
             }
-            transaction
+            let collected = transaction
                 .execute(
                     "DELETE FROM configuration_revisions r WHERE r.configuration = $1 \
                      AND NOT r.hash = ANY($2) AND NOT EXISTS (SELECT 1 FROM \
@@ -80,6 +82,9 @@ impl ConfigBackend for PgConfigBackend {
                 )
                 .await
                 .map_err(sql)?;
+            if collected > 0 {
+                notify(&*transaction, CONFIGURATION, &name).await?;
+            }
             let mut kept = BTreeMap::new();
             for row in transaction
                 .query(
@@ -114,6 +119,7 @@ impl ConfigBackend for PgConfigBackend {
                 .execute("DELETE FROM configurations WHERE name = $1", &[&name])
                 .await
                 .map_err(sql)?;
+            notify(&*transaction, CONFIGURATION, &name).await?;
             transaction.commit().await.map_err(sql)
         })
     }

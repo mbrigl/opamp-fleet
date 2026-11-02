@@ -21,7 +21,7 @@ use prost::Message as _;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tokio::sync::watch;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::agent_store::{AgentStore, PersistedAgent, Pin};
 use crate::audit::{Audit, Entry};
@@ -1226,6 +1226,84 @@ impl AppState {
     /// A fresh identity for one WebSocket connection.
     pub fn connection_id(&self) -> ConnId {
         self.next_conn.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Reads the Configurations and, where package delivery is armed, the Deployments and the
+    /// Packages again from their stores, as another instance changed them
+    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// clause 12). Each one whose flag is set is dropped and read again whole.
+    ///
+    /// # Errors
+    /// Returns an error when a store cannot be read; what it held is then kept.
+    pub fn reload_catalogue(
+        &self,
+        configurations: bool,
+        deployments: bool,
+        packages: bool,
+    ) -> Result<(), String> {
+        if configurations {
+            self.configs.reload()?;
+        }
+        if let Some(offering) = &self.packages {
+            if deployments {
+                offering.deployments().reload()?;
+            }
+            if packages {
+                offering.store().reload()?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Takes up the assignments another instance's rollout wrote
+    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+    /// clauses 8 and 9): the record of each Agent of `uids` this instance holds, or of every one
+    /// it holds where `uids` is `None`, is read again from the store, its assignment taken into
+    /// what is held, and the WebSocket loops woken, so a connected Agent is offered what it was
+    /// released at once. The records are read before the fleet lock is taken, so no report waits
+    /// for the read.
+    ///
+    /// # Errors
+    /// Returns an error when the store cannot be read; what is held is then kept.
+    pub fn take_up_assignments(&self, uids: Option<&HashSet<InstanceUid>>) -> Result<(), String> {
+        let stored: HashMap<InstanceUid, PersistedAgent> = match uids {
+            None => self.agent_store.load()?,
+            Some(uids) => {
+                let held: Vec<InstanceUid> = {
+                    let fleet = self.fleet.lock().expect("fleet lock");
+                    uids.iter()
+                        .filter(|uid| fleet.contains_key(uid))
+                        .copied()
+                        .collect()
+                };
+                let mut stored = HashMap::new();
+                for uid in held {
+                    if let Some(record) = self.agent_store.get(&uid)? {
+                        stored.insert(uid, record);
+                    }
+                }
+                stored
+            }
+        };
+        let mut fleet = self.fleet.lock().expect("fleet lock");
+        let mut moved = 0usize;
+        for (uid, persisted) in stored {
+            if let Some(record) = fleet.get_mut(&uid) {
+                if record.assignment != persisted.assignment {
+                    record.assignment = persisted.assignment;
+                    moved += 1;
+                }
+            }
+        }
+        drop(fleet);
+        if moved > 0 {
+            self.push.send_modify(|rev| *rev += 1);
+            debug!(
+                agents = moved,
+                "took up the assignments another instance released"
+            );
+        }
+        Ok(())
     }
 
     /// A receiver that fires whenever any Configuration changes; WebSocket loops use it to push
