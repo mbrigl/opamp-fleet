@@ -292,13 +292,14 @@ and configured in the Server's configuration alone, and move an old layout by an
       verifies, and within it in batches of a bounded number of entries, so no statement outgrows
       the statement timeout every connection of the Server holds. A round that does not end
       within five minutes is rolled back whole; the prune then stops, and the next start or day
-      goes on from where the last round that ended left the record.
+      goes on from where the last round that ended left the record. A round that prunes no chain
+      ends the prune too, with a warning: there is nothing a next round would do differently.
     - An `audit.pruned` is an entry like any other and is pruned in its turn. Where an entry an
       instance removes is an `audit.pruned` whose link is still needed, the instance records that
       link again in a new `audit.pruned`. A link is still needed when the chain it names begins
       right after the entry it records as last removed, or is closed with no entries left on that
-      entry's hash, and the same prune does not prune that chain further; a chain the same prune
-      prunes further is linked by the `audit.pruned` recorded for it in that prune. Where an entry
+      entry's hash, and the same round does not prune that chain further; a chain the same round
+      prunes further is linked by the `audit.pruned` recorded for it in that round. Where an entry
       it removes names the archive as its `predecessor`, the `audit.chain_opened` of the first
       chain or an `audit.pruned` that carried it, a new `audit.pruned` carries the predecessor on
       as `predecessor_chain`, `predecessor_seq` and `predecessor_hash`. A closed chain with no
