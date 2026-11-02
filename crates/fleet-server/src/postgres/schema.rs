@@ -28,7 +28,7 @@ pub const SCHEMA_TABLE: &str = "fleet_schema";
 
 /// Every table the migrations create, so that a database holding any of them is recognised as one
 /// the Server already wrote ([`super::Database::server_tables`]).
-pub const TABLES: [&str; 20] = [
+pub const TABLES: [&str; 23] = [
     "configurations",
     "configuration_revisions",
     "deployments",
@@ -48,6 +48,9 @@ pub const TABLES: [&str; 20] = [
     "deployment_packages",
     "deployment_configurations",
     "revocation_list_version",
+    "audit_chains",
+    "audit_entries",
+    "audit_archive",
     // Not tables of the records, but the Server's all the same.
     SCHEMA_TABLE,
 ];
@@ -95,6 +98,13 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 6,
         oldest_server: "0.6.1",
         sql: REVOCATION_LIST_VERSION,
+    },
+    // Tables only added; the release before it never reads them and keeps its audit record in
+    // files. What two releases side by side leave open is ticket 11's.
+    Migration {
+        version: 7,
+        oldest_server: "0.6.1",
+        sql: AUDIT_CHAINS,
     },
 ];
 
@@ -313,6 +323,32 @@ CREATE TABLE revocation_list_version (
     version bigint NOT NULL
 );
 INSERT INTO revocation_list_version (singleton, version) VALUES (true, 0);
+";
+
+/// The audit record, one hash chain per lease
+/// (ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance): a record per
+/// chain, named by the instance id of the lease that opened it, with the hash of its closing entry
+/// once it is closed; each entry as the line it was hashed as; and the end of the file record a
+/// move from files left as the archive, which the first chain names as its predecessor.
+const AUDIT_CHAINS: &str = r"
+CREATE TABLE audit_chains (
+    id uuid PRIMARY KEY,
+    host text NOT NULL,
+    opened_at timestamptz NOT NULL,
+    closed_at timestamptz,
+    closed_hash text
+);
+CREATE TABLE audit_entries (
+    chain uuid NOT NULL REFERENCES audit_chains (id),
+    seq bigint NOT NULL,
+    line text NOT NULL,
+    PRIMARY KEY (chain, seq)
+);
+CREATE TABLE audit_archive (
+    singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
+    seq bigint NOT NULL,
+    hash text NOT NULL
+);
 ";
 
 /// This Server's version, `MAJOR.MINOR.PATCH`: the base of the version it reports, so a

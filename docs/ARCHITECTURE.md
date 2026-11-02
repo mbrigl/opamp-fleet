@@ -122,9 +122,9 @@ no module.
   ([ADR-0028](adr/0028-package-versions-high-water-mark-and-floor.md));
   `LedgerStore` in `revocation`; `AuditStore` in `audit_log`. The filesystem adapters are in `fs`,
   which also opens the data directory and refuses anything its layout does not name. With
-  `[database] store = "postgres"` every port but the blob and the audit port has its PostgreSQL
-  adapter in `postgres` instead (`postgres::agents`, `configs`, `deployments`, `packages`,
-  `ledger`, `bootstrap`, `enrolment`, `floors`), each call one transaction; `postgres` holds the
+  `[database] store = "postgres"` every port but the blob port has its PostgreSQL adapter in
+  `postgres` instead (`postgres::agents`, `configs`, `deployments`, `packages`, `ledger`,
+  `bootstrap`, `enrolment`, `floors`, `audit`), each call one transaction; `postgres` holds the
   connection
   they share — TLS 1.3 on *ring*, a pool on a `bridge` runtime of its own, the advisory lock that
   keeps one Server per database — and applies the schema embedded in `postgres::schema` as
@@ -173,7 +173,11 @@ no module.
   ([ADR-0012](adr/0012-tls-1-3-two-planes-and-bounded-input.md)).
 - **Audit record** — `audit` is the port every security decision is recorded through;
   `audit_log` chains the entries by hash and `fs::FsAuditStore` keeps them under
-  `data_dir/audit/` ([ADR-0023](adr/0023-an-append-only-audit-record.md)).
+  `data_dir/audit/` ([ADR-0023](adr/0023-an-append-only-audit-record.md)). On PostgreSQL
+  `postgres::audit::PgAuditStore` keeps one chain per lease; the lease's take opens it and closes
+  the chains of the lapsed leases it removes, as each renewal does, and an orderly shutdown closes
+  the instance's own
+  ([ADR-draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance](adr/draft-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance.md)).
 - **Server ports beyond storage** — `fleet` owns `CertificateSigner`, which the local CA in `ca`
   implements for the CSR flow and the renewal proof (ADR-0021), and
   `Clock`, which `clock::SystemClock` implements. The `[connection_offer]` and

@@ -124,6 +124,7 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             ("postgres::deployments", Adapter),
             ("postgres::enrolment", Adapter),
             ("postgres::floors", Adapter),
+            ("postgres::audit", Adapter),
             ("postgres::import", Adapter),
             ("postgres::lease", Adapter),
             ("postgres::ledger", Adapter),

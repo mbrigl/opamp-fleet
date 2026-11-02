@@ -265,6 +265,11 @@ async fn renew(
                 Some(renewal) => {
                     sent = renewal.sent;
                     versions.send_replace(Some(renewal.list_version));
+                    if let Waited::LockLost =
+                        take_over_lapsed(&database, times, &instance_id, sent).await
+                    {
+                        return lock_lost(held, &instance_id);
+                    }
                 }
                 None => break,
             }
@@ -306,6 +311,42 @@ async fn renew(
             }
         }
     }
+}
+
+/// Takes over the leases that lapsed, after a renewal sent at `sent`
+/// (ADR-draft-several-server-instances-share-one-postgresql-database-and-coordinate-through-it
+/// clause 18), closing their audit chains; bounded by half a renewal interval, so a database that
+/// does not answer delays the next renewal by no more than that, well inside the lease.
+async fn take_over_lapsed(
+    database: &Arc<Database>,
+    times: LeaseTimes,
+    instance_id: &str,
+    sent: Instant,
+) -> Waited<()> {
+    let deadline = sent + times.lapse;
+    let bound = times.renew / 2;
+    let (db, id) = (database.clone(), instance_id.to_string());
+    let taking = tokio::task::spawn_blocking(move || db.take_over_lapsed(&id, bound));
+    match until_deadline(database, deadline, taking).await {
+        Waited::Done(Ok(Ok(taken_over))) => {
+            for lapsed in taken_over {
+                info!(
+                    instance_id = %instance_id,
+                    taken_over = %lapsed,
+                    "took over the lease of an instance that is gone"
+                );
+            }
+        }
+        Waited::Done(Ok(Err(e))) => {
+            warn!(instance_id = %instance_id, error = %e, "could not take over the lapsed leases");
+        }
+        Waited::Done(Err(e)) => {
+            warn!(instance_id = %instance_id, error = %e, "could not take over the lapsed leases");
+        }
+        Waited::LockLost => return Waited::LockLost,
+        Waited::Lapsed => {}
+    }
+    Waited::Done(())
 }
 
 /// The end of an instance whose exclusive lock is gone: no lease from now on, and the planes end.
