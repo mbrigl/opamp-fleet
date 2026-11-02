@@ -202,73 +202,112 @@ fn prune_round_of(
         // A connection of its own, taken from the pool, so that the session-level lock ends with
         // it whatever happens to this call.
         let mut lock = deadpool_postgres::Object::take(client(&pool).await?);
-        let locked: bool = lock
-            .query_one(&format!("SELECT pg_try_advisory_lock({PRUNE_LOCK})"), &[])
-            .await
-            .map_err(sql)?
-            .get(0);
-        let mut chains: Vec<String> = Vec::new();
-        if let Some(own) = &own {
-            if lock
-                .query_opt(
-                    "SELECT 1 FROM audit_chains WHERE id = $1::text::uuid AND closed_hash IS NULL",
-                    &[own],
-                )
-                .await
-                .map_err(sql)?
-                .is_some()
-            {
-                chains.push(own.clone());
-            }
-        }
-        if locked {
-            for row in lock
-                .query(
-                    "SELECT id::text FROM audit_chains WHERE closed_hash IS NOT NULL \
-                     ORDER BY opened_at, id",
-                    &[],
-                )
-                .await
-                .map_err(sql)?
-            {
-                chains.push(row.get(0));
-            }
-        }
-        // The own chain may have been closed by a takeover between the two reads.
-        let mut seen = BTreeSet::new();
-        chains.retain(|chain| seen.insert(chain.clone()));
-        let plan = plan(&*lock, &chains, days, budget).await?;
-        let mut pruned = Pruned {
-            closed_chains: locked,
-            capped: plan.capped,
-            ..Pruned::default()
-        };
-        if plan.chains.is_empty() {
-            return Ok(pruned);
-        }
-        let written = entries(&plan.chains, &plan.carried, plan.predecessor.as_ref());
-        let recorded = tokio::task::spawn_blocking(move || {
-            written.into_iter().all(|entry| audit.record(entry).is_ok())
-                && audit.drain(WRITTEN_TIMEOUT)
-        })
+        round_on(&mut lock, audit, own, days, budget).await
+    })
+}
+
+/// [`prune_round_of`] on the connection `lock`, which takes the prune lock when it is free and lets
+/// go of it before it answers. The session ends only some time after the connection is dropped,
+/// so a lock left to it could still be held when the next round of the same prune tries it, and
+/// that round would leave the closed chains as if another instance pruned them.
+async fn round_on(
+    lock: &mut deadpool_postgres::ClientWrapper,
+    audit: Arc<AuditLog>,
+    own: Option<String>,
+    days: i64,
+    budget: i64,
+) -> Result<Pruned, String> {
+    let locked: bool = lock
+        .query_one(&format!("SELECT pg_try_advisory_lock({PRUNE_LOCK})"), &[])
         .await
-        .map_err(|e| format!("the audit writer's wait failed: {e}"))?;
-        if !recorded {
-            return Err(
-                "the audit.pruned entries could not be written, so nothing was pruned".to_string(),
+        .map_err(sql)?
+        .get(0);
+    let pruned = round_under(lock, locked, audit, own, days, budget).await;
+    if locked {
+        // Answered either way: what the round did stands, and the session's end lets go of the
+        // lock where this cannot.
+        if let Err(e) = lock
+            .execute(&format!("SELECT pg_advisory_unlock({PRUNE_LOCK})"), &[])
+            .await
+        {
+            tracing::warn!(
+                error = %sql(e),
+                "the audit prune lock was not let go; it goes when its session ends"
             );
         }
-        // One transaction for every chain: the old link of a chain pruned further may sit in
-        // another chain pruned here, so a prune that stopped between two deletes would leave a
-        // chain linked by nothing.
-        let transaction = lock.transaction().await.map_err(sql)?;
-        delete(&*transaction, &plan.chains).await?;
-        transaction.commit().await.map_err(sql)?;
-        pruned.chains = plan.chains;
-        pruned.carried = plan.carried;
-        pruned.predecessor = plan.predecessor.is_some();
-        Ok(pruned)
+    }
+    pruned
+}
+
+/// The work of one round on `lock`, which holds the prune lock when `locked`.
+async fn round_under(
+    lock: &mut deadpool_postgres::ClientWrapper,
+    locked: bool,
+    audit: Arc<AuditLog>,
+    own: Option<String>,
+    days: i64,
+    budget: i64,
+) -> Result<Pruned, String> {
+    let mut chains: Vec<String> = Vec::new();
+    if let Some(own) = &own {
+        if lock
+            .query_opt(
+                "SELECT 1 FROM audit_chains WHERE id = $1::text::uuid AND closed_hash IS NULL",
+                &[own],
+            )
+            .await
+            .map_err(sql)?
+            .is_some()
+        {
+            chains.push(own.clone());
+        }
+    }
+    if locked {
+        for row in lock
+            .query(
+                "SELECT id::text FROM audit_chains WHERE closed_hash IS NOT NULL \
+                 ORDER BY opened_at, id",
+                &[],
+            )
+            .await
+            .map_err(sql)?
+        {
+            chains.push(row.get(0));
+        }
+    }
+    // The own chain may have been closed by a takeover between the two reads.
+    let mut seen = BTreeSet::new();
+    chains.retain(|chain| seen.insert(chain.clone()));
+    let plan = plan(&**lock, &chains, days, budget).await?;
+    let mut pruned = Pruned {
+        closed_chains: locked,
+        capped: plan.capped,
+        ..Pruned::default()
+    };
+    if plan.chains.is_empty() {
+        return Ok(pruned);
+    }
+    let written = entries(&plan.chains, &plan.carried, plan.predecessor.as_ref());
+    let recorded = tokio::task::spawn_blocking(move || {
+        written.into_iter().all(|entry| audit.record(entry).is_ok()) && audit.drain(WRITTEN_TIMEOUT)
     })
+    .await
+    .map_err(|e| format!("the audit writer's wait failed: {e}"))?;
+    if !recorded {
+        return Err(
+            "the audit.pruned entries could not be written, so nothing was pruned".to_string(),
+        );
+    }
+    // One transaction for every chain: the old link of a chain pruned further may sit in
+    // another chain pruned here, so a prune that stopped between two deletes would leave a
+    // chain linked by nothing.
+    let transaction = lock.transaction().await.map_err(sql)?;
+    delete(&*transaction, &plan.chains).await?;
+    transaction.commit().await.map_err(sql)?;
+    pruned.chains = plan.chains;
+    pruned.carried = plan.carried;
+    pruned.predecessor = plan.predecessor.is_some();
+    Ok(pruned)
 }
 
 /// What a prune removes and records.
@@ -1069,6 +1108,51 @@ mod tests {
         assert_eq!(rounds.len(), 2, "{rounds:?}");
         assert!(!rounds[1].capped);
         assert_eq!(first_entry(&test), OLD + 1, "the backlog drained");
+        held(&a.database);
+    }
+
+    /// A round lets go of the prune lock before it answers, not by its session's end, which comes
+    /// only some time after its connection is dropped: else the next round of the same prune may
+    /// find the lock still held, leave the closed chains as if another instance pruned them, and
+    /// end the prune with their old entries left. The round's connection is kept open here past
+    /// the round, as a session that has not ended yet.
+    /// Verifies: ADR-0044
+    #[test]
+    fn a_round_lets_go_of_the_prune_lock_before_it_answers() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let closed = writing(&test, "host-x");
+        closed.decide(3);
+        assert!(closed.audit.close(Duration::from_secs(10)), "not closed");
+        let a = writing(&test, "host-a");
+        age(&test, &closed.chain, "1, 2");
+        let (audit, own) = (a.audit.clone(), a.chain.clone());
+        let (pruned, free) = a
+            .database
+            .run_within(PRUNE_TIMEOUT, move |pool| async move {
+                let mut lock = deadpool_postgres::Object::take(client(&pool).await?);
+                let days = super::super::signed(RETAIN);
+                let pruned = round_on(&mut lock, audit, Some(own), days, ROUND_ENTRIES).await?;
+                let other = client(&pool).await?;
+                let free: bool = other
+                    .query_one(&format!("SELECT pg_try_advisory_lock({PRUNE_LOCK})"), &[])
+                    .await
+                    .map_err(sql)?
+                    .get(0);
+                if free {
+                    other
+                        .execute(&format!("SELECT pg_advisory_unlock({PRUNE_LOCK})"), &[])
+                        .await
+                        .map_err(sql)?;
+                }
+                drop(lock);
+                Ok((pruned, free))
+            })
+            .expect("the round");
+        assert!(pruned.closed_chains, "{pruned:?}");
+        assert_eq!(pruned.chains.len(), 1, "{pruned:?}");
+        assert!(free, "the round's session still held the prune lock");
         held(&a.database);
     }
 
