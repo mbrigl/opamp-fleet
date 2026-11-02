@@ -818,10 +818,14 @@ async fn main() {
                 })
                 .await;
                 match pruned {
-                    Ok(Ok(pruned)) => tracing::info!(
-                        chains = pruned.chains.len(),
-                        carried = pruned.carried.len(),
-                        closed_chains = pruned.closed_chains,
+                    Ok(Ok(rounds)) => tracing::info!(
+                        rounds = rounds.len(),
+                        chains = rounds.iter().map(|round| round.chains.len()).sum::<usize>(),
+                        carried = rounds
+                            .iter()
+                            .map(|round| round.carried.len())
+                            .sum::<usize>(),
+                        closed_chains = rounds.iter().any(|round| round.closed_chains),
                         "pruned the audit record to {retain_days} days"
                     ),
                     Ok(Err(e)) => tracing::warn!(error = %e, "cannot prune the audit record"),

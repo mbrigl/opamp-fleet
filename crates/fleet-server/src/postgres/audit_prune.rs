@@ -26,8 +26,14 @@ use crate::audit_log::{line_hash, AuditLog};
 pub(crate) const PRUNE_LOCK: &str =
     "hashtextextended('opamp-fleet-server-audit-prune:' || coalesce(current_schema(), ''), 0)";
 
-/// How long one prune may take, its wait for the `audit.pruned` entries included.
+/// How long one round of a prune may take, its wait for the `audit.pruned` entries included.
 const PRUNE_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// The entries one round of a prune removes at most, across its chains: 20 statements of
+/// [`DELETE_BATCH`]. A batch by the primary key takes milliseconds; even at a second each, a
+/// hundred times that, a round takes 20 s, a fifteenth of [`PRUNE_TIMEOUT`], so a round fits
+/// with room for a database under load, and a backlog drains over as many rounds as it needs.
+pub(crate) const ROUND_ENTRIES: i64 = 100_000;
 
 /// How long the prune waits for its `audit.pruned` entries to be written.
 const WRITTEN_TIMEOUT: Duration = Duration::from_secs(30);
@@ -66,6 +72,9 @@ pub struct Pruned {
     pub predecessor: bool,
     /// Whether it held the prune lock, and so pruned the closed chains.
     pub closed_chains: bool,
+    /// Whether it removed as many entries as one round may, so that old entries may be left for
+    /// the next round.
+    pub capped: bool,
 }
 
 /// The `audit.pruned` entries a prune writes, in order: each chain it prunes, then each link it
@@ -122,18 +131,62 @@ fn predecessor_named(value: &Value, chain_key: &str) -> Option<Predecessor> {
 }
 
 /// Prunes the record on `database` for the instance whose chain is `own`, recording through
-/// `audit`: its own chain, and, when it gets the prune lock, every closed chain. Entries stored
-/// more than `retain_days` days ago go, the longest such run from each chain's start, from every
-/// chain in one transaction.
+/// `audit`, in rounds of [`prune_round`], one right after the other until a round finds nothing
+/// more to remove; answers what each round did.
 ///
 /// # Errors
-/// Returns an error when the database cannot be read or written, or when the `audit.pruned`
-/// entries could not be written; then nothing was deleted.
+/// As [`prune_round`]: the round that fails deleted nothing, and the rounds before it stand.
 pub fn prune(
     database: &Database,
     audit: Arc<AuditLog>,
     own: Option<String>,
     retain_days: u64,
+) -> Result<Vec<Pruned>, String> {
+    prune_in_rounds_of(database, &audit, own.as_ref(), retain_days, ROUND_ENTRIES)
+}
+
+/// [`prune`] in rounds of at most `round` entries each.
+fn prune_in_rounds_of(
+    database: &Database,
+    audit: &Arc<AuditLog>,
+    own: Option<&String>,
+    retain_days: u64,
+    round: i64,
+) -> Result<Vec<Pruned>, String> {
+    let mut rounds = Vec::new();
+    loop {
+        let round = prune_round_of(database, audit.clone(), own.cloned(), retain_days, round)?;
+        let more = round.capped;
+        rounds.push(round);
+        if !more {
+            return Ok(rounds);
+        }
+    }
+}
+
+/// One round of a prune: the instance's own chain, and, when it gets the prune lock, every closed
+/// chain. Entries stored more than `retain_days` days ago go, at most [`ROUND_ENTRIES`] of them,
+/// each chain's run from its start, from every chain in one transaction.
+///
+/// # Errors
+/// Returns an error when the database cannot be read or written, or when the `audit.pruned`
+/// entries could not be written; then nothing was deleted.
+pub fn prune_round(
+    database: &Database,
+    audit: Arc<AuditLog>,
+    own: Option<String>,
+    retain_days: u64,
+) -> Result<Pruned, String> {
+    prune_round_of(database, audit, own, retain_days, ROUND_ENTRIES)
+}
+
+/// [`prune_round`] removing at most `budget` entries.
+fn prune_round_of(
+    database: &Database,
+    audit: Arc<AuditLog>,
+    own: Option<String>,
+    retain_days: u64,
+    budget: i64,
 ) -> Result<Pruned, String> {
     // At most 36 500 (`[audit] retain_days`), so the bits carry over unchanged.
     let days = super::signed(retain_days);
@@ -176,9 +229,10 @@ pub fn prune(
         // The own chain may have been closed by a takeover between the two reads.
         let mut seen = BTreeSet::new();
         chains.retain(|chain| seen.insert(chain.clone()));
-        let plan = plan(&*lock, &chains, days).await?;
+        let plan = plan(&*lock, &chains, days, budget).await?;
         let mut pruned = Pruned {
             closed_chains: locked,
+            capped: plan.capped,
             ..Pruned::default()
         };
         if plan.chains.is_empty() {
@@ -215,22 +269,54 @@ struct Plan {
     chains: Vec<Link>,
     carried: Vec<Link>,
     predecessor: Option<Predecessor>,
+    /// Whether `budget` ran out, so that old entries may be left.
+    capped: bool,
 }
 
 /// For each chain of `chains`, the longest run of entries from its start all stored more than
-/// `days` days ago; and the links and the predecessor the entries in those runs record that are still
+/// `days` days ago, cut so that the runs hold at most `budget` entries together; and the links and the predecessor the entries in those runs record that are still
 /// needed once they are gone.
-async fn plan(client: &impl GenericClient, chains: &[String], days: i64) -> Result<Plan, String> {
+async fn plan(
+    client: &impl GenericClient,
+    chains: &[String],
+    days: i64,
+    mut budget: i64,
+) -> Result<Plan, String> {
     let mut plan = Plan::default();
     let mut removed: Vec<Link> = Vec::new();
     for chain in chains {
+        if budget == 0 {
+            plan.capped = true;
+            break;
+        }
+        let bounds = client
+            .query_one(
+                "SELECT min(seq), coalesce((SELECT min(seq) - 1 FROM audit_entries \
+                 WHERE chain = $1::text::uuid \
+                 AND recorded_at >= now() - $2::bigint * interval '24 hours'), max(seq)) \
+                 FROM audit_entries WHERE chain = $1::text::uuid",
+                &[chain, &days],
+            )
+            .await
+            .map_err(sql)?;
+        let (Some(first), Some(old_end)) = (
+            bounds.get::<_, Option<i64>>(0),
+            bounds.get::<_, Option<i64>>(1),
+        ) else {
+            continue;
+        };
+        if old_end < first {
+            continue;
+        }
+        let end: i64 = old_end.min(first.saturating_add(budget - 1));
+        budget -= end - first + 1;
+        if budget == 0 {
+            plan.capped = true;
+        }
         let Some(row) = client
             .query_opt(
-                "SELECT seq, line FROM audit_entries WHERE chain = $1::text::uuid AND seq = \
-                 coalesce((SELECT min(seq) - 1 FROM audit_entries WHERE chain = $1::text::uuid \
-                 AND recorded_at >= now() - $2::bigint * interval '24 hours'), \
-                 (SELECT max(seq) FROM audit_entries WHERE chain = $1::text::uuid))",
-                &[chain, &days],
+                "SELECT seq, line FROM audit_entries WHERE chain = $1::text::uuid AND seq = $2",
+                &[chain, &end],
             )
             .await
             .map_err(sql)?
@@ -407,7 +493,7 @@ mod tests {
         }
 
         fn prune(&self) -> Pruned {
-            prune(
+            prune_round(
                 &self.database,
                 self.audit.clone(),
                 Some(self.chain.clone()),
@@ -899,6 +985,73 @@ mod tests {
             "{pruned:?}"
         );
         assert_eq!(lines(&test, chain).len(), 1, "the old run is gone");
+        held(&a.database);
+    }
+
+    /// A backlog larger than one round drains across rounds within one prune: each round removes
+    /// at most its share of entries and leaves a record that verifies, and the next follows right
+    /// away until nothing old is left. Rounds of 1000 here stand for [`ROUND_ENTRIES`].
+    /// Verifies: ADR-draft-the-servers-state-and-its-stores
+    #[test]
+    fn a_backlog_larger_than_one_round_drains_in_rounds() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        const ROUND: i64 = 1000;
+        const OLD: u64 = 2500;
+        let a = writing(&test, "host-a");
+        let chain = "00000000-0000-4000-8000-000000000025";
+        let (mut prev, mut values) = (crate::audit_log::GENESIS.to_string(), Vec::new());
+        for seq in 1..=OLD + 1 {
+            let entry = match seq {
+                1 => Entry::new("audit.chain_opened", "recorded"),
+                _ if seq == OLD + 1 => {
+                    Entry::new("audit.chain_closed", "recorded").with("reason", "shutdown")
+                }
+                _ => Entry::new("admission.admitted", "admitted").with("n", seq),
+            };
+            let line = crate::audit_log::render(seq, 0, &entry.with("chain", chain), &prev);
+            prev = line_hash(&line);
+            let age = if seq <= OLD {
+                "now() - interval '400 days'"
+            } else {
+                "now()"
+            };
+            values.push(format!("('{chain}', {seq}, '{line}', {age})"));
+        }
+        test.sql(&format!(
+            "INSERT INTO audit_chains (id, host, opened_at, closed_at, closed_hash) \
+             VALUES ('{chain}', 'host-x', now(), now(), '{prev}'); \
+             INSERT INTO audit_entries (chain, seq, line, recorded_at) VALUES {};",
+            values.join(", ")
+        ));
+        let first_entry = |test: &TestDatabase| -> u64 {
+            test.rows(&format!(
+                "SELECT min(seq) FROM audit_entries WHERE chain = '{chain}'"
+            ))[0][0]
+                .as_deref()
+                .expect("an entry")
+                .parse()
+                .expect("seq")
+        };
+
+        let one = prune_round_of(
+            &a.database,
+            a.audit.clone(),
+            Some(a.chain.clone()),
+            RETAIN,
+            ROUND,
+        )
+        .expect("one round");
+        assert!(one.capped, "{one:?}");
+        assert_eq!(first_entry(&test), 1001, "one round's share");
+        held(&a.database);
+
+        let rounds = prune_in_rounds_of(&a.database, &a.audit, Some(&a.chain), RETAIN, ROUND)
+            .expect("the rest");
+        assert_eq!(rounds.len(), 2, "{rounds:?}");
+        assert!(!rounds[1].capped);
+        assert_eq!(first_entry(&test), OLD + 1, "the backlog drained");
         held(&a.database);
     }
 
