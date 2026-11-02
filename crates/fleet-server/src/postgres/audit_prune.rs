@@ -156,6 +156,14 @@ fn prune_in_rounds_of(
     let mut rounds = Vec::new();
     loop {
         let round = prune_round_of(database, audit.clone(), own.cloned(), retain_days, round)?;
+        if round.capped && round.chains.is_empty() {
+            // A next round would find what this one found.
+            return Err(
+                "a round of the audit prune was cut off by its budget and pruned no \
+                        chain, so the prune stopped — run server audit-verify --config"
+                    .to_string(),
+            );
+        }
         let more = round.capped;
         rounds.push(round);
         if !more {
@@ -274,8 +282,8 @@ struct Plan {
 }
 
 /// For each chain of `chains`, the longest run of entries from its start all stored more than
-/// `days` days ago, cut so that the runs hold at most `budget` entries together; and the links and the predecessor the entries in those runs record that are still
-/// needed once they are gone.
+/// `days` days ago, cut so that the runs hold at most `budget` entries together; and the links
+/// and the predecessor the entries in those runs record that are still needed once they are gone.
 async fn plan(
     client: &impl GenericClient,
     chains: &[String],
@@ -309,10 +317,6 @@ async fn plan(
             continue;
         }
         let end: i64 = old_end.min(first.saturating_add(budget - 1));
-        budget -= end - first + 1;
-        if budget == 0 {
-            plan.capped = true;
-        }
         let Some(row) = client
             .query_opt(
                 "SELECT seq, line FROM audit_entries WHERE chain = $1::text::uuid AND seq = $2",
@@ -321,8 +325,21 @@ async fn plan(
             .await
             .map_err(sql)?
         else {
+            // A chain with a gap where the cut falls is not one an instance wrote; verify names
+            // it, and the prune leaves it as it is.
+            tracing::warn!(
+                chain = %chain,
+                seq = end,
+                "the audit chain holds no entry where the prune would cut it, so it is not \
+                 pruned — run server audit-verify --config"
+            );
             continue;
         };
+        // Charged only for a chain that enters the plan, so a round that is capped prunes one.
+        budget -= end - first + 1;
+        if budget == 0 {
+            plan.capped = true;
+        }
         let last_seq = super::unsigned(row.get::<_, i64>(0));
         plan.chains.push(Link {
             chain: chain.clone(),
@@ -1053,6 +1070,71 @@ mod tests {
         assert!(!rounds[1].capped);
         assert_eq!(first_entry(&test), OLD + 1, "the backlog drained");
         held(&a.database);
+    }
+
+    /// A chain with an entry missing where a round's budget cuts it is left as it is, and the run
+    /// of rounds ends rather than repeating a round that prunes nothing.
+    /// Verifies: ADR-draft-the-servers-state-and-its-stores
+    #[test]
+    fn a_round_that_prunes_no_chain_ends_the_prune() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        const ROUND: i64 = 1000;
+        const OLD: u64 = 2500;
+        let a = writing(&test, "host-a");
+        let chain = "00000000-0000-4000-8000-000000000026";
+        let (mut prev, mut values) = (crate::audit_log::GENESIS.to_string(), Vec::new());
+        for seq in 1..=OLD + 1 {
+            let entry = match seq {
+                1 => Entry::new("audit.chain_opened", "recorded"),
+                _ if seq == OLD + 1 => {
+                    Entry::new("audit.chain_closed", "recorded").with("reason", "shutdown")
+                }
+                _ => Entry::new("admission.admitted", "admitted").with("n", seq),
+            };
+            let line = crate::audit_log::render(seq, 0, &entry.with("chain", chain), &prev);
+            prev = line_hash(&line);
+            let age = if seq <= OLD {
+                "now() - interval '400 days'"
+            } else {
+                "now()"
+            };
+            // The entry where a round of 1000 would cut the chain is gone.
+            if seq != 1000 {
+                values.push(format!("('{chain}', {seq}, '{line}', {age})"));
+            }
+        }
+        test.sql(&format!(
+            "INSERT INTO audit_chains (id, host, opened_at, closed_at, closed_hash) \
+             VALUES ('{chain}', 'host-x', now(), now(), '{prev}'); \
+             INSERT INTO audit_entries (chain, seq, line, recorded_at) VALUES {};",
+            values.join(", ")
+        ));
+        let (database, audit, own) = (a.database.clone(), a.audit.clone(), a.chain.clone());
+        let (done, ended) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done.send(prune_in_rounds_of(
+                &database,
+                &audit,
+                Some(&own),
+                RETAIN,
+                ROUND,
+            ));
+        });
+        let rounds = ended
+            .recv_timeout(Duration::from_secs(60))
+            .expect("the prune never ended")
+            .expect("the prune");
+        assert!(rounds.iter().all(|round| !round.capped), "{rounds:?}");
+        assert_eq!(
+            test.rows(&format!(
+                "SELECT count(*) FROM audit_entries WHERE chain = '{chain}'"
+            ))[0][0]
+                .as_deref(),
+            Some("2500"),
+            "the chain was pruned past its missing entry"
+        );
     }
 
     /// When its `audit.pruned` entries cannot be written, the prune deletes nothing.
