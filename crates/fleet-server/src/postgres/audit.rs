@@ -1394,12 +1394,10 @@ mod tests {
             store.append(2, &[&line])
         });
         let waiting = || {
-            test.rows(
-                "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' \
+            test.sessions(
+                "wait_event_type = 'Lock' \
                  AND query LIKE 'SELECT closed_hash FROM audit_chains%FOR UPDATE'",
-            )[0][0]
-                .as_deref()
-                != Some("0")
+            ) > 0
         };
         let deadline = std::time::Instant::now() + Duration::from_secs(4);
         while !waiting() {
