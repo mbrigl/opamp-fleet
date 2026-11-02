@@ -1194,6 +1194,12 @@ pub(crate) mod testing {
                             .map_err(sql)?;
                         let _ = held.send(());
                         let _ = tokio::task::spawn_blocking(move || opened.recv()).await;
+                        // Let go here, not by the session's end, which comes some time after the
+                        // connection is dropped.
+                        client
+                            .execute("SELECT pg_advisory_unlock($1)", &[&key])
+                            .await
+                            .map_err(sql)?;
                         drop(client);
                         Ok::<_, String>(())
                     })
@@ -1226,7 +1232,7 @@ pub(crate) mod testing {
     }
 
     impl Gate {
-        /// Lets go of the lock, and returns once its session ended.
+        /// Lets go of the lock, and returns once it is let go.
         pub(crate) fn open(mut self) {
             self.release();
         }
