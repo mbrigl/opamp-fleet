@@ -795,7 +795,7 @@ monitors a production store or database.
 
 ## Enforcement
 
-Tests that carry `Verifies: ADR-0029`:
+Tests that carry `Verifies: ADR-0044`:
 
 - Layout, ports and migration of the old layout:
   [`fs/mod.rs`](../../crates/fleet-server/src/fs/mod.rs)
@@ -927,7 +927,7 @@ Tests that carry `Verifies: ADR-0029`:
   `an_instance_that_must_be_alone_fails_startup_beside_a_live_lease`,
   `an_instance_that_loses_its_exclusive_lock_logs_it_and_refuses_every_call`. They take the
   place of `a_second_server_against_the_same_database_fails_startup_naming_it` and
-  `a_server_that_loses_its_lock_logs_it_and_writes_nothing_more`, which verify ADR-0029
+  `a_server_that_loses_its_lock_logs_it_and_writes_nothing_more`, which verify ADR-0044
   clause 23.
 - A test that will carry `Verifies: ADR-0044`, for clause 22:
   [`postgres/mod.rs`](../../crates/fleet-server/src/postgres/mod.rs)
@@ -944,7 +944,7 @@ Tests that carry `Verifies: ADR-0029`:
   `data_dir` beside the database with the filesystem blob store and no `audit/` there, and that
   with S3 it creates no `data_dir` and refuses one the configuration names (clause 1). It takes
   the place of `a_data_dir_beside_the_database_holds_the_audit_and_the_blobs_alone`, which
-  verifies ADR-0029 clause 1.
+  verifies ADR-0044 clause 1.
 - Clause 12 as it stands here, retention by `retain_days` on the PostgreSQL store included, is
   verified by the tests
   [ADR-0042](0042-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance.md)

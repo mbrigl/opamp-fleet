@@ -896,7 +896,7 @@ Agent plane with token buckets.
   [`crates/fleet-server/tests/packages.rs`](../../crates/fleet-server/tests/packages.rs):
   `an_upload_that_stops_is_answered_408_and_leaves_nothing_staged`, on the Operator plane.
 
-These tests carry `Verifies: ADR-0012`:
+These tests carry `Verifies: ADR-0045`:
 
 - [`crates/opamp/src/tls.rs`](../../crates/opamp/src/tls.rs):
   `the_provider_offers_tls_1_3_suites_alone` (clause 5);
@@ -939,7 +939,7 @@ The Operator plane's own certificate (clauses 9 to 13), each test marked as veri
   `the_operator_planes_certificate_is_watched_once`. `pki::depended_on` lists
   `[rest.tls] cert_file`, and lists a file named in both sections once (clause 13).
 
-Tests of the rate limit, each marked `Verifies: ADR-0012`:
+Tests of the rate limit, each marked `Verifies: ADR-0045`:
 
 - `crates/fleet-server/src/agent_rate.rs`:
   - `a_bucket_starts_full_and_refills_at_the_configured_rate` (clause 22);

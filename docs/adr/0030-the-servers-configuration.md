@@ -16,7 +16,7 @@ The Server runs in a container. A container is configured by its orchestrator, a
 orchestrator's natural channel is the environment: a variable per setting, changed per deployment
 without rebuilding the image or mounting a file. Every setting of `server.toml` must be reachable
 that way, the PostgreSQL connection and the object store of
-[ADR-0029](0029-the-servers-state-and-its-stores.md) among them. The Client runs as an
+[ADR-0044](0044-the-servers-state-and-its-stores.md) among them. The Client runs as an
 operating-system service on the host it manages, not in a container.
 
 Secrets must not travel in the environment. A container's environment is shown by `docker
@@ -26,7 +26,7 @@ inherited by every child process. Docker's secrets reach a container as files un
 Server keeps every secret it needs in a file named by a `*_file` key: the PostgreSQL password,
 the S3 secret key, the CA keys. Two tables of `server.toml` may hold sensitive values inline:
 `[rest.auth.basic_users]`, whose Argon2id hashes an attacker can attack offline
-([ADR-0021](0021-admission-by-client-certificate-and-revocation.md)), and
+([ADR-0038](0038-admission-by-client-certificate-and-revocation.md)), and
 `[telemetry_offer.headers]`, which typically carries an access token for the receiving backend.
 
 The keys of those two tables are data — user names and header names — not schema. An environment
@@ -101,9 +101,9 @@ environment carry paths to secrets but never a secret itself.
    the Server logs, at info level, the name of every key its environment set, and never a value.
 
 8. **No other variable configures the Server.** The `AWS_*` variables are read as
-   [ADR-0029](0029-the-servers-state-and-its-stores.md) clauses 17 and 18 say: for credentials
+   [ADR-0044](0044-the-servers-state-and-its-stores.md) clauses 17 and 18 say: for credentials
    only, never for an endpoint or an option. `FLEET_TEST_*` variables are read by tests alone.
-   Where ADR-0029 says the S3 connection is configured in `server.toml` alone, the environment of
+   Where ADR-0044 says the S3 connection is configured in `server.toml` alone, the environment of
    this ADR counts as `server.toml`: `FLEET_SERVER__BLOBS__S3__ENDPOINT` sets the endpoint, and
    `AWS_ENDPOINT` still does not.
 

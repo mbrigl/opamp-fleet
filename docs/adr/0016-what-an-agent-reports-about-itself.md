@@ -53,7 +53,7 @@ unfiltered, such a report could state:
   that reports another platform is offered a binary built for another machine, which the
   Supervisor swaps over the program; only the health gate would catch it.
 - **A Client Agent.** The Client Agent is recognised by the `supervisor.kind.*` attributes that it
-  alone reports ([ADR-0024](0024-the-fleet-record-of-agents-and-hosts.md)). A process that reports
+  alone reports ([ADR-0043](0043-the-fleet-record-of-agents-and-hosts.md)). A process that reports
   one makes a second Client Agent in its group: nobody in the group inherits Labels, and every
   Agent of the host is marked ambiguous and drops out of every Deployment aimed by an inherited
   Label. Behind a Gateway the group is keyed by the reported `host.id` or `host.name`, so a process
@@ -250,7 +250,7 @@ to the destinations the Server offers, in TLS 1.3 and in cleartext only to a loo
     where the code reports nothing under the same key. What the code reports always wins, so an
     attribute can never restate the type or the instance name. An attribute that is added stands
     against the Managed Process: the fold leaves its key alone (clause 8). Tagging one Agent among
-    several is a Label's job ([ADR-0024](0024-the-fleet-record-of-agents-and-hosts.md)): a
+    several is a Label's job ([ADR-0043](0043-the-fleet-record-of-agents-and-hosts.md)): a
     `[[supervisor]]` block carrying an `attributes` table fails at startup with a message naming
     the Server's Label. The Client Agent also reports the kinds it was compiled with
     ([ADR-0017](0017-supervisor-mode-and-its-kinds.md)).
@@ -431,7 +431,7 @@ to the destinations the Server offers, in TLS 1.3 and in cleartext only to a loo
 33. **`certificate`, `tls` and `proxy` behave as they do on the OpAMP settings.** An offered
     `certificate` is honoured: its `cert` is presented by the exporter, paired with the key this
     Client generated for its CSR — the client-certificate machinery of
-    [ADR-0021](0021-admission-by-client-certificate-and-revocation.md), reused as-is. A
+    [ADR-0038](0038-admission-by-client-certificate-and-revocation.md), reused as-is. A
     `private_key` in the offer is refused by name, because this Client's private key never leaves
     its host and is never accepted from the Server; a `cert` with no key on disk to pair with is
     refused by name too. `ca_cert` is not added to the trust store, as the Baseline advises. `tls`
@@ -471,7 +471,7 @@ Managed Process can read on its host, which includes the Client's `state_dir` an
 run under one account ([ADR-0037](0037-the-accounts-the-service-runs-under.md)); `service.version`,
 which stays the process's word; what a compromised Client reports, since its code builds the whole
 description and no rule on the Client binds it; and the Server's precedence of the effective
-description ([ADR-0024](0024-the-fleet-record-of-agents-and-hosts.md)).
+description ([ADR-0043](0043-the-fleet-record-of-agents-and-hosts.md)).
 
 ## Alternatives considered
 
@@ -525,7 +525,7 @@ description ([ADR-0024](0024-the-fleet-record-of-agents-and-hosts.md)).
   true values with the false ones: pinning one host by `host.name`
   ([ADR-0027](0027-packages-signatures-and-delivery.md)) would stop working, the artifact could no
   longer be chosen, and the grouping behind a Gateway
-  ([ADR-0024](0024-the-fleet-record-of-agents-and-hosts.md)) would lose its key. The Supervisor
+  ([ADR-0043](0043-the-fleet-record-of-agents-and-hosts.md)) would lose its key. The Supervisor
   knows which value came from the process and can decide where the Server cannot. Rejected.
 - **Let an operator admit further keys per `[[supervisor]]` block.** That would restore a
   Collector's own tags. But it puts a per-Agent setting back into `supervisor.toml`, where tagging
@@ -718,7 +718,7 @@ description ([ADR-0024](0024-the-fleet-record-of-agents-and-hosts.md)).
 - Positive: a Managed Process cannot draw another host's Configurations, be offered an artifact
   for another platform, make its host or another one ambiguous, or override the operator's
   attributes or shadow a Label outside `service.*`. That the Client Agent is recognised by the
-  attributes it alone reports ([ADR-0024](0024-the-fleet-record-of-agents-and-hosts.md)) holds on
+  attributes it alone reports ([ADR-0043](0043-the-fleet-record-of-agents-and-hosts.md)) holds on
   every honest Client.
 - Positive: the fleet view shows each host's addresses, the attributes are searchable, and the
   wire stays convention-shaped for any OpenTelemetry-aware consumer.

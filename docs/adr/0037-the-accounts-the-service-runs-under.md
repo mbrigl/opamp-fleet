@@ -19,7 +19,7 @@ read everything the Client can: the whole `state_dir` with the Client's private 
 `client-key.pem`, the `config/` of every other Supervisor, and the Client's environment through
 `/proc`. It can rewrite its own `program/` and so outlast the next package, and with the Client's
 key it can present itself to the Server for any `instance_uid` of its host
-([ADR-0021](0021-admission-by-client-certificate-and-revocation.md)).
+([ADR-0038](0038-admission-by-client-certificate-and-revocation.md)).
 
 The specification places a Managed Process and its account below the Client's account on its
 host: it must not gain the Client's key, program, or configuration. Its Strategy puts security
@@ -385,7 +385,7 @@ either account placed.
     terminal. The alternative it prints for writing the file by hand names the endpoint together
     with `[tls] cert_file` and `key_file`, the identity the operator adds before the start, and
     names no credential and no `[auth]` section, because the Client reads none
-    ([ADR-0021](0021-admission-by-client-certificate-and-revocation.md)).
+    ([ADR-0038](0038-admission-by-client-certificate-and-revocation.md)).
 
     On Windows the stop and the start go as follows, so that nothing runs under an account whose
     rights the install changes or takes away, nor under a registration it rewrites:
@@ -466,7 +466,7 @@ either account placed.
     its key are files the operator puts on the host, and `EndpointDlg` says that they are added to
     `supervisor.toml` afterwards, or through `service install --interactive` from an elevated
     prompt. It mentions no credential, because the Client reads none
-    ([ADR-0021](0021-admission-by-client-certificate-and-revocation.md)).
+    ([ADR-0038](0038-admission-by-client-certificate-and-revocation.md)).
 
 11. **No privileged step goes through a link the account could have placed.** This covers every
     read, write, rename, removal, mode change and ownership change `service install` and

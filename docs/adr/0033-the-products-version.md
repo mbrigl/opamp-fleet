@@ -143,7 +143,7 @@ compared nowhere.
     keep the full string too.
 
 **Out of scope:** what a release builds and publishes (targets and artifacts,
-[ADR-0034](0034-releases-attestations-and-the-server-image.md); installers,
+[ADR-0040](0040-releases-attestations-and-the-server-image.md); installers,
 [ADR-0019](0019-the-installed-service-and-its-state.md)); whether a Managed Process's package
 version, free-form and an upstream project's own numbering, is parsed beyond what ordering needs;
 release-candidate tags (`version/1.2.3-rc.1`), refused by the grammar until a release-candidate

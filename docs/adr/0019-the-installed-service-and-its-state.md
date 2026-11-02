@@ -16,7 +16,7 @@ convenience", Q-1 "Secure by default"): the first configuration an installer wri
 authenticate and must not send plaintext beyond the loopback. Plaintext is accepted on the loopback
 alone, a host name is never the loopback, and a Client without a client certificate is refused at
 startup. The Agent plane admits a peer by its client certificate alone
-([ADR-0021](0021-admission-by-client-certificate-and-revocation.md)), so there is no fleet
+([ADR-0038](0038-admission-by-client-certificate-and-revocation.md)), so there is no fleet
 credential for an installer to ask for, write or name.
 
 Forces:
@@ -71,7 +71,7 @@ so a native package that registered a service of its own would write a second re
 all of that. Self-update and a package manager must not own the same bytes: if `dpkg`, `rpm` or the
 MSI owned the layout, every fleet update would leave the host in a state `dpkg -V` reports as
 modified and the next `apt upgrade` silently reverts. The releases that carry these packages are
-[ADR-0034](0034-releases-attestations-and-the-server-image.md)'s.
+[ADR-0040](0040-releases-attestations-and-the-server-image.md)'s.
 
 And one force on the name. The Baseline reserves `service.name` for the Agent *type* and recommends
 a reverse FQDN, a recommendation this project does not enforce
@@ -410,7 +410,7 @@ and is delivered by `.deb`, `.rpm` and `.msi` packages that run its own `service
     the Agent plane always serves TLS, so a development Server answers no plaintext request, and
     `localhost` is a host name, which is never the loopback (only the IP literals `127.0.0.1` and
     `::1` are), so the Client would refuse the value at startup. The scheme selects the transport
-    ([ADR-0012](0012-tls-1-3-two-planes-and-bounded-input.md)), so the click-through install runs
+    ([ADR-0045](0045-tls-1-3-two-planes-and-bounded-input.md)), so the click-through install runs
     WebSocket, as an unconfigured Client would. Like every value an installer writes, the prefill
     passes the rule the Client applies at startup
     ([ADR-0022](0022-bootstrap-certificates-and-enrolment.md), on what an installer writes).
@@ -444,13 +444,13 @@ variant builds are ever published, and where their `UpgradeCode`s are recorded; 
 discovers what is installed on a host; a confined SELinux policy module; configuration reload on
 `SIGHUP`; `Type=notify` integration; the startup rules themselves and the Server's enrolment window
 and approval, which the installer only applies and names
-([ADR-0021](0021-admission-by-client-certificate-and-revocation.md)); hosting apt and yum
+([ADR-0038](0038-admission-by-client-certificate-and-revocation.md)); hosting apt and yum
 repositories; preseeding the endpoint on Linux; a macOS `.pkg`, which needs a Developer ID and
 notarization; the files an enrolment writes as root into the state directory, which no
 privileged step writes through a link ([ADR-0037](0037-the-accounts-the-service-runs-under.md)
 clause 11); the `[tls]` files an enrolment reads as root; `[logging] dir`, which only the
 service's own run uses; the releases and the Server's image
-([ADR-0034](0034-releases-attestations-and-the-server-image.md)).
+([ADR-0040](0040-releases-attestations-and-the-server-image.md)).
 
 ## Alternatives considered
 
@@ -814,7 +814,7 @@ service's own run uses; the releases and the Server's image
   [`cli.rs`](../../crates/fleet-agent/src/cli.rs);
   `a_leftover_auth_section_is_ignored_with_a_notice` in
   [`config.rs`](../../crates/fleet-agent/src/config.rs), shared with
-  [ADR-0021](0021-admission-by-client-certificate-and-revocation.md);
+  [ADR-0038](0038-admission-by-client-certificate-and-revocation.md);
   `the_questionnaires_enrolment_stores_the_issued_certificate_and_copies_nothing` in
   [`tests/enrolment_e2e.rs`](../../crates/fleet-agent/tests/enrolment_e2e.rs);
   `the_post_install_prints_no_endpoint_the_client_refuses_at_startup` and
