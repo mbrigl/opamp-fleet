@@ -1246,7 +1246,10 @@ mod tests {
         assert!(telemetry
             .apply(&silent, &description(), &ClientConfig::default())
             .is_empty());
-        telemetry.sample(&mut sysinfo::System::new(), &this_process());
+        telemetry.sample(
+            &mut sysinfo::System::new().expect("a System"),
+            &this_process(),
+        );
 
         let withdrawal = ConnectionSettingsOffers {
             own_metrics: Some(destination("")),
@@ -1290,7 +1293,7 @@ mod tests {
         assert!(telemetry
             .apply(&refusing, &description(), &ClientConfig::default())
             .is_empty());
-        let mut system = sysinfo::System::new();
+        let mut system = sysinfo::System::new().expect("a System");
         for _ in 0..3 {
             telemetry.sample(&mut system, &this_process());
         }

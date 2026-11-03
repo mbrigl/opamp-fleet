@@ -41,7 +41,11 @@ impl HostFacts for SystemHost {
 
 /// The host's network addresses, enumerated live from the platform (ADR-0016).
 fn host_addresses() -> (Vec<String>, Vec<String>) {
-    let networks = sysinfo::Networks::new_with_refreshed_list();
+    // An error is `sysinfo` unable to enumerate interfaces at all: what the platform cannot answer
+    // is left out (ADR-0016), so both lists stay empty.
+    let Ok(networks) = sysinfo::Networks::new_with_refreshed_list() else {
+        return (Vec::new(), Vec::new());
+    };
     collect_host_addresses(networks.values().map(|data| {
         (
             data.mac_address().0,
@@ -190,7 +194,8 @@ fn cpu_model() -> Option<&'static str> {
     static MODEL: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     MODEL
         .get_or_init(|| {
-            let mut system = sysinfo::System::new();
+            // No `System` to read from is no CPU model, like a platform that names no brand.
+            let mut system = sysinfo::System::new().ok()?;
             system.refresh_cpu_list(sysinfo::CpuRefreshKind::nothing());
             system
                 .cpus()
