@@ -404,7 +404,9 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
     // destinations outlive a connection: a reconnect must not tear the exporters down, and a
     // verified new offer is what replaces them.
     let telemetry = crate::telemetry::Telemetry::new();
-    let mut system = sysinfo::System::new();
+    // Without a `System` there is no pid to sample, so every tick records nothing: what `sample`
+    // does for a pid the platform cannot find.
+    let mut system = sysinfo::System::new().ok();
     let sampling = engine.sampling_handle();
 
     // Gateway Mode (ADR-0015), if armed: a downstream endpoint and an upstream pool, running
@@ -446,9 +448,12 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
             telemetry.sample_interval(),
             || telemetry.reporting(),
             || {
+                let Some(system) = system.as_mut() else {
+                    return;
+                };
                 let targets = sampling.lock().map(|t| t.clone()).unwrap_or_default();
                 for target in &targets {
-                    telemetry.sample(&mut system, target);
+                    telemetry.sample(system, target);
                 }
             },
         )

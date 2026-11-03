@@ -41,9 +41,14 @@ impl HostFacts for SystemHost {
 
 /// The host's network addresses, enumerated live from the platform (ADR-0016).
 fn host_addresses() -> (Vec<String>, Vec<String>) {
-    let networks = sysinfo::Networks::new_with_refreshed_list();
-    collect_host_addresses(networks.values().map(|data| {
+    // An error is `sysinfo` unable to enumerate interfaces at all: what the platform cannot answer
+    // is left out (ADR-0016 clause 5), so both lists stay empty.
+    let Ok(networks) = sysinfo::Networks::new_with_refreshed_list() else {
+        return (Vec::new(), Vec::new());
+    };
+    collect_host_addresses(networks.iter().map(|(name, data)| {
         (
+            name.as_os_str(),
             data.mac_address().0,
             data.ip_networks().iter().map(|net| net.addr).collect(),
         )
@@ -53,17 +58,21 @@ fn host_addresses() -> (Vec<String>, Vec<String>) {
 /// The rules of [`host_addresses`], separated from the platform so they are testable: an
 /// interface whose every address is loopback is skipped whole — its MAC too, which is how the
 /// conventions' "excluding loopback interfaces" reads for both keys — and an unspecified MAC is
-/// no answer. Both lists come out deduplicated and sorted, so the description does not change
+/// no answer. An interface whose name is not UTF-8 is skipped whole, the same on every platform.
+/// Both lists come out deduplicated and sorted, so the description does not change
 /// with enumeration order and re-report an unchanged host.
 ///
 /// The formats are the conventions': IPv4 dotted-quad and IPv6 RFC 5952 (both what [`IpAddr`]'s
 /// `Display` writes), the MAC in IEEE RA hyphen-separated uppercase hexadecimal.
-fn collect_host_addresses(
-    interfaces: impl Iterator<Item = ([u8; 6], Vec<IpAddr>)>,
+fn collect_host_addresses<'a>(
+    interfaces: impl Iterator<Item = (&'a std::ffi::OsStr, [u8; 6], Vec<IpAddr>)>,
 ) -> (Vec<String>, Vec<String>) {
     let mut ips = std::collections::BTreeSet::new();
     let mut macs = std::collections::BTreeSet::new();
-    for (mac, addrs) in interfaces {
+    for (name, mac, addrs) in interfaces {
+        if name.to_str().is_none() {
+            continue;
+        }
         if !addrs.is_empty() && addrs.iter().all(IpAddr::is_loopback) {
             continue;
         }
@@ -190,7 +199,8 @@ fn cpu_model() -> Option<&'static str> {
     static MODEL: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     MODEL
         .get_or_init(|| {
-            let mut system = sysinfo::System::new();
+            // No `System` to read from is no CPU model, like a platform that names no brand.
+            let mut system = sysinfo::System::new().ok()?;
             system.refresh_cpu_list(sysinfo::CpuRefreshKind::nothing());
             system
                 .cpus()
@@ -316,8 +326,10 @@ mod tests {
     // Verifies: ADR-0016
     #[test]
     fn host_addresses_follow_the_conventions() {
+        use std::ffi::OsStr;
         use std::net::{Ipv4Addr, Ipv6Addr};
         let loopback = (
+            OsStr::new("lo"),
             [0; 6],
             vec![
                 IpAddr::V4(Ipv4Addr::LOCALHOST),
@@ -326,6 +338,7 @@ mod tests {
         );
         let mac = [0xac, 0xde, 0x48, 0x23, 0x45, 0x67];
         let ethernet = (
+            OsStr::new("eth0"),
             mac,
             vec![
                 IpAddr::V4(Ipv4Addr::new(192, 168, 1, 140)),
@@ -335,15 +348,48 @@ mod tests {
             ],
         );
         // A bond partner: the same MAC again, one of its addresses again.
-        let bonded = (mac, vec![IpAddr::V4(Ipv4Addr::new(192, 168, 1, 140))]);
+        let bonded = (
+            OsStr::new("eth1"),
+            mac,
+            vec![IpAddr::V4(Ipv4Addr::new(192, 168, 1, 140))],
+        );
         // A tunnel: an address worth reporting, no hardware address behind it.
-        let tunnel = ([0; 6], vec![IpAddr::V4(Ipv4Addr::new(10, 0, 0, 7))]);
+        let tunnel = (
+            OsStr::new("tun0"),
+            [0; 6],
+            vec![IpAddr::V4(Ipv4Addr::new(10, 0, 0, 7))],
+        );
         let (ips, macs) = collect_host_addresses([loopback, ethernet, bonded, tunnel].into_iter());
         assert_eq!(
             ips,
             ["10.0.0.7", "192.168.1.140", "fe80::abc2:4a28:737a:609e"]
         );
         assert_eq!(macs, ["AC-DE-48-23-45-67"]);
+    }
+
+    /// An interface whose name is not UTF-8 reports neither its addresses nor its MAC.
+    // Verifies: ADR-0016
+    #[test]
+    fn an_interface_whose_name_is_not_utf8_is_skipped() {
+        use std::net::Ipv4Addr;
+        #[cfg(unix)]
+        let name = {
+            use std::os::unix::ffi::OsStringExt;
+            std::ffi::OsString::from_vec(vec![b'e', 0xff, b'0'])
+        };
+        #[cfg(windows)]
+        let name = {
+            use std::os::windows::ffi::OsStringExt;
+            std::ffi::OsString::from_wide(&[u16::from(b'e'), 0xd800, u16::from(b'0')])
+        };
+        let interface = (
+            name.as_os_str(),
+            [0xac, 0xde, 0x48, 0x23, 0x45, 0x67],
+            vec![IpAddr::V4(Ipv4Addr::new(192, 168, 1, 140))],
+        );
+        let (ips, macs) = collect_host_addresses(std::iter::once(interface));
+        assert!(ips.is_empty(), "{ips:?}");
+        assert!(macs.is_empty(), "{macs:?}");
     }
 
     /// The os-release parser behind `os.*`, now including `os.build_id` (ADR-0016): quotes
