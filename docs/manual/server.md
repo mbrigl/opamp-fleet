@@ -505,7 +505,8 @@ verified and its host name checked — what libpq calls `verify-full`. Every set
 configuration alone: `PGHOST`, `PGSSLMODE` and the other `PG*` variables in the Server's environment
 change nothing. A database that cannot be reached at startup stops the start, naming the host and
 the database; one lost while the Server runs fails the acts that need it, as a failed write does.
-Every call is bounded: it fails when no pooled connection is free within 5 seconds, when the
+Every call is bounded: it fails when no pooled connection is free within 5 seconds (a new Agent's
+record waits up to 15 seconds for one, so a connecting fleet does not send it away), when the
 database does not answer it within 15 seconds (a rollout gets 20 ms more per record it writes), and
 the database itself ends a statement after 10 seconds, a wait for a lock after 5 and a transaction
 left open by a client that went away after 60. TCP keepalives notice a database host that is gone
