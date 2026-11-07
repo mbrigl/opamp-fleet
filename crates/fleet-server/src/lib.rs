@@ -33,6 +33,8 @@ pub mod pki;
 pub mod postgres;
 pub mod revocation;
 pub mod s3;
+#[cfg(test)]
+mod test_support;
 pub mod throttle;
 pub mod tls;
 pub mod transport;

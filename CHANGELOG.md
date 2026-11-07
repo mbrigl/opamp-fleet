@@ -65,6 +65,25 @@ once its tag exists.
 
 ### Fixed
 
+- **An Agent that comes back on a new connection of its host keeps its identity**
+  ([ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side](docs/adr/draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+  clause 8). A peer whose reports waited for the database longer than one heartbeat interval
+  ended its connection for silence and came back while the Server still handled the old one's
+  reports; its Agents were taken for duplicates of themselves and re-keyed, each into a record of
+  its own without the labels and assignments of the old one. Now only an Agent alive on a
+  connection of another peer is a duplicate. On a new connection of the host whose certificate its
+  old connection presented, the newest connection takes the Agent. While it carries the Agent, the
+  older one's reports are taken up but take it no more, its goodbye does not end the Agent's
+  connection, it is not asked for the component map, and a queued restart, in a reply or pushed,
+  goes out only on the connection that carries the Agent. A newer connection that has carried
+  none of the Agent's reports for one heartbeat interval (the one the Server offers, else 30 s)
+  carries it no more: the next report on an older connection takes it back, so an Agent a
+  Gateway's pool moved to another of its open connections follows it there. A connection that
+  presented no host is re-keyed as before.
+  Two Agents of one `instance_uid` on one host, a clone with the host's certificate, now share one
+  record rather than being told apart.
+  **What to do:** nothing; give a cloned host a certificate of its own.
+
 - **A revocation is made only with its certificate on the audit record**
   ([ADR-draft-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again](docs/adr/draft-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again.md)
   clauses 1 and 5). The `revocation.revoked` that names a revoked certificate followed the

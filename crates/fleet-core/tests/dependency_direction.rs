@@ -136,6 +136,8 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             ("postgres::packages", Adapter),
             ("postgres::schema", Adapter),
             ("s3", Adapter),
+            // Test-only: the log capture the unit tests share, bound to `tracing_subscriber`.
+            ("test_support", Adapter),
             ("tls", Adapter),
             ("transport", Adapter),
         ],

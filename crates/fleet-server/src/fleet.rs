@@ -50,6 +50,10 @@ pub const DEFAULT_STALE_AFTER: Duration = Duration::from_secs(90);
 /// flooded with fresh, self-asserted UIDs (ADR-0038).
 pub const DEFAULT_MAX_AGENTS: usize = 100_000;
 
+/// The heartbeat interval an Agent is held to where this Server offers none: the OpAMP default,
+/// 30 seconds.
+const DEFAULT_HEARTBEAT: Duration = Duration::from_secs(30);
+
 /// The Capability Set this Server declares (see docs/CONFORMANCE.md).
 pub const SERVER_CAPABILITIES: u64 = ServerCapabilities::AcceptsStatus as u64
     | ServerCapabilities::OffersRemoteConfig as u64
@@ -116,6 +120,12 @@ pub struct AgentRecord {
     /// polling is stateless. Only the owning connection may mark the Agent disconnected, and a
     /// report from a *different* live connection is the duplicate the Baseline wants detected.
     pub owner: Option<ConnId>,
+    /// When the connection that carries it last carried a report of it, in milliseconds since the
+    /// epoch — runtime-only. An older connection of its host takes it back once this is a
+    /// heartbeat interval old
+    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// clause 8).
+    pub carried_ms: u64,
     /// Whether this Server heard the Agent report since it started — runtime-only. What it holds
     /// of one it did not is what it loaded, which on a shared store another instance may have
     /// written since.
@@ -303,6 +313,7 @@ impl AgentRecord {
             connection_settings_status: persisted.connection_settings_status,
             package_statuses: persisted.package_statuses,
             owner: None,
+            carried_ms: 0,
             heard: false,
             labels: persisted.labels,
             host: persisted.host,
@@ -701,6 +712,56 @@ enum Took {
     Lost { holder: String },
 }
 
+/// Which connection carries an Agent a WebSocket report arrives for, as the duplicate detection
+/// sees it
+/// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+/// clause 8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Carried {
+    /// None, or the connection the report arrived on.
+    Not,
+    /// An older connection of the host the report's connection presented: the report's connection
+    /// takes the Agent.
+    ByOlder,
+    /// A newer connection of that host: the report is taken up, and does not take the Agent.
+    ByNewer,
+    /// A newer connection of that host that carried no report of it for a heartbeat interval: the
+    /// report's connection takes the Agent back.
+    ByStale,
+    /// A connection of another peer, or one where either presented no host: a duplicate.
+    ByAnotherPeer,
+}
+
+impl Carried {
+    /// Who carries `record` for a report on `conn`, which presented a certificate of `host`, at
+    /// `now_ms`, a carrier that has carried no report of it for `interval` being stale.
+    /// Connection ids grow, so the higher one is the newer connection. The host `record` names is
+    /// the one it last arrived over, which the connection that carries it presented.
+    fn of(
+        record: &AgentRecord,
+        conn: ConnId,
+        host: Option<&str>,
+        now_ms: u64,
+        interval: Duration,
+    ) -> Self {
+        match record.owner {
+            Some(owner) if record.connected && owner != conn => {
+                let interval_ms = u64::try_from(interval.as_millis()).unwrap_or(u64::MAX);
+                if host.is_none() || record.host.as_deref() != host {
+                    Carried::ByAnotherPeer
+                } else if owner < conn {
+                    Carried::ByOlder
+                } else if now_ms.saturating_sub(record.carried_ms) >= interval_ms {
+                    Carried::ByStale
+                } else {
+                    Carried::ByNewer
+                }
+            }
+            _ => Carried::Not,
+        }
+    }
+}
+
 /// What memory held of an Agent as its report began: what the report decides its calls to the
 /// store from, before it takes the fleet lock to take them up.
 struct Seen {
@@ -811,6 +872,11 @@ struct Ending {
     reported: InstanceUid,
     /// It said goodbye.
     disconnected: bool,
+    /// It came on an older connection of the host whose newer one carries the Agent, which its
+    /// goodbye does not end and a queued restart is not sent on
+    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// clause 8).
+    superseded: bool,
     identification: Option<AgentIdentification>,
     reply_flags: u64,
 }
@@ -1204,6 +1270,18 @@ impl AppState {
     /// stored may be one interval old (ADR-0043 clause 8).
     fn stale_after(&self) -> Duration {
         self.heartbeat_budget() + self.presence_interval
+    }
+
+    /// One heartbeat interval: the one this Server offers, else 30 seconds, the default interval
+    /// a WebSocket's silence is judged by without one
+    /// (ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended
+    /// clause 2).
+    fn heartbeat_interval(&self) -> Duration {
+        self.connection_offer
+            .as_ref()
+            .map(|offer| offer.settings.heartbeat_interval_seconds)
+            .filter(|seconds| *seconds > 0)
+            .map_or(DEFAULT_HEARTBEAT, Duration::from_secs)
     }
 
     /// Three heartbeat intervals, or the configured default.
@@ -2971,15 +3049,19 @@ impl AppState {
 
     /// The queued restart for this Agent as the Baseline's command-only message, taken once —
     /// `None` when nothing is queued (or the Agent went away). One its connection does not take is
-    /// queued again through [`unsent`](Self::unsent).
+    /// queued again through [`unsent`](Self::unsent). It is handed out only to `conn`, the
+    /// WebSocket connection asking, where that connection carries the Agent: an older connection
+    /// of its host that still names it leaves the restart to the newer one
+    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// clause 8).
     ///
     /// A delivery holds the Agent's own lock, and clears the restart in the store with the fleet
     /// lock let go.
-    pub fn restart_command_for(&self, uid: &InstanceUid) -> Option<ServerToAgent> {
+    pub fn restart_command_for(&self, uid: &InstanceUid, conn: ConnId) -> Option<ServerToAgent> {
         let due = |fleet: &HashMap<InstanceUid, AgentRecord>| {
-            fleet
-                .get(uid)
-                .is_some_and(|record| record.restart_pending && record.connected)
+            fleet.get(uid).is_some_and(|record| {
+                record.restart_pending && record.connected && record.owner == Some(conn)
+            })
         };
         if !due(&self.fleet.lock().expect("fleet lock")) {
             return None;
@@ -3775,6 +3857,9 @@ impl AppState {
         // routes by it — a reply addressed to the new identity reaches no one, and the Agent goes
         // on reporting under the old one. The new identity travels in agent_identification alone.
         let mut uid = reported;
+        // One moment for the round's two looks at a stale carrier, so the take-up judges it as the
+        // first look did.
+        let now_ms = self.clock.now_ms();
         let mut loaded = self.hold_from_store(&uid);
         let mut reply_flags = 0u64;
         let mut identification = None;
@@ -3906,34 +3991,62 @@ impl AppState {
         // What memory holds of the Agent, read once, the record a re-key moves standing for the
         // one under its new identity.
         //
-        // Duplicate instance_uid detection (a Baseline SHOULD): the same identity alive on
-        // *another* WebSocket connection — bad UID generators, cloned VMs — is rekeyed exactly
-        // as the Baseline prescribes: mint a fresh uid and answer with AgentIdentification,
-        // which the Client adopts. The newcomer starts a record of its own; the incumbent and
-        // its connection stay untouched. (Stateless plain-HTTP polling offers nothing to
-        // distinguish two pollers by, so detection is WebSocket-only.)
+        // Duplicate instance_uid detection (a Baseline SHOULD): the same identity alive on a
+        // WebSocket connection of *another peer* — bad UID generators, cloned VMs — is rekeyed
+        // exactly as the Baseline prescribes: mint a fresh uid and answer with
+        // AgentIdentification, which the Client adopts. The newcomer starts a record of its own;
+        // the incumbent and its connection stay untouched. (Stateless plain-HTTP polling offers
+        // nothing to distinguish two pollers by, so detection is WebSocket-only.) An Agent that
+        // comes back on a new connection of the host whose certificate its old connection
+        // presented is not a duplicate of itself: the newest connection takes it, and the older
+        // one's reports no longer take it back
+        // (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+        // clause 8).
         let arrived_over = self
             .revocations
             .as_ref()
             .and(presented.and_then(|p| p.host.clone()));
         let described = msg.agent_description.is_some();
+        let mut superseded = false;
         let mut seen = {
             let fleet = self.fleet.lock().expect("fleet lock");
             let mut record = fleet
                 .get(&uid)
                 .or_else(|| rekeyed.and_then(|(old, _)| fleet.get(&old)));
             if let Some(this_conn) = conn {
-                let duplicate = record.is_some_and(|existing| {
-                    existing.connected && existing.owner.is_some_and(|owner| owner != this_conn)
-                });
-                if duplicate {
-                    let new_uid = InstanceUid::default();
-                    warn!(duplicate = %uid, new = %new_uid, "duplicate instance_uid; rekeying the newcomer");
-                    identification = Some(AgentIdentification {
-                        new_instance_uid: new_uid.as_bytes().to_vec(),
-                    });
-                    uid = new_uid;
-                    record = None;
+                match record.map_or(Carried::Not, |existing| {
+                    Carried::of(
+                        existing,
+                        this_conn,
+                        arrived_over.as_deref(),
+                        now_ms,
+                        self.heartbeat_interval(),
+                    )
+                }) {
+                    Carried::Not => {}
+                    Carried::ByOlder => {
+                        info!(
+                            agent = %uid,
+                            "the agent came back on a new connection of its host, which carries it now"
+                        );
+                    }
+                    Carried::ByStale => {
+                        info!(
+                            agent = %uid,
+                            "the connection of its host that carried the agent carried none of its \
+                             reports for a heartbeat interval; this one carries it now"
+                        );
+                    }
+                    Carried::ByNewer => superseded = true,
+                    Carried::ByAnotherPeer => {
+                        let new_uid = InstanceUid::default();
+                        warn!(duplicate = %uid, new = %new_uid, "duplicate instance_uid; rekeying the newcomer");
+                        identification = Some(AgentIdentification {
+                            new_instance_uid: new_uid.as_bytes().to_vec(),
+                        });
+                        uid = new_uid;
+                        record = None;
+                    }
                 }
             }
             Seen::of(record, |record| {
@@ -4078,7 +4191,9 @@ impl AppState {
 
         // The take of an Agent this connection begins to carry, written now: its answer is taken
         // up with the record below.
-        let connects = created || !seen.connected || seen.owner != conn;
+        // A report of an older connection of the host whose newer one carries the Agent takes it
+        // no more.
+        let connects = !superseded && (created || !seen.connected || seen.owner != conn);
         let _taking = connects.then(|| Taking::of(&self.taking, uid));
         let took = if connects {
             self.take_row(&uid, self.clock.now_ms())
@@ -4115,6 +4230,19 @@ impl AppState {
                 pending.remove(&old);
             }
         }
+        // Whether a newer connection of the host took the Agent while this round read and wrote
+        // the store, or still carries it: this connection then leaves it to that one.
+        let superseded = conn.is_some_and(|this_conn| {
+            fleet.get(&uid).is_some_and(|record| {
+                Carried::of(
+                    record,
+                    this_conn,
+                    arrived_over.as_deref(),
+                    now_ms,
+                    self.heartbeat_interval(),
+                ) == Carried::ByNewer
+            })
+        });
         let now_connects = created
             || fleet
                 .get(&uid)
@@ -4124,7 +4252,7 @@ impl AppState {
         // would start from the message under the old one and assign a second. It finds the Agent
         // no longer carried, its connection closed meanwhile, and leaves it so: it wrote no take,
         // and nothing would mark the Agent disconnected again.
-        let uncarried = now_connects && !connects;
+        let uncarried = now_connects && !connects && !superseded;
         if left || (uncarried && rekeyed.is_none()) {
             // Forgotten or moved through another instance, or no longer carried, while this
             // round read and wrote the store: the next round goes on from what it holds now.
@@ -4160,12 +4288,15 @@ impl AppState {
         // A demand for the component map may have been lost with the previous connection, or with
         // an Agent that restarted, which plain HTTP shows instead of a connection, so either may be
         // asked again.
-        if !uncarried {
+        if !uncarried && !superseded {
             if !record.connected || record.owner != conn || restarted {
                 record.components_demanded = None;
             }
             record.connected = true;
             record.owner = conn;
+            // When the take-up commits, not when the round began: a round that waited on the store
+            // leaves its carrier as fresh as its report.
+            record.carried_ms = self.clock.now_ms();
         }
         record.heard = true;
         record.last_seen_ms = self.clock.now_ms();
@@ -4226,6 +4357,7 @@ impl AppState {
             uid,
             reported,
             disconnected: msg.agent_disconnect.is_some(),
+            superseded,
             identification,
             reply_flags,
         };
@@ -4321,7 +4453,7 @@ impl AppState {
         ending: &mut Ending,
         issued: Option<TlsCertificate>,
     ) -> Settled {
-        if ending.disconnected {
+        if ending.disconnected && !ending.superseded {
             info!(agent = %ending.uid, "agent disconnected");
             record.connected = false;
             record.owner = None;
@@ -4331,6 +4463,7 @@ impl AppState {
         // Agent that declared it can report one (the flag is meaningless toward any other), once
         // per hash on a connection.
         if !ending.disconnected
+            && !ending.superseded
             && record.capabilities
                 & opamp::proto::AgentCapabilities::ReportsAvailableComponents as u64
                 != 0
@@ -4353,6 +4486,7 @@ impl AppState {
         // exchange instead of being combined with it.
         if record.restart_pending
             && !ending.disconnected
+            && !ending.superseded
             && ending.identification.is_none()
             && ending.reply_flags == 0
             && record.capabilities & opamp::proto::AgentCapabilities::AcceptsRestartCommand as u64
@@ -4575,6 +4709,7 @@ impl AppState {
             connection_settings_status: None,
             package_statuses: None,
             owner: conn,
+            carried_ms: self.clock.now_ms(),
             heard: true,
             // A new Agent waits (ADR-0026 clause 10): it is assigned nothing until an operator's
             // rollout act says so, and the fleet view shows what it could get.
@@ -6657,6 +6792,7 @@ mod tests {
             connection_settings_status: None,
             package_statuses: None,
             owner: None,
+            carried_ms: 0,
             heard: false,
             labels: BTreeMap::new(),
             host: None,
@@ -7075,17 +7211,20 @@ mod tests {
             Ok(Some(true)),
             "delivered elsewhere"
         );
-        assert!(state.restart_command_for(&uid).is_none(), "not sent twice");
+        assert!(
+            state.restart_command_for(&uid, 1).is_none(),
+            "not sent twice"
+        );
         assert!(!state.fleet.lock().expect("fleet")[&uid].restart_pending);
 
         assert!(state.request_restart(&uid).is_ok(), "queued again");
-        assert!(state.restart_command_for(&uid).is_some(), "sent");
+        assert!(state.restart_command_for(&uid, 1).is_some(), "sent");
         assert_eq!(
             other.set_restart_pending(&uid, false),
             Ok(Some(false)),
             "and cleared"
         );
-        assert!(state.restart_command_for(&uid).is_none(), "once");
+        assert!(state.restart_command_for(&uid, 1).is_none(), "once");
     }
 
     /// A restart whose command was not sent is queued again, on a lease that lapsed meanwhile
@@ -7100,7 +7239,7 @@ mod tests {
         };
         state.process(restartable(1), Transport::WebSocket, Some(1));
         assert!(state.request_restart(&uid).is_ok(), "queued");
-        let command = state.restart_command_for(&uid).expect("sent");
+        let command = state.restart_command_for(&uid, 1).expect("sent");
         assert!(
             !stored
                 .get(&uid)
@@ -7219,7 +7358,7 @@ mod tests {
     fn kept_put_back(state: &AppState, failing: &std::sync::atomic::AtomicBool, uid: &InstanceUid) {
         state.process(restartable(uid, 1), Transport::WebSocket, Some(1));
         assert!(state.request_restart(uid).is_ok(), "queued");
-        let command = state.restart_command_for(uid).expect("sent");
+        let command = state.restart_command_for(uid, 1).expect("sent");
         failing.store(true, Ordering::SeqCst);
         state.unsent(&command);
         failing.store(false, Ordering::SeqCst);
@@ -7235,10 +7374,10 @@ mod tests {
         let uid = InstanceUid([0x33; 16]);
         kept_put_back(&state, &failing, &uid);
         assert!(state.request_restart(&uid).is_ok(), "requested again");
-        assert!(state.restart_command_for(&uid).is_some(), "delivered");
+        assert!(state.restart_command_for(&uid, 1).is_some(), "delivered");
         assert_eq!(state.retry_restarts(), 0, "nothing is kept");
         assert!(
-            state.restart_command_for(&uid).is_none(),
+            state.restart_command_for(&uid, 1).is_none(),
             "no second restart"
         );
 
@@ -7249,10 +7388,10 @@ mod tests {
             "requested through another instance"
         );
         state.take_up_agents(None).expect("taken up");
-        assert!(state.restart_command_for(&uid).is_some(), "delivered");
+        assert!(state.restart_command_for(&uid, 1).is_some(), "delivered");
         assert_eq!(state.retry_restarts(), 0, "nothing is kept");
         assert!(
-            state.restart_command_for(&uid).is_none(),
+            state.restart_command_for(&uid, 1).is_none(),
             "no second restart"
         );
 
@@ -7316,7 +7455,7 @@ mod tests {
         assert_eq!(due, [uid], "due at the next call");
         // Between finding it due and trying it: requested and delivered.
         assert!(state.request_restart(&uid).is_ok(), "requested again");
-        assert!(state.restart_command_for(&uid).is_some(), "delivered");
+        assert!(state.restart_command_for(&uid, 1).is_some(), "delivered");
         for uid in &due {
             state.put_back(uid, true);
         }
@@ -7483,8 +7622,8 @@ mod tests {
             state.process(restartable(uid, 1), Transport::WebSocket, Some(1));
             assert!(state.request_restart(uid).is_ok(), "queued");
         }
-        let command = state.restart_command_for(&uid).expect("sent");
-        let other = state.restart_command_for(&gone).expect("sent");
+        let command = state.restart_command_for(&uid, 1).expect("sent");
+        let other = state.restart_command_for(&gone, 1).expect("sent");
         let tries = || set.load(Ordering::SeqCst);
         let base = tries();
 
@@ -10530,6 +10669,574 @@ mod tests {
         }
     }
 
+    /// An Agent that comes back on a new connection of its host keeps its identity, the newest
+    /// connection carries it and the move is logged; a report of the older connection is taken up
+    /// and leaves it there, so the older one's close leaves it connected. On a connection of
+    /// another host the same identity is a duplicate, re-keyed.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    #[test]
+    fn an_agent_on_a_new_connection_of_its_host_is_carried_by_it_and_not_rekeyed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let revocations = Arc::new(
+            Revocations::open(
+                Box::new(crate::fs::FsLedgerStore::open(dir.path()).expect("ledger")),
+                Arc::new(crate::clock::SystemClock),
+                Vec::new(),
+            )
+            .expect("revocations"),
+        );
+        let state = AppState::new(dir.path().join("configs"))
+            .expect("state")
+            .with_revocations(Some(revocations));
+        let uid = InstanceUid::default();
+        let (old, new, other) = (
+            state.connection_id(),
+            state.connection_id(),
+            state.connection_id(),
+        );
+        let carrier = |state: &AppState| {
+            state
+                .fleet
+                .lock()
+                .expect("fleet lock")
+                .get(&uid)
+                .map(|record| (record.connected, record.owner))
+        };
+        crate::test_support::logged();
+        {
+            let host = of_host("edge-1");
+            let first = state.process_presented(
+                report(&uid, 1),
+                Transport::WebSocket,
+                Some(old),
+                Some(&host),
+            );
+            assert!(first.reply.agent_identification.is_none());
+            let back = state.process_presented(
+                report(&uid, 2),
+                Transport::WebSocket,
+                Some(new),
+                Some(&host),
+            );
+            assert!(
+                back.reply.agent_identification.is_none(),
+                "not a duplicate of itself"
+            );
+            assert_eq!(carrier(&state), Some((true, Some(new))));
+            let late = state.process_presented(
+                report(&uid, 3),
+                Transport::WebSocket,
+                Some(old),
+                Some(&host),
+            );
+            assert!(late.reply.agent_identification.is_none());
+            assert!(late.reply.error_response.is_none(), "taken up");
+            assert_eq!(
+                carrier(&state),
+                Some((true, Some(new))),
+                "the older one takes it no more"
+            );
+            state.mark_disconnected(&[uid], old);
+            assert_eq!(carrier(&state), Some((true, Some(new))));
+
+            let clone = state.process_presented(
+                report(&uid, 1),
+                Transport::WebSocket,
+                Some(other),
+                Some(&of_host("edge-2")),
+            );
+            let new_uid = clone
+                .reply
+                .agent_identification
+                .expect("another host's is re-keyed");
+            assert_ne!(new_uid.new_instance_uid, uid.as_bytes().to_vec());
+        }
+        let came_back = crate::test_support::lines_with(&[
+            "came back on a new connection of its host",
+            &uid.to_string(),
+        ]);
+        assert_eq!(
+            came_back.len(),
+            1,
+            "the move to the new connection is logged once: {came_back:?}"
+        );
+    }
+
+    /// A state on files with a host register whose writes of the Hosts run `probe` first, and the
+    /// state `probe` may reach once it is made.
+    fn with_probed_register(
+        dir: &std::path::Path,
+        probe: Probe,
+        of: &Arc<OnceLock<std::sync::Weak<AppState>>>,
+    ) -> Arc<AppState> {
+        let revocations = Arc::new(
+            Revocations::open(
+                Box::new(ProbedLedger {
+                    inner: Box::new(crate::fs::FsLedgerStore::open(dir).expect("ledger")),
+                    probe,
+                }),
+                Arc::new(crate::clock::SystemClock),
+                Vec::new(),
+            )
+            .expect("revocations"),
+        );
+        let state = Arc::new(
+            AppState::new(dir.join("configs"))
+                .expect("state")
+                .with_revocations(Some(revocations)),
+        );
+        of.set(Arc::downgrade(&state)).expect("set once");
+        state
+    }
+
+    /// Who carries `uid` in `state`'s memory: whether connected, and on which connection.
+    fn carrier_of(state: &AppState, uid: &InstanceUid) -> Option<(bool, Option<ConnId>)> {
+        state
+            .fleet
+            .lock()
+            .expect("fleet lock")
+            .get(uid)
+            .map(|record| (record.connected, record.owner))
+    }
+
+    /// A goodbye the older connection of a host delivers while a newer one carries the Agent does
+    /// not end the Agent's connection: it stays connected on the newer one.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    #[test]
+    fn a_goodbye_on_an_older_connection_of_the_host_leaves_the_agent_with_the_newer() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let of = Arc::new(OnceLock::new());
+        let state = with_probed_register(dir.path(), Arc::new(|_, _| {}), &of);
+        let uid = InstanceUid::default();
+        let (old, new) = (state.connection_id(), state.connection_id());
+        let host = of_host("edge-1");
+        state.process_presented(
+            report(&uid, 1),
+            Transport::WebSocket,
+            Some(old),
+            Some(&host),
+        );
+        state.process_presented(
+            report(&uid, 3),
+            Transport::WebSocket,
+            Some(new),
+            Some(&host),
+        );
+        let mut goodbye = report(&uid, 2);
+        goodbye.agent_disconnect = Some(opamp::proto::AgentDisconnect {});
+        let answered =
+            state.process_presented(goodbye, Transport::WebSocket, Some(old), Some(&host));
+        assert!(
+            answered.disconnected,
+            "the older connection lets the Agent go"
+        );
+        assert_eq!(carrier_of(&state, &uid), Some((true, Some(new))));
+    }
+
+    /// A queued restart is not sent on an older connection of the host while a newer one carries
+    /// the Agent: it stays queued, and the newer connection's next report is sent it.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    #[test]
+    fn a_queued_restart_is_not_sent_on_an_older_connection_of_the_host() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let of = Arc::new(OnceLock::new());
+        let state = with_probed_register(dir.path(), Arc::new(|_, _| {}), &of);
+        let uid = InstanceUid::default();
+        let (old, new) = (state.connection_id(), state.connection_id());
+        let host = of_host("edge-1");
+        let restartable = |sequence_num| {
+            let mut msg = report(&uid, sequence_num);
+            msg.capabilities |= opamp::proto::AgentCapabilities::AcceptsRestartCommand as u64;
+            msg
+        };
+        state.process_presented(restartable(1), Transport::WebSocket, Some(old), Some(&host));
+        state.process_presented(restartable(2), Transport::WebSocket, Some(new), Some(&host));
+        assert!(state.request_restart(&uid).is_ok(), "queued");
+        let late =
+            state.process_presented(restartable(3), Transport::WebSocket, Some(old), Some(&host));
+        assert!(
+            late.reply.command.is_none(),
+            "not sent on the older connection"
+        );
+        assert!(state.fleet.lock().expect("fleet lock")[&uid].restart_pending);
+        let next =
+            state.process_presented(restartable(4), Transport::WebSocket, Some(new), Some(&host));
+        assert!(next.reply.command.is_some(), "sent on the newer one");
+    }
+
+    /// A queued restart pushed to every connection that named the Agent goes out only on the one
+    /// that carries it: an older connection of its host that still names it, its peer likely
+    /// gone, is handed none, and the restart stays queued for the newer one.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    #[test]
+    fn a_pushed_restart_goes_out_only_on_the_connection_that_carries_the_agent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let of = Arc::new(OnceLock::new());
+        let state = with_probed_register(dir.path(), Arc::new(|_, _| {}), &of);
+        let uid = InstanceUid::default();
+        let (old, new) = (state.connection_id(), state.connection_id());
+        let host = of_host("edge-1");
+        let restartable = |sequence_num| {
+            let mut msg = report(&uid, sequence_num);
+            msg.capabilities |= opamp::proto::AgentCapabilities::AcceptsRestartCommand as u64;
+            msg
+        };
+        state.process_presented(restartable(1), Transport::WebSocket, Some(old), Some(&host));
+        state.process_presented(restartable(2), Transport::WebSocket, Some(new), Some(&host));
+        let late =
+            state.process_presented(restartable(3), Transport::WebSocket, Some(old), Some(&host));
+        assert_eq!(late.uid, Some(uid), "the older connection still names it");
+        assert!(state.request_restart(&uid).is_ok(), "queued");
+        assert!(
+            state.restart_command_for(&uid, old).is_none(),
+            "not handed to the older connection"
+        );
+        assert!(state.fleet.lock().expect("fleet lock")[&uid].restart_pending);
+        assert!(
+            state.restart_command_for(&uid, new).is_some(),
+            "handed to the newer one"
+        );
+    }
+
+    /// A report of an older connection of the host does not use up the demand for the component
+    /// map: the newer connection is asked for it.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    #[test]
+    fn an_older_connection_of_the_host_is_not_asked_for_the_component_map() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let of = Arc::new(OnceLock::new());
+        let state = with_probed_register(dir.path(), Arc::new(|_, _| {}), &of);
+        let uid = InstanceUid::default();
+        let (old, new) = (state.connection_id(), state.connection_id());
+        let host = of_host("edge-1");
+        let hashed = |sequence_num| {
+            let mut msg = report(&uid, sequence_num);
+            msg.capabilities |= opamp::proto::AgentCapabilities::ReportsAvailableComponents as u64;
+            msg.available_components = Some(opamp::proto::AvailableComponents {
+                hash: vec![sequence_num as u8],
+                ..Default::default()
+            });
+            msg
+        };
+        let asked = |processed: &Processed| {
+            processed.reply.flags & ServerToAgentFlags::ReportAvailableComponents as u64 != 0
+        };
+        state.process_presented(hashed(1), Transport::WebSocket, Some(old), Some(&host));
+        state.process_presented(hashed(2), Transport::WebSocket, Some(new), Some(&host));
+        let late = state.process_presented(hashed(3), Transport::WebSocket, Some(old), Some(&host));
+        assert!(!asked(&late), "not asked on the older connection");
+        let next = state.process_presented(hashed(3), Transport::WebSocket, Some(new), Some(&host));
+        assert!(asked(&next), "asked on the newer one");
+    }
+
+    /// A state on files whose clock the test moves, with a host register in which `gw-1` is a
+    /// Gateway's Host; beside it the clock and a certificate of that Gateway.
+    fn with_a_gateway(
+        dir: &std::path::Path,
+        offer: Option<ConnectionOffer>,
+    ) -> (AppState, Arc<AtomicU64>, Presented) {
+        let now = Arc::new(AtomicU64::new(1_000_000));
+        let revocations = Arc::new(
+            Revocations::open(
+                Box::new(crate::fs::FsLedgerStore::open(dir).expect("ledger")),
+                Arc::new(crate::clock::SystemClock),
+                Vec::new(),
+            )
+            .expect("revocations"),
+        );
+        let state = AppState::with_stores(
+            Box::new(crate::fs::FsAgentStore::open(dir).expect("agents")),
+            Box::new(crate::fs::FsConfigBackend::open(dir).expect("configs")),
+            Box::new(Manual(now.clone())),
+        )
+        .expect("state")
+        .with_revocations(Some(revocations.clone()))
+        .with_connection_offer(offer);
+        let gateway = of_host("gw-1");
+        // Its first report makes its Host; the mark makes it a Gateway's.
+        let first = state.connection_id();
+        state.process_presented(
+            report(&InstanceUid::default(), 1),
+            Transport::WebSocket,
+            Some(first),
+            Some(&gateway),
+        );
+        assert!(revocations.set_gateway("gw-1", true).expect("mark"));
+        (state, now, gateway)
+    }
+
+    /// An Agent behind a Gateway that its pool moved from the newer of two open connections to the
+    /// older one is taken by its report there once the newer one has carried none of its reports
+    /// for a heartbeat interval: it is asked for its component map there, and its goodbye there
+    /// ends it.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    #[test]
+    fn a_gateway_s_agent_moved_to_an_older_connection_is_taken_there_after_an_interval() {
+        crate::test_support::logged();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (state, now, gateway) = with_a_gateway(dir.path(), None);
+        let uid = InstanceUid::default();
+        let (older, newer) = (state.connection_id(), state.connection_id());
+        let hashed = |sequence_num: u64| {
+            let mut msg = report(&uid, sequence_num);
+            msg.capabilities |= opamp::proto::AgentCapabilities::ReportsAvailableComponents as u64;
+            msg.available_components = Some(opamp::proto::AvailableComponents {
+                hash: vec![7],
+                ..Default::default()
+            });
+            msg
+        };
+        let asked = |processed: &Processed| {
+            processed.reply.flags & ServerToAgentFlags::ReportAvailableComponents as u64 != 0
+        };
+        state.process_presented(hashed(1), Transport::WebSocket, Some(newer), Some(&gateway));
+        assert_eq!(carrier_of(&state, &uid), Some((true, Some(newer))));
+        // The Agent restarts, and the pool places it on the older connection; the newer one,
+        // carrying other Agents, stays open and carries none of its reports from now on.
+        now.fetch_add(DEFAULT_HEARTBEAT.as_millis() as u64, Ordering::SeqCst);
+        let taken =
+            state.process_presented(hashed(1), Transport::WebSocket, Some(older), Some(&gateway));
+        assert_eq!(
+            carrier_of(&state, &uid),
+            Some((true, Some(older))),
+            "the older connection carries it"
+        );
+        assert!(asked(&taken), "asked for its component map there");
+        assert_eq!(
+            crate::test_support::lines_with(&["carried none of its reports", &uid.to_string()])
+                .len(),
+            1,
+            "the move to the stale carrier's older connection is logged"
+        );
+        let mut goodbye = report(&uid, 2);
+        goodbye.agent_disconnect = Some(opamp::proto::AgentDisconnect {});
+        state.process_presented(goodbye, Transport::WebSocket, Some(older), Some(&gateway));
+        assert_eq!(
+            carrier_of(&state, &uid),
+            Some((false, None)),
+            "its goodbye ends it"
+        );
+    }
+
+    /// Within a heartbeat interval of the newer connection's last report of an Agent, a report on
+    /// an older connection of the same Gateway does not take the Agent back.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    #[test]
+    fn within_an_interval_an_older_connection_of_a_gateway_does_not_take_the_agent_back() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (state, now, gateway) = with_a_gateway(dir.path(), None);
+        let uid = InstanceUid::default();
+        let (older, newer) = (state.connection_id(), state.connection_id());
+        state.process_presented(
+            report(&uid, 1),
+            Transport::WebSocket,
+            Some(newer),
+            Some(&gateway),
+        );
+        now.fetch_add(DEFAULT_HEARTBEAT.as_millis() as u64 - 1, Ordering::SeqCst);
+        state.process_presented(
+            report(&uid, 2),
+            Transport::WebSocket,
+            Some(older),
+            Some(&gateway),
+        );
+        assert_eq!(carrier_of(&state, &uid), Some((true, Some(newer))));
+        // A report on the newer connection carries it on, so a heartbeat later the older one
+        // still does not take it.
+        state.process_presented(
+            report(&uid, 3),
+            Transport::WebSocket,
+            Some(newer),
+            Some(&gateway),
+        );
+        now.fetch_add(DEFAULT_HEARTBEAT.as_millis() as u64 - 1, Ordering::SeqCst);
+        state.process_presented(
+            report(&uid, 4),
+            Transport::WebSocket,
+            Some(older),
+            Some(&gateway),
+        );
+        assert_eq!(carrier_of(&state, &uid), Some((true, Some(newer))));
+    }
+
+    /// The interval this Server offers decides when a Gateway's newer connection is stale: at an
+    /// offered 60 seconds, a report on the older connection 30 seconds after the newer one's last
+    /// does not take the Agent, and one 60 seconds after does.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    #[test]
+    fn the_offered_heartbeat_interval_decides_when_a_carrier_is_stale() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let offer = ConnectionOffer::from_config(
+            &toml::from_str::<crate::config::ConnectionOfferConfig>(
+                "heartbeat_interval_secs = 60\n",
+            )
+            .expect("offer config"),
+        );
+        let (state, now, gateway) = with_a_gateway(dir.path(), Some(offer));
+        let uid = InstanceUid::default();
+        let (older, newer) = (state.connection_id(), state.connection_id());
+        state.process_presented(
+            report(&uid, 1),
+            Transport::WebSocket,
+            Some(newer),
+            Some(&gateway),
+        );
+        now.fetch_add(30_000, Ordering::SeqCst);
+        state.process_presented(
+            report(&uid, 2),
+            Transport::WebSocket,
+            Some(older),
+            Some(&gateway),
+        );
+        assert_eq!(
+            carrier_of(&state, &uid),
+            Some((true, Some(newer))),
+            "30 s is within the offered interval"
+        );
+        now.fetch_add(30_000, Ordering::SeqCst);
+        state.process_presented(
+            report(&uid, 3),
+            Transport::WebSocket,
+            Some(older),
+            Some(&gateway),
+        );
+        assert_eq!(
+            carrier_of(&state, &uid),
+            Some((true, Some(older))),
+            "60 s is one offered interval"
+        );
+    }
+
+    /// A newer connection whose report waited on the store for a heartbeat interval is as fresh as
+    /// its report once it took the Agent: the older connection's next report does not take the
+    /// Agent back.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    #[test]
+    fn a_carrier_whose_report_waited_an_interval_is_not_stale_once_it_took_the_agent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let now = Arc::new(AtomicU64::new(1_000_000));
+        let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let probe: Probe = {
+            let (now, armed) = (now.clone(), armed.clone());
+            Arc::new(move |call, _| {
+                if call == "save_hosts" && armed.swap(false, Ordering::SeqCst) {
+                    // The newer connection's round waits an interval on the store.
+                    now.fetch_add(DEFAULT_HEARTBEAT.as_millis() as u64, Ordering::SeqCst);
+                }
+            })
+        };
+        let revocations = Arc::new(
+            Revocations::open(
+                Box::new(ProbedLedger {
+                    inner: Box::new(crate::fs::FsLedgerStore::open(dir.path()).expect("ledger")),
+                    probe,
+                }),
+                Arc::new(crate::clock::SystemClock),
+                Vec::new(),
+            )
+            .expect("revocations"),
+        );
+        let state = AppState::with_stores(
+            Box::new(crate::fs::FsAgentStore::open(dir.path()).expect("agents")),
+            Box::new(crate::fs::FsConfigBackend::open(dir.path()).expect("configs")),
+            Box::new(Manual(now.clone())),
+        )
+        .expect("state")
+        .with_revocations(Some(revocations));
+        let uid = InstanceUid::default();
+        let (old, new) = (state.connection_id(), state.connection_id());
+        let until = |not_after_ms| Presented {
+            not_after_ms,
+            ..of_host("edge-1")
+        };
+        state.process_presented(
+            report(&uid, 1),
+            Transport::WebSocket,
+            Some(old),
+            Some(&until(1)),
+        );
+        armed.store(true, Ordering::SeqCst);
+        state.process_presented(
+            report(&uid, 2),
+            Transport::WebSocket,
+            Some(new),
+            Some(&until(2)),
+        );
+        assert!(
+            !armed.load(Ordering::SeqCst),
+            "the newer connection's round waited"
+        );
+        assert_eq!(carrier_of(&state, &uid), Some((true, Some(new))));
+        state.process_presented(
+            report(&uid, 3),
+            Transport::WebSocket,
+            Some(old),
+            Some(&until(2)),
+        );
+        assert_eq!(
+            carrier_of(&state, &uid),
+            Some((true, Some(new))),
+            "the older connection's backlog does not take it back"
+        );
+    }
+
+    /// A report of an older connection of the host whose newer connection closes while the report
+    /// is taken up is not left without a connection: the older one carries the Agent again.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    #[test]
+    fn an_older_connection_takes_the_agent_back_when_the_newer_closes_meanwhile() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let of: Arc<OnceLock<std::sync::Weak<AppState>>> = Arc::new(OnceLock::new());
+        let uid = InstanceUid::default();
+        let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let closing = Arc::new(Mutex::new(None::<ConnId>));
+        let probe: Probe = {
+            let (of, armed, closing) = (of.clone(), armed.clone(), closing.clone());
+            Arc::new(move |call, _| {
+                if call == "save_hosts" && armed.swap(false, Ordering::SeqCst) {
+                    // The newer connection closes while the older one's report moves its Host's
+                    // valid until.
+                    let state = of.get().and_then(std::sync::Weak::upgrade).expect("state");
+                    let conn = closing.lock().expect("closing").expect("a connection");
+                    state.mark_disconnected(&[uid], conn);
+                }
+            })
+        };
+        let state = with_probed_register(dir.path(), probe, &of);
+        let (old, new) = (state.connection_id(), state.connection_id());
+        *closing.lock().expect("closing") = Some(new);
+        let until = |not_after_ms| Presented {
+            not_after_ms,
+            ..of_host("edge-1")
+        };
+        state.process_presented(
+            report(&uid, 1),
+            Transport::WebSocket,
+            Some(old),
+            Some(&until(1)),
+        );
+        state.process_presented(
+            report(&uid, 2),
+            Transport::WebSocket,
+            Some(new),
+            Some(&until(1)),
+        );
+        assert_eq!(carrier_of(&state, &uid), Some((true, Some(new))));
+        armed.store(true, Ordering::SeqCst);
+        let late = state.process_presented(
+            report(&uid, 3),
+            Transport::WebSocket,
+            Some(old),
+            Some(&until(2)),
+        );
+        assert!(
+            !armed.load(Ordering::SeqCst),
+            "the newer connection closed meanwhile"
+        );
+        assert!(late.reply.error_response.is_none());
+        assert_eq!(carrier_of(&state, &uid), Some((true, Some(old))));
+    }
+
     /// What an instance wrote of an Agent's presence, the count of takes among it, leaves with the
     /// Agent wherever it leaves what the instance holds: when it is forgotten here, when it was
     /// forgotten through another instance, and under its old identity when it is re-keyed.
@@ -12634,6 +13341,7 @@ mod tests {
             &self,
             hosts: &BTreeMap<String, crate::revocation::Host>,
         ) -> Result<(), String> {
+            (self.probe)("save_hosts", None);
             self.inner.save_hosts(hosts)
         }
     }
@@ -13112,7 +13820,7 @@ mod tests {
             "queued again"
         );
         assert!(
-            state.restart_command_for(&uid).is_some(),
+            state.restart_command_for(&uid, 1).is_some(),
             "the second restart is sent next"
         );
     }
