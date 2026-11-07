@@ -3917,7 +3917,15 @@ async fn set_gateway(
             .with("host", host.clone())
             .with("gateway", request.gateway)
     };
-    match state.set_gateway(&host, request.gateway) {
+    // Off the async workers: a mark of a Host this instance held no copy of reads the ledger
+    // again before it answers.
+    let marked = tokio::task::spawn_blocking({
+        let (state, host, gateway) = (state.clone(), host.clone(), request.gateway);
+        move || state.set_gateway(&host, gateway)
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("the mark ended: {e}")));
+    match marked {
         Ok(true) => {
             info!(%host, gateway = request.gateway, "gateway mark set");
             fill_place(place, mark(if request.gateway { "set" } else { "cleared" }));

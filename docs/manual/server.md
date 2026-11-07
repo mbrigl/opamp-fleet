@@ -1032,11 +1032,13 @@ that wrote them ended in between, at its next lease renewal (`lease_renew_secs`)
 wait for it: every instance asks the database at each binding, so no host is let speak for an Agent
 another host holds. A Host's valid until moved forward by an issuance or a prune is announced after
 the commit too. A revocation, a release, a re-key, a Gateway's mark, a Host forgotten and a
-certificate registered or removed are announced in their commit. Every lease renewal reads the
-certificate register, the revocation list and the Hosts again, which takes about a fifth of a second
-for 10 000 Hosts with a certificate each. A first report whose call loses its answer has its
-instance read the Hosts again at once; a binding that lands after that read is taken up at the
-Agent's next report or the next renewal.
+certificate registered or removed are announced in their commit. A Gateway's mark through any
+instance finds a Host the database holds, or a host a certificate in the register names, though
+that instance has not heard of it yet; a host the database does not know is answered `404`. Every
+lease renewal reads the certificate register, the revocation list and the Hosts again, which takes
+about a fifth of a second for 10 000 Hosts with a certificate each. A first report whose call loses
+its answer has its instance read the Hosts again at once; a binding that lands after that read is
+taken up at the Agent's next report or the next renewal.
 
 ### An approval whose commit fails
 
@@ -1173,12 +1175,14 @@ start.
   themselves.
 - **From 0.7.1** every Server stops first. An instance that shares the database starts, and
   migrates, only once no Server holds the database alone, as a Server of 0.7.1 does while it runs.
-- **Beside 0.8.0** two things about new Agents differ from a fleet of one release. `max_agents` may
-  be passed by the records the two releases create at the same moment, since 0.8.0 counts under a
-  lock the newer release does not take. And when both create the record of the same new Agent at
-  the same moment, the database ends one of the two as a deadlock after its `deadlock_timeout`
-  (one second by default); that report is answered `Unavailable`, and the Agent reports again.
-  Both end with the last instance of 0.8.0.
+- **Beside 0.8.0** three things differ from a fleet of one release. `max_agents` may be passed by
+  the records the two releases create at the same moment, since 0.8.0 counts under a lock the newer
+  release does not take. When both create the record of the same new Agent at the same moment, the
+  database ends one of the two as a deadlock after its `deadlock_timeout` (one second by default);
+  that report is answered `Unavailable`, and the Agent reports again. And a Gateway's mark through
+  an instance of 0.8.0 may be refused for a Host it has not heard of yet, or written for a host the
+  database has forgotten; make marks through an instance of this release. All three end with the
+  last instance of 0.8.0.
 
 The first start of this release on a database migrates it to the schema of the paged lists: it
 adds columns to the Agents' table and builds three indexes over it, one of them over a digest of
