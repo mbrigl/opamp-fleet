@@ -9,7 +9,7 @@
 > **Kept current by:** Markus Brigl. A document everyone may edit and nobody owns is
 > the one that goes stale.
 >
-> **Last design revision:** none yet, due after 20 changes. The revision that ran moves the
+> **Last design revision:** 2026-11-06, due after 20 changes. The revision that ran moves the
 > date; the number is this project's to set; a sensor counts the changes outside `docs/` since
 > the commit that set the date and says when the next is due
 > ([ADR-0006](adr/0006-feature-layer.md)).
@@ -21,11 +21,13 @@ than anywhere else, and none beats one that has stopped being true.
 
 ```text
  operator ── REST / bundled UI ──▶ Operator plane :4321 ─┐
-                                                         │  Server (Linux)
- Client ──── OpAMP, mTLS ──────────────▶ Agent plane :4320 ─┘   │
-   │  ▲                                                          └─▶ data_dir: fleet state,
-   │  └── Gateway (a Client) ◀── OpAMP, mTLS ── other Clients        register, audit record,
-   │                                                                 artifacts by SHA-256
+                                                         │  Server (Linux): one, or several
+ Client ──── OpAMP, mTLS ──────────────▶ Agent plane :4320 ─┘   │  instances behind a balancer
+   │  ▲                                                          └─▶ data_dir, or PostgreSQL with
+   │  └── Gateway (a Client) ◀── OpAMP, mTLS ── other Clients        the blobs as files or in an S3
+   │                                                                 bucket, which instances share:
+   │                                                                 fleet state, register, audit
+   │                                                                 record, artifacts by SHA-256
    ├── Supervisor Endpoint (loopback) ◀── a Collector's opampextension
    ├── Managed Processes: Collector, any command — where a process account is registered, under
    │     it, started by the second service over a Unix socket or named pipe
@@ -69,10 +71,14 @@ Five crates in one workspace ([ADR-0008](adr/0008-five-crates-on-tokio-and-axum.
   ([ADR-0008](adr/0008-five-crates-on-tokio-and-axum.md)). Always the
   generated types, framing and the endpoint's body rules. Behind `client`, an Agent's protocol state
   machine, the two transports, and `client::connection`, which builds a connection, its TLS and its
-  HTTP client from a `Connection` the application fills in. Behind `server`, the endpoint around a
-  `Handler`, `server::listen`, the listener with its TLS and its bounds on connection setup, and
-  `server::pace`, the floor every body and WebSocket message it serves is held to. The server
-  side takes a WebSocket over through hyper's upgrade and reads its frames with
+  HTTP client from a `Connection` the application fills in. The WebSocket driver ends a
+  connection on which nothing arrived for one heartbeat interval (`client::ws::Silence`), and
+  draws its reconnects and its waits after an `Unavailable` from `client::backoff`
+  ([ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended](adr/draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended.md)).
+  Behind `server`, the endpoint around a `Handler`, which answers a WebSocket's pings while it
+  handles a message, `server::listen`, the listener with its TLS and its bounds on connection
+  setup, and `server::pace`, the floor every body and WebSocket message it serves is held to. The
+  server side takes a WebSocket over through hyper's upgrade and reads its frames with
   `tokio-tungstenite`, the library the client side uses too.
   `tls` reads PEM and installs the ring provider. It reads no file and knows nothing of this
   project.
@@ -130,8 +136,9 @@ no module.
   `configs`, `deployments`, `packages`, `ledger`, `bootstrap`, `enrolment`, `floors`, `audit`),
   each call one transaction; `postgres` holds the
   connection
-  they share — TLS 1.3 on *ring*, a pool on a `bridge` runtime of its own, the advisory lock that
-  keeps one Server per database — and applies the schema embedded in `postgres::schema` as
+  they share — TLS 1.3 on *ring*, a pool on a `bridge` runtime of its own, the exclusive lock of
+  an instance that must be alone on the database, the leases of `postgres::lease` and the
+  notifications of `postgres::notify` — and applies the schema embedded in `postgres::schema` as
   numbered migrations; `postgres::import` is `server migrate-to-postgres`, which copies a
   `data_dir` into the database offline
   ([ADR-0044](adr/0044-the-servers-state-and-its-stores.md)). The core's
@@ -148,6 +155,20 @@ no module.
   `contract` test there that runs on both stores. A new store copies its shape and its test
   ([ADR-0009](adr/0009-ports-and-adapters.md),
   [ADR-0044](adr/0044-the-servers-state-and-its-stores.md)).
+- **Server instances** — on PostgreSQL every Server is an instance, and several share one
+  database and one bucket
+  ([ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side](adr/draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)).
+  `instance` takes a lease, a row of `postgres::lease`, before either listener opens, renews it,
+  proves it before every answer, and closes both planes while it cannot. Each lease it takes checks
+  the schema under the migrations' lock and records the instance's release, and a migration refuses
+  while a live lease is of a release older than the schema it leaves needs, so two consecutive
+  versions run side by side. A change that concerns a live session is one `NOTIFY` of
+  `postgres::notify`, sent in the transaction that commits it, or right after the commit for a
+  binding and a Host row that widen trust; each instance listens on a connection of its own, reads
+  its caches again rather than patching them, and counts a missed notification as every
+  notification. `fleet` holds only the Agents whose connections the instance carries: the holder of
+  an Agent is its row's instance, the newest connection takes it by one conditional update, and an
+  instance writes the presence of what it carries in batches.
 - **Server listeners** — `tls` reads the `[tls]`, `[rest.tls]` and `[enrolment]` files into the
   material each plane serves with — the Agent plane requiring a client certificate in the
   handshake, the Operator plane asking for none and serving `[rest.tls]`'s certificate when the
@@ -185,6 +206,10 @@ no module.
   the chains of the lapsed leases it removes, as each renewal does, and an orderly shutdown closes
   the instance's own
   ([ADR-0042](adr/0042-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance.md)).
+  Each entry names the lease its decision was taken under (`taken_under`), and on PostgreSQL the
+  writer keeps a batch whose write failed and tries it again first
+  ([ADR-draft-the-audit-record-is-one-hash-chain-per-lease-and-names-the-lease-each-decision-was-taken-under](adr/draft-the-audit-record-is-one-hash-chain-per-lease-and-names-the-lease-each-decision-was-taken-under.md),
+  [ADR-draft-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again](adr/draft-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again.md)).
   `postgres::audit_prune` bounds it by `[audit] retain_days`: a task `main` starts prunes at
   startup and once a day, the instance's own chain always and the closed chains while it holds the
   prune's advisory lock, recording each `audit.pruned` through the instance's writer and waiting
@@ -382,7 +407,15 @@ ordinary `transport` with the bootstrap pair until the issued certificate is in 
 directory ([ADR-0022](adr/0022-bootstrap-certificates-and-enrolment.md)). From then on the Client
 renews at two thirds of the certificate's life,
 proving with the old key which certificate it renews. A revocation closes the sessions it
-concerns at once and follows every renewal.
+concerns at once, on every instance by its notification, and follows every renewal.
+
+**An instance is lost.** Killed, its connections are cut; frozen, its Agents end their
+WebSockets after one heartbeat interval of silence. Each Agent reconnects after a delay drawn over
+`[0, 30 s)`, through the balancer, to an instance that still holds its lease, which reads the
+Agent's record at its first report and takes it as its holder. Once the lost instance's lease has
+lapsed, the instance that removes it closes its audit chain. The others serve from what the lost
+instance committed to the database
+([ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side](adr/draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)).
 
 **A Supervisor starts its program.** Without a process account the runner starts the Managed
 Process, its version probe and a package's preflight as the Client. Where `service install

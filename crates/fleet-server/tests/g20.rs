@@ -1435,6 +1435,7 @@ fn in_list(uids: impl IntoIterator<Item = InstanceUid>) -> String {
 /// `lease_renew_secs`; no notification is left unread; and a Gateway's ten pool connections from
 /// one address are refused by neither the admission throttle nor the bound on new connections.
 /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+/// Verifies: G-20
 #[test]
 fn g20_a_killed_instance_s_agents_are_carried_by_the_others_within_the_bounds() {
     failover(Loss::Killed);
@@ -1445,6 +1446,7 @@ fn g20_a_killed_instance_s_agents_are_carried_by_the_others_within_the_bounds() 
 /// interval. The same bounds hold as for a killed instance.
 /// Verifies: ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended
 /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+/// Verifies: G-20
 #[test]
 fn g20_a_frozen_instance_s_agents_are_carried_by_the_others_within_the_bounds() {
     failover(Loss::Frozen);
@@ -1833,6 +1835,7 @@ fn failover(loss: Loss) {
 /// than its interval after it was due, and no notification is left unread. No Agent is re-keyed
 /// as a duplicate, while the fleet connects or after.
 /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+/// Verifies: G-20
 #[test]
 fn g20_three_instances_carry_the_presence_and_notifications_of_100_000_agents() {
     if !stack_named() {
