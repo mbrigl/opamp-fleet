@@ -39,8 +39,11 @@ struct Schema {
     _slot: Slot,
 }
 
-/// How many tests work in a schema at once. Each runs instances whose pools, listening
-/// connections and leases hold up to eight connections together, and the test database, like
+/// How many tests work in a schema at once. A pool opens a connection only for a call in flight
+/// and keeps it, up to its `pool_size` (16 by default), so a test holds as many as it makes calls
+/// at once, beside a listening connection and a lease's session per instance it serves: about
+/// eight for most tests, up to the 24 calls at once of
+/// `many_creations_at_once_on_many_instances_never_pass_the_ceiling`. The test database, like
 /// CI's, admits 100 (three of them reserved), so the tests the harness would otherwise run at
 /// once, one per core, can exhaust it.
 const SCHEMAS_AT_ONCE: usize = 8;

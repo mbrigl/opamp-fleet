@@ -2094,6 +2094,50 @@ mod tests {
         assert_eq!(counted(), 3);
     }
 
+    /// The count follows the Agents' records of its own schema whatever the search path of the
+    /// session that writes them: the triggers' functions are pinned to the schema the migration
+    /// ran in, not to the search path it ran under. Here that path starts with `"$user"` and names
+    /// a schema created only afterwards, which a function keeping the path would count in.
+    /// Verifies: ADR-0044
+    #[test]
+    fn the_count_is_kept_in_its_own_schema_whatever_the_writing_session_names_first() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let decoy = format!("fleet_test_decoy_{}", hex::encode(InstanceUid::default().0));
+        let database = crate::postgres::Database::open_in(
+            &test.config(),
+            crate::postgres::Exclusive::Alone("the test".to_string()),
+            Some(&format!("\"$user\",{decoy},{}", test.schema)),
+        )
+        .expect("open under a path naming $user first");
+        let store = PgAgentStore::open(database.clone()).expect("open");
+        store.put(&InstanceUid([1; 16]), &record()).expect("put");
+        let copied = InstanceUid([2; 16]);
+        test.sql(&format!(
+            "CREATE SCHEMA {decoy};
+             CREATE TABLE {decoy}.agent_count (
+                 one boolean PRIMARY KEY DEFAULT true, agents bigint NOT NULL);
+             INSERT INTO {decoy}.agent_count (agents) VALUES (100);
+             CREATE TEMP TABLE copied AS SELECT * FROM agents;
+             UPDATE copied SET instance_uid = '{copied}';
+             SELECT set_config('search_path', '{decoy},' || current_schema(), false);
+             INSERT INTO agents SELECT * FROM copied;
+             DELETE FROM agents WHERE instance_uid = '{copied}';
+             INSERT INTO agents SELECT * FROM copied;"
+        ));
+        let decoyed = test.rows(&format!("SELECT agents FROM {decoy}.agent_count"));
+        test.sql(&format!("DROP SCHEMA {decoy} CASCADE"));
+        let rows = test.rows("SELECT (SELECT agents FROM agent_count), count(*) FROM agents");
+        assert_eq!(rows[0][0], rows[0][1], "the count is the rows'");
+        assert_eq!(rows[0][1].as_deref(), Some("2"));
+        assert_eq!(
+            decoyed[0][0].as_deref(),
+            Some("100"),
+            "the decoy is untouched"
+        );
+    }
+
     /// A creation commits without waiting for its flush, and the calls made after it on the same
     /// connections commit synchronously again: a take, a report's write and a binding after it
     /// wait for the flush, of the creation's too.

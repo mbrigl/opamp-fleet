@@ -3958,14 +3958,28 @@ impl AppState {
         let mut reserved = Reservation::none(&self.reserved_new);
         if !seen.known {
             let at_ceiling = if self.agent_store.is_shared() {
-                let record = self.new_record(msg.sequence_num, transport, conn);
+                let persisted = self
+                    .new_record(msg.sequence_num, transport, conn)
+                    .to_persisted();
                 match self
                     .agent_store
-                    .create_within(&uid, &record.to_persisted(), self.max_agents)
+                    .create_within(&uid, &persisted, self.max_agents)
                 {
                     Ok(Creation::Created) => {
                         info!(agent = %uid, transport = transport.as_str(), "new agent");
                         created = true;
+                        // Held from its commit on, not yet carried, as a record found is: what
+                        // another instance commits to it from now on and announces is taken up
+                        // into it, and the report goes on from it.
+                        let digest = persisted.durable_digest();
+                        let mut fleet = self.fleet.lock().expect("fleet lock");
+                        if let std::collections::hash_map::Entry::Vacant(held) = fleet.entry(uid) {
+                            self.written
+                                .lock()
+                                .expect("written lock")
+                                .insert(uid, digest);
+                            held.insert(AgentRecord::from_persisted(persisted));
+                        }
                         false
                     }
                     Ok(Creation::Found(stored)) => {
@@ -4039,10 +4053,12 @@ impl AppState {
                 if let Err(e) =
                     revocations.check_report(host, &subject, not_after_ms, bound.as_bytes())
                 {
-                    // A record this report created goes with it; one another instance created
-                    // stays. A re-key made stands, and what is held follows it.
+                    // A record this report created goes with it, from the store and from what
+                    // is held; one another instance created stays. A re-key made stands, and what
+                    // is held follows it.
                     if created {
                         self.unpersist(&uid);
+                        self.fleet.lock().expect("fleet lock").remove(&uid);
                     }
                     self.follow_move(rekeyed, seen.group.clone());
                     return Ok(Processed {
@@ -4103,16 +4119,18 @@ impl AppState {
             || fleet
                 .get(&uid)
                 .is_none_or(|record| !record.connected || record.owner != conn);
-        let left = seen.known && rekeyed.is_none() && !fleet.contains_key(&uid);
-        if left || (now_connects && !connects) {
+        let left = (seen.known || created) && rekeyed.is_none() && !fleet.contains_key(&uid);
+        // A round that re-keyed the Agent goes on under the identity it assigned: a next round
+        // would start from the message under the old one and assign a second. It finds the Agent
+        // no longer carried, its connection closed meanwhile, and leaves it so: it wrote no take,
+        // and nothing would mark the Agent disconnected again.
+        let uncarried = now_connects && !connects;
+        if left || (uncarried && rekeyed.is_none()) {
             // Forgotten or moved through another instance, or no longer carried, while this
             // round read and wrote the store: the next round goes on from what it holds now.
             drop(fleet);
             self.place_again(elsewhere);
             return Err(Box::new(msg));
-        }
-        if created {
-            fleet.insert(uid, self.new_record(msg.sequence_num, transport, conn));
         }
         let known = seen.known;
         let record = fleet.entry(uid).or_insert_with(|| {
@@ -4142,11 +4160,13 @@ impl AppState {
         // A demand for the component map may have been lost with the previous connection, or with
         // an Agent that restarted, which plain HTTP shows instead of a connection, so either may be
         // asked again.
-        if !record.connected || record.owner != conn || restarted {
-            record.components_demanded = None;
+        if !uncarried {
+            if !record.connected || record.owner != conn || restarted {
+                record.components_demanded = None;
+            }
+            record.connected = true;
+            record.owner = conn;
         }
-        record.connected = true;
-        record.owner = conn;
         record.heard = true;
         record.last_seen_ms = self.clock.now_ms();
         if connects {
@@ -12457,6 +12477,79 @@ mod tests {
         assert_eq!(stored_presence(&test, &uid), format!("{third} true 3"));
     }
 
+    /// A report that re-keyed its Agent and then finds it no longer carried, its connection
+    /// marked closed meanwhile, goes on under the identity it assigned rather than start again
+    /// from the message: a next round would mint a second identity and leave the first record
+    /// behind. The Agent stays disconnected, as the closed connection left it.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side, ADR-0043
+    #[test]
+    fn a_report_that_rekeyed_its_agent_does_not_start_again() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let of: Arc<OnceLock<std::sync::Weak<AppState>>> = Arc::new(OnceLock::new());
+        let uid = InstanceUid([0x9c; 16]);
+        let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let probe: Probe = {
+            let (of, armed) = (of.clone(), armed.clone());
+            Arc::new(move |call, _| {
+                if call == "rebind" && armed.swap(false, Ordering::SeqCst) {
+                    // The connection closes while the report moves the binding.
+                    let a = of.get().and_then(std::sync::Weak::upgrade).expect("A");
+                    a.mark_disconnected(&[uid], 7);
+                }
+            })
+        };
+        let revocations = Revocations::open(
+            Box::new(ProbedLedger {
+                inner: Box::new(crate::postgres::ledger::PgLedgerStore::new(
+                    database.clone(),
+                )),
+                probe,
+            }),
+            Arc::new(crate::clock::SystemClock),
+            Vec::new(),
+        )
+        .expect("revocations");
+        let a = Arc::new(
+            AppState::with_stores(
+                Box::new(crate::postgres::agents::PgAgentStore::new(database.clone())),
+                Box::new(crate::postgres::configs::PgConfigBackend::new(
+                    database.clone(),
+                )),
+                Box::new(crate::clock::SystemClock),
+            )
+            .expect("state")
+            .with_revocations(Some(Arc::new(revocations))),
+        );
+        of.set(Arc::downgrade(&a)).expect("set once");
+        a.serve_under(tokio::sync::watch::channel(Some(LEASE_A.to_string())).1);
+        let host = of_host("h9c");
+        a.process_presented(report(&uid, 1), Transport::WebSocket, Some(7), Some(&host));
+        armed.store(true, Ordering::SeqCst);
+        let mut rekey = report(&uid, 2);
+        rekey.flags = AgentToServerFlags::RequestInstanceUid as u64;
+        let answered = a.process_presented(rekey, Transport::WebSocket, Some(7), Some(&host));
+        let assigned = answered
+            .reply
+            .agent_identification
+            .as_ref()
+            .map(|identification| identification.new_instance_uid.clone())
+            .expect("re-keyed");
+        let rows = test.rows("SELECT instance_uid FROM agents");
+        assert_eq!(rows.len(), 1, "one record: {rows:?}");
+        assert_eq!(
+            answered.uid.map(|uid| uid.as_bytes().to_vec()),
+            Some(assigned)
+        );
+        let moved = answered.uid.expect("the new identity");
+        assert!(
+            !view(&a, &moved).connected,
+            "left disconnected, as its closed connection left it"
+        );
+    }
+
     /// A ledger store that runs a probe before each write a report makes of the host register:
     /// binding an `instance_uid`, writing a Host and moving a binding.
     struct ProbedLedger {
@@ -12762,6 +12855,203 @@ mod tests {
             stored_presence(&test, &uid).starts_with(&format!("{LEASE_B} true")),
             "B holds it: {}",
             stored_presence(&test, &uid)
+        );
+    }
+
+    /// What another instance commits to a new Agent's record between its creation here and the
+    /// end of the report that created it is taken into what this instance holds when it hears of
+    /// it: the record is held from its creation on, so the take-up finds it, and the report goes
+    /// on from it rather than from a record of its own. A label is what such a commit can carry:
+    /// a rollout then releases nothing and a restart is refused, since the record names neither a
+    /// description nor a capability before the report that created it is written, and what is
+    /// held agrees with the store on all three.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    #[test]
+    fn what_another_instance_commits_to_a_new_agent_while_its_report_runs_is_held() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let hooked = Hooked::new(Box::new(crate::postgres::agents::PgAgentStore::new(
+            database.clone(),
+        )));
+        let after_take = hooked.after_take.clone();
+        let blobs = tempfile::tempdir().expect("blobs");
+        let a = Arc::new(delivering_on(&database, Box::new(hooked), blobs.path()));
+        a.serve_under(tokio::sync::watch::channel(Some(LEASE_A.to_string())).1);
+        let b = Arc::new(delivering_on(
+            &database,
+            Box::new(crate::postgres::agents::PgAgentStore::new(database.clone())),
+            blobs.path(),
+        ));
+        aim_at_the_early_ring(&b);
+        let uid = InstanceUid([0x98; 16]);
+        {
+            let (a, b) = (Arc::downgrade(&a), b.clone());
+            *after_take.lock().expect("hook lock") = Some(Box::new(move || {
+                // The record is committed; B labels it, rolls its Deployment out to it and asks
+                // it to restart, and A hears of it before its report holds the Agent.
+                label(&b, &uid, &[("ring", "early")]);
+                b.rollout_to_agent(&uid, None)
+                    .expect("the rollout through B");
+                assert!(
+                    matches!(b.request_restart(&uid), Err(RestartError::NoCapability)),
+                    "a restart is refused before the record names its capabilities"
+                );
+                let a = a.upgrade().expect("A");
+                a.take_up_agents(Some(&HashSet::from([uid])))
+                    .expect("A takes it up");
+            }));
+        }
+        let created = a.process(restartable(&uid, 1), Transport::WebSocket, Some(7));
+        assert_eq!(created.uid, Some(uid));
+        let stored = crate::postgres::agents::PgAgentStore::new(database.clone())
+            .get(&uid)
+            .expect("read")
+            .expect("stored");
+        let held = view(&a, &uid);
+        assert_eq!(held.labels, stored.labels, "the label is held");
+        assert_eq!(held.labels.get("ring").map(String::as_str), Some("early"));
+        assert_eq!(
+            held.assigned_deployment,
+            stored
+                .assignment
+                .map(|assignment| assignment.deployment)
+                .unwrap_or_default(),
+            "the assignment held is the one stored"
+        );
+        assert!(!stored.restart_pending && created.reply.command.is_none());
+    }
+
+    /// A new Agent's record is held from its creation on but not carried until its report holds
+    /// it: a presence batch run meanwhile writes nothing of it, and the Agent is not connected
+    /// here until the report ends.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    #[test]
+    fn a_new_agents_record_is_held_from_its_creation_but_not_carried_before_its_report_ends() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let hooked = Hooked::new(Box::new(crate::postgres::agents::PgAgentStore::new(
+            database.clone(),
+        )));
+        let after_take = hooked.after_take.clone();
+        let a = Arc::new(on_postgres(&database, Box::new(hooked)));
+        a.serve_under(tokio::sync::watch::channel(Some(LEASE_A.to_string())).1);
+        let uid = InstanceUid([0x9d; 16]);
+        let (looked, look) = std::sync::mpsc::channel();
+        {
+            let a = Arc::downgrade(&a);
+            *after_take.lock().expect("hook lock") = Some(Box::new(move || {
+                let a = a.upgrade().expect("A");
+                let held = a
+                    .fleet
+                    .lock()
+                    .expect("fleet lock")
+                    .get(&uid)
+                    .map(|record| (record.connected, record.owner));
+                let _ = looked.send((held, a.write_presence(LEASE_A)));
+            }));
+        }
+        a.process(report(&uid, 1), Transport::WebSocket, Some(7));
+        let (held, batch) = look.recv_timeout(Duration::from_secs(30)).expect("looked");
+        assert_eq!(held, Some((false, None)), "held, not carried");
+        assert_eq!(batch, Ok(0), "no presence written of it");
+        assert!(view(&a, &uid).connected, "carried once the report ends");
+    }
+
+    /// A new Agent's report that the host register refuses leaves no record, neither stored nor
+    /// held: the record its creation made goes from both.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    #[test]
+    fn a_new_agents_report_the_register_refuses_leaves_no_record_held_or_stored() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let hooked = Hooked::new(Box::new(crate::postgres::agents::PgAgentStore::new(
+            database.clone(),
+        )));
+        let probe = hooked.probe.clone();
+        let a = on_postgres(&database, Box::new(hooked));
+        let b = Arc::new(on_postgres(
+            &database,
+            Box::new(crate::postgres::agents::PgAgentStore::new(database.clone())),
+        ));
+        let uid = InstanceUid([0x99; 16]);
+        let subject = crate::revocation::SubjectValues::default;
+        {
+            // Before A creates the record, B binds the Agent to another host, and its record is
+            // forgotten again, the binding staying: A's creation goes ahead, and the register
+            // then refuses the report.
+            let armed = Arc::new(std::sync::atomic::AtomicBool::new(true));
+            let sql = test.sql_runner();
+            *probe.lock().expect("hook lock") = Some(Arc::new(move |call, named| {
+                if call != "create_within"
+                    || named != Some(&uid)
+                    || !armed.swap(false, Ordering::SeqCst)
+                {
+                    return;
+                }
+                report_over(&b, "h2", subject(), uid, &[]);
+                sql(&format!("DELETE FROM agents WHERE instance_uid = '{uid}'"));
+            }));
+        }
+        let refused = report_over(&a, "h1", subject(), uid, &[]);
+        assert_eq!(refused.uid, None, "refused");
+        assert!(
+            !a.fleet.lock().expect("fleet lock").contains_key(&uid),
+            "not held"
+        );
+        assert!(
+            test.rows(&format!(
+                "SELECT instance_uid FROM agents WHERE instance_uid = '{uid}'"
+            ))
+            .is_empty(),
+            "not stored"
+        );
+    }
+
+    /// A new Agent forgotten through another instance between its creation here and the end of
+    /// the report that created it is created anew by a next round of that report, so what is held
+    /// is stored.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side, ADR-0043
+    #[test]
+    fn a_new_agent_forgotten_while_its_report_runs_is_created_anew() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let hooked = Hooked::new(Box::new(crate::postgres::agents::PgAgentStore::new(
+            database.clone(),
+        )));
+        let after_take = hooked.after_take.clone();
+        let a = Arc::new(on_postgres(&database, Box::new(hooked)));
+        a.serve_under(tokio::sync::watch::channel(Some(LEASE_A.to_string())).1);
+        let uid = InstanceUid([0x9a; 16]);
+        {
+            let on = Arc::downgrade(&a);
+            let gone = format!("DELETE FROM agents WHERE instance_uid = '{uid}'");
+            let test = test.sql_runner();
+            *after_take.lock().expect("hook lock") = Some(Box::new(move || {
+                test(&gone);
+                on.upgrade()
+                    .expect("A")
+                    .take_up_agents(Some(&HashSet::from([uid])))
+                    .expect("A hears the Agent forgotten");
+            }));
+        }
+        let answered = a.process(report(&uid, 1), Transport::WebSocket, Some(8));
+        assert_eq!(answered.uid, Some(uid), "carried");
+        assert!(view(&a, &uid).connected, "held");
+        assert_eq!(
+            test.rows(&format!(
+                "SELECT instance_uid FROM agents WHERE instance_uid = '{uid}'"
+            ))
+            .len(),
+            1,
+            "stored anew"
         );
     }
 
