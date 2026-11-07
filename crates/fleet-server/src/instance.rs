@@ -636,7 +636,10 @@ pub fn follow(
 /// Writes the presence of the Agents this instance carries every `interval`, in one batch under the
 /// instance id of the lease it holds, and nothing while it holds none
 /// (ADR-0043 clause 4). A batch that fails is logged, and what
-/// it held is written with the next one. The batches run until they are stopped.
+/// it held is written with the next one. A batch written later than its interval after it was
+/// due is logged as a warning naming how late it was
+/// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+/// clause 5). The batches run until they are stopped.
 pub fn write_presence(state: Arc<AppState>, held: Held, interval: Duration) -> PresenceBatches {
     let (stop, mut stopped) = tokio::sync::oneshot::channel();
     let task = tokio::spawn(async move {
@@ -645,15 +648,25 @@ pub fn write_presence(state: Arc<AppState>, held: Held, interval: Duration) -> P
         // The first tick is at once, and nothing has reported yet.
         tick.tick().await;
         loop {
-            tokio::select! {
-                _ = tick.tick() => {}
+            // When this batch was due: a tick delayed by the batch before it keeps its deadline.
+            let due = tokio::select! {
+                due = tick.tick() => due,
                 _ = &mut stopped => break,
-            }
+            };
             let Some(holder) = held.borrow().clone() else {
                 continue;
             };
             let state = state.clone();
-            match tokio::task::spawn_blocking(move || state.write_presence(&holder)).await {
+            let written = tokio::task::spawn_blocking(move || state.write_presence(&holder)).await;
+            let late = due.elapsed();
+            if late > interval {
+                warn!(
+                    late_ms = u64::try_from(late.as_millis()).unwrap_or(u64::MAX),
+                    interval_ms = u64::try_from(interval.as_millis()).unwrap_or(u64::MAX),
+                    "a presence batch was written later than its interval after it was due"
+                );
+            }
+            match written {
                 Ok(Ok(written)) => debug!(agents = written, "wrote the presence of the agents"),
                 Ok(Err(e)) => {
                     warn!(error = %e, "could not write the presence of the agents; the next batch writes it")
@@ -1349,6 +1362,118 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5), stopping)
             .await
             .expect("stopped once the batch is written");
+    }
+
+    /// A state whose presence batches go through a [`Gated`] store, holding one Agent to write.
+    fn gated_state(
+        dir: &std::path::Path,
+    ) -> (
+        Arc<crate::fleet::AppState>,
+        tokio::sync::mpsc::UnboundedReceiver<()>,
+        std::sync::mpsc::Sender<()>,
+    ) {
+        let (begun, begins) = tokio::sync::mpsc::unbounded_channel();
+        let (open, gate) = std::sync::mpsc::channel();
+        let state = Arc::new(
+            crate::fleet::AppState::with_stores(
+                Box::new(Gated {
+                    inner: crate::fs::FsAgentStore::open(dir).expect("agents"),
+                    begun,
+                    gate: Mutex::new(gate),
+                }),
+                Box::new(crate::fs::FsConfigBackend::open(dir).expect("configs")),
+                Box::new(crate::clock::SystemClock),
+            )
+            .expect("state"),
+        );
+        state.process(
+            opamp::proto::AgentToServer {
+                instance_uid: InstanceUid::default().as_bytes().to_vec(),
+                sequence_num: 1,
+                ..Default::default()
+            },
+            crate::fleet::Transport::WebSocket,
+            Some(1),
+        );
+        (state, begins, open)
+    }
+
+    /// The lines a plain log writes while `run` runs on this thread.
+    async fn logged_while<F: std::future::Future<Output = ()>>(run: F) -> Vec<String> {
+        let collected = Collected::default();
+        let writer = collected.clone();
+        let _guard = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_writer(move || writer.clone())
+                .with_ansi(false)
+                .finish(),
+        );
+        run.await;
+        collected.lines()
+    }
+
+    /// A presence batch written later than its interval after it was due is logged as a warning
+    /// naming how late it was.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    #[tokio::test]
+    async fn a_presence_batch_written_late_is_logged_with_how_late() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (state, mut begins, open) = gated_state(dir.path());
+        let lines = logged_while(async move {
+            let (_lease, held) = tokio::sync::watch::channel(Some("holder".to_string()));
+            let batches = super::write_presence(state, held, Duration::from_millis(50));
+            tokio::time::timeout(Duration::from_secs(5), begins.recv())
+                .await
+                .expect("a batch begins in time")
+                .expect("a batch begins");
+            // The database takes four intervals to write it.
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            open.send(()).expect("open the gate");
+            // Stopping waits for the batch, and its lateness is logged as it ends.
+            tokio::time::timeout(Duration::from_secs(5), batches.stop())
+                .await
+                .expect("stopped in time");
+        })
+        .await;
+        let late = lines
+            .iter()
+            .find(|line| line.contains("later than its interval after it was due"))
+            .unwrap_or_else(|| panic!("no late batch logged: {lines:?}"));
+        assert!(late.contains("WARN"), "{late}");
+        let late_ms: u64 = late
+            .split("late_ms=")
+            .nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|value| value.parse().ok())
+            .unwrap_or_else(|| panic!("no late_ms in {late}"));
+        assert!(late_ms >= 200, "{late}");
+    }
+
+    /// A presence batch written within its interval logs no lateness.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    #[tokio::test]
+    async fn a_presence_batch_written_in_time_logs_no_lateness() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (state, mut begins, open) = gated_state(dir.path());
+        let lines = logged_while(async move {
+            let (_lease, held) = tokio::sync::watch::channel(Some("holder".to_string()));
+            let batches = super::write_presence(state, held, Duration::from_millis(500));
+            tokio::time::timeout(Duration::from_secs(5), begins.recv())
+                .await
+                .expect("a batch begins in time")
+                .expect("a batch begins");
+            open.send(()).expect("open the gate");
+            tokio::time::timeout(Duration::from_secs(5), batches.stop())
+                .await
+                .expect("stopped in time");
+        })
+        .await;
+        assert!(
+            !lines
+                .iter()
+                .any(|line| line.contains("later than its interval")),
+            "{lines:?}"
+        );
     }
 
     /// What the log writes, collected.

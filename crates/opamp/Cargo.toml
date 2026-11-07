@@ -47,6 +47,8 @@ hyper = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio.workspace = true
+# Reading back what the WebSocket driver logs, such as the delay it drew.
+tracing-subscriber.workspace = true
 tokio-tungstenite.workspace = true
 futures-util.workspace = true
 reqwest.workspace = true

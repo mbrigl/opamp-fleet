@@ -1,6 +1,7 @@
 //! The WebSocket transport: one connection, reconnected with backoff, carrying every Agent of the
 //! session — the *n* over one of ADR-0015.
 
+use std::net::IpAddr;
 use std::time::Duration;
 
 use crate::frame;
@@ -12,7 +13,9 @@ use tokio_tungstenite::tungstenite::http::{HeaderMap, StatusCode};
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::protocol::{CloseFrame, WebSocketConfig};
 use tokio_tungstenite::tungstenite::{Error as WsError, Message};
-use tokio_tungstenite::{connect_async_tls_with_config, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{
+    client_async_tls_with_config, connect_async_tls_with_config, MaybeTlsStream, WebSocketStream,
+};
 use tracing::{info, warn};
 
 pub use tokio_tungstenite::Connector;
@@ -55,6 +58,21 @@ pub async fn run<S: Session, X: StopSignal>(
     session: &mut S,
     stop: &mut X,
 ) -> Result<Ended, String> {
+    run_from(settings, None, session, stop).await
+}
+
+/// [`run`], with every connection opened from `local` where it names an address. A Client names
+/// none; a program that stands in for many hosts on one machine names one per host, so that a
+/// balancer keyed on the peer's address tells them apart.
+///
+/// # Errors
+/// Returns an error when the endpoint is not a valid URL.
+pub async fn run_from<S: Session, X: StopSignal>(
+    settings: &Settings,
+    local: Option<IpAddr>,
+    session: &mut S,
+    stop: &mut X,
+) -> Result<Ended, String> {
     let mut backoff = Backoff::new();
     loop {
         // What to wait before the next attempt: drawn over the first window when a connection
@@ -62,11 +80,12 @@ pub async fn run<S: Session, X: StopSignal>(
         // than a refusal's `Retry-After`.
         let mut lost = false;
         let mut retry_after = None;
-        match connect(
+        match connect_from(
             &settings.endpoint,
             &settings.headers,
             settings.connector.clone(),
             settings.max_message_size,
+            local,
         )
         .await
         {
@@ -81,10 +100,7 @@ pub async fn run<S: Session, X: StopSignal>(
                     }
                     Served::Reconnect => return Ok(Ended::Reconnect),
                     Served::End => return Ok(Ended::End),
-                    Served::ConnectionLost => {
-                        warn!("connection lost; reconnecting");
-                        lost = true;
-                    }
+                    Served::ConnectionLost => lost = true,
                 }
             }
             Err(Connect::Refused(WsError::Http(response)))
@@ -120,6 +136,13 @@ pub async fn run<S: Session, X: StopSignal>(
         }
 
         let delay = next_delay(&mut backoff, lost, retry_after);
+        if lost {
+            // The delay drawn is logged, so that a fleet's spread can be read back.
+            warn!(
+                delay_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+                "connection lost; reconnecting"
+            );
+        }
         tokio::select! {
             () = tokio::time::sleep(delay) => {}
             () = stop.requested() => {
@@ -176,6 +199,20 @@ pub async fn connect(
     connector: Option<Connector>,
     max_message_size: usize,
 ) -> Result<Socket, Connect> {
+    connect_from(endpoint, headers, connector, max_message_size, None).await
+}
+
+/// [`connect`], from the local address `local` where it names one.
+///
+/// # Errors
+/// Returns why the socket could not be opened.
+pub async fn connect_from(
+    endpoint: &str,
+    headers: &HeaderMap,
+    connector: Option<Connector>,
+    max_message_size: usize,
+    local: Option<IpAddr>,
+) -> Result<Socket, Connect> {
     let config = WebSocketConfig::default()
         .max_message_size(Some(max_message_size))
         .max_frame_size(Some(max_message_size));
@@ -183,10 +220,59 @@ pub async fn connect(
         .into_client_request()
         .map_err(|e| Connect::InvalidEndpoint(format!("invalid endpoint {endpoint}: {e}")))?;
     request.headers_mut().extend(headers.clone());
-    connect_async_tls_with_config(request, Some(config), false, connector)
+    let Some(local) = local else {
+        return connect_async_tls_with_config(request, Some(config), false, connector)
+            .await
+            .map(|(socket, _)| socket)
+            .map_err(Connect::Refused);
+    };
+    let uri = request.uri();
+    let host = uri
+        .host()
+        .ok_or_else(|| Connect::InvalidEndpoint(format!("no host in {endpoint}")))?
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_string();
+    let port = uri
+        .port_u16()
+        .unwrap_or(if uri.scheme_str() == Some("wss") {
+            443
+        } else {
+            80
+        });
+    let stream = bound_stream(local, &host, port)
+        .await
+        .map_err(|e| Connect::Refused(WsError::Io(e)))?;
+    client_async_tls_with_config(request, stream, Some(config), connector)
         .await
         .map(|(socket, _)| socket)
         .map_err(Connect::Refused)
+}
+
+/// A TCP connection to `host:port` from `local`, trying each address of `host` of `local`'s family.
+async fn bound_stream(local: IpAddr, host: &str, port: u16) -> std::io::Result<TcpStream> {
+    let mut last = None;
+    for remote in tokio::net::lookup_host((host, port)).await? {
+        if remote.is_ipv4() != local.is_ipv4() {
+            continue;
+        }
+        let socket = if local.is_ipv4() {
+            tokio::net::TcpSocket::new_v4()?
+        } else {
+            tokio::net::TcpSocket::new_v6()?
+        };
+        socket.bind(std::net::SocketAddr::new(local, 0))?;
+        match socket.connect(remote).await {
+            Ok(stream) => return Ok(stream),
+            Err(e) => last = Some(e),
+        }
+    }
+    Err(last.unwrap_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::AddrNotAvailable,
+            format!("no address of {host} in the family of {local}"),
+        )
+    }))
 }
 
 async fn serve<S: Session, X: StopSignal>(
@@ -427,6 +513,118 @@ mod tests {
         fn requested(&mut self) -> impl std::future::Future<Output = ()> + Send {
             std::future::pending()
         }
+    }
+
+    /// A connection opened from a named local address reaches the server from that address
+    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// clause 20).
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    #[tokio::test]
+    async fn a_connection_from_a_named_address_reaches_the_server_from_it() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let server = tokio::spawn(async move {
+            let (stream, peer) = listener.accept().await.expect("accept");
+            let _socket = accept_async(stream).await.expect("handshake");
+            peer
+        });
+        let local: IpAddr = "127.0.0.7".parse().expect("address");
+        let _socket = connect_from(
+            &format!("ws://localhost:{}/v1/opamp", addr.port()),
+            &HeaderMap::new(),
+            None,
+            4096,
+            Some(local),
+        )
+        .await
+        .expect("connect");
+        let peer = tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .expect("the server accepts in time")
+            .expect("the server task");
+        assert_eq!(peer.ip(), local, "the server sees the named address");
+    }
+
+    /// What the tracing of one test writes, kept to be read back.
+    #[derive(Clone, Default)]
+    struct Written(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Written {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("log").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A lost connection logs the delay it drew, and the next connection comes no earlier
+    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// clause 20).
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    #[tokio::test]
+    async fn a_lost_connection_logs_the_delay_it_drew_and_waits_it() {
+        let written = Written::default();
+        let log = written.clone();
+        let _guard = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_writer(move || log.clone())
+                .with_ansi(false)
+                .finish(),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        // The first connection is closed once its snapshot arrived; the second is when the
+        // Agent came back.
+        let server = async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let mut socket = accept_async(stream).await.expect("handshake");
+            let _ = socket.next().await;
+            let _ = socket.close(None).await;
+            drop(socket);
+            let lost = std::time::Instant::now();
+            let (stream, _) = listener.accept().await.expect("accept again");
+            let back = lost.elapsed();
+            drop(stream);
+            back
+        };
+        let settings = Settings {
+            endpoint: format!("ws://{addr}/v1/opamp"),
+            headers: HeaderMap::new(),
+            connector: None,
+            max_message_size: 4096,
+            heartbeat: None,
+        };
+        let (mut quiet, mut never) = (Quiet, Never);
+        let back = tokio::time::timeout(Backoff::AFTER_LOSS + Duration::from_secs(10), async {
+            tokio::select! {
+                back = server => back,
+                _ = run(&settings, &mut quiet, &mut never) => panic!("the run ended"),
+            }
+        })
+        .await
+        .expect("the Agent comes back within the window");
+        let text = String::from_utf8(written.0.lock().expect("log").clone()).expect("utf-8");
+        let line = text
+            .lines()
+            .find(|line| line.contains("connection lost; reconnecting"))
+            .unwrap_or_else(|| panic!("no reconnect line in {text}"));
+        let drawn: u64 = line
+            .split("delay_ms=")
+            .nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|value| value.parse().ok())
+            .unwrap_or_else(|| panic!("no delay_ms in {line}"));
+        assert!(drawn < 30_000, "drawn over [0, 30 s): {drawn}");
+        assert!(
+            back >= Duration::from_millis(drawn),
+            "back after {back:?}, before the {drawn} ms drawn"
+        );
     }
 
     /// The specification: a `ServerToAgent` past the receive limit is malformed — the Agent refuses

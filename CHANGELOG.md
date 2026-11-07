@@ -49,6 +49,20 @@ once its tag exists.
   **What to do:** nothing for the step from 0.8.0. To skip a release, stop every instance of the
   older one first.
 
+- **The `opamp` crate's WebSocket driver may connect from a named address, and logs the delay it
+  drew after a lost connection**
+  ([ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side](docs/adr/draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+  clause 20). `ws::run_from` and `ws::connect_from` take a local address; `ws::run` and
+  `ws::connect` are unchanged and name none. The line *connection lost; reconnecting* carries
+  `delay_ms`, the wait before the first attempt.
+  **What to do:** nothing.
+
+- **A presence batch written late is logged**
+  ([ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side](docs/adr/draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+  clause 5). On PostgreSQL an instance warns, with `late_ms`, when a batch is written later than
+  `presence_interval_secs` after it was due.
+  **What to do:** nothing; the warning says the database is not keeping up with the fleet.
+
 ### Fixed
 
 - **An approval records its certificate only with its decision**
