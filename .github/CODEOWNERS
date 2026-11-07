@@ -1,7 +1,7 @@
 # Code owners for the two artifacts only a human decides: the specification, and the decision
 # record — an ADR's Status line included. The rules themselves are stated in
 # AGENTS.md, section 3; the review this file drives is a repository setting, listed under
-# "Repository settings" in ../README.md, and until that setting is enabled this file changes
+# "Repository settings" in ../CONTRIBUTING.md, and until that setting is enabled this file changes
 # nothing.
 /docs/SPECIFICATION.md @mbrigl
 /docs/adr/ @mbrigl

@@ -15,7 +15,7 @@
 # main. Without origin/main, a repository that has no remote's main yet, nothing is decided.
 # A refused fast-forward has already brought the index and the working tree to its target while
 # main stays: from a clean tree, 'git restore --source=HEAD --staged --worktree .' takes them
-# back. Enabled as the README's "Git hooks" says; it needs git 2.28 or later.
+# back. Enabled as the "Git hooks" of CONTRIBUTING.md says; it needs git 2.28 or later.
 #
 # Bypassable by running git without the hooks ('git -c core.hooksPath=/dev/null'), or by moving
 # origin/main itself ('git update-ref refs/remotes/origin/main'); AGENTS.md, section 6 says who

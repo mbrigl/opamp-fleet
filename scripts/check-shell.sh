@@ -22,6 +22,12 @@
 # (`sed -e S -i f`), and it reads text, so it flags the words inside a quoted string or after a
 # trailing comment; spell those differently.
 #
+# It refuses a pipe into grep with -q (or --quiet, --silent) as well. Under pipefail, grep exits
+# at its first match, and a producer that writes on after that dies of SIGPIPE: the pipeline fails
+# and reads as no match, but only when the scheduler runs grep between two writes, so under load.
+# A here-string, a variable, or grep -c reads the input whole. The same limits as for sed apply:
+# comment lines are not read, the rule reads text, and a pipe on the line before is not seen.
+#
 # Usage:
 #     scripts/check-shell.sh [repository root]        (or: bash scripts/check-shell.sh)
 # The root defaults to this repository; scripts/test-check-shell.sh passes fixtures.
@@ -59,12 +65,14 @@ fi
 
 # GNU-only: sed -i, with or without a suffix argument after it, and sed --in-place.
 IN_PLACE='(^|[;&|(`[:space:]])sed([[:space:]]+-[a-zA-Z]+)*[[:space:]]+(-[a-zA-Z]*i([[:space:]]|$)|--in-place)'
+# A pipe, not '||', into grep with -q among its options, or --quiet or --silent.
+QUIET_PIPE='(^|[^|])[|][[:space:]]*grep([[:space:]]+-[a-zA-Z]+)*[[:space:]]+(-[a-zA-Z]*q|--quiet|--silent)'
 
 failed=0
 if ((have_shellcheck)); then
   shellcheck "${scripts[@]}" || failed=1
 else
-  echo "shellcheck is not installed — ShellCheck skipped (CI enforces it); the sed rule runs."
+  echo "shellcheck is not installed — ShellCheck skipped (CI enforces it); the sed and grep rules run."
   echo "Install it to run locally: https://www.shellcheck.net"
 fi
 
@@ -76,6 +84,13 @@ for f in "${scripts[@]}"; do
     echo "    $text"
     failed=1
   done < <(grep -nE "$IN_PLACE" "$f" | grep -vE '^[0-9]+:[[:space:]]*#')
+  while IFS=: read -r line text; do
+    echo "${f#"$ROOT"/}:$line: a pipe into grep -q fails under pipefail when grep exits at its" \
+      "match before the producer has written its last line; read the input whole instead:" \
+      "grep -q PATTERN <<< \"\$(PRODUCER)\", or count with grep -c"
+    echo "    $text"
+    failed=1
+  done < <(grep -nE "$QUIET_PIPE" "$f" | grep -vE '^[0-9]+:[[:space:]]*#')
 done
 
 if ((failed)); then

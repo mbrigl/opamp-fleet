@@ -3,16 +3,16 @@
 # Self-test of scripts/check-docs.sh. Verifies: ADR-0001 ADR-0003 ADR-0005
 #
 # Each case builds a throwaway git repository under a temporary directory — a rule file with
-# numbered sections, a README with a Project Layout block, the required-checks markers, and the
-# Template release line, a workflow and a local runner listing the same check, an ADR record with
-# its index, and one skill with its pointer — runs the check against it, and asserts the exit
-# code and, for a failing case, the message that names the violation. The baseline passes; every
-# other case breaks one thing. The skill pointer check (check 11 of check-docs.sh) is covered in
-# every direction; of the older checks, one case each pins the message a maintainer would meet
-# first — check 9 gets two more for the toolchain job a derived project adds, checks 12 and 13
-# (inherited ADRs decided and the template's identity replaced once the setup file is gone) have
-# a case for each of their conditions, and check 14 (the template release named) one for each
-# form the line may take.
+# numbered sections, a README with the Template release line, a CONTRIBUTING.md with a Project
+# Layout block and the required-checks markers, a workflow and a local runner listing the same
+# check, an ADR record with its index, and one skill with its pointer — runs the check against it,
+# and asserts the exit code and, for a failing case, the message that names the violation. The
+# baseline passes; every other case breaks one thing. The skill pointer check (check 11 of
+# check-docs.sh) is covered in every direction; of the older checks, one case each pins the message
+# a maintainer would meet first — check 9 gets two more for the toolchain job a derived project
+# adds, checks 12 and 13 (inherited ADRs decided and the template's identity replaced once the setup
+# file is gone) have a case for each of their conditions, and check 14 (the template release named)
+# one for each form the line may take.
 #
 # Section references and ADR numbers inside fixtures are assembled, never written literally, so
 # that check-docs.sh does not read this script's own fixtures as references into this repository.
@@ -34,14 +34,14 @@ sed_in() {
   sed "$2" "$1" > "$1.tmp" && mv "$1.tmp" "$1"
 }
 
-# layout <dir> <path...> — name each path in the Project Layout block of the fixture's README,
-# for a case that adds a top-level file for another reason (check 10).
+# layout <dir> <path...> — name each path in the Project Layout block of the fixture's
+# CONTRIBUTING.md, for a case that adds a top-level file for another reason (check 10).
 layout() {
   local dir="$1"; shift
   awk -v add="$(printf '%s\n' "$@")" '
     { print }
     $1 == "AGENTS.md" && !done { n = split(add, p, "\n"); for (i = 1; i <= n; i++) if (p[i] != "") print p[i] "  # added"; done = 1 }
-  ' "$dir/README.md" > "$dir/README.md.tmp" && mv "$dir/README.md.tmp" "$dir/README.md"
+  ' "$dir/CONTRIBUTING.md" > "$dir/CONTRIBUTING.md.tmp" && mv "$dir/CONTRIBUTING.md.tmp" "$dir/CONTRIBUTING.md"
 }
 
 # insert_before <file> <line prefix> <text> — insert text, where "\n" starts a new line, before
@@ -101,10 +101,19 @@ repo() {
   {
     echo "# Fixture"
     echo
+    echo "## Template"
+    echo
+    echo "- **Template release:** unreleased"
+  } > "$dir/README.md"
+
+  {
+    echo "# Contributing"
+    echo
     echo "## Project Layout"
     echo
     echo '```'
-    echo "README.md             # this file"
+    echo "README.md             # for those who use it"
+    echo "CONTRIBUTING.md       # this file"
     echo "AGENTS.md             # the rule file"
     echo "docs/adr/             # decisions"
     echo "scripts/              # the checks"
@@ -119,11 +128,7 @@ repo() {
     # shellcheck disable=SC2016  # the backticks are literal Markdown, not a command substitution
     echo '`docs`'
     echo "<!-- required-checks end -->"
-    echo
-    echo "## Template"
-    echo
-    echo "- **Template release:** unreleased"
-  } > "$dir/README.md"
+  } > "$dir/CONTRIBUTING.md"
 
   {
     echo "jobs:"
@@ -214,7 +219,7 @@ expect fail "skills only in the pointer directory, none for the other agents" "$
 
 d="$(repo no-skills)"
 rm -r "$d/.agents" "$d/.claude"
-sed_in "$d/README.md" '/^\.agents\/skills\/ /d; /^\.claude\/skills\/ /d'
+sed_in "$d/CONTRIBUTING.md" '/^\.agents\/skills\/ /d; /^\.claude\/skills\/ /d'
 expect pass "a repository without skills has nothing to check" "$d"
 
 # --- cases: inherited ADRs after setup (check 12) ---------------------------------------
@@ -448,6 +453,11 @@ expect fail "a bold label outside an ADR header is prose" "$d" "columns — wrap
 
 # release_line <dir> <text> — replace the baseline's Template release line with the given text.
 release_line() { sed_in "$1/README.md" "s/^- \*\*Template release:\*\* unreleased$/$2/"; }
+
+d="$(repo release-no-readme)"
+rm "$d/README.md"
+sed_in "$d/CONTRIBUTING.md" '/^README\.md /d'
+expect fail "no README to carry the Template release line" "$d" "README.md: not found"
 
 d="$(repo release-tag)"
 release_line "$d" '- **Template release:** v1.4.0 of the template ([tags](https:\/\/example.invalid\/tags)).'
@@ -718,7 +728,7 @@ d="$(repo other-workflow-required)"
 printf 'on: [pull_request]\njobs:\n  again:\n    steps:\n      - run: bash scripts/check-docs.sh\n' \
   > "$d/.github/workflows/again.yml"
 # shellcheck disable=SC2016  # the backticks are literal Markdown, not a command substitution
-sed_in "$d/README.md" 's|^`docs`$|`docs`, `again`|'
+sed_in "$d/CONTRIBUTING.md" 's|^`docs`$|`docs`, `again`|'
 expect fail "a required check that is a job of another workflow than checks.yml" "$d" \
   "required check 'again' is not a job of .github/workflows/checks.yml"
 d="$(repo other-workflow-inline)"
@@ -741,7 +751,7 @@ build_job() {
   [[ "$local_gate" == "local" ]] \
     && echo 'run "Build, test, lint" scripts/check-build.sh' >> "$dir/scripts/check-all.sh"
   # shellcheck disable=SC2016  # the backticks are literal Markdown, not a command substitution
-  sed_in "$dir/README.md" 's|^`docs`$|`docs`, `build`|'
+  sed_in "$dir/CONTRIBUTING.md" 's|^`docs`$|`docs`, `build`|'
 }
 
 d="$(repo build-job)"
@@ -790,7 +800,7 @@ expect fail "a script a workflow that is no gate runs, and the local runner does
   "does not run 'scripts/sign.sh', which a workflow runs"
 
 # matrix_job <dir> <required names> — a toolchain job with a matrix in the workflow and the
-# local runner, and the README's required checks extended by the names given.
+# local runner, and the required checks of CONTRIBUTING.md extended by the names given.
 # With 'flow', the strategy is written in flow style; with 'outputs', the job computes a matrix
 # as an output and has none of its own.
 matrix_job() {
@@ -807,7 +817,7 @@ matrix_job() {
   } >> "$dir/.github/workflows/checks.yml"
   echo 'echo build' > "$dir/scripts/check-build.sh"
   echo 'run "Build, test, lint" scripts/check-build.sh' >> "$dir/scripts/check-all.sh"
-  sed_in "$dir/README.md" "s|^\`docs\`\$|\`docs\`, $names|"
+  sed_in "$dir/CONTRIBUTING.md" "s|^\`docs\`\$|\`docs\`, $names|"
 }
 
 # Verifies: ADR-0002
@@ -831,12 +841,12 @@ expect pass "a job that computes a matrix as an output, named by its name" "$d"
 d="$(repo matrix-none)"
 build_job "$d" "bash scripts/check-build.sh" local
 # shellcheck disable=SC2016  # the backticks are literal Markdown, not a command substitution
-sed_in "$d/README.md" 's|`build`|`build (ubuntu-latest)`|'
+sed_in "$d/CONTRIBUTING.md" 's|`build`|`build (ubuntu-latest)`|'
 expect fail "a check run named for a job without a matrix" "$d" \
   "names a check run of 'build', which has no matrix"
 
 d="$(repo layout-stale)"
-sed_in "$d/README.md" 's|^docs/adr/ |docs/gone/ |'
+sed_in "$d/CONTRIBUTING.md" 's|^docs/adr/ |docs/gone/ |'
 expect fail "a Project Layout entry that no longer exists" "$d" "is not a directory of this repository"
 
 # Verifies: ADR-0001

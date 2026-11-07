@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Takes up a branch whose pull request into main has merged, and drops it: step 8 of the
-# README's Integration branches.
+# Integration branches of CONTRIBUTING.md.
 #
 #   1. Fetches origin, pruning, and refuses unless the branch's head is one origin/main has, so
 #      that dropping it loses no commit.

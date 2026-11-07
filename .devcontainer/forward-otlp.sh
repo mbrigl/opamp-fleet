@@ -30,7 +30,7 @@ set -euo pipefail
 HOST="${OTLP_FORWARD_HOST:-host.docker.internal}"
 
 for port in 4317 4318 9100 5432; do
-  if ss -Hltn "sport = :$port" | grep -q .; then
+  if grep -q . <<< "$(ss -Hltn "sport = :$port")"; then
     echo "forward-otlp: 127.0.0.1:$port is already listening; left as it is"
     continue
   fi

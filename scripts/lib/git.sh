@@ -32,3 +32,32 @@ enter_root() {
     exit 2
   fi
 }
+
+# resolve_change <name> <base> [head] — the change a sensor reads, from the base and head it was
+# given. Sets CHANGE_HEAD to the head, or HEAD when none is given, and CHANGE_WORKTREE to 1 when
+# none is given, for a change that ends in the working tree, else 0. Sets CHANGE_BASE to the base,
+# or the merge base of the head with main when none is given; a base of zeros, which a push event
+# reports for a new branch, counts as none. With no base and no main it prints that there is
+# nothing to compare and returns 1, for the sensor to end as it ends; a base or head that does
+# not resolve to a commit exits 2. <name> opens each message.
+# shellcheck disable=SC2034 # CHANGE_* are the caller's
+resolve_change() {
+  local name="$1" ref
+  CHANGE_BASE="${2:-}" CHANGE_HEAD="${3:-}" CHANGE_WORKTREE=0
+  [[ -n "$CHANGE_HEAD" ]] || { CHANGE_HEAD=HEAD; CHANGE_WORKTREE=1; }
+  [[ "$CHANGE_BASE" =~ ^0+$ ]] && CHANGE_BASE=""
+  [[ -n "$CHANGE_BASE" ]] || CHANGE_BASE="$(main_merge_base "$CHANGE_HEAD")"
+  if [[ -z "$CHANGE_BASE" ]]; then
+    echo "$name: nothing to compare — no base given and no main to compare with."
+    return 1
+  fi
+  for ref in "$CHANGE_BASE" "$CHANGE_HEAD"; do
+    git rev-parse --verify -q "$ref^{commit}" >/dev/null \
+      || { echo "$name: '$ref' does not resolve to a commit." >&2; exit 2; }
+  done
+}
+
+# change_file <head> <path> — the file as the change has it: in the working tree when <head> is
+# empty, else at the commit <head> names. Fails as cat or git show fails, for a file the change
+# does not have.
+change_file() { if [[ -z "$1" ]]; then cat -- "$2"; else git show "$1:$2"; fi; }

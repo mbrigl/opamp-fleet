@@ -3,8 +3,8 @@
 
   // Pinned to a Debian *release*, not the floating `:debian` tag.
   "image": "mcr.microsoft.com/devcontainers/base:debian12",
-  "workspaceFolder": "/workspace",
-  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind",
+  // No workspaceFolder or workspaceMount: the default, /workspaces/<directory name>, keeps each
+  // project under a path of its own, and an agent keys its memory by the path (ADR-0004).
 
   "remoteUser": "vscode",
   "containerEnv": {
@@ -29,7 +29,7 @@
 
   // DevContainer Features layered on top of the base image. The container intentionally has NO
   // access to the host Docker daemon (no socket mount) — see ADR-0004. Manage the host's containers
-  // from a host-side VS Code extension instead (README → "Dev Container").
+  // from a host-side VS Code extension instead (CONTRIBUTING.md → "Dev Container").
   "features": {
     // GitHub CLI (`gh`) — used by the coding agent for GitHub operations and as the git
     // credential helper. A push and every gh action wait for a human instruction
@@ -61,7 +61,7 @@
   // Runs inside the container on every start, so the settings are set again should a session
   // have changed them: the repository's git hooks under .githooks/ and the merge settings they
   // rely on. What each refuses, and the same commands for a clone outside the container, are under
-  // "Git hooks" in the README. The development observability stack runs on the host,
+  // "Git hooks" in CONTRIBUTING.md. The development observability stack runs on the host,
   // apart from this container (observability/compose.yaml); this puts its Collector on the
   // container's loopback, 127.0.0.1:4317 and :4318, because the Client sends own telemetry in
   // plaintext to a loopback IP literal alone (ADR-0016), the stack's rustfs on :9100, the S3

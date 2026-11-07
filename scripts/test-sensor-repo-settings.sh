@@ -5,7 +5,8 @@
 # The sensor reads GitHub through gh; here a stand-in named by GH answers instead, with the lines
 # gh's --jq would print for each endpoint, kept in a fixture directory. Each case writes those
 # answers, runs the sensor, and asserts the exit code and a line the reviewer would read. The
-# settings README.md lists report nothing; every other case is one setting that differs. What
+# settings CONTRIBUTING.md lists report nothing, also where the list of checks is longer than a pipe
+# holds; every other case is one setting that differs. What
 # the --jq expressions make of GitHub's JSON is not run here, since it needs gh; that is review.
 #
 # Verifies: ADR-0002
@@ -38,7 +39,7 @@ chmod +x "$fake"
 # shellcheck disable=SC2016  # the backticks are literal Markdown, not a command substitution
 CHECKS='`docs`, `traceability`, and `shell`'
 T=$'\t'
-# The lines the sensor's --jq prints for the rules of one ruleset that matches the README.
+# The lines the sensor's --jq prints for the rules of one ruleset that matches CONTRIBUTING.md.
 RULES="pull_request${T}merge${T}true
 strict${T}true
 check${T}docs
@@ -47,14 +48,14 @@ check${T}traceability
 non_fast_forward
 deletion"
 
-# repo <name> — a fixture whose README names three required checks and whose answers match it:
-# the rules above, push protection enabled, private vulnerability reporting on. Printed as its
+# repo <name> — a fixture whose CONTRIBUTING.md names three required checks and whose answers match
+# it: the rules above, push protection enabled, private vulnerability reporting on. Printed as its
 # path; a case edits the answers under <path>/fix.
 repo() {
   local dir="$work/$1"
   mkdir -p "$dir/fix"
   printf '## Repository settings\n<!-- required-checks begin -->\n%s\n<!-- required-checks end -->\n' \
-    "$CHECKS" > "$dir/README.md"
+    "$CHECKS" > "$dir/CONTRIBUTING.md"
   echo "owner/name" > "$dir/fix/repo"
   echo "$RULES" > "$dir/fix/repos_owner_name_rules_branches_main"
   echo "enabled" > "$dir/fix/repos_owner_name"
@@ -83,23 +84,38 @@ expect() {
 }
 
 d="$(repo match)"
-expect "settings as the README lists them report nothing" "$d" 0 "nothing to report"
+expect "settings as CONTRIBUTING.md lists them report nothing" "$d" 0 "nothing to report"
 
-# A job with a matrix, named in the README by its check runs: names with a space compare whole.
+# A job with a matrix, named in CONTRIBUTING.md by its check runs: names with a space compare whole.
 d="$(repo matrix)"
 # shellcheck disable=SC2016  # the backticks are literal Markdown, not a command substitution
 printf '<!-- required-checks begin -->\n%s, `build (ubuntu-latest)`, `build (macos-latest)`\n<!-- required-checks end -->\n' \
-  "$CHECKS" > "$d/README.md"
+  "$CHECKS" > "$d/CONTRIBUTING.md"
 answer "$d" repos/owner/name/rules/branches/main \
   "$RULES"$'\n'"check${T}build (macos-latest)"$'\n'"check${T}build (ubuntu-latest)"
-expect "the check runs of a matrix job, as the README names them, report nothing" "$d" 0 \
+expect "the check runs of a matrix job, as CONTRIBUTING.md names them, report nothing" "$d" 0 \
   "nothing to report"
 d="$(repo matrix-missing)"
 # shellcheck disable=SC2016  # the backticks are literal Markdown, not a command substitution
 printf '<!-- required-checks begin -->\n%s, `build (ubuntu-latest)`\n<!-- required-checks end -->\n' \
-  "$CHECKS" > "$d/README.md"
-expect "a check run the README names and the ruleset lacks" "$d" 0 \
-  "main: the required checks lack 'build (ubuntu-latest)', which README names"
+  "$CHECKS" > "$d/CONTRIBUTING.md"
+expect "a check run CONTRIBUTING.md names and the ruleset lacks" "$d" 0 \
+  "main: the required checks lack 'build (ubuntu-latest)', which CONTRIBUTING.md names"
+
+# A list of checks longer than a pipe holds, its first name the one sought: a grep that exits at
+# that name before the list is written cuts the writer off, and the name reads as missing.
+# Each name stays below the size of one argument, since a name is grep's pattern.
+pad="$(printf '%*s' 50000 '' | tr ' ' z)"
+named="" rules="$RULES"
+for c in a b c d; do
+  named+=", \`z$c$pad\`"
+  rules+=$'\n'"check${T}z$c$pad"
+done
+d="$(repo long-list)"
+printf '<!-- required-checks begin -->\n%s%s\n<!-- required-checks end -->\n' \
+  "$CHECKS" "$named" > "$d/CONTRIBUTING.md"
+answer "$d" repos/owner/name/rules/branches/main "$rules"
+expect "a list of checks longer than a pipe holds is read whole" "$d" 0 "nothing to report"
 
 d="$(repo no-ruleset)"
 answer "$d" repos/owner/name/rules/branches/main ""
@@ -124,12 +140,12 @@ expect "Code Owners review off" "$d" 0 "the Code Owners review is not required"
 
 d="$(repo no-checks)"
 answer "$d" repos/owner/name/rules/branches/main "$(grep -vE '^(strict|check)' <<< "$RULES")"
-expect "no required status checks" "$d" 0 "no status checks are required — README names: docs shell traceability"
+expect "no required status checks" "$d" 0 "no status checks are required — CONTRIBUTING.md names: docs shell traceability"
 
 d="$(repo checks-differ)"
 answer "$d" repos/owner/name/rules/branches/main "${RULES/check${T}traceability/check${T}build}"
-expect "a check README names is not required" "$d" 0 "the required checks lack 'traceability'"
-expect "a required check README does not name" "$d" 0 "the required check 'build' is not among those"
+expect "a check CONTRIBUTING.md names is not required" "$d" 0 "the required checks lack 'traceability'"
+expect "a required check CONTRIBUTING.md does not name" "$d" 0 "the required check 'build' is not among those"
 
 d="$(repo check-with-space)"
 answer "$d" repos/owner/name/rules/branches/main "$RULES
@@ -154,7 +170,7 @@ check${T}shell
 check${T}traceability
 non_fast_forward
 deletion"
-expect "two rulesets whose strictest rules match the README report nothing" "$d" 0 "nothing to report"
+expect "two rulesets whose strictest rules match CONTRIBUTING.md report nothing" "$d" 0 "nothing to report"
 d="$(repo two-rulesets-loose)"
 answer "$d" repos/owner/name/rules/branches/main "pull_request${T}merge,squash${T}false
 pull_request${T}merge,rebase,squash${T}false

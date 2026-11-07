@@ -12,10 +12,11 @@
 #      (.agents/skills/propose-adr/concepts/toolchain.md), and a heuristic: a
 #      deleted 'manifest.json' is reported too, and the reviewer sees at once that it is none.
 #      A deletion, or a rename to a path that is no longer one, is a finding.
-#   2. Markers: an added line, in any file, that carries a skip or focus marker of one of those
-#      toolchains (MARKERS below). A focus marker ('it.only', 'fdescribe') runs one test and
-#      skips every other. A marker on a deleted line is not read: removing a skip is not a
-#      weakening.
+#   2. Markers: an added line that carries a skip or focus marker of one of those toolchains,
+#      read only in the files of that toolchain, by extension (MARKERS below): a Rust method
+#      named 'fit(' is no focused JavaScript test. A focus marker ('it.only', 'fdescribe') runs
+#      one test and skips every other. A marker on a deleted line is not read: removing a skip is
+#      not a weakening.
 #
 # Pure bash + git + awk. Usage:
 #     scripts/sensor-tests-kept.sh [--root <dir>] [base [head]]
@@ -34,21 +35,20 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib/git.sh"
 enter_root "Tests kept sensor" "${BASH_SOURCE[0]}" "$@"
 shift "$ROOT_TAKEN"
 
-MARKERS='@Disabled|@Ignore|enabled *= *false|t\.Skip[a-zA-Z]*\(|pytest\.mark\.skip|pytest\.skip\(|unittest\.skip|#\[ignore\]|(^|[^A-Za-z0-9_.])(it|test|describe|context)\.(skip|only)\(|(^|[^A-Za-z0-9_])(xit|xtest|xdescribe|fit|fdescribe|ftest)\(|Skip *= *"'
+# MARKERS — per toolchain of the catalogue entry Toolchain, the extensions of its files and the
+# skip and focus markers read in them, one 'extensions<TAB>regex' a line.
+MARKERS="$(cat <<'TABLE'
+java kt kts groovy gradle scala	@Disabled|@Ignore|enabled *= *false
+js jsx mjs cjs ts tsx mts cts vue svelte	(^|[^A-Za-z0-9_.])(it|test|describe|context)\.(skip|only)\(|(^|[^A-Za-z0-9_.])(xit|xtest|xdescribe|fit|fdescribe|ftest)\(
+py	pytest\.mark\.skip|pytest\.skip\(|unittest\.skip
+go	t\.Skip[a-zA-Z]*\(
+rs	#\[ignore\]
+cs fs vb	Skip *= *"
+TABLE
+)"
 
-base="${1:-}"
-head="${2:-HEAD}"
-
-[[ "$base" =~ ^0+$ ]] && base=""
-[[ -n "$base" ]] || base="$(main_merge_base "$head")"
-if [[ -z "$base" ]]; then
-  echo "Tests kept sensor: nothing to compare — no base given and no main to compare with."
-  exit 0
-fi
-for ref in "$base" "$head"; do
-  git rev-parse --verify -q "$ref^{commit}" >/dev/null \
-    || { echo "Tests kept sensor: '$ref' does not resolve to a commit." >&2; exit 2; }
-done
+resolve_change "Tests kept sensor" "${1:-}" "${2:-HEAD}" || exit 0
+base="$CHANGE_BASE" head="$CHANGE_HEAD"
 if [[ "$(git rev-parse "$base^{commit}")" == "$(git rev-parse "$head^{commit}")" ]]; then
   echo "Tests kept sensor: nothing to compare — base and head are the same commit."
   exit 0
@@ -75,13 +75,28 @@ done < <(git diff --name-status -M --diff-filter=DR "$base" "$head")
 # and are left out.
 while IFS= read -r hit; do
   findings+=("skip or focus marker added: $hit")
-done < <(git diff -U0 --no-color "$base" "$head" -- . \
+done < <(git -c core.quotePath=false diff -U0 --no-color "$base" "$head" -- . \
            ':(exclude)scripts/sensor-tests-kept.sh' ':(exclude)scripts/test-sensor-tests-kept.sh' \
            ':(exclude).agents/skills/propose-adr/concepts/toolchain.md' \
          | MARKERS="$MARKERS" awk '
-             /^\+\+\+ / { file = substr($0, 7); next }
+             BEGIN {
+               n = split(ENVIRON["MARKERS"], rows, "\n")
+               for (i = 1; i <= n; i++) {
+                 split(rows[i], cols, "\t")
+                 m = split(cols[1], exts, " ")
+                 for (j = 1; j <= m; j++) markers[exts[j]] = cols[2]
+               }
+             }
+             /^\+\+\+ / {
+               # A path with a space ends in a tab, which is no part of it.
+               file = substr($0, 7); sub(/\t$/, "", file)
+               ext = tolower(file); sub(/^.*\//, "", ext)
+               ext = (ext ~ /\./) ? ext : ""; sub(/^.*\./, "", ext)
+               re = (ext in markers) ? markers[ext] : ""
+               next
+             }
              /^@@/      { match($0, /\+[0-9]+/); line = substr($0, RSTART + 1, RLENGTH - 1) + 0; next }
-             /^\+/      { if ($0 ~ ENVIRON["MARKERS"]) printf "%s:%d: %s\n", file, line, substr($0, 2); line++ }
+             /^\+/      { if (re != "" && $0 ~ re) printf "%s:%d: %s\n", file, line, substr($0, 2); line++ }
            ')
 
 short_base="$(git rev-parse --short "$base")"

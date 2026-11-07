@@ -9,9 +9,9 @@
 > **Kept current by:** Markus Brigl. A document everyone may edit and nobody owns is
 > the one that goes stale.
 >
-> **Last design revision:** 2026-11-06, due after 20 changes. The revision that ran moves the
-> date; the number is this project's to set; a sensor counts the changes outside `docs/` since
-> the commit that set the date and says when the next is due
+> **Last design revision:** 2026-11-06, due after 20 changes. The revision that took the count
+> moves the date; the number is this project's to set; a sensor counts the changes outside
+> `docs/` since the commit that set the date and says when the next is due
 > ([ADR-0006](adr/0006-feature-layer.md)).
 
 ## Context

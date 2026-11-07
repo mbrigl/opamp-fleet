@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Self-test of the git hooks under .githooks/: every refusal and every passage the table under
-# "Git hooks" in the README lists (AGENTS.md, sections 5 and 6).
+# "Git hooks" in CONTRIBUTING.md lists (AGENTS.md, sections 5 and 6).
 #
 # Each case builds a throwaway repository under a temporary directory with core.hooksPath pointing
 # at this repository's .githooks/, runs a real 'git commit' or 'git push' in it — the push goes to
@@ -117,7 +117,7 @@ g "$d" add docs && g "$d" commit -q -m draft
 out="$(g "$d" push -q origin feature 2>&1)"; rc=$?
 check "a push that carries a draft ADR passes" test "$rc" -eq 0
 check "and counts the drafts and names the script that numbers them" \
-  grep -qF "feature carries 1 draft ADR(s); they take their numbers on the branch of the pull request into main, by scripts/ready-for-main.sh (README, Integration branches, step 7)." <<< "$out"
+  grep -qF "feature carries 1 draft ADR(s); they take their numbers on the branch of the pull request into main, by scripts/ready-for-main.sh (CONTRIBUTING.md, Integration branches, step 7)." <<< "$out"
 
 # A tree the checks passed on passes again without them: the committed check script reads its
 # verdict from outside the tree, so the same tree can turn red. A rework that keeps the tree, an
@@ -275,8 +275,8 @@ edit_index() {
 
 # indexed <name> <rule on feature> <rule on feat/x> <line below the table on feat/x> [driver] — a
 # fixture whose ADR index holds a rule, a row, and a line right below the table, with the
-# repository's .gitattributes and green checks; 'feature' and 'feat/x' each append a row and set
-# the rule as told, and feat/x the line below. The merge driver is configured as the README says,
+# repository's .gitattributes and green checks; 'feature' and 'feat/x' each append a row and set the
+# rule as told, and feat/x the line below. The merge driver is configured as CONTRIBUTING.md says,
 # unless the fifth argument is 'none'.
 indexed() {
   local d index

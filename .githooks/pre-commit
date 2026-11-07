@@ -9,7 +9,8 @@
 # human alike. A merge that stops on a conflict is concluded by 'git commit', which runs this hook
 # and not pre-merge-commit. Its resolution is the one part of a merge written by hand, so this hook
 # runs all of scripts/check-all.sh on it, with --changed as before a push, where pre-merge-commit
-# runs only the documentation check on a clean merge. Enabled as the README's "Git hooks" says.
+# runs only the documentation check on a clean merge. Enabled as the "Git hooks" of CONTRIBUTING.md
+# says.
 #
 # Bypassable with 'git commit --no-verify'; AGENTS.md, section 6 says who may.
 # scripts/test-git-hooks.sh exercises this hook.

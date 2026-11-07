@@ -2,14 +2,21 @@
 #
 # Runs every consistency check this repository enforces, in one command.
 #
-# AGENTS.md §5 requires these checks to pass before pushing. This script is the local equivalent
-# of .github/workflows/checks.yml; check 9 of check-docs.sh holds the two lists, the required
-# status checks named in README.md, and the scripts under scripts/ together. A script that runs
-# on a human's instruction only is named on an '# On instruction:' line below, and a workflow
-# that publishes rather than checks, such as a release, on a '# Not a gate:' line.
+# AGENTS.md §5 requires these checks to pass before pushing. This script is the local equivalent of
+# .github/workflows/checks.yml; check 9 of check-docs.sh holds the two lists, the required status
+# checks named in CONTRIBUTING.md, and the scripts under scripts/ together. A script that runs on a
+# human's instruction only is named on an '# On instruction:' line below, and a workflow that
+# publishes rather than checks, such as a release, on a '# Not a gate:' line.
 #
 # Every check runs even after an earlier one fails, so a single run reports everything that is
 # wrong instead of the first thing. The exit code is what a pre-push decision is made on.
+#
+# A check or self-test that passes shows its last line, its summary, and any line that says it
+# skipped something, such as the shell lint without ShellCheck. A sensor shows its first line, the
+# headline that says what it found, and how many more lines its report has, blank ones not
+# counted. One that fails shows all it printed. A session reads every line a run prints, so a
+# green run costs a line a check. With --verbose every check and sensor shows all it printed; the
+# reviewer is handed that output.
 #
 # With --changed, a self-test (scripts/test-*.sh) runs only where the branch changed what it
 # tests: the self-test itself or a path its '# Inputs:' header line names, changed in the working
@@ -25,7 +32,7 @@
 # where it is missing.
 #
 # Usage:
-#     scripts/check-all.sh [--changed]        (or: bash scripts/check-all.sh [--changed])
+#     scripts/check-all.sh [--changed] [--verbose]   (or: bash scripts/check-all.sh …)
 # CHECK_ALL_JOBS=<n> runs at most n checks at once, 1 one after another; the default is the
 # number of processors.
 # Exit code 0 when every check passes, 1 when any of them fails, 2 on an unknown argument or a
@@ -51,11 +58,14 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib/git.sh"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 changed_mode=0
-case "${1:-}" in
-  "") ;;
-  --changed) changed_mode=1 ;;
-  *) echo "check-all: unknown argument '$1' — usage: scripts/check-all.sh [--changed]" >&2; exit 2 ;;
-esac
+verbose=0
+for arg in "$@"; do
+  case "$arg" in
+    --changed) changed_mode=1 ;;
+    --verbose) verbose=1 ;;
+    *) echo "check-all: unknown argument '$arg' — usage: scripts/check-all.sh [--changed] [--verbose]" >&2; exit 2 ;;
+  esac
+done
 
 # The paths changed against the merge base with origin/main, else main, read once: the local
 # main may lag the remote's, or a clone without the hooks may have moved it. On main, or without
@@ -114,7 +124,7 @@ if [[ ! "$max_jobs" =~ ^[1-9][0-9]*$ ]]; then
   exit 2
 fi
 out="$(mktemp -d)"
-labels=() running=0
+labels=() kinds=() running=0
 # stop — on every exit, a signal's included: stop every job the runner still has, the one started
 # an instant before included, wait for them, and remove their files.
 # shellcheck disable=SC2317 # run by the trap
@@ -135,6 +145,7 @@ run() {
   local label="$1" script="$2" i="${#labels[@]}"
   shift 2
   labels+=("$label")
+  kinds+=("$([[ "$script" == scripts/sensor-*.sh ]] && echo sensor || echo check)")
   if ((changed_mode)) && ! needs_run "$script"; then
     echo "skipped — neither it nor its inputs changed against main; CI runs it" > "$out/$i"
     echo 0 > "$out/$i.rc"
@@ -164,12 +175,12 @@ run "Normalize map self-test" scripts/test-normalize-remap.sh
 # brings drafts to main (ADR-0002); its self-test runs here.
 # On instruction: scripts/number-adrs.sh
 run "Numbering script self-test" scripts/test-number-adrs.sh
-# The readiness script merges and commits on a human's instruction, as step 7 of the README's
-# Integration branches; its self-test runs here.
+# The readiness script merges and commits on a human's instruction, as step 7 of
+# Integration branches in CONTRIBUTING.md; its self-test runs here.
 # On instruction: scripts/ready-for-main.sh
 run "Readiness script self-test" scripts/test-ready-for-main.sh
 # The drop script moves main and deletes a branch on a human's instruction, as step 8 of the
-# README's Integration branches; its self-test runs here.
+# Integration branches of CONTRIBUTING.md; its self-test runs here.
 # On instruction: scripts/drop-merged-branch.sh
 run "Drop script self-test" scripts/test-drop-merged-branch.sh
 run "Traceability self-test" scripts/test-check-traceability.sh
@@ -180,10 +191,14 @@ run "Tests-kept sensor self-test" scripts/test-sensor-tests-kept.sh
 run "Tests-kept sensor" scripts/sensor-tests-kept.sh
 run "Binding ADRs sensor self-test" scripts/test-sensor-binding-adrs.sh
 run "Binding ADRs sensor" scripts/sensor-binding-adrs.sh
+run "Plain rules sensor self-test" scripts/test-sensor-plain-rules.sh
+run "Plain rules sensor" scripts/sensor-plain-rules.sh
 run "Revision-due sensor self-test" scripts/test-sensor-revision-due.sh
 run "Revision-due sensor" scripts/sensor-revision-due.sh
 run "Plan frontier sensor self-test" scripts/test-sensor-plan-frontier.sh
 run "Plan frontier sensor" scripts/sensor-plan-frontier.sh
+run "Backlog sensor self-test" scripts/test-sensor-backlog.sh
+run "Backlog sensor" scripts/sensor-backlog.sh
 run "Action references sensor self-test" scripts/test-sensor-action-refs.sh
 run "Action references sensor" scripts/sensor-action-refs.sh
 run "Review binding sensor self-test" scripts/test-sensor-review-binding.sh
@@ -231,9 +246,23 @@ wait
 
 failed=()
 for i in "${!labels[@]}"; do
+  if [[ "$(cat "$out/$i.rc" 2>/dev/null)" != 0 ]]; then
+    failed+=("${labels[i]}")
+  elif ((!verbose)) && [[ "${kinds[i]}" == check ]]; then
+    last="$(grep -v '^[[:space:]]*$' "$out/$i" | tail -n 1)"
+    printf 'ok: %s%s\n' "${labels[i]}" "${last:+ — $last}"
+    grep -iE 'skip' "$out/$i" | grep -vxF -- "$last" | sed 's/^/    /'
+    continue
+  elif ((!verbose)); then
+    first="$(grep -m1 -v '^[[:space:]]*$' "$out/$i")"
+    more="$(grep -cv '^[[:space:]]*$' "$out/$i")"
+    more=$((more - 1))
+    printf 'sensor: %s%s%s\n' "${labels[i]}" "${first:+ — $first}" \
+      "$( ((more > 0)) && echo " (+$more line$( ((more == 1)) || echo s); --verbose shows them)")"
+    continue
+  fi
   printf '\n==> %s\n' "${labels[i]}"
   cat "$out/$i"
-  [[ "$(cat "$out/$i.rc" 2>/dev/null)" == 0 ]] || failed+=("${labels[i]}")
 done
 
 printf '\n'

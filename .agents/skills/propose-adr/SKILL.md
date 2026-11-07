@@ -1,6 +1,6 @@
 ---
 name: propose-adr
-description: Develop and submit an Architecture Decision Record. Use when a change is architecture-relevant, when a decision is costly to reverse or constrains future choices, when a reader without this conversation would take a choice for a mistake, when a change takes an early decision no ADR decides, such as the shape of the code, the environment, or the supply chain (it carries a catalogue of architecture and project concepts to propose from), or when the human asks for an ADR.
+description: Develop and submit an Architecture Decision Record, with a catalogue of concepts to propose from. Use when a change is architecture-relevant, costly to reverse, constrains future choices, or would look like a mistake to a reader without this conversation, when it takes an early decision no ADR decides, such as the shape of the code, the environment, or the supply chain, or when the human asks for an ADR.
 ---
 
 # Propose an ADR

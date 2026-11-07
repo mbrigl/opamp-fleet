@@ -1,6 +1,6 @@
 ---
 name: plan-feature
-description: Plan work larger than one agent session in the tree under docs/plan/ — a feature spec cut into tracer-bullet tickets, files deleted when their work lands. Use when a request will not fit one session, or when the human asks for a spec, tickets, or a plan.
+description: Plan work larger than one agent session under docs/plan/ as a feature spec cut into tracer-bullet tickets. Use when a request will not fit one session, or when the human asks for a spec, tickets, or a plan.
 ---
 
 # Plan a feature
@@ -33,12 +33,15 @@ spec: chart it with the human in the conversation until the questions run out.
    not a bullet: use `propose-adr`.
 3. Cut tickets as vertical slices, each a copy of [`ticket.md`](ticket.md) at
    `docs/plan/<spec>/<NN>-<slug>.md`, numbered in the order they are cut. Each is an end-to-end
-   behaviour that is demoable or verifiable on its own, sized to one fresh session, with
+   behaviour that is demoable or verifiable on its own, sized to one fresh session. Two that follow
+   each other and fit one session together are one ticket, since each pays a session's start and a
+   review, except the tracer bullet, which is proven before more is built on it. Each has
    Given/When/Then acceptance criteria, the tickets that block it by path, and *Read first*: the
-   ADRs in force whose *Applies to* it touches, the glossary terms and conventions in play, the
-   golden path it copies, the seam its tests go on. The first slice through new ground is the
-   tracer bullet. Where it takes a decision the catalogue of `propose-adr` has an entry for and no
-   ADR in force decides, `propose-adr` runs before it.
+   paths it touches, from which the sensor finds the ADRs that bind them, the glossary terms and
+   conventions in play, the golden path it copies, the seam its tests go on, each by its section
+   where a section is enough. The first slice through new ground is the tracer bullet. Where it
+   takes a decision the catalogue of `propose-adr` has an entry for and no ADR in force decides,
+   `propose-adr` runs before it.
 4. Set each ticket's *Mode*: "unattended" only under the conditions of
    [`AGENTS.md` §4](../../../AGENTS.md#4-working-style), each answered on the ticket; the stop
    is concrete, the attempts, time, or criterion past which the session hands off. Otherwise
