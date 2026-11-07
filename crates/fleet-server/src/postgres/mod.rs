@@ -1421,6 +1421,41 @@ pub(crate) mod testing {
             }
         }
 
+        /// Locks `table` against every read, on a session of its own, in a transaction that runs
+        /// `writes` and commits once the [`Gate`] is opened or dropped: a read that reaches the
+        /// table waits until then, and finds what `writes` committed unless it reads in a snapshot
+        /// taken before.
+        pub(crate) fn hold_reads(&self, table: &str, writes: &str) -> Gate {
+            let (pg, tls) = self.admin_connection();
+            let lock = format!(
+                "SET search_path = {}; SET idle_in_transaction_session_timeout = '60s'; \
+                 BEGIN; LOCK TABLE {table} IN ACCESS EXCLUSIVE MODE",
+                self.schema
+            );
+            let commit = format!("{writes}; COMMIT");
+            let (open, opened) = std::sync::mpsc::channel::<()>();
+            let (held, holds) = std::sync::mpsc::channel::<()>();
+            let thread = std::thread::spawn(move || {
+                Bridge::new("records-test-hold-reads")
+                    .expect("runtime")
+                    .run(async move {
+                        let client = connect(&pg, &tls).await?;
+                        client.batch_execute(&lock).await.map_err(sql)?;
+                        let _ = held.send(());
+                        let _ = tokio::task::spawn_blocking(move || opened.recv()).await;
+                        client.batch_execute(&commit).await.map_err(sql)?;
+                        drop(client);
+                        Ok::<_, String>(())
+                    })
+                    .expect("the held reads");
+            });
+            holds.recv().expect("the reads are held");
+            Gate {
+                open,
+                thread: Some(thread),
+            }
+        }
+
         fn admin(&self, statements: &str) {
             let (pg, tls) = self.admin_connection();
             let statements = statements.to_string();

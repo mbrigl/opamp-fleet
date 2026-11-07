@@ -124,6 +124,14 @@ once its tag exists.
   **What to do:** nothing. A virtual machine paused by its hypervisor, whose clocks do not count
   the pause, is not covered: such an instance serves on until its next renewal finds its lease
   lapsed, as before.
+- **An Agent is read in one snapshot**
+  ([ADR-0043](docs/adr/0043-the-fleet-record-of-agents-and-hosts.md)). On PostgreSQL an instance
+  read an Agent's Configurations and then its row as two statements, when it read the fleet whole,
+  a few Agents, the assignments at its start, or an Agent it was about to create and found stored.
+  A rollout that committed between them paired its revisions with another rollout's Deployment,
+  and the instance could offer the Agent an assignment no rollout made until its next read. Each
+  of these reads is now one statement, which reads one committed state.
+  **What to do:** nothing.
 - **An act whose answer is lost is taken up once it commits**
   ([ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side](docs/adr/draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
   clauses 8 and 10). On PostgreSQL an act whose commit landed while its answer was lost, on a
