@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use tokio_postgres::GenericClient;
+use super::Cached as GenericClient;
 
 use super::{client, sql, Database};
 use crate::configs::validate_name;
@@ -34,7 +34,7 @@ impl DeploymentBackend for PgDeploymentBackend {
     fn load(&self) -> Result<Vec<Deployment>, String> {
         self.database.run(|pool| async move {
             let client = client(&pool).await?;
-            read(&**client, None).await
+            read(&client, None).await
         })
     }
 
@@ -58,8 +58,8 @@ impl DeploymentBackend for PgDeploymentBackend {
                 )
                 .await
                 .map_err(sql)?;
-            let deployment = one(&*transaction, &name).await?;
-            super::notify::notify(&*transaction, super::notify::DEPLOYMENT, &name).await?;
+            let deployment = one(&transaction, &name).await?;
+            super::notify::notify(&transaction, super::notify::DEPLOYMENT, &name).await?;
             transaction.commit().await.map_err(sql)?;
             Ok(deployment)
         })
@@ -72,11 +72,11 @@ impl DeploymentBackend for PgDeploymentBackend {
         let decided = self.database.run(move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
-            let decided = change_rows(&*transaction, &name, &change).await?;
+            let decided = change_rows(&transaction, &name, &change).await?;
             let decided = match decided {
                 Ok(()) => {
-                    super::notify::notify(&*transaction, super::notify::DEPLOYMENT, &name).await?;
-                    Ok(one(&*transaction, &name).await?)
+                    super::notify::notify(&transaction, super::notify::DEPLOYMENT, &name).await?;
+                    Ok(one(&transaction, &name).await?)
                 }
                 Err(refused) => Err(refused),
             };
@@ -129,9 +129,9 @@ impl DeploymentBackend for PgDeploymentBackend {
                     }
                     Member::Package(id) => Change::RemovePackage(id.clone()),
                 };
-                if change_rows(&*transaction, name, &removed).await?.is_ok() {
-                    super::notify::notify(&*transaction, super::notify::DEPLOYMENT, name).await?;
-                    changed.push(one(&*transaction, name).await?);
+                if change_rows(&transaction, name, &removed).await?.is_ok() {
+                    super::notify::notify(&transaction, super::notify::DEPLOYMENT, name).await?;
+                    changed.push(one(&transaction, name).await?);
                 }
             }
             transaction.commit().await.map_err(sql)?;
@@ -178,7 +178,7 @@ impl DeploymentBackend for PgDeploymentBackend {
                 .execute("DELETE FROM deployments WHERE name = $1", &[&name])
                 .await
                 .map_err(sql)?;
-            super::notify::notify(&*transaction, super::notify::DEPLOYMENT, &name).await?;
+            super::notify::notify(&transaction, super::notify::DEPLOYMENT, &name).await?;
             transaction.commit().await.map_err(sql)?;
             Ok(Ok(()))
         });

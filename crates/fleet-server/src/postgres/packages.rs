@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use tokio_postgres::GenericClient;
+use super::Cached as GenericClient;
 
 use super::notify::{notify, PACKAGE};
 use super::{blob_lock_refused, BLOB_LOCK};
@@ -34,7 +34,7 @@ impl PackageBackend for PgPackageBackend {
     fn load(&self) -> Result<Vec<Package>, String> {
         self.database.run(|pool| async move {
             let client = client(&pool).await?;
-            read_all(&**client).await
+            read_all(&client).await
         })
     }
 
@@ -52,7 +52,7 @@ impl PackageBackend for PgPackageBackend {
                 .await
                 .map_err(sql)?;
             if created > 0 {
-                notify(&*transaction, PACKAGE, &id.to_string()).await?;
+                notify(&transaction, PACKAGE, &id.to_string()).await?;
             }
             transaction.commit().await.map_err(sql)
         })
@@ -97,7 +97,7 @@ impl PackageBackend for PgPackageBackend {
             {
                 return Err(REMOVED_WHILE_UPLOADED.to_string());
             }
-            if !hold_unassigned(&*transaction, &id, |id, _| assigned(id)).await? {
+            if !hold_unassigned(&transaction, &id, |id, _| assigned(id)).await? {
                 return Err(format!("no package set {id}"));
             }
             transaction
@@ -118,7 +118,7 @@ impl PackageBackend for PgPackageBackend {
                 )
                 .await
                 .map_err(sql)?;
-            notify(&*transaction, PACKAGE, &id.to_string()).await?;
+            notify(&transaction, PACKAGE, &id.to_string()).await?;
             transaction.commit().await.map_err(sql)
         })
     }
@@ -139,7 +139,7 @@ impl PackageBackend for PgPackageBackend {
         self.database.run(move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
-            hold_unassigned(&*transaction, &id, |id, _| assigned(id)).await?;
+            hold_unassigned(&transaction, &id, |id, _| assigned(id)).await?;
             let updated = transaction
                 .execute(
                     "UPDATE package_entries SET signature = $6 WHERE agent_type = $1 \
@@ -156,7 +156,7 @@ impl PackageBackend for PgPackageBackend {
                 .await
                 .map_err(sql)?;
             let signed = if updated == 1 {
-                notify(&*transaction, PACKAGE, &id.to_string()).await?;
+                notify(&transaction, PACKAGE, &id.to_string()).await?;
                 Signed::Written
             } else {
                 let stored = transaction
@@ -182,7 +182,7 @@ impl PackageBackend for PgPackageBackend {
         self.database.run(move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
-            hold_unassigned(&*transaction, &id, |id, _| assigned(id)).await?;
+            hold_unassigned(&transaction, &id, |id, _| assigned(id)).await?;
             let removed = transaction
                 .execute(
                     "DELETE FROM package_entries WHERE agent_type = $1 AND version = $2 \
@@ -192,7 +192,7 @@ impl PackageBackend for PgPackageBackend {
                 .await
                 .map_err(sql)?;
             if removed > 0 {
-                notify(&*transaction, PACKAGE, &id.to_string()).await?;
+                notify(&transaction, PACKAGE, &id.to_string()).await?;
             }
             transaction.commit().await.map_err(sql)
         })
@@ -207,7 +207,7 @@ impl PackageBackend for PgPackageBackend {
         self.database.run(move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
-            if !hold_unassigned(&*transaction, &id, pinned).await? {
+            if !hold_unassigned(&transaction, &id, pinned).await? {
                 return transaction.commit().await.map_err(sql);
             }
             transaction
@@ -218,11 +218,11 @@ impl PackageBackend for PgPackageBackend {
                 .await
                 .map_err(sql)?;
             super::deployments::drop_member_rows(
-                &*transaction,
+                &transaction,
                 &crate::deployments::Member::Package(id.clone()),
             )
             .await?;
-            notify(&*transaction, PACKAGE, &id.to_string()).await?;
+            notify(&transaction, PACKAGE, &id.to_string()).await?;
             transaction.commit().await.map_err(sql)
         })
     }

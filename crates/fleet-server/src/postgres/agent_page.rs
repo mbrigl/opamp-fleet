@@ -10,9 +10,9 @@
 
 use std::collections::BTreeMap;
 
+use super::Cached as GenericClient;
 use opamp::uid::InstanceUid;
 use tokio_postgres::types::ToSql;
-use tokio_postgres::GenericClient;
 
 use super::{client, signed, sql, unsigned, Database};
 use crate::agent_store::{AgentPage, Holder, PageQuery, PagedAgent, StoredAgent};
@@ -168,7 +168,7 @@ pub(super) fn derive_missing(database: &Database) -> Result<(), String> {
                     transport: crate::fleet::Transport::parse(row.get(6)),
                 });
                 let stamp: Vec<u8> = row.get(7);
-                if write_derived(&*transaction, &key, &derived, Some(&stamp)).await? {
+                if write_derived(&transaction, &key, &derived, Some(&stamp)).await? {
                     written += 1;
                 }
             }
@@ -456,7 +456,7 @@ pub(super) fn query_page(database: &Database, query: &PageQuery<'_>) -> Result<A
             .get(0);
         let rows = transaction.query(&page_sql, &refs).await.map_err(sql)?;
         let keys: Vec<String> = rows.iter().map(|row| row.get(0)).collect();
-        let records = super::agents::read(&*transaction, Some(&keys)).await?;
+        let records = super::agents::read(&transaction, Some(&keys)).await?;
         transaction.commit().await.map_err(sql)?;
         Ok((total, rows, records))
     })?;
@@ -558,7 +558,7 @@ fn arrived_over(
             .map(|row| (row.get(0), row.get(1), row.get(2), row.get(3)))
             .collect();
         let keys: Vec<String> = presence.iter().map(|(key, ..)| key.clone()).collect();
-        let records = super::agents::read(&*transaction, Some(&keys)).await?;
+        let records = super::agents::read(&transaction, Some(&keys)).await?;
         let gateway: bool = transaction
             .query_opt("SELECT gateway FROM hosts WHERE host = $1", &[&host])
             .await

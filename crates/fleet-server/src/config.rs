@@ -508,6 +508,9 @@ pub struct DatabaseConfig {
     /// How often an instance writes the presence of the Agents it carries, in seconds, from 10 to
     /// 60; PostgreSQL only (ADR-0043 clause 4).
     pub presence_interval_secs: Option<u64>,
+    /// The connections an instance's pool holds at most, from 2 to 256; PostgreSQL only
+    /// (ADR-0044 clause 24).
+    pub pool_size: Option<usize>,
 }
 
 impl Default for DatabaseConfig {
@@ -518,9 +521,16 @@ impl Default for DatabaseConfig {
             lease_renew_secs: None,
             lease_secs: None,
             presence_interval_secs: None,
+            pool_size: None,
         }
     }
 }
+
+/// The connections an instance's pool holds at most, by default (ADR-0044 clause 24).
+pub const DEFAULT_POOL_SIZE: usize = 16;
+/// The fewest and the most connections a pool may hold: at least two, so one is left beside a
+/// creation of an Agent's record.
+const POOL_SIZES: std::ops::RangeInclusive<usize> = 2..=256;
 
 /// How often an instance renews its lease, by default.
 const DEFAULT_LEASE_RENEW_SECS: u64 = 10;
@@ -552,6 +562,20 @@ impl DatabaseConfig {
     #[must_use]
     pub fn postgres(&self) -> Option<&PostgresConfig> {
         self.postgres.as_ref().filter(|_| self.store == "postgres")
+    }
+
+    /// The connections the pool holds at most, the default where the key is not set.
+    #[must_use]
+    pub fn pool_size(&self) -> usize {
+        self.pool_size.unwrap_or(DEFAULT_POOL_SIZE)
+    }
+
+    /// Hands the pool's size to the `[database.postgres]` section, which opens the database.
+    fn carry_pool_size(&mut self) {
+        let size = self.pool_size();
+        if let Some(postgres) = &mut self.postgres {
+            postgres.pool_size = size;
+        }
     }
 
     /// The lease's times, the defaults where a key is not set.
@@ -586,6 +610,7 @@ impl DatabaseConfig {
                 ("lease_renew_secs", self.lease_renew_secs),
                 ("lease_secs", self.lease_secs),
                 ("presence_interval_secs", self.presence_interval_secs),
+                ("pool_size", self.pool_size.map(|size| size as u64)),
             ] {
                 if value.is_some() {
                     return Err(format!(
@@ -616,6 +641,14 @@ impl DatabaseConfig {
                     PRESENCE_INTERVAL_SECS.end()
                 ));
             }
+        }
+        if !POOL_SIZES.contains(&self.pool_size()) {
+            return Err(format!(
+                "[database] pool_size must be from {} to {}, not {}",
+                POOL_SIZES.start(),
+                POOL_SIZES.end(),
+                self.pool_size()
+            ));
         }
         if lapse < renew.saturating_mul(3) {
             return Err(format!(
@@ -674,6 +707,14 @@ pub struct PostgresConfig {
     /// `false` connects without TLS, which is allowed to a loopback IP literal alone (Q-1).
     #[serde(default = "default_postgres_tls")]
     pub tls: bool,
+    /// The connections the pool holds at most: `[database] pool_size`, carried here when the
+    /// configuration is loaded.
+    #[serde(skip, default = "default_pool_size")]
+    pub pool_size: usize,
+}
+
+fn default_pool_size() -> usize {
+    DEFAULT_POOL_SIZE
 }
 
 fn default_postgres_port() -> u16 {
@@ -1324,6 +1365,7 @@ impl ServerConfig {
             .read_table_files()
             .and_then(|()| config.check())
             .map_err(|e| format!("{origin}: {e}"))?;
+        config.database.carry_pool_size();
         Ok(Layered {
             config,
             origin,
@@ -3131,6 +3173,48 @@ mod tests {
             exclusive(&format!("{s3}{}", bootstrap(true))),
             Exclusive::Alone("[enrolment] bootstrap_ca_key_file".to_string())
         );
+    }
+
+    /// `[database] pool_size` is 16 by default, from 2 to 256, PostgreSQL's alone, and reaches the
+    /// connection settings the pool is opened with; one outside the range, or set beside the
+    /// filesystem store, fails startup naming the key.
+    /// Verifies: ADR-0044
+    #[test]
+    fn the_pool_size_is_checked_and_reaches_the_pool() {
+        let load = |database: &str| {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("server.toml");
+            std::fs::write(&path, format!("{TLS}{database}")).expect("write");
+            ServerConfig::load(&path)
+        };
+        let with = |keys: &str| {
+            format!(
+                "[database]\nstore = \"postgres\"\n{keys}[database.postgres]\n\
+                 host = \"db.example\"\ndbname = \"fleet\"\nuser = \"fleet\"\n\
+                 password_file = \"/run/secrets/db\"\n"
+            )
+        };
+        let size = |keys: &str| {
+            let config = load(&with(keys)).expect("loads");
+            (
+                config.database.pool_size(),
+                config.database.postgres().expect("postgres").pool_size,
+            )
+        };
+        assert_eq!(size(""), (16, 16), "the default");
+        assert_eq!(size("pool_size = 2\n"), (2, 2));
+        assert_eq!(size("pool_size = 256\n"), (256, 256));
+        for (database, named) in [
+            (with("pool_size = 1\n"), "[database] pool_size"),
+            (with("pool_size = 257\n"), "[database] pool_size"),
+            (
+                "[database]\npool_size = 16\n".to_string(),
+                "[database] pool_size",
+            ),
+        ] {
+            let e = load(&database).expect_err("refused");
+            assert!(e.contains(named), "{database}: {e}");
+        }
     }
 
     /// The lease keys and the presence interval belong to PostgreSQL: with the filesystem store

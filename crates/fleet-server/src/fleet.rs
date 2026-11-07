@@ -3,7 +3,7 @@
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -664,6 +664,190 @@ pub struct AppState {
     /// The Agents forgotten while a WebSocket carried them, by that connection, until its loop
     /// takes them and ends their session (ADR-0043 clause 10). Locked strictly after `fleet`.
     forgotten: Mutex<HashMap<ConnId, Vec<InstanceUid>>>,
+    /// Each Agent's own lock, one of [`AGENT_LOCKS`] by its `instance_uid`. A report holds its
+    /// Agent's from its start to its answer, across what it reads and writes in the store, and
+    /// takes the fleet lock only to take that into memory; the reading of a holder again, a
+    /// request, a delivery and the put-back of a restart, a forget and a label change take it
+    /// too. Taken strictly before `fleet`, and never while holding it; of several, in the order
+    /// of their index.
+    agent_locks: Box<[Mutex<()>]>,
+    /// How often an Agent's lock was found taken and waited for.
+    agent_lock_waits: AtomicU64,
+    /// The Agents whose take a report of this instance is making, from before it is written until
+    /// the report holds the Agent in memory, which [`release_taken`](Self::release_taken) waits
+    /// for. Locked after an Agent's own lock, and alone.
+    taking: Mutex<HashSet<InstanceUid>>,
+    /// The new Agents a report on a store this Server alone writes has counted against
+    /// `max_agents` and not yet taken into memory.
+    reserved_new: AtomicUsize,
+}
+
+/// How many locks the Agents' own locks are spread over: two Agents share one only by their
+/// `instance_uid`, and then one waits for the other's report.
+const AGENT_LOCKS: usize = 1024;
+
+/// How often a report starts again where an Agent it went on from left memory while it read and
+/// wrote the store, before it is answered `Unavailable`.
+const REPORT_ROUNDS: usize = 3;
+
+/// What a take written before the fleet lock answered
+/// ([`take_row`](AppState::take_row)).
+enum Took {
+    /// None was made: no shared store, no lease, or no record.
+    Nothing,
+    /// Taken under `holder`, with the count of takes the store answered.
+    Taken { holder: String, take: u64 },
+    /// Made under `holder`, its answer lost.
+    Lost { holder: String },
+}
+
+/// What memory held of an Agent as its report began: what the report decides its calls to the
+/// store from, before it takes the fleet lock to take them up.
+struct Seen {
+    /// Memory held a record of it.
+    known: bool,
+    connected: bool,
+    owner: Option<ConnId>,
+    /// The Host it last arrived over.
+    host: Option<String>,
+    /// The group it is placed in.
+    group: Option<Group>,
+    /// The group the report places it in where the report carries no description.
+    joined: Option<Group>,
+}
+
+impl Seen {
+    /// What `record` holds, `joined` the group it joins without a description.
+    fn of(
+        record: Option<&AgentRecord>,
+        joined: impl FnOnce(&AgentRecord) -> Option<Group>,
+    ) -> Self {
+        match record {
+            None => Seen {
+                known: false,
+                connected: false,
+                owner: None,
+                host: None,
+                group: None,
+                joined: None,
+            },
+            Some(record) => Seen {
+                known: true,
+                connected: record.connected,
+                owner: record.owner,
+                host: record.host.clone(),
+                group: record.placement.group.clone(),
+                joined: joined(record),
+            },
+        }
+    }
+}
+
+/// A new Agent counted against `max_agents` on a store the Server alone writes, until the report
+/// takes it into memory or ends.
+struct Reservation<'a> {
+    count: &'a AtomicUsize,
+    held: bool,
+}
+
+impl<'a> Reservation<'a> {
+    /// None held.
+    fn none(count: &'a AtomicUsize) -> Self {
+        Reservation { count, held: false }
+    }
+
+    /// One counted beside the `held` records memory holds and those `count` counts, unless that
+    /// reaches `max`. Made under the fleet lock, so two reports do not count past it together.
+    fn of(count: &'a AtomicUsize, held: usize, max: usize) -> Self {
+        if held.saturating_add(count.load(Ordering::SeqCst)) >= max {
+            return Reservation::none(count);
+        }
+        count.fetch_add(1, Ordering::SeqCst);
+        Reservation { count, held: true }
+    }
+
+    fn held(&self) -> bool {
+        self.held
+    }
+
+    /// No longer counted: taken into memory, where it counts, or let go.
+    fn release(&mut self) {
+        if std::mem::take(&mut self.held) {
+            self.count.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+}
+
+impl Drop for Reservation<'_> {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+/// An Agent in [`AppState::taking`] while a report makes its take, until the report ends.
+struct Taking<'a> {
+    taking: &'a Mutex<HashSet<InstanceUid>>,
+    uid: InstanceUid,
+}
+
+impl<'a> Taking<'a> {
+    fn of(taking: &'a Mutex<HashSet<InstanceUid>>, uid: InstanceUid) -> Self {
+        taking.lock().expect("taking lock").insert(uid);
+        Taking { taking, uid }
+    }
+}
+
+impl Drop for Taking<'_> {
+    fn drop(&mut self) {
+        self.taking.lock().expect("taking lock").remove(&self.uid);
+    }
+}
+
+/// What a report's end answers with, once its record is taken into memory.
+struct Ending {
+    /// The identity the Agent goes by after the report.
+    uid: InstanceUid,
+    /// The identity it reported, which the reply is addressed to.
+    reported: InstanceUid,
+    /// It said goodbye.
+    disconnected: bool,
+    identification: Option<AgentIdentification>,
+    reply_flags: u64,
+}
+
+/// Where a report's end stands once its record is taken into memory.
+enum Pending {
+    /// Its reply, or a restart to clear first.
+    Settled(Settled),
+    /// A certificate it asked for to sign first, with what its record held.
+    Issue(Box<PersistedAgent>, Vec<u8>),
+}
+
+/// A report's end decided under the fleet lock.
+enum Settled {
+    /// The reply, and what the record held, to persist before it goes out.
+    Done(Box<(Processed, PersistedAgent)>),
+    /// A queued restart goes out instead once its clear is written; the certificate issued goes
+    /// with the reply where it does not.
+    Restart(Option<TlsCertificate>),
+}
+
+/// The Client Agents of groups another instance carries, with their labels, by group.
+type ClientsByGroup = HashMap<Group, Vec<(InstanceUid, BTreeMap<String, String>)>>;
+
+/// How a placement reads the Client Agents of a group that this instance does not hold
+/// (ADR-0043 clause 19,
+/// ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+/// clause 8).
+enum Elsewhere {
+    /// From the store as the group is placed, under the fleet lock.
+    Now,
+    /// Read before the fleet lock was taken, by group, not yet sifted of what is held; a group
+    /// placed that was not read is noted in `missed` and placed again once the lock is let go.
+    Read {
+        read: ClientsByGroup,
+        missed: Vec<Group>,
+    },
 }
 
 /// What became of an Agent found gone from the store: dropped as forgotten, or kept, as its row
@@ -883,6 +1067,10 @@ impl AppState {
             lease: OnceLock::new(),
             proof: OnceLock::new(),
             forgotten: Mutex::new(HashMap::new()),
+            agent_locks: (0..AGENT_LOCKS).map(|_| Mutex::new(())).collect(),
+            agent_lock_waits: AtomicU64::new(0),
+            taking: Mutex::new(HashSet::new()),
+            reserved_new: AtomicUsize::new(0),
         };
         state.place_all();
         Ok(state)
@@ -1128,7 +1316,7 @@ impl AppState {
         groups.clear();
         self.locate_all(&mut fleet, &mut groups);
         for group in groups.keys() {
-            self.inherit_held(&mut fleet, &groups, group);
+            self.inherit_held(&mut fleet, &groups, group, &mut Elsewhere::Now);
         }
     }
 
@@ -1159,14 +1347,71 @@ impl AppState {
     /// (ADR-0041
     /// clause 8). Behind a Gateway, where the register binds no Agent, the Agents that arrived
     /// over the Gateway's Host are read instead ([`arrived_over`](Self::arrived_over)).
+    ///
+    /// What is read of a group's Client Agents held elsewhere is read as `elsewhere` says: at once,
+    /// under the fleet lock, or before it was taken, as a report places its Agent.
     fn inherit_held(
         &self,
         fleet: &mut HashMap<InstanceUid, AgentRecord>,
         groups: &HashMap<Group, HashSet<InstanceUid>>,
         group: &Group,
+        elsewhere: &mut Elsewhere,
     ) {
-        let outside = self.client_agents_elsewhere(fleet, group);
+        let outside = match elsewhere {
+            Elsewhere::Now => self.client_agents_elsewhere(fleet, group),
+            Elsewhere::Read { read, missed } => match read.get(group) {
+                Some(found) => {
+                    let mut outside: Vec<(InstanceUid, BTreeMap<String, String>)> = found
+                        .iter()
+                        .filter(|(uid, _)| !fleet.contains_key(uid))
+                        .cloned()
+                        .collect();
+                    outside.sort_by_key(|(uid, _)| uid.0);
+                    outside
+                }
+                None => {
+                    if !missed.contains(group) {
+                        missed.push(group.clone());
+                    }
+                    Vec::new()
+                }
+            },
+        };
         inherit(fleet, groups, group, &outside);
+    }
+
+    /// Reads, before the fleet lock is taken, the Client Agents of each of `wanted` that this
+    /// instance does not hold, as [`client_agents_elsewhere`](Self::client_agents_elsewhere) reads
+    /// them under it: what a report's placement inherits from, so the lock waits for no read. What
+    /// this instance comes to hold meanwhile is sifted out when the group is placed.
+    fn read_elsewhere(&self, wanted: &[Group]) -> ClientsByGroup {
+        let mut read = HashMap::new();
+        for group in wanted {
+            if !read.contains_key(group) {
+                let found = self.clients_elsewhere(group, &|uid| {
+                    self.fleet.lock().expect("fleet lock").contains_key(uid)
+                });
+                read.insert(group.clone(), found);
+            }
+        }
+        read
+    }
+
+    /// Places again each group of `missed` that a report's placement found unread: read first,
+    /// then placed under the fleet lock.
+    fn place_groups_again(&self, missed: Vec<Group>) {
+        if missed.is_empty() {
+            return;
+        }
+        let mut elsewhere = Elsewhere::Read {
+            read: self.read_elsewhere(&missed),
+            missed: Vec::new(),
+        };
+        let mut fleet = self.fleet.lock().expect("fleet lock");
+        let groups = self.groups.lock().expect("groups lock");
+        for group in &missed {
+            self.inherit_held(&mut fleet, &groups, group, &mut elsewhere);
+        }
     }
 
     /// The Client Agents of a group that this instance does not hold, with their labels, as
@@ -1181,6 +1426,16 @@ impl AppState {
         fleet: &HashMap<InstanceUid, AgentRecord>,
         group: &Group,
     ) -> Vec<(InstanceUid, BTreeMap<String, String>)> {
+        self.clients_elsewhere(group, &|uid| fleet.contains_key(uid))
+    }
+
+    /// The Client Agents of `group` read from the store, of those `held` says this instance does
+    /// not hold, as [`client_agents_elsewhere`](Self::client_agents_elsewhere) answers them.
+    fn clients_elsewhere(
+        &self,
+        group: &Group,
+        held: &dyn Fn(&InstanceUid) -> bool,
+    ) -> Vec<(InstanceUid, BTreeMap<String, String>)> {
         if !self.agent_store.is_shared() {
             return Vec::new();
         }
@@ -1190,10 +1445,10 @@ impl AppState {
                     let mut clients: Vec<(InstanceUid, BTreeMap<String, String>)> = found
                         .into_iter()
                         .filter(|(uid, record)| {
-                            !fleet.contains_key(uid)
-                                && crate::labels::is_client_agent(record.description.as_ref())
+                            crate::labels::is_client_agent(record.description.as_ref())
                                 && crate::labels::machine(record.description.as_ref()).as_ref()
                                     == Some(machine)
+                                && !held(uid)
                         })
                         .map(|(uid, record)| (uid, record.labels))
                         .collect();
@@ -1215,7 +1470,7 @@ impl AppState {
         let elsewhere: Vec<InstanceUid> = bound
             .iter()
             .filter_map(|uid| parse_hex_uid(uid))
-            .filter(|uid| !fleet.contains_key(uid))
+            .filter(|uid| !held(uid))
             .collect();
         if elsewhere.is_empty() {
             return Vec::new();
@@ -1337,7 +1592,12 @@ impl AppState {
 
     /// Places one Agent again after what places it may have changed — its Host, its report, or
     /// its identity — and the groups it left and joined with it.
-    fn place(&self, fleet: &mut HashMap<InstanceUid, AgentRecord>, uid: &InstanceUid) {
+    fn place(
+        &self,
+        fleet: &mut HashMap<InstanceUid, AgentRecord>,
+        uid: &InstanceUid,
+        elsewhere: &mut Elsewhere,
+    ) {
         let Some(record) = fleet.get_mut(uid) else {
             return;
         };
@@ -1357,10 +1617,10 @@ impl AppState {
         }
         if let Some(joined) = &group {
             groups.entry(joined.clone()).or_default().insert(*uid);
-            self.inherit_held(fleet, &groups, joined);
+            self.inherit_held(fleet, &groups, joined, elsewhere);
         }
         if let Some(left) = left.filter(|left| Some(left) != group.as_ref()) {
-            self.inherit_held(fleet, &groups, &left);
+            self.inherit_held(fleet, &groups, &left, elsewhere);
         }
     }
 
@@ -1371,13 +1631,14 @@ impl AppState {
         fleet: &mut HashMap<InstanceUid, AgentRecord>,
         uid: &InstanceUid,
         group: Option<Group>,
+        elsewhere: &mut Elsewhere,
     ) {
         let Some(group) = group else {
             return;
         };
         let mut groups = self.groups.lock().expect("groups lock");
         unindex(&mut groups, &group, uid);
-        self.inherit_held(fleet, &groups, &group);
+        self.inherit_held(fleet, &groups, &group, elsewhere);
     }
 
     /// The register and the revocation list.
@@ -1926,7 +2187,7 @@ impl AppState {
             .map(|(group, _)| group.clone())
             .collect();
         for group in &due {
-            self.inherit_held(&mut fleet, &groups, group);
+            self.inherit_held(&mut fleet, &groups, group, &mut Elsewhere::Now);
         }
     }
 
@@ -2235,6 +2496,8 @@ impl AppState {
     /// store announced to the instance that carries the Agent, which decides from what is stored
     /// (ADR-0043 clause 2).
     pub fn request_restart(&self, uid: &InstanceUid) -> Result<(), RestartError> {
+        // A request, a delivery, a try and a forget of one Agent each hold its own lock.
+        let _agent = self.agent_lock(uid);
         let mut fleet = self.fleet.lock().expect("fleet lock");
         let capabilities = if self.agent_store.is_shared() {
             self.agent_store
@@ -2288,6 +2551,8 @@ impl AppState {
         set: BTreeMap<String, String>,
     ) -> Result<(), LabelError> {
         crate::labels::check_pairs(&set).map_err(LabelError::Invalid)?;
+        // Not between a report's read of the record and its taking it into memory.
+        let _agent = self.agent_lock(uid);
         let mut fleet = self.fleet.lock().expect("fleet lock");
         let description = if self.agent_store.is_shared() {
             self.agent_store
@@ -2328,9 +2593,9 @@ impl AppState {
         &self,
         old: &InstanceUid,
         new: &InstanceUid,
-        record: &AgentRecord,
-    ) -> Result<(), String> {
-        let Err(e) = self.agent_store.rekey(old, new, &record.to_persisted()) else {
+        record: &PersistedAgent,
+    ) -> Result<(), (String, bool)> {
+        let Err(e) = self.agent_store.rekey(old, new, record) else {
             return Ok(());
         };
         match self.agent_store.moved(old, new) {
@@ -2338,7 +2603,7 @@ impl AppState {
                 info!(%old, %new, error = %e, "the re-key committed though its answer was lost");
                 Ok(())
             }
-            Ok(false) => Err(e),
+            Ok(false) => Err((e, false)),
             Err(read) => {
                 self.unsure_rekeys.lock().expect("rekeys lock").insert(
                     *old,
@@ -2347,9 +2612,12 @@ impl AppState {
                         moved: false,
                     },
                 );
-                Err(format!(
-                    "{e}; it could not be read back either, so the Agent's next report reads it \
-                     back: {read}"
+                Err((
+                    format!(
+                        "{e}; it could not be read back either, so the Agent's next report reads \
+                         it back: {read}"
+                    ),
+                    true,
                 ))
             }
         }
@@ -2357,9 +2625,9 @@ impl AppState {
 
     /// Reads back the re-key of `old` whose answer was lost and whose read back failed, if one
     /// is pending: once the store answers, it is pending no more. One a notification's read found
-    /// moved is answered moved without a read. The read runs under the fleet lock, as the re-key
-    /// does, and may wait for the share lock up to the database's `lock_timeout` within the
-    /// call's bound.
+    /// moved is answered moved without a read. The read runs before the fleet lock is taken, under
+    /// the Agent's own lock, as the re-key does, and may wait for the share lock up to the
+    /// database's `lock_timeout` within the call's bound.
     fn read_back_unsure_rekey(&self, old: &InstanceUid) -> UnsureRekey {
         let pending = self
             .unsure_rekeys
@@ -2392,27 +2660,38 @@ impl AppState {
     }
 
     /// Reads back, wherever `old` is found gone from the store, the re-key of it whose answer was
-    /// lost and whose read back failed, if one is pending. Moved, what is held moves to the new
-    /// identity, the Agent's session stays, and the new identity is assigned at the next report
-    /// under `old`; a session that ended meanwhile has its disconnect written to the new row by
-    /// the next presence batch, since what is held moves disconnected. Not known, `old` is kept.
-    fn take_up_unsure_rekey(
-        &self,
-        fleet: &mut HashMap<InstanceUid, AgentRecord>,
-        old: &InstanceUid,
-    ) -> Gone {
+    /// lost and whose read back failed, if one is pending: the identity it moved to, and whether
+    /// the store holds it moved. Made without the fleet lock where a report finds the row gone;
+    /// [`apply_unsure_rekey`](Self::apply_unsure_rekey) takes it up.
+    fn read_unsure_rekey(&self, old: &InstanceUid) -> Option<(InstanceUid, Result<bool, String>)> {
         let pending = self
             .unsure_rekeys
             .lock()
             .expect("rekeys lock")
             .get(old)
             .copied();
-        let Some(PendingRekey { new, .. }) = pending else {
+        let PendingRekey { new, .. } = pending?;
+        Some((new, self.agent_store.moved(old, &new)))
+    }
+
+    /// Takes up what [`read_unsure_rekey`](Self::read_unsure_rekey) read of `old`. Moved, what is
+    /// held moves to the new identity, the Agent's session stays, and the new identity is assigned
+    /// at the next report under `old`; a session that ended meanwhile has its disconnect written to
+    /// the new row by the next presence batch, since what is held moves disconnected. Not known,
+    /// `old` is kept.
+    fn apply_unsure_rekey(
+        &self,
+        fleet: &mut HashMap<InstanceUid, AgentRecord>,
+        old: &InstanceUid,
+        read: Option<(InstanceUid, Result<bool, String>)>,
+        elsewhere: &mut Elsewhere,
+    ) -> Gone {
+        let Some((new, moved)) = read else {
             return Gone::Forgotten;
         };
-        match self.agent_store.moved(old, &new) {
+        match moved {
             Ok(true) => {
-                self.rekey_held(fleet, old, new);
+                self.rekey_held(fleet, old, new, elsewhere);
                 self.presence_written
                     .lock()
                     .expect("presence lock")
@@ -2443,11 +2722,12 @@ impl AppState {
         fleet: &mut HashMap<InstanceUid, AgentRecord>,
         old: &InstanceUid,
         new: InstanceUid,
+        elsewhere: &mut Elsewhere,
     ) {
         if let Some(mut record) = fleet.remove(old) {
             let group = record.placement.group.take();
             fleet.insert(new, record);
-            self.unplace(fleet, old, group);
+            self.unplace(fleet, old, group, elsewhere);
             self.written.lock().expect("written lock").remove(old);
             self.presence_written
                 .lock()
@@ -2479,7 +2759,7 @@ impl AppState {
         self.written.lock().expect("written lock").remove(uid);
         if let Some(group) = record.placement.group.clone() {
             let groups = self.groups.lock().expect("groups lock");
-            self.inherit_held(fleet, &groups, &group);
+            self.inherit_held(fleet, &groups, &group, &mut Elsewhere::Now);
         }
     }
 
@@ -2602,6 +2882,7 @@ impl AppState {
     /// Agent that declared no heartbeat is never called stale, and gating on staleness would leave
     /// its row on a decommissioned host permanently unremovable.
     pub fn forget_agent(&self, uid: &InstanceUid) -> Result<(), ForgetError> {
+        let _agent = self.agent_lock(uid);
         let mut fleet = self.fleet.lock().expect("fleet lock");
         let (budget, now_ms) = (self.stale_after(), self.clock.now_ms());
         if let Some(record) = fleet.get(uid) {
@@ -2671,7 +2952,12 @@ impl AppState {
             // A session that still carries it ends (ADR-0043 clause 10).
             self.end_session(uid, &record);
             // A Client Agent forgotten takes its labels from the Agents that inherited them.
-            self.unplace(&mut fleet, uid, record.placement.group.clone());
+            self.unplace(
+                &mut fleet,
+                uid,
+                record.placement.group.clone(),
+                &mut Elsewhere::Now,
+            );
             // A pinned revision only this Agent referenced is unreferenced now (ADR-0026).
             self.collect_revisions(record.assigned_configurations().keys().cloned());
         } else {
@@ -2686,13 +2972,26 @@ impl AppState {
     /// The queued restart for this Agent as the Baseline's command-only message, taken once —
     /// `None` when nothing is queued (or the Agent went away). One its connection does not take is
     /// queued again through [`unsent`](Self::unsent).
+    ///
+    /// A delivery holds the Agent's own lock, and clears the restart in the store with the fleet
+    /// lock let go.
     pub fn restart_command_for(&self, uid: &InstanceUid) -> Option<ServerToAgent> {
-        let mut fleet = self.fleet.lock().expect("fleet lock");
-        let record = fleet.get_mut(uid)?;
-        if !record.restart_pending || !record.connected {
+        let due = |fleet: &HashMap<InstanceUid, AgentRecord>| {
+            fleet
+                .get(uid)
+                .is_some_and(|record| record.restart_pending && record.connected)
+        };
+        if !due(&self.fleet.lock().expect("fleet lock")) {
             return None;
         }
-        self.take_restart(uid, record)
+        let _agent = self.agent_lock(uid);
+        if !due(&self.fleet.lock().expect("fleet lock")) {
+            return None;
+        }
+        let cleared = self.clear_restart(uid);
+        let mut fleet = self.fleet.lock().expect("fleet lock");
+        let record = fleet.get_mut(uid)?;
+        self.take_restart(uid, record, cleared)
             .then(|| restart_command(uid, self.capabilities()))
     }
 
@@ -2702,8 +3001,18 @@ impl AppState {
     /// (ADR-0043 clause 2). One that cannot be cleared is
     /// kept for the next exchange, and one cleared whose command is not sent is put back by
     /// [`unsent`](Self::unsent).
-    fn take_restart(&self, uid: &InstanceUid, record: &mut AgentRecord) -> bool {
-        match self.agent_store.set_restart_pending(uid, false) {
+    ///
+    /// The clear is written before the fleet lock is taken, under the Agent's own lock, which
+    /// requests, deliveries, forgets and the tries of a put-back take
+    /// ([`clear_restart`](Self::clear_restart)); `cleared` is what it answered, and this takes it
+    /// into `record`.
+    fn take_restart(
+        &self,
+        uid: &InstanceUid,
+        record: &mut AgentRecord,
+        cleared: Result<Option<bool>, String>,
+    ) -> bool {
+        match cleared {
             Ok(was) => {
                 record.restart_pending = false;
                 self.written.lock().expect("written lock").remove(uid);
@@ -2718,6 +3027,12 @@ impl AppState {
                 false
             }
         }
+    }
+
+    /// Clears the queued restart of `uid` in the store, as [`take_restart`](Self::take_restart)
+    /// takes it up.
+    fn clear_restart(&self, uid: &InstanceUid) -> Result<Option<bool>, String> {
+        self.agent_store.set_restart_pending(uid, false)
     }
 
     /// A message its connection did not take. A restart command among them is queued again, so
@@ -2760,14 +3075,15 @@ impl AppState {
     }
 
     /// Sets the restart of `uid` queued again in the store and in the record this instance holds,
-    /// and tells the sessions, under the fleet lock, which requests, deliveries and forgets take
-    /// too. A `retry` is made only while its put-back is still kept, so one a request, a delivery
+    /// and tells the sessions, under the Agent's own lock, which requests, deliveries and forgets
+    /// take too. A `retry` is made only while its put-back is still kept, so one a request, a delivery
     /// or a forget dropped since it was found due is not tried; any put-back drops what is kept
     /// once the store answers.
     /// One the store does not take is kept, or waits longer, for
     /// [`retry_restarts`](Self::retry_restarts). An Agent forgotten meanwhile has nothing to
     /// restart.
     fn put_back(&self, uid: &InstanceUid, retry: bool) {
+        let _agent = self.agent_lock(uid);
         let mut fleet = self.fleet.lock().expect("fleet lock");
         if retry
             && !self
@@ -2928,8 +3244,8 @@ impl AppState {
     /// A write that fails is logged, never fatal: a fleet that keeps running on a full disk beats
     /// one that refuses reports. Answers whether the record is still stored: on a shared store
     /// one forgotten through another instance is not, and is not written again.
-    fn persist_if_dirty(&self, uid: &InstanceUid, record: &AgentRecord) -> bool {
-        match self.persist(uid, record) {
+    fn persist_if_dirty(&self, uid: &InstanceUid, persisted: &PersistedAgent) -> bool {
+        match self.persist(uid, persisted) {
             Ok(stored) => stored,
             Err(e) => {
                 warn!(agent = %uid, error = %e, "cannot persist the agent record");
@@ -2944,37 +3260,56 @@ impl AppState {
     /// created or read before (ADR-0043 clause 14), so only what a report decides is written of
     /// it, and nothing creates it again.
     ///
-    /// The `written` lock — and the fleet lock every caller holds while it reads `record` — stays
-    /// held across the store's write. Releasing it would let two writes of one record race, and an
-    /// older state land after a newer one while `written` names the newer; and an act is answered
-    /// only once its record is written (ADR-0043 clause 4). What a store's write may take is
-    /// bounded instead: a PostgreSQL call fails after `postgres::CALL_TIMEOUT` (ADR-0044 clause 24).
-    fn persist(&self, uid: &InstanceUid, record: &AgentRecord) -> Result<bool, String> {
-        let persisted = record.to_persisted();
+    /// `persisted` is what the record held when the report let the fleet lock go, and it is
+    /// written after: no other report waits for the write. Two writes of one record do not race,
+    /// so an older state never lands after a newer one, since the Agent's own lock, which every
+    /// report of it holds from its start to its answer, is held across the write; and a report is
+    /// answered only once its record is written (ADR-0043 clause 4). What a store's write may take
+    /// is bounded: a PostgreSQL call fails after `postgres::CALL_TIMEOUT` (ADR-0044 clause 24).
+    fn persist(&self, uid: &InstanceUid, persisted: &PersistedAgent) -> Result<bool, String> {
         let digest = persisted.durable_digest();
-        let mut written = self.written.lock().expect("written lock");
-        if written.get(uid) == Some(&digest) {
+        if self.written.lock().expect("written lock").get(uid) == Some(&digest) {
             return Ok(true);
         }
-        if !self.agent_store.write_report(uid, &persisted)? {
+        if !self.agent_store.write_report(uid, persisted)? {
             return Ok(false);
         }
-        written.insert(*uid, digest);
+        self.written
+            .lock()
+            .expect("written lock")
+            .insert(*uid, digest);
         Ok(true)
     }
 
     /// Answers a report of an Agent whose record another instance forgot while this one wrote it:
     /// the Agent is dropped here too and its session ended, and the reply offers nothing
     /// (ADR-0043 clause 10).
-    fn forgotten_elsewhere(
-        &self,
-        fleet: &mut HashMap<InstanceUid, AgentRecord>,
-        uid: &InstanceUid,
-        reported: &InstanceUid,
-    ) -> Processed {
+    ///
+    /// Made after the report's write found no row, so what it reads is read before the fleet lock
+    /// is taken: the re-key read back, and the Client Agents of the group the Agent leaves.
+    fn forgotten_elsewhere(&self, uid: &InstanceUid, reported: &InstanceUid) -> Processed {
+        let (held, group) = {
+            let fleet = self.fleet.lock().expect("fleet lock");
+            let record = fleet.get(uid);
+            (
+                record.is_some(),
+                record.and_then(|record| record.placement.group.clone()),
+            )
+        };
+        let unsure = if held {
+            self.read_unsure_rekey(uid)
+        } else {
+            None
+        };
+        let mut elsewhere = self.elsewhere_of(group.as_slice());
+        let gone = {
+            let mut fleet = self.fleet.lock().expect("fleet lock");
+            self.drop_forgotten_read(&mut fleet, uid, unsure, &mut elsewhere)
+        };
+        self.place_again(elsewhere);
         // Kept where its row moved through a re-key of this instance's own: the connection goes
         // on carrying it under the identity it reported.
-        let kept = !matches!(self.drop_forgotten(fleet, uid), Gone::Forgotten);
+        let kept = !matches!(gone, Gone::Forgotten);
         self.push.send_modify(|rev| *rev += 1);
         Processed {
             reply: ServerToAgent {
@@ -2989,7 +3324,7 @@ impl AppState {
 
     /// Drops an Agent another instance forgot from what this one holds, and ends its session. One
     /// whose row moved through a re-key of this instance's own whose answer was lost is read back
-    /// first ([`take_up_unsure_rekey`](Self::take_up_unsure_rekey)), and kept where it moved or
+    /// first ([`read_unsure_rekey`](Self::read_unsure_rekey)), and kept where it moved or
     /// where that is not known. A re-key pending to it is dropped with it.
     fn drop_forgotten(
         &self,
@@ -2999,7 +3334,22 @@ impl AppState {
         if !fleet.contains_key(uid) {
             return Gone::Forgotten;
         }
-        match self.take_up_unsure_rekey(fleet, uid) {
+        let read = self.read_unsure_rekey(uid);
+        self.drop_forgotten_read(fleet, uid, read, &mut Elsewhere::Now)
+    }
+
+    /// [`drop_forgotten`](Self::drop_forgotten) from the re-key read back `unsure` read already.
+    fn drop_forgotten_read(
+        &self,
+        fleet: &mut HashMap<InstanceUid, AgentRecord>,
+        uid: &InstanceUid,
+        unsure: Option<(InstanceUid, Result<bool, String>)>,
+        elsewhere: &mut Elsewhere,
+    ) -> Gone {
+        if !fleet.contains_key(uid) {
+            return Gone::Forgotten;
+        }
+        match self.apply_unsure_rekey(fleet, uid, unsure, elsewhere) {
             Gone::Forgotten => {}
             kept => return kept,
         }
@@ -3017,7 +3367,7 @@ impl AppState {
             .lock()
             .expect("presence lock")
             .remove(uid);
-        self.unplace(fleet, uid, record.placement.group.clone());
+        self.unplace(fleet, uid, record.placement.group.clone(), elsewhere);
         info!(agent = %uid, "dropped an agent forgotten through another instance");
         Gone::Forgotten
     }
@@ -3141,14 +3491,18 @@ impl AppState {
     /// change more than ten times within a minute is logged as a likely duplicate. Without a lease
     /// nothing is written. One that fails is logged, and the next batch writes it, where no other
     /// instance took the Agent meanwhile.
-    fn write_connected(&self, uid: &InstanceUid, presence: Presence) {
+    ///
+    /// Written before the fleet lock is taken, under the Agent's own lock, which
+    /// [`release_taken`](Self::release_taken) takes too; its answer is taken up with the record
+    /// ([`took`](Self::took)).
+    fn take_row(&self, uid: &InstanceUid, last_seen_ms: u64) -> Took {
         if !self.agent_store.is_shared() {
-            return;
+            return Took::Nothing;
         }
         let Some(holder) = self.lease.get().and_then(|lease| lease.borrow().clone()) else {
-            return;
+            return Took::Nothing;
         };
-        let take = match self.agent_store.take(uid, &holder, presence.last_seen_ms) {
+        match self.agent_store.take(uid, &holder, last_seen_ms) {
             Ok(Some(taken)) => {
                 if let Some(from) = &taken.from {
                     debug!(agent = %uid, from = %from, "took the agent from another instance");
@@ -3160,24 +3514,37 @@ impl AppState {
                          likely a duplicate instance_uid on two connections"
                     );
                 }
-                taken.take
+                Took::Taken {
+                    holder,
+                    take: taken.take,
+                }
             }
             // Forgotten through another instance: this exchange's write finds no record, and
             // drops it.
-            Ok(None) => return,
+            Ok(None) => Took::Nothing,
             Err(e) => {
                 warn!(agent = %uid, error = %e, "cannot write that the agent is connected here");
-                // The take may have been written, its answer lost: its disconnect is written only
-                // under the count read back then.
-                let mut written = self.presence_written.lock().expect("presence lock");
+                Took::Lost { holder }
+            }
+        }
+    }
+
+    /// Takes up what [`take_row`](Self::take_row) answered, with the presence the record holds
+    /// once the report is taken into it. A take whose answer was lost may have been written: its
+    /// disconnect is written only under the count read back then.
+    fn took(&self, uid: &InstanceUid, took: Took, presence: Presence) {
+        let mut written = self.presence_written.lock().expect("presence lock");
+        match took {
+            Took::Nothing => {}
+            Took::Taken { holder, take } => {
+                written.under(&holder);
+                written.taken(*uid, presence, take);
+            }
+            Took::Lost { holder } => {
                 written.under(&holder);
                 written.lost(*uid);
-                return;
             }
-        };
-        let mut written = self.presence_written.lock().expect("presence lock");
-        written.under(&holder);
-        written.taken(*uid, presence, take);
+        }
     }
 
     /// Stops carrying each Agent of `uids`, every one this instance carries where `None`, whose
@@ -3186,9 +3553,11 @@ impl AppState {
     /// clause 8). It is held as on a closed connection, and its disconnect is not written, since
     /// the row is the other instance's. An Agent the row still names is kept, so of two instances
     /// that take one Agent at once only the one the row does not name stops carrying it. The
-    /// holders are read once without the fleet lock, and those that differ again under it, which
-    /// every take of this instance holds, so a take made here since the first read is seen. On a
-    /// store that keeps no presence, or without a lease, nothing is read.
+    /// holders are read under the own locks of the Agents this instance carries or is taking,
+    /// which every take of this instance holds until its report holds the Agent in memory: a take
+    /// made here before the read is seen, and one another instance's take overtook before this
+    /// instance held the Agent is read once it is held. On a store that keeps no presence, or
+    /// without a lease, nothing is read.
     ///
     /// # Errors
     /// Returns an error when the holders cannot be read; what is held is then kept.
@@ -3199,32 +3568,49 @@ impl AppState {
         let Some(holder) = self.lease.get().and_then(|lease| lease.borrow().clone()) else {
             return Ok(());
         };
-        let carried = |fleet: &HashMap<InstanceUid, AgentRecord>| -> Vec<InstanceUid> {
+        let named = |uid: &InstanceUid| uids.is_none_or(|uids| uids.contains(uid));
+        let carried = |fleet: &HashMap<InstanceUid, AgentRecord>| -> HashSet<InstanceUid> {
             fleet
                 .iter()
-                .filter(|(uid, record)| {
-                    record.connected && uids.is_none_or(|uids| uids.contains(uid))
-                })
+                .filter(|(uid, record)| record.connected && named(uid))
                 .map(|(uid, _)| *uid)
                 .collect()
         };
-        let named_elsewhere = |stored: HashMap<InstanceUid, Option<String>>| -> Vec<InstanceUid> {
-            stored
+        let mut concerned = carried(&self.fleet.lock().expect("fleet lock"));
+        concerned.extend(
+            self.taking
+                .lock()
+                .expect("taking lock")
+                .iter()
+                .filter(|uid| named(uid))
+                .copied(),
+        );
+        if concerned.is_empty() {
+            return Ok(());
+        }
+        let _agents = self.agent_locks_of(Some(&concerned));
+        let held: Vec<InstanceUid> = {
+            let fleet = self.fleet.lock().expect("fleet lock");
+            let carried = carried(&fleet);
+            concerned
                 .into_iter()
-                .filter(|(_, stored)| stored.as_deref() != Some(holder.as_str()))
-                .map(|(uid, _)| uid)
+                .filter(|uid| carried.contains(uid))
                 .collect()
         };
-        let held = carried(&self.fleet.lock().expect("fleet lock"));
         if held.is_empty() {
             return Ok(());
         }
-        let differing = named_elsewhere(self.agent_store.holders(&held)?);
-        if differing.is_empty() {
+        let taken: Vec<InstanceUid> = self
+            .agent_store
+            .holders(&held)?
+            .into_iter()
+            .filter(|(_, stored)| stored.as_deref() != Some(holder.as_str()))
+            .map(|(uid, _)| uid)
+            .collect();
+        if taken.is_empty() {
             return Ok(());
         }
         let mut fleet = self.fleet.lock().expect("fleet lock");
-        let taken = named_elsewhere(self.agent_store.holders(&differing)?);
         let mut written = self.presence_written.lock().expect("presence lock");
         for uid in taken {
             let Some(record) = fleet.get_mut(&uid).filter(|record| record.connected) else {
@@ -3333,8 +3719,7 @@ impl AppState {
         conn: Option<ConnId>,
         presented: Option<&Presented>,
     ) -> Processed {
-        let mut sender = msg.instance_uid.clone();
-        let Some(mut uid) = InstanceUid::from_wire(&msg.instance_uid) else {
+        let Some(reported) = InstanceUid::from_wire(&msg.instance_uid) else {
             warn!(
                 len = msg.instance_uid.len(),
                 "report with a malformed instance_uid"
@@ -3345,14 +3730,52 @@ impl AppState {
                 disconnected: false,
             };
         };
+        // The Agent's own lock, held across everything this report reads and writes in the
+        // store: two reports of one Agent are taken up and written in order, a take is not
+        // overtaken by the reading of the holder again, and a restart's clear by a request, a try
+        // or a forget. The fleet lock is taken only to take into memory what was read and
+        // written, so no other Agent's report waits for a call to the store.
+        let _agent = self.agent_lock(&reported);
+        let mut msg = msg;
+        for _ in 0..REPORT_ROUNDS {
+            match self.report_round(msg, transport, conn, presented, reported) {
+                Ok(processed) => return processed,
+                Err(again) => msg = *again,
+            }
+        }
+        warn!(
+            agent = %reported,
+            "the agent left memory while each round of its report read the store"
+        );
+        Processed {
+            reply: unavailable(
+                &msg.instance_uid,
+                "the Server cannot take this report up now; retry later",
+            ),
+            uid: None,
+            disconnected: false,
+        }
+    }
+
+    /// One round of [`process_presented`](Self::process_presented): what the report needs of the
+    /// store is read and written first, then taken into memory under the fleet lock. A round
+    /// whose Agent left memory meanwhile — forgotten, or moved through another instance — hands
+    /// the report back, and the next round goes on from what the store holds then.
+    fn report_round(
+        &self,
+        msg: AgentToServer,
+        transport: Transport,
+        conn: Option<ConnId>,
+        presented: Option<&Presented>,
+        reported: InstanceUid,
+    ) -> Result<Processed, Box<AgentToServer>> {
+        let mut sender = msg.instance_uid.clone();
         // The reply is addressed to the identity the Agent reported, even when it is re-keyed
         // below: the Baseline makes a reply's instance_uid match the message's, and the Agent
         // routes by it — a reply addressed to the new identity reaches no one, and the Agent goes
         // on reporting under the old one. The new identity travels in agent_identification alone.
-        let reported = uid;
+        let mut uid = reported;
         let mut loaded = self.hold_from_store(&uid);
-
-        let mut fleet = self.fleet.lock().expect("fleet lock");
         let mut reply_flags = 0u64;
         let mut identification = None;
 
@@ -3382,11 +3805,11 @@ impl AppState {
                 // A CSR in the same message must not name the claimed identity either.
                 sender = uid.as_bytes().to_vec();
                 if let Err(e) = revocations.may_report(host, uid.as_bytes()) {
-                    return Processed {
+                    return Ok(Processed {
                         reply: bad_request(&e),
                         uid: None,
                         disconnected: false,
-                    };
+                    });
                 }
             }
             binding = Some((host, uid));
@@ -3402,34 +3825,61 @@ impl AppState {
         } else {
             UnsureRekey::None
         };
+        let asked = identification.is_none()
+            && msg.flags & AgentToServerFlags::RequestInstanceUid as u64 != 0;
+        let moves = matches!(unsure, UnsureRekey::Moved(_))
+            || (asked && matches!(unsure, UnsureRekey::None));
+        let (held, to_move) = {
+            let fleet = self.fleet.lock().expect("fleet lock");
+            let to_move = (moves && unsure == UnsureRekey::None)
+                .then(|| fleet.get(&uid).map(AgentRecord::to_persisted))
+                .flatten();
+            (fleet.contains_key(&uid), to_move)
+        };
         // While it is not known, a report under the old identity of which nothing is held creates
         // no record: the row may have moved.
-        if unsure == UnsureRekey::Unknown && !fleet.contains_key(&uid) {
-            drop(fleet);
-            return Processed {
+        if unsure == UnsureRekey::Unknown && !held {
+            return Ok(Processed {
                 reply: unavailable(
                     &msg.instance_uid,
                     "the Server cannot tell yet whether this Agent's identity moved; retry later",
                 ),
                 uid: None,
                 disconnected: false,
-            };
+            });
         }
-        let asked = identification.is_none()
-            && msg.flags & AgentToServerFlags::RequestInstanceUid as u64 != 0;
-        if matches!(unsure, UnsureRekey::Moved(_)) || (asked && matches!(unsure, UnsureRekey::None))
-        {
+        if moves {
             // The stored record follows the identity in one step (ADR-0043 clause 14), before what
             // is held does; what this report changes is written by the dirty check at this
             // exchange's end. A move that fails leaves the Agent under the identity it has, and
-            // the reply assigns none, so the Agent asks again with its next report.
+            // the reply assigns none, so the Agent asks again with its next report. Until what is
+            // held follows, the move is kept as pending, so a read again that finds the old row
+            // gone meanwhile reads it back rather than drop the Agent.
             let (new_uid, moved) = match unsure {
                 UnsureRekey::Moved(new_uid) => (new_uid, Ok(())),
                 _ => {
                     let new_uid = InstanceUid::default();
-                    let moved = match fleet.get(&uid) {
+                    let moved = match &to_move {
                         None => Ok(()),
-                        Some(record) => self.rekey_reading_back(&uid, &new_uid, record),
+                        Some(record) => {
+                            self.unsure_rekeys.lock().expect("rekeys lock").insert(
+                                uid,
+                                PendingRekey {
+                                    new: new_uid,
+                                    moved: false,
+                                },
+                            );
+                            self.rekey_reading_back(&uid, &new_uid, record)
+                                .map_err(|(e, kept)| {
+                                    if !kept {
+                                        self.unsure_rekeys
+                                            .lock()
+                                            .expect("rekeys lock")
+                                            .remove(&uid);
+                                    }
+                                    e
+                                })
+                        }
                     };
                     (new_uid, moved)
                 }
@@ -3437,7 +3887,6 @@ impl AppState {
             match moved {
                 Ok(()) => {
                     // The new identity is placed below.
-                    self.rekey_held(&mut fleet, &uid, new_uid);
                     info!(old = %uid, new = %new_uid, "assigned a server-generated instance_uid");
                     identification = Some(AgentIdentification {
                         new_instance_uid: new_uid.as_bytes().to_vec(),
@@ -3454,27 +3903,46 @@ impl AppState {
             }
         }
 
+        // What memory holds of the Agent, read once, the record a re-key moves standing for the
+        // one under its new identity.
+        //
         // Duplicate instance_uid detection (a Baseline SHOULD): the same identity alive on
         // *another* WebSocket connection — bad UID generators, cloned VMs — is rekeyed exactly
         // as the Baseline prescribes: mint a fresh uid and answer with AgentIdentification,
         // which the Client adopts. The newcomer starts a record of its own; the incumbent and
         // its connection stay untouched. (Stateless plain-HTTP polling offers nothing to
         // distinguish two pollers by, so detection is WebSocket-only.)
-        if let Some(this_conn) = conn {
-            let duplicate = fleet.get(&uid).is_some_and(|existing| {
-                existing.connected && existing.owner.is_some_and(|owner| owner != this_conn)
-            });
-            if duplicate {
-                let new_uid = InstanceUid::default();
-                warn!(duplicate = %uid, new = %new_uid, "duplicate instance_uid; rekeying the newcomer");
-                identification = Some(AgentIdentification {
-                    new_instance_uid: new_uid.as_bytes().to_vec(),
+        let arrived_over = self
+            .revocations
+            .as_ref()
+            .and(presented.and_then(|p| p.host.clone()));
+        let described = msg.agent_description.is_some();
+        let mut seen = {
+            let fleet = self.fleet.lock().expect("fleet lock");
+            let mut record = fleet
+                .get(&uid)
+                .or_else(|| rekeyed.and_then(|(old, _)| fleet.get(&old)));
+            if let Some(this_conn) = conn {
+                let duplicate = record.is_some_and(|existing| {
+                    existing.connected && existing.owner.is_some_and(|owner| owner != this_conn)
                 });
-                uid = new_uid;
+                if duplicate {
+                    let new_uid = InstanceUid::default();
+                    warn!(duplicate = %uid, new = %new_uid, "duplicate instance_uid; rekeying the newcomer");
+                    identification = Some(AgentIdentification {
+                        new_instance_uid: new_uid.as_bytes().to_vec(),
+                    });
+                    uid = new_uid;
+                    record = None;
+                }
             }
-        }
+            Seen::of(record, |record| {
+                (!described)
+                    .then(|| self.group_of(arrived_over.as_deref(), record.description.as_ref()))
+                    .flatten()
+            })
+        };
 
-        let mut known = fleet.contains_key(&uid);
         // Admitting a genuinely new Agent past the ceiling would let a peer cycling self-asserted
         // UIDs (ADR-0038) grow the in-memory map and its per-Agent disk mirror without bound. Known
         // Agents keep reporting; only a *new* UID at capacity is refused, `Unavailable` so a Client
@@ -3483,68 +3951,83 @@ impl AppState {
         // ceiling bounds the records stored, counted by the store as it creates this one, so it
         // holds for the fleet and not for one instance. A record stored already passes none: it
         // is another instance's, which the read before the lock missed, and this report goes on
-        // from it as from one read then.
-        let created = if known || !self.agent_store.is_shared() {
-            Ok(false)
-        } else {
-            let record = self.new_record(msg.sequence_num, transport, conn);
-            match self
-                .agent_store
-                .create_within(&uid, &record.to_persisted(), self.max_agents)
-            {
-                Ok(Creation::Created) => {
-                    info!(agent = %uid, transport = transport.as_str(), "new agent");
-                    fleet.insert(uid, record);
-                    Ok(true)
+        // from it as from one read then. On a store this Server alone writes, the new Agent is
+        // counted against what memory holds and what other reports counted and have not yet
+        // taken into it.
+        let mut created = false;
+        let mut reserved = Reservation::none(&self.reserved_new);
+        if !seen.known {
+            let at_ceiling = if self.agent_store.is_shared() {
+                let record = self.new_record(msg.sequence_num, transport, conn);
+                match self
+                    .agent_store
+                    .create_within(&uid, &record.to_persisted(), self.max_agents)
+                {
+                    Ok(Creation::Created) => {
+                        info!(agent = %uid, transport = transport.as_str(), "new agent");
+                        created = true;
+                        false
+                    }
+                    Ok(Creation::Found(stored)) => {
+                        let digest = stored.durable_digest();
+                        let found = AgentRecord::from_persisted(*stored);
+                        let mut fleet = self.fleet.lock().expect("fleet lock");
+                        let joined = |record: &AgentRecord| {
+                            (!described)
+                                .then(|| {
+                                    self.group_of(
+                                        arrived_over.as_deref(),
+                                        record.description.as_ref(),
+                                    )
+                                })
+                                .flatten()
+                        };
+                        if let Some(record) = fleet.get(&uid) {
+                            seen = Seen::of(Some(record), joined);
+                        } else {
+                            self.written
+                                .lock()
+                                .expect("written lock")
+                                .insert(uid, digest);
+                            seen = Seen::of(Some(&found), joined);
+                            fleet.insert(uid, found);
+                        }
+                        loaded = true;
+                        false
+                    }
+                    Ok(Creation::Full) => true,
+                    Err(e) => {
+                        warn!(agent = %uid, error = %e, "cannot store a new agent's record");
+                        return Ok(Processed {
+                            reply: unavailable(
+                                &msg.instance_uid,
+                                "the Server cannot store this Agent's record now; retry later",
+                            ),
+                            uid: None,
+                            disconnected: false,
+                        });
+                    }
                 }
-                Ok(Creation::Found(stored)) => {
-                    self.written
-                        .lock()
-                        .expect("written lock")
-                        .insert(uid, stored.durable_digest());
-                    fleet.insert(uid, AgentRecord::from_persisted(*stored));
-                    (known, loaded) = (true, true);
-                    Ok(false)
-                }
-                Ok(Creation::Full) => Ok(false),
-                Err(e) => Err(e),
-            }
-        };
-        let created = match created {
-            Ok(created) => created,
-            Err(e) => {
-                drop(fleet);
-                warn!(agent = %uid, error = %e, "cannot store a new agent's record");
-                return Processed {
+            } else {
+                let fleet = self.fleet.lock().expect("fleet lock");
+                reserved = Reservation::of(&self.reserved_new, fleet.len(), self.max_agents);
+                !reserved.held()
+            };
+            if at_ceiling {
+                warn!(
+                    agent = %uid,
+                    max_agents = self.max_agents,
+                    "refusing a new agent: the fleet is at its record ceiling"
+                );
+                return Ok(Processed {
                     reply: unavailable(
                         &msg.instance_uid,
-                        "the Server cannot store this Agent's record now; retry later",
+                        "the Server is at its Agent-record ceiling; retry later",
                     ),
                     uid: None,
                     disconnected: false,
-                };
+                });
             }
-        };
-        let at_ceiling = if self.agent_store.is_shared() {
-            !known && !created
-        } else {
-            !known && fleet.len() >= self.max_agents
-        };
-        if at_ceiling {
-            drop(fleet);
-            warn!(
-                agent = %uid,
-                max_agents = self.max_agents,
-                "refusing a new agent: the fleet is at its record ceiling"
-            );
-            return Processed {
-                reply: unavailable(
-                    &msg.instance_uid,
-                    "the Server is at its Agent-record ceiling; retry later",
-                ),
-                uid: None,
-                disconnected: false,
-            };
         }
         if let Some(revocations) = &self.revocations {
             if let Some((host, bound)) = binding {
@@ -3557,16 +4040,16 @@ impl AppState {
                     revocations.check_report(host, &subject, not_after_ms, bound.as_bytes())
                 {
                     // A record this report created goes with it; one another instance created
-                    // stays.
+                    // stays. A re-key made stands, and what is held follows it.
                     if created {
-                        fleet.remove(&uid);
                         self.unpersist(&uid);
                     }
-                    return Processed {
+                    self.follow_move(rekeyed, seen.group.clone());
+                    return Ok(Processed {
                         reply: bad_request(&e),
                         uid: None,
                         disconnected: false,
-                    };
+                    });
                 }
             }
             // A re-key an Agent asks for keeps its host (ADR-0022 clause 11).
@@ -3576,10 +4059,67 @@ impl AppState {
                 }
             }
         }
+
+        // The take of an Agent this connection begins to carry, written now: its answer is taken
+        // up with the record below.
+        let connects = created || !seen.connected || seen.owner != conn;
+        let _taking = connects.then(|| Taking::of(&self.taking, uid));
+        let took = if connects {
+            self.take_row(&uid, self.clock.now_ms())
+        } else {
+            Took::Nothing
+        };
+
+        // What places it in its Client and under its Host may have changed (ADR-0043): a new
+        // record, a new Host, a new description, or a new identity — a re-key took the old one
+        // out of its group, and a compressed message carries no description to place it by. The
+        // Client Agents of the groups it leaves and joins that another instance carries are read
+        // now.
+        let moved = seen.host != arrived_over;
+        let places = !seen.known || moved || described || rekeyed.is_some() || loaded;
+        let joined = if described || !seen.known {
+            self.group_of(arrived_over.as_deref(), msg.agent_description.as_ref())
+        } else {
+            seen.joined.clone()
+        };
+        let groups: Vec<Group> = if places || rekeyed.is_some() {
+            [seen.group.clone(), joined].into_iter().flatten().collect()
+        } else {
+            Vec::new()
+        };
+        let mut elsewhere = self.elsewhere_of(&groups);
+
+        let mut fleet = self.fleet.lock().expect("fleet lock");
+        if let Some((old, new)) = rekeyed {
+            if fleet.contains_key(&old) {
+                self.rekey_held(&mut fleet, &old, new, &mut elsewhere);
+            }
+            let mut pending = self.unsure_rekeys.lock().expect("rekeys lock");
+            if pending.get(&old).is_some_and(|pending| pending.new == new) {
+                pending.remove(&old);
+            }
+        }
+        let now_connects = created
+            || fleet
+                .get(&uid)
+                .is_none_or(|record| !record.connected || record.owner != conn);
+        let left = seen.known && rekeyed.is_none() && !fleet.contains_key(&uid);
+        if left || (now_connects && !connects) {
+            // Forgotten or moved through another instance, or no longer carried, while this
+            // round read and wrote the store: the next round goes on from what it holds now.
+            drop(fleet);
+            self.place_again(elsewhere);
+            return Err(Box::new(msg));
+        }
+        if created {
+            fleet.insert(uid, self.new_record(msg.sequence_num, transport, conn));
+        }
+        let known = seen.known;
         let record = fleet.entry(uid).or_insert_with(|| {
             info!(agent = %uid, transport = transport.as_str(), "new agent");
             self.new_record(msg.sequence_num, transport, conn)
         });
+        reserved.release();
 
         // A compressed report (unchanged fields omitted) is only usable if our state is current.
         // A gap in sequence_num — or an Agent we have never seen describing itself with nothing —
@@ -3594,13 +4134,8 @@ impl AppState {
         }
 
         // The Host it arrived over (ADR-0043 clause 16) — none without a host register.
-        let arrived_over = self
-            .revocations
-            .as_ref()
-            .and(presented.and_then(|p| p.host.clone()));
         let moved = record.host != arrived_over;
         record.host = arrived_over;
-        let described = msg.agent_description.is_some();
 
         record.sequence_num = msg.sequence_num;
         record.transport = transport;
@@ -3610,13 +4145,12 @@ impl AppState {
         if !record.connected || record.owner != conn || restarted {
             record.components_demanded = None;
         }
-        let connects = created || !record.connected || record.owner != conn;
         record.connected = true;
         record.owner = conn;
         record.heard = true;
         record.last_seen_ms = self.clock.now_ms();
         if connects {
-            self.write_connected(&uid, record.presence());
+            self.took(&uid, took, record.presence());
         }
         if msg.capabilities != 0 {
             record.capabilities = msg.capabilities;
@@ -3640,50 +4174,7 @@ impl AppState {
             record.connection_settings_status = Some(status);
         }
         if let Some(statuses) = msg.package_statuses {
-            use opamp::proto::PackageStatusEnum as P;
-            for (name, status) in &statuses.packages {
-                let before = record
-                    .package_statuses
-                    .as_ref()
-                    .and_then(|previous| previous.packages.get(name))
-                    .map(|previous| (previous.status, previous.agent_has_version.clone()));
-                let outcome = if status.status == P::Installed as i32 {
-                    Some("installed")
-                } else if status.status == P::InstallFailed as i32 {
-                    Some("failed")
-                } else {
-                    None
-                };
-                if let (Some(outcome), true) = (
-                    outcome,
-                    before != Some((status.status, status.agent_has_version.clone())),
-                ) {
-                    self.audit_refusal(
-                        Entry::new("package.outcome", outcome)
-                            .with("instance_uid", uid.to_string())
-                            .with("package", name.clone())
-                            .with("version", status.agent_has_version.clone())
-                            .with("offered_version", status.server_offered_version.clone())
-                            .with(
-                                "error",
-                                (!status.error_message.is_empty())
-                                    .then(|| status.error_message.clone()),
-                            ),
-                    );
-                }
-            }
-            for status in statuses.packages.values() {
-                if status.status == opamp::proto::PackageStatusEnum::InstallFailed as i32 {
-                    warn!(agent = %uid, package = %status.name, error = %status.error_message, "package installation failed");
-                }
-            }
-            // An Agent that refuses the offer itself has no package to hang the reason on, so the
-            // report carries it. Logged and surfaced, or a Client refusing every offer it is sent
-            // would look like one that is simply not installing anything.
-            if !statuses.error_message.is_empty() {
-                warn!(agent = %uid, error = %statuses.error_message, "the agent refused the package offer");
-            }
-            record.package_statuses = Some(statuses);
+            self.take_up_package_statuses(&uid, record, statuses);
         }
         if let Some(incoming) = msg.available_components {
             // A routine hash-only update must not degrade an already-fetched full map of the
@@ -3698,101 +4189,120 @@ impl AppState {
             }
         }
 
-        // What places it in its Client and under its Host may have changed (ADR-0043): a new
-        // record, a new Host, a new description, or a new identity — a re-key took the old one
-        // out of its group, and a compressed message carries no description to place it by.
         if !known || moved || described || rekeyed.is_some() || loaded {
-            self.place(&mut fleet, &uid);
+            self.place(&mut fleet, &uid, &mut elsewhere);
         }
         let record = fleet.get_mut(&uid).expect("the record was just written");
 
-        // The Agent asked to be issued a client certificate (ADR-0038). Signing it here, on the
-        // connection it arrived over, is the whole of the approval: admission already required
-        // every proof this endpoint asks of any message, which is what the Baseline's flow means
-        // by awaiting one.
-        let issued = match msg
+        // The Agent asked to be issued a client certificate (ADR-0038); it is signed once the
+        // fleet lock is let go.
+        let request = msg
             .connection_settings_request
             .as_ref()
             .and_then(|request| request.opamp.as_ref())
             .and_then(|opamp| opamp.certificate_request.as_ref())
-        {
-            None => None,
-            Some(request) => {
-                // `Ok(Err(..))` is a request the Server refuses; `Err(..)` a record it cannot write,
-                // which the Agent retries (ADR-0039 clause 5).
-                let outcome: Result<Result<Signed, String>, String> = match &self.client_ca {
-                    // The Baseline's MUST when the Server cannot act on the request. An Agent
-                    // reaching here ignored the undeclared capability, so it is a client error.
-                    None => Ok(Err("this Server issues no client certificates".to_string())),
-                    Some(ca) => match String::from_utf8(request.csr.clone())
-                        .map_err(|_| "the certificate signing request is not PEM".to_string())
-                        .and_then(|csr| {
-                            // The message's own instance_uid, before any re-key (ADR-0038).
-                            ca.check_claims(&csr, &sender)?;
-                            let (predecessor, host, subject) =
-                                self.renews(ca.as_ref(), &csr, presented)?;
-                            Ok((ca.sign(&csr, &host, &subject)?, predecessor))
-                        }) {
-                        Err(e) => Ok(Err(e)),
-                        Ok((signed, predecessor)) => self
-                            .record_issued(&signed, &sender, predecessor)
-                            .map(|()| Ok(signed)),
-                    },
-                };
-                let outcome = match outcome {
-                    Ok(outcome) => outcome,
-                    Err(e) => {
-                        warn!(agent = %uid, error = %e, "held back a certificate: the audit record is unavailable");
-                        if !self.persist_if_dirty(&uid, record) {
-                            return self.forgotten_elsewhere(&mut fleet, &uid, &reported);
-                        }
-                        return Processed {
-                            reply: unavailable(&msg.instance_uid, &e),
-                            uid: Some(uid),
-                            disconnected: false,
-                        };
-                    }
-                };
-                match outcome {
-                    Ok(signed) => {
-                        info!(
-                            agent = %uid,
-                            serial = %signed.facts.id.serial,
-                            "issued a client certificate"
-                        );
-                        Some(TlsCertificate {
-                            cert: signed.pem.into_bytes(),
-                            // The Agent generated its own key and keeps it — the point of the CSR
-                            // flow — so the Server has nothing to put here and must not invent it.
-                            private_key: Vec::new(),
-                            ..Default::default()
-                        })
-                    }
-                    Err(e) => {
-                        warn!(agent = %uid, error = %e, "refused a certificate signing request");
-                        self.audit_refusal(
-                            Entry::new("issuance.refused", "refused")
-                                .with("instance_uid", uid.to_string())
-                                .with("reason", e.clone()),
-                        );
-                        // The report's updates above are already in the record, so they are
-                        // persisted even though the CSR is refused (ADR-0043).
-                        if !self.persist_if_dirty(&uid, record) {
-                            return self.forgotten_elsewhere(&mut fleet, &uid, &reported);
-                        }
-                        return Processed {
-                            reply: bad_request(&e),
-                            uid: Some(uid),
-                            disconnected: false,
-                        };
-                    }
-                }
-            }
+            .map(|request| request.csr.clone());
+        let mut ending = Ending {
+            uid,
+            reported,
+            disconnected: msg.agent_disconnect.is_some(),
+            identification,
+            reply_flags,
         };
+        let pending = match request {
+            None => Pending::Settled(self.settle(record, &mut ending, None)),
+            Some(csr) => Pending::Issue(Box::new(record.to_persisted()), csr),
+        };
+        drop(fleet);
+        self.place_again(elsewhere);
+        Ok(self.finish(pending, &sender, presented, ending))
+    }
 
-        let disconnected = msg.agent_disconnect.is_some();
-        if disconnected {
-            info!(agent = %uid, "agent disconnected");
+    /// Takes a report's package statuses into `record`: an outcome that moved is audited, and a
+    /// failed installation and an offer the Agent refused are logged.
+    fn take_up_package_statuses(
+        &self,
+        uid: &InstanceUid,
+        record: &mut AgentRecord,
+        statuses: PackageStatuses,
+    ) {
+        use opamp::proto::PackageStatusEnum as P;
+        for (name, status) in &statuses.packages {
+            let before = record
+                .package_statuses
+                .as_ref()
+                .and_then(|previous| previous.packages.get(name))
+                .map(|previous| (previous.status, previous.agent_has_version.clone()));
+            let outcome = if status.status == P::Installed as i32 {
+                Some("installed")
+            } else if status.status == P::InstallFailed as i32 {
+                Some("failed")
+            } else {
+                None
+            };
+            if let (Some(outcome), true) = (
+                outcome,
+                before != Some((status.status, status.agent_has_version.clone())),
+            ) {
+                self.audit_refusal(
+                    Entry::new("package.outcome", outcome)
+                        .with("instance_uid", uid.to_string())
+                        .with("package", name.clone())
+                        .with("version", status.agent_has_version.clone())
+                        .with("offered_version", status.server_offered_version.clone())
+                        .with(
+                            "error",
+                            (!status.error_message.is_empty())
+                                .then(|| status.error_message.clone()),
+                        ),
+                );
+            }
+        }
+        for status in statuses.packages.values() {
+            if status.status == P::InstallFailed as i32 {
+                warn!(agent = %uid, package = %status.name, error = %status.error_message, "package installation failed");
+            }
+        }
+        // An Agent that refuses the offer itself has no package to hang the reason on, so the
+        // report carries it. Logged and surfaced, or a Client refusing every offer it is sent
+        // would look like one that is simply not installing anything.
+        if !statuses.error_message.is_empty() {
+            warn!(agent = %uid, error = %statuses.error_message, "the agent refused the package offer");
+        }
+        record.package_statuses = Some(statuses);
+    }
+
+    /// Moves what this instance holds to the identity a re-key moved the stored record to, where
+    /// a report that made the move is refused before it takes it into memory.
+    fn follow_move(&self, rekeyed: Option<(InstanceUid, InstanceUid)>, left: Option<Group>) {
+        let Some((old, new)) = rekeyed else {
+            return;
+        };
+        let mut elsewhere = self.elsewhere_of(left.as_slice());
+        {
+            let mut fleet = self.fleet.lock().expect("fleet lock");
+            if fleet.contains_key(&old) {
+                self.rekey_held(&mut fleet, &old, new, &mut elsewhere);
+            }
+            let mut pending = self.unsure_rekeys.lock().expect("rekeys lock");
+            if pending.get(&old).is_some_and(|pending| pending.new == new) {
+                pending.remove(&old);
+            }
+        }
+        self.place_again(elsewhere);
+    }
+
+    /// Under the fleet lock, what a report's end makes of `record` once a certificate it asked
+    /// for is `issued` or refused: its goodbye, the demand for its component map, and the reply,
+    /// or a queued restart that goes out instead, whose clear is written once the lock is let go.
+    fn settle(
+        &self,
+        record: &mut AgentRecord,
+        ending: &mut Ending,
+        issued: Option<TlsCertificate>,
+    ) -> Settled {
+        if ending.disconnected {
+            info!(agent = %ending.uid, "agent disconnected");
             record.connected = false;
             record.owner = None;
         }
@@ -3800,7 +4310,7 @@ impl AppState {
         // A hash without the map is an offer to fetch: demand the full component list from an
         // Agent that declared it can report one (the flag is meaningless toward any other), once
         // per hash on a connection.
-        if !disconnected
+        if !ending.disconnected
             && record.capabilities
                 & opamp::proto::AgentCapabilities::ReportsAvailableComponents as u64
                 != 0
@@ -3812,7 +4322,7 @@ impl AppState {
             {
                 if record.components_demanded.as_ref() != Some(&stored.hash) {
                     record.components_demanded = Some(stored.hash.clone());
-                    reply_flags |= ServerToAgentFlags::ReportAvailableComponents as u64;
+                    ending.reply_flags |= ServerToAgentFlags::ReportAvailableComponents as u64;
                 }
             }
         }
@@ -3822,34 +4332,32 @@ impl AppState {
         // an identity reassignment, a demanded full report — defers the command to the next
         // exchange instead of being combined with it.
         if record.restart_pending
-            && !disconnected
-            && identification.is_none()
-            && reply_flags == 0
+            && !ending.disconnected
+            && ending.identification.is_none()
+            && ending.reply_flags == 0
             && record.capabilities & opamp::proto::AgentCapabilities::AcceptsRestartCommand as u64
                 != 0
-            && self.take_restart(&uid, record)
         {
-            if !self.persist_if_dirty(&uid, record) {
-                return self.forgotten_elsewhere(&mut fleet, &uid, &reported);
-            }
-            return Processed {
-                reply: restart_command(&uid, self.capabilities()),
-                uid: Some(uid),
-                disconnected: false,
-            };
+            return Settled::Restart(issued);
         }
+        Settled::Done(Box::new((
+            self.reply_of(record, ending, issued),
+            record.to_persisted(),
+        )))
+    }
 
-        // Everything this report changed is in the record now; persist it if it moved the
-        // durable state (ADR-0043) — a heartbeat did not, and writes nothing.
-        if !self.persist_if_dirty(&uid, record) {
-            return self.forgotten_elsewhere(&mut fleet, &uid, &reported);
-        }
-
+    /// The reply to a report, with the offers `record` is due.
+    fn reply_of(
+        &self,
+        record: &AgentRecord,
+        ending: &Ending,
+        issued: Option<TlsCertificate>,
+    ) -> Processed {
         // The config offer — composed from this Agent's assignments (ADR-0026), gated by the
         // hash comparison, and only toward an Agent that both said goodbye ≠ true and declared
         // AcceptsRemoteConfig (capability negotiation is binding). Matching proposes; only an
         // operator's rollout act made anything an assignment.
-        let remote_config = if disconnected {
+        let remote_config = if ending.disconnected {
             None
         } else {
             let desired = self.configs.compose(record.assigned_configurations());
@@ -3858,7 +4366,7 @@ impl AppState {
 
         // The connection-settings offer (ADR-0013), gated the same way: by capability and by
         // the hash the Agent last reported — the Baseline's own "compare and include" MUST.
-        let connection_settings = if disconnected {
+        let connection_settings = if ending.disconnected {
             None
         } else {
             self.settings_offer(record, issued)
@@ -3866,7 +4374,7 @@ impl AppState {
 
         // The package offer (ADR-0027), gated by capability and the reported
         // server_provided_all_packages_hash — the Baseline's "compare and include" for packages.
-        let packages_available = if disconnected {
+        let packages_available = if ending.disconnected {
             None
         } else {
             self.packages_offer(record)
@@ -3874,18 +4382,150 @@ impl AppState {
 
         Processed {
             reply: ServerToAgent {
-                instance_uid: reported.as_bytes().to_vec(),
+                instance_uid: ending.reported.as_bytes().to_vec(),
                 capabilities: self.capabilities(),
-                flags: reply_flags,
+                flags: ending.reply_flags,
                 remote_config,
                 connection_settings,
                 packages_available,
-                agent_identification: identification,
+                agent_identification: ending.identification.clone(),
                 ..Default::default()
             },
-            uid: Some(uid),
-            disconnected,
+            uid: Some(ending.uid),
+            disconnected: ending.disconnected,
         }
+    }
+
+    /// The end of a report once its record is taken into memory, with the fleet lock let go: a
+    /// certificate it asked for is signed and recorded, a queued restart cleared, and everything
+    /// the report changed is persisted if it moved the durable state (ADR-0043) — a heartbeat did
+    /// not, and writes nothing — before the Agent is answered.
+    fn finish(
+        &self,
+        pending: Pending,
+        sender: &[u8],
+        presented: Option<&Presented>,
+        mut ending: Ending,
+    ) -> Processed {
+        let settled = match pending {
+            Pending::Issue(persisted, csr) => {
+                match self.issue(csr, sender, presented, &ending, &persisted) {
+                    Ok(issued) => {
+                        let mut fleet = self.fleet.lock().expect("fleet lock");
+                        let Some(record) = fleet.get_mut(&ending.uid) else {
+                            drop(fleet);
+                            return self.forgotten_elsewhere(&ending.uid, &ending.reported);
+                        };
+                        self.settle(record, &mut ending, Some(issued))
+                    }
+                    Err(answered) => return *answered,
+                }
+            }
+            Pending::Settled(settled) => settled,
+        };
+        let (processed, persisted) = match settled {
+            Settled::Done(done) => *done,
+            Settled::Restart(issued) => {
+                let cleared = self.clear_restart(&ending.uid);
+                let mut fleet = self.fleet.lock().expect("fleet lock");
+                let Some(record) = fleet.get_mut(&ending.uid) else {
+                    drop(fleet);
+                    return self.forgotten_elsewhere(&ending.uid, &ending.reported);
+                };
+                if self.take_restart(&ending.uid, record, cleared) {
+                    let processed = Processed {
+                        reply: restart_command(&ending.uid, self.capabilities()),
+                        uid: Some(ending.uid),
+                        disconnected: false,
+                    };
+                    (processed, record.to_persisted())
+                } else {
+                    (
+                        self.reply_of(record, &ending, issued),
+                        record.to_persisted(),
+                    )
+                }
+            }
+        };
+        if !self.persist_if_dirty(&ending.uid, &persisted) {
+            return self.forgotten_elsewhere(&ending.uid, &ending.reported);
+        }
+        processed
+    }
+
+    /// Signs and records the certificate a report asked for (ADR-0038): signing it here, on the
+    /// connection it arrived over, is the whole of the approval, since admission already required
+    /// every proof this endpoint asks of any message, which is what the Baseline's flow means by
+    /// awaiting one. A request the Server refuses, or one whose record cannot be written, which
+    /// the Agent retries (ADR-0039 clause 5), is answered here, the report's record persisted.
+    fn issue(
+        &self,
+        csr: Vec<u8>,
+        sender: &[u8],
+        presented: Option<&Presented>,
+        ending: &Ending,
+        persisted: &PersistedAgent,
+    ) -> Result<TlsCertificate, Box<Processed>> {
+        let uid = ending.uid;
+        // `Ok(Err(..))` is a request the Server refuses; `Err(..)` a record it cannot write,
+        // which the Agent retries (ADR-0039 clause 5).
+        let outcome: Result<Result<Signed, String>, String> = match &self.client_ca {
+            // The Baseline's MUST when the Server cannot act on the request. An Agent reaching
+            // here ignored the undeclared capability, so it is a client error.
+            None => Ok(Err("this Server issues no client certificates".to_string())),
+            Some(ca) => match String::from_utf8(csr)
+                .map_err(|_| "the certificate signing request is not PEM".to_string())
+                .and_then(|csr| {
+                    // The message's own instance_uid, before any re-key (ADR-0038).
+                    ca.check_claims(&csr, sender)?;
+                    let (predecessor, host, subject) = self.renews(ca.as_ref(), &csr, presented)?;
+                    Ok((ca.sign(&csr, &host, &subject)?, predecessor))
+                }) {
+                Err(e) => Ok(Err(e)),
+                Ok((signed, predecessor)) => self
+                    .record_issued(&signed, sender, predecessor)
+                    .map(|()| Ok(signed)),
+            },
+        };
+        let refused = match outcome {
+            Ok(Ok(signed)) => {
+                info!(
+                    agent = %uid,
+                    serial = %signed.facts.id.serial,
+                    "issued a client certificate"
+                );
+                return Ok(TlsCertificate {
+                    cert: signed.pem.into_bytes(),
+                    // The Agent generated its own key and keeps it — the point of the CSR flow —
+                    // so the Server has nothing to put here and must not invent it.
+                    private_key: Vec::new(),
+                    ..Default::default()
+                });
+            }
+            Err(e) => {
+                warn!(agent = %uid, error = %e, "held back a certificate: the audit record is unavailable");
+                unavailable(ending.reported.as_bytes(), &e)
+            }
+            Ok(Err(e)) => {
+                warn!(agent = %uid, error = %e, "refused a certificate signing request");
+                self.audit_refusal(
+                    Entry::new("issuance.refused", "refused")
+                        .with("instance_uid", uid.to_string())
+                        .with("reason", e.clone()),
+                );
+                bad_request(&e)
+            }
+        };
+        // The report's updates are already in the record, so they are persisted even though no
+        // certificate is issued (ADR-0043).
+        if !self.persist_if_dirty(&uid, persisted) {
+            return Err(Box::new(self.forgotten_elsewhere(&uid, &ending.reported)));
+        }
+        Err(Box::new(Processed {
+            reply: refused,
+            uid: Some(uid),
+            disconnected: false,
+        }))
     }
 
     /// The record of an Agent first heard of now.
@@ -3920,6 +4560,93 @@ impl AppState {
             // rollout act says so, and the fleet view shows what it could get.
             assignment: None,
         }
+    }
+
+    /// The index of `uid`'s own lock among [`AGENT_LOCKS`].
+    fn agent_lock_index(uid: &InstanceUid) -> usize {
+        use std::hash::{Hash as _, Hasher as _};
+        let mut hasher = std::hash::DefaultHasher::new();
+        uid.0.hash(&mut hasher);
+        (hasher.finish() % AGENT_LOCKS as u64) as usize
+    }
+
+    /// Takes the lock at `index` among the Agents' own locks, counting a wait.
+    fn agent_lock_at(&self, index: usize) -> std::sync::MutexGuard<'_, ()> {
+        let lock = &self.agent_locks[index];
+        match lock.try_lock() {
+            Ok(guard) => guard,
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                self.agent_lock_waits.fetch_add(1, Ordering::SeqCst);
+                lock.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+            }
+        }
+    }
+
+    /// Takes `uid`'s own lock. Never taken while the fleet lock is held.
+    fn agent_lock(&self, uid: &InstanceUid) -> std::sync::MutexGuard<'_, ()> {
+        self.agent_lock_at(Self::agent_lock_index(uid))
+    }
+
+    /// Takes the own locks of the Agents of `uids`, every one where `None`, in the order of
+    /// their index.
+    fn agent_locks_of(
+        &self,
+        uids: Option<&HashSet<InstanceUid>>,
+    ) -> Vec<std::sync::MutexGuard<'_, ()>> {
+        let indexes: BTreeSet<usize> = match uids {
+            Some(uids) => uids.iter().map(Self::agent_lock_index).collect(),
+            None => (0..AGENT_LOCKS).collect(),
+        };
+        indexes
+            .into_iter()
+            .map(|index| self.agent_lock_at(index))
+            .collect()
+    }
+
+    /// How often an Agent's own lock was found taken and waited for.
+    pub fn agent_lock_waits(&self) -> u64 {
+        self.agent_lock_waits.load(Ordering::SeqCst)
+    }
+
+    /// How a report's placement reads the Client Agents of `groups` held elsewhere: read now,
+    /// before the fleet lock is taken, on a shared store; on a store this Server alone writes
+    /// there is nothing to read.
+    fn elsewhere_of(&self, groups: &[Group]) -> Elsewhere {
+        if !self.agent_store.is_shared() {
+            return Elsewhere::Now;
+        }
+        Elsewhere::Read {
+            read: self.read_elsewhere(groups),
+            missed: Vec::new(),
+        }
+    }
+
+    /// Places again what a placement from `elsewhere` found unread; called with no lock held.
+    fn place_again(&self, elsewhere: Elsewhere) {
+        if let Elsewhere::Read { missed, .. } = elsewhere {
+            self.place_groups_again(missed);
+        }
+    }
+
+    /// The group an Agent arriving over `host` and described by `description` is placed in, as
+    /// [`locate`](Self::locate) places it.
+    fn group_of(
+        &self,
+        host: Option<&str>,
+        description: Option<&AgentDescription>,
+    ) -> Option<Group> {
+        let (Some(host), Some(revocations)) = (host, &self.revocations) else {
+            return None;
+        };
+        if revocations.placement(host).0 {
+            return crate::labels::machine(description).map(|machine| Group::Behind {
+                gateway: host.to_string(),
+                machine,
+            });
+        }
+        Some(Group::Host(host.to_string()))
     }
 
     /// On a shared store, loads the record of `uid` from it when this Server does not hold one, as
@@ -8971,10 +9698,27 @@ mod tests {
         /// asked for.
         failing_restarts: Arc<std::sync::atomic::AtomicBool>,
         restarts_set: Arc<AtomicU64>,
+        /// What runs before every call to the store, given the call and the Agent it names.
+        probe: Arc<Mutex<Option<Probe>>>,
+        /// What runs once after a take committed, before it is answered.
+        after_take: Arc<Mutex<Option<Act>>>,
+        /// What runs once after a re-key committed, before it is answered.
+        after_rekey: Arc<Mutex<Option<Act>>>,
     }
 
     /// What [`Hooked`] runs once after a read.
     type Act = Box<dyn FnOnce() + Send>;
+
+    /// What [`Hooked`] runs before every call to the store.
+    type Probe = Arc<dyn Fn(&'static str, Option<&InstanceUid>) + Send + Sync>;
+
+    /// Runs the probe set in `probe`, if one is, for `call` naming `uid`.
+    fn probed(probe: &Mutex<Option<Probe>>, call: &'static str, uid: Option<&InstanceUid>) {
+        let probe = probe.lock().expect("hook lock").clone();
+        if let Some(probe) = probe {
+            probe(call, uid);
+        }
+    }
 
     impl Hooked {
         fn new(inner: Box<dyn AgentStore>) -> Self {
@@ -8999,6 +9743,9 @@ mod tests {
                 after_takes: Arc::new(Mutex::new(None)),
                 failing_restarts: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 restarts_set: Arc::new(AtomicU64::new(0)),
+                probe: Arc::new(Mutex::new(None)),
+                after_take: Arc::new(Mutex::new(None)),
+                after_rekey: Arc::new(Mutex::new(None)),
             }
         }
     }
@@ -9009,6 +9756,7 @@ mod tests {
             self.inner.load()
         }
         fn get(&self, uid: &InstanceUid) -> Result<Option<PersistedAgent>, String> {
+            probed(&self.probe, "get", Some(uid));
             let failing = self
                 .failing_gets
                 .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
@@ -9028,6 +9776,7 @@ mod tests {
             &self,
             uids: &[InstanceUid],
         ) -> Result<HashMap<InstanceUid, PersistedAgent>, String> {
+            probed(&self.probe, "get_many", None);
             self.batched_gets.fetch_add(1, Ordering::SeqCst);
             self.inner.get_many(uids)
         }
@@ -9044,6 +9793,7 @@ mod tests {
             &self,
             query: &crate::agent_store::PageQuery<'_>,
         ) -> Result<crate::agent_store::AgentPage, String> {
+            probed(&self.probe, "query_page", None);
             self.inner.query_page(query)
         }
         fn reported_values(
@@ -9059,6 +9809,7 @@ mod tests {
             self.inner.put(uid, record)
         }
         fn write_report(&self, uid: &InstanceUid, record: &PersistedAgent) -> Result<bool, String> {
+            probed(&self.probe, "write_report", Some(uid));
             self.inner.write_report(uid, record)
         }
         fn write_report_unless_held_elsewhere(
@@ -9077,6 +9828,7 @@ mod tests {
             record: &PersistedAgent,
             max_records: usize,
         ) -> Result<Creation, String> {
+            probed(&self.probe, "create_within", Some(uid));
             self.inner.create_within(uid, record, max_records)
         }
         fn set_labels(
@@ -9091,6 +9843,7 @@ mod tests {
             uid: &InstanceUid,
             pending: bool,
         ) -> Result<Option<bool>, String> {
+            probed(&self.probe, "set_restart_pending", Some(uid));
             if pending {
                 self.restarts_set.fetch_add(1, Ordering::SeqCst);
                 if self.failing_restarts.load(Ordering::SeqCst) {
@@ -9143,10 +9896,15 @@ mod tests {
             holder: &str,
             last_seen_ms: u64,
         ) -> Result<Option<crate::agent_store::Taken>, String> {
+            probed(&self.probe, "take", Some(uid));
             if self.failing_takes.load(Ordering::SeqCst) {
                 return Err("the take is not written".to_string());
             }
             let taken = self.inner.take(uid, holder, last_seen_ms);
+            let after = self.after_take.lock().expect("hook lock").take();
+            if let Some(after) = after {
+                after();
+            }
             if self.losing_takes.load(Ordering::SeqCst) {
                 return Err("the answer of the take is lost".to_string());
             }
@@ -9156,6 +9914,7 @@ mod tests {
             &self,
             uids: &[InstanceUid],
         ) -> Result<HashMap<InstanceUid, Option<String>>, String> {
+            probed(&self.probe, "holders", None);
             let holders = self.inner.holders(uids);
             let after = self.after_holders.lock().expect("hook lock").take();
             if let Some(after) = after {
@@ -9169,16 +9928,22 @@ mod tests {
             new: &InstanceUid,
             record: &PersistedAgent,
         ) -> Result<(), String> {
+            probed(&self.probe, "rekey", Some(old));
             if self.failing_rekeys.load(Ordering::SeqCst) {
                 return Err("the move is held back".to_string());
             }
             self.inner.rekey(old, new, record)?;
+            let after = self.after_rekey.lock().expect("hook lock").take();
+            if let Some(after) = after {
+                after();
+            }
             if self.losing_rekeys.load(Ordering::SeqCst) {
                 return Err("the move's answer is lost".to_string());
             }
             Ok(())
         }
         fn moved(&self, old: &InstanceUid, new: &InstanceUid) -> Result<bool, String> {
+            probed(&self.probe, "moved", Some(old));
             self.moved_reads.fetch_add(1, Ordering::SeqCst);
             if self.failing_moved.load(Ordering::SeqCst) {
                 return Err("the read back is held back".to_string());
@@ -9809,12 +10574,12 @@ mod tests {
         assert_eq!(kept(&a, &rekeyed), (false, false), "re-keyed");
     }
 
-    /// An instance that heard another took an Agent reads the holder again under the fleet lock
-    /// before it stops carrying it: a take of its own made between its first read and the lock, by
-    /// the Agent's new connection here, keeps the Agent carried.
+    /// An instance that heard another took an Agent reads its holder under the Agent's own lock: a
+    /// take of its own by the Agent's new connection here, made while the holder is read, waits
+    /// for the read and keeps the Agent carried.
     /// Verifies: ADR-0041
     #[test]
-    fn an_agent_taken_back_here_between_the_two_reads_of_its_holder_stays_carried() {
+    fn an_agent_taken_back_here_while_its_holder_is_read_stays_carried() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
             return;
         };
@@ -9837,18 +10602,25 @@ mod tests {
         let uid = InstanceUid([0x74; 16]);
         a.process(report(&uid, 1), Transport::WebSocket, Some(7));
         b.process(report(&uid, 2), Transport::WebSocket, Some(9));
-        // Between A's first read of the holder and its fleet lock, the Agent's old connection to A
-        // closes and it connects to A again, which takes it back.
+        // While A reads the holder, the Agent's old connection to A closes and it connects to A
+        // again, which takes it back.
         let again = a.clone();
+        let (taken_back, taking_back) = std::sync::mpsc::channel();
         *after_holders.lock().expect("hook lock") = Some(Box::new(move || {
-            again.mark_disconnected(&[uid], 7);
-            again.process(report(&uid, 3), Transport::WebSocket, Some(8));
+            std::thread::spawn(move || {
+                again.mark_disconnected(&[uid], 7);
+                again.process(report(&uid, 3), Transport::WebSocket, Some(8));
+                let _ = taken_back.send(());
+            });
         }));
         a.release_taken(None).expect("release");
         assert!(
             after_holders.lock().expect("hook lock").is_none(),
-            "the take came between the reads"
+            "the take came while the holder was read"
         );
+        taking_back
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the Agent's new connection is answered");
         assert!(view(&a, &uid).connected, "still carried");
     }
 
@@ -11683,5 +12455,559 @@ mod tests {
         a.write_presence(third)
             .expect("A's batch under its third lease");
         assert_eq!(stored_presence(&test, &uid), format!("{third} true 3"));
+    }
+
+    /// A ledger store that runs a probe before each write a report makes of the host register:
+    /// binding an `instance_uid`, writing a Host and moving a binding.
+    struct ProbedLedger {
+        inner: Box<dyn crate::revocation::LedgerStore>,
+        probe: Probe,
+    }
+
+    impl crate::revocation::LedgerStore for ProbedLedger {
+        fn load(&self) -> Result<crate::revocation::Ledger, String> {
+            self.inner.load()
+        }
+        fn put_issued(&self, issued: &crate::revocation::Issued) -> Result<(), String> {
+            self.inner.put_issued(issued)
+        }
+        fn remove_issued(&self, id: &CertId, now_ms: u64) -> Result<bool, String> {
+            self.inner.remove_issued(id, now_ms)
+        }
+        fn register_issued(
+            &self,
+            issued: &crate::revocation::Issued,
+            bounds: &crate::revocation::RegisterBounds,
+        ) -> Result<crate::revocation::Registered, String> {
+            self.inner.register_issued(issued, bounds)
+        }
+        fn register_minting(
+            &self,
+            issued: &crate::revocation::Issued,
+            bounds: &crate::revocation::RegisterBounds,
+            mint: Option<(&str, &crate::revocation::Host)>,
+            bootstrap: Option<&CertId>,
+        ) -> Result<crate::revocation::Registered, String> {
+            self.inner.register_minting(issued, bounds, mint, bootstrap)
+        }
+        fn add_revocation(
+            &self,
+            entry: &crate::revocation::Revocation,
+            bound: usize,
+        ) -> Result<crate::revocation::Added, String> {
+            self.inner.add_revocation(entry, bound)
+        }
+        fn list_version(&self) -> Option<u64> {
+            self.inner.list_version()
+        }
+        fn remove_revocation(&self, id: &str) -> Result<bool, String> {
+            self.inner.remove_revocation(id)
+        }
+        fn bind(&self, instance_uid: &str, host: &str) -> Result<crate::revocation::Bound, String> {
+            (self.probe)("bind", None);
+            self.inner.bind(instance_uid, host)
+        }
+        fn bind_seen(
+            &self,
+            instance_uid: &str,
+            host: &str,
+            row: &crate::revocation::Host,
+        ) -> Result<crate::revocation::Bound, String> {
+            (self.probe)("bind_seen", None);
+            self.inner.bind_seen(instance_uid, host, row)
+        }
+        fn unbind(&self, instance_uid: &str) -> Result<Option<String>, String> {
+            self.inner.unbind(instance_uid)
+        }
+        fn rebind(
+            &self,
+            old: &str,
+            new: &str,
+        ) -> Result<Option<(String, crate::revocation::Bound)>, String> {
+            (self.probe)("rebind", None);
+            self.inner.rebind(old, new)
+        }
+        fn unbind_host(&self, host: &str) -> Result<(), String> {
+            self.inner.unbind_host(host)
+        }
+        fn writes_hosts_by_act(&self) -> bool {
+            self.inner.writes_hosts_by_act()
+        }
+        fn write_host_act(&self, act: &crate::revocation::HostAct) -> Result<(), String> {
+            (self.probe)("write_host_act", None);
+            self.inner.write_host_act(act)
+        }
+        fn save_hosts(
+            &self,
+            hosts: &BTreeMap<String, crate::revocation::Host>,
+        ) -> Result<(), String> {
+            self.inner.save_hosts(hosts)
+        }
+    }
+
+    /// A probe that notes each call with whether the fleet lock of the state `of` names was free
+    /// as it was made.
+    fn lock_probe(
+        of: &Arc<OnceLock<std::sync::Weak<AppState>>>,
+        seen: &Arc<Mutex<Vec<(&'static str, bool)>>>,
+    ) -> Probe {
+        let (of, seen) = (of.clone(), seen.clone());
+        Arc::new(move |call, _| {
+            let free = of
+                .get()
+                .and_then(std::sync::Weak::upgrade)
+                .is_none_or(|state| state.fleet.try_lock().is_ok());
+            seen.lock().expect("seen lock").push((call, free));
+        })
+    }
+
+    /// No call a report makes to the database holds the fleet lock: the creation of a new Agent's
+    /// record, the binding of its `instance_uid` and the write of its Host, its take, the read of
+    /// its group's Client Agents another instance carries, the write of what it reported, and a
+    /// re-key it asks for with the move of its binding are each made with the lock free, so no
+    /// other report waits for them.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side, ADR-0043
+    #[test]
+    fn a_report_holds_the_fleet_lock_across_no_call_to_the_database() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let hooked = Hooked::new(Box::new(crate::postgres::agents::PgAgentStore::new(
+            database.clone(),
+        )));
+        // Another instance carries an Agent of the same Host, so placing this one reads it.
+        let b = on_postgres(
+            &database,
+            Box::new(crate::postgres::agents::PgAgentStore::new(database.clone())),
+        );
+        let elsewhere = InstanceUid([0x90; 16]);
+        b.process_presented(
+            report(&elsewhere, 1),
+            Transport::WebSocket,
+            Some(1),
+            Some(&of_host("h91")),
+        );
+        let (of, seen) = (Arc::new(OnceLock::new()), Arc::new(Mutex::new(Vec::new())));
+        let probe = lock_probe(&of, &seen);
+        *hooked.probe.lock().expect("hook lock") = Some(probe.clone());
+        let revocations = Revocations::open(
+            Box::new(ProbedLedger {
+                inner: Box::new(crate::postgres::ledger::PgLedgerStore::new(
+                    database.clone(),
+                )),
+                probe,
+            }),
+            Arc::new(crate::clock::SystemClock),
+            Vec::new(),
+        )
+        .expect("revocations");
+        let a = Arc::new(
+            AppState::with_stores(
+                Box::new(hooked),
+                Box::new(crate::postgres::configs::PgConfigBackend::new(
+                    database.clone(),
+                )),
+                Box::new(crate::clock::SystemClock),
+            )
+            .expect("state")
+            .with_revocations(Some(Arc::new(revocations))),
+        );
+        of.set(Arc::downgrade(&a)).expect("set once");
+        a.serve_under(tokio::sync::watch::channel(Some(LEASE_A.to_string())).1);
+
+        let uid = InstanceUid([0x91; 16]);
+        let host = of_host("h91");
+        a.process_presented(report(&uid, 1), Transport::WebSocket, Some(7), Some(&host));
+        let mut rekey = report(&uid, 2);
+        rekey.flags = AgentToServerFlags::RequestInstanceUid as u64;
+        let answered = a.process_presented(rekey, Transport::WebSocket, Some(7), Some(&host));
+        assert!(
+            answered.reply.agent_identification.is_some(),
+            "re-keyed: {:?}",
+            answered.reply
+        );
+
+        let seen = seen.lock().expect("seen lock").clone();
+        for call in [
+            "create_within",
+            "get_many",
+            "bind_seen",
+            "write_host_act",
+            "take",
+            "write_report",
+            "rekey",
+            "rebind",
+        ] {
+            assert!(
+                seen.iter().any(|(made, _)| *made == call),
+                "{call} was made: {seen:?}"
+            );
+        }
+        let held: Vec<&(&str, bool)> = seen.iter().filter(|(_, free)| !free).collect();
+        assert!(held.is_empty(), "the fleet lock was held across {held:?}");
+    }
+
+    /// While one Agent's report waits for a call to its store, another Agent's report is answered:
+    /// what the fleet lock guards is applied before and after the call, never across it.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    #[test]
+    fn another_agents_report_is_answered_while_one_agents_write_waits() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hooked = Hooked::new(Box::new(
+            crate::fs::FsAgentStore::open(dir.path()).expect("agents"),
+        ));
+        let (held, other) = (InstanceUid([0x92; 16]), InstanceUid([0x93; 16]));
+        let (entered, entering) = std::sync::mpsc::channel::<()>();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let released = Arc::new(Mutex::new(released));
+        *hooked.probe.lock().expect("hook lock") = Some(Arc::new(move |call, uid| {
+            if call == "write_report" && uid == Some(&held) {
+                let _ = entered.send(());
+                let _ = released
+                    .lock()
+                    .expect("release lock")
+                    .recv_timeout(Duration::from_secs(30));
+            }
+        }));
+        let state = Arc::new(
+            AppState::with_stores(
+                Box::new(hooked),
+                Box::new(crate::fs::FsConfigBackend::open(dir.path()).expect("configs")),
+                Box::new(crate::clock::SystemClock),
+            )
+            .expect("state"),
+        );
+        let waiting = {
+            let state = state.clone();
+            std::thread::spawn(move || {
+                state.process(report(&held, 1), Transport::WebSocket, Some(1))
+            })
+        };
+        entering
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the held Agent's write is under way");
+        let (answered, answering) = std::sync::mpsc::channel();
+        {
+            let state = state.clone();
+            std::thread::spawn(move || {
+                let _ =
+                    answered.send(state.process(report(&other, 1), Transport::WebSocket, Some(2)));
+            });
+        }
+        let other_answer = answering.recv_timeout(Duration::from_secs(30));
+        let _ = release.send(());
+        let held_answer = waiting.join().expect("the held report");
+        let other_answer = other_answer.expect("the other Agent is answered while the write waits");
+        assert_eq!(other_answer.uid, Some(other));
+        assert_eq!(held_answer.uid, Some(held));
+    }
+
+    /// An instance whose take of an Agent another instance's take overtakes before it holds the
+    /// Agent in memory stops carrying it once it hears of that take: hearing of it waits for the
+    /// report under way here, so it reads the holder after this instance holds the Agent, and the
+    /// newest connection keeps the Agent.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    #[test]
+    fn an_instance_whose_take_is_overtaken_before_it_holds_the_agent_stops_carrying_it() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let hooked = Hooked::new(Box::new(crate::postgres::agents::PgAgentStore::new(
+            database.clone(),
+        )));
+        let after_take = hooked.after_take.clone();
+        let a = Arc::new(on_postgres(&database, Box::new(hooked)));
+        a.serve_under(tokio::sync::watch::channel(Some(LEASE_A.to_string())).1);
+        let b = Arc::new(on_postgres(
+            &database,
+            Box::new(crate::postgres::agents::PgAgentStore::new(database.clone())),
+        ));
+        b.serve_under(tokio::sync::watch::channel(Some(LEASE_B.to_string())).1);
+        let uid = InstanceUid([0x94; 16]);
+        b.process(report(&uid, 1), Transport::WebSocket, Some(3));
+
+        // A's take commits; then B takes the Agent again, and A hears of it while its report has
+        // not yet taken the Agent into what it holds.
+        let (heard, hearing) = std::sync::mpsc::channel();
+        let waits_before = a.agent_lock_waits();
+        let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let (a, b, finished) = (Arc::downgrade(&a), b.clone(), finished.clone());
+            *after_take.lock().expect("hook lock") = Some(Box::new(move || {
+                // The Agent's connection to B closed, and it opens another to B.
+                b.mark_disconnected(&[uid], 3);
+                b.process(report(&uid, 2), Transport::WebSocket, Some(4));
+                let a = a.upgrade().expect("A");
+                let (on_a, done) = (a.clone(), finished.clone());
+                std::thread::spawn(move || {
+                    let read = on_a.release_taken(Some(&HashSet::from([uid])));
+                    done.store(true, Ordering::SeqCst);
+                    let _ = heard.send(read);
+                });
+                // Hearing waits for this report, or is done before it goes on.
+                until("A hears of B's take", || {
+                    a.agent_lock_waits() > waits_before || finished.load(Ordering::SeqCst)
+                });
+            }));
+        }
+        a.process(report(&uid, 2), Transport::WebSocket, Some(7));
+        hearing
+            .recv_timeout(Duration::from_secs(30))
+            .expect("A heard of the take")
+            .expect("A read the holder");
+        assert!(!view(&a, &uid).connected, "A no longer carries it");
+        assert!(
+            stored_presence(&test, &uid).starts_with(&format!("{LEASE_B} true")),
+            "B holds it: {}",
+            stored_presence(&test, &uid)
+        );
+    }
+
+    /// A restart requested while a delivery of the one queued before clears it is not lost: the
+    /// request waits for the delivery, which holds the Agent's own lock across its clear, and is
+    /// queued after it, so the Agent is sent it next.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    #[test]
+    fn a_restart_requested_while_a_delivery_clears_one_stays_queued() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hooked = Hooked::new(Box::new(
+            crate::fs::FsAgentStore::open(dir.path()).expect("agents"),
+        ));
+        let probe = hooked.probe.clone();
+        let state = Arc::new(
+            AppState::with_stores(
+                Box::new(hooked),
+                Box::new(crate::fs::FsConfigBackend::open(dir.path()).expect("configs")),
+                Box::new(crate::clock::SystemClock),
+            )
+            .expect("state"),
+        );
+        let uid = InstanceUid([0x95; 16]);
+        state.process(restartable(&uid, 1), Transport::WebSocket, Some(1));
+        assert!(state.request_restart(&uid).is_ok(), "queued");
+
+        let (requested, requesting) = std::sync::mpsc::channel();
+        let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let armed = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let waits_before = state.agent_lock_waits();
+        {
+            let (on, finished) = (Arc::downgrade(&state), finished.clone());
+            *probe.lock().expect("hook lock") = Some(Arc::new(move |call, _| {
+                if call != "set_restart_pending" || !armed.swap(false, Ordering::SeqCst) {
+                    return;
+                }
+                let state = on.upgrade().expect("state");
+                let (again, done, requested) = (state.clone(), finished.clone(), requested.clone());
+                std::thread::spawn(move || {
+                    let request = again.request_restart(&uid).is_ok();
+                    done.store(true, Ordering::SeqCst);
+                    let _ = requested.send(request);
+                });
+                until("the request waits for the delivery or is done", || {
+                    state.agent_lock_waits() > waits_before || finished.load(Ordering::SeqCst)
+                });
+            }));
+        }
+        let delivered = state.process(restartable(&uid, 2), Transport::WebSocket, Some(1));
+        assert!(
+            delivered.reply.command.is_some(),
+            "the first restart is delivered"
+        );
+        assert!(
+            requesting
+                .recv_timeout(Duration::from_secs(30))
+                .expect("the second request is answered"),
+            "queued again"
+        );
+        assert!(
+            state.restart_command_for(&uid).is_some(),
+            "the second restart is sent next"
+        );
+    }
+
+    /// A label set while a report reads the Agent's record from the store, before it holds it, is
+    /// not undone by what the read found: the label waits for the report, which holds the Agent's
+    /// own lock, and is then taken into the record held.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    #[test]
+    fn a_label_set_while_a_report_reads_the_record_is_not_undone() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let hooked = Hooked::new(Box::new(crate::postgres::agents::PgAgentStore::new(
+            database.clone(),
+        )));
+        let after_get = hooked.after_get.clone();
+        let a = Arc::new(on_postgres(&database, Box::new(hooked)));
+        let b = on_postgres(
+            &database,
+            Box::new(crate::postgres::agents::PgAgentStore::new(database.clone())),
+        );
+        let uid = InstanceUid([0x96; 16]);
+        b.process(report(&uid, 1), Transport::Http, None);
+        label(&b, &uid, &[("tier", "edge")]);
+
+        let (labelled, labelling) = std::sync::mpsc::channel();
+        let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let waits_before = a.agent_lock_waits();
+        {
+            let (on, finished) = (Arc::downgrade(&a), finished.clone());
+            *after_get.lock().expect("hook lock") = Some(Box::new(move || {
+                let a = on.upgrade().expect("A");
+                let (again, done) = (a.clone(), finished.clone());
+                std::thread::spawn(move || {
+                    label(&again, &uid, &[("tier", "core")]);
+                    done.store(true, Ordering::SeqCst);
+                    let _ = labelled.send(());
+                });
+                until("the label waits for the report or is done", || {
+                    a.agent_lock_waits() > waits_before || finished.load(Ordering::SeqCst)
+                });
+            }));
+        }
+        a.process(report(&uid, 2), Transport::Http, None);
+        labelling
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the label is set");
+        assert_eq!(view(&a, &uid).labels["tier"], "core", "the label set stays");
+    }
+
+    /// A report whose Agent leaves memory while it reads and writes the store — forgotten through
+    /// another instance — starts again from what the store holds then, and the Agent is held
+    /// under a record created anew.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side, ADR-0043
+    #[test]
+    fn a_report_whose_agent_leaves_memory_meanwhile_starts_again() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let hooked = Hooked::new(Box::new(crate::postgres::agents::PgAgentStore::new(
+            database.clone(),
+        )));
+        let after_take = hooked.after_take.clone();
+        let a = Arc::new(on_postgres(&database, Box::new(hooked)));
+        a.serve_under(tokio::sync::watch::channel(Some(LEASE_A.to_string())).1);
+        let uid = InstanceUid([0x97; 16]);
+        a.process(report(&uid, 1), Transport::WebSocket, Some(7));
+        a.mark_disconnected(&[uid], 7);
+        {
+            let on = Arc::downgrade(&a);
+            let gone = format!("DELETE FROM agents WHERE instance_uid = '{uid}'");
+            let test = test.sql_runner();
+            *after_take.lock().expect("hook lock") = Some(Box::new(move || {
+                test(&gone);
+                on.upgrade()
+                    .expect("A")
+                    .take_up_agents(Some(&HashSet::from([uid])))
+                    .expect("A hears the Agent forgotten");
+            }));
+        }
+        let answered = a.process(report(&uid, 2), Transport::WebSocket, Some(8));
+        assert_eq!(answered.uid, Some(uid), "carried");
+        assert!(view(&a, &uid).connected, "held");
+        assert_eq!(
+            test.rows(&format!(
+                "SELECT instance_uid FROM agents WHERE instance_uid = '{uid}'"
+            ))
+            .len(),
+            1,
+            "stored anew"
+        );
+    }
+
+    /// A report whose Agent leaves memory in each of its rounds is answered `Unavailable`, so the
+    /// Agent retries, rather than starting again without end.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    #[test]
+    fn a_report_whose_agent_leaves_memory_in_every_round_is_answered_unavailable() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let hooked = Hooked::new(Box::new(crate::postgres::agents::PgAgentStore::new(
+            database.clone(),
+        )));
+        let probe = hooked.probe.clone();
+        let a = Arc::new(on_postgres(&database, Box::new(hooked)));
+        a.serve_under(tokio::sync::watch::channel(Some(LEASE_A.to_string())).1);
+        let uid = InstanceUid([0x98; 16]);
+        a.process(report(&uid, 1), Transport::WebSocket, Some(7));
+        a.mark_disconnected(&[uid], 7);
+        let rounds = Arc::new(AtomicU64::new(0));
+        {
+            let (on, rounds) = (Arc::downgrade(&a), rounds.clone());
+            let other = crate::postgres::agents::PgAgentStore::new(database.clone());
+            let gone = format!("DELETE FROM agents WHERE instance_uid = '{uid}'");
+            let test = test.sql_runner();
+            *probe.lock().expect("hook lock") = Some(Arc::new(move |call, _| {
+                if call != "take" {
+                    return;
+                }
+                rounds.fetch_add(1, Ordering::SeqCst);
+                // Forgotten and heard of here, then stored again by another instance.
+                test(&gone);
+                on.upgrade()
+                    .expect("A")
+                    .take_up_agents(Some(&HashSet::from([uid])))
+                    .expect("A hears the Agent forgotten");
+                other
+                    .put(&uid, &crate::agent_store::tests::record())
+                    .expect("stored again");
+            }));
+        }
+        let answered = a.process(report(&uid, 2), Transport::WebSocket, Some(8));
+        assert_eq!(rounds.load(Ordering::SeqCst), REPORT_ROUNDS as u64);
+        assert!(
+            answered
+                .reply
+                .error_response
+                .as_ref()
+                .is_some_and(|error| error.error_message.contains("retry later")),
+            "answered unavailable: {:?}",
+            answered.reply
+        );
+        assert_eq!(answered.uid, None);
+    }
+
+    /// A re-key an Agent asked for that a read again finds made before the report holds the Agent
+    /// under its new identity keeps the Agent: the move is pending until then, so the read again
+    /// reads it back and moves what is held, and the session goes on, its labels with it.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side, ADR-0043
+    #[test]
+    fn a_rekey_a_read_again_finds_before_the_report_holds_it_keeps_the_agent() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let hooked = Hooked::new(Box::new(crate::postgres::agents::PgAgentStore::new(
+            database.clone(),
+        )));
+        let after_rekey = hooked.after_rekey.clone();
+        let a = Arc::new(on_postgres(&database, Box::new(hooked)));
+        a.serve_under(tokio::sync::watch::channel(Some(LEASE_A.to_string())).1);
+        let uid = InstanceUid([0x99; 16]);
+        a.process(report(&uid, 1), Transport::WebSocket, Some(7));
+        label(&a, &uid, &[("tier", "edge")]);
+        {
+            let on = Arc::downgrade(&a);
+            *after_rekey.lock().expect("hook lock") = Some(Box::new(move || {
+                // As after a missed notification: everything held is read again.
+                on.upgrade()
+                    .expect("A")
+                    .take_up_agents(None)
+                    .expect("read again");
+            }));
+        }
+        let mut rekey = report(&uid, 2);
+        rekey.flags = AgentToServerFlags::RequestInstanceUid as u64;
+        let answered = a.process(rekey, Transport::WebSocket, Some(7));
+        let new = answered.uid.expect("carried");
+        assert_ne!(new, uid, "re-keyed");
+        assert!(a.take_forgotten(7).is_empty(), "its session goes on");
+        assert_eq!(view(&a, &new).labels["tier"], "edge", "its labels with it");
     }
 }

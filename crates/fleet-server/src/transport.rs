@@ -1090,9 +1090,17 @@ impl Handler for Fleet {
                 subject_values: carrier.proofs.subject_values.clone(),
                 not_after_ms: *not_after_ms,
             });
-        let outcome =
-            self.0
-                .process_presented(report, carrier.transport, carrier.conn, presented.as_ref());
+        // The report reads and writes the store, so it runs off the runtime's workers: a
+        // handshake, another connection's message and a ping never wait for it.
+        let (state, transport, conn) = (self.0.clone(), carrier.transport, carrier.conn);
+        let outcome = match tokio::task::spawn_blocking(move || {
+            state.process_presented(report, transport, conn, presented.as_ref())
+        })
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(e) => std::panic::resume_unwind(e.into_panic()),
+        };
         if let (Some(uid), Some(_)) = (outcome.uid, carrier.conn) {
             if outcome.disconnected {
                 carrier.seen.retain(|s| s != &uid);

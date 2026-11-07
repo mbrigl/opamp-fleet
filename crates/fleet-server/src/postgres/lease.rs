@@ -188,13 +188,12 @@ impl Database {
                     super::audit::Ended::HolderGone
                 };
                 written.extend(
-                    super::audit::close_lapsed(&*transaction, lapsed, &instance_id, ended).await?,
+                    super::audit::close_lapsed(&transaction, lapsed, &instance_id, ended).await?,
                 );
             }
             let taken_over: Vec<String> = removed.into_iter().map(|(id, _)| id).collect();
             written.push(
-                super::audit::open_chain(&*transaction, &instance_id, &host, files.as_ref())
-                    .await?,
+                super::audit::open_chain(&transaction, &instance_id, &host, files.as_ref()).await?,
             );
             transaction
                 .execute(
@@ -299,7 +298,7 @@ impl Database {
             for chain in &lapsed {
                 written.extend(
                     super::audit::close_lapsed(
-                        &*transaction,
+                        &transaction,
                         chain,
                         &id,
                         super::audit::Ended::Lapsed,

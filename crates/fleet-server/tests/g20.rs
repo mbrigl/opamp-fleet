@@ -196,6 +196,59 @@ impl Role {
         lines.join("\n")
     }
 
+    /// The mean time one statement takes from this process to the database and back, over one
+    /// connection: what every call of an instance pays at least once.
+    fn round_trip(&self) -> Duration {
+        let mut pg = tokio_postgres::Config::new();
+        pg.host(&self.host)
+            .port(self.port)
+            .dbname(&self.dbname)
+            .user(&self.user)
+            .password(&self.password)
+            .connect_timeout(Duration::from_secs(10));
+        let roots = self.ca_file.as_ref().map(|path| {
+            opamp::tls::root_store(&std::fs::read(path).expect("FLEET_TEST_POSTGRES_CA_FILE"))
+                .expect("roots")
+        });
+        if roots.is_some() {
+            pg.ssl_mode(tokio_postgres::config::SslMode::Require);
+        }
+        std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime")
+                .block_on(async move {
+                    let client = match roots {
+                        Some(roots) => {
+                            let tls = tokio_postgres_rustls::MakeRustlsConnect::new(
+                                opamp::tls::client_builder()
+                                    .with_root_certificates(roots)
+                                    .with_no_client_auth(),
+                            );
+                            let (client, connection) = pg.connect(tls).await.expect("db");
+                            tokio::spawn(connection);
+                            client
+                        }
+                        None => {
+                            let (client, connection) =
+                                pg.connect(tokio_postgres::NoTls).await.expect("db");
+                            tokio::spawn(connection);
+                            client
+                        }
+                    };
+                    const TIMES: u32 = 50;
+                    let started = Instant::now();
+                    for _ in 0..TIMES {
+                        client.simple_query("SELECT 1").await.expect("a round trip");
+                    }
+                    started.elapsed() / TIMES
+                })
+        })
+        .join()
+        .expect("the round trips")
+    }
+
     /// One text `query` answers, in the role's schema.
     fn text(&self, query: &str) -> String {
         self.query(
@@ -1329,6 +1382,8 @@ fn failover(loss: Loss) {
                 fleet.connect(&endpoint, gateway_address, &gateway_tls, agents)
             })
             .collect();
+        // Every connection is opened by now: what the fleet takes to be held is counted from here.
+        let opened = started.elapsed();
         let agents = fleet.agents();
         assert!(
             eventually(Duration::from_secs(180), || fleet.connected_hosts()
@@ -1345,8 +1400,10 @@ fn failover(loss: Loss) {
         };
         assert!(
             eventually(Duration::from_secs(120), || held(&role) == agents).await,
-            "every Agent is held: {} of {agents}",
-            held(&role)
+            "every Agent is held: {} of {agents} after {:?}; a database round trip {:?}",
+            held(&role),
+            started.elapsed(),
+            role.round_trip()
         );
         let ramp_took = started.elapsed();
         let answer = client
@@ -1361,8 +1418,13 @@ fn failover(loss: Loss) {
             answer.status()
         );
         eprintln!(
-            "{agents} Agents on {} connections across 3 instances, held after {ramp_took:?}; {}",
+            "{agents} Agents on {} connections across 3 instances, held after {ramp_took:?}, {:?} \
+             after the last connection opened, {:.0} new Agents a second; a database round trip \
+             {:?}; {}",
             fleet.hosts.len(),
+            ramp_took.saturating_sub(opened),
+            agents as f64 / ramp_took.as_secs_f64(),
+            role.round_trip(),
             memory(&instances)
         );
 

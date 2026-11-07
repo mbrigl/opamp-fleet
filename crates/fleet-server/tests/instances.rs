@@ -102,6 +102,7 @@ impl Schema {
             user,
             password_file: password_file.into(),
             tls: ca_file.is_some(),
+            pool_size: fleet_server::config::DEFAULT_POOL_SIZE,
             ca_file,
         };
         let mut random = [0u8; 8];
@@ -126,6 +127,7 @@ impl Schema {
             password_file: self.config.password_file.clone(),
             ca_file: self.config.ca_file.clone(),
             tls: self.config.tls,
+            pool_size: self.config.pool_size,
         }
     }
 
@@ -2477,6 +2479,61 @@ fn the_ceiling_on_agent_records_holds_across_instances() {
     assert_eq!(
         schema.query("SELECT instance_uid FROM agents"),
         [first.to_string()]
+    );
+}
+
+/// Many Agents created at once through twelve instances leave no more records than `max_agents`:
+/// each creation counts the records the others created, however many are made at once.
+/// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side, ADR-0043
+#[test]
+fn many_creations_at_once_on_many_instances_never_pass_the_ceiling() {
+    use fleet_server::fleet::{AppState, Transport};
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    const CEILING: usize = 40;
+    let states: Vec<Arc<AppState>> = (0..12)
+        .map(|_| {
+            Arc::new(
+                AppState::on(&records(&schema))
+                    .expect("state")
+                    .with_max_agents(CEILING),
+            )
+        })
+        .collect();
+    let creating: Vec<_> = (0..24u8)
+        .map(|thread| {
+            let state = states[usize::from(thread) % 12].clone();
+            std::thread::spawn(move || {
+                for n in 0..10u8 {
+                    let mut uid = [0x70; 16];
+                    (uid[1], uid[2]) = (thread, n);
+                    state.process(
+                        AgentToServer {
+                            instance_uid: uid.to_vec(),
+                            sequence_num: 1,
+                            capabilities: AgentCapabilities::ReportsStatus as u64,
+                            ..Default::default()
+                        },
+                        Transport::Http,
+                        None,
+                    );
+                }
+            })
+        })
+        .collect();
+    for thread in creating {
+        thread.join().expect("the creations");
+    }
+    assert_eq!(
+        schema.query("SELECT count(*)::text FROM agents"),
+        [CEILING.to_string()],
+        "the records stored"
+    );
+    assert_eq!(
+        schema.query("SELECT agents::text FROM agent_count"),
+        [CEILING.to_string()],
+        "the count kept"
     );
 }
 

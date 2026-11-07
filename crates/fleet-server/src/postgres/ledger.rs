@@ -6,7 +6,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
-use tokio_postgres::GenericClient;
+use super::Cached as GenericClient;
 
 use super::notify::{notify, CERTIFICATE, HOST};
 use super::{client, signed, sql, unsigned, Database};
@@ -84,7 +84,7 @@ impl LedgerStore for PgLedgerStore {
                 .start()
                 .await
                 .map_err(sql)?;
-            let ledger = read_all(&*transaction).await?;
+            let ledger = read_all(&transaction).await?;
             transaction.commit().await.map_err(sql)?;
             Ok(ledger)
         })?;
@@ -99,9 +99,9 @@ impl LedgerStore for PgLedgerStore {
         let version = self.database.run(move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
-            write_issued(&*transaction, &issued).await?;
-            notify(&*transaction, CERTIFICATE, &issued.facts.id.serial).await?;
-            let version = bump_list_version(&*transaction).await?;
+            write_issued(&transaction, &issued).await?;
+            notify(&transaction, CERTIFICATE, &issued.facts.id.serial).await?;
+            let version = bump_list_version(&transaction).await?;
             transaction.commit().await.map_err(sql)?;
             Ok(version)
         })?;
@@ -146,8 +146,8 @@ impl LedgerStore for PgLedgerStore {
             if removed == 0 {
                 return Ok(None);
             }
-            notify(&*transaction, CERTIFICATE, &id.serial).await?;
-            let version = bump_list_version(&*transaction).await?;
+            notify(&transaction, CERTIFICATE, &id.serial).await?;
+            let version = bump_list_version(&transaction).await?;
             transaction.commit().await.map_err(sql)?;
             Ok(Some(version))
         })?;
@@ -187,7 +187,7 @@ impl LedgerStore for PgLedgerStore {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
             let registered = register_in(
-                &*transaction,
+                &transaction,
                 &issued,
                 &bounds,
                 mint.as_ref().map(|(host, entry)| (host.as_str(), entry)),
@@ -197,7 +197,7 @@ impl LedgerStore for PgLedgerStore {
             if registered != Registered::Registered {
                 return Ok((registered, None));
             }
-            let version = read_list_version(&*transaction).await?;
+            let version = read_list_version(&transaction).await?;
             transaction.commit().await.map_err(sql)?;
             Ok((registered, Some(version)))
         })?;
@@ -246,8 +246,8 @@ impl LedgerStore for PgLedgerStore {
                     )
                     .await
                     .map_err(sql)?;
-                super::notify::notify(&*transaction, super::notify::REVOCATION, &wider.id).await?;
-                let version = bump_list_version(&*transaction).await?;
+                super::notify::notify(&transaction, super::notify::REVOCATION, &wider.id).await?;
+                let version = bump_list_version(&transaction).await?;
                 transaction.commit().await.map_err(sql)?;
                 return Ok((Added::Widened(wider), Some(version)));
             }
@@ -263,9 +263,9 @@ impl LedgerStore for PgLedgerStore {
             }
             let position = last.map_or(0, |last| last + 1);
             let id = entry.id.clone();
-            write_revocations(&*transaction, &[(position, entry)]).await?;
-            super::notify::notify(&*transaction, super::notify::REVOCATION, &id).await?;
-            let version = bump_list_version(&*transaction).await?;
+            write_revocations(&transaction, &[(position, entry)]).await?;
+            super::notify::notify(&transaction, super::notify::REVOCATION, &id).await?;
+            let version = bump_list_version(&transaction).await?;
             transaction.commit().await.map_err(sql)?;
             Ok((Added::Added, Some(version)))
         })?;
@@ -285,8 +285,8 @@ impl LedgerStore for PgLedgerStore {
             if removed == 0 {
                 return Ok(None);
             }
-            super::notify::notify(&*transaction, super::notify::REVOCATION, &id).await?;
-            let version = bump_list_version(&*transaction).await?;
+            super::notify::notify(&transaction, super::notify::REVOCATION, &id).await?;
+            let version = bump_list_version(&transaction).await?;
             transaction.commit().await.map_err(sql)?;
             Ok(Some(version))
         })?;
@@ -316,7 +316,7 @@ impl LedgerStore for PgLedgerStore {
         self.database.run(move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
-            let made = insert_host_row(&*transaction, &host, &row).await?;
+            let made = insert_host_row(&transaction, &host, &row).await?;
             let gateway: bool = transaction
                 .query_one(
                     "SELECT gateway FROM hosts WHERE host = $1 FOR NO KEY UPDATE",
@@ -349,7 +349,7 @@ impl LedgerStore for PgLedgerStore {
                 return Ok(Bound::Taken(holder));
             }
             if made || inserted > 0 {
-                notify(&*transaction, HOST, &host).await?;
+                notify(&transaction, HOST, &host).await?;
             }
             transaction.commit().await.map_err(sql)?;
             Ok(Bound::Bound)
@@ -361,9 +361,9 @@ impl LedgerStore for PgLedgerStore {
         self.database.run(move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
-            let host = unbind_in(&*transaction, &instance_uid).await?;
+            let host = unbind_in(&transaction, &instance_uid).await?;
             if host.is_some() {
-                notify(&*transaction, HOST, host.as_deref().unwrap_or_default()).await?;
+                notify(&transaction, HOST, host.as_deref().unwrap_or_default()).await?;
             }
             transaction.commit().await.map_err(sql)?;
             Ok(host)
@@ -377,7 +377,7 @@ impl LedgerStore for PgLedgerStore {
         self.database.run(move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
-            let Some(host) = unbind_in(&*transaction, &old).await? else {
+            let Some(host) = unbind_in(&transaction, &old).await? else {
                 return Ok(None);
             };
             transaction
@@ -396,7 +396,7 @@ impl LedgerStore for PgLedgerStore {
                 .await
                 .map_err(sql)?
                 .get(0);
-            notify(&*transaction, HOST, &host).await?;
+            notify(&transaction, HOST, &host).await?;
             transaction.commit().await.map_err(sql)?;
             let bound = if holder == host {
                 Bound::Bound
@@ -417,7 +417,7 @@ impl LedgerStore for PgLedgerStore {
                 .await
                 .map_err(sql)?;
             if removed > 0 {
-                notify(&*transaction, HOST, &host).await?;
+                notify(&transaction, HOST, &host).await?;
             }
             transaction.commit().await.map_err(sql)
         })
@@ -435,7 +435,7 @@ impl LedgerStore for PgLedgerStore {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
             let changed = match &act {
-                HostAct::Seen { host, entry } => write_seen(&*transaction, host, entry).await?,
+                HostAct::Seen { host, entry } => write_seen(&transaction, host, entry).await?,
                 HostAct::Extended(untils) => {
                     let mut changed = false;
                     for (host, until) in untils {
@@ -499,7 +499,7 @@ impl LedgerStore for PgLedgerStore {
                 }
             };
             if changed {
-                notify(&*transaction, HOST, "").await?;
+                notify(&transaction, HOST, "").await?;
             }
             transaction.commit().await.map_err(sql)
         })
@@ -535,9 +535,9 @@ impl LedgerStore for PgLedgerStore {
                 .await
                 .map_err(sql)?;
             for (host, entry) in &changed {
-                write_host(&*transaction, host, entry).await?;
+                write_host(&transaction, host, entry).await?;
             }
-            notify(&*transaction, HOST, "").await?;
+            notify(&transaction, HOST, "").await?;
             transaction.commit().await.map_err(sql)
         })?;
         hosts.clone_into(&mut written);
@@ -1988,7 +1988,7 @@ mod tests {
         database
             .run(move |pool| async move {
                 let client = client(&pool).await?;
-                write_issued(&**client, &renewal).await
+                write_issued(&client, &renewal).await
             })
             .expect("a Server of 0.8.0 registers X', a renewal of X, moving no version");
         let b = instance();
@@ -2141,8 +2141,8 @@ mod tests {
         database
             .run(move |pool| async move {
                 let client = client(&pool).await?;
-                write_issued(&**client, &renewal).await?;
-                write_issued(&**client, &grandchild).await
+                write_issued(&client, &renewal).await?;
+                write_issued(&client, &grandchild).await
             })
             .expect("a Server of 0.8.0 registers X', a renewal of X, and X'', one of X'");
         assert_eq!(a.list_version(), Some(stored_version(&test)));
@@ -2465,8 +2465,8 @@ mod tests {
         database
             .run(|pool| async move {
                 let client = client(&pool).await?;
-                write_bindings(&**client, "g", &host(&["01"], true)).await?;
-                write_bindings(&**client, "h", &host(&["02"], false)).await
+                write_bindings(&client, "g", &host(&["01"], true)).await?;
+                write_bindings(&client, "h", &host(&["02"], false)).await
             })
             .expect("write");
         assert_eq!(

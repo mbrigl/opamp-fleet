@@ -14,8 +14,8 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
+use super::Cached as GenericClient;
 use serde_json::Value;
-use tokio_postgres::GenericClient;
 
 use super::{client, sql, Database};
 use crate::audit::{Audit as _, Entry};
@@ -302,7 +302,7 @@ async fn round_under(
     // another chain pruned here, so a prune that stopped between two deletes would leave a
     // chain linked by nothing.
     let transaction = lock.transaction().await.map_err(sql)?;
-    delete(&*transaction, &plan.chains).await?;
+    delete(&transaction, &plan.chains).await?;
     transaction.commit().await.map_err(sql)?;
     pruned.chains = plan.chains;
     pruned.carried = plan.carried;

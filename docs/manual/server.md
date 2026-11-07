@@ -397,7 +397,7 @@ asynchronous replication, leaves the new primary without them: across a failover
 with synchronous replication. And an instance of 0.8.0 beside this release neither marks nor reads a
 mark, so while both releases run a sweep through it can still delete an artifact an upload just
 stored. An upload waits for the lock up to 5 seconds, a sweep up to 60. Each sweep in progress holds
-the lock on a database session of its own, beside the pool's eight, which the database's
+the lock on a database session of its own, beside the pool's `pool_size`, which the database's
 `max_connections` must allow for. The lock is taken on PostgreSQL with the filesystem blob store
 too, where the instance is alone and it decides nothing. A start whose sweep cannot have the lock
 fails, naming the lock; a sweep after an act logs it, and what it would have deleted stays until the
@@ -466,8 +466,12 @@ Optional. Where the Server keeps its records: one file per record under `data_di
 one PostgreSQL database. Both are supported in production. On files the Server loads every record
 at startup and answers from memory. On PostgreSQL it loads no Agent at startup: it keeps in memory
 the Agents connected to it, each read at its first report, and reads the fleet the API lists from
-the database. Either way the store is the durable copy, written before an act is answered. Several
-instances may share one database: see [Several instances](#several-instances).
+the database. Either way the store is the durable copy, written before an act is answered. On
+PostgreSQL one write does not wait for the database's disk: the record of an Agent first heard of.
+A crash of the database may lose the records created last, and each such Agent's next report
+creates its record again; nothing the Server wrote after one, its take, its binding or an audit
+entry, outlives it, since each of those waits for the disk. Several instances may share one
+database: see [Several instances](#several-instances).
 
 ```toml
 [database]
@@ -487,6 +491,7 @@ password_file = "/run/secrets/fleet-db-password"
 | `lease_renew_secs` | `10` | With `"postgres"` alone: how often an instance renews its lease, from 1 to 3600. Set with `"fs"`, it fails startup naming it. |
 | `lease_secs` | `30` | With `"postgres"` alone: how long after its last renewal a lease lapses, at least three renewals and at most 3600. Set with `"fs"`, it fails startup naming it. |
 | `presence_interval_secs` | `30` | With `"postgres"` alone: how often an instance writes, in one batch, where each Agent it carries is connected and when it was last heard from, from 10 to 60. The report that connects an Agent to an instance writes it at once, so no other instance forgets an Agent that has just connected. A heartbeat reaches the database at most once per interval and Agent, so the staleness budget grows by this interval. A batch written later than this interval after it was due is logged as a warning with `late_ms`: the database is not keeping up with the fleet's presence. Set with `"fs"`, it fails startup naming it. |
+| `pool_size` | `16` | With `"postgres"` alone: the connections an instance's pool holds at most, from 2 to 256. At most half of them create the records of new Agents at once, so the other half serves every other call while creations wait for one another. The database's `max_connections` must allow `pool_size` for each instance, plus one session for each sweep in progress and one that listens for notifications. Set with `"fs"`, it fails startup naming it. |
 | `postgres.host` | — | Required with `"postgres"`. The database's host name or IP address — what its certificate must name. |
 | `postgres.port` | `5432` | Its port. |
 | `postgres.dbname` | — | Required with `"postgres"`. The database. The Server does not create it. |
@@ -506,14 +511,15 @@ the database itself ends a statement after 10 seconds, a wait for a lock after 5
 left open by a client that went away after 60. TCP keepalives notice a database host that is gone
 within about half a minute.
 
-The role needs the right to create tables in its default schema: at every start the Server applies
-the migrations of its schema the database has not yet seen, in one transaction, and records them in
-the table `fleet_schema`. A migration only adds, and each names the oldest Server that understands
-the schema it leaves. A database whose schema needs a newer Server stops the start, naming both
-versions, and is left unchanged. A Server of 0.7.1 is refused that way once this release has started
-on its database: back the database up before the upgrade, since going back to 0.7.1 afterwards
-means restoring it. The Server creates tables and indexes, and nothing else: the database, the role,
-its rights and extensions, replication and backups are the operator's.
+The role needs the right to create tables and functions in its default schema: at every start the
+Server applies the migrations of its schema the database has not yet seen, in one transaction, and
+records them in the table `fleet_schema`. A migration only adds, and each names the oldest Server
+that understands the schema it leaves. A database whose schema needs a newer Server stops the start,
+naming both versions, and is left unchanged. A Server of 0.7.1 is refused that way once this release
+has started on its database: back the database up before the upgrade, since going back to 0.7.1
+afterwards means restoring it. The Server creates tables and indexes, and the trigger, with its
+function, that keeps the count of the Agents' records `max_agents` is decided by, and nothing else:
+the database, the role, its rights and extensions, replication and backups are the operator's.
 
 Every Server on PostgreSQL is an instance: before it opens either listener it takes a lease in the
 database under an instance id of its own, renews it every `lease_renew_secs`, and keeps its

@@ -18,10 +18,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
+use super::Cached as GenericClient;
 use futures_util::StreamExt as _;
 use serde::{Deserialize, Serialize};
 use tokio_postgres::tls::MakeTlsConnect;
-use tokio_postgres::{AsyncMessage, GenericClient, NoTls, Socket};
+use tokio_postgres::{AsyncMessage, NoTls, Socket};
 
 use super::{sql, Database, Tls};
 

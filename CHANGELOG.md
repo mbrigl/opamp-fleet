@@ -65,6 +65,34 @@ once its tag exists.
 
 ### Fixed
 
+- **An instance on PostgreSQL takes up its Agents without waiting one database round trip at a
+  time**
+  ([ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side](docs/adr/draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+  clause 8,
+  [ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision](docs/adr/draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
+  clause 22). Each Agent's report held one lock of the whole instance across its calls to the
+  database, on a worker of the runtime, so an instance served one round trip at a time: TLS
+  handshakes and the heartbeats of connected Agents waited behind it, and an instance took up about
+  two new Agents a second. A report now runs off the runtime's workers, makes its calls to the
+  database under a lock of its own Agent, and takes the instance's lock only to take what it read
+  and wrote into memory. The binding of an Agent to its Host and the write of the Host are made
+  with the host register's lock let go too, so a handshake and another report no longer wait for
+  them. The ceiling `max_agents` is decided from a count the database keeps,
+  migration 14, a table and a trigger on the Agents' table that counts what a Server of 0.8.0 adds
+  and removes too, in the one statement that creates a record, rather than by counting every
+  record under a lock held across several round trips. While an instance of 0.8.0 runs beside
+  those of this release, the ceiling may be passed by the records created at the same moment. That
+  creation does not wait for the database's disk, so a crash of the database may lose the records
+  created last; each such Agent's next report creates its record again. Each
+  statement is prepared once per pooled connection, so running it again costs one round trip. A
+  report whose Agent is forgotten through another instance while it runs starts again, and is
+  answered `Unavailable` after three such rounds.
+  An instance's pool holds `[database] pool_size` connections, 16 by default (it held 8), and at
+  most half of them create new Agents' records at once.
+  **What to do:** the database role needs the right to create functions in its schema as well as
+  tables; PostgreSQL's `CREATE` right on the schema gives both. Allow the database's
+  `max_connections` for `pool_size` connections of each instance.
+
 - **An Agent leaves a Server that stopped answering within one heartbeat interval**
   ([ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended](docs/adr/draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended.md)).
   A Server that was frozen, lost its power or was cut off closed nothing, and its Agents stayed on
