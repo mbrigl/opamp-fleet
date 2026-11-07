@@ -1,4 +1,4 @@
-# ADR-draft-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again: The Server keeps an append-only audit record of every security decision, each entry chained to the one before by its hash, and on PostgreSQL a failed write is kept and tried again
+# ADR-0046: The Server keeps an append-only audit record of every security decision, each entry chained to the one before by its hash, and on PostgreSQL a failed write is kept and tried again
 
 - **Status:** 🟡 proposed
 - **Date:** 2026-11-04
@@ -96,7 +96,7 @@ the SHA-256 of the entry before it, emit the same entry as a `tracing` event wit
    - On the PostgreSQL store two entries are written in the transaction of a lease instead: a
      chain's `audit.chain_opened` in the one that takes its lease, and the `audit.chain_closed` of
      a lease another instance takes over in the one that removes that lease
-     ([ADR-draft-the-audit-record-is-one-hash-chain-per-lease-and-names-the-lease-each-decision-was-taken-under](draft-the-audit-record-is-one-hash-chain-per-lease-and-names-the-lease-each-decision-was-taken-under.md)
+     ([ADR-0047](0047-the-audit-record-is-one-hash-chain-per-lease-and-names-the-lease-each-decision-was-taken-under.md)
      clause 3). No lease is then held without its chain open, and none is removed with its chain
      left open.
    - On the filesystem store the record is one chain. The first entry of a file carries the hash
@@ -127,13 +127,13 @@ the SHA-256 of the entry before it, emit the same entry as a `tracing` event wit
      time it was opened, and a first entry `audit.chain_opened` whose `prev` is 64 zeros. The
      first chain the store ever opens names, as its `predecessor`, the last entry of the file
      chain a migration left as an archive
-     ([ADR-draft-the-audit-record-is-one-hash-chain-per-lease-and-names-the-lease-each-decision-was-taken-under](draft-the-audit-record-is-one-hash-chain-per-lease-and-names-the-lease-each-decision-was-taken-under.md)
+     ([ADR-0047](0047-the-audit-record-is-one-hash-chain-per-lease-and-names-the-lease-each-decision-was-taken-under.md)
      clause 6). Every
      entry the instance writes under that lease belongs to that chain, and the lease names it
      ([ADR-0041](0041-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md)
      clauses 1 and 3). How a chain ends, and how one that ended is told apart from one that was
      cut, is clause 3 of
-     [ADR-draft-the-audit-record-is-one-hash-chain-per-lease-and-names-the-lease-each-decision-was-taken-under](draft-the-audit-record-is-one-hash-chain-per-lease-and-names-the-lease-each-decision-was-taken-under.md).
+     [ADR-0047](0047-the-audit-record-is-one-hash-chain-per-lease-and-names-the-lease-each-decision-was-taken-under.md).
    - On the PostgreSQL store an entry is written when the transaction that inserts it commits. A
      transaction that does not commit is a failed write (clause 5).
 
@@ -283,8 +283,8 @@ store. Where the record is kept, its permissions, its writing and how long it go
   `a_write_whose_answer_was_lost_is_not_written_again` and
   `a_landed_write_is_not_written_again_into_the_next_chain` (clause 5); a decision after the
   shutdown's close is refused and counted, by a test that will carry `Verifies:
-  ADR-draft-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again`.
+  ADR-0046`.
 - Clauses 2 and 3 as they stand here, the chains per lease on the PostgreSQL store included, are
   verified by the tests
-  [ADR-draft-the-audit-record-is-one-hash-chain-per-lease-and-names-the-lease-each-decision-was-taken-under](draft-the-audit-record-is-one-hash-chain-per-lease-and-names-the-lease-each-decision-was-taken-under.md)
+  [ADR-0047](0047-the-audit-record-is-one-hash-chain-per-lease-and-names-the-lease-each-decision-was-taken-under.md)
   names.

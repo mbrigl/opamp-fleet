@@ -1,4 +1,4 @@
-# ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side: Several Server instances share one PostgreSQL database, and two versions run side by side
+# ADR-0048: Several Server instances share one PostgreSQL database, and two versions run side by side
 
 - **Status:** 🟡 proposed
 - **Date:** 2026-11-02
@@ -34,7 +34,7 @@ broadcast to every instance, and a lease per instance.
 the ports into one database for a single instance;
 [ADR-0042](0042-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance.md)
 (audit chains per instance) gives each writing instance its own chain; and
-[ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server](draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server.md)
+[ADR-0049](0049-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server.md)
 (paging) lets the Operator plane read the fleet a page at a time from the database. This ADR is
 what turns those into several instances. A CA key the Server holds is a file, which one instance
 alone can hold (clause 2); CA keys every instance can reach are a decision of their own.
@@ -83,7 +83,7 @@ every change that concerns a live session by one `NOTIFY`.
      whose exclusive lock is free, belongs to a process that is gone. The next instance that takes
      a lease takes such a lease over as clause 18 does instead of failing, whether it must be
      alone or not, and closes its chain with `reason` `holder_gone`, since the lease has not lapsed
-     ([ADR-draft-the-audit-record-is-one-hash-chain-per-lease-and-names-the-lease-each-decision-was-taken-under](draft-the-audit-record-is-one-hash-chain-per-lease-and-names-the-lease-each-decision-was-taken-under.md)
+     ([ADR-0047](0047-the-audit-record-is-one-hash-chain-per-lease-and-names-the-lease-each-decision-was-taken-under.md)
      clause 3).
    - When the lock's connection ends while the instance runs, the lock is gone with it. The
      instance logs an error naming the database, ends every session it carries and refuses every
@@ -258,7 +258,7 @@ every change that concerns a live session by one `NOTIFY`.
    database. It finds that Client Agent among the Agents the host register binds to the Host. The
    register binds none to a Gateway's Host, so behind a Gateway the instance finds it by a read of
    the Agents that arrived over that Host, through the port's `query_page` filtered on that Host
-   ([ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server](draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server.md)
+   ([ADR-0049](0049-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server.md)
    clause 9), so an Agent behind a Gateway inherits the labels of a Client Agent another instance
    carries in the memory of its own instance too. An instance places such a group when it places
    one of its Agents, again when the labels of the Client Agent it placed the group under change,
@@ -345,7 +345,7 @@ every change that concerns a live session by one `NOTIFY`.
     read again on each notification of their kind and after a missed one (clauses 9, 10 and 12).
     The four lists that grow with the fleet are answered a page at a time where a request asks for
     one
-    ([ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server](draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server.md)).
+    ([ADR-0049](0049-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server.md)).
     - An Agent's view names the instance that holds it: `holder`, the instance id its presence
       names, and `holder_host`, the host name that instance's lease records, as read from the
       database. Both are empty for an Agent whose presence names no instance with a live lease.
@@ -436,9 +436,9 @@ every change that concerns a live session by one `NOTIFY`.
       ([ADR-0044](0044-the-servers-state-and-its-stores.md)
       clauses 8 to 10 and 21). An approval registers its certificate, writes the Host it mints
       and decides its request in one such transaction
-      ([ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision](draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
+      ([ADR-0050](0050-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
       clause 9). An instance of 0.8.0 reads no rejected key
-      ([ADR-draft-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window](draft-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)
+      ([ADR-0052](0052-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)
       clause 16), so through it a rejected key waits again and may be approved, until the last
       instance of 0.8.0 is replaced.
     - An `instance_uid` is bound to at most one Host, by a unique constraint. A binding that meets
@@ -448,7 +448,7 @@ every change that concerns a live session by one `NOTIFY`.
       not for one instance.
     - The ceiling on the Agents' records, `max_agents`, is counted from one row in the statement
       that creates a record
-      ([ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision](draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
+      ([ADR-0050](0050-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
       clause 22), so it holds for the fleet too. An instance of 0.8.0 counts under a lock of its
       own, so while one runs beside the instances of this release the ceiling may be passed by the
       records created at the same moment.
@@ -545,7 +545,7 @@ every change that concerns a live session by one `NOTIFY`.
 chains, but for closing the chain of a process that died (clause 18)
 ([ADR-0042](0042-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance.md)),
 and their checkpoints, a decision of their own; paging and filtering
-([ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server](draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server.md));
+([ADR-0049](0049-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server.md));
 CA keys that every instance can reach; sharing rate limits across instances; a routing table or
 instance-to-instance messages; several databases or regions; the Agent plane's load balancer and
 the database cluster, which the operator runs.
@@ -625,7 +625,7 @@ the database cluster, which the operator runs.
 ## Enforcement
 
 Tests that carry `Verifies:
-ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side`,
+ADR-0048`,
 run against the PostgreSQL that `FLEET_TEST_POSTGRES_URL` names, with two instances in one test
 process, or three where a bullet says so. They decide:
 
