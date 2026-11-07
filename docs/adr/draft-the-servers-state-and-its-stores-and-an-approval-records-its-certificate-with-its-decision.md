@@ -778,8 +778,9 @@ that decides its request, and move an old layout by an offline command.
 **Out of scope:** presence, leases and notifying other instances
 ([ADR-0041](0041-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md));
 copying the archived filesystem audit record into the database, which clause 27 links instead;
-paging and filtering in the
-database; moving records from PostgreSQL back to files or blobs from S3 back to the filesystem;
+paging and filtering in the database, which
+[ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server](draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server.md)
+decides; moving records from PostgreSQL back to files or blobs from S3 back to the filesystem;
 Object Lock and bucket versioning, which the operator may enable but the Server neither needs nor
 checks; server-side encryption beyond what the bucket's own default applies; keeping the
 effective configuration other than as the display text it is; migrating between two `data_dir`
@@ -965,12 +966,11 @@ monitors a production store or database.
   reading it; on PostgreSQL every list the Operator plane shows is a query (clause 3). A first
   start on S3 with a large `data_dir/blobs/` takes as long as the upload of
   what is missing.
-- Follow-ups: paging and filtering the REST API in the database; whether the sweep of
-  unreferenced blobs moves to a background task once the store is shared; whether a separate blob
-  directory is needed; for the operator manual: backing up and restoring PostgreSQL and the bucket
-  is the operator's, and a database restored from before a revocation lets the revoked
-  certificate in again, so after a restore the operator sets again the revocations the audit
-  record holds since the backup.
+- Follow-ups: whether the sweep of unreferenced blobs moves to a background task once the store is
+  shared; whether a separate blob directory is needed; for the operator manual: backing up and
+  restoring PostgreSQL and the bucket is the operator's, and a database restored from before a
+  revocation lets the revoked certificate in again, so after a restore the operator sets again the
+  revocations the audit record holds since the backup.
 
 ## Enforcement
 
