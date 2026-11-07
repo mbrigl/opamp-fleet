@@ -901,6 +901,7 @@ mod tests {
             crate::packages::PackageStore::with_backend(
                 Box::new(PgPackageBackend::new(database_a.clone())),
                 Box::new(pausing),
+                crate::clock::Elapsed::monotonic(),
             )
             .expect("open A"),
         );
@@ -965,6 +966,7 @@ mod tests {
             crate::packages::PackageStore::with_backend(
                 Box::new(PgPackageBackend::new(database.clone())),
                 Box::new(pausing),
+                crate::clock::Elapsed::monotonic(),
             )
             .expect("open"),
         );
@@ -1146,6 +1148,11 @@ mod tests {
             std::time::Duration::from_secs(130),
             "the bound the ADR names"
         );
+        assert_eq!(
+            crate::packages::DELETED_WITHIN,
+            crate::postgres::CALL_TIMEOUT,
+            "a sweep calls the blob store no later than the bound of the renewal before it"
+        );
     }
 
     /// A's startup sweep, on `a`, marks a blob no entry names, is held inside its deletion, and
@@ -1170,6 +1177,7 @@ mod tests {
                 crate::packages::PackageStore::with_backend(
                     Box::new(PgPackageBackend::new(a)),
                     Box::new(pausing),
+                    crate::clock::Elapsed::monotonic(),
                 )
                 .map(drop)
             }
@@ -1256,6 +1264,7 @@ mod tests {
             crate::packages::PackageStore::with_backend(
                 Box::new(PgPackageBackend::new(database.clone())),
                 Box::new(pausing),
+                crate::clock::Elapsed::monotonic(),
             )
             .expect("open"),
         );
@@ -1304,6 +1313,7 @@ mod tests {
         crate::packages::PackageStore::with_backend(
             Box::new(PgPackageBackend::new(database.clone())),
             Box::new(crate::fs::FsBlobStore::open(dir).expect("blobs")),
+            crate::clock::Elapsed::monotonic(),
         )
         .expect("open")
     }
@@ -1377,6 +1387,7 @@ mod tests {
             crate::packages::PackageStore::with_backend(
                 Box::new(PgPackageBackend::new(database.clone())),
                 Box::new(pausing),
+                crate::clock::Elapsed::monotonic(),
             )
             .expect("open A"),
         );
@@ -1424,6 +1435,7 @@ mod tests {
             crate::packages::PackageStore::with_backend(
                 Box::new(PgPackageBackend::new(database.clone())),
                 Box::new(pausing),
+                crate::clock::Elapsed::monotonic(),
             )
             .expect("open A"),
         );
@@ -1518,6 +1530,7 @@ mod tests {
             crate::packages::PackageStore::with_backend(
                 Box::new(PgPackageBackend::new(database.clone())),
                 Box::new(pausing),
+                crate::clock::Elapsed::monotonic(),
             )
             .expect("open A"),
         );
@@ -1573,6 +1586,7 @@ mod tests {
         let err = crate::packages::PackageStore::with_backend(
             Box::new(PgPackageBackend::new(database.clone())),
             Box::new(crate::fs::FsBlobStore::open(dir.path()).expect("blobs")),
+            crate::clock::Elapsed::monotonic(),
         )
         .map(drop)
         .expect_err("the lock is held");

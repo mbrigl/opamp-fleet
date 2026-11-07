@@ -4,19 +4,20 @@
 //! holds one, and the changes of other instances it takes up.
 //!
 //! An instance takes its lease before it opens either listener and renews it while it serves. It
-//! measures the lease from the moment it sent the last renewal the database confirmed, so it deems
-//! it lapsed no later than the database and every other instance do. Once it cannot prove one, it
-//! ends every session it carries and closes both listeners; it never serves on a lease it cannot
-//! prove, because it could not learn of a revocation. When the database answers again it takes a
-//! new lease under a new instance id and binds the same addresses again. On the filesystem store
-//! there is one Server, no lease, and the planes are served until the Server stops.
+//! measures the lease from the moment it sent the last renewal the database confirmed, on a clock
+//! that counts a suspend ([`Elapsed`]), so it deems it lapsed no later than the database and every
+//! other instance do. It reads that clock before each answer ([`Proof`]). Once it cannot prove
+//! one, it ends every session it carries and closes both listeners; it never serves on a lease it
+//! cannot prove, because it could not learn of a revocation. When the database answers again it
+//! takes a new lease under a new instance id and binds the same addresses again. On the filesystem
+//! store there is one Server, no lease, and the planes are served until the Server stops.
 
 use std::collections::HashSet;
 use std::future::Future;
 use std::net::{SocketAddr, TcpListener};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use axum::Router;
 use opamp::server::listen::Handle;
@@ -25,9 +26,9 @@ use rustls::ServerConfig;
 use tokio::sync::watch;
 use tracing::{debug, error, info, warn};
 
+use crate::clock::Elapsed;
 use crate::config::LeaseTimes;
 use crate::fleet::AppState;
-use crate::postgres::lease::Taken;
 use crate::postgres::notify::{
     Heard, Notice, ASSIGNMENT, CERTIFICATE, CONFIGURATION, DEPLOYMENT, ENROLMENT, FLOOR, FORGOTTEN,
     HOST, LABELS, PACKAGE, RESTART, REVOCATION, TAKEN, WINDOW,
@@ -38,9 +39,83 @@ use crate::postgres::Database;
 /// it could not.
 const RETRY: Duration = Duration::from_secs(1);
 
+/// How often the lease's clock is read while the instance waits: after a suspend, the longest it
+/// takes the instance to close its listeners, besides the check before each answer.
+const CHECKED_EVERY: Duration = Duration::from_millis(100);
+
 /// The lease an instance holds, as the planes see it: its instance id while it can prove one,
 /// `None` while it cannot.
 pub type Held = watch::Receiver<Option<String>>;
+
+/// Whether the lease is still held by the clock it is measured on, read at the moment of asking:
+/// what each request on either plane and each message of an Agent checks before it is answered
+/// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+/// clause 3). The lease thread reads the clock only every [`CHECKED_EVERY`], and after a suspend
+/// this answers at once.
+#[derive(Clone)]
+pub struct Proof {
+    clock: Elapsed,
+    /// When the lease lapses, in nanoseconds on `clock`; 0 while none is held.
+    deadline: Arc<AtomicU64>,
+}
+
+impl Proof {
+    /// A lease that lapses at `deadline` on `clock`.
+    #[must_use]
+    pub fn until(clock: Elapsed, deadline: Duration) -> Self {
+        let proof = Proof {
+            clock,
+            deadline: Arc::new(AtomicU64::new(0)),
+        };
+        proof.lapses_at(deadline);
+        proof
+    }
+
+    /// Whether the lease is held now.
+    #[must_use]
+    pub fn holds(&self) -> bool {
+        nanos(self.clock.now()) < self.deadline.load(Ordering::SeqCst)
+    }
+
+    fn lapses_at(&self, deadline: Duration) {
+        self.deadline.store(nanos(deadline), Ordering::SeqCst);
+    }
+
+    fn lost(&self) {
+        self.deadline.store(0, Ordering::SeqCst);
+    }
+}
+
+/// `time` in whole nanoseconds, as far as they fit.
+fn nanos(time: Duration) -> u64 {
+    u64::try_from(time.as_nanos()).unwrap_or(u64::MAX)
+}
+
+/// What either plane answers while the lease is not held by its clock.
+const NO_LEASE: &str = "this instance holds no lease it can prove; connect again";
+
+/// `router`, answering `503` to every request while `proof` does not hold: a request that reaches
+/// an instance after a suspend, before it has closed its listeners, is not served.
+pub fn gated(router: Router, proof: Option<Proof>) -> Router {
+    let Some(proof) = proof else {
+        return router;
+    };
+    router.layer(axum::middleware::from_fn(
+        move |request: axum::extract::Request, next: axum::middleware::Next| {
+            let holds = proof.holds();
+            async move {
+                if holds {
+                    next.run(request).await
+                } else {
+                    axum::response::IntoResponse::into_response((
+                        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                        NO_LEASE,
+                    ))
+                }
+            }
+        },
+    ))
+}
 
 /// The lease of a running instance, renewed in the background until it is released.
 ///
@@ -53,22 +128,24 @@ pub struct Lease {
     list_versions: watch::Receiver<Option<u64>>,
     /// How many times a renewal, or a new lease, removed a lease that had lapsed.
     takeovers: watch::Receiver<u64>,
+    proof: Proof,
     stop: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 impl Lease {
-    /// Takes a lease on `database` for `host` and renews it every `times.renew` in the background.
+    /// Takes a lease on `database` for `host` and renews it every `times.renew` in the background,
+    /// measured on [`Elapsed::monotonic`].
     ///
     /// # Errors
     /// Returns an error when the first lease cannot be taken in time: the database does not
     /// answer, or this instance may not share the database with the instances on it.
     pub fn take(database: Arc<Database>, times: LeaseTimes, host: &str) -> Result<Self, String> {
         let instance_id = crate::postgres::lease::new_instance_id()?;
-        Self::take_as(database, times, host, instance_id)
+        Self::take_as(database, times, host, instance_id, Elapsed::monotonic())
     }
 
     /// [`take`](Self::take) under `instance_id`, the one the instance made at startup and its log
-    /// names already.
+    /// names already, measured on `clock`.
     ///
     /// # Errors
     /// As [`take`](Self::take).
@@ -77,9 +154,12 @@ impl Lease {
         times: LeaseTimes,
         host: &str,
         instance_id: String,
+        clock: Elapsed,
     ) -> Result<Self, String> {
-        let taken = take_in_time(&database, times, host, instance_id, None)?;
+        let taken = take_in_time(&database, &clock, times, host, instance_id, None)?;
         info!(instance_id = %taken.instance_id, "took a lease");
+        let proof = Proof::until(clock.clone(), taken.sent.saturating_add(times.lapse));
+        let proving = proof.clone();
         let (held, watched) = watch::channel(Some(taken.instance_id.clone()));
         let (versions, list_versions) = watch::channel(None);
         let (taking, takeovers) = watch::channel(0);
@@ -94,10 +174,21 @@ impl Lease {
                     .build()
                 {
                     Ok(runtime) => runtime.block_on(async move {
+                        let lease = Renewing {
+                            database: renewing,
+                            clock,
+                            times,
+                            host,
+                            held,
+                            proof: proving,
+                            versions,
+                            takeovers: taking,
+                        };
                         tokio::select! {
-                            () = renew(renewing, times, host, &held, &versions, &taking, taken) => {}
+                            () = renew(&lease, taken) => {}
                             _ = stopped => {}
                         }
+                        lease.proof.lost();
                     }),
                     Err(e) => error!(error = %e, "cannot start the lease's runtime"),
                 }
@@ -108,8 +199,16 @@ impl Lease {
             held: watched,
             list_versions,
             takeovers,
+            proof,
             stop: Some(stop),
         })
+    }
+
+    /// Whether the lease is held by its clock now, for each answer to check
+    /// ([`Proof`]).
+    #[must_use]
+    pub fn proof(&self) -> Proof {
+        self.proof.clone()
     }
 
     /// The lease as the planes see it. It ends, and the planes with it, once the instance can
@@ -163,11 +262,13 @@ impl Lease {
 /// own lapsed lease, and every other lease it removes as one of an instance that is gone.
 pub(crate) fn take_in_time(
     database: &Database,
+    clock: &Elapsed,
     times: LeaseTimes,
     host: &str,
     instance_id: String,
     own: Option<&str>,
 ) -> Result<Taken, String> {
+    let sent = clock.now();
     let taken = database.take_lease_within(instance_id, host, times.lapse, times.lapse)?;
     for removed in &taken.taken_over {
         if own == Some(removed.as_str()) {
@@ -184,13 +285,37 @@ pub(crate) fn take_in_time(
             );
         }
     }
-    if Instant::now() >= taken.sent + times.lapse {
+    if clock.now() >= sent.saturating_add(times.lapse) {
         return Err(format!(
             "the lease {} was answered for after it had lapsed",
             taken.instance_id
         ));
     }
-    Ok(taken)
+    Ok(Taken {
+        instance_id: taken.instance_id,
+        sent,
+        taken_over: taken.taken_over,
+    })
+}
+
+/// A lease taken: under which instance id, when its request was sent on the lease's clock, and the
+/// leases it took over.
+pub(crate) struct Taken {
+    pub(crate) instance_id: String,
+    pub(crate) sent: Duration,
+    pub(crate) taken_over: Vec<String>,
+}
+
+/// What the lease thread renews with, and what it tells.
+struct Renewing {
+    database: Arc<Database>,
+    clock: Elapsed,
+    times: LeaseTimes,
+    host: String,
+    held: watch::Sender<Option<String>>,
+    proof: Proof,
+    versions: watch::Sender<Option<u64>>,
+    takeovers: watch::Sender<u64>,
 }
 
 /// What a wait inside [`renew`] ended with.
@@ -200,22 +325,36 @@ enum Waited<T> {
     LockLost,
 }
 
-/// Waits for `work` until `deadline`, and not a moment past the exclusive lock's loss.
+/// Waits for `work` until `deadline` on the lease's clock, and not a moment past the exclusive
+/// lock's loss. Both are read every [`CHECKED_EVERY`], since the runtime's timer may not count a
+/// suspend: a wait a suspend ran past its deadline ends lapsed within that, whatever it waits for.
 async fn until_deadline<T>(
-    database: &Database,
-    deadline: Instant,
+    lease: &Renewing,
+    deadline: Duration,
     work: impl std::future::Future<Output = T>,
 ) -> Waited<T> {
-    let lock_lost = async {
-        while !database.lock_lost() {
-            tokio::time::sleep(Duration::from_millis(100)).await;
+    let watching = async {
+        loop {
+            if lease.database.lock_lost() {
+                return Waited::LockLost;
+            }
+            if lease.clock.now() >= deadline {
+                return Waited::Lapsed;
+            }
+            tokio::time::sleep(CHECKED_EVERY).await;
         }
     };
     tokio::select! {
+        biased;
+        waited = watching => waited,
         done = work => Waited::Done(done),
-        () = tokio::time::sleep_until(deadline.into()) => Waited::Lapsed,
-        () = lock_lost => Waited::LockLost,
     }
+}
+
+/// Sleeps until `at` on the lease's clock, as far as the runtime's timer can tell; a suspend that
+/// the timer does not count is caught by [`until_deadline`] around it.
+async fn sleep_until(clock: &Elapsed, at: Duration) {
+    tokio::time::sleep(at.saturating_sub(clock.now())).await;
 }
 
 /// Renews the lease `taken` until it cannot prove it; then takes a new one under a new instance
@@ -224,41 +363,43 @@ async fn until_deadline<T>(
 /// Server: such an instance takes it again only when it is started again
 /// (ADR-0041
 /// clause 2).
-async fn renew(
-    database: Arc<Database>,
-    times: LeaseTimes,
-    host: String,
-    held: &watch::Sender<Option<String>>,
-    versions: &watch::Sender<Option<u64>>,
-    takeovers: &watch::Sender<u64>,
-    taken: Taken,
-) {
+async fn renew(lease: &Renewing, taken: Taken) {
+    let Renewing {
+        database,
+        clock,
+        times,
+        host,
+        held,
+        proof,
+        versions,
+        takeovers,
+    } = lease;
+    let times = *times;
     let (mut instance_id, mut sent) = (taken.instance_id, taken.sent);
     loop {
         // Held: renewed every `renew`, and lost the moment `lapse` has passed since the last
-        // renewal the database confirmed was sent. Each attempt is bounded by `renew`, so one
-        // connection that hangs costs one attempt, not the lease.
+        // renewal the database confirmed was sent, on the lease's clock, a suspend included. Each
+        // attempt is bounded by `renew`, so one connection that hangs costs one attempt, not the
+        // lease.
         loop {
-            let deadline = sent + times.lapse;
-            let next = (sent + times.renew).min(deadline);
+            let deadline = sent.saturating_add(times.lapse);
+            proof.lapses_at(deadline);
+            let next = sent.saturating_add(times.renew).min(deadline);
             let attempt = loop {
-                match until_deadline(&database, deadline, tokio::time::sleep_until(next.into()))
-                    .await
-                {
+                match until_deadline(lease, deadline, sleep_until(clock, next)).await {
                     Waited::Done(()) => {}
                     Waited::Lapsed => break None,
-                    Waited::LockLost => return lock_lost(held, &instance_id),
+                    Waited::LockLost => return lock_lost(lease, &instance_id),
                 }
-                let bound = times
-                    .renew
-                    .min(deadline.saturating_duration_since(Instant::now()));
+                let bound = times.renew.min(deadline.saturating_sub(clock.now()));
                 let (db, id) = (database.clone(), instance_id.clone());
+                let asked = clock.now();
                 let renewing =
                     tokio::task::spawn_blocking(move || db.renew_lease(&id, times.lapse, bound));
-                match until_deadline(&database, deadline, renewing).await {
-                    Waited::Done(Ok(Ok(Some(renewal)))) => break Some(renewal),
+                match until_deadline(lease, deadline, renewing).await {
+                    Waited::Done(Ok(Ok(Some(renewal)))) => break Some((asked, renewal)),
                     Waited::Done(Ok(Ok(None))) | Waited::Lapsed => break None,
-                    Waited::LockLost => return lock_lost(held, &instance_id),
+                    Waited::LockLost => return lock_lost(lease, &instance_id),
                     Waited::Done(Ok(Err(e))) => {
                         warn!(instance_id = %instance_id, error = %e, "could not renew the lease");
                     }
@@ -268,18 +409,19 @@ async fn renew(
                 }
                 // Tried again a second later, until the lease lapses: the last confirmed renewal
                 // still decides when that is.
-                match until_deadline(&database, deadline, tokio::time::sleep(RETRY)).await {
+                match until_deadline(lease, deadline, tokio::time::sleep(RETRY)).await {
                     Waited::Done(()) => {}
                     Waited::Lapsed => break None,
-                    Waited::LockLost => return lock_lost(held, &instance_id),
+                    Waited::LockLost => return lock_lost(lease, &instance_id),
                 }
             };
             match attempt {
-                Some(renewal) => {
-                    sent = renewal.sent;
+                Some((asked, renewal)) => {
+                    sent = asked;
+                    proof.lapses_at(sent.saturating_add(times.lapse));
                     versions.send_replace(Some(renewal.list_version));
-                    match take_over_lapsed(&database, times, &instance_id, sent).await {
-                        Waited::LockLost => return lock_lost(held, &instance_id),
+                    match take_over_lapsed(lease, &instance_id, sent).await {
+                        Waited::LockLost => return lock_lost(lease, &instance_id),
                         Waited::Done(true) => takeovers.send_modify(|count| *count += 1),
                         Waited::Done(false) | Waited::Lapsed => {}
                     }
@@ -287,6 +429,7 @@ async fn renew(
                 None => break,
             }
         }
+        proof.lost();
         error!(
             instance_id = %instance_id,
             "lost the lease: ending every session and closing both listeners until a new lease is \
@@ -296,12 +439,17 @@ async fn renew(
         // Lost: a new lease under a new instance id, once the database answers in time.
         loop {
             if database.lock_lost() {
-                return lock_lost(held, &instance_id);
+                return lock_lost(lease, &instance_id);
             }
-            let (db, host, lost) = (database.clone(), host.clone(), instance_id.clone());
+            let (db, host, lost, clock) = (
+                database.clone(),
+                host.clone(),
+                instance_id.clone(),
+                clock.clone(),
+            );
             match tokio::task::spawn_blocking(move || {
                 let fresh = crate::postgres::lease::new_instance_id()?;
-                take_in_time(&db, times, &host, fresh, Some(&lost))
+                take_in_time(&db, &clock, times, &host, fresh, Some(&lost))
             })
             .await
             .unwrap_or_else(|e| Err(e.to_string()))
@@ -314,6 +462,7 @@ async fn renew(
                     );
                     instance_id = taken.instance_id;
                     sent = taken.sent;
+                    proof.lapses_at(sent.saturating_add(times.lapse));
                     held.send_replace(Some(instance_id.clone()));
                     if !taken.taken_over.is_empty() {
                         takeovers.send_modify(|count| *count += 1);
@@ -347,17 +496,12 @@ async fn renew(
 /// clause 18), closing their audit chains; bounded by half a renewal interval, so a database that
 /// does not answer delays the next renewal by no more than that, well inside the lease. Answers
 /// whether it took over any.
-async fn take_over_lapsed(
-    database: &Arc<Database>,
-    times: LeaseTimes,
-    instance_id: &str,
-    sent: Instant,
-) -> Waited<bool> {
-    let deadline = sent + times.lapse;
-    let bound = times.renew / 2;
-    let (db, id) = (database.clone(), instance_id.to_string());
+async fn take_over_lapsed(lease: &Renewing, instance_id: &str, sent: Duration) -> Waited<bool> {
+    let deadline = sent.saturating_add(lease.times.lapse);
+    let bound = lease.times.renew / 2;
+    let (db, id) = (lease.database.clone(), instance_id.to_string());
     let taking = tokio::task::spawn_blocking(move || db.take_over_lapsed(&id, bound));
-    match until_deadline(database, deadline, taking).await {
+    match until_deadline(lease, deadline, taking).await {
         Waited::Done(Ok(Ok(taken_over))) => {
             for lapsed in &taken_over {
                 info!(
@@ -381,13 +525,14 @@ async fn take_over_lapsed(
 }
 
 /// The end of an instance whose exclusive lock is gone: no lease from now on, and the planes end.
-fn lock_lost(held: &watch::Sender<Option<String>>, instance_id: &str) {
+fn lock_lost(lease: &Renewing, instance_id: &str) {
+    lease.proof.lost();
     error!(
         instance_id = %instance_id,
         "lost the exclusive lock: ending every session, closing both listeners, and serving no more \
          until the Server is started again"
     );
-    held.send_replace(None);
+    lease.held.send_replace(None);
 }
 
 /// Takes up the changes other instances commit
@@ -753,6 +898,7 @@ pub struct Planes {
 ///
 /// With a lease, the planes are open only while it is held: once it is lost, every connection is
 /// cut and both listeners are closed; once a new one is held, the same addresses are bound again.
+/// Each request on either plane is answered `503` while `proof` does not hold ([`gated`]).
 ///
 /// # Errors
 /// Returns an error when a plane cannot be served.
@@ -760,8 +906,13 @@ pub async fn serve(
     planes: Planes,
     listeners: (TcpListener, TcpListener),
     mut held: Option<Held>,
+    proof: Option<Proof>,
     stop: impl Future<Output = ()> + Send + 'static,
 ) -> Result<(), String> {
+    let (agents, operators) = (
+        gated(planes.agents.clone(), proof.clone()),
+        gated(planes.operators.clone(), proof),
+    );
     let addresses = (
         listeners.0.local_addr().map_err(|e| e.to_string())?,
         listeners.1.local_addr().map_err(|e| e.to_string())?,
@@ -842,14 +993,14 @@ pub async fn serve(
                 handle.clone()
             )
             .with_max_new_connections_per_sec(planes.agent_max_new_connections_per_sec)
-            .serve(planes.agents.clone()),
+            .serve(agents.clone()),
             crate::listen::plane(
                 operator,
                 Some(planes.operator_tls.clone()),
                 planes.operator_max_connections,
                 handle
             )
-            .serve(planes.operators.clone()),
+            .serve(operators.clone()),
         );
         watching.abort();
         agents.map_err(|e| format!("serving the Agent plane: {e}"))?;
@@ -990,8 +1141,55 @@ mod tests {
 
     use opamp::uid::InstanceUid;
 
-    use super::{take_up, Agents, Due, Heard, LoggedId, NamesInstance};
+    use super::{gated, take_up, Agents, Due, Heard, LoggedId, NamesInstance, Proof, NO_LEASE};
     use crate::postgres::notify::Notice;
+
+    /// A request is served while the lease is held by its clock, and answered `503` once the clock
+    /// has jumped past its lapse, as after a suspend, though nothing else has noticed yet.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    #[tokio::test]
+    async fn a_request_is_answered_503_once_the_leases_clock_has_passed_its_lapse() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        opamp::tls::install_ring_provider();
+        let suspended = Arc::new(AtomicU64::new(0));
+        let monotonic = crate::clock::Elapsed::monotonic();
+        let clock = crate::clock::Elapsed::new({
+            let suspended = suspended.clone();
+            move || monotonic.now() + Duration::from_nanos(suspended.load(Ordering::SeqCst))
+        });
+        let lapse = Duration::from_secs(30);
+        let proof = Proof::until(clock.clone(), clock.now() + lapse);
+        let router = gated(
+            axum::Router::new().route("/", axum::routing::get(|| async { "served" })),
+            Some(proof),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let url = format!("http://{}/", listener.local_addr().expect("address"));
+        tokio::spawn(async move { axum::serve(listener, router).await });
+        let client = reqwest::Client::new();
+        let get = || async {
+            let response = tokio::time::timeout(Duration::from_secs(5), client.get(&url).send())
+                .await
+                .expect("an answer in time")
+                .expect("answered");
+            let status = response.status();
+            (status, response.text().await.expect("body"))
+        };
+        assert_eq!(get().await, (reqwest::StatusCode::OK, "served".to_string()));
+        suspended.store(
+            u64::try_from((lapse + Duration::from_secs(1)).as_nanos()).expect("nanoseconds"),
+            Ordering::SeqCst,
+        );
+        assert_eq!(
+            get().await,
+            (
+                reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                NO_LEASE.to_string()
+            )
+        );
+    }
 
     /// A filesystem store whose presence batch waits at a gate: it says when one has begun, and
     /// ends it once the gate opens.

@@ -1071,7 +1071,9 @@ pub(crate) mod tests {
             store: "s3".to_string(),
             s3: Some(again(&config)),
         };
-        let (store, cleanup) = PackageStore::open_on(&records, None, &blobs).expect("open");
+        let (store, cleanup) =
+            PackageStore::open_on(&records, None, &blobs, crate::clock::Elapsed::monotonic())
+                .expect("open");
         let cleanup = cleanup.expect("a cleanup on the bucket");
         let (_named, held) = tokio::sync::watch::channel(Some(live.to_string()));
         cleanup.stage_under(held);

@@ -415,6 +415,28 @@ pub trait Clock: Send + Sync {
     fn now_ms(&self) -> u64;
 }
 
+/// The port of the time that has passed, as a lease and a sweep measure it
+/// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+/// clause 3, ADR-0044 clause 14): a clock that counts the time the host was suspended, which the
+/// binary hands the lease and the package store (on Linux `CLOCK_BOOTTIME`). A reading is the time since an origin of the
+/// clock's own: two readings of one clock compare, readings of two clocks do not. The adapters'
+/// constructors are in [`crate::clock`].
+#[derive(Clone)]
+pub struct Elapsed(Arc<dyn Fn() -> Duration + Send + Sync>);
+
+impl Elapsed {
+    /// A clock that reads `read`.
+    pub fn new(read: impl Fn() -> Duration + Send + Sync + 'static) -> Self {
+        Elapsed(Arc::new(read))
+    }
+
+    /// The time since this clock's origin.
+    #[must_use]
+    pub fn now(&self) -> Duration {
+        (self.0)()
+    }
+}
+
 /// The CSR flow's port (ADR-0038): what signs an Agent's certificate signing request. The local
 /// CA ([`ClientCa`](crate::ca::ClientCa)) is the adapter the composition root wires when
 /// `[client_ca]` is configured.
@@ -628,6 +650,9 @@ pub struct AppState {
     /// The lease this instance serves under on a shared store, whose instance id the presence
     /// written at a connecting report names as the holder; unset where there is none.
     lease: OnceLock<watch::Receiver<Option<String>>>,
+    /// Whether that lease is held by its clock now, which each message of an Agent checks before it
+    /// is answered; unset where there is no lease.
+    proof: OnceLock<Box<dyn Fn() -> bool + Send + Sync>>,
     /// The Agents forgotten while a WebSocket carried them, by that connection, until its loop
     /// takes them and ends their session (ADR-0043 clause 10). Locked strictly after `fleet`.
     forgotten: Mutex<HashMap<ConnId, Vec<InstanceUid>>>,
@@ -800,6 +825,7 @@ impl AppState {
             presence_interval: Duration::ZERO,
             presence_written: Mutex::new(PresenceWritten::default()),
             lease: OnceLock::new(),
+            proof: OnceLock::new(),
             forgotten: Mutex::new(HashMap::new()),
         };
         state.place_all();
@@ -910,6 +936,21 @@ impl AppState {
     /// ignored.
     pub fn serve_under(&self, lease: watch::Receiver<Option<String>>) {
         let _ = self.lease.set(lease);
+    }
+
+    /// Answers the messages of Agents only while `holds` answers that the lease is held by its
+    /// clock
+    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// clause 3). Set once; a later call is ignored.
+    pub fn answer_while(&self, holds: impl Fn() -> bool + Send + Sync + 'static) {
+        let _ = self.proof.set(Box::new(holds));
+    }
+
+    /// Whether this instance may answer an Agent now: always without a lease, and with one while
+    /// it is held by its clock.
+    #[must_use]
+    pub fn holds_its_lease(&self) -> bool {
+        self.proof.get().is_none_or(|holds| holds())
     }
 
     /// The staleness budget in force: the heartbeat interval this Server offered when it offered
@@ -6938,6 +6979,7 @@ mod tests {
                 go: Mutex::new(goes),
             }),
             Box::new(crate::fs::FsBlobStore::open(&packages).expect("blobs")),
+            crate::clock::Elapsed::monotonic(),
         )
         .expect("store");
         let id = PackageId::new("otelcol", "1.0.0").expect("id");
@@ -6995,6 +7037,7 @@ mod tests {
                 go: Mutex::new(goes),
             }),
             Box::new(crate::fs::FsBlobStore::open(&packages).expect("blobs")),
+            crate::clock::Elapsed::monotonic(),
         )
         .expect("store");
         let (first, second) = (
@@ -8395,6 +8438,7 @@ mod tests {
             &records,
             Some(dir),
             &toml::from_str::<crate::config::BlobsConfig>("").expect("blobs"),
+            crate::clock::Elapsed::monotonic(),
         )
         .expect("packages");
         on_postgres(database, agents).with_packages(Some(

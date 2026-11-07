@@ -584,3 +584,99 @@ async fn forgetting_an_agent_ends_its_session() {
         "the shared socket still serves the Agent it carries"
     );
 }
+
+/// A message that arrives while the instance's lease is lapsed by its clock — after a suspend of
+/// its host, before it has closed its listeners — is not answered; the one before was.
+/// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+#[tokio::test]
+async fn a_message_is_not_answered_while_the_lease_is_lapsed_by_its_clock() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    let server = spawn().await;
+    let suspended = std::sync::Arc::new(AtomicU64::new(0));
+    let monotonic = fleet_server::clock::Elapsed::monotonic();
+    let clock = fleet_server::clock::Elapsed::new({
+        let suspended = suspended.clone();
+        move || monotonic.now() + Duration::from_nanos(suspended.load(Ordering::SeqCst))
+    });
+    let lapse = Duration::from_secs(30);
+    let proof = fleet_server::instance::Proof::until(clock.clone(), clock.now() + lapse);
+    server.state.answer_while(move || proof.holds());
+    let mut socket = connect(server.addr).await;
+    let uid = InstanceUid::default();
+    send(&mut socket, &full_report(&uid, "ws-test", 1)).await;
+    recv(&mut socket).await;
+
+    suspended.store(
+        u64::try_from((lapse + Duration::from_secs(1)).as_nanos()).expect("nanoseconds"),
+        Ordering::SeqCst,
+    );
+    send(&mut socket, &full_report(&uid, "ws-test", 2)).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+    loop {
+        match tokio::time::timeout_at(deadline, socket.next()).await {
+            Err(_) => break,
+            Ok(Some(Ok(Message::Binary(_)))) => {
+                panic!("a message was answered on a lease lapsed by its clock")
+            }
+            Ok(Some(Ok(_))) => continue,
+            Ok(Some(Err(_)) | None) => break,
+        }
+    }
+}
+
+/// A push that falls due while the instance's lease is lapsed by its clock is not sent: a restart
+/// requested then stays queued for an instance that holds a lease.
+/// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+#[tokio::test]
+async fn nothing_is_pushed_while_the_lease_is_lapsed_by_its_clock() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    let server = spawn().await;
+    let suspended = std::sync::Arc::new(AtomicU64::new(0));
+    let monotonic = fleet_server::clock::Elapsed::monotonic();
+    let clock = fleet_server::clock::Elapsed::new({
+        let suspended = suspended.clone();
+        move || monotonic.now() + Duration::from_nanos(suspended.load(Ordering::SeqCst))
+    });
+    let lapse = Duration::from_secs(30);
+    let proof = fleet_server::instance::Proof::until(clock.clone(), clock.now() + lapse);
+    server.state.answer_while(move || proof.holds());
+    let mut socket = connect(server.addr).await;
+    let uid = InstanceUid::default();
+    let mut report = full_report(&uid, "restartable", 1);
+    report.capabilities |= opamp::proto::AgentCapabilities::AcceptsRestartCommand as u64;
+    send(&mut socket, &report).await;
+    recv(&mut socket).await;
+
+    suspended.store(
+        u64::try_from((lapse + Duration::from_secs(1)).as_nanos()).expect("nanoseconds"),
+        Ordering::SeqCst,
+    );
+    let response = tokio::time::timeout(
+        Duration::from_secs(5),
+        reqwest::Client::new()
+            .post(format!(
+                "http://{}/api/v1/agents/{uid}/restart",
+                server.rest_addr
+            ))
+            .send(),
+    )
+    .await
+    .expect("an answer in time")
+    .expect("post");
+    assert_eq!(response.status(), 202);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+    loop {
+        match tokio::time::timeout_at(deadline, socket.next()).await {
+            Err(_) => break,
+            Ok(Some(Ok(Message::Binary(_)))) => {
+                panic!("a push was sent on a lease lapsed by its clock")
+            }
+            Ok(Some(Ok(_))) => continue,
+            Ok(Some(Err(_)) | None) => break,
+        }
+    }
+    assert!(
+        server.state.restart_command_for(&uid).is_some(),
+        "the restart stays queued"
+    );
+}

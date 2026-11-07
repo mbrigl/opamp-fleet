@@ -824,6 +824,7 @@ mod tests {
             &records,
             Some(&new),
             &crate::config::BlobsConfig::default(),
+            crate::clock::Elapsed::monotonic(),
         )
         .expect("every entry finds its blob in the new data_dir");
         assert!(!state_packages.is_empty());
@@ -921,6 +922,7 @@ mod tests {
                 store: "s3".to_string(),
                 s3: Some(again(&bucket)),
             },
+            crate::clock::Elapsed::monotonic(),
         )
         .expect("every entry finds its blob in the bucket");
         assert!(!packages.is_empty());
@@ -1040,6 +1042,7 @@ mod tests {
                     store: "s3".to_string(),
                     s3: Some(again(&bucket)),
                 },
+                crate::clock::Elapsed::monotonic(),
             )
             .expect("every entry finds its blob in the bucket");
         }

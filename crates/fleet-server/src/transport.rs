@@ -129,6 +129,9 @@ fn is_gateway(subject: &Subject, revocations: Option<&Arc<Revocations>>) -> bool
     }
 }
 
+/// What a message is refused with while the instance holds no lease it can prove.
+const NO_LEASE: &str = "this instance holds no lease it can prove; connect again";
+
 /// What a message past the limit is answered (ADR-0045 clause 25).
 const THROTTLED: &str = "too many messages arrive from this sender — retry later";
 
@@ -1037,6 +1040,13 @@ impl Handler for Fleet {
     }
 
     async fn on_message(&self, carrier: &mut Carrier, report: AgentToServer) -> Reply {
+        // Nothing is answered on a lease this instance cannot prove, after a suspend before its
+        // listeners are closed included
+        // (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+        // clause 3).
+        if !self.0.holds_its_lease() {
+            return Reply::Refuse(StatusCode::SERVICE_UNAVAILABLE, NO_LEASE.to_string());
+        }
         // An enrolment request through a Gateway (ADR-0015 clause 25); counted in the Gateway's
         // enrolment aggregate and, once checked, by the bootstrap certificate it names (ADR-0015 clause 26).
         let through_gateway = self.enrolment_through_gateway(carrier, &report);
@@ -1094,6 +1104,13 @@ impl Handler for Fleet {
     }
 
     fn on_outbound(&self, carrier: &mut Carrier, push: Push) -> Vec<ServerToAgent> {
+        // Nothing is pushed on a lease this instance cannot prove: a queued restart stays queued,
+        // and an offer or an approval waits for an instance that holds one
+        // (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+        // clause 3).
+        if !self.0.holds_its_lease() {
+            return Vec::new();
+        }
         if let (Push::Enrolment, Some(enrolling)) = (push, &carrier.enrolling) {
             // A decision reached while the host waits: an approval is handed over at once.
             let Some(request) = enrolling.request.lock().expect("request lock").clone() else {

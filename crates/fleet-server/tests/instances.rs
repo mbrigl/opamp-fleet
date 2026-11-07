@@ -10,7 +10,7 @@
 //! `scripts/check-store.sh postgres` runs them, and fails on a skip.
 
 use std::net::{SocketAddr, TcpListener};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -269,6 +269,9 @@ struct Instance {
     throttle: Option<Arc<fleet_server::throttle::Throttle>>,
     database: Arc<Database>,
     held: fleet_server::instance::Held,
+    /// The time, in nanoseconds, the lease's clock counts beyond what passed: a suspend of the
+    /// host, which the clock counts though the process did not run.
+    suspended: Arc<AtomicU64>,
     stop: Option<tokio::sync::oneshot::Sender<()>>,
     _dir: tempfile::TempDir,
 }
@@ -390,6 +393,7 @@ impl Instance {
             &records,
             Some(blobs.unwrap_or(dir.path())),
             &toml::from_str::<fleet_server::config::BlobsConfig>("").expect("blobs"),
+            fleet_server::clock::Elapsed::monotonic(),
         )
         .expect("packages");
         let state = Arc::new(
@@ -429,11 +433,26 @@ impl Instance {
         let agents = fleet_server::agent_app(state.clone(), admission);
         let operators = fleet_server::operator_app(state.clone(), None);
 
+        let suspended = Arc::new(AtomicU64::new(0));
         let lease = {
             let database = database.clone();
-            fleet_server::instance::Lease::take(database, TIMES, "test-host").expect("lease")
+            let monotonic = fleet_server::clock::Elapsed::monotonic();
+            let suspended = suspended.clone();
+            let clock = fleet_server::clock::Elapsed::new(move || {
+                monotonic.now() + Duration::from_nanos(suspended.load(Ordering::SeqCst))
+            });
+            fleet_server::instance::Lease::take_as(
+                database,
+                TIMES,
+                "test-host",
+                fleet_server::postgres::lease::new_instance_id().expect("id"),
+                clock,
+            )
+            .expect("lease")
         };
         state.serve_under(lease.held());
+        let proof = lease.proof();
+        state.answer_while(move || proof.holds());
         let following = if follows {
             fleet_server::instance::follow(
                 &database,
@@ -464,6 +483,7 @@ impl Instance {
                 },
                 (agent_listener, operator_listener),
                 Some(lease.held()),
+                Some(lease.proof()),
                 async move {
                     let _ = stopped.await;
                 },
@@ -483,6 +503,7 @@ impl Instance {
             throttle,
             database,
             held,
+            suspended,
             stop: Some(stop),
             _dir: dir,
         }
@@ -491,6 +512,13 @@ impl Instance {
     /// The instance id of the lease it holds, if it holds one.
     fn instance_id(&self) -> Option<String> {
         self.held.borrow().clone()
+    }
+
+    /// The host is suspended for `pause` and runs again: the lease's clock counts it, though the
+    /// process did not run.
+    fn suspend_for(&self, pause: Duration) {
+        let nanos = u64::try_from(pause.as_nanos()).expect("a pause in nanoseconds");
+        self.suspended.fetch_add(nanos, Ordering::SeqCst);
     }
 
     /// Whether the Agent plane takes a TCP connection: what a probe sees.
@@ -745,6 +773,100 @@ async fn an_instance_without_a_lease_closes_its_listeners_until_it_holds_a_new_o
     );
 }
 
+/// An instance whose clock jumps past its lease's lapse while it did not run, as after a suspend
+/// of its host, answers nothing more: its next request is not served, a message on a session it
+/// carried is not answered and the session is cut, and it holds no lease until it takes a new one
+/// under a new instance id, with both listeners open again.
+/// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_instance_whose_clock_jumps_past_its_lapse_serves_nothing_until_it_holds_a_new_lease() {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message as Ws;
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let instance = Instance::start(&pki, &schema, schema.config_on(schema.config.port)).await;
+    let first = instance.instance_id().expect("a lease");
+    let (cert, key) = pki.issue("agent-a");
+    let mut session = websocket(&instance, &pki, &cert, &key).await;
+    exchange(&mut session).await;
+    let client = agent_client(&pki, &cert, &key);
+    let url = agent_url(&instance, fleet_server::transport::PACKAGE_FLOORS_PATH);
+    let answered = tokio::time::timeout(Duration::from_secs(5), client.get(&url).send())
+        .await
+        .expect("an answer in time")
+        .expect("served")
+        .status();
+    assert!(
+        answered.is_success(),
+        "served before the suspend: {answered}"
+    );
+
+    // Every lease change from now on, as the planes see it.
+    let mut held = instance.held.clone();
+    held.borrow_and_update();
+    let (seen, mut changes) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while held.changed().await.is_ok() {
+            if seen.send(held.borrow_and_update().clone()).is_err() {
+                return;
+            }
+        }
+    });
+
+    instance.suspend_for(TIMES.lapse + Duration::from_secs(1));
+    let report = AgentToServer {
+        instance_uid: InstanceUid::default().as_bytes().to_vec(),
+        sequence_num: 2,
+        capabilities: AgentCapabilities::ReportsStatus as u64,
+        ..Default::default()
+    };
+    let framed = opamp::frame::encode_within(&report, usize::MAX).expect("frame");
+    // The send may already find the session cut.
+    let _ = session.send(Ws::Binary(framed.into())).await;
+    match tokio::time::timeout(Duration::from_secs(5), client.get(&url).send()).await {
+        Ok(Ok(response)) => assert_eq!(
+            response.status(),
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            "a request after the suspend was served"
+        ),
+        Ok(Err(_)) => {} // The listener was closed already.
+        Err(_) => panic!("the request after the suspend hung"),
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        match tokio::time::timeout_at(deadline, session.next()).await {
+            Err(_) => panic!("the session outlived the lease"),
+            Ok(Some(Ok(Ws::Binary(_)))) => panic!("a message after the suspend was answered"),
+            Ok(Some(Ok(Ws::Close(_))) | Some(Err(_)) | None) => break,
+            Ok(Some(Ok(_))) => continue,
+        }
+    }
+
+    let lost = tokio::time::timeout(Duration::from_secs(5), changes.recv())
+        .await
+        .expect("the lease was not given up after the suspend")
+        .expect("the lease is watched");
+    assert_eq!(lost, None, "the lease was given up before anything else");
+    let again = tokio::time::timeout(Duration::from_secs(20), changes.recv())
+        .await
+        .expect("no new lease was taken")
+        .expect("the lease is watched")
+        .expect("a new lease");
+    assert_ne!(first, again, "a new lease is held under a new instance id");
+    assert!(
+        eventually(Duration::from_secs(5), || instance.both_planes().0).await,
+        "the listeners were not opened again"
+    );
+    let served = tokio::time::timeout(Duration::from_secs(5), client.get(&url).send())
+        .await
+        .expect("an answer in time")
+        .expect("served")
+        .status();
+    assert!(served.is_success(), "served under the new lease: {served}");
+}
+
 /// The store as one instance opens it, in the test's schema: what each instance writes through.
 fn records(schema: &Schema) -> Records {
     Records::Postgres(
@@ -985,6 +1107,7 @@ fn two_entries_added_at_once_on_two_instances_are_both_kept() {
                 PackageStore::with_backend(
                     records(&schema).packages().expect("packages"),
                     Box::new(fleet_server::fs::FsBlobStore::open(&root).expect("blobs")),
+                    fleet_server::clock::Elapsed::monotonic(),
                 )
                 .expect("open"),
             )
@@ -3598,6 +3721,7 @@ fn a_package_pinned_through_one_instance_is_not_changed_through_another() {
         PackageStore::with_backend(
             records(&schema).packages().expect("packages"),
             Box::new(fleet_server::fs::FsBlobStore::open(blobs.path()).expect("blobs")),
+            fleet_server::clock::Elapsed::monotonic(),
         )
         .expect("open")
     };

@@ -191,8 +191,13 @@ no module.
   clause 12).
 - **Server ports beyond storage** — `fleet` owns `CertificateSigner`, which the local CA in `ca`
   implements for the CSR flow and the renewal proof (ADR-0038), and
-  `Clock`, which `clock::SystemClock` implements. The `[connection_offer]` and
-  `[telemetry_offer]` sections become the fleet's offers in `config`.
+  `Clock`, which `clock::SystemClock` implements. It owns `Elapsed` too, the time that has passed
+  as a lease and a sweep measure it: `PackageStore::with_backend` takes it, and `instance`'s
+  `Lease::take_as`. `clock::Elapsed::monotonic` is the adapter on `std::time::Instant`, and
+  `main.rs` hands both of them `CLOCK_BOOTTIME`, which counts a suspend of the host, on Linux
+  ([ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side](adr/draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+  clause 3). The `[connection_offer]` and `[telemetry_offer]` sections become the fleet's offers in
+  `config`.
 - **Server configuration** — `config` builds one TOML document from the defaults, `server.toml`
   when one is read, and the `FLEET_SERVER__…` variables over it, and deserializes it once, so the
   environment is checked as strictly as the file; `main.rs` reads the process environment and

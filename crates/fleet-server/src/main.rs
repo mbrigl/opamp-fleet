@@ -509,6 +509,11 @@ async fn main() {
     // One TLS provider for the whole process (ADR-0045): ring, never a system library.
     opamp::tls::install_ring_provider();
 
+    // The clock a lease and a sweep measure on counts a suspend of the host
+    // (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    // clause 3), handed to the package store and the lease.
+    let elapsed = since_boot().unwrap_or_else(fleet_server::clock::Elapsed::monotonic);
+
     let Layered { config, origin, .. } = load_config(parse_args());
 
     // The TLS material first: a Server that cannot serve it does not start, and admission needs
@@ -696,6 +701,7 @@ async fn main() {
                 &records,
                 config.data_dir(),
                 &config.blobs,
+                elapsed.clone(),
             )
             .map(|(store, staging)| {
                 (
@@ -751,6 +757,7 @@ async fn main() {
                     config.database.lease(),
                     &host_name(),
                     id,
+                    elapsed.clone(),
                 )
             }) {
                 Ok(lease) => {
@@ -963,6 +970,8 @@ async fn main() {
     let presence = match (&lease, &records) {
         (Some(lease), fleet_server::Records::Postgres(database)) => {
             state.serve_under(lease.held());
+            let proof = lease.proof();
+            state.answer_while(move || proof.holds());
             let presence = config.database.presence_interval().map(|interval| {
                 fleet_server::instance::write_presence(state.clone(), lease.held(), interval)
             });
@@ -994,6 +1003,7 @@ async fn main() {
         },
         (agent_listener, operator_listener),
         lease.as_ref().map(fleet_server::instance::Lease::held),
+        lease.as_ref().map(fleet_server::instance::Lease::proof),
         shutdown,
     )
     .await;
@@ -1071,6 +1081,37 @@ fn clean_staging_on_takeover(
     });
 }
 
+/// `CLOCK_BOOTTIME`, which counts the time the host was suspended, as the clock a lease and a sweep
+/// measure on: on Linux, where the Server ships, once a first reading succeeds. A later reading
+/// that fails reads as the end of time, so a lease measured on it lapses rather than holds.
+#[cfg(target_os = "linux")]
+fn since_boot() -> Option<fleet_server::clock::Elapsed> {
+    fn read() -> Option<std::time::Duration> {
+        let mut now = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: clock_gettime writes only the timespec this function owns.
+        let read = unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut now) };
+        (read == 0).then(|| {
+            std::time::Duration::new(
+                u64::try_from(now.tv_sec).unwrap_or(0),
+                u32::try_from(now.tv_nsec).unwrap_or(0),
+            )
+        })
+    }
+    read()?;
+    Some(fleet_server::clock::Elapsed::new(|| {
+        read().unwrap_or(std::time::Duration::MAX)
+    }))
+}
+
+/// Elsewhere the clock of `std::time::Instant`.
+#[cfg(not(target_os = "linux"))]
+fn since_boot() -> Option<fleet_server::clock::Elapsed> {
+    None
+}
+
 /// The name of the host the Server runs on, which its lease records: the kernel's on Linux, where
 /// the Server ships, and the `HOSTNAME` variable elsewhere.
 fn host_name() -> String {
@@ -1123,6 +1164,43 @@ fn uploaded_artifacts_notice(signs_csrs: bool) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// On Linux the lease's clock is `CLOCK_BOOTTIME`: it reads, it moves on as time passes, and it
+    /// counts at least as much as the monotonic clock, which a suspend would leave behind.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_leases_clock_is_the_one_that_counts_a_suspend() {
+        let clock = since_boot().expect("CLOCK_BOOTTIME reads");
+        let (first, started) = (clock.now(), std::time::Instant::now());
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let (passed, monotonic) = (clock.now() - first, started.elapsed());
+        assert!(passed >= std::time::Duration::from_millis(20), "{passed:?}");
+        assert!(
+            passed + std::time::Duration::from_millis(5) >= monotonic,
+            "{passed:?}"
+        );
+        let boottime = || {
+            let mut now = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
+            // SAFETY: clock_gettime writes only the timespec this closure owns.
+            assert_eq!(
+                unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut now) },
+                0
+            );
+            std::time::Duration::new(
+                u64::try_from(now.tv_sec).expect("seconds"),
+                u32::try_from(now.tv_nsec).expect("nanoseconds"),
+            )
+        };
+        let (before, read, after) = (boottime(), clock.now(), boottime());
+        assert!(
+            before <= read && read <= after,
+            "the clock reads CLOCK_BOOTTIME: {read:?}, not between {before:?} and {after:?}"
+        );
+    }
 
     /// `hash-credential` makes an operator's Basic entry and nothing else: the Agent plane has no
     /// credential to hash.
