@@ -437,7 +437,10 @@ every change that concerns a live session by one `NOTIFY`.
       clauses 8 to 10 and 21). An approval registers its certificate, writes the Host it mints
       and decides its request in one such transaction
       ([ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision](draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
-      clause 9).
+      clause 9). An instance of 0.8.0 reads no rejected key
+      ([ADR-draft-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window](draft-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)
+      clause 16), so through it a rejected key waits again and may be approved, until the last
+      instance of 0.8.0 is replaced.
     - An `instance_uid` is bound to at most one Host, by a unique constraint. A binding that meets
       another Host's fails, and the instance reads the binding that holds and decides by it.
     - The bounds of the register, the revocation list, the bootstrap entries and the enrolment

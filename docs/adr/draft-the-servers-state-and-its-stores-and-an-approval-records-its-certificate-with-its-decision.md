@@ -208,7 +208,10 @@ that decides its request, and move an old layout by an offline command.
      whose end has passed is closed when it is loaded.
    - When the window closes, every enrolment connection is closed and every pending request
      expires, an approved one whose certificate the host has not yet collected included. That
-     host enrols again in the next window.
+     host enrols again in the next window. The rejected keys outlive the window, persisted
+     through the same port
+     ([ADR-draft-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window](draft-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)
+     clause 16).
 
 9. **The Server keeps a register of what it signed.**
    - For each certificate the register holds:
