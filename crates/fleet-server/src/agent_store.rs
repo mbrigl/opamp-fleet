@@ -32,7 +32,27 @@ use sha2::{Digest, Sha256};
 
 use crate::configs::Pinned;
 use crate::fleet::{Assignment, Transport};
+use crate::listing::{AgentFilter, AgentSort, Candidate, Position};
 use crate::packages::PackageId;
+
+/// What the derived values of `record` come from
+/// (ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server
+/// clause 8).
+#[must_use]
+pub fn source_of<'a>(
+    uid: &'a InstanceUid,
+    record: &'a PersistedAgent,
+) -> crate::listing::Source<'a> {
+    crate::listing::Source {
+        uid,
+        description: record.description.as_ref(),
+        health: record.health.as_ref(),
+        remote_config_status: record.remote_config_status.as_ref(),
+        package_statuses: record.package_statuses.as_ref(),
+        capabilities: record.capabilities,
+        transport: record.transport,
+    }
+}
 
 /// Everything about one Agent that survives a restart: what it reported and what an operator
 /// queued for it — never what a live connection knows (`connected`, the owning connection).
@@ -162,6 +182,90 @@ pub struct StoredAgent {
     /// Connected as stored, and only while the instance it names as the holder has a live lease;
     /// `false` on a store that keeps no presence.
     pub connected: bool,
+    /// The instance its presence names, while that instance has a live lease
+    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// clause 13); `None` on a store that keeps no presence.
+    pub holder: Option<Holder>,
+}
+
+/// The instance that holds an Agent: the id of its lease, and the host name the lease records.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Holder {
+    pub instance_id: String,
+    pub host: String,
+}
+
+/// What [`AgentStore::query_page`] is asked
+/// (ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server
+/// clause 9).
+pub struct PageQuery<'a> {
+    pub filter: &'a AgentFilter,
+    pub sort: AgentSort,
+    pub descending: bool,
+    /// The position the page starts after; `None` for the first page.
+    pub after: Option<&'a Position>,
+    /// The most records it answers.
+    pub limit: usize,
+    /// A record heard from last before this is stale, where it promised heartbeats.
+    pub seen_before_ms: u64,
+}
+
+/// One record of a page, with its presence and where its Client Agent places it (ADR-0043
+/// clause 19), as the store found it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PagedAgent {
+    pub uid: InstanceUid,
+    pub stored: StoredAgent,
+    /// Its Client Agent — itself, for the Client Agent — when its group holds exactly one.
+    pub client_agent: Option<InstanceUid>,
+    /// Its group holds more than one Client Agent.
+    pub ambiguous: bool,
+    /// The labels of its Client Agent; empty for the Client Agent itself.
+    pub inherited: BTreeMap<String, String>,
+    /// Where it stands in the order the page was sorted by, as the store sorted it: what the
+    /// cursor of the page after it names.
+    pub position: Position,
+}
+
+/// What [`AgentStore::reported_values`] answers
+/// (ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server
+/// clause 9): the distinct reported `key=value` pairs and `service_name` values, each sorted.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ReportedValues {
+    pub pairs: Vec<String>,
+    pub service_names: Vec<String>,
+}
+
+impl ReportedValues {
+    /// The distinct values of `derived`, each sorted, at most `limit` of each.
+    #[must_use]
+    pub fn of<'a>(
+        derived: impl IntoIterator<Item = &'a crate::listing::Derived>,
+        limit: usize,
+    ) -> Self {
+        let (mut pairs, mut names) = (BTreeSet::new(), BTreeSet::new());
+        for derived in derived {
+            pairs.extend(
+                derived.reported.iter().filter_map(|(key, value)| {
+                    value.as_ref().map(|value| format!("{key}={value}"))
+                }),
+            );
+            if !derived.service_name.is_empty() {
+                names.insert(derived.service_name.clone());
+            }
+        }
+        ReportedValues {
+            pairs: pairs.into_iter().take(limit).collect(),
+            service_names: names.into_iter().take(limit).collect(),
+        }
+    }
+}
+
+/// What [`AgentStore::query_page`] answers: the page, and how many records match the filter.
+#[derive(Debug, Default)]
+pub struct AgentPage {
+    pub agents: Vec<PagedAgent>,
+    pub total: usize,
 }
 
 /// What [`AgentStore::take`] found of the holder it replaced
@@ -276,12 +380,103 @@ pub trait AgentStore: Send + Sync {
                     StoredAgent {
                         record,
                         connected: false,
+                        holder: None,
                     },
                 )
             })
             .collect();
         all.sort_by_key(|(uid, _)| uid.0);
         Ok(all)
+    }
+
+    /// The records that match `query.filter`, with their presence, in the order of its sort after
+    /// the position it names, at most `query.limit` of them, and the number that match
+    /// (ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server
+    /// clause 9). The default answers from every record [`load`](Self::load) reads, each
+    /// disconnected and held by none, as a store that keeps no presence may. It knows no host
+    /// register, so it places no Agent under a Client Agent and matches no Host value: a Server
+    /// on such a store answers the Operator plane's lists from memory, and asks this only for the
+    /// Agents that arrived over a Host. A shared store, and a wrapper of one, overrides it.
+    ///
+    /// # Errors
+    /// Returns an error when the records cannot be read.
+    fn query_page(&self, query: &PageQuery<'_>) -> Result<AgentPage, String> {
+        let none = BTreeMap::new();
+        let mut matching = Vec::new();
+        for (uid, record) in self.load()? {
+            let derived = crate::listing::derive(&source_of(&uid, &record));
+            let effective = crate::labels::effective_description(&crate::labels::Sources {
+                host: &none,
+                reported: record.description.as_ref(),
+                own: &record.labels,
+                inherited: &none,
+            });
+            let candidate = Candidate {
+                derived: &derived,
+                connected: false,
+                stale: crate::listing::is_stale(
+                    record.capabilities,
+                    record.last_seen_ms,
+                    query.seen_before_ms,
+                ),
+                holder: None,
+                host: record.host.as_deref(),
+                effective: effective.as_ref(),
+                own: &record.labels,
+                inherited: &none,
+                host_values: &none,
+            };
+            if !query.filter.admits(&candidate) {
+                continue;
+            }
+            let position = Position {
+                key: crate::listing::agent_key(
+                    query.sort,
+                    &derived,
+                    false,
+                    record.sequence_num,
+                    record.last_seen_ms,
+                ),
+                tiebreak: uid.to_string(),
+            };
+            matching.push((
+                position.clone(),
+                PagedAgent {
+                    uid,
+                    stored: StoredAgent {
+                        record,
+                        connected: false,
+                        holder: None,
+                    },
+                    client_agent: None,
+                    ambiguous: false,
+                    inherited: BTreeMap::new(),
+                    position,
+                },
+            ));
+        }
+        let page = crate::listing::page(matching, query.descending, query.after, query.limit);
+        Ok(AgentPage {
+            agents: page.entries,
+            total: page.total,
+        })
+    }
+
+    /// The distinct reported `key=value` pairs and `service_name` values of every record, each
+    /// sorted, at most `limit` of each: what the UI suggests
+    /// (ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server
+    /// clause 9). The default answers from every record [`load`](Self::load) reads; a shared store,
+    /// and a wrapper of one, overrides it.
+    ///
+    /// # Errors
+    /// Returns an error when the records cannot be read.
+    fn reported_values(&self, limit: usize) -> Result<ReportedValues, String> {
+        let derived: Vec<crate::listing::Derived> = self
+            .load()?
+            .iter()
+            .map(|(uid, record)| crate::listing::derive(&source_of(uid, record)))
+            .collect();
+        Ok(ReportedValues::of(&derived, limit))
     }
 
     /// Whether other Servers write this store too, so the fleet reads an Agent it does not hold

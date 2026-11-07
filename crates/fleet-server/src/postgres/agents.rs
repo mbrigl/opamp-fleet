@@ -14,7 +14,10 @@ use tokio_postgres::GenericClient;
 
 use super::notify::{notify, ASSIGNMENT, CONFIGURATION, FORGOTTEN, LABELS, RESTART, TAKEN};
 use super::{client, signed, sql, unsigned, Database};
-use crate::agent_store::{AgentStore, Creation, PersistedAgent, Pin, Presence, StoredAgent, Taken};
+use crate::agent_store::{
+    AgentPage, AgentStore, Creation, Holder, PageQuery, PersistedAgent, Pin, Presence, StoredAgent,
+    Taken,
+};
 use crate::configs::Pinned;
 use crate::fleet::{Assignment, Transport};
 use crate::packages::PackageId;
@@ -263,7 +266,7 @@ impl AgentStore for PgAgentStore {
         let began = self.began();
         let keys: Option<Vec<String>> =
             only.map(|uids| uids.iter().map(ToString::to_string).collect());
-        let (records, connected) = self.database.run(move |pool| async move {
+        let (records, mut presence) = self.database.run(move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client
                 .build_transaction()
@@ -278,22 +281,33 @@ impl AgentStore for PgAgentStore {
                     Some(keys) => (" AND a.instance_uid = ANY($1)", vec![keys]),
                     None => ("", Vec::new()),
                 };
-            let connected: BTreeSet<String> = transaction
+            let presence: HashMap<String, (bool, Holder)> = transaction
                 .query(
                     &format!(
-                        "SELECT a.instance_uid FROM agents AS a WHERE a.connected AND EXISTS \
-                         (SELECT 1 FROM leases AS l WHERE l.instance_id = a.holder \
-                         AND l.expires_at > now()){filter}"
+                        "SELECT a.instance_uid, a.connected, l.instance_id::text, l.host \
+                         FROM agents AS a JOIN leases AS l ON l.instance_id = a.holder \
+                         AND l.expires_at > now(){filter}"
                     ),
                     &params,
                 )
                 .await
                 .map_err(sql)?
                 .into_iter()
-                .map(|row| row.get(0))
+                .map(|row| {
+                    (
+                        row.get(0),
+                        (
+                            row.get(1),
+                            Holder {
+                                instance_id: row.get(2),
+                                host: row.get(3),
+                            },
+                        ),
+                    )
+                })
                 .collect();
             transaction.commit().await.map_err(sql)?;
-            Ok((records, connected))
+            Ok((records, presence))
         })?;
         self.refresh(
             began,
@@ -308,8 +322,19 @@ impl AgentStore for PgAgentStore {
         let mut all: Vec<(InstanceUid, StoredAgent)> = records
             .into_iter()
             .map(|(uid, record)| {
-                let connected = connected.contains(&uid.to_string());
-                (uid, StoredAgent { record, connected })
+                let (connected, holder) = presence
+                    .remove(&uid.to_string())
+                    .map_or((false, None), |(connected, holder)| {
+                        (connected, Some(holder))
+                    });
+                (
+                    uid,
+                    StoredAgent {
+                        record,
+                        connected,
+                        holder,
+                    },
+                )
             })
             .collect();
         all.sort_by_key(|(uid, _)| uid.0);
@@ -318,6 +343,32 @@ impl AgentStore for PgAgentStore {
 
     fn is_shared(&self) -> bool {
         true
+    }
+
+    /// The rows written without their derived columns derived again first, then one
+    /// `SELECT DISTINCT` over those columns for each.
+    fn reported_values(&self, limit: usize) -> Result<crate::agent_store::ReportedValues, String> {
+        super::agent_page::reported_values(&self.database, limit)
+    }
+
+    /// The rows written without their derived columns derived again first, then the count and
+    /// the page in one snapshot of the database.
+    fn query_page(&self, query: &PageQuery<'_>) -> Result<AgentPage, String> {
+        let began = self.began();
+        let page = super::agent_page::query_page(&self.database, query)?;
+        let uids: Vec<InstanceUid> = page.agents.iter().map(|agent| agent.uid).collect();
+        let found: HashMap<InstanceUid, Option<&Assignment>> = page
+            .agents
+            .iter()
+            .map(|agent| (agent.uid, agent.stored.record.assignment.as_ref()))
+            .collect();
+        self.refresh(
+            began,
+            Read::Only(&uids),
+            |uid| found.get(uid).copied().flatten(),
+            uids.iter(),
+        );
+        Ok(page)
     }
 
     /// A new record whole; of one that exists, the columns a report decides alone, so a label
@@ -928,7 +979,10 @@ fn encode<M: Message>(message: Option<&M>) -> Option<Vec<u8>> {
     message.map(Message::encode_to_vec)
 }
 
-fn decode<M: Message + Default>(bytes: Option<Vec<u8>>, what: &str) -> Result<Option<M>, String> {
+pub(super) fn decode<M: Message + Default>(
+    bytes: Option<Vec<u8>>,
+    what: &str,
+) -> Result<Option<M>, String> {
     bytes
         .map(|bytes| {
             M::decode(bytes.as_slice()).map_err(|e| format!("{what} does not decode: {e}"))
@@ -945,7 +999,7 @@ pub(crate) async fn read_all(
 }
 
 /// The records of the keys `only` names, or of every Agent where it names none.
-async fn read(
+pub(super) async fn read(
     client: &impl GenericClient,
     only: Option<&[String]>,
 ) -> Result<HashMap<InstanceUid, PersistedAgent>, String> {
@@ -1149,7 +1203,30 @@ async fn write_reported(
         ),
         None => String::new(),
     };
-    let update = format!("UPDATE agents SET {sets} WHERE instance_uid = $1{held}");
+    // The derived columns and their digest in the same statement, the digest over the values bound.
+    let first = REPORTED.len()
+        + 2
+        + if unless_held_elsewhere.is_some() {
+            2
+        } else {
+            0
+        };
+    let derived_sets = derived_sets(first, |column| {
+        Some(
+            match column {
+                "instance_uid" => "$1::text",
+                "capabilities" => "$3::bigint",
+                "transport" => "$4::text",
+                "description" => "$7::bytea",
+                "health" => "$8::bytea",
+                "remote_config_status" => "$9::bytea",
+                "package_statuses" => "$11::bytea",
+                _ => return None,
+            }
+            .to_string(),
+        )
+    });
+    let update = format!("UPDATE agents SET {sets}, {derived_sets} WHERE instance_uid = $1{held}");
     let (sequence_num, capabilities, last_seen_ms) = (
         signed(record.sequence_num),
         signed(record.capabilities),
@@ -1189,7 +1266,41 @@ async fn write_reported(
         params.push(&holder);
         params.push(&take);
     }
+    let derived = derived_of(uid, record);
+    params.extend(
+        derived
+            .iter()
+            .map(|p| p.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync)),
+    );
     Ok(client.execute(&update, &params).await.map_err(sql)? > 0)
+}
+
+/// The values of the columns the list of Agents reads, derived from `record`, which every write
+/// of it writes in the same statement
+/// (ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server
+/// clause 8).
+fn derived_of(
+    uid: &InstanceUid,
+    record: &PersistedAgent,
+) -> Vec<Box<dyn tokio_postgres::types::ToSql + Sync + Send>> {
+    super::agent_page::derived_params(&crate::listing::derive(&crate::agent_store::source_of(
+        uid, record,
+    )))
+}
+
+/// `SET` of the derived columns, their values bound from `$first` on, and of their digest over
+/// the values the statement binds for the columns it is the digest of, `column` naming each.
+fn derived_sets(first: usize, column: impl Fn(&str) -> Option<String>) -> String {
+    let mut sets: Vec<String> = super::agent_page::DERIVED_COLUMNS
+        .iter()
+        .enumerate()
+        .map(|(i, name)| format!("{name} = ${}", first + i))
+        .collect();
+    sets.push(format!(
+        "derived_from = {}",
+        super::agent_page::stamp_of(column)
+    ));
+    sets.join(", ")
 }
 
 /// Writes the assignment of one Agent record alone, its Configurations exactly the assignment's,
@@ -1260,6 +1371,8 @@ pub(crate) async fn write(
     let updates = COLUMNS
         .split(", ")
         .skip(1)
+        .chain(super::agent_page::DERIVED_COLUMNS)
+        .chain(["derived_from"])
         .map(|column| format!("{column} = EXCLUDED.{column}"))
         .collect::<Vec<_>>()
         .join(", ");
@@ -1279,32 +1392,65 @@ async fn insert(
     let labels = serde_json::to_value(&record.labels).expect("labels serialize");
     let assignment = record.assignment.as_ref();
     let package = assignment.and_then(|assignment| assignment.package.as_ref());
+    let derived = derived_of(uid, record);
+    let derived_names = super::agent_page::DERIVED_COLUMNS.join(", ");
+    let derived_values = (19..19 + derived.len())
+        .map(|n| format!("${n}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let stamp = super::agent_page::stamp_of(|column| {
+        Some(
+            match column {
+                "instance_uid" => "$1::text",
+                "capabilities" => "$3::bigint",
+                "transport" => "$4::text",
+                "description" => "$8::bytea",
+                "health" => "$9::bytea",
+                "remote_config_status" => "$10::bytea",
+                "package_statuses" => "$12::bytea",
+                _ => return None,
+            }
+            .to_string(),
+        )
+    });
+    let mut values: Vec<Box<dyn tokio_postgres::types::ToSql + Sync + Send>> = vec![
+        Box::new(key.clone()),
+        Box::new(signed(record.sequence_num)),
+        Box::new(signed(record.capabilities)),
+        Box::new(record.transport.as_str()),
+        Box::new(signed(record.last_seen_ms)),
+        Box::new(record.restart_pending),
+        Box::new(
+            record
+                .effective_config
+                .as_ref()
+                .map(|text| text.as_bytes().to_vec()),
+        ),
+        Box::new(encode(record.description.as_ref())),
+        Box::new(encode(record.health.as_ref())),
+        Box::new(encode(record.remote_config_status.as_ref())),
+        Box::new(encode(record.connection_settings_status.as_ref())),
+        Box::new(encode(record.package_statuses.as_ref())),
+        Box::new(encode(record.available_components.as_ref())),
+        Box::new(labels),
+        Box::new(record.host.clone()),
+        Box::new(assignment.map(|assignment| assignment.deployment.clone())),
+        Box::new(package.map(|id| id.agent_type.clone())),
+        Box::new(package.map(|id| id.version.clone())),
+    ];
+    values.extend(derived);
+    let params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = values
+        .iter()
+        .map(|p| p.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync))
+        .collect();
     let written = client
         .execute(
             &format!(
-                "INSERT INTO agents ({COLUMNS}) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, \
-                 $11, $12, $13, $14, $15, $16, $17, $18) ON CONFLICT (instance_uid) {on_conflict}"
+                "INSERT INTO agents ({COLUMNS}, {derived_names}, derived_from) VALUES ($1, $2, $3, \
+                 $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, \
+                 {derived_values}, {stamp}) ON CONFLICT (instance_uid) {on_conflict}"
             ),
-            &[
-                &key,
-                &signed(record.sequence_num),
-                &signed(record.capabilities),
-                &record.transport.as_str(),
-                &signed(record.last_seen_ms),
-                &record.restart_pending,
-                &record.effective_config.as_deref().map(str::as_bytes),
-                &encode(record.description.as_ref()),
-                &encode(record.health.as_ref()),
-                &encode(record.remote_config_status.as_ref()),
-                &encode(record.connection_settings_status.as_ref()),
-                &encode(record.package_statuses.as_ref()),
-                &encode(record.available_components.as_ref()),
-                &labels,
-                &record.host,
-                &assignment.map(|assignment| assignment.deployment.as_str()),
-                &package.map(|id| id.agent_type.as_str()),
-                &package.map(|id| id.version.as_str()),
-            ],
+            &params,
         )
         .await
         .map_err(sql)?
@@ -1430,6 +1576,70 @@ mod tests {
         store.remove(&one).expect("removing the absent is fine");
         assert_eq!(store.pinning(Pin::Configuration("base")), 1);
         assert_eq!(all(&*open().0).len(), 1);
+
+        // The read the Server makes of the Agents behind a Gateway: those that arrived over its
+        // Host, and no other.
+        let behind = [InstanceUid([0x0b; 16]), InstanceUid([0x0c; 16])];
+        let mut gatewayed = record();
+        gatewayed.host = Some("gateway".to_string());
+        gatewayed
+            .description
+            .get_or_insert_with(Default::default)
+            .non_identifying_attributes
+            .extend([
+                opamp::attributes::string_attr("zone", "b"),
+                // Taken, and no value a Selector matches: no pair to suggest.
+                opamp::proto::KeyValue {
+                    key: "port".to_string(),
+                    value: Some(opamp::proto::AnyValue {
+                        value: Some(opamp::proto::any_value::Value::IntValue(8)),
+                    }),
+                },
+            ]);
+        for uid in &behind {
+            store.put(uid, &gatewayed).expect("put");
+        }
+        let filter = crate::listing::AgentFilter {
+            arrived_over: Some("gateway".to_string()),
+            ..crate::listing::AgentFilter::default()
+        };
+        let page = open()
+            .0
+            .query_page(&crate::agent_store::PageQuery {
+                filter: &filter,
+                sort: crate::listing::AgentSort::Name,
+                descending: false,
+                after: None,
+                limit: 10,
+                seen_before_ms: 0,
+            })
+            .expect("page");
+        let found: Vec<InstanceUid> = page.agents.iter().map(|agent| agent.uid).collect();
+        assert_eq!(
+            found, behind,
+            "the Agents that arrived over the Host, by name and UID"
+        );
+        assert_eq!(page.total, 2);
+        assert!(page
+            .agents
+            .iter()
+            .all(|agent| agent.stored.record == gatewayed));
+
+        // What the UI suggests: the distinct reported pairs and types, each sorted, bounded.
+        let derived: Vec<crate::listing::Derived> = all(&*open().0)
+            .iter()
+            .map(|(uid, record)| {
+                crate::listing::derive(&crate::agent_store::source_of(uid, record))
+            })
+            .collect();
+        let expected = crate::agent_store::ReportedValues::of(&derived, 1000);
+        assert!(expected.pairs.len() > 1 && !expected.service_names.is_empty());
+        assert_eq!(open().0.reported_values(1000).expect("values"), expected);
+        let one = open().0.reported_values(1).expect("values");
+        assert_eq!(
+            (one.pairs.as_slice(), one.service_names.as_slice()),
+            (&expected.pairs[..1], &expected.service_names[..1])
+        );
     }
 
     /// A report's write on PostgreSQL leaves what the acts wrote through another instance: the
@@ -1621,7 +1831,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0044
+    /// Verifies: ADR-0044, ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server
     #[test]
     fn the_agent_port_contract_holds_on_the_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1636,7 +1846,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0044
+    /// Verifies: ADR-0044, ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server
     #[test]
     fn the_agent_port_contract_holds_on_postgres() {
         let Some(test) = TestDatabase::named() else {
@@ -1889,6 +2099,139 @@ mod tests {
             opened.referenced_revisions("base"),
             BTreeSet::from(["0123abcd".to_string()])
         );
+    }
+
+    /// A record created, a report written and a record imported each carry their derived columns
+    /// and the digest of what they derive from, written in the statement that writes the record,
+    /// so no row a Server of this release writes needs deriving again.
+    /// Verifies: ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server
+    #[test]
+    fn every_write_of_a_record_writes_its_derived_columns_with_it() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let store = PgAgentStore::new(database.clone());
+        let stale = || {
+            test.once(&format!(
+                "SELECT count(*)::text FROM agents WHERE derived_from IS DISTINCT FROM {}",
+                crate::postgres::schema::stamp!()
+            ))
+        };
+        let mut full = record();
+        full.package_statuses = Some(opamp::proto::PackageStatuses {
+            error_message: "a package".to_string(),
+            ..Default::default()
+        });
+        assert!(
+            full.health.is_some() && full.description.is_some() && full.package_statuses.is_some()
+        );
+        let (created, imported) = (InstanceUid([0x31; 16]), InstanceUid([0x32; 16]));
+        store.put(&created, &full).expect("create");
+        assert_eq!(stale(), "0", "created");
+        let mut reported = full.clone();
+        reported.health = None;
+        reported.capabilities ^= 1;
+        assert!(store.write_report(&created, &reported).expect("report"));
+        assert_eq!(stale(), "0", "reported");
+        let import = |uid: InstanceUid, record: PersistedAgent| {
+            database
+                .run(move |pool| async move {
+                    let client = client(&pool).await?;
+                    write(&**client, &uid, &record).await
+                })
+                .expect("import");
+        };
+        import(imported, full.clone());
+        assert_eq!(stale(), "0", "imported");
+        let mut over = full.clone();
+        over.health = None;
+        import(created, over);
+        assert_eq!(stale(), "0", "imported over a record");
+        let names = test.once(&format!(
+            "SELECT display_name || '/' || search_text FROM agents WHERE instance_uid = '{created}'"
+        ));
+        assert!(names.contains(&created.to_string()), "{names}");
+    }
+
+    /// A page names the holder of an Agent only while its lease is live: `holder=<id>` lists the
+    /// Agent and `holder=none` does not, `connected=true` lists it; once the lease has lapsed,
+    /// without being released, `holder=none` lists it, and neither `holder=<id>` nor
+    /// `connected=true` does. The read of the Agents behind a Gateway's Host says the same.
+    /// Verifies: ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server
+    #[test]
+    fn a_page_names_a_holder_only_while_its_lease_is_live() {
+        use crate::listing::{AgentFilter, AgentSort, HolderFilter};
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let a = database
+            .take_lease("host-a", std::time::Duration::from_secs(60))
+            .expect("lease")
+            .instance_id;
+        let store = PgAgentStore::new(database.clone());
+        let held = InstanceUid([7; 16]);
+        store.put(&held, &record()).expect("put");
+        store
+            .take(&held, &a, 5_000)
+            .expect("take")
+            .expect("a record");
+        let host = record().host;
+        let page = |filter: AgentFilter| {
+            store
+                .query_page(&crate::agent_store::PageQuery {
+                    filter: &filter,
+                    sort: AgentSort::Name,
+                    descending: false,
+                    after: None,
+                    limit: 10,
+                    seen_before_ms: 0,
+                })
+                .expect("page")
+                .agents
+        };
+        let uids = |filter: AgentFilter| -> Vec<InstanceUid> {
+            page(filter).iter().map(|agent| agent.uid).collect()
+        };
+        let holder = |holder: HolderFilter| AgentFilter {
+            holder: Some(holder),
+            ..AgentFilter::default()
+        };
+        let connected = AgentFilter {
+            connected: Some(true),
+            ..AgentFilter::default()
+        };
+        let behind = AgentFilter {
+            arrived_over: host.clone(),
+            ..AgentFilter::default()
+        };
+        assert_eq!(uids(holder(HolderFilter::Instance(a.clone()))), [held]);
+        assert_eq!(uids(holder(HolderFilter::None)), []);
+        assert_eq!(uids(connected.clone()), [held]);
+        let found = page(behind.clone());
+        assert_eq!(
+            found[0]
+                .stored
+                .holder
+                .as_ref()
+                .map(|h| (h.instance_id.as_str(), h.host.as_str())),
+            Some((a.as_str(), "host-a"))
+        );
+        assert!(found[0].stored.connected);
+        test.sql(&format!(
+            "UPDATE leases SET expires_at = now() - interval '1 second' WHERE instance_id = '{a}'"
+        ));
+        assert_eq!(uids(holder(HolderFilter::Instance(a.clone()))), []);
+        assert_eq!(
+            uids(holder(HolderFilter::None)),
+            [held],
+            "a lapsed lease holds nothing"
+        );
+        assert_eq!(uids(connected), []);
+        let found = page(behind);
+        assert_eq!(found[0].stored.holder, None);
+        assert!(!found[0].stored.connected);
     }
 
     /// A rollout whose last record cannot be written leaves none of its assignments behind, on

@@ -125,6 +125,16 @@ pub const MIGRATIONS: &[Migration] = &[
         oldest_server: "0.8.0",
         sql: AUDIT_RECORDED_AT,
     },
+    // Columns only added, with defaults, and indexes. A Server of 0.8.0 writes none of them, and
+    // the rows it writes are derived again before the list of Agents reads them, so it serves on
+    // the schema they leave
+    // (ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server
+    // clause 8).
+    Migration {
+        version: 11,
+        oldest_server: "0.8.0",
+        sql: AGENTS_DERIVED,
+    },
 ];
 
 /// The first schema: one table per kind of record, the parts of a record that are many in tables of
@@ -402,6 +412,58 @@ UPDATE audit_entries
     WHERE line ~ '"time":"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z"';
 CREATE INDEX audit_entries_recorded_at ON audit_entries (chain, recorded_at);
 "#;
+
+/// The digest of the columns of a row of `agents` its derived ones come from
+/// (ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server
+/// clause 8): what a row whose derived columns were written with it holds in `derived_from`. Each
+/// text column enters as its MD5, each `bytea` column length-prefixed, so two rows differ in the
+/// digest wherever they differ in a column, and every function in it is immutable, so the partial
+/// index of migration 11 can name it. The query that finds the rows to derive again names it
+/// exactly as the index does, or the index is not used.
+macro_rules! stamp {
+    () => {
+        "sha256('\\x01'::bytea \
+    || decode(md5(instance_uid), 'hex') || decode(md5(transport), 'hex') \
+    || int8send(capabilities) \
+    || CASE WHEN description IS NULL THEN '\\x00'::bytea \
+        ELSE '\\x01'::bytea || int4send(length(description)) || description END \
+    || CASE WHEN health IS NULL THEN '\\x00'::bytea \
+        ELSE '\\x01'::bytea || int4send(length(health)) || health END \
+    || CASE WHEN remote_config_status IS NULL THEN '\\x00'::bytea \
+        ELSE '\\x01'::bytea || int4send(length(remote_config_status)) || remote_config_status END \
+    || CASE WHEN package_statuses IS NULL THEN '\\x00'::bytea \
+        ELSE '\\x01'::bytea || int4send(length(package_statuses)) || package_statuses END)"
+    };
+}
+pub(crate) use stamp;
+
+/// What the list of Agents reads of each record
+/// (ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server
+/// clause 8): the display name and the other sort keys, the reported values a Selector matches,
+/// the `service_name`, the machine that groups an Agent behind a Gateway, whether it is its
+/// Client's own Agent, one search text, and the digest of the columns they come from. A row whose
+/// digest does not match them, as every row the migration finds, is derived again, and the partial
+/// index finds those rows; the other index finds a group's Client Agents.
+const AGENTS_DERIVED: &str = concat!(
+    "
+ALTER TABLE agents ADD COLUMN display_name text NOT NULL DEFAULT '';
+ALTER TABLE agents ADD COLUMN health_rank bigint NOT NULL DEFAULT 1;
+ALTER TABLE agents ADD COLUMN config_status text NOT NULL DEFAULT '';
+ALTER TABLE agents ADD COLUMN version_shown text NOT NULL DEFAULT '';
+ALTER TABLE agents ADD COLUMN os_shown text NOT NULL DEFAULT '';
+ALTER TABLE agents ADD COLUMN service_name text NOT NULL DEFAULT '';
+ALTER TABLE agents ADD COLUMN reported json NOT NULL DEFAULT '{}';
+ALTER TABLE agents ADD COLUMN machine text NOT NULL DEFAULT '';
+ALTER TABLE agents ADD COLUMN client_agent boolean NOT NULL DEFAULT false;
+ALTER TABLE agents ADD COLUMN search_text text NOT NULL DEFAULT '';
+ALTER TABLE agents ADD COLUMN derived_from bytea;
+CREATE INDEX agents_host ON agents (host);
+CREATE INDEX agents_client_agents ON agents (host, machine) WHERE client_agent;
+CREATE INDEX agents_derived_missing ON agents (instance_uid) WHERE derived_from IS DISTINCT FROM ",
+    stamp!(),
+    ";
+"
+);
 
 /// This Server's version, `MAJOR.MINOR.PATCH`: the base of the version it reports, so a
 /// development build understands the schema of the release it is heading for.

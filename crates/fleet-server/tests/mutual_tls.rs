@@ -5916,3 +5916,194 @@ async fn an_enrolment_request_is_read_from_exactly_one_pem_block() {
         enrolment.pending()
     );
 }
+
+/// The Hosts, the certificates and the revocations a page at a time: each in its fixed order,
+/// pages that follow each other by their `Link`, every one counting all that match, and filters
+/// applied before the page is cut.
+/// Verifies: ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server
+#[tokio::test]
+async fn the_hosts_the_certificates_and_the_revocations_page_in_their_fixed_order() {
+    let pki = Pki::new();
+    let served = serve(&pki, revocations_setup(&pki)).await;
+    let mut serials = Vec::new();
+    for name in ["edge-01", "edge-02", "edge-03"] {
+        let (cert, key) = pki.issue(name);
+        let http = client(&served.ca_pem, Some((&cert, &key)));
+        let (csr, _) = csr_for(name);
+        let reply = decode(
+            post(
+                &http,
+                &served.endpoint,
+                with_csr(&InstanceUid::default(), csr),
+            )
+            .await,
+        )
+        .await;
+        let issued = String::from_utf8(
+            reply
+                .connection_settings
+                .and_then(|s| s.opamp)
+                .and_then(|o| o.certificate)
+                .expect("issued")
+                .cert,
+        )
+        .expect("pem");
+        serials.push(cert_id(&issued).serial);
+    }
+    let revocations = served.revocations.as_ref().expect("armed");
+    for serial in &serials {
+        revocations
+            .revoke_certificate("client", serial)
+            .expect("revoke");
+    }
+    let operator_client = client(&served.ca_pem, None);
+    let base = format!("https://localhost:{}", served.operator_port);
+    let read = |path: String| {
+        let operator_client = operator_client.clone();
+        let base = base.clone();
+        async move {
+            let response = operator_client
+                .get(format!("{base}{path}"))
+                .send()
+                .await
+                .expect("send");
+            let status = response.status();
+            let total = response
+                .headers()
+                .get("x-total-count")
+                .map(|v| v.to_str().expect("text").to_string());
+            let next = response.headers().get("link").map(|link| {
+                let link = link.to_str().expect("text");
+                assert!(link.ends_with("; rel=\"next\""), "{link}");
+                link.trim_start_matches('<')
+                    .split('>')
+                    .next()
+                    .expect("a target")
+                    .to_string()
+            });
+            let body: serde_json::Value = response.json().await.expect("json");
+            (status, total, next, body)
+        }
+    };
+    let all = |route: &'static str, field: &'static str| {
+        let read = &read;
+        async move {
+            let mut path = format!("{route}?limit=2");
+            let mut seen = Vec::new();
+            let mut pages = 0;
+            loop {
+                let (status, total, next, body) = read(path).await;
+                assert_eq!(status, 200, "{body}");
+                assert_eq!(total.as_deref(), Some("3"), "every page counts all");
+                pages += 1;
+                seen.extend(
+                    body.as_array()
+                        .expect("a page")
+                        .iter()
+                        .map(|entry| entry.pointer(field).expect(field).to_string()),
+                );
+                match next {
+                    Some(next) => path = next,
+                    None => break,
+                }
+            }
+            assert_eq!(pages, 2, "{route}: three entries, two to a page");
+            seen
+        }
+    };
+    let hosts = all("/api/v1/hosts", "/host").await;
+    let mut sorted = hosts.clone();
+    sorted.sort();
+    assert_eq!(hosts, sorted, "Hosts by host id");
+    assert_eq!(hosts.len(), 3);
+    let mut certificates = all("/api/v1/certificates", "/serial").await;
+    certificates.sort();
+    let mut issued: Vec<String> = serials.iter().map(|s| format!("{s:?}")).collect();
+    issued.sort();
+    assert_eq!(certificates, issued, "each certificate once");
+    let mut revoked = all("/api/v1/revocations", "/certificate/serial").await;
+    revoked.sort();
+    assert_eq!(revoked, issued, "each revocation once");
+    for (route, field) in [
+        ("/api/v1/certificates", "issued_ms"),
+        ("/api/v1/revocations", "revoked_ms"),
+    ] {
+        let (_, _, _, body) = read(route.to_string()).await;
+        let times: Vec<u64> = body
+            .as_array()
+            .expect("whole")
+            .iter()
+            .map(|entry| entry[field].as_u64().expect("a time"))
+            .collect();
+        assert!(times.is_sorted(), "{route} by {field}: {times:?}");
+    }
+
+    let count = |path: &'static str| {
+        let read = &read;
+        async move {
+            let (status, total, _, body) = read(path.to_string()).await;
+            assert_eq!(status, 200, "{body}");
+            total.expect("counted")
+        }
+    };
+    let one = |route: &str, q: &str| format!("{route}?q={q}");
+    let host = hosts[1].trim_matches('"').to_uppercase();
+    let (status, total, _, _) = read(one("/api/v1/hosts", &host)).await;
+    assert_eq!(
+        (status.as_u16(), total.as_deref()),
+        (200, Some("1")),
+        "q over the host id, any case"
+    );
+    assert_eq!(count("/api/v1/hosts?gateway=false").await, "3");
+    assert_eq!(count("/api/v1/hosts?gateway=true").await, "0");
+    let (_, total, _, _) = read(one("/api/v1/certificates", &serials[1])).await;
+    assert_eq!(total.as_deref(), Some("1"), "q over the serial");
+    let (_, total, _, _) = read(one("/api/v1/revocations", &serials[2])).await;
+    assert_eq!(total.as_deref(), Some("1"), "q over the serial revoked");
+    let (_, total, _, _) = read(one("/api/v1/revocations", hosts[0].trim_matches('"'))).await;
+    assert_eq!(
+        total.as_deref(),
+        Some("1"),
+        "q over the host of the certificate revoked"
+    );
+    // A cursor made by hand whose key is of the other kind the list sorts by.
+    let forged = |key: serde_json::Value| {
+        use base64::Engine as _;
+        use sha2::Digest as _;
+        let digest = hex::encode(&sha2::Sha256::digest(b"")[..16]);
+        let body = serde_json::json!({"p": {"key": key, "tiebreak": "x"}, "d": digest});
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(body.to_string())
+    };
+    for path in [
+        format!(
+            "/api/v1/hosts?limit=2&cursor={}",
+            forged(serde_json::json!({"Int": 1}))
+        ),
+        format!(
+            "/api/v1/certificates?limit=2&cursor={}",
+            forged(serde_json::json!({"Text": "a"}))
+        ),
+        format!(
+            "/api/v1/revocations?limit=2&cursor={}",
+            forged(serde_json::json!({"Text": "a"}))
+        ),
+    ] {
+        let (status, _, _, body) = read(path.clone()).await;
+        assert_eq!(status, 400, "{path}: {body}");
+    }
+    let (status, _, _, _) = read(format!(
+        "/api/v1/certificates?limit=2&cursor={}",
+        forged(serde_json::json!({"Int": 1}))
+    ))
+    .await;
+    assert_eq!(status, 200, "a cursor of the right kind is a position");
+    for refused in [
+        "/api/v1/hosts?limit=0",
+        "/api/v1/hosts?gateway=maybe",
+        "/api/v1/certificates?sort=serial",
+        "/api/v1/revocations?cursor=nothing",
+    ] {
+        let (status, _, _, body) = read(refused.to_string()).await;
+        assert_eq!(status, 400, "{refused}: {body}");
+    }
+}

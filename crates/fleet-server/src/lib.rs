@@ -26,6 +26,7 @@ pub mod fs;
 pub mod instance;
 pub mod labels;
 pub mod listen;
+pub mod listing;
 pub mod migrate;
 pub mod packages;
 pub mod pki;

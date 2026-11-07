@@ -756,6 +756,12 @@ probes each instance with a TCP connection to the port `listen` names, `4320` by
 instance without a lease has closed its listeners and is sent no Agent. The Operator plane of any
 instance shows the whole fleet and acts on it.
 
+Each Agent's view names the instance that carries it: `holder`, the instance id of its lease, and
+`holder_host`, the host name that lease records. Both are empty while no instance with a live
+lease holds the Agent, as after its instance stopped and before it reconnected. The Agents tab
+shows the holder in an Agent's details, and `GET /api/v1/agents?holder=<instance id>` lists what
+one instance carries, `holder=none` what none does: what a lost instance took with it.
+
 ### What a failover does
 
 - **An instance stops in order** (`SIGTERM`). It closes both listeners at once and ends its
@@ -811,12 +817,15 @@ The fleet view, the reach counts and what a rollout releases are read from the d
 there every Agent inherits the labels of its Client Agent as on one Server. In the memory of the
 instance that carries an Agent, two cases do not inherit yet:
 
-- **An Agent behind a Gateway** whose Client Agent another instance carries does not inherit that
-  Client Agent's labels.
 - **A Client Agent bound to its Host** on one instance just before another instance first places a
   fellow Agent of that Host is inherited there only once that group is placed again: when the
   Client Agent's labels change, an Agent of the group is forgotten, the Agent's report changes, or
   the instance has missed a notification and reads again.
+- **A Client Agent that arrives behind a Gateway** on one instance after another instance placed a
+  fellow Agent behind the same Gateway is inherited there only once that group is placed again:
+  when an Agent of the group joins, leaves or changes its report on that instance, or the instance
+  has missed a notification and reads again. Once the group is placed under it, a change of the
+  Client Agent's labels on any instance reaches it.
 
 ### An approval whose commit fails
 
@@ -872,6 +881,11 @@ wrong order: an instance that shares the database starts, and migrates, only onc
 the database alone, as a Server of 0.7.1 does while it runs. Two releases side by side, for an
 upgrade without a stop, are not built yet. Nor has any load been proven on several instances: how
 many Agents they carry and how long a failover of a large fleet takes are not yet measured.
+
+The first start of this release on a database migrates it to the schema of the paged lists: it
+adds columns to the Agents' table and builds three indexes over it, one of them over a digest of
+every row, in the transaction that migrates. Every write of an Agent's record waits for it, for
+a time that grows with the fleet and is not yet measured; start it at a quiet moment.
 
 ## Upgrading to one data directory
 
@@ -1981,7 +1995,8 @@ when [`[rest.auth]`](#the-operator-plane-restauth) is configured, needs Basic cr
 
 | Method & path | What it does |
 |---|---|
-| `GET /api/v1/agents` | The whole fleet: every Agent, its attributes, capabilities, the Deployment that claims it, what is rolled out to it and what waits, package installations, health, and sync state. |
+| `GET /api/v1/agents` | The fleet: every Agent, its attributes, capabilities, the Deployment that claims it, what is rolled out to it and what waits, package installations, health, sync state and, on PostgreSQL, its holder. Pages and filters — see [Lists that page](#lists-that-page). |
+| `GET /api/v1/agents/attributes` | The distinct `key=value` pairs the fleet reports that a Selector can match, and the distinct `service_name` values, each sorted, at most 1000 of each: what the Deployment and Configuration forms suggest. |
 | `POST /api/v1/agents/{instance_uid}/restart` | Queue a restart of that Agent's Managed Process. Delivered on the next exchange — pushed over WebSocket, on the next poll over plain HTTP. Only Supervisor-backed Agents accept it; a Client's own Agent has no process to restart. |
 | `PUT /api/v1/agents/{instance_uid}/labels` | Set this Agent's labels — see [Labels: rollout channels without touching the host](#labels-rollout-channels-without-touching-the-host). Body: `{"labels": {…}}`; an empty map clears them. |
 | `DELETE /api/v1/agents/{instance_uid}` | Forget this Agent — see [Forgetting an Agent](#forgetting-an-agent) below. Reaches no host. `409` while it is still reporting. |
@@ -2256,6 +2271,42 @@ that interval; the Server logs a warning at startup naming both keys when that i
 buckets live in memory: the subjects and aggregates up to the certificate register's 100 000, the
 Agents behind Gateways up to `max_agents`, and a full table forgets the bucket used least
 recently. `0` for any key is refused at startup; no value switches the limit off.
+
+### Lists that page
+
+`GET /api/v1/agents`, `GET /api/v1/hosts`, `GET /api/v1/certificates` and
+`GET /api/v1/revocations` grow with the fleet. Without `limit` each answers its whole JSON array,
+as before, while at most 10 000 entries match its filters; a longer one is answered `400`, naming
+`limit`, and never cut short. With `limit` (1 to 1000, a larger value read as 1000) each answers
+one page, the same array of the same entries:
+
+- `X-Total-Count` names how many entries match, on every answer.
+- `Link: <…>; rel="next"` names the next page: the same route and parameters with a `cursor`.
+  The last page has none. A cursor is opaque; pass it back unchanged, to any instance. One that
+  does not parse, or comes with another `sort` or other filters, is answered `400`. A `cursor`
+  without `limit` answers a page of 1000.
+- An entry whose sort value changes while you page may show twice or not at all; one that does not
+  change shows once.
+- A parameter the route does not take is answered `400`, naming it.
+
+The Agents sort by `sort` — `name` (the default), `connected`, `health` (unhealthy first, then not
+reported, then healthy), `config`, `version`, `os`, `seq` or `seen` — with `order` `asc` or `desc`,
+ties by Instance UID. They take `q`, a case-insensitive substring of what the Agents tab's filter
+searches (the names, the Instance UID, the OS and platform, the versions, the configuration and
+health status, the attributes, labels, inherited labels and Host values, the capabilities, the
+package statuses, and `connected`, `disconnected` or `stale`; not the Configurations a rollout
+would release); `selector`, `key=value` pairs separated by commas, matched as a Deployment's
+Selector matches; `connected` and `stale`, `true` or `false`; `service_name`; and, on PostgreSQL,
+`holder`, an instance id or `none`. On the filesystem store `holder` is answered `400`.
+
+```console
+$ curl -s --cacert ca.pem -D - \
+       'https://127.0.0.1:4321/api/v1/agents?limit=100&selector=ring%3Dcanary&sort=seen&order=desc'
+```
+
+The Hosts sort by host id and take `q` over the host id and its subject values, and `gateway`.
+The certificates sort by when they were issued, the revocations by when they were made; both take
+`q` over the serial, the subject and the host.
 
 ### The Operator plane: `[rest.auth]`
 

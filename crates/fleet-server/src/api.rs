@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use axum::body::Body;
-use axum::extract::{DefaultBodyLimit, Path, Query, Request, State};
+use axum::extract::{DefaultBodyLimit, Path, Query, RawQuery, Request, State};
 use axum::http::{header, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Response};
@@ -30,6 +30,10 @@ use crate::deployments::{Deployment, DeploymentError, DeploymentStore};
 use crate::fleet::{self, AppState, DeleteError, ForgetError, RestartError, RolloutError};
 use crate::labels::LabelError;
 use crate::packages::{PackageId, PackageSummary, Platform, SignatureState};
+
+mod paging;
+
+use paging::Asked;
 
 #[derive(OpenApi)]
 #[openapi(
@@ -199,6 +203,7 @@ async fn authenticate(
 pub fn router(state: Arc<AppState>, auth: Option<OperatorAuth>) -> Router {
     let (api, document) = OpenApiRouter::with_openapi(ApiDoc::openapi())
         .routes(routes!(agents))
+        .routes(routes!(reported_attributes))
         .routes(routes!(restart_agent))
         .routes(routes!(forget_agent))
         .routes(routes!(set_agent_labels))
@@ -671,6 +676,11 @@ struct AgentResponse {
     /// The Host this Agent last arrived over (ADR-0043 clause 16), or empty. Behind a Gateway, the
     /// Gateway's.
     host: String,
+    /// On PostgreSQL, the instance id of the Server instance that holds this Agent under a live
+    /// lease; empty without one, and always on the filesystem store.
+    holder: String,
+    /// The host name that instance's lease records; empty when `holder` is.
+    holder_host: String,
     /// The `fleet.host.*` values Selectors match on this Agent, from the certificate of the Host it
     /// arrived over directly (ADR-0043 clause 18); empty behind a Gateway.
     host_attributes: BTreeMap<String, String>,
@@ -727,6 +737,8 @@ impl From<fleet::AgentView> for AgentResponse {
             client_agent: view.client_agent,
             ambiguous: view.ambiguous,
             host: view.host,
+            holder: view.holder,
+            holder_host: view.holder_host,
             host_attributes: view.host_attributes,
             ignored_attributes: view.ignored_attributes,
         }
@@ -816,25 +828,188 @@ impl From<fleet::PackageStatusView> for PackageStatusResponse {
     }
 }
 
-/// The fleet: every Agent the Server knows, its reported attributes, and the Configurations
+/// The parameters a list that pages takes, besides its filters
+/// (ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server
+/// clauses 3 and 4).
+const LIMIT_DOC: &str = "How many entries a page holds, 1 to 1000; a larger value is answered as \
+                         1000. Without limit and cursor the whole list is answered while it holds \
+                         at most 10000 entries after its filters, and a longer one is a 400 \
+                         naming limit.";
+
+/// The fleet, a page at a time where `limit` asks for one: every Agent the Server knows that
+/// matches the filters, in the order of `sort`, its reported attributes, and the Configurations
 /// currently matching it.
 #[utoipa::path(
     get,
     path = "/api/v1/agents",
     tag = "fleet",
+    params(
+        ("limit" = Option<u32>, Query, description = LIMIT_DOC),
+        ("cursor" = Option<String>, Query, description = "The position the page starts after, from the Link of the page before; opaque, passed back unchanged with the same sort and filters"),
+        ("q" = Option<String>, Query, description = "A case-insensitive substring of what the UI's filter searches: the names, the status, the OS, the platform, the versions, the attributes and labels, the capabilities and the package statuses"),
+        ("selector" = Option<String>, Query, description = "key=value pairs separated by commas, matched as a Deployment's Selector matches an Agent: the Host's values, what it reported, its labels and its Client Agent's"),
+        ("connected" = Option<bool>, Query, description = "Only the Agents a connection carries, or only those it does not"),
+        ("stale" = Option<bool>, Query, description = "Only the stale Agents, or only those that are not"),
+        ("service_name" = Option<String>, Query, description = "Only the Agents of this type"),
+        ("holder" = Option<String>, Query, description = "On PostgreSQL: only the Agents the instance of this id holds, or with none those no instance with a live lease holds; on the filesystem store a 400"),
+        ("sort" = Option<String>, Query, description = "name (the default), connected, health, config, version, os, seq or seen; ties are broken by Instance UID"),
+        ("order" = Option<String>, Query, description = "asc (the default) or desc")
+    ),
     responses(
-        (status = 200, description = "Every known Agent", body = [AgentResponse]),
+        (status = 200, description = "The Agents that match, a page of them where limit asks for one", body = [AgentResponse],
+            headers(
+                ("X-Total-Count" = u64, description = "How many Agents match the filters"),
+                ("Link" = String, description = "The next page, rel=\"next\"; absent on the last")
+            )),
+        (status = 400, description = "A parameter this route does not take, one that is not valid, a cursor that does not parse or was made for another sort or filters, holder on the filesystem store, or more than 10000 Agents without limit", body = ErrorBody),
         (status = 500, description = "The fleet cannot be read from the store", body = ErrorBody)
     )
 )]
-async fn agents(State(state): State<Arc<AppState>>) -> Response {
-    match state.fleet_view() {
-        Ok(views) => Json(
-            views
+async fn agents(State(state): State<Arc<AppState>>, RawQuery(raw): RawQuery) -> Response {
+    let asked = match Asked::parse(
+        raw.as_deref(),
+        &[
+            "q",
+            "selector",
+            "connected",
+            "stale",
+            "service_name",
+            "holder",
+            "sort",
+            "order",
+        ],
+    ) {
+        Ok(asked) => asked,
+        Err((status, message)) => return error(status, message),
+    };
+    let query = match agent_query(&state, &asked) {
+        Ok(query) => query,
+        Err((status, message)) => return error(status, message),
+    };
+    // A whole answer is counted first, so a list past the bound is refused without being read.
+    if asked.limit.is_none() {
+        match state.list_agents(&fleet::AgentQuery {
+            limit: 0,
+            ..query.clone()
+        }) {
+            Ok(counted) if counted.total > crate::listing::WHOLE_BOUND => {
+                return asked.answer(
+                    "/api/v1/agents",
+                    Vec::<AgentResponse>::new(),
+                    counted.total,
+                    None,
+                )
+            }
+            Ok(_) => {}
+            Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, e),
+        }
+    }
+    match state.list_agents(&query) {
+        Ok(listing) => asked.answer(
+            "/api/v1/agents",
+            listing
+                .agents
                 .into_iter()
                 .map(AgentResponse::from)
-                .collect::<Vec<_>>(),
-        )
+                .collect(),
+            listing.total,
+            listing.next,
+        ),
+        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+/// What a request of the list of Agents asks, or the `400` that says what is wrong with it.
+fn agent_query(state: &AppState, asked: &Asked) -> Result<fleet::AgentQuery, Refusal> {
+    use crate::listing::{AgentFilter, AgentSort, HolderFilter};
+    let sort = match asked.params.get("sort") {
+        None => AgentSort::Name,
+        Some(name) => AgentSort::parse(name).ok_or_else(|| {
+            paging::refused(format!(
+                "sort: {name:?} is none of name, connected, health, config, version, os, seq, seen"
+            ))
+        })?,
+    };
+    let descending = match asked.params.get("order").map(String::as_str) {
+        None | Some("asc") => false,
+        Some("desc") => true,
+        Some(other) => {
+            return Err(paging::refused(format!(
+                "order: {other:?} is neither asc nor desc"
+            )))
+        }
+    };
+    let selector = match asked.params.get("selector") {
+        None => BTreeMap::new(),
+        Some(text) => crate::listing::parse_selector(text).ok_or_else(|| {
+            paging::refused(format!(
+                "selector: {text:?} is not key=value pairs separated by commas"
+            ))
+        })?,
+    };
+    let holder = match asked.params.get("holder") {
+        None => None,
+        Some(_) if !state.keeps_holders() => {
+            return Err(paging::refused(
+                "holder: on the filesystem store there is one Server and no holder",
+            ))
+        }
+        Some(id) if id == "none" => Some(HolderFilter::None),
+        Some(id) if id.is_empty() => {
+            return Err(paging::refused("holder: an instance id, or none"))
+        }
+        Some(id) => Some(HolderFilter::Instance(id.clone())),
+    };
+    let after = asked.after_keyed(matches!(
+        sort,
+        AgentSort::Name | AgentSort::Config | AgentSort::Version | AgentSort::Os
+    ))?;
+    Ok(fleet::AgentQuery {
+        filter: AgentFilter {
+            q: asked.q(),
+            selector,
+            connected: asked.flag("connected")?,
+            stale: asked.flag("stale")?,
+            service_name: asked.params.get("service_name").cloned(),
+            holder,
+            arrived_over: None,
+        },
+        sort,
+        descending,
+        after,
+        limit: asked.reading(),
+    })
+}
+
+/// What the fleet reports, for suggestions
+/// (ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server
+/// clause 7).
+#[derive(Serialize, ToSchema)]
+struct ReportedValuesResponse {
+    /// The distinct `key=value` pairs the Agents report that a Selector can match, sorted, at most
+    /// 1000.
+    attributes: Vec<String>,
+    /// The distinct `service_name` values the Agents report, sorted, at most 1000.
+    service_names: Vec<String>,
+}
+
+/// The distinct `key=value` pairs and Agent types the fleet reports: what the Deployment form
+/// suggests for a Selector and the Configuration form for a type.
+#[utoipa::path(
+    get,
+    path = "/api/v1/agents/attributes",
+    tag = "fleet",
+    responses(
+        (status = 200, description = "The distinct pairs and types, each sorted, at most 1000 of each", body = ReportedValuesResponse),
+        (status = 500, description = "The fleet cannot be read from the store", body = ErrorBody)
+    )
+)]
+async fn reported_attributes(State(state): State<Arc<AppState>>) -> Response {
+    match state.reported_values() {
+        Ok(values) => Json(ReportedValuesResponse {
+            attributes: values.pairs,
+            service_names: values.service_names,
+        })
         .into_response(),
         Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
@@ -3489,68 +3664,151 @@ fn revocation_off() -> Response {
     error(StatusCode::NOT_FOUND, "revocation is not configured")
 }
 
-/// Every certificate the client CA signed that has not yet expired, oldest first.
+/// Every certificate the client CA signed that has not yet expired, oldest first, a page at a
+/// time where `limit` asks for one.
 #[utoipa::path(
     get,
     path = "/api/v1/certificates",
     tag = "revocation",
+    params(
+        ("limit" = Option<u32>, Query, description = LIMIT_DOC),
+        ("cursor" = Option<String>, Query, description = "The position the page starts after, from the Link of the page before"),
+        ("q" = Option<String>, Query, description = "A case-insensitive substring of the subject, the serial or the host")
+    ),
     responses(
-        (status = 200, description = "Every unexpired certificate the client CA signed, oldest first", body = Vec<CertificateView>),
+        (status = 200, description = "Every unexpired certificate the client CA signed that matches, by the time it was issued, then by issuer and serial", body = Vec<CertificateView>,
+            headers(
+                ("X-Total-Count" = u64, description = "How many certificates match the filters"),
+                ("Link" = String, description = "The next page, rel=\"next\"; absent on the last")
+            )),
+        (status = 400, description = "A parameter this route does not take, one that is not valid, a cursor that names no position of this list, or more than 10000 without limit", body = ErrorBody),
         (status = 404, description = "Revocation is not configured", body = ErrorBody)
     )
 )]
-async fn list_certificates(State(state): State<Arc<AppState>>) -> Response {
+async fn list_certificates(
+    State(state): State<Arc<AppState>>,
+    RawQuery(raw): RawQuery,
+) -> Response {
     let Some(revocations) = state.revocations() else {
         return revocation_off();
     };
+    let asked = match Asked::parse(raw.as_deref(), &["q"]) {
+        Ok(asked) => asked,
+        Err((status, message)) => return error(status, message),
+    };
+    let after = match asked.after_keyed(false) {
+        Ok(after) => after,
+        Err((status, message)) => return error(status, message),
+    };
+    let q = asked.q();
     let authority = |id: &crate::revocation::CertId| {
         revocations
             .authority_of(&id.issuer)
             .map_or_else(|| "unknown".to_string(), |a| a.role.clone())
     };
-    let issued: Vec<CertificateView> = revocations
+    let issued: Vec<(crate::listing::Position, CertificateView)> = revocations
         .issued()
         .into_iter()
-        .map(|issued| CertificateView {
-            authority: authority(&issued.facts.id),
-            issuer: issued.facts.issuer_name,
-            serial: issued.facts.id.serial,
-            subject: issued.facts.subject,
-            key_fingerprint: issued.facts.key_fingerprint,
-            not_after_ms: issued.facts.not_after_ms,
-            instance_uid: issued.instance_uid,
-            issued_ms: issued.issued_ms,
-            predecessor: issued.predecessor.map(|id| CertificateRef {
-                authority: authority(&id),
-                serial: id.serial,
-            }),
-            host: issued.facts.host,
+        .filter(|issued| {
+            q.as_ref().is_none_or(|q| {
+                [
+                    issued.facts.subject.as_str(),
+                    issued.facts.id.serial.as_str(),
+                    issued.facts.host.as_deref().unwrap_or_default(),
+                ]
+                .iter()
+                .any(|field| field.to_lowercase().contains(q.as_str()))
+            })
+        })
+        .map(|issued| {
+            let position = crate::listing::Position {
+                key: crate::listing::Key::Int(issued.issued_ms as i64),
+                tiebreak: format!("{}\n{}", issued.facts.id.issuer, issued.facts.id.serial),
+            };
+            let view = CertificateView {
+                authority: authority(&issued.facts.id),
+                issuer: issued.facts.issuer_name,
+                serial: issued.facts.id.serial,
+                subject: issued.facts.subject,
+                key_fingerprint: issued.facts.key_fingerprint,
+                not_after_ms: issued.facts.not_after_ms,
+                instance_uid: issued.instance_uid,
+                issued_ms: issued.issued_ms,
+                predecessor: issued.predecessor.map(|id| CertificateRef {
+                    authority: authority(&id),
+                    serial: id.serial,
+                }),
+                host: issued.facts.host,
+            };
+            (position, view)
         })
         .collect();
-    Json(issued).into_response()
+    let page = paging::cut(&asked, after.as_ref(), issued);
+    asked.answer("/api/v1/certificates", page.entries, page.total, page.next)
 }
 
-/// Every Host, by host id, with its subject values and the Agents that arrived over it.
+/// Every Host, by host id, with its subject values and the Agents that arrived over it, a page at
+/// a time where `limit` asks for one.
 #[utoipa::path(
     get,
     path = "/api/v1/hosts",
     tag = "revocation",
+    params(
+        ("limit" = Option<u32>, Query, description = LIMIT_DOC),
+        ("cursor" = Option<String>, Query, description = "The position the page starts after, from the Link of the page before"),
+        ("q" = Option<String>, Query, description = "A case-insensitive substring of the host id or one of its subject values"),
+        ("gateway" = Option<bool>, Query, description = "Only the Gateways, or only the Hosts that are none")
+    ),
     responses(
-        (status = 200, description = "Every Host, by host id, with its subject values and the Agents that arrived over it (ADR-0043)", body = Vec<HostView>),
+        (status = 200, description = "Every Host that matches, by host id, with its subject values and the Agents that arrived over it (ADR-0043)", body = Vec<HostView>,
+            headers(
+                ("X-Total-Count" = u64, description = "How many Hosts match the filters"),
+                ("Link" = String, description = "The next page, rel=\"next\"; absent on the last")
+            )),
+        (status = 400, description = "A parameter this route does not take, one that is not valid, a cursor that names no position of this list, or more than 10000 without limit", body = ErrorBody),
         (status = 404, description = "Revocation is not configured", body = ErrorBody),
         (status = 500, description = "The fleet cannot be read from the store", body = ErrorBody)
     )
 )]
-async fn list_hosts(State(state): State<Arc<AppState>>) -> Response {
+async fn list_hosts(State(state): State<Arc<AppState>>, RawQuery(raw): RawQuery) -> Response {
     let Some(revocations) = state.revocations() else {
         return revocation_off();
     };
+    let asked = match Asked::parse(raw.as_deref(), &["q", "gateway"]) {
+        Ok(asked) => asked,
+        Err((status, message)) => return error(status, message),
+    };
+    let (after, gateway) = match (asked.after_keyed(true), asked.flag("gateway")) {
+        (Ok(after), Ok(gateway)) => (after, gateway),
+        (Err((status, message)), _) | (_, Err((status, message))) => return error(status, message),
+    };
+    let q = asked.q();
+    let matching: Vec<_> = revocations
+        .hosts()
+        .into_iter()
+        .filter(|(host, entry, _)| {
+            gateway.is_none_or(|gateway| gateway == entry.gateway)
+                && q.as_ref().is_none_or(|q| {
+                    std::iter::once(host.as_str())
+                        .chain(entry.subject.attributes().map(|(_, value)| value))
+                        .any(|field| field.to_lowercase().contains(q.as_str()))
+                })
+        })
+        .map(|(host, entry, certificates)| {
+            let position = crate::listing::Position {
+                key: crate::listing::Key::Text(host.clone()),
+                tiebreak: host.clone(),
+            };
+            (position, (host, entry, certificates))
+        })
+        .collect();
+    let page = paging::cut(&asked, after.as_ref(), matching);
     let mut carried = match state.host_agents() {
         Ok(carried) => carried,
         Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, e),
     };
-    let hosts: Vec<HostView> = revocations
-        .hosts()
+    let hosts: Vec<HostView> = page
+        .entries
         .into_iter()
         .map(|(host, entry, certificates)| {
             let agents = carried.remove(&host).unwrap_or_default();
@@ -3580,7 +3838,7 @@ async fn list_hosts(State(state): State<Arc<AppState>>) -> Response {
             }
         })
         .collect();
-    Json(hosts).into_response()
+    asked.answer("/api/v1/hosts", hosts, page.total, page.next)
 }
 
 /// Marks a host as a Gateway, which speaks for the Agents behind it, or takes the mark away.
@@ -3623,26 +3881,81 @@ async fn set_gateway(
     }
 }
 
-/// The revocation list, oldest first.
+/// The revocation list, oldest first, a page at a time where `limit` asks for one.
 #[utoipa::path(
     get,
     path = "/api/v1/revocations",
     tag = "revocation",
+    params(
+        ("limit" = Option<u32>, Query, description = LIMIT_DOC),
+        ("cursor" = Option<String>, Query, description = "The position the page starts after, from the Link of the page before"),
+        ("q" = Option<String>, Query, description = "A case-insensitive substring of the serial, or of the subject or the host of the certificate revoked while the register holds it")
+    ),
     responses(
-        (status = 200, description = "The revocation list, oldest first", body = Vec<RevocationView>),
+        (status = 200, description = "The revocations that match, by the time they were made, then by id", body = Vec<RevocationView>,
+            headers(
+                ("X-Total-Count" = u64, description = "How many revocations match the filters"),
+                ("Link" = String, description = "The next page, rel=\"next\"; absent on the last")
+            )),
+        (status = 400, description = "A parameter this route does not take, one that is not valid, a cursor that names no position of this list, or more than 10000 without limit", body = ErrorBody),
         (status = 404, description = "Revocation is not configured", body = ErrorBody)
     )
 )]
-async fn list_revocations(State(state): State<Arc<AppState>>) -> Response {
+async fn list_revocations(State(state): State<Arc<AppState>>, RawQuery(raw): RawQuery) -> Response {
     let Some(revocations) = state.revocations() else {
         return revocation_off();
     };
-    let list: Vec<RevocationView> = revocations
+    let asked = match Asked::parse(raw.as_deref(), &["q"]) {
+        Ok(asked) => asked,
+        Err((status, message)) => return error(status, message),
+    };
+    let after = match asked.after_keyed(false) {
+        Ok(after) => after,
+        Err((status, message)) => return error(status, message),
+    };
+    let q = asked.q();
+    // What the register says of a revoked certificate, while it holds it.
+    let issued: BTreeMap<(String, String), (String, String)> = match &q {
+        None => BTreeMap::new(),
+        Some(_) => revocations
+            .issued()
+            .into_iter()
+            .map(|issued| {
+                (
+                    (issued.facts.id.issuer, issued.facts.id.serial),
+                    (issued.facts.subject, issued.facts.host.unwrap_or_default()),
+                )
+            })
+            .collect(),
+    };
+    let matching: Vec<(crate::listing::Position, RevocationView)> = revocations
         .list()
         .into_iter()
-        .map(RevocationView::of)
+        .filter(|entry| {
+            let Some(q) = &q else { return true };
+            let crate::revocation::Revoked::Certificate {
+                issuers, serial, ..
+            } = &entry.revoked;
+            serial.to_lowercase().contains(q.as_str())
+                || issuers.iter().any(|issuer| {
+                    issued
+                        .get(&(issuer.clone(), serial.clone()))
+                        .is_some_and(|(subject, host)| {
+                            subject.to_lowercase().contains(q.as_str())
+                                || host.to_lowercase().contains(q.as_str())
+                        })
+                })
+        })
+        .map(|entry| {
+            let position = crate::listing::Position {
+                key: crate::listing::Key::Int(entry.revoked_ms as i64),
+                tiebreak: entry.id.clone(),
+            };
+            (position, RevocationView::of(entry))
+        })
         .collect();
-    Json(list).into_response()
+    let page = paging::cut(&asked, after.as_ref(), matching);
+    asked.answer("/api/v1/revocations", page.entries, page.total, page.next)
 }
 
 /// Revokes a certificate, and every renewal of it. Every session it admitted ends at once, and no

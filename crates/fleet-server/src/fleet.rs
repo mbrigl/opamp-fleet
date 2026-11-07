@@ -128,6 +128,10 @@ pub struct AgentRecord {
     pub host: Option<String>,
     /// Where the Host and the Client Agent place this Agent — derived, never persisted.
     pub placement: Placement,
+    /// The instance that holds it, as a shared store read it
+    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// clause 13); `None` for what this Server holds in memory.
+    pub holder: Option<crate::agent_store::Holder>,
     /// What the operator's last rollout released to this Agent (ADR-0026 clause 6). **Every offer
     /// is composed from this**; matching only proposes. Written by the rollout acts, persisted like
     /// `restart_pending` — operator intent that survives a restart (ADR-0043). `None` is what it
@@ -237,6 +241,21 @@ impl AgentRecord {
     /// What of this record survives a restart (ADR-0043): everything report-derived or
     /// operator-queued, never what a live connection knows.
     /// Where it is connected, as a presence batch writes it.
+    /// What its derived values come from
+    /// (ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server
+    /// clause 8).
+    fn source<'a>(&'a self, uid: &'a InstanceUid) -> crate::listing::Source<'a> {
+        crate::listing::Source {
+            uid,
+            description: self.description.as_ref(),
+            health: self.health.as_ref(),
+            remote_config_status: self.remote_config_status.as_ref(),
+            package_statuses: self.package_statuses.as_ref(),
+            capabilities: self.capabilities,
+            transport: self.transport,
+        }
+    }
+
     fn presence(&self) -> Presence {
         Presence {
             connected: self.connected,
@@ -288,6 +307,7 @@ impl AgentRecord {
             labels: persisted.labels,
             host: persisted.host,
             placement: Placement::default(),
+            holder: None,
             assignment: persisted.assignment,
         }
     }
@@ -993,9 +1013,8 @@ impl AppState {
     /// the Agents the host register binds to the Host that this instance does not hold are read
     /// from the store, and a Client Agent among them counts as one of the group
     /// (ADR-0041
-    /// clause 8). Behind a Gateway nothing is read: the register binds no Agent to a Gateway's
-    /// Host, and the Agents a Gateway carries arrive over its connection, to the instance that
-    /// holds it.
+    /// clause 8). Behind a Gateway, where the register binds no Agent, the Agents that arrived
+    /// over the Gateway's Host are read instead ([`arrived_over`](Self::arrived_over)).
     fn inherit_held(
         &self,
         fleet: &mut HashMap<InstanceUid, AgentRecord>,
@@ -1006,17 +1025,44 @@ impl AppState {
         inherit(fleet, groups, group, &outside);
     }
 
-    /// The Client Agents of a Host group that this instance does not hold, with their labels, as
-    /// stored; none on a store this Server alone writes, and none behind a Gateway. One that
-    /// cannot be read is logged, and the group is placed from what this instance holds.
+    /// The Client Agents of a group that this instance does not hold, with their labels, as
+    /// stored; none on a store this Server alone writes. Of a Host, those the host register binds
+    /// to it; behind a Gateway, which the register binds none to, those that arrived over the
+    /// Gateway's Host and report the group's machine, read through the port's `query_page`
+    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// clause 8). One that cannot be read is logged, and the group is placed from what this
+    /// instance holds.
     fn client_agents_elsewhere(
         &self,
         fleet: &HashMap<InstanceUid, AgentRecord>,
         group: &Group,
     ) -> Vec<(InstanceUid, BTreeMap<String, String>)> {
-        let (true, Group::Host(host), Some(revocations)) =
-            (self.agent_store.is_shared(), group, &self.revocations)
-        else {
+        if !self.agent_store.is_shared() {
+            return Vec::new();
+        }
+        if let Group::Behind { gateway, machine } = group {
+            return match self.arrived_over(gateway) {
+                Ok(found) => {
+                    let mut clients: Vec<(InstanceUid, BTreeMap<String, String>)> = found
+                        .into_iter()
+                        .filter(|(uid, record)| {
+                            !fleet.contains_key(uid)
+                                && crate::labels::is_client_agent(record.description.as_ref())
+                                && crate::labels::machine(record.description.as_ref()).as_ref()
+                                    == Some(machine)
+                        })
+                        .map(|(uid, record)| (uid, record.labels))
+                        .collect();
+                    clients.sort_by_key(|(uid, _)| uid.0);
+                    clients
+                }
+                Err(e) => {
+                    warn!(gateway = %gateway, error = %e, "cannot read the agents behind the gateway that another instance carries");
+                    Vec::new()
+                }
+            };
+        }
+        let (Group::Host(host), Some(revocations)) = (group, &self.revocations) else {
             return Vec::new();
         };
         let SpeaksFor::Agents(bound) = revocations.speaks_for(host) else {
@@ -1086,8 +1132,9 @@ impl AppState {
     /// The record of `uid` as the Operator plane reads it from the shared store, placed as
     /// [`stored_fleet`](Self::stored_fleet) places it, without the whole fleet: one read of it and
     /// of the Agents the host register binds to the same Host, which are the group its Client
-    /// Agent is found in. An Agent that arrived over a Gateway is placed among the whole fleet,
-    /// since the register knows no group behind a Gateway, whatever Host it binds the Agent to.
+    /// Agent is found in. An Agent that arrived over a Gateway is placed among the Agents that
+    /// arrived over the same Host ([`arrived_over`](Self::arrived_over)), since the register knows
+    /// no group behind a Gateway, whatever Host it binds the Agent to.
     fn stored_agent(&self, uid: &InstanceUid) -> Result<Option<AgentRecord>, String> {
         let bound = self.revocations.as_ref().and_then(|revocations| {
             let host = revocations.bound_host(uid.as_bytes())?;
@@ -1114,8 +1161,11 @@ impl AppState {
                     .is_some_and(|revocations| revocations.is_gateway(host))
             })
         });
-        if behind_a_gateway {
-            return Ok(self.stored_fleet()?.remove(uid));
+        if let (true, Some(host)) = (
+            behind_a_gateway,
+            read.get(uid).and_then(|record| record.host.clone()),
+        ) {
+            return Ok(self.placed(self.arrived_over(&host)?).remove(uid));
         }
         Ok(self.placed(std::mem::take(&mut read)).remove(uid))
     }
@@ -1129,6 +1179,7 @@ impl AppState {
             .map(|(uid, stored)| {
                 let mut record = AgentRecord::from_persisted(stored.record);
                 record.connected = stored.connected;
+                record.holder = stored.holder;
                 (uid, record)
             })
             .collect()
@@ -1673,9 +1724,11 @@ impl AppState {
         Ok(())
     }
 
-    /// Places again each Host group this instance holds members of whose Client Agent may be one
-    /// of `uids` that it does not hold — the group's Client Agent now, or an Agent the host register
-    /// binds to its Host — or every Host group where `uids` is `None`.
+    /// Places again each group this instance holds members of whose Client Agent may be one of
+    /// `uids` that it does not hold — the group's Client Agent now, or, of a Host, an Agent the
+    /// host register binds to it — or every group where `uids` is `None`. Behind a Gateway a
+    /// Client Agent another instance carries that the group was not placed under yet is found
+    /// only where `uids` is `None`.
     fn place_again_for(&self, uids: Option<&HashSet<InstanceUid>>) {
         let Some(revocations) = &self.revocations else {
             return;
@@ -1695,15 +1748,17 @@ impl AppState {
         let due: Vec<Group> = groups
             .iter()
             .filter(|(group, members)| {
-                let Group::Host(host) = group else {
-                    return false;
-                };
                 let Some(elsewhere) = &elsewhere else {
                     return true;
                 };
-                let bound = match revocations.speaks_for(host) {
-                    SpeaksFor::Agents(bound) => bound,
-                    SpeaksFor::Any => BTreeSet::new(),
+                // Behind a Gateway the register binds no Agent; the group's Client Agent is the
+                // one it was placed under.
+                let bound = match group {
+                    Group::Host(host) => match revocations.speaks_for(host) {
+                        SpeaksFor::Agents(bound) => bound,
+                        SpeaksFor::Any => BTreeSet::new(),
+                    },
+                    Group::Behind { .. } => BTreeSet::new(),
                 };
                 elsewhere.iter().any(|uid| {
                     bound.contains(&hex::encode(uid.as_bytes()))
@@ -3311,6 +3366,7 @@ impl AppState {
             labels: BTreeMap::new(),
             host: None,
             placement: Placement::default(),
+            holder: None,
             sequence_num,
             capabilities: 0,
             description: None,
@@ -3420,7 +3476,7 @@ impl AppState {
         let speaks_for = revocations.speaks_for(host);
         let stored = match (self.agent_store.is_shared(), &speaks_for) {
             (false, _) => None,
-            (true, SpeaksFor::Any) => Some(self.stored_fleet()),
+            (true, SpeaksFor::Any) => Some(self.arrived_over(host).map(|found| self.placed(found))),
             (true, SpeaksFor::Agents(uids)) => {
                 let uids: Vec<InstanceUid> =
                     uids.iter().filter_map(|uid| parse_hex_uid(uid)).collect();
@@ -3878,6 +3934,182 @@ impl AppState {
             .map(|record| self.view_of(deployments.as_ref(), uid, &record)))
     }
 
+    /// Whether the Agents have a holder to filter by: on a shared store, where each presence
+    /// names one
+    /// (ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server
+    /// clause 6).
+    pub fn keeps_holders(&self) -> bool {
+        self.agent_store.is_shared()
+    }
+
+    /// One page of the list of Agents
+    /// (ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server
+    /// clauses 3 to 6 and 8): on a store this Server alone writes, cut from what it holds; on a
+    /// shared store read through [`AgentStore::query_page`], each Agent placed under the Client
+    /// Agent the store found for it and with the values of the Host it arrived over.
+    ///
+    /// # Errors
+    /// Returns an error when the shared store cannot be read.
+    pub fn list_agents(&self, query: &AgentQuery) -> Result<AgentListing, String> {
+        let deployments = self.deployment_store().map(DeploymentStore::snapshot);
+        let seen_before_ms = self
+            .clock
+            .now_ms()
+            .saturating_sub(self.stale_after().as_millis() as u64);
+        let position =
+            |uid: &InstanceUid, record: &AgentRecord, derived: &crate::listing::Derived| {
+                crate::listing::Position {
+                    key: crate::listing::agent_key(
+                        query.sort,
+                        derived,
+                        record.connected,
+                        record.sequence_num,
+                        record.last_seen_ms,
+                    ),
+                    tiebreak: uid.to_string(),
+                }
+            };
+        if !self.agent_store.is_shared() {
+            let fleet = self.fleet.lock().expect("fleet lock");
+            let mut matching = Vec::new();
+            for (uid, record) in fleet.iter() {
+                let derived = crate::listing::derive(&record.source(uid));
+                let effective = record.effective_description();
+                let candidate = crate::listing::Candidate {
+                    derived: &derived,
+                    connected: record.connected,
+                    stale: crate::listing::is_stale(
+                        record.capabilities,
+                        record.last_seen_ms,
+                        seen_before_ms,
+                    ),
+                    holder: None,
+                    host: record.host.as_deref(),
+                    effective: effective.as_deref(),
+                    own: &record.labels,
+                    inherited: &record.placement.inherited,
+                    host_values: &record.placement.host_values,
+                };
+                if query.filter.admits(&candidate) {
+                    matching.push((position(uid, record, &derived), *uid));
+                }
+            }
+            let page = crate::listing::page(
+                matching,
+                query.descending,
+                query.after.as_ref(),
+                query.limit,
+            );
+            let agents = page
+                .entries
+                .iter()
+                .filter_map(|uid| {
+                    fleet
+                        .get(uid)
+                        .map(|record| self.view_of(deployments.as_ref(), uid, record))
+                })
+                .collect();
+            return Ok(AgentListing {
+                agents,
+                total: page.total,
+                next: page.next,
+            });
+        }
+        let page = self
+            .agent_store
+            .query_page(&crate::agent_store::PageQuery {
+                filter: &query.filter,
+                sort: query.sort,
+                descending: query.descending,
+                after: query.after.as_ref(),
+                limit: query.limit.saturating_add(1),
+                seen_before_ms,
+            })?;
+        let mut paged = page.agents;
+        let more = paged.len() > query.limit;
+        paged.truncate(query.limit);
+        let mut next = None;
+        let mut agents = Vec::with_capacity(paged.len());
+        for found in paged {
+            let uid = found.uid;
+            if more {
+                // As the store sorted it, which is what its next page continues after.
+                next = Some(found.position.clone());
+            }
+            let record = self.placed_as_found(found);
+            agents.push(self.view_of(deployments.as_ref(), &uid, &record));
+        }
+        Ok(AgentListing {
+            agents,
+            total: page.total,
+            next,
+        })
+    }
+
+    /// The distinct reported `key=value` pairs and `service_name` values of the fleet, each sorted,
+    /// at most 1000 of each
+    /// (ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server
+    /// clause 7): from memory on a store this Server alone writes, through the port on a shared one.
+    ///
+    /// # Errors
+    /// Returns an error when the shared store cannot be read.
+    pub fn reported_values(&self) -> Result<crate::agent_store::ReportedValues, String> {
+        let limit = crate::listing::MAX_LIMIT;
+        if self.agent_store.is_shared() {
+            return self.agent_store.reported_values(limit);
+        }
+        let fleet = self.fleet.lock().expect("fleet lock");
+        let derived: Vec<crate::listing::Derived> = fleet
+            .iter()
+            .map(|(uid, record)| crate::listing::derive(&record.source(uid)))
+            .collect();
+        Ok(crate::agent_store::ReportedValues::of(&derived, limit))
+    }
+
+    /// A record a page read, placed as the store found it: under the Client Agent it named, and
+    /// with the values of the Host it arrived over, from this instance's register.
+    fn placed_as_found(&self, found: crate::agent_store::PagedAgent) -> AgentRecord {
+        let mut record = AgentRecord::from_persisted(found.stored.record);
+        record.connected = found.stored.connected;
+        record.holder = found.stored.holder;
+        let (host_values, group) = self.locate(&record);
+        record.placement = Placement {
+            host_values,
+            group,
+            client_agent: found.client_agent,
+            inherited: found.inherited,
+            ambiguous: found.ambiguous,
+        };
+        record
+    }
+
+    /// The records of the Agents that last arrived over `host`, as stored, through
+    /// [`AgentStore::query_page`] filtered on that Host
+    /// (ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server
+    /// clause 9): the Agents behind a Gateway, whichever instance carries them.
+    fn arrived_over(&self, host: &str) -> Result<HashMap<InstanceUid, AgentRecord>, String> {
+        let filter = crate::listing::AgentFilter {
+            arrived_over: Some(host.to_string()),
+            ..crate::listing::AgentFilter::default()
+        };
+        let page = self
+            .agent_store
+            .query_page(&crate::agent_store::PageQuery {
+                filter: &filter,
+                sort: crate::listing::AgentSort::Seq,
+                descending: false,
+                after: None,
+                limit: self.max_agents,
+                seen_before_ms: 0,
+            })?;
+        Ok(self.records_of(
+            page.agents
+                .into_iter()
+                .map(|found| (found.uid, found.stored))
+                .collect(),
+        ))
+    }
+
     /// The view of each Agent of `fleet`, in the order of its `instance_uid`.
     fn views(&self, fleet: &HashMap<InstanceUid, AgentRecord>) -> Vec<AgentView> {
         // One copy of the Deployments for the whole view, rather than one per Agent.
@@ -4134,10 +4366,32 @@ fn offer(record: &AgentRecord, desired: Option<&DesiredConfig>) -> Option<AgentR
 /// A value that is not a version is returned as it stands. `service.version` is whatever an Agent
 /// puts there, and a Foreign Agent numbers itself however its own project does — trimming a string
 /// this Server does not understand would be inventing a version rather than showing one.
-fn display_version(reported: &str) -> String {
+pub(crate) fn display_version(reported: &str) -> String {
     fleet_core::version::identity(reported)
         .unwrap_or(reported)
         .to_string()
+}
+
+/// What the list of Agents is asked
+/// (ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server
+/// clauses 3 to 6).
+#[derive(Clone, Debug, Default)]
+pub struct AgentQuery {
+    pub filter: crate::listing::AgentFilter,
+    pub sort: crate::listing::AgentSort,
+    pub descending: bool,
+    /// The position the page starts after; `None` for the first page.
+    pub after: Option<crate::listing::Position>,
+    pub limit: usize,
+}
+
+/// One page of the list of Agents.
+pub struct AgentListing {
+    pub agents: Vec<AgentView>,
+    /// How many Agents match the filters.
+    pub total: usize,
+    /// Where the next page starts, when another follows.
+    pub next: Option<crate::listing::Position>,
 }
 
 /// The Agents one Host carries, and the name it is shown by (ADR-0043 clause 24).
@@ -4310,6 +4564,12 @@ pub struct AgentView {
     /// The Host this Agent last arrived over (ADR-0043 clause 16), or empty. Behind a Gateway, the
     /// Gateway's.
     pub host: String,
+    /// The instance id of the instance that holds it under a live lease
+    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// clause 13); empty without one, and always on the filesystem store.
+    pub holder: String,
+    /// The host name that instance's lease records; empty when `holder` is.
+    pub holder_host: String,
     /// The `fleet.host.*` values its effective description takes from that Host (ADR-0043
     /// clause 18); empty behind a Gateway.
     pub host_attributes: BTreeMap<String, String>,
@@ -4381,7 +4641,7 @@ pub struct PackageStatusView {
 }
 
 impl PackageStatusView {
-    fn from_status(status: &opamp::proto::PackageStatus) -> Self {
+    pub(crate) fn from_status(status: &opamp::proto::PackageStatus) -> Self {
         use opamp::proto::PackageStatusEnum as S;
         let name = match status.status {
             s if s == S::Installed as i32 => "Installed",
@@ -4409,7 +4669,7 @@ impl PackageStatusView {
 
 /// A declared capability bitmask as the names from the Baseline's `AgentCapabilities`. Undefined
 /// bits are surfaced verbatim rather than dropped — a peer declaring them is worth seeing.
-fn capability_names(mask: u64) -> Vec<String> {
+pub(crate) fn capability_names(mask: u64) -> Vec<String> {
     use opamp::proto::AgentCapabilities as C;
     const KNOWN: [(C, &str); 16] = [
         (C::ReportsStatus, "ReportsStatus"),
@@ -4455,7 +4715,7 @@ fn capability_names(mask: u64) -> Vec<String> {
 /// Reported attributes as the API shows them: string values as-is, string arrays (the shape the
 /// conventions give `host.ip` and `host.mac`, ADR-0016) joined with a comma, other value kinds in
 /// their debug form — the view is for reading, the wire keeps the typed original.
-fn attr_map(attributes: &[KeyValue]) -> BTreeMap<String, String> {
+pub(crate) fn attr_map(attributes: &[KeyValue]) -> BTreeMap<String, String> {
     fn text(value: &any_value::Value) -> String {
         match value {
             any_value::Value::StringValue(s) => s.clone(),
@@ -4604,6 +4864,16 @@ impl AgentView {
                 .unwrap_or_default(),
             ambiguous: record.placement.ambiguous,
             host: record.host.clone().unwrap_or_default(),
+            holder: record
+                .holder
+                .as_ref()
+                .map(|holder| holder.instance_id.clone())
+                .unwrap_or_default(),
+            holder_host: record
+                .holder
+                .as_ref()
+                .map(|holder| holder.host.clone())
+                .unwrap_or_default(),
             host_attributes: record.placement.host_values.clone(),
             ignored_attributes: crate::labels::ignored(record.description.as_ref()),
         }
@@ -5066,6 +5336,7 @@ mod tests {
             labels: BTreeMap::new(),
             host: None,
             placement: Placement::default(),
+            holder: None,
             assignment: None,
         }
     }
@@ -7678,6 +7949,18 @@ mod tests {
             }
             self.inner.query(only)
         }
+        fn query_page(
+            &self,
+            query: &crate::agent_store::PageQuery<'_>,
+        ) -> Result<crate::agent_store::AgentPage, String> {
+            self.inner.query_page(query)
+        }
+        fn reported_values(
+            &self,
+            limit: usize,
+        ) -> Result<crate::agent_store::ReportedValues, String> {
+            self.inner.reported_values(limit)
+        }
         fn is_shared(&self) -> bool {
             self.inner.is_shared()
         }
@@ -8414,6 +8697,622 @@ mod tests {
             batched_gets.load(Ordering::SeqCst) - batched_before,
             1,
             "and one read of all three under it"
+        );
+    }
+
+    // ---- The list of Agents, a page at a time, alike on every store ----
+
+    /// A full report from `uid` over a certificate naming `host`, at sequence number `seq`.
+    #[allow(clippy::too_many_arguments)]
+    fn report_listed(
+        state: &AppState,
+        host: &str,
+        subject: crate::revocation::SubjectValues,
+        uid: InstanceUid,
+        seq: u64,
+        capabilities: u64,
+        identifying: &[(&str, &str)],
+        non_identifying: &[(&str, &str)],
+    ) {
+        let pairs = |pairs: &[(&str, &str)]| {
+            pairs
+                .iter()
+                .map(|(key, value)| opamp::attributes::string_attr(key, value))
+                .collect()
+        };
+        let message = AgentToServer {
+            instance_uid: uid.as_bytes().to_vec(),
+            sequence_num: seq,
+            capabilities,
+            agent_description: Some(AgentDescription {
+                identifying_attributes: pairs(identifying),
+                non_identifying_attributes: pairs(non_identifying),
+            }),
+            ..Default::default()
+        };
+        state.process_presented(
+            message,
+            Transport::Http,
+            None,
+            Some(&Presented {
+                id: CertId::new(b"CA", host),
+                host: Some(host.to_string()),
+                subject_values: subject,
+                not_after_ms: u64::MAX,
+            }),
+        );
+    }
+
+    const C1: InstanceUid = InstanceUid([0xa1; 16]);
+    const A1: InstanceUid = InstanceUid([0xa2; 16]);
+    const A2: InstanceUid = InstanceUid([0xa3; 16]);
+    const CB: InstanceUid = InstanceUid([0xa5; 16]);
+    const B1: InstanceUid = InstanceUid([0xa6; 16]);
+    const B2: InstanceUid = InstanceUid([0xa7; 16]);
+
+    /// A fleet of six on `state`, its clock at `now`: on Host `h1` (organization `acme`) a Client
+    /// Agent labelled `ring=early` and an Agent `web-1`; on `h2` an Agent `web-2` reporting
+    /// `env=prod` and labelled `ring=solo`; behind the Gateway `gw` a Client Agent of machine `m9`
+    /// labelled `ring=late`, an Agent `db-1` of that machine, and an Agent of machine `m8`. `web-1`
+    /// and `db-1` promise heartbeats and fall silent; `web-2` promises them and reports again.
+    fn listed_fleet(state: &AppState, now: &AtomicU64) {
+        let heartbeat = opamp::proto::AgentCapabilities::ReportsStatus as u64
+            | opamp::proto::AgentCapabilities::ReportsHeartbeat as u64;
+        let status = opamp::proto::AgentCapabilities::ReportsStatus as u64;
+        let none = crate::revocation::SubjectValues::default;
+        let client = [("supervisor.kind.otelcol", "true")];
+        report_listed(
+            state,
+            "h1",
+            organization("acme"),
+            C1,
+            5,
+            status,
+            &[("service.name", "fleet-agent")],
+            &[("supervisor.kind.otelcol", "true"), ("host.name", "m1")],
+        );
+        report_listed(
+            state,
+            "h1",
+            organization("acme"),
+            A1,
+            3,
+            heartbeat,
+            &[("service.name", "otelcol")],
+            &[("service.instance.name", "web-1")],
+        );
+        report_listed(
+            state,
+            "h2",
+            organization("other"),
+            A2,
+            9,
+            heartbeat,
+            &[("service.name", "otelcol")],
+            &[("service.instance.name", "web-2"), ("env", "prod")],
+        );
+        report_listed(
+            state,
+            "gw",
+            none(),
+            CB,
+            7,
+            status,
+            &[("service.name", "fleet-agent")],
+            &[client[0], ("host.name", "m9")],
+        );
+        assert_eq!(state.set_gateway("gw", true), Ok(true));
+        report_listed(
+            state,
+            "gw",
+            none(),
+            B1,
+            1,
+            heartbeat,
+            &[("service.name", "otelcol")],
+            &[("service.instance.name", "db-1"), ("host.name", "m9")],
+        );
+        report_listed(
+            state,
+            "gw",
+            none(),
+            B2,
+            2,
+            status,
+            &[("service.name", "otelcol")],
+            &[("host.name", "m8")],
+        );
+        label(state, &C1, &[("ring", "early")]);
+        label(state, &A2, &[("ring", "solo")]);
+        label(state, &CB, &[("ring", "late")]);
+        now.fetch_add(600_000, Ordering::SeqCst);
+        report_listed(
+            state,
+            "h2",
+            organization("other"),
+            A2,
+            10,
+            heartbeat,
+            &[("service.name", "otelcol")],
+            &[
+                ("service.instance.name", "web-2"),
+                ("env", "prod"),
+                ("fresh", "yes"),
+            ],
+        );
+    }
+
+    /// The Agents `filter` admits in the order of `sort`, read a page of two at a time, and the
+    /// count every page names.
+    fn listed(
+        state: &AppState,
+        filter: crate::listing::AgentFilter,
+        sort: crate::listing::AgentSort,
+        descending: bool,
+    ) -> Vec<InstanceUid> {
+        let mut query = AgentQuery {
+            filter,
+            sort,
+            descending,
+            after: None,
+            limit: 2,
+        };
+        let mut seen = Vec::new();
+        let mut totals = BTreeSet::new();
+        loop {
+            let page = state.list_agents(&query).expect("a page");
+            assert!(page.agents.len() <= 2);
+            totals.insert(page.total);
+            seen.extend(
+                page.agents
+                    .iter()
+                    .map(|view| InstanceUid::parse(&view.instance_uid).expect("uid")),
+            );
+            match page.next {
+                Some(next) => query.after = Some(next),
+                None => break,
+            }
+        }
+        assert_eq!(
+            totals,
+            BTreeSet::from([seen.len()]),
+            "every page counts all"
+        );
+        seen
+    }
+
+    /// The same queries over the same fleet: filtered on what the UI searches, on a Selector that
+    /// matches a Host value, a reported attribute, a label and a label inherited from a Client
+    /// Agent, behind a Gateway too, on staleness, the type and the Host an Agent arrived over, and
+    /// ordered by each key with ties broken by Instance UID, a page at a time.
+    fn the_list_answers(state: &AppState) {
+        use crate::listing::{AgentFilter, AgentSort, HolderFilter};
+        let only = |filter: AgentFilter| {
+            let mut found = listed(state, filter, AgentSort::Name, false);
+            found.sort_by_key(|uid| uid.0);
+            found
+        };
+        let selector = |pairs: &[(&str, &str)]| AgentFilter {
+            selector: pairs
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                .collect(),
+            ..AgentFilter::default()
+        };
+        let q = |text: &str| AgentFilter {
+            q: Some(text.to_string()),
+            ..AgentFilter::default()
+        };
+        assert_eq!(
+            only(selector(&[("ring", "early")])),
+            [C1, A1],
+            "own and inherited"
+        );
+        assert_eq!(
+            only(selector(&[("ring", "late")])),
+            [CB, B1],
+            "behind a Gateway"
+        );
+        assert_eq!(only(selector(&[("ring", "solo")])), [A2]);
+        assert_eq!(
+            only(selector(&[("fleet.host.organization", "acme")])),
+            [C1, A1]
+        );
+        assert_eq!(only(selector(&[("env", "prod")])), [A2]);
+        assert_eq!(
+            only(selector(&[("host.name", "m9"), ("ring", "late")])),
+            [CB, B1]
+        );
+        assert_eq!(only(selector(&[("env", "staging")])), []);
+        assert_eq!(only(q("ring=late")), [CB, B1]);
+        assert_eq!(only(q("acme")), [C1, A1], "the Host's values");
+        assert_eq!(only(q("web-")), [A1, A2]);
+        assert_eq!(only(q("fresh=yes")), [A2]);
+        assert_eq!(
+            only(AgentFilter {
+                service_name: Some("otelcol".to_string()),
+                ..AgentFilter::default()
+            }),
+            [A1, A2, B1, B2]
+        );
+        assert_eq!(
+            only(AgentFilter {
+                stale: Some(true),
+                ..AgentFilter::default()
+            }),
+            [A1, B1]
+        );
+        assert_eq!(
+            only(AgentFilter {
+                arrived_over: Some("gw".to_string()),
+                ..AgentFilter::default()
+            }),
+            [CB, B1, B2]
+        );
+        assert_eq!(
+            only(AgentFilter {
+                holder: Some(HolderFilter::Instance("elsewhere".to_string())),
+                ..AgentFilter::default()
+            }),
+            []
+        );
+        assert_eq!(
+            only(AgentFilter {
+                holder: Some(HolderFilter::None),
+                ..AgentFilter::default()
+            }),
+            [C1, A1, A2, CB, B1, B2]
+        );
+        let all = AgentFilter::default;
+        assert_eq!(
+            listed(state, all(), AgentSort::Name, false),
+            [B1, C1, CB, B2, A1, A2],
+            "db-1, fleet-agent twice by Instance UID, otelcol, web-1, web-2"
+        );
+        assert_eq!(
+            listed(state, all(), AgentSort::Name, true),
+            [A2, A1, B2, C1, CB, B1],
+            "a tie keeps its Instance UIDs in their order"
+        );
+        assert_eq!(
+            listed(state, all(), AgentSort::Seq, false),
+            [B1, B2, A1, C1, CB, A2]
+        );
+        assert_eq!(
+            listed(state, all(), AgentSort::Seen, true)[0],
+            A2,
+            "heard last"
+        );
+        let views: BTreeMap<String, AgentView> = state
+            .list_agents(&AgentQuery {
+                limit: 10,
+                ..AgentQuery::default()
+            })
+            .expect("all")
+            .agents
+            .into_iter()
+            .map(|view| (view.instance_uid.clone(), view))
+            .collect();
+        let b1 = &views[&B1.to_string()];
+        assert_eq!(
+            b1.inherited_labels.get("ring").map(String::as_str),
+            Some("late")
+        );
+        assert_eq!(b1.client_agent, CB.to_string());
+        assert_eq!(views[&A1.to_string()].client_agent, C1.to_string());
+        assert!(views[&B2.to_string()].client_agent.is_empty());
+        assert!(views
+            .values()
+            .all(|view| view.holder.is_empty() && view.holder_host.is_empty()));
+        let values = state.reported_values().expect("values");
+        assert_eq!(
+            values.pairs,
+            [
+                "env=prod",
+                "fresh=yes",
+                "host.name=m1",
+                "host.name=m8",
+                "host.name=m9",
+                "service.instance.name=db-1",
+                "service.instance.name=web-1",
+                "service.instance.name=web-2",
+                "service.name=fleet-agent",
+                "service.name=otelcol",
+                "supervisor.kind.otelcol=true",
+            ]
+        );
+        assert_eq!(values.service_names, ["fleet-agent", "otelcol"]);
+    }
+
+    /// A fleet whose clock is `now`, its host register and its records on files in `dir`.
+    fn listed_on_files(dir: &std::path::Path, now: &Arc<AtomicU64>) -> AppState {
+        let revocations = Revocations::open(
+            Box::new(crate::fs::FsLedgerStore::open(dir).expect("ledger")),
+            Arc::new(crate::clock::SystemClock),
+            Vec::new(),
+        )
+        .expect("revocations");
+        AppState::with_stores(
+            Box::new(crate::fs::FsAgentStore::open(dir).expect("agents")),
+            Box::new(crate::fs::FsConfigBackend::open(dir).expect("configs")),
+            Box::new(Manual(now.clone())),
+        )
+        .expect("state")
+        .with_revocations(Some(Arc::new(revocations)))
+    }
+
+    /// The list of Agents on the filesystem store, cut from memory.
+    /// Verifies: ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server
+    #[test]
+    fn the_list_of_agents_filters_sorts_and_pages_on_the_filesystem() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let now = Arc::new(AtomicU64::new(1_000_000_000));
+        let state = listed_on_files(dir.path(), &now);
+        listed_fleet(&state, &now);
+        the_list_answers(&state);
+    }
+
+    /// The list of Agents on PostgreSQL, read through the port's `query_page`, answers what the
+    /// filesystem store answers; a row the release before wrote, without its derived columns, is
+    /// derived again before it is read; and a label set on a Client Agent writes that one row and
+    /// narrows a Selector to the Agents that inherit it.
+    /// Verifies: ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server
+    #[test]
+    fn the_list_of_agents_filters_sorts_and_pages_alike_on_postgres() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let now = Arc::new(AtomicU64::new(1_000_000_000));
+        let revocations = Revocations::open(
+            Box::new(crate::postgres::ledger::PgLedgerStore::new(
+                database.clone(),
+            )),
+            Arc::new(crate::clock::SystemClock),
+            Vec::new(),
+        )
+        .expect("revocations");
+        let state = AppState::with_stores(
+            Box::new(crate::postgres::agents::PgAgentStore::open(database.clone()).expect("open")),
+            Box::new(crate::postgres::configs::PgConfigBackend::new(
+                database.clone(),
+            )),
+            Box::new(Manual(now.clone())),
+        )
+        .expect("state")
+        .with_revocations(Some(Arc::new(revocations)));
+        listed_fleet(&state, &now);
+        assert_eq!(
+            test.once(&format!(
+                "SELECT count(*)::text FROM agents WHERE derived_from IS DISTINCT FROM {}",
+                crate::postgres::schema::stamp!()
+            )),
+            "0",
+            "every write wrote the derived columns with the record"
+        );
+        the_list_answers(&state);
+
+        // As a Server of 0.8.0 leaves a row: its derived columns as they were, or none at all.
+        test.sql("UPDATE agents SET derived_from = NULL, display_name = '', search_text = '', reported = '{}', machine = '', client_agent = false");
+        let changed = AgentDescription {
+            identifying_attributes: vec![opamp::attributes::string_attr("service.name", "otelcol")],
+            non_identifying_attributes: vec![
+                opamp::attributes::string_attr("service.instance.name", "web-2"),
+                opamp::attributes::string_attr("env", "staging"),
+                opamp::attributes::string_attr("fresh", "yes"),
+            ],
+        };
+        test.sql(&format!(
+            "UPDATE agents SET description = '\\x{}'::bytea WHERE instance_uid = '{A2}'",
+            hex::encode(changed.encode_to_vec())
+        ));
+        assert!(
+            state
+                .reported_values()
+                .expect("values")
+                .pairs
+                .contains(&"env=staging".to_string()),
+            "the values the release before wrote are derived before they are read"
+        );
+        let staging = crate::listing::AgentFilter {
+            selector: BTreeMap::from([("env".to_string(), "staging".to_string())]),
+            ..crate::listing::AgentFilter::default()
+        };
+        assert_eq!(
+            listed(&state, staging, crate::listing::AgentSort::Name, false),
+            [A2],
+            "what the release before wrote is read as its record says"
+        );
+        test.sql(&format!(
+            "UPDATE agents SET description = '\\x{}'::bytea WHERE instance_uid = '{A2}'",
+            hex::encode(
+                AgentDescription {
+                    identifying_attributes: vec![opamp::attributes::string_attr(
+                        "service.name",
+                        "otelcol"
+                    )],
+                    non_identifying_attributes: vec![
+                        opamp::attributes::string_attr("service.instance.name", "web-2"),
+                        opamp::attributes::string_attr("env", "prod"),
+                        opamp::attributes::string_attr("fresh", "yes"),
+                    ],
+                }
+                .encode_to_vec()
+            )
+        ));
+        the_list_answers(&state);
+
+        // A display name the database sorts by that its record would derive otherwise, as a row
+        // written while the derivation changed: the cursor continues after the value sorted by,
+        // so one Agent a page still shows each Agent once.
+        test.sql(&format!(
+            "UPDATE agents SET display_name = 'b' WHERE instance_uid = '{C1}'"
+        ));
+        let mut query = AgentQuery {
+            limit: 1,
+            ..AgentQuery::default()
+        };
+        let mut seen = Vec::new();
+        loop {
+            let page = state.list_agents(&query).expect("a page");
+            seen.extend(page.agents.iter().map(|view| view.instance_uid.clone()));
+            match page.next {
+                Some(next) => query.after = Some(next),
+                None => break,
+            }
+        }
+        assert_eq!(
+            seen,
+            [C1, B1, CB, B2, A1, A2].map(|uid| uid.to_string()),
+            "by the name stored: b, db-1, fleet-agent, otelcol, web-1, web-2"
+        );
+
+        // The read of the Agents behind a Gateway reads no derived column, so it derives none.
+        test.sql("UPDATE agents SET derived_from = NULL");
+        let behind = state.arrived_over("gw").expect("behind the Gateway");
+        let mut behind: Vec<InstanceUid> = behind.into_keys().collect();
+        behind.sort_by_key(|uid| uid.0);
+        assert_eq!(behind, [CB, B1, B2]);
+        assert_eq!(
+            test.once("SELECT count(*)::text FROM agents WHERE derived_from IS NOT NULL"),
+            "0",
+            "nothing was derived again"
+        );
+        state
+            .list_agents(&AgentQuery {
+                limit: 1,
+                ..AgentQuery::default()
+            })
+            .expect("a list derives them");
+
+        let written = |uid: &InstanceUid| {
+            test.once(&format!(
+                "SELECT xmin::text FROM agents WHERE instance_uid = '{uid}'"
+            ))
+        };
+        let before = written(&A1);
+        label(&state, &C1, &[("ring", "mid")]);
+        let mid = crate::listing::AgentFilter {
+            selector: BTreeMap::from([("ring".to_string(), "mid".to_string())]),
+            ..crate::listing::AgentFilter::default()
+        };
+        let mut found = listed(&state, mid, crate::listing::AgentSort::Name, false);
+        found.sort_by_key(|uid| uid.0);
+        assert_eq!(found, [C1, A1]);
+        assert_eq!(
+            written(&A1),
+            before,
+            "no row but the Client Agent's was written"
+        );
+    }
+
+    /// On PostgreSQL the check of a Gateway's package download, and the view of an Agent behind
+    /// it, read the Agents that arrived over the Gateway's Host through the port's `query_page`,
+    /// not the whole fleet, and still find the Client Agent behind the Gateway whose labels the
+    /// Agent inherits.
+    /// Verifies: ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server, ADR-0027
+    #[test]
+    fn a_gateways_download_and_an_agent_behind_it_read_the_gateways_agents_and_not_the_fleet() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let dir = tempfile::tempdir().expect("blobs");
+        let a = delivering_on(
+            &database,
+            Box::new(crate::postgres::agents::PgAgentStore::open(database.clone()).expect("open")),
+            dir.path(),
+        );
+        let (client, agent, other) = (
+            InstanceUid([0xb1; 16]),
+            InstanceUid([0xb2; 16]),
+            InstanceUid([0xb3; 16]),
+        );
+        let none = crate::revocation::SubjectValues::default;
+        let takes = opamp::proto::AgentCapabilities::ReportsStatus as u64
+            | opamp::proto::AgentCapabilities::AcceptsPackages as u64
+            | opamp::proto::AgentCapabilities::ReportsPackageStatuses as u64;
+        report_listed(
+            &a,
+            "gw",
+            none(),
+            client,
+            1,
+            takes,
+            &[("service.name", "fleet-agent")],
+            &[("supervisor.kind.otelcol", "true"), ("host.name", "m1")],
+        );
+        assert_eq!(a.set_gateway("gw", true), Ok(true));
+        report_listed(
+            &a,
+            "gw",
+            none(),
+            agent,
+            1,
+            takes,
+            &[("service.name", "otelcol")],
+            &[
+                ("os.type", "linux"),
+                ("host.arch", "amd64"),
+                ("host.name", "m1"),
+            ],
+        );
+        report_listed(
+            &a,
+            "h2",
+            none(),
+            other,
+            1,
+            takes,
+            &[("service.name", "otelcol")],
+            &[("os.type", "linux"), ("host.arch", "amd64")],
+        );
+        label(&a, &client, &[("ring", "early")]);
+        let id = PackageId::new("otelcol", "1.0.0").expect("id");
+        let linux = Platform::new("linux", "amd64").expect("platform");
+        a.create_package_set(&id).expect("set");
+        a.put_package_entry(&id, &linux, &mut &b"v1"[..])
+            .expect("entry");
+        a.put_package_entry_signature(&id, &linux, vec![1; 64])
+            .expect("signature");
+        a.deployment_store()
+            .expect("deployments")
+            .put(
+                "early",
+                BTreeMap::from([("ring".to_string(), "early".to_string())]),
+            )
+            .expect("deployment");
+        a.put_deployment_package("early", &id, true)
+            .expect("hold it");
+        assert_eq!(
+            a.rollout_deployment("early").expect("rollout"),
+            1,
+            "the inheriting Agent"
+        );
+
+        let hooked = Hooked::new(Box::new(
+            crate::postgres::agents::PgAgentStore::open(database.clone()).expect("open"),
+        ));
+        let whole = hooked.whole_queries.clone();
+        let b = delivering_on(&database, Box::new(hooked), dir.path());
+        assert!(
+            b.offers_artifact("gw", &id, &linux),
+            "the Gateway fetches what its Agent was released"
+        );
+        assert!(
+            !b.offers_artifact("h2", &id, &linux),
+            "nothing was released over h2"
+        );
+        let view = b.agent_view(&agent).expect("read").expect("known");
+        assert_eq!(
+            view.inherited_labels.get("ring").map(String::as_str),
+            Some("early")
+        );
+        assert_eq!(view.client_agent, client.to_string());
+        assert_eq!(
+            whole.load(Ordering::SeqCst),
+            0,
+            "no read of the whole fleet"
         );
     }
 }
