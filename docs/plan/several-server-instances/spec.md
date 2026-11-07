@@ -203,7 +203,7 @@ The plan lands on `main` in three stages, each a release of its own.
    which supersedes ADR-0022.
 3. **The keys on a token.** Tickets 12, 16 and 17. The CA keys live on a PKCS#11 token, so
    instances holding a CA run side by side, the heads of the audit chains are signed, and the
-   record may be exported. Its four drafts are on the local branch `feat/multi-instance-stage-3`,
+   record may be exported. Its four drafts are on the branch `feat/multi-instance-stage-3`,
    not on this one, so that the pull request of stage 2 numbers only its own:
    `draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one.md`,
    `draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token.md`,
