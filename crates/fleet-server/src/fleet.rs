@@ -2794,7 +2794,10 @@ impl AppState {
 
     /// Moves what this instance holds of `old` to `new`, as a re-key moves the stored row: the
     /// labels go with it (ADR-0043 clause 21), the old identity leaves its group, and what was
-    /// written of its presence moves with the row.
+    /// written of its presence moves with the row. A put-back of its restart kept for retry moves
+    /// too, so the retry queues the restart on the row's new identity
+    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// clause 8).
     fn rekey_held(
         &self,
         fleet: &mut HashMap<InstanceUid, AgentRecord>,
@@ -2811,6 +2814,10 @@ impl AppState {
                 .lock()
                 .expect("presence lock")
                 .rekey(old, new);
+            let mut kept = self.unput_restarts.lock().expect("restarts lock");
+            if let Some(backoff) = kept.remove(old) {
+                kept.insert(new, backoff);
+            }
         }
     }
 
@@ -3136,8 +3143,10 @@ impl AppState {
     }
 
     /// Tries again each put-back of a restart that is due, and answers how many are still kept.
-    /// One that fails again waits twice as many calls, up to [`Backoff::MAX_WAIT`]; one that holds,
-    /// or whose Agent was forgotten, is dropped. The composition root calls this every second, so
+    /// One that fails again waits twice as many calls, up to [`Backoff::MAX_WAIT`]; one that holds
+    /// is dropped, and so is one whose Agent's row is gone, forgotten or re-keyed through another
+    /// instance, with a warning naming the Agent. One whose row moved through a re-key of this
+    /// instance's own not read back yet waits for the read back. The composition root calls this every second, so
     /// the intervals grow to a minute; a process that ends first loses the restarts still kept
     /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
     /// clause 8).
@@ -3163,7 +3172,11 @@ impl AppState {
     /// once the store answers.
     /// One the store does not take is kept, or waits longer, for
     /// [`retry_restarts`](Self::retry_restarts). An Agent forgotten meanwhile has nothing to
-    /// restart.
+    /// restart; one whose record the store does not hold, forgotten or re-keyed through another
+    /// instance, is logged and dropped, and one whose record a re-key of this instance's own whose
+    /// answer was lost may have moved stays kept, for the read back to move it
+    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// clause 8).
     fn put_back(&self, uid: &InstanceUid, retry: bool) {
         let _agent = self.agent_lock(uid);
         let mut fleet = self.fleet.lock().expect("fleet lock");
@@ -3177,12 +3190,30 @@ impl AppState {
             return;
         }
         let answered = self.agent_store.set_restart_pending(uid, true);
+        // A re-key of this instance's own whose answer was lost may have moved the row: until its
+        // read back moves what is held, and this put-back with it, the put-back stays kept.
+        let unsure = matches!(answered, Ok(None))
+            && self
+                .unsure_rekeys
+                .lock()
+                .expect("rekeys lock")
+                .get(uid)
+                .is_some_and(|pending| !pending.moved);
         let mut kept = self.unput_restarts.lock().expect("restarts lock");
         match answered {
+            Ok(None) if unsure => {
+                let backoff = kept.entry(*uid).or_insert_with(Backoff::first);
+                if retry {
+                    backoff.failed();
+                }
+                info!(agent = %uid, "a re-key of the agent is not read back yet; its restart is tried again after it");
+            }
             Ok(held) => {
                 kept.remove(uid);
                 drop(kept);
                 if held.is_none() {
+                    // Forgotten, or re-keyed through another instance meanwhile: not seen apart.
+                    warn!(agent = %uid, "the restart is no longer tried, the Agent's row is gone");
                     return;
                 }
                 if let Some(record) = fleet.get_mut(uid) {
@@ -7672,6 +7703,207 @@ mod tests {
             reply.command.map(|c| c.r#type),
             Some(opamp::proto::CommandType::Restart as i32),
             "the next connection is sent it"
+        );
+    }
+
+    /// Whether the record `stored` holds of `uid` has a restart queued; `None` without a record.
+    fn queued(stored: &dyn AgentStore, uid: &InstanceUid) -> Option<bool> {
+        stored
+            .get(uid)
+            .expect("get")
+            .map(|record| record.restart_pending)
+    }
+
+    /// A kept put-back follows the re-key its Agent asks for: the retry queues the restart on the
+    /// new identity, and the Agent's next report under it is sent the restart. Run on each store.
+    fn a_kept_put_back_follows_a_rekey_the_agent_asks_for(
+        state: &AppState,
+        failing: &std::sync::atomic::AtomicBool,
+        stored: &dyn AgentStore,
+    ) {
+        let uid = InstanceUid([0x3b; 16]);
+        kept_put_back(state, failing, &uid);
+        let mut rekey = restartable(&uid, 2);
+        rekey.flags = AgentToServerFlags::RequestInstanceUid as u64;
+        let new = state
+            .process(rekey, Transport::WebSocket, Some(1))
+            .uid
+            .expect("carried");
+        assert_ne!(new, uid, "re-keyed");
+        assert_eq!(state.retry_restarts(), 0, "the retry held");
+        assert_eq!(queued(stored, &uid), None, "the old row is gone");
+        assert_eq!(
+            queued(stored, &new),
+            Some(true),
+            "queued on the new identity"
+        );
+        let reply = state
+            .process(restartable(&new, 3), Transport::WebSocket, Some(1))
+            .reply;
+        assert_eq!(
+            reply.command.map(|c| c.r#type),
+            Some(opamp::proto::CommandType::Restart as i32),
+            "the next report is sent it"
+        );
+    }
+
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    #[test]
+    fn a_kept_put_back_follows_a_rekey_the_agent_asks_for_on_files() {
+        let (state, failing, stored, _dir) = with_failing_restarts();
+        a_kept_put_back_follows_a_rekey_the_agent_asks_for(&state, &failing, &stored);
+    }
+
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    #[test]
+    fn a_kept_put_back_follows_a_rekey_the_agent_asks_for_on_postgres() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let hooked = Hooked::new(Box::new(crate::postgres::agents::PgAgentStore::new(
+            database.clone(),
+        )));
+        let failing = hooked.failing_restarts.clone();
+        let state = on_postgres(&database, Box::new(hooked));
+        state.serve_under(tokio::sync::watch::channel(Some(LEASE_A.to_string())).1);
+        let stored = crate::postgres::agents::PgAgentStore::new(database.clone());
+        a_kept_put_back_follows_a_rekey_the_agent_asks_for(&state, &failing, &stored);
+    }
+
+    /// A kept put-back follows a re-key whose answer was lost and whose read back failed, once a
+    /// read again of what is held reads it back as moved: the retry queues the restart on the new
+    /// identity.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    #[test]
+    fn a_kept_put_back_follows_a_rekey_read_back_as_moved() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        a_kept_put_back_follows_a_rekey_read_back(&test, false);
+    }
+
+    /// A try of a kept put-back that finds the row gone while a re-key of this instance's own is
+    /// not read back yet keeps it, and the read back moves it: the restart is queued on the new
+    /// identity, not dropped.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    #[test]
+    fn a_kept_put_back_tried_before_its_rekey_is_read_back_follows_it() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        a_kept_put_back_follows_a_rekey_read_back(&test, true);
+    }
+
+    /// A kept put-back and a re-key of its Agent whose answer was lost and whose read back failed;
+    /// the store answers again, a try is made before the read back where `tried_first`, and the
+    /// put-back is tried until it holds.
+    fn a_kept_put_back_follows_a_rekey_read_back(
+        test: &crate::postgres::testing::TestDatabase,
+        tried_first: bool,
+    ) {
+        let database = test.open();
+        let hooked = Hooked::new(Box::new(crate::postgres::agents::PgAgentStore::new(
+            database.clone(),
+        )));
+        let (failing, losing, unreadable) = (
+            hooked.failing_restarts.clone(),
+            hooked.losing_rekeys.clone(),
+            hooked.failing_moved.clone(),
+        );
+        let a = on_postgres(&database, Box::new(hooked));
+        a.serve_under(tokio::sync::watch::channel(Some(LEASE_A.to_string())).1);
+        let stored = crate::postgres::agents::PgAgentStore::new(database.clone());
+        let uid = InstanceUid([0x3c; 16]);
+        kept_put_back(&a, &failing, &uid);
+        losing.store(true, Ordering::SeqCst);
+        unreadable.store(true, Ordering::SeqCst);
+        let mut rekey = restartable(&uid, 2);
+        rekey.flags = AgentToServerFlags::RequestInstanceUid as u64;
+        let answered = a.process(rekey, Transport::WebSocket, Some(1));
+        losing.store(false, Ordering::SeqCst);
+        assert_eq!(answered.uid, Some(uid), "not known: it keeps its identity");
+        unreadable.store(false, Ordering::SeqCst);
+        if tried_first {
+            assert_eq!(
+                a.retry_restarts(),
+                1,
+                "kept while the re-key is not read back"
+            );
+        }
+        a.take_up_agents(None).expect("read again");
+        let held = held_by(&a);
+        assert_eq!(held.len(), 1);
+        let new = InstanceUid::parse(&held[0]).expect("a uid");
+        assert_ne!(new, uid, "read back as moved");
+        let kept = (0..8).map(|_| a.retry_restarts()).find(|kept| *kept == 0);
+        assert_eq!(kept, Some(0), "the retry held");
+        assert_eq!(
+            queued(&stored, &new),
+            Some(true),
+            "queued on the new identity"
+        );
+    }
+
+    /// A put-back whose Agent was re-keyed through another instance while this one retried finds
+    /// its record gone: the restart is not tried again, and a warning names the Agent.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    #[test]
+    fn a_kept_put_back_whose_row_another_instance_rekeyed_is_logged() {
+        crate::test_support::logged();
+        let (state, failing, stored, _dir) = with_failing_restarts();
+        let uid = InstanceUid([0x3e; 16]);
+        kept_put_back(&state, &failing, &uid);
+        state.mark_disconnected(&[uid], 1);
+        let new = InstanceUid([0x3f; 16]);
+        let record = stored.get(&uid).expect("get").expect("stored");
+        stored
+            .rekey(&uid, &new, &record)
+            .expect("re-keyed through another instance");
+        assert_eq!(state.retry_restarts(), 0, "not tried again");
+        assert_eq!(queued(&stored, &new), Some(false), "not seen");
+        assert_eq!(
+            crate::test_support::lines_with(&[
+                "the restart is no longer tried, the Agent's row is gone",
+                &uid.to_string(),
+            ])
+            .len(),
+            1,
+            "a warning names the Agent"
+        );
+    }
+
+    /// The re-key of a duplicate newcomer moves no row: a put-back kept for the Agent stays with
+    /// it, the retry queues the restart on its identity, and the newcomer is sent none.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    #[test]
+    fn a_kept_put_back_stays_with_its_agent_when_a_duplicate_is_rekeyed() {
+        let (state, failing, stored, _dir) = with_failing_restarts();
+        let uid = InstanceUid([0x3d; 16]);
+        kept_put_back(&state, &failing, &uid);
+        let duplicate = state.process(restartable(&uid, 1), Transport::WebSocket, Some(2));
+        let newcomer = duplicate.uid.expect("carried");
+        assert_ne!(newcomer, uid, "the newcomer is re-keyed");
+        assert!(duplicate.reply.agent_identification.is_some());
+        assert!(duplicate.reply.command.is_none());
+        assert_eq!(state.retry_restarts(), 0, "the retry held");
+        assert_eq!(queued(&stored, &uid), Some(true), "queued on the Agent");
+        assert_ne!(
+            queued(&stored, &newcomer),
+            Some(true),
+            "not on the newcomer"
+        );
+        let reply = state
+            .process(restartable(&newcomer, 2), Transport::WebSocket, Some(2))
+            .reply;
+        assert!(reply.command.is_none(), "the newcomer is sent no restart");
+        let reply = state
+            .process(restartable(&uid, 2), Transport::WebSocket, Some(1))
+            .reply;
+        assert_eq!(
+            reply.command.map(|c| c.r#type),
+            Some(opamp::proto::CommandType::Restart as i32),
+            "the Agent is sent it"
         );
     }
 
