@@ -309,11 +309,15 @@ pub trait LedgerStore: Send + Sync {
     /// Returns an error when it cannot be written.
     fn put_issued(&self, issued: &Issued) -> Result<(), String>;
 
-    /// Removes one register entry.
+    /// Removes one register entry the prune found expired, with no valid certificate renewed from
+    /// it, and answers whether it removed it. A store other instances share removes it only while
+    /// it holds no certificate renewed from it that is valid at `now_ms`, whatever the instance
+    /// that prunes holds, so a renewal it never took up keeps its chain
+    /// (ADR-0044 clause 10).
     ///
     /// # Errors
     /// Returns an error when it cannot be removed.
-    fn remove_issued(&self, id: &CertId) -> Result<(), String>;
+    fn remove_issued(&self, id: &CertId, now_ms: u64) -> Result<bool, String>;
 
     /// Writes one register entry, deciding from what is stored: the register's bounds are
     /// counted, and a renewal whose chain holds a revoked certificate is refused, in the write
@@ -1084,16 +1088,20 @@ impl Revocations {
             approved.mint(),
             Some(&approved.bootstrap),
         )?)?;
+        state.took_up_own_write(self.store.list_version());
         self.take_up_approved(state, approved);
         Ok(())
     }
 
     /// Takes up what an enrolment store wrote of `approved` in the transaction that decided its
     /// request, once that transaction committed (ADR-0044 clause 9): the register entry and the
-    /// Host, which the store wrote by act, in memory alone.
-    pub fn took_up_approved(&self, approved: &Approved) {
+    /// Host, which the store wrote by act, in memory alone, and the list's version that
+    /// transaction left, `written`, where it is known (ADR-0044 clause 10). An approval whose
+    /// commit was read back names none, and the list is then read again before a version is held.
+    pub fn took_up_approved(&self, approved: &Approved, written: Option<u64>) {
         let mut state = self.state.lock().expect("revocation lock");
         state.acted();
+        state.took_up_own_write(written);
         self.take_up_approved(state, approved);
     }
 
@@ -1207,6 +1215,7 @@ impl Revocations {
             self.store
                 .register_minting(&issued, &bounds, mint, bootstrap)?,
         )?;
+        state.took_up_own_write(self.store.list_version());
         state.insert(issued);
         Ok(())
     }
@@ -1977,10 +1986,19 @@ impl Revocations {
         if gone.is_empty() {
             return Ok(forgotten);
         }
-        for id in &gone {
-            self.store.remove_issued(id)?;
-            state.remove(id);
+        let mut removed = Vec::with_capacity(gone.len());
+        for id in gone {
+            if self.store.remove_issued(&id, now)? {
+                state.took_up_own_write(self.store.list_version());
+                state.remove(&id);
+                removed.push(id);
+            } else {
+                // The store holds a valid renewal of it that this instance never took up: its
+                // register is not the stored one, so it holds no version until it reads it again.
+                state.list_version = None;
+            }
         }
+        let gone = removed;
         let dropped: Vec<String> = state
             .revocations
             .iter()
@@ -2039,13 +2057,13 @@ mod tests {
             ledger.issued.push(issued.clone());
             Ok(())
         }
-        fn remove_issued(&self, id: &CertId) -> Result<(), String> {
+        fn remove_issued(&self, id: &CertId, _now_ms: u64) -> Result<bool, String> {
             self.0
                 .lock()
                 .expect("lock")
                 .issued
                 .retain(|i| &i.facts.id != id);
-            Ok(())
+            Ok(true)
         }
         fn add_revocation(&self, entry: &Revocation, bound: usize) -> Result<Added, String> {
             Ok(add_to(
@@ -2520,8 +2538,8 @@ mod tests {
         fn put_issued(&self, issued: &Issued) -> Result<(), String> {
             self.0.put_issued(issued)
         }
-        fn remove_issued(&self, id: &CertId) -> Result<(), String> {
-            self.0.remove_issued(id)
+        fn remove_issued(&self, id: &CertId, now_ms: u64) -> Result<bool, String> {
+            self.0.remove_issued(id, now_ms)
         }
         fn add_revocation(&self, entry: &Revocation, bound: usize) -> Result<Added, String> {
             self.0.add_revocation(entry, bound)
@@ -2548,8 +2566,8 @@ mod tests {
         fn put_issued(&self, issued: &Issued) -> Result<(), String> {
             self.inner.put_issued(issued)
         }
-        fn remove_issued(&self, id: &CertId) -> Result<(), String> {
-            self.inner.remove_issued(id)
+        fn remove_issued(&self, id: &CertId, now_ms: u64) -> Result<bool, String> {
+            self.inner.remove_issued(id, now_ms)
         }
         fn add_revocation(&self, entry: &Revocation, bound: usize) -> Result<Added, String> {
             self.inner.add_revocation(entry, bound)
@@ -2673,8 +2691,8 @@ mod tests {
         fn put_issued(&self, issued: &Issued) -> Result<(), String> {
             self.inner.put_issued(issued)
         }
-        fn remove_issued(&self, id: &CertId) -> Result<(), String> {
-            self.inner.remove_issued(id)
+        fn remove_issued(&self, id: &CertId, now_ms: u64) -> Result<bool, String> {
+            self.inner.remove_issued(id, now_ms)
         }
         fn add_revocation(&self, entry: &Revocation, bound: usize) -> Result<Added, String> {
             self.inner.add_revocation(entry, bound)
@@ -3215,8 +3233,8 @@ mod tests {
         fn put_issued(&self, issued: &Issued) -> Result<(), String> {
             self.0.put_issued(issued)
         }
-        fn remove_issued(&self, id: &CertId) -> Result<(), String> {
-            self.0.remove_issued(id)
+        fn remove_issued(&self, id: &CertId, now_ms: u64) -> Result<bool, String> {
+            self.0.remove_issued(id, now_ms)
         }
         fn register_minting(
             &self,
@@ -3366,8 +3384,8 @@ mod tests {
         fn put_issued(&self, issued: &Issued) -> Result<(), String> {
             self.inner.put_issued(issued)
         }
-        fn remove_issued(&self, id: &CertId) -> Result<(), String> {
-            self.inner.remove_issued(id)
+        fn remove_issued(&self, id: &CertId, now_ms: u64) -> Result<bool, String> {
+            self.inner.remove_issued(id, now_ms)
         }
         fn register_issued(
             &self,
@@ -3697,8 +3715,8 @@ mod tests {
         fn put_issued(&self, issued: &Issued) -> Result<(), String> {
             self.inner.put_issued(issued)
         }
-        fn remove_issued(&self, id: &CertId) -> Result<(), String> {
-            self.inner.remove_issued(id)
+        fn remove_issued(&self, id: &CertId, now_ms: u64) -> Result<bool, String> {
+            self.inner.remove_issued(id, now_ms)
         }
         fn add_revocation(&self, entry: &Revocation, bound: usize) -> Result<Added, String> {
             self.inner.add_revocation(entry, bound)
@@ -3835,8 +3853,8 @@ mod tests {
         fn put_issued(&self, issued: &Issued) -> Result<(), String> {
             self.inner.put_issued(issued)
         }
-        fn remove_issued(&self, id: &CertId) -> Result<(), String> {
-            self.inner.remove_issued(id)
+        fn remove_issued(&self, id: &CertId, now_ms: u64) -> Result<bool, String> {
+            self.inner.remove_issued(id, now_ms)
         }
         fn add_revocation(&self, entry: &Revocation, bound: usize) -> Result<Added, String> {
             self.inner.add_revocation(entry, bound)

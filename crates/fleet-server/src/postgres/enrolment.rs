@@ -65,7 +65,9 @@ fn held_elsewhere(error: &tokio_postgres::Error) -> bool {
 
 /// How the transaction that decides an approved request ended.
 enum Ended {
-    Committed,
+    /// Committed, leaving the revocation list's version where the register entry written with
+    /// it moved it, if one was.
+    Committed(Option<u64>),
     /// The register refused the entry; the transaction was rolled back.
     Refused(String),
     /// The database server answered an error at the commit or at the statement before it: the
@@ -319,6 +321,7 @@ impl EnrolmentStore for PgEnrolmentStore {
                     let id = id.to_string();
                     let registering = approved.clone();
                     let ended = self.database.run(move |_| async move {
+                        let mut version = None;
                         if let Some(approved) = &registering {
                             let registered = super::ledger::register_in(
                                 &***held.client(),
@@ -333,6 +336,8 @@ impl EnrolmentStore for PgEnrolmentStore {
                                 drop(held.let_go());
                                 return Ok(Ended::Refused(refused));
                             }
+                            version =
+                                Some(super::ledger::read_list_version(&***held.client()).await?);
                         }
                         if let Err(e) = held
                             .client()
@@ -349,10 +354,10 @@ impl EnrolmentStore for PgEnrolmentStore {
                             return refused_by_the_server(e, At::Commit);
                         }
                         drop(held.let_go());
-                        Ok(Ended::Committed)
+                        Ok(Ended::Committed(version))
                     })?;
-                    match ended {
-                        Ended::Committed => {}
+                    let written = match ended {
+                        Ended::Committed(written) => written,
                         Ended::NotCommitted(e) => return Ok(Approval::NotCommitted(e)),
                         Ended::Refused(refused) => {
                             return Ok(Approval::Refused(
@@ -365,9 +370,9 @@ impl EnrolmentStore for PgEnrolmentStore {
                                 },
                             ));
                         }
-                    }
+                    };
                     if let Some(approved) = &approved {
-                        registrar.committed(approved);
+                        registrar.committed(approved, written);
                     }
                     return Ok(Approval::Approved(decision));
                 }
@@ -1481,7 +1486,8 @@ mod tests {
     /// An approval whose decision fails to commit after the certificate is signed leaves neither
     /// its register entry nor its Host, in the database or in memory, and its signature is
     /// recorded as rolled back; approved again, the request is signed once more, and one
-    /// certificate for its key is in the register beside one Host (ADR-0044 clause 9).
+    /// certificate for its key is in the register beside one Host, the list's version moved by
+    /// its entry alone and held by the approving instance (ADR-0044 clauses 9 and 10).
     /// Verifies: ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision
     #[test]
     fn an_approval_whose_commit_fails_records_nothing_and_a_second_records_one_certificate() {
@@ -1537,6 +1543,14 @@ mod tests {
             .map(|issued| issued.facts.id.serial)
             .collect();
         assert_eq!(held, ["2"]);
+        assert_eq!(
+            (
+                register.list_version(),
+                test.rows("SELECT version FROM revocation_list_version")[0][0].as_deref()
+            ),
+            (Some(1), Some("1")),
+            "the entry moved the list's version, and the approving instance holds it"
+        );
         assert_eq!(*recorder.committed.lock().expect("committed"), ["2"]);
         assert_eq!(
             enrolment.submit(submitted("k"), requester()),

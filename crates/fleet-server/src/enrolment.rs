@@ -91,8 +91,9 @@ pub trait Registrar {
     fn register(&self, approved: &Approved) -> Result<(), DecisionError>;
 
     /// Takes up `approved` once the store wrote it in the transaction that decided its request,
-    /// and that transaction committed.
-    fn committed(&self, approved: &Approved);
+    /// and that transaction committed, with the revocation list's version the transaction left,
+    /// `written`: `None` where it is not known, as for a commit read back (ADR-0044 clause 10).
+    fn committed(&self, approved: &Approved, written: Option<u64>);
 }
 
 /// What an approval keeps of what it signed (ADR-0044 clause 9): it records the signature in the
@@ -998,7 +999,7 @@ impl Enrolment {
             Ok(Some(request)) if request.decision.as_ref() == Some(&ours) => {
                 tracing::warn!(request = %id, "an approval whose commit answered an error had committed");
                 if let Some(approved) = approved {
-                    recorder.committed(approved);
+                    recorder.committed(approved, None);
                 }
                 Some(ours)
             }
@@ -1362,12 +1363,12 @@ pub(crate) mod tests {
                 .register_approved(approved)
                 .map_err(DecisionError::Sign)
         }
-        fn committed(&self, approved: &Approved) {
+        fn committed(&self, approved: &Approved, written: Option<u64>) {
             self.committed
                 .lock()
                 .expect("committed")
                 .push(approved.issued().facts.id.serial.clone());
-            self.revocations.took_up_approved(approved);
+            self.revocations.took_up_approved(approved, written);
         }
     }
 
@@ -1455,7 +1456,7 @@ pub(crate) mod tests {
         fn register(&self, _: &Approved) -> Result<(), DecisionError> {
             Ok(())
         }
-        fn committed(&self, _: &Approved) {}
+        fn committed(&self, _: &Approved, _: Option<u64>) {}
     }
 
     impl<F: Fn(&Signed, &[u8], &CertId) -> Result<(), DecisionError>> Recorder for Recording<F> {

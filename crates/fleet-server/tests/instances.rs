@@ -1668,8 +1668,8 @@ impl fleet_server::enrolment::Registrar for Registering<'_> {
             .map_err(fleet_server::enrolment::DecisionError::Store)
     }
 
-    fn committed(&self, approved: &fleet_server::revocation::Approved) {
-        self.0.took_up_approved(approved);
+    fn committed(&self, approved: &fleet_server::revocation::Approved, written: Option<u64>) {
+        self.0.took_up_approved(approved, written);
     }
 }
 
@@ -2125,6 +2125,67 @@ async fn a_revocation_whose_notification_is_missed_is_caught_at_the_next_renewal
         closed_within(&mut session, TIMES.renew * 3).await,
         Some((1008, "revoked".to_string())),
         "B did not catch the missed revocation at a renewal"
+    );
+}
+
+/// A renewal registered by another writer, whose notification never arrives while the listening
+/// connection stays up, is taken up by the next lease renewal: so a revocation of the certificate
+/// it renewed, committed by this instance afterwards, refuses the renewal too (ADR-0038 clause 28,
+/// ADR-0044 clause 10).
+/// Verifies: ADR-0041, ADR-0044
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_renewal_whose_notification_is_missed_is_refused_once_its_predecessor_is_revoked() {
+    use fleet_server::revocation::{Issued, LedgerStore, RegisterBounds, Registered};
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let b = Instance::start(&pki, &schema, schema.config_on(schema.config.port)).await;
+    assert!(b.has_read(1).await, "B never listened");
+    let (old, _) = pki.issue("edge-01");
+    let (renewed, _) = pki.issue("edge-01");
+    let old = cert_id(&old);
+    let renewed = {
+        let der = opamp::tls::certificates(renewed.as_bytes()).expect("pem");
+        fleet_server::ca::facts(der[0].as_ref()).expect("facts")
+    };
+    let renewed_id = renewed.id.clone();
+
+    // Registered as an instance registers it, through a writer whose notification B takes for its
+    // own and so never takes up: a notification missed.
+    let writer = fleet_server::postgres::ledger::PgLedgerStore::new(b.database.clone());
+    let predecessor = old.clone();
+    let registered = tokio::task::spawn_blocking(move || {
+        writer.register_issued(
+            &Issued {
+                facts: renewed,
+                instance_uid: "01".into(),
+                predecessor: Some(predecessor),
+                issued_ms: 1,
+            },
+            &RegisterBounds {
+                size: 100,
+                per_root: 100,
+            },
+        )
+    })
+    .await
+    .expect("register")
+    .expect("register the renewal");
+    assert_eq!(registered, Registered::Registered);
+    let on_b = b.revocations.clone();
+    let serial = old.serial.clone();
+    tokio::task::spawn_blocking(move || on_b.revoke_certificate("client", &serial))
+        .await
+        .expect("revoke")
+        .expect("revoke on B");
+    assert!(b.revocations.is_certificate_revoked(&old));
+    assert!(
+        eventually(TIMES.renew * 3, || b
+            .revocations
+            .is_certificate_revoked(&renewed_id))
+        .await,
+        "B admits the renewal of the certificate it revoked"
     );
 }
 

@@ -182,6 +182,19 @@ once its tag exists.
   at `error` how many went unrecorded.
   **What to do:** nothing. A tool that reads `taken_under` as a chain identifier treats `none` as
   no lease, and one that reads `reason` knows `holder_gone`.
+- **A renewal stays revoked with its predecessor on every instance**
+  ([ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision](docs/adr/draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
+  clause 10). On PostgreSQL an instance that missed the notification of a renewal another
+  instance registered, and then revoked the certificate it renewed, admitted the renewal, and so
+  did its Gateways' list, until another instance changed the list. Every change to the register
+  now moves the revocation list's version, so such an instance reads the register again by its
+  next lease renewal. An instance that pruned an expired certificate could remove it while a
+  renewal of it it had not taken up was still valid, and a later revocation of the expired one
+  then left the renewal admitted; the database now keeps such an entry. A Gateway fetches the
+  list in full after each renewal or enrolment rather than being answered `304`.
+  **What to do:** nothing. While instances of 0.8.0 serve beside this release, a renewal one of
+  them registers still moves no version, and one pruning beside this one removes an expired entry
+  regardless of its renewals; replace them to close both.
 
 ## [0.8.0]
 

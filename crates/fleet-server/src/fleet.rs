@@ -5665,9 +5665,9 @@ impl Registrar for Approving<'_> {
         }
     }
 
-    fn committed(&self, approved: &crate::revocation::Approved) {
+    fn committed(&self, approved: &crate::revocation::Approved, written: Option<u64>) {
         if let Some(revocations) = &self.0.revocations {
-            revocations.took_up_approved(approved);
+            revocations.took_up_approved(approved, written);
         }
     }
 }
