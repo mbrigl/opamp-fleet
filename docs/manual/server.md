@@ -491,7 +491,7 @@ password_file = "/run/secrets/fleet-db-password"
 | `lease_renew_secs` | `10` | With `"postgres"` alone: how often an instance renews its lease, from 1 to 3600. Set with `"fs"`, it fails startup naming it. |
 | `lease_secs` | `30` | With `"postgres"` alone: how long after its last renewal a lease lapses, at least three renewals and at most 3600. Set with `"fs"`, it fails startup naming it. |
 | `presence_interval_secs` | `30` | With `"postgres"` alone: how often an instance writes, in one batch, where each Agent it carries is connected and when it was last heard from, from 10 to 60. The report that connects an Agent to an instance writes it at once, so no other instance forgets an Agent that has just connected. A heartbeat reaches the database at most once per interval and Agent, so the staleness budget grows by this interval. A batch written later than this interval after it was due is logged as a warning with `late_ms`: the database is not keeping up with the fleet's presence. Set with `"fs"`, it fails startup naming it. |
-| `pool_size` | `16` | With `"postgres"` alone: the connections an instance's pool holds at most, from 2 to 256. At most half of them create the records of new Agents at once, so the other half serves every other call while creations wait for one another. The database's `max_connections` must allow `pool_size` for each instance, plus one session for each sweep in progress and one that listens for notifications. Set with `"fs"`, it fails startup naming it. |
+| `pool_size` | `16` | With `"postgres"` alone: the connections an instance's pool holds at most, from 2 to 256. At most half of them create the records of new Agents at once, so the other half serves every other call while creations wait for one another. The database's `max_connections` must allow `pool_size` for each instance, plus one session for each sweep in progress, one for a prune of the audit record in progress, and one that listens for notifications. Set with `"fs"`, it fails startup naming it. |
 | `postgres.host` | — | Required with `"postgres"`. The database's host name or IP address — what its certificate must name. |
 | `postgres.port` | `5432` | Its port. |
 | `postgres.dbname` | — | Required with `"postgres"`. The database. The Server does not create it. |
@@ -788,6 +788,22 @@ probes each instance with a TCP connection to the port `listen` names, `4320` by
 instance without a lease has closed its listeners and is sent no Agent. The Operator plane of any
 instance shows the whole fleet and acts on it.
 
+Give the balancer **source-address affinity** on the Agent plane, so that it sends one peer
+address to one instance for as long as that instance is up:
+
+- **The throttle and the rate limits count per instance.** The admission throttle and
+  [`[agent_rate_limit]`](#how-often-a-member-may-be-heard) keep their counts in each instance's
+  memory, so a host whose connections are spread over three instances is allowed three times as
+  much, and one that reaches another instance starts there with a full allowance.
+- **A plain-HTTP Client's poll on a new connection may reach another instance.** A poll that
+  reaches another instance than the poll before takes the Agent there, a write to the database and a
+  notification to every instance, and moves its holder. An Agent whose holder changes more than
+  ten times in a minute is logged as `likely a duplicate instance_uid on two connections`, which
+  is how a Client polling more often than every six seconds reads without affinity.
+- **A Gateway's connections share its address,** so under affinity they all reach one instance.
+
+When an instance is lost, the balancer sends its addresses to the others.
+
 Each Agent's view names the instance that carries it: `holder`, the instance id of its lease, and
 `holder_host`, the host name that lease records. Both are empty while no instance with a live
 lease holds the Agent, as after its instance stopped and before it reconnected. The Agents tab
@@ -815,6 +831,151 @@ one instance carries, `holder=none` what none does: what a lost instance took wi
 
 A request in flight on an instance that ends without stopping is not answered: read through
 another instance whether it took effect before making it again.
+
+### Stopping an instance
+
+An instance stops on `SIGTERM`. It closes both listeners at once, answers the requests already in
+flight, and ends each WebSocket session at an instant drawn over `drain_secs`, 20 seconds by
+default; what is still open 2 seconds after that is cut. Each of its Agents then waits a delay
+drawn over 30 seconds before it reconnects, so the Agents of a stopped instance reach the others
+spread over `drain_secs` and 30 seconds more. Each instance takes at most
+`max_new_connections_per_sec` new connections a second and answers the rest `503` with a
+`Retry-After`, after which they come back.
+
+Once its sessions are ended, the instance writes where its Agents are, closes its audit chain,
+waiting up to 5 seconds for the record to be written out, and releases its lease. A stop
+therefore takes `drain_secs` and a few seconds more, and whatever stops the instance must wait
+longer before it sends `SIGKILL`: Docker's default of 10 seconds is too short, which
+`--stop-timeout 30` mends ([In a container](#in-a-container)); an orchestrator's grace period,
+30 seconds by default in Kubernetes, fits the default `drain_secs`. Raise the two together. An
+instance killed before it is done ends as one that ends without stopping: its Agents read as
+connected through it until its lease lapses, and the instance that takes the lease over closes its
+chain.
+
+### The database and the bucket
+
+Every instance stands on the one database and the one bucket, so the fleet is served on after the
+loss of an instance only while those two are served on. Making them redundant, backing them up and
+restoring them is yours: the Server creates neither and copies neither.
+
+**Replicate the database synchronously.** A failover of the database must lose no audit entry and
+no revocation, so the standby it fails over to must hold every commit the primary answered. Name
+the standbys in the primary's `synchronous_standby_names`, and keep `synchronous_commit` at `on`,
+its default, or `remote_apply` for the database and the role the Server signs in as. With
+asynchronous replication a failover loses what the standby had not received: a revocation the
+Operator plane answered as made, the audit entries of the last decisions, and the marks of a sweep
+in progress ([`[blobs]`](#blobs)). One write never waits, whatever the replication: the record of
+an Agent first heard of is committed without waiting for the disk or a standby, so a failover may
+lose the records created last, and each such Agent's next report creates its record again.
+
+A primary waits for a synchronous standby at every commit, so while none answers, nothing the
+Server writes commits but the records of new Agents, and to the instances that is an outage of
+the database. Run two standbys and name them as `ANY 1 (…)`, so that the loss of one stops
+nothing.
+
+**Point `[database.postgres] host` at the primary through an address the failover moves,** such
+as a virtual IP or a DNS name, and give every server that may become the primary a certificate for
+that name. While the database fails over, the acts that need it fail, answered `500`, and a new
+Agent's first report is answered `Unavailable` and sent again. Each instance connects again and
+reads again everything it holds, since it cannot know what it missed meanwhile. A failover that
+takes longer than `lease_secs` after an instance's last renewal is an
+[instance that loses the database](#what-a-failover-does): it ends its sessions and closes its
+listeners until it holds a new lease. An instance that must be alone loses its lock with its
+session and exits ([`[database]`](#database)); its service manager starts it again.
+
+**Back up the database and the bucket together, and restore them together.** The database holds
+every record and the audit record, the bucket the artifacts the Package entries name. An entry
+whose artifact the bucket lacks stops every start, naming the entry, and a Package deleted after
+the database's backup has its artifacts deleted by the next sweep, so a bucket restored as it is
+now may lack what the restored database names. Turn versioning on for the bucket and keep its
+noncurrent versions, by a lifecycle rule, at least as long as the oldest database backup you
+keep, or back the bucket up with a tool that restores it to a moment; then restore it to the
+moment of the database's backup. The Server reads only the current objects, so the old versions
+change nothing for it. An artifact the restored bucket holds and no entry names goes with the
+next sweep.
+
+To restore, stop every instance, restore the database and the bucket, and start one instance
+taken out of the balancer's pool, so that no Agent reaches it until the steps below are done: its
+probe connects as soon as it holds its lease. The leases the backup holds have lapsed, and that
+instance takes them over and closes their chains, as after a failover. What happened since the
+backup is gone from the database, the audit record included. What still holds it is the audit
+record's copy in the instances' logs, under the target `audit`, so ship those logs off the
+instances' hosts from the first instance on.
+
+**A database restored from before a revocation admits the revoked certificate again,** and so it
+does for the other trust withdrawn since the backup. Merge the log copies of every instance by
+their `time`, and take the lines from a minute before the backup on: each instance stamps them by
+its own clock, so keep the instances' clocks within that minute of one another. Then, through the
+instance's Operator plane:
+
+1. **Decide each revocation by its last line.** A revocation's `id` stands for its certificate, so
+   revoking a certificate again after a lift gives the same `id`. For each `id` that a
+   `revocation.revoked` or a `revocation.lifted` names, take the later of them: where it is
+   `revocation.revoked`, revoke again by its `authority` and `serial`, which changes nothing
+   where `GET /api/v1/revocations` lists it already; where it is `revocation.lifted`, lift it
+   where that list holds it. Where a lift and a revocation of one `id` lie within a minute of each
+   other, their order is not certain: keep it revoked.
+2. **Revoke the renewals signed since the backup.** With [`[client_ca]`](#client_ca) the register
+   resolves a revocation to the renewals of its certificate, but a renewal signed since the backup
+   is not in the restored register, and a certificate the register does not hold is admitted
+   unless it is revoked itself. Each `issuance.signed` names the certificate it signed by
+   `authority` and `serial`, and the certificate it renews by `predecessor_serial`. For each one
+   since the backup, follow `predecessor_serial` through the lines since the backup to the first
+   certificate not signed since it. The register keeps each ancestor of a certificate still
+   valid, so the restored register holds that one and every certificate it descends from, except
+   a certificate an operator provisioned: the register holds only what the Server signed, and a
+   provisioned first certificate is named only as its renewal's predecessor. The database's
+   `certificates` table names them all, the provisioned one among them:
+
+   ```sql
+   WITH RECURSIVE chain AS (
+       SELECT issuer, serial, predecessor_issuer, predecessor_serial
+         FROM certificates WHERE serial = '<serial>'
+       UNION
+       SELECT c.issuer, c.serial, c.predecessor_issuer, c.predecessor_serial
+         FROM certificates AS c JOIN chain
+           ON c.issuer = chain.predecessor_issuer AND c.serial = chain.predecessor_serial
+   )
+   SELECT serial FROM chain
+   UNION
+   SELECT predecessor_serial FROM chain WHERE predecessor_serial IS NOT NULL;
+   ```
+
+   Where that first certificate is a provisioned one the query finds no row for, it alone is the
+   chain's rest. Where the serials of the lines since the backup or the query's answer name a
+   certificate step 1 revoked, revoke the renewal by its own serial.
+3. **Withdraw again the other trust withdrawn since the backup**, each by its last line:
+   - a Gateway mark a `host.gateway` names: clear it again where the outcome is `cleared`, and
+     set it again where it is `set`, with `PUT /api/v1/hosts/{host}/gateway`. A host enrolled
+     since the backup is answered `404` until it has reported again; set its mark then;
+   - a floor a `package_floor.set` names, unless a later `package_floor.removed` names its Agent
+     type: set it again where the restored floor is lower or absent. The line names the version
+     but not the signature; `opamp-fleetctl package floor` signs the same version with the same
+     key into the same signature again ([the tools](tools.md#keeping-old-builds-off-the-fleet));
+   - the enrolment window, by the last `enrolment.window`: where it is `closed` or `expired` and
+     `GET /api/v1/enrolment/window` shows the window open, close it with
+     `DELETE /api/v1/enrolment/window`; where it is `opened` and the window shows a later end
+     than the line's `until_ms`, close it, or open it again for the time left to that end;
+   - the requests decided since the backup: while the window is open, reject with
+     `POST /api/v1/enrolments/{id}/reject` each request `GET /api/v1/enrolments` lists, now and
+     as hosts send them again, whose `id` an `enrolment.rejected` names, or an `issuance.signed`
+     names as its `request`. A request's `id` stands for its key, so one approved since the
+     backup comes back pending, and approved again it would sign a certificate for that key that
+     no revocation names.
+
+The enrolment requests queued and not yet decided since the backup are gone, so such a host
+enrols again. Then put the instance into the balancer's pool and start the others.
+
+**A revocation without its line** cannot be set again from the record. The entry that names a
+revocation's certificate follows the revocation, and is dropped where the audit record cannot
+take it by then ([The audit record](#the-audit-record)). Such a revocation shows as an
+`operator.act` for `POST /api/v1/revocations` with no `revocation.revoked` after it, and its
+certificate has to be known from elsewhere; a revocation request that failed shows the same way,
+and its `operator.act` with the outcome `completed`, where it was written, tells the two apart by
+its `status`. The same holds for the other acts of step 3: their `operator.act` names the host,
+the Agent type or the request in its path, but not a floor's version, nor whether a Gateway mark
+was set or cleared, so clear a mark until it is known. And the last entries before the database
+was lost are in neither copy, since an entry reaches the log only once the database holds it.
 
 ### A CA key in a file means a standby
 
@@ -900,15 +1061,17 @@ there under its old one; its row under the new identity reads as disconnected on
 here ended and the read back held, or, if the instance stops first, once its lease has lapsed,
 and is forgotten by the silence bound.
 
-### From one Server on files to two instances
+### From one Server on files to three instances
 
 1. **Run this release** on the one Server, on files.
 2. **Make the stores.** A PostgreSQL database and a role that may create tables in its default
-   schema, and a bucket with the lifecycle rule of [`[blobs]`](#blobs), both reachable from each
-   instance's host. Their replication and backups are yours.
-3. **Choose the CA's place.** With a CA key in a file, the second instance is a
-   [standby](#a-ca-key-in-a-file-means-a-standby); for two that serve at once, issue the hosts'
-   certificates outside the Server first.
+   schema, replicated as [The database and the bucket](#the-database-and-the-bucket) says, and a
+   versioned bucket with the lifecycle rule of [`[blobs]`](#blobs), both reachable from each
+   instance's host. Ship each instance's log off its host from its start on: its audit lines are
+   what a restore of the database needs.
+3. **Choose the CA's place.** With a CA key in a file, every instance after the first is a
+   [standby](#a-ca-key-in-a-file-means-a-standby); for instances that serve at once, issue the
+   hosts' certificates outside the Server first.
 4. **Write the `server.toml` the instances start with**: `[database] store = "postgres"` with its
    `[database.postgres]` section, `[blobs] store = "s3"` with its `[blobs.s3]` section, no
    `data_dir`, and no `[audit] max_file_bytes` or `keep_files`, which are the filesystem store's.
@@ -921,43 +1084,83 @@ and is forgotten by the silence bound.
    with `server blobs-to-s3` instead ([`[blobs]`](#blobs)).
 6. **Start the first instance**, and check the record with `server audit-verify --config
    <server.toml> --archive <data_dir>/audit`.
-7. **Put the balancer in front** under the address the Clients connect to. To give them a new one,
-   offer it with `[connection_offer] endpoint`
+7. **Put the balancer in front** under the address the Clients connect to, with source-address
+   affinity ([Several instances](#several-instances)). To give the Clients a new address, offer it
+   with `[connection_offer] endpoint`
    ([Moving the fleet](#moving-the-fleet-connection-settings)).
 8. **Start the second instance** on another host, with the same `server.toml`.
+9. **Start the third instance** on a third host, with the same `server.toml`
+   ([A third instance](#a-third-instance)).
 
-### Upgrading the instances
+### A third instance
 
-Two consecutive releases serve one database side by side, so an orchestrator's rolling update may
-replace the instances one at a time. The migrations of a release name the release before it as the
-oldest Server that understands the schema they leave, so the instances of that release that still
-run serve on it; what a release stops using goes with a later one. The first instance of the new
-release to start migrates the schema, and instances that start together wait for it.
+A third instance starts as the second did: on a host of its own, with the same `server.toml`,
+behind the same balancer, which sends it Agents once its probe connects. Nothing moves the Agents
+the others carry. A WebSocket stays on the instance it reached, so the third instance fills with
+the Agents that connect anew: new hosts, and the Agents of an instance that stops or is lost.
 
-While instances of 0.8.0 serve beside those of a newer release, two things about new Agents differ
-from a fleet of one release. `max_agents` may be passed by the records the two releases create at
-the same moment, since 0.8.0 counts under a lock the newer release does not take. And when both
-create the record of the same new Agent at the same moment, the database ends one of the two as a
-deadlock after its `deadlock_timeout` (one second by default); that report is answered
-`Unavailable`, and the Agent reports again. Both end with the last instance of 0.8.0.
+With three instances, the loss of one gives each of the other two half of its Agents, where with
+two the one left takes them all. Size them so that one instance fewer still carries the fleet:
 
-Each lease records the release of its instance; a lease of 0.8.0, which records none, counts as
-0.8.0. An instance stops at its start, naming both releases and changing nothing, while a live lease
-is of a release older than the oldest Server its migrations leave: stop the instances of that
-release first. So an upgrade that skips a release waits until every instance of the older one has
-stopped, and a Server alone may skip releases. To skip a release from 0.8.0, scale the instances of
-0.8.0 to zero before the newer release starts, so that none of them is restarted meanwhile. An
-instance of 0.8.0 checks the schema only at its own start and could take its lease just after the
-newer release checked the leases. Releases from the one after 0.8.0 on close that gap themselves.
-A lease that lapsed counts as none, and so does the lease of an instance that had to be alone and
-whose process is gone. An instance whose lease lapsed while a newer release migrated checks the
-schema as it takes its new lease, and on one that needs a newer Server it stops, naming both
-versions, and exits with a failure, as at a failed start.
+- **Connections.** Each instance holds at most `max_connections` Agent-plane connections, 10 000 by
+  default, and closes one past it on accept. A fleet that two of three instances must carry holds
+  at most twice that, a Gateway counting once for each connection of its pool.
+- **New connections.** Each instance takes at most `max_new_connections_per_sec` new connections a
+  second, 200 by default, which bounds how fast the Agents of a lost instance come back.
+- **The database's connections.** It must allow `pool_size` connections for each instance, one
+  more that listens for notifications, one for each sweep in progress, and one for a prune of the
+  audit record in progress: 57 for three instances at the defaults, counting one sweep and one
+  prune each, of PostgreSQL's default `max_connections` of 100, three of which it keeps for
+  superusers. A rolling update that starts a new instance before it stops an old one needs one
+  instance's share more.
+- **Peers that share an address.** Affinity sends every host behind one address translation, and
+  every connection of a Gateway, to one instance, so such a group weighs on one instance alone.
 
-An instance that shares the database starts, and migrates, only once no Server holds the database
-alone, as a Server of 0.7.1 does while it runs. The upgrade from 0.7.1 therefore still stops every
-Server first. No load has been proven on several instances yet: how many Agents they carry and how
-long a failover of a large fleet takes are not yet measured.
+No load has been proven on several instances yet: how many Agents they carry and how long a
+failover of a large fleet takes are not yet measured.
+
+### A rolling update
+
+Two consecutive releases serve one database side by side, so the instances are replaced one at a
+time while the others serve the fleet:
+
+1. **Read the release's notes** for what each change needs done, and back the database up.
+2. **Stop one instance** with `SIGTERM` and let it finish
+   ([Stopping an instance](#stopping-an-instance)). Its Agents reconnect to the others.
+3. **Start the new release in its place**, with the same `server.toml`. The first instance of the
+   new release migrates the schema, and an instance that starts meanwhile waits for it. Wait until
+   it serves: it logs `serving the OpAMP endpoint and package downloads over TLS`, and the
+   balancer's probe connects.
+4. **Do the same with each other instance**, one at a time.
+
+An orchestrator's rolling update does this when it replaces one instance at a time and gives each
+the grace period of [Stopping an instance](#stopping-an-instance).
+
+The migrations of a release name the release before it as the oldest Server that understands the
+schema they leave, so the instances of that release that still run serve on it; what a release
+stops using goes with a later one. Each lease records the release of its instance; a lease of
+0.8.0, which records none, counts as 0.8.0. An instance stops at its start, naming both releases
+and changing nothing, while a live lease is of a release older than the oldest Server its
+migrations leave: stop the instances of that release first. A lease that lapsed counts as none, and
+so does the lease of an instance that had to be alone and whose process is gone. An instance whose
+lease lapsed while a newer release migrated checks the schema as it takes its new lease, and on one
+that needs a newer Server it stops, naming both versions, and exits with a failure, as at a failed
+start.
+
+- **Skipping a release** stops every instance of the older release first, since a newer release
+  does not start beside them; a Server alone may skip releases. To skip a release from 0.8.0,
+  scale the instances of 0.8.0 to zero before the newer release starts, so that none of them is
+  restarted meanwhile: an instance of 0.8.0 checks the schema only at its own start and could take
+  its lease just after the newer release checked the leases. Releases after 0.8.0 close that gap
+  themselves.
+- **From 0.7.1** every Server stops first. An instance that shares the database starts, and
+  migrates, only once no Server holds the database alone, as a Server of 0.7.1 does while it runs.
+- **Beside 0.8.0** two things about new Agents differ from a fleet of one release. `max_agents` may
+  be passed by the records the two releases create at the same moment, since 0.8.0 counts under a
+  lock the newer release does not take. And when both create the record of the same new Agent at
+  the same moment, the database ends one of the two as a deadlock after its `deadlock_timeout`
+  (one second by default); that report is answered `Unavailable`, and the Agent reports again.
+  Both end with the last instance of 0.8.0.
 
 The first start of this release on a database migrates it to the schema of the paged lists: it
 adds columns to the Agents' table and builds three indexes over it, one of them over a digest of
@@ -1516,9 +1719,14 @@ before it are not bound by those after it, so check them against a copy taken ea
 intruder on the Server host the chain only helps with a copy taken before, so ship the directory off
 the host. The record also goes to the Server's log under the target `audit`.
 
-The Server never takes a decision it cannot record: when the record cannot be written — a full
-disk, a failed device — it admits no Agent and runs no operator act, answering `503`, until it
-can. A certificate request in that time is answered `Unavailable` with a time to retry, and the
+The Server takes no decision whose entry it cannot queue: when the record cannot be written — a
+full disk, a failed device — or its queue of 10 000 entries is full, it admits no Agent and runs
+no operator act, answering `503`, until it can. An operator act is recorded before it runs, as
+`operator.act` with its method and path; the entry that says what it did, such as the
+certificate a revocation names, follows the act and is dropped where the queue is full or the
+record cannot be written by then.
+The next entry that is written counts what was dropped as `unrecorded_before`. A certificate
+request in that time is answered `Unavailable` with a time to retry, and the
 Agent asks again. Refusals past ten a second from one address are counted into one line, not
 dropped.
 `[audit] max_file_bytes` (64 MiB) and `keep_files` (16) bound the space it takes on the filesystem
@@ -1586,11 +1794,10 @@ round deletes from all its chains in one transaction, in batches of a few thousa
 writes its own `audit.pruned` entries first, so a round that stops part-way deletes nothing and the
 record verifies after every round. A round that does not end within five minutes is rolled back, the
 prune stops with `cannot prune the audit record` in the log, and the next start or day goes on from
-there. A day is 24 hours, whatever the database's time zone. Upgrade all instances together: a
-Server of a release before this one does not know `audit.pruned`, and its `audit-verify --config`
-reports every pruned chain as broken.
+there. A day is 24 hours, whatever the database's time zone. A Server before 0.8.0 does not know
+`audit.pruned`, and its `audit-verify --config` reports every pruned chain as broken.
 
-A Server that was on PostgreSQL before this release kept its audit record in files under
+A Server that was on PostgreSQL before 0.8.0 kept its audit record in files under
 `data_dir/audit/`. At its first start, before the database holds any chain or archive, it records
 the last entry of those files as the archive, as `server migrate-to-postgres` does, and the first
 chain names it as its `predecessor`: check the link with `--archive <data_dir>/audit`. An empty or
