@@ -3,7 +3,7 @@ name: G-20
 # The two tests that decide G-20 (docs/SPECIFICATION.md): three Server instances behind a layer-4
 # balancer that keeps the peer's address, on PostgreSQL and S3, one of them killed under 10 000
 # simulated Agents, and the presence and notifications of 100 000 simulated Agents for ten minutes
-# (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+# (ADR-0048
 # clause 20 and the Enforcement). `crates/fleet-server/tests/g20.rs` holds both; the balancer and
 # the simulated fleet are the test's own, so the stack needs no image beyond the stores' ones.
 #

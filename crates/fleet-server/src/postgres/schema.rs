@@ -131,7 +131,7 @@ pub const MIGRATIONS: &[Migration] = &[
     // Columns only added, with defaults, and indexes. A Server of 0.8.0 writes none of them, and
     // the rows it writes are derived again before the list of Agents reads them, so it serves on
     // the schema they leave
-    // (ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server
+    // (ADR-0049
     // clause 8).
     Migration {
         version: 11,
@@ -140,7 +140,7 @@ pub const MIGRATIONS: &[Migration] = &[
     },
     // A column only added, with a default. A Server of 0.8.0 writes no release into it, and every
     // lease taken before it is one of 0.8.0, which the default names
-    // (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    // (ADR-0048
     // clause 16).
     Migration {
         version: 12,
@@ -166,7 +166,7 @@ pub const MIGRATIONS: &[Migration] = &[
     // A table only added. A Server of 0.8.0 reads and writes none of it: it neither refuses nor
     // drops a rejected key, so beside the instances of this release a rejected key may wait again
     // through it and be approved
-    // (ADR-draft-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window
+    // (ADR-0052
     // clause 16).
     Migration {
         version: 15,
@@ -176,7 +176,7 @@ pub const MIGRATIONS: &[Migration] = &[
 ];
 
 /// The rejected keys, each the id of the request it refuses, with when it was rejected
-/// (ADR-draft-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window
+/// (ADR-0052
 /// clause 16): written by a rejection under the queue's lock, read by every take under it and by
 /// every approval, and deleted by no close or end of the window.
 const ENROLMENT_REJECTED: &str = "
@@ -247,7 +247,7 @@ CREATE INDEX blob_deletions_sweep ON blob_deletions (sweep);
 ";
 
 /// The release of the instance that holds each lease
-/// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+/// (ADR-0048
 /// clause 16): what an instance compares with the oldest Server its migrations leave before it
 /// migrates.
 const LEASE_RELEASE: &str = "
@@ -534,7 +534,7 @@ CREATE INDEX audit_entries_recorded_at ON audit_entries (chain, recorded_at);
 "#;
 
 /// The digest of the columns of a row of `agents` its derived ones come from
-/// (ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server
+/// (ADR-0049
 /// clause 8): what a row whose derived columns were written with it holds in `derived_from`. Each
 /// text column enters as its MD5, each `bytea` column length-prefixed, so two rows differ in the
 /// digest wherever they differ in a column, and every function in it is immutable, so the partial
@@ -558,7 +558,7 @@ macro_rules! stamp {
 pub(crate) use stamp;
 
 /// What the list of Agents reads of each record
-/// (ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server
+/// (ADR-0049
 /// clause 8): the display name and the other sort keys, the reported values a Selector matches,
 /// the `service_name`, the machine that groups an Agent behind a Gateway, whether it is its
 /// Client's own Agent, one search text, and the digest of the columns they come from. A row whose
@@ -662,7 +662,7 @@ fn needs_newer(needs: &str, ours: &str) -> String {
 /// Refuses the schema when it names an oldest Server newer than `ours`, naming both versions: what
 /// an instance checks under the migrations' lock before it migrates and in the transaction that
 /// takes each lease
-/// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+/// (ADR-0048
 /// clause 16).
 ///
 /// # Errors
@@ -695,7 +695,7 @@ async fn leases_record_releases(client: &impl GenericClient) -> Result<bool, Str
 /// `None` when there is none. A lease of an instance that had to be alone counts as none: the
 /// caller holds the exclusive lock or found it free, so that lease's process is gone, and the
 /// next lease taken takes it over
-/// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+/// (ADR-0048
 /// clauses 2 and 16).
 async fn lease_older_than(
     client: &impl GenericClient,
@@ -749,7 +749,7 @@ async fn lease_older_than(
 /// refused before anything is written, naming both versions, and so is every schema while a live
 /// lease names a release older than the oldest Server the schema names once `migrations` are
 /// applied, naming both releases, whether they are applied already or not
-/// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+/// (ADR-0048
 /// clause 16).
 ///
 /// # Errors
@@ -824,7 +824,7 @@ mod tests {
     /// The migrations are numbered from 1 without a gap, and none names a Server newer than this
     /// one — a build that refused its own schema would never start. This release's own name 0.8.0.
     /// Verifies: ADR-0044
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn the_migrations_are_numbered_and_this_server_understands_them() {
         for (index, migration) in MIGRATIONS.iter().enumerate() {
@@ -847,7 +847,7 @@ mod tests {
         }
         // The first release to run beside another serves beside 0.8.0: its migrations name it, so
         // the instances of 0.8.0 that still run serve on the schema they leave
-        // (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+        // (ADR-0048
         // clause 16).
         for migration in &MIGRATIONS[10..] {
             assert_eq!(

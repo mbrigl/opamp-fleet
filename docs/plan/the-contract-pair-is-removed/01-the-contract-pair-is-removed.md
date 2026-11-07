@@ -24,9 +24,9 @@ the arrays. The arrays themselves go with ticket 02. This follows the stores dra
 ## Read first
 
 - The stores draft,
-  ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision
+  ADR-0050
   clause 22;
-  ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+  ADR-0048
   clause 16
 - `postgres/schema.rs`, `postgres/ledger.rs`, `postgres/deployments.rs`
 

@@ -29,7 +29,7 @@ other bounds.
 ## Read first
 
 - ADR-0045, *A host speaks for at most 256 Agents*
-- ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+- ADR-0048
   clause 19
 - `revocation.rs` `admits`, `check_report_by_act`; `postgres/ledger.rs` `bind_seen`
 

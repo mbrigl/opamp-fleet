@@ -38,7 +38,7 @@ standby to side by side, land with it.
   `draft-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md`
   clauses 8 and 17; `draft-the-operator-program-opamp-fleetctl.md` clauses 5 to 8, 12, 13 and 16
   to 18;
-  ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+  ADR-0048
   clauses 2 and 16 (the lease's audit key label is a migration that follows it);
   ADR-0044 clause 22
 - Golden path: the local CA and its renewal tests, and `pki init` in the operator tool

@@ -330,7 +330,7 @@ impl Ended {
 /// (ADR-0041
 /// clause 18): `audit.chain_closed` with the `reason` `ended` names after its last entry, and that
 /// entry's hash and the time in its record
-/// (ADR-draft-the-audit-record-is-one-hash-chain-per-lease-and-names-the-lease-each-decision-was-taken-under
+/// (ADR-0047
 /// clause 3). A chain already closed, or a lease that opened none, is left as it is.
 pub(crate) async fn close_lapsed(
     transaction: &impl GenericClient,
@@ -930,7 +930,7 @@ mod tests {
 
     /// A revocation the Operator plane answers `201` on PostgreSQL leaves, in the instance's chain,
     /// an entry naming its certificate by `authority` and `serial`.
-    /// Verifies: ADR-draft-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again
+    /// Verifies: ADR-0046
     #[test]
     fn a_revocation_is_recorded_with_its_certificate() {
         let Some(test) = TestDatabase::named() else {
@@ -1173,7 +1173,7 @@ mod tests {
     /// by the lease's clock — is marked `taken_under` `none`, in the next chain and in the chain
     /// of the lease whose clock ran out alike; the writer's own closing entry carries no mark, and
     /// the record verifies.
-    /// Verifies: ADR-draft-the-audit-record-is-one-hash-chain-per-lease-and-names-the-lease-each-decision-was-taken-under
+    /// Verifies: ADR-0047
     #[test]
     fn a_decision_taken_under_no_lease_is_marked_taken_under_none() {
         use std::sync::atomic::{AtomicU64, Ordering};
@@ -1241,7 +1241,7 @@ mod tests {
     /// After the shutdown's close nothing more is recorded: a decision is refused and counted, and
     /// one that passed the checks just before the close is counted by the writer rather than
     /// written; the closed chain still ends on its closing entry and verifies.
-    /// Verifies: ADR-draft-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again
+    /// Verifies: ADR-0046
     #[test]
     fn a_decision_after_the_shutdowns_close_is_refused_and_counted() {
         let Some(test) = TestDatabase::named() else {
@@ -1477,7 +1477,7 @@ mod tests {
     /// Refusals that passed the checks just before the shutdown's close and were counted for their
     /// aggregate are counted as unrecorded when the aggregate falls due, and the count of a decision
     /// refused after the close stays: no line is written past the closing entry.
-    /// Verifies: ADR-draft-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again
+    /// Verifies: ADR-0046
     #[test]
     fn an_aggregate_past_the_shutdowns_close_is_counted_and_keeps_the_count() {
         let Some(test) = TestDatabase::named() else {
@@ -1542,7 +1542,7 @@ mod tests {
     /// A shutdown's close whose answer was lost counts as written when the chain holds its closing
     /// entry, so the lease can be released, and the record verifies; one that did not land is
     /// not, and leaves the chain open for the instance that takes over its lease.
-    /// Verifies: ADR-draft-the-audit-record-is-one-hash-chain-per-lease-and-names-the-lease-each-decision-was-taken-under
+    /// Verifies: ADR-0047
     #[test]
     fn a_close_whose_answer_was_lost_counts_as_written_once_the_chain_holds_it() {
         let Some(test) = TestDatabase::named() else {

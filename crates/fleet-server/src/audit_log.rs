@@ -173,7 +173,7 @@ enum Message {
 
 /// The lease a decision was taken under, as its entry names it where the store keeps one chain
 /// per lease
-/// (ADR-draft-the-audit-record-is-one-hash-chain-per-lease-and-names-the-lease-each-decision-was-taken-under
+/// (ADR-0047
 /// clause 3).
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Under {
@@ -425,7 +425,7 @@ impl AuditLog {
 
     /// [`drain`](Self::drain) at an orderly shutdown, and then, where the store keeps one chain
     /// per lease, the chain closed with `audit.chain_closed` and `reason` `shutdown`
-    /// (ADR-draft-the-audit-record-is-one-hash-chain-per-lease-and-names-the-lease-each-decision-was-taken-under
+    /// (ADR-0047
     /// clause 3). A closing write whose answer was lost counts as written when the chain holds its
     /// closing entry. Once the chain is closed every decision is refused and counted
     /// ([`unrecorded_count`](Self::unrecorded_count)).
@@ -2054,7 +2054,7 @@ mod tests {
     /// written is queued though the channel is full by then, a place asked for while the channel
     /// is full is refused and counted, a drain waiting in the channel leaves the place held its
     /// room, and once the writer has taken everything no place is left counted.
-    /// Verifies: ADR-draft-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again
+    /// Verifies: ADR-0046
     #[test]
     fn a_held_place_counts_against_the_channel_until_it_is_written_or_given_back() {
         let memory = Memory::default();
@@ -2119,7 +2119,7 @@ mod tests {
 
     /// The shutdown's close gives no place once it began, fails while a place is still held when
     /// its bound runs out, and otherwise waits for the place to be written before it closes.
-    /// Verifies: ADR-draft-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again
+    /// Verifies: ADR-0046
     #[test]
     fn the_close_waits_for_the_places_held_and_gives_none_once_it_began() {
         let memory = Memory::default();

@@ -123,7 +123,7 @@ pub struct AgentRecord {
     /// When the connection that carries it last carried a report of it, in milliseconds since the
     /// epoch — runtime-only. An older connection of its host takes it back once this is a
     /// heartbeat interval old
-    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// (ADR-0048
     /// clause 8).
     pub carried_ms: u64,
     /// Whether this Server heard the Agent report since it started — runtime-only. What it holds
@@ -139,7 +139,7 @@ pub struct AgentRecord {
     /// Where the Host and the Client Agent place this Agent — derived, never persisted.
     pub placement: Placement,
     /// The instance that holds it, as a shared store read it
-    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// (ADR-0048
     /// clause 13); `None` for what this Server holds in memory.
     pub holder: Option<crate::agent_store::Holder>,
     /// What the operator's last rollout released to this Agent (ADR-0026 clause 6). **Every offer
@@ -252,7 +252,7 @@ impl AgentRecord {
     /// operator-queued, never what a live connection knows.
     /// Where it is connected, as a presence batch writes it.
     /// What its derived values come from
-    /// (ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server
+    /// (ADR-0049
     /// clause 8).
     fn source<'a>(&'a self, uid: &'a InstanceUid) -> crate::listing::Source<'a> {
         crate::listing::Source {
@@ -427,7 +427,7 @@ pub trait Clock: Send + Sync {
 }
 
 /// The port of the time that has passed, as a lease and a sweep measure it
-/// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+/// (ADR-0048
 /// clause 3, ADR-0044 clause 14): a clock that counts the time the host was suspended, which the
 /// binary hands the lease and the package store (on Linux `CLOCK_BOOTTIME`). A reading is the time since an origin of the
 /// clock's own: two readings of one clock compare, readings of two clocks do not. The adapters'
@@ -714,7 +714,7 @@ enum Took {
 
 /// Which connection carries an Agent a WebSocket report arrives for, as the duplicate detection
 /// sees it
-/// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+/// (ADR-0048
 /// clause 8).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Carried {
@@ -874,7 +874,7 @@ struct Ending {
     disconnected: bool,
     /// It came on an older connection of the host whose newer one carries the Agent, which its
     /// goodbye does not end and a queued restart is not sent on
-    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// (ADR-0048
     /// clause 8).
     superseded: bool,
     identification: Option<AgentIdentification>,
@@ -903,7 +903,7 @@ type ClientsByGroup = HashMap<Group, Vec<(InstanceUid, BTreeMap<String, String>)
 
 /// How a placement reads the Client Agents of a group that this instance does not hold
 /// (ADR-0043 clause 19,
-/// ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+/// ADR-0048
 /// clause 8).
 enum Elsewhere {
     /// From the store as the group is placed, under the fleet lock.
@@ -1266,7 +1266,7 @@ impl AppState {
 
     /// Answers the messages of Agents only while `holds` answers that the lease is held by its
     /// clock
-    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// (ADR-0048
     /// clause 3). Set once; a later call is ignored.
     pub fn answer_while(&self, holds: impl Fn() -> bool + Send + Sync + 'static) {
         let _ = self.proof.set(Box::new(holds));
@@ -1290,7 +1290,7 @@ impl AppState {
 
     /// One heartbeat interval: the one this Server offers, else 30 seconds, the default interval
     /// a WebSocket's silence is judged by without one
-    /// (ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended
+    /// (ADR-0051
     /// clause 2).
     fn heartbeat_interval(&self) -> Duration {
         self.connection_offer
@@ -1512,7 +1512,7 @@ impl AppState {
     /// stored; none on a store this Server alone writes. Of a Host, those the host register binds
     /// to it; behind a Gateway, which the register binds none to, those that arrived over the
     /// Gateway's Host and report the group's machine, read through the port's `query_page`
-    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// (ADR-0048
     /// clause 8). One that cannot be read is logged, and the group is placed from what this
     /// instance holds.
     fn client_agents_elsewhere(
@@ -2681,7 +2681,7 @@ impl AppState {
     /// Re-keys the stored record of `old` to `new`. Where the store answers an error, the move may
     /// have committed all the same, so it is read back before the Agent is answered: moved, it
     /// stands. A read back that fails leaves the pair for the Agent's next report to read back
-    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// (ADR-0048
     /// clause 10).
     fn rekey_reading_back(
         &self,
@@ -2812,7 +2812,7 @@ impl AppState {
     /// labels go with it (ADR-0043 clause 21), the old identity leaves its group, and what was
     /// written of its presence moves with the row. A put-back of its restart kept for retry moves
     /// too, so the retry queues the restart on the row's new identity
-    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// (ADR-0048
     /// clause 8).
     fn rekey_held(
         &self,
@@ -3075,7 +3075,7 @@ impl AppState {
     /// queued again through [`unsent`](Self::unsent). It is handed out only to `conn`, the
     /// WebSocket connection asking, where that connection carries the Agent: an older connection
     /// of its host that still names it leaves the restart to the newer one
-    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// (ADR-0048
     /// clause 8).
     ///
     /// A delivery holds the Agent's own lock, and clears the restart in the store with the fleet
@@ -3145,7 +3145,7 @@ impl AppState {
     /// wherever the send is seen to fail. That holds on a lease that lapsed meanwhile too, since
     /// setting it again only restores what the Operator asked for. A put-back the store does not
     /// take is kept and tried again by [`retry_restarts`](Self::retry_restarts)
-    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// (ADR-0048
     /// clause 8).
     pub fn unsent(&self, message: &ServerToAgent) {
         let restart = opamp::proto::CommandType::Restart as i32;
@@ -3164,7 +3164,7 @@ impl AppState {
     /// instance, with a warning naming the Agent. One whose row moved through a re-key of this
     /// instance's own not read back yet waits for the read back. The composition root calls this every second, so
     /// the intervals grow to a minute; a process that ends first loses the restarts still kept
-    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// (ADR-0048
     /// clause 8).
     pub fn retry_restarts(&self) -> usize {
         for uid in self.due_restarts() {
@@ -3191,7 +3191,7 @@ impl AppState {
     /// restart; one whose record the store does not hold, forgotten or re-keyed through another
     /// instance, is logged and dropped, and one whose record a re-key of this instance's own whose
     /// answer was lost may have moved stays kept, for the read back to move it
-    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// (ADR-0048
     /// clause 8).
     fn put_back(&self, uid: &InstanceUid, retry: bool) {
         let _agent = self.agent_lock(uid);
@@ -3253,7 +3253,7 @@ impl AppState {
     /// Takes up what another instance announced of the restarts of `uids`, every Agent where a
     /// notification was missed: a request there is this restart now, so a put-back still kept is
     /// dropped. After a missed notification only one whose record shows a restart queued is
-    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// (ADR-0048
     /// clause 8).
     ///
     /// # Errors
@@ -3282,7 +3282,7 @@ impl AppState {
 
     /// Drops the put-back of `uid`'s restart kept for retry, if one is: what a request, a delivery
     /// and a forget of the Agent do
-    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// (ADR-0048
     /// clause 8).
     fn drop_kept_restart(&self, uid: &InstanceUid) {
         self.unput_restarts
@@ -3401,7 +3401,7 @@ impl AppState {
     /// shutdown flush of another instance with a higher sequence number, as of an Agent that started
     /// again, may have written over it, and the next report writes it again. Once a count is
     /// answered, a report that changes nothing durable writes nothing again
-    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// (ADR-0048
     /// clause 8).
     fn persist(&self, uid: &InstanceUid, persisted: &PersistedAgent) -> Result<bool, String> {
         let digest = persisted.durable_digest();
@@ -3538,7 +3538,7 @@ impl AppState {
     /// are written again. An Agent whose take's answer was lost and that disconnected since has its
     /// holder and count of takes read first, and its disconnect is written under that count where
     /// the row names `holder` and the Agent was not taken here again since it was looked at
-    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// (ADR-0048
     /// clause 8). Read under the fleet lock and written after it is released, so no report waits
     /// for the batch; its answers are kept only of the Agents nothing was kept of anew meanwhile. A
     /// batch that fails is written again with the next one. Answers how many it wrote.
@@ -4073,7 +4073,7 @@ impl AppState {
         // comes back on a new connection of the host whose certificate its old connection
         // presented is not a duplicate of itself: the newest connection takes it, and the older
         // one's reports no longer take it back
-        // (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+        // (ADR-0048
         // clause 8).
         let arrived_over = self
             .revocations
@@ -5437,14 +5437,14 @@ impl AppState {
 
     /// Whether the Agents have a holder to filter by: on a shared store, where each presence
     /// names one
-    /// (ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server
+    /// (ADR-0049
     /// clause 6).
     pub fn keeps_holders(&self) -> bool {
         self.agent_store.is_shared()
     }
 
     /// One page of the list of Agents
-    /// (ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server
+    /// (ADR-0049
     /// clauses 3 to 6 and 8): on a store this Server alone writes, cut from what it holds; on a
     /// shared store read through [`AgentStore::query_page`], each Agent placed under the Client
     /// Agent the store found for it and with the values of the Host it arrived over.
@@ -5549,7 +5549,7 @@ impl AppState {
 
     /// The distinct reported `key=value` pairs and `service_name` values of the fleet, each sorted,
     /// at most 1000 of each
-    /// (ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server
+    /// (ADR-0049
     /// clause 7): from memory on a store this Server alone writes, through the port on a shared one.
     ///
     /// # Errors
@@ -5586,7 +5586,7 @@ impl AppState {
 
     /// The records of the Agents that last arrived over `host`, as stored, through
     /// [`AgentStore::query_page`] filtered on that Host
-    /// (ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server
+    /// (ADR-0049
     /// clause 9): the Agents behind a Gateway, whichever instance carries them.
     fn arrived_over(&self, host: &str) -> Result<HashMap<InstanceUid, AgentRecord>, String> {
         let filter = crate::listing::AgentFilter {
@@ -5874,7 +5874,7 @@ pub(crate) fn display_version(reported: &str) -> String {
 }
 
 /// What the list of Agents is asked
-/// (ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server
+/// (ADR-0049
 /// clauses 3 to 6).
 #[derive(Clone, Debug, Default)]
 pub struct AgentQuery {
@@ -6066,7 +6066,7 @@ pub struct AgentView {
     /// Gateway's.
     pub host: String,
     /// The instance id of the instance that holds it under a live lease
-    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// (ADR-0048
     /// clause 13); empty without one, and always on the filesystem store.
     pub holder: String,
     /// The host name that instance's lease records; empty when `holder` is.
@@ -7374,7 +7374,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn a_restart_whose_send_failed_is_queued_again_on_files() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -7383,7 +7383,7 @@ mod tests {
         a_restart_whose_send_failed_is_queued_again(&state, &stored);
     }
 
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn a_restart_whose_send_failed_is_queued_again_on_postgres() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -7440,7 +7440,7 @@ mod tests {
     /// A kept put-back is one restart with a request made meanwhile, and with a delivery of a
     /// restart another instance queued meanwhile: once that one is delivered, retrying queues no
     /// second.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn a_kept_put_back_is_dropped_by_a_request_or_a_delivery_meanwhile() {
         let (state, failing, stored, _dir) = with_failing_restarts();
@@ -7489,7 +7489,7 @@ mod tests {
 
     /// A kept put-back goes with its Agent's forget, through this instance or one heard of from
     /// another: an Agent that comes back under the same identity is not restarted for it.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn a_kept_put_back_goes_with_its_agents_forget() {
         let (state, failing, stored, _dir) = with_failing_restarts();
@@ -7518,7 +7518,7 @@ mod tests {
 
     /// A try found due is not made once a request and its delivery dropped the put-back before
     /// the try took the fleet lock, so the Agent is not restarted a second time.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn a_try_found_due_is_not_made_once_a_request_and_its_delivery_dropped_it() {
         let (state, failing, stored, _dir) = with_failing_restarts();
@@ -7546,7 +7546,7 @@ mod tests {
     /// A request through another instance, taken up from its announcement, drops a put-back kept
     /// here, so its delivery there is the one restart; after a missed notification one whose
     /// record shows a restart queued is dropped, and one whose record shows none is kept.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn a_request_announced_by_another_instance_drops_a_kept_put_back() {
         let (state, failing, stored, _dir) = with_failing_restarts();
@@ -7607,7 +7607,7 @@ mod tests {
     /// On PostgreSQL the announcement of a request through another instance is what drops a
     /// put-back kept here: once it is taken up, the request's delivery there leaves nothing for a
     /// retry here to restart again.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn a_request_announced_by_another_instance_drops_a_kept_put_back_on_postgres() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -7670,7 +7670,7 @@ mod tests {
     /// A put-back the store does not take is kept and tried again, at intervals that double, until
     /// it holds; the Agent's next connection is then sent the restart. One whose Agent is
     /// forgotten meanwhile is dropped.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn a_put_back_the_store_refuses_is_tried_again_until_it_holds() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -7789,14 +7789,14 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn a_kept_put_back_follows_a_rekey_the_agent_asks_for_on_files() {
         let (state, failing, stored, _dir) = with_failing_restarts();
         a_kept_put_back_follows_a_rekey_the_agent_asks_for(&state, &failing, &stored);
     }
 
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn a_kept_put_back_follows_a_rekey_the_agent_asks_for_on_postgres() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -7816,7 +7816,7 @@ mod tests {
     /// A kept put-back follows a re-key whose answer was lost and whose read back failed, once a
     /// read again of what is held reads it back as moved: the retry queues the restart on the new
     /// identity.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn a_kept_put_back_follows_a_rekey_read_back_as_moved() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -7828,7 +7828,7 @@ mod tests {
     /// A try of a kept put-back that finds the row gone while a re-key of this instance's own is
     /// not read back yet keeps it, and the read back moves it: the restart is queued on the new
     /// identity, not dropped.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn a_kept_put_back_tried_before_its_rekey_is_read_back_follows_it() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -7889,7 +7889,7 @@ mod tests {
 
     /// A put-back whose Agent was re-keyed through another instance while this one retried finds
     /// its record gone: the restart is not tried again, and a warning names the Agent.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn a_kept_put_back_whose_row_another_instance_rekeyed_is_logged() {
         crate::test_support::logged();
@@ -7917,7 +7917,7 @@ mod tests {
 
     /// The re-key of a duplicate newcomer moves no row: a put-back kept for the Agent stays with
     /// it, the retry queues the restart on its identity, and the newcomer is sent none.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn a_kept_put_back_stays_with_its_agent_when_a_duplicate_is_rekeyed() {
         let (state, failing, stored, _dir) = with_failing_restarts();
@@ -9313,7 +9313,7 @@ mod tests {
     /// written registers nothing, and an entry that cannot be written takes the decision back, so
     /// the request waits again with nothing registered, each signature is recorded as rolled back,
     /// and approved again it is signed anew (ADR-0044 clause 9).
-    /// Verifies: ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision
+    /// Verifies: ADR-0050
     #[cfg(unix)]
     #[test]
     fn an_approval_on_files_whose_register_entry_fails_takes_its_decision_back() {
@@ -9394,7 +9394,7 @@ mod tests {
     /// The audit record of an approval whose decision was not written still verifies, and names
     /// that signature as undecided by its serial and request, beside the signature of the approval
     /// that was (ADR-0044 clause 9).
-    /// Verifies: ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision
+    /// Verifies: ADR-0050
     #[cfg(unix)]
     #[test]
     fn the_audit_record_of_an_approval_that_did_not_commit_verifies_and_names_it_undecided() {
@@ -9428,7 +9428,7 @@ mod tests {
     /// between the two writes, is taken back: the request waits again and its signature is
     /// recorded as undecided, while an approval whose certificate is registered stays decided
     /// (ADR-0044 clause 9).
-    /// Verifies: ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision
+    /// Verifies: ADR-0050
     #[test]
     fn a_decision_found_at_startup_without_its_register_entry_waits_again() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -10624,7 +10624,7 @@ mod tests {
     /// B's memory too, and A, which has not taken up the deletions and still holds both in
     /// memory, is refused when it adds either to a Deployment: the add reads the member it adds
     /// in its own transaction and finds it gone, so no Deployment names it.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side, ADR-0026
+    /// Verifies: ADR-0048, ADR-0026
     #[test]
     fn a_member_deleted_through_one_instance_is_refused_by_another_that_has_not_taken_it_up() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -10679,7 +10679,7 @@ mod tests {
     /// row too, so the deletion waits for its commit, and then takes the member out of every
     /// Deployment in the transaction that deletes it. Whichever commits first, no Deployment names
     /// the deleted member once both have — for a Configuration and for a Package.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side, ADR-0026
+    /// Verifies: ADR-0048, ADR-0026
     #[test]
     fn an_add_held_while_another_instance_deletes_the_member_leaves_no_deployment_naming_it() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -10947,7 +10947,7 @@ mod tests {
     /// connection carries it and the move is logged; a report of the older connection is taken up
     /// and leaves it there, so the older one's close leaves it connected. On a connection of
     /// another host the same identity is a duplicate, re-keyed.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn an_agent_on_a_new_connection_of_its_host_is_carried_by_it_and_not_rekeyed() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -11075,7 +11075,7 @@ mod tests {
 
     /// A goodbye the older connection of a host delivers while a newer one carries the Agent does
     /// not end the Agent's connection: it stays connected on the newer one.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn a_goodbye_on_an_older_connection_of_the_host_leaves_the_agent_with_the_newer() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -11109,7 +11109,7 @@ mod tests {
 
     /// A queued restart is not sent on an older connection of the host while a newer one carries
     /// the Agent: it stays queued, and the newer connection's next report is sent it.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn a_queued_restart_is_not_sent_on_an_older_connection_of_the_host() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -11141,7 +11141,7 @@ mod tests {
     /// A queued restart pushed to every connection that named the Agent goes out only on the one
     /// that carries it: an older connection of its host that still names it, its peer likely
     /// gone, is handed none, and the restart stays queued for the newer one.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn a_pushed_restart_goes_out_only_on_the_connection_that_carries_the_agent() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -11174,7 +11174,7 @@ mod tests {
 
     /// A report of an older connection of the host does not use up the demand for the component
     /// map: the newer connection is asked for it.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn an_older_connection_of_the_host_is_not_asked_for_the_component_map() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -11243,7 +11243,7 @@ mod tests {
     /// older one is taken by its report there once the newer one has carried none of its reports
     /// for a heartbeat interval: it is asked for its component map there, and its goodbye there
     /// ends it.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn a_gateway_s_agent_moved_to_an_older_connection_is_taken_there_after_an_interval() {
         crate::test_support::logged();
@@ -11294,7 +11294,7 @@ mod tests {
 
     /// Within a heartbeat interval of the newer connection's last report of an Agent, a report on
     /// an older connection of the same Gateway does not take the Agent back.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn within_an_interval_an_older_connection_of_a_gateway_does_not_take_the_agent_back() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -11336,7 +11336,7 @@ mod tests {
     /// The interval this Server offers decides when a Gateway's newer connection is stale: at an
     /// offered 60 seconds, a report on the older connection 30 seconds after the newer one's last
     /// does not take the Agent, and one 60 seconds after does.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn the_offered_heartbeat_interval_decides_when_a_carrier_is_stale() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -11384,7 +11384,7 @@ mod tests {
     /// A newer connection whose report waited on the store for a heartbeat interval is as fresh as
     /// its report once it took the Agent: the older connection's next report does not take the
     /// Agent back.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn a_carrier_whose_report_waited_an_interval_is_not_stale_once_it_took_the_agent() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -11456,7 +11456,7 @@ mod tests {
 
     /// A report of an older connection of the host whose newer connection closes while the report
     /// is taken up is not left without a connection: the older one carries the Agent again.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn an_older_connection_takes_the_agent_back_when_the_newer_closes_meanwhile() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -12136,7 +12136,7 @@ mod tests {
     }
 
     /// The list of Agents on the filesystem store, cut from memory.
-    /// Verifies: ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server
+    /// Verifies: ADR-0049
     #[test]
     fn the_list_of_agents_filters_sorts_and_pages_on_the_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -12150,7 +12150,7 @@ mod tests {
     /// filesystem store answers; a row the release before wrote, without its derived columns, is
     /// derived again before it is read; and a label set on a Client Agent writes that one row and
     /// narrows a Selector to the Agents that inherit it.
-    /// Verifies: ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server
+    /// Verifies: ADR-0049
     #[test]
     fn the_list_of_agents_filters_sorts_and_pages_alike_on_postgres() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -12304,7 +12304,7 @@ mod tests {
     /// it, read the Agents that arrived over the Gateway's Host through the port's `query_page`,
     /// not the whole fleet, and still find the Client Agent behind the Gateway whose labels the
     /// Agent inherits.
-    /// Verifies: ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server, ADR-0027
+    /// Verifies: ADR-0049, ADR-0027
     #[test]
     fn a_gateways_download_and_an_agent_behind_it_read_the_gateways_agents_and_not_the_fleet() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -12479,7 +12479,7 @@ mod tests {
     /// An Agent whose connecting take was written and whose answer was lost, and that disconnects
     /// before the next batch, has its row name no holder after that batch: the batch reads the
     /// row's holder and count first and writes the disconnect under the count it read, once.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn the_goodbye_of_an_agent_whose_take_lost_its_answer_is_written() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -12503,7 +12503,7 @@ mod tests {
     /// Of two Agents whose takes lost their answers, one B took since is not written by A's batch,
     /// and one A took again after the batch first looked at it and before it read the rows is left
     /// as that take wrote it.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn a_lost_take_whose_row_was_taken_since_writes_no_goodbye() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -12542,7 +12542,7 @@ mod tests {
 
     /// An Agent re-keyed on A that disconnects before A's next batch has the row under its new
     /// identity name no holder after that batch: what A wrote of its presence moves with it.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn the_goodbye_of_an_agent_rekeyed_is_written_under_its_new_identity() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -12676,7 +12676,7 @@ mod tests {
     /// A label set whose commit lands after its call lost its answer is held in the memory of the
     /// instance that carries the Agent once it lands, though its own notification is otherwise
     /// passed over.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn a_label_whose_answer_was_lost_is_taken_up_once_it_commits() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -12708,7 +12708,7 @@ mod tests {
 
     /// A floor set whose commit lands after its call lost its answer is served by the instance
     /// that set it once it lands.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn a_floor_whose_answer_was_lost_is_taken_up_once_it_commits() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -12738,7 +12738,7 @@ mod tests {
 
     /// A revocation whose commit lands after its call lost its answer is in the list of the
     /// instance that made it once it lands, renewals aside.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn a_revocation_whose_answer_was_lost_is_taken_up_once_it_commits() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -12761,7 +12761,7 @@ mod tests {
     /// A re-key whose commit lands after its call lost its answer is read back under a lock that
     /// waits for it: the Agent is assigned the identity its record moved to, one row names it,
     /// under that identity, and no record is created for the old one when it reports again.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn a_rekey_whose_answer_was_lost_is_read_back_and_stands() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -12832,7 +12832,7 @@ mod tests {
     /// A re-key whose answer was lost and whose read back failed is read back at the Agent's next
     /// report, whether it asks again or not, and assigns the identity the record moved to; no other
     /// is minted and no record is created for the old one.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn a_rekey_whose_read_back_failed_is_read_back_at_the_next_report() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -12904,7 +12904,7 @@ mod tests {
     /// holds moves to the new identity, the Agent's session not ended. A disconnect on that session
     /// under the old identity is written to the new row, and a report under the old identity, on a
     /// new connection, is assigned the new one; one row names the Agent throughout.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn a_rekey_whose_read_back_failed_is_taken_up_when_its_commit_lands() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -13043,7 +13043,7 @@ mod tests {
     /// meanwhile has its disconnect written to the row the move landed in, though a batch wrote
     /// it to the old row before, and the next report
     /// under the old identity is assigned the new one.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn a_rekey_whose_read_back_fails_at_its_notification_keeps_the_agent_until_it_holds() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -13083,7 +13083,7 @@ mod tests {
     /// A report whose write finds the old row gone, while the re-key that moved it is not known,
     /// keeps the Agent and its session and the pending re-key, and creates nothing; once the
     /// store answers, the next report is assigned the new identity.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn a_report_that_finds_the_old_row_gone_keeps_a_rekey_not_known() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -13117,7 +13117,7 @@ mod tests {
     /// The read back of a take still in flight waits for it: an Agent whose take's answer was lost
     /// and that disconnected has its disconnect written under the count that take commits, so the
     /// row names no holder once the batch ran.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn the_read_back_of_a_take_waits_for_a_take_still_in_flight() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -13165,7 +13165,7 @@ mod tests {
     /// comes back through B and reconnects to A, which takes it again, leaves the newer take's count kept, though
     /// the record counts from the start again and the batch answered a greater one: the Agent's
     /// goodbye is then written.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn a_batch_answered_after_a_newer_take_keeps_that_takes_count() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -13203,7 +13203,7 @@ mod tests {
     /// An Agent that A took and that B took since does not name A after A's batch: neither once B
     /// wrote its disconnect, before A heard of the take, nor while B, whose lease is not live,
     /// still names itself; A stops carrying both when it hears of the takes.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn a_batch_names_its_instance_over_no_take_counted_since_its_own() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -13246,7 +13246,7 @@ mod tests {
     /// An Agent that disconnected under a lease A then lost has its record flushed at A's
     /// shutdown, whether or not A wrote a batch under its new lease: the count of takes outlives
     /// the lease it was answered under.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn an_agent_disconnected_under_a_lost_lease_is_flushed_at_shutdown() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -13295,7 +13295,7 @@ mod tests {
     /// An Agent whose row named another holder when A's batch read it, and that connected to A
     /// again before the batch went on, with that take's answer lost too, and disconnected, stays
     /// unsure: A's next batch reads it again and writes its goodbye.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn an_agent_taken_again_after_the_batch_read_its_row_is_read_again() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -13332,7 +13332,7 @@ mod tests {
     /// not written, is named by A's next batch: a take that failed leaves A no count, so the batch
     /// takes back a row no instance holds whatever its count, and A, which carries the Agent, is
     /// named.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn a_connect_whose_take_was_not_written_is_named_by_the_next_batch() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -13364,7 +13364,7 @@ mod tests {
     /// An Agent whose take on A was not written, and that disconnected before A's next batch, has
     /// its last record written by A's shutdown flush: the batch read a row that names no holder
     /// and no take since, so what A heard of it last is the newest.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn the_shutdown_flush_writes_an_agent_whose_take_was_not_written() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -13403,7 +13403,7 @@ mod tests {
     /// An Agent whose take on A was not written, that B took and let go before A's next batch
     /// read the row, keeps what B flushed of it at A's shutdown flush: the row names no holder,
     /// but B's take counted since the one A was answered.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn the_shutdown_flush_of_a_lost_take_keeps_a_take_counted_since() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -13438,7 +13438,7 @@ mod tests {
     /// An Agent first heard on A, whose record A created and whose take was not written, and that
     /// disconnected before A's next batch, has its last record written by A's shutdown flush: the
     /// record counted no take when A created it.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn the_shutdown_flush_writes_an_agent_created_here_whose_take_was_not_written() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -13523,7 +13523,7 @@ mod tests {
     /// An Agent another instance with a live lease holds is not taken by a report of A, whose take
     /// was not written: the report is written, and the holder and its count stay. The holder's
     /// shutdown flush, as it stops, writes no lower sequence number over A's report.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn a_report_whose_take_was_not_written_takes_no_agent_a_live_instance_holds() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -13583,7 +13583,7 @@ mod tests {
     /// started again and is carried by A with a take that was not written, has A's record again at
     /// A's next report, though B's shutdown flush wrote its older record over A's: A, answered no
     /// count for the Agent, writes every report of it.
-    /// Verifies: ADR-0043, ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0043, ADR-0048
     #[test]
     fn a_record_an_older_flush_wrote_over_a_restarted_agent_heals_at_its_next_report() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -13647,7 +13647,7 @@ mod tests {
     /// An Agent that B, stopping, still holds with a live lease, that started again and is carried
     /// by A with a take that was not written, has A's record again at A's next report, though B's
     /// shutdown flush wrote its older record over A's.
-    /// Verifies: ADR-0043, ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0043, ADR-0048
     #[test]
     fn a_record_a_stopping_holders_flush_wrote_over_a_restarted_agent_heals_at_its_next_report() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -13680,7 +13680,7 @@ mod tests {
     /// carries with a take that was not written, keeps what A wrote of it at B's shutdown flush:
     /// the count B was answered of the record created again is the one stored, but the row holds
     /// the higher sequence number of A's report.
-    /// Verifies: ADR-0043, ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0043, ADR-0048
     #[test]
     fn the_shutdown_flush_keeps_a_newer_carriers_record_after_a_record_created_again() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -13723,7 +13723,7 @@ mod tests {
 
     /// An Agent whose take was written under A's old lease and whose answer was lost is named by
     /// A's batch under its new lease: A keeps no count from before the lost take to refuse it with.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn a_lost_take_under_an_old_lease_is_named_by_the_batch_under_the_new_one() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -13756,7 +13756,7 @@ mod tests {
     /// A batch never names its instance over a live take whose count equals its own: an Agent
     /// forgotten through B and created again there counts its takes from the start, and A, which
     /// has not heard of the forget, writes nothing of it.
-    /// Verifies: ADR-0043, ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0043, ADR-0048
     #[test]
     fn a_batch_never_names_its_instance_over_a_live_take_of_a_record_created_again() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -13781,7 +13781,7 @@ mod tests {
     /// it was answered: the Agent it named anew under the lease before is named again under the
     /// next one. Each batch takes back the row its instance's previous lease, now not live, holds
     /// under the count it was answered.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn a_batch_that_meets_a_change_of_lease_keeps_the_counts_it_was_answered() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -13822,7 +13822,7 @@ mod tests {
     /// marked closed meanwhile, goes on under the identity it assigned rather than start again
     /// from the message: a next round would mint a second identity and leave the first record
     /// behind. The Agent stays disconnected, as the closed connection left it.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side, ADR-0043
+    /// Verifies: ADR-0048, ADR-0043
     #[test]
     fn a_report_that_rekeyed_its_agent_does_not_start_again() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -14001,7 +14001,7 @@ mod tests {
     /// its group's Client Agents another instance carries, the write of what it reported, and a
     /// re-key it asks for with the move of its binding are each made with the lock free, so no
     /// other report waits for them.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side, ADR-0043
+    /// Verifies: ADR-0048, ADR-0043
     #[test]
     fn a_report_holds_the_fleet_lock_across_no_call_to_the_database() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -14085,7 +14085,7 @@ mod tests {
 
     /// While one Agent's report waits for a call to its store, another Agent's report is answered:
     /// what the fleet lock guards is applied before and after the call, never across it.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn another_agents_report_is_answered_while_one_agents_write_waits() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -14142,7 +14142,7 @@ mod tests {
     /// Agent in memory stops carrying it once it hears of that take: hearing of it waits for the
     /// report under way here, so it reads the holder after this instance holds the Agent, and the
     /// newest connection keeps the Agent.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn an_instance_whose_take_is_overtaken_before_it_holds_the_agent_stops_carrying_it() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -14207,7 +14207,7 @@ mod tests {
     /// a rollout then releases nothing and a restart is refused, since the record names neither a
     /// description nor a capability before the report that created it is written, and what is
     /// held agrees with the store on all three.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn what_another_instance_commits_to_a_new_agent_while_its_report_runs_is_held() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -14268,7 +14268,7 @@ mod tests {
     /// A new Agent's record is held from its creation on but not carried until its report holds
     /// it: a presence batch run meanwhile writes nothing of it, and the Agent is not connected
     /// here until the report ends.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn a_new_agents_record_is_held_from_its_creation_but_not_carried_before_its_report_ends() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -14305,7 +14305,7 @@ mod tests {
 
     /// A new Agent's report that the host register refuses leaves no record, neither stored nor
     /// held: the record its creation made goes from both.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn a_new_agents_report_the_register_refuses_leaves_no_record_held_or_stored() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -14358,7 +14358,7 @@ mod tests {
     /// A new Agent forgotten through another instance between its creation here and the end of
     /// the report that created it is created anew by a next round of that report, so what is held
     /// is stored.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side, ADR-0043
+    /// Verifies: ADR-0048, ADR-0043
     #[test]
     fn a_new_agent_forgotten_while_its_report_runs_is_created_anew() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -14400,7 +14400,7 @@ mod tests {
     /// A restart requested while a delivery of the one queued before clears it is not lost: the
     /// request waits for the delivery, which holds the Agent's own lock across its clear, and is
     /// queued after it, so the Agent is sent it next.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn a_restart_requested_while_a_delivery_clears_one_stays_queued() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -14462,7 +14462,7 @@ mod tests {
     /// A label set while a report reads the Agent's record from the store, before it holds it, is
     /// not undone by what the read found: the label waits for the report, which holds the Agent's
     /// own lock, and is then taken into the record held.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn a_label_set_while_a_report_reads_the_record_is_not_undone() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -14510,7 +14510,7 @@ mod tests {
     /// A report whose Agent leaves memory while it reads and writes the store — forgotten through
     /// another instance — starts again from what the store holds then, and the Agent is held
     /// under a record created anew.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side, ADR-0043
+    /// Verifies: ADR-0048, ADR-0043
     #[test]
     fn a_report_whose_agent_leaves_memory_meanwhile_starts_again() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -14553,7 +14553,7 @@ mod tests {
 
     /// A report whose Agent leaves memory in each of its rounds is answered `Unavailable`, so the
     /// Agent retries, rather than starting again without end.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn a_report_whose_agent_leaves_memory_in_every_round_is_answered_unavailable() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -14608,7 +14608,7 @@ mod tests {
     /// A re-key an Agent asked for that a read again finds made before the report holds the Agent
     /// under its new identity keeps the Agent: the move is pending until then, so the read again
     /// reads it back and moves what is held, and the session goes on, its labels with it.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side, ADR-0043
+    /// Verifies: ADR-0048, ADR-0043
     #[test]
     fn a_rekey_a_read_again_finds_before_the_report_holds_it_keeps_the_agent() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {

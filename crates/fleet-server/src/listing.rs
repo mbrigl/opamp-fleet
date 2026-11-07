@@ -1,5 +1,5 @@
 //! The lists that grow with the fleet, read a page at a time
-//! (ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server):
+//! (ADR-0049):
 //! the filters, the order, the opaque cursor, and what an Agent's record gives the queries to
 //! search and sort by.
 //!
@@ -558,7 +558,7 @@ mod tests {
 
     /// Pages follow each other without a gap or a repeat, ties broken by the tiebreak, in either
     /// direction, and the last page names no next one.
-    /// Verifies: ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server
+    /// Verifies: ADR-0049
     #[test]
     fn pages_follow_each_other_in_a_stable_order() {
         let entries = || {

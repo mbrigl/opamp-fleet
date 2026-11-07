@@ -40,7 +40,7 @@ G-20: the fleet view, the reach counts and what a rollout releases read the data
 
 ## Read first
 
-- ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+- ADR-0048
   clauses 8 and 9; ADR-0043 clauses 18 and 19
 - `fleet.rs` (`place`, `inherit_held`, `client_agents_elsewhere`), `revocation.rs` (how a register
   notification is read again)

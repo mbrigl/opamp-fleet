@@ -1063,9 +1063,9 @@ mod tests {
 
     /// An upstream connection on which nothing arrives for one heartbeat interval is ended, and
     /// the Agent it carried is placed anew at its next report, on a connection of its own
-    /// (ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended clauses 1,
+    /// (ADR-0051 clauses 1,
     /// 4).
-    /// Verifies: ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended
+    /// Verifies: ADR-0051
     #[tokio::test]
     async fn an_upstream_connection_on_which_nothing_arrives_is_ended_and_its_agents_placed_anew() {
         use std::sync::atomic::Ordering;
@@ -1107,8 +1107,8 @@ mod tests {
 
     /// An upstream that accepts the TCP connection and never answers the upgrade fails the
     /// forward once one heartbeat interval has passed, rather than holding it
-    /// (ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended clause 3).
-    /// Verifies: ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended
+    /// (ADR-0051 clause 3).
+    /// Verifies: ADR-0051
     #[tokio::test]
     async fn an_upstream_that_never_answers_the_upgrade_fails_the_forward_within_the_bound() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -1149,8 +1149,8 @@ mod tests {
     /// An upstream reader held up by a downstream Agent that reads its replies slowly, for longer
     /// than an interval, keeps a connection to an upstream that answers: the Gateway's own delay
     /// is not the Server's silence
-    /// (ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended clause 1).
-    /// Verifies: ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended
+    /// (ADR-0051 clause 1).
+    /// Verifies: ADR-0051
     #[tokio::test]
     async fn an_upstream_reader_held_up_by_a_slow_downstream_keeps_a_live_connection() {
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1234,9 +1234,9 @@ mod tests {
 
     /// An upstream connection ended for its silence is closed towards the Server too: its writer,
     /// which may be blocked on a peer that reads nothing, is aborted rather than left holding the
-    /// socket (ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended
+    /// socket (ADR-0051
     /// clause 4).
-    /// Verifies: ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended
+    /// Verifies: ADR-0051
     #[tokio::test]
     async fn an_ended_upstream_connection_is_closed_towards_the_server() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -1288,8 +1288,8 @@ mod tests {
 
     /// An upstream that answers the pool's pings keeps its connection over several bounds,
     /// though it sends nothing else
-    /// (ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended clause 1).
-    /// Verifies: ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended
+    /// (ADR-0051 clause 1).
+    /// Verifies: ADR-0051
     #[tokio::test]
     async fn an_upstream_that_answers_pings_keeps_its_connection() {
         use std::sync::atomic::Ordering;

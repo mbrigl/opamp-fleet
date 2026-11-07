@@ -1070,7 +1070,7 @@ fn a_bootstrap_ca_sharing_its_subject_with_the_client_ca_is_refused() {
 /// An operator approving a request that is not pending is told so with `404`; a rejection of an id
 /// the queue does not hold is `204`, so its key is refused when it arrives, and one of an id that
 /// is no key's fingerprint is `400` (clause 10).
-/// Verifies: ADR-0038, ADR-draft-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window
+/// Verifies: ADR-0038, ADR-0052
 #[tokio::test]
 async fn an_unknown_request_is_not_approved_and_is_rejected_before_it_arrives() {
     let pki = Pki::new();
@@ -2546,7 +2546,7 @@ impl fleet_server::audit::Audit for FullAfterTheAct {
 
 /// A revocation whose entry cannot be queued after its `operator.act` was is not made: it is
 /// answered `503`, the list stays as it was, and the session of the certificate goes on.
-/// Verifies: ADR-draft-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again
+/// Verifies: ADR-0046
 #[tokio::test]
 async fn a_revocation_whose_entry_cannot_be_queued_is_not_made() {
     let pki = Pki::new();
@@ -2595,7 +2595,7 @@ async fn a_revocation_whose_entry_cannot_be_queued_is_not_made() {
 
 /// A revocation answered `201` leaves an entry naming its certificate by `authority` and `serial`,
 /// under the `id` the answer gives.
-/// Verifies: ADR-draft-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again
+/// Verifies: ADR-0046
 #[tokio::test]
 async fn a_revocation_is_recorded_with_its_certificate() {
     let pki = Pki::new();
@@ -2725,7 +2725,7 @@ async fn withdraw_trust(served: &Served, id: &str) -> Vec<(&'static str, u16)> {
 /// An act that withdraws trust whose entry cannot be queued after its `operator.act` was is not
 /// made: it is answered `503`, and the mark, the floor, the request and the window stay as they
 /// were.
-/// Verifies: ADR-draft-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again
+/// Verifies: ADR-0046
 #[tokio::test]
 async fn an_act_withdrawing_trust_whose_entry_cannot_be_queued_is_not_made() {
     let pki = Pki::new();
@@ -2762,7 +2762,7 @@ async fn an_act_withdrawing_trust_whose_entry_cannot_be_queued_is_not_made() {
 /// Each act that withdraws trust, answered as made, leaves the entry a restore repeats it by: the
 /// Gateway mark's names its host and that it is cleared, the floor's its Agent type and version,
 /// the rejection's the request's `id`, and the window's that it is closed.
-/// Verifies: ADR-draft-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again
+/// Verifies: ADR-0046
 #[tokio::test]
 async fn an_act_withdrawing_trust_is_recorded_with_what_a_restore_needs() {
     let pki = Pki::new();
@@ -2803,7 +2803,7 @@ async fn an_act_withdrawing_trust_is_recorded_with_what_a_restore_needs() {
 
 /// A revocation of a bootstrap certificate whose PKCS#12 file cannot be removed is made, and
 /// answered `500` saying so; its entry is on the record all the same.
-/// Verifies: ADR-draft-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again
+/// Verifies: ADR-0046
 #[cfg(unix)]
 #[tokio::test]
 async fn a_revocation_whose_file_stays_is_recorded_all_the_same() {
@@ -5781,7 +5781,7 @@ async fn gateway_presenting(
 /// waits in the queue naming the Gateway's host in place of a peer address, there and in the audit,
 /// becomes no Agent, and its approval mints a host of its own — never the Gateway's — whose
 /// certificate the enrolling host collects in a later reply, addressed to it.
-/// Verifies: ADR-0015, ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision
+/// Verifies: ADR-0015, ADR-0050
 #[tokio::test]
 async fn an_enrolment_through_a_gateway_is_decided_as_any_enrolment() {
     let pki = Pki::new();
@@ -6291,7 +6291,7 @@ async fn an_enrolment_request_is_read_from_exactly_one_pem_block() {
 /// The Hosts, the certificates and the revocations a page at a time: each in its fixed order,
 /// pages that follow each other by their `Link`, every one counting all that match, and filters
 /// applied before the page is cut.
-/// Verifies: ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server
+/// Verifies: ADR-0049
 #[tokio::test]
 async fn the_hosts_the_certificates_and_the_revocations_page_in_their_fixed_order() {
     let pki = Pki::new();
@@ -6570,7 +6570,7 @@ impl fleet_server::agent_store::AgentStore for HeldWrite {
 /// completes and its report is answered: the report runs off the runtime's workers, so the one
 /// worker of the Server's runtime here stays free, and the fleet lock is not held across the
 /// call.
-/// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+/// Verifies: ADR-0048
 #[test]
 fn a_handshake_completes_and_a_report_is_answered_while_another_reports_store_call_waits() {
     let pki = Pki::new();
@@ -6644,7 +6644,7 @@ fn a_handshake_completes_and_a_report_is_answered_while_another_reports_store_ca
 /// An Agent whose report waits for its store call is answered a WebSocket ping on the same
 /// connection meanwhile, so a stall of the Server's handling ends no live connection for silence;
 /// its reply follows once the call is let go.
-/// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+/// Verifies: ADR-0048
 #[test]
 fn a_ping_is_answered_on_a_connection_whose_report_waits_for_its_store_call() {
     let pki = Pki::new();

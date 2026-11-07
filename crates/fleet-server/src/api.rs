@@ -829,7 +829,7 @@ impl From<fleet::PackageStatusView> for PackageStatusResponse {
 }
 
 /// The parameters a list that pages takes, besides its filters
-/// (ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server
+/// (ADR-0049
 /// clauses 3 and 4).
 const LIMIT_DOC: &str = "How many entries a page holds, 1 to 1000; a larger value is answered as \
                          1000. Without limit and cursor the whole list is answered while it holds \
@@ -982,7 +982,7 @@ fn agent_query(state: &AppState, asked: &Asked) -> Result<fleet::AgentQuery, Ref
 }
 
 /// What the fleet reports, for suggestions
-/// (ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server
+/// (ADR-0049
 /// clause 7).
 #[derive(Serialize, ToSchema)]
 struct ReportedValuesResponse {
@@ -3688,7 +3688,7 @@ fn note(state: &AppState, entry: crate::audit::Entry) {
 }
 
 /// Holds a place in the record for the entry of an act about to run, which says what the act did
-/// once it has (ADR-draft-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again
+/// once it has (ADR-0046
 /// clause 5): without one the act does not run, and is answered `503`. `None` where the Server
 /// keeps no record.
 fn hold_place(state: &AppState) -> Result<Option<crate::audit::Permit>, crate::audit::Unavailable> {
@@ -4229,7 +4229,7 @@ mod tests {
     /// A revocation whose store answers an error may have been made all the same, so its place is
     /// written with the outcome `unknown`, naming the certificate as a revocation that was made
     /// would, and a restore sets it again.
-    /// Verifies: ADR-draft-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again
+    /// Verifies: ADR-0046
     #[tokio::test]
     async fn a_revocation_whose_store_answer_was_lost_is_recorded_as_unknown() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -4348,7 +4348,7 @@ mod tests {
     /// so its place is written with the outcome `unknown` and what it was asked to do, and a
     /// restore repeats it; a window closed here is closed whatever its store answers, so its entry
     /// says `closed`.
-    /// Verifies: ADR-draft-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again
+    /// Verifies: ADR-0046
     #[tokio::test]
     async fn an_act_withdrawing_trust_whose_store_answered_an_error_is_recorded_all_the_same() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -4437,7 +4437,7 @@ mod tests {
     /// recorded as `enrolment.rejected` with `queued` false, and refuses that request when it
     /// arrives in a window; one queued is recorded with `queued` true. An id that is not 64
     /// lowercase hexadecimal digits is answered `400` and recorded nowhere.
-    /// Verifies: ADR-draft-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window
+    /// Verifies: ADR-0052
     #[tokio::test]
     async fn an_id_not_queued_is_rejected_and_a_malformed_one_is_refused() {
         use crate::enrolment::tests::{key, request, requester};
