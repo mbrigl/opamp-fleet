@@ -5,14 +5,14 @@
 #
 # Changes reach main through a pull request, and the local main only takes up the remote's by a
 # fast-forward. Branches integrate first on a feat/ branch by a local merge (AGENTS.md, section 6).
-# Two branches green on their own collide at a merge mostly in the record: the same ADR number,
-# an index row, a link or an anchor the other moved. scripts/check-docs.sh decides those in about
-# a second, so it runs here on the merged tree, which git has written before this hook and before
-# the commit. The rest of scripts/check-all.sh runs before the push (pre-push), where it sees every
+# Two branches green on their own collide at a merge mostly in the record: the same ADR number, an
+# index row, a link or an anchor the other moved. scripts/check-docs.sh decides those in about a
+# second, so it runs here on the merged tree, which git has written before this hook and before the
+# commit. The rest of scripts/check-all.sh runs before the push (pre-push), where it sees every
 # merge at once; a merge that stops on a conflict, the one carrying edits by hand, runs all of it
 # when concluded (pre-commit). A fast-forward makes no commit and runs no hook; 'merge.ff' false
-# prevents one, and the push still gates what it brought. Enabled as the README's "Git hooks"
-# says.
+# prevents one, and the push still gates what it brought. Enabled as the "Git hooks" of
+# CONTRIBUTING.md says.
 #
 # A repository without scripts/check-docs.sh has nothing to run, and the merge proceeds.
 # Bypassable with 'git merge --no-verify'; AGENTS.md, section 6 says who may.

@@ -5,9 +5,10 @@
 # Each case builds a throwaway git repository under a temporary directory with a
 # docs/ARCHITECTURE.md carrying the 'Last design revision' line and commits on chosen dates,
 # runs the sensor against it, and asserts the exit code and the line a reader would meet. The
-# cases cover the count from the first commit and from the commit that set the date, what is not
-# counted (a docs-only commit, a merge, a change of the number), the due message with its
-# directories and their changes, and the three ways the line fails to read.
+# cases cover the count from the first commit and from the commit that set the date, a second
+# revision on one day, what is not counted (a docs-only commit, a merge, a change of the number),
+# the due message with its directories and their changes, and the three ways the line fails to
+# read.
 #
 # Verifies: ADR-0002
 # Inputs: scripts/sensor-revision-due.sh scripts/lib/
@@ -126,6 +127,22 @@ commit_at "$d" "2026-02-01T00:00:10" "revision"
 mkdir -p "$d/src"; echo "x" >> "$d/src/b.py"
 commit_at "$d" "2026-02-01T00:00:20" "change on the day of the revision"
 expect 0 "a change on the day of the revision counts" "$d" "1 of 20 changes outside docs/ since 2026-02-01"
+
+# A second revision on the day of the first writes its ordinal after the date, and the count
+# starts again from it: the changes between the two were revised by the second.
+d="$(repo second-of-a-day)"
+overview "$d" "**Last design revision:** 2026-02-01, due after 20 changes."
+commit_at "$d" "2026-02-01T09:00:00" "revision"
+mkdir -p "$d/src"
+for f in a b c; do
+  echo "x" >> "$d/src/$f.py"
+  commit_at "$d" "2026-02-01T10:00:00" "change $f"
+done
+overview "$d" "**Last design revision:** 2026-02-01 (2), due after 20 changes."
+commit_at "$d" "2026-02-01T15:00:00" "second revision of the day"
+echo "x" >> "$d/src/d.py"
+commit_at "$d" "2026-02-01T16:00:00" "change d"
+expect 0 "a second revision on one day starts the count again" "$d" "1 of 20 changes outside docs/ since 2026-02-01 (2) — not yet due"
 
 d="$(repo number-only)"
 overview "$d" "**Last design revision:** 2026-02-01, due after 20 changes."

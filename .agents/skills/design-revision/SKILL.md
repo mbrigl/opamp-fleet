@@ -1,6 +1,6 @@
 ---
 name: design-revision
-description: Revisit the design of what recent work touched — the tickets of a feature spec, or the changes counted since the last revision — survey the modules for entropy, check the architecture overview against the tree, read the ADRs that bind the modules and the criteria the work served against the system, turn the mistakes made on the way into checks, and drop what nothing justified. Use when a feature spec's tickets have all merged, when scripts/sensor-revision-due.sh reports the revision DUE, or when the human asks for a retro or an architecture review.
+description: Revisit the design of what recent work touched — its modules, the architecture overview, and the ADRs and criteria that bind them. Use when a feature spec's tickets have all merged, when scripts/sensor-revision-due.sh reports the revision DUE, or when the human asks for a retro or an architecture review.
 ---
 
 # Revise the design
@@ -21,6 +21,11 @@ target. One session, one spec.
 Without a spec, when [`scripts/sensor-revision-due.sh`](../../../scripts/sensor-revision-due.sh)
 says the revision is due, the scope is the directories it lists: the changes since the last
 revision. One session, one count.
+
+A spec's revision runs the sensor as it begins. Where it says the revision is due, that revision
+takes the directories it lists too: moving the line resets the count, and changes no spec covered
+would otherwise go unrevised. Where it says not yet due, the revision leaves the line as it reads,
+and the count runs on over the changes it did not look at.
 
 ## 2. Survey the modules
 
@@ -46,9 +51,13 @@ described: each is a finding, because a stale overview is believed.
 
 ## 4. Read the record and the constitution against the system
 
-Take the ADRs in force whose *Applies to* names a touched module, through the index in
-[`docs/adr/README.md`](../../../docs/adr/README.md). Read each in full, because the revision weighs
-its forces against the system. Decisions that have grown into one, each ADR true on its own
+Take the ADRs in force whose *Applies to* names a touched module:
+[`scripts/sensor-binding-adrs.sh`](../../../scripts/sensor-binding-adrs.sh) `--sections`, with a
+`--path` for each, prints their header, *Decision*, and *Enforcement*, and the *Applies to* written
+in prose to match. Read in full each whose *Decision* the survey of step 2 or the system
+questions, and each whose *Context* names what the work touched, because the revision weighs its
+forces against the system; one the system still bears out, its forces untouched, stands on those
+three parts. Decisions that have grown into one, each ADR true on its own
 and the set said in one sentence, are a candidate for one superseding ADR that consolidates
 them ([mechanics](../../../docs/adr/README.md#mechanics)).
 
@@ -71,9 +80,9 @@ dropped, unless an ADR or a criterion cites it
 ([ADR-0002](../../../docs/adr/0002-decisions-verified-by-tests.md)).
 
 Then the rules added since the last revision: every rule written into
-[`AGENTS.md`](../../../AGENTS.md), the [README](../../../README.md), or the
-[record's mechanics](../../../docs/adr/README.md#mechanics), and every step written into a skill,
-read from the diff of those files since the commit that set the date of the `Last design
+[`AGENTS.md`](../../../AGENTS.md), the mechanics of [`CONTRIBUTING.md`](../../../CONTRIBUTING.md),
+or the [record's mechanics](../../../docs/adr/README.md#mechanics), and every step written into a
+skill, read from the diff of those files since the commit that set the date of the `Last design
 revision` line, where [`scripts/sensor-revision-due.sh`](../../../scripts/sensor-revision-due.sh)
 starts its count, or from all history while the line reads `none yet`. A rule in prose is the
 fallback for what no check can decide
@@ -93,6 +102,12 @@ found, a ticket per rule to drop, a ticket per check to write, a `proposed` ADR 
 `propose-adr` where a finding is a decision, a consolidating one included, and a drafted
 specification change as a ticket whose *Mode* is "with the human". The tickets go into
 `docs/plan/revision-<YYYY-MM-DD>/`, in the shape of the `plan-feature` skill's ticket template,
-without a spec. Move the `Last design
-revision` line of [`docs/ARCHITECTURE.md`](../../../docs/ARCHITECTURE.md) to today's date. Then
-delete the `spec.md` of a spec in scope: it is closed.
+without a spec; a second revision on one day numbers on in the same directory. List the backlog
+entries that touch the modules in scope, from
+[`scripts/sensor-backlog.sh`](../../../scripts/sensor-backlog.sh) or the host's issues, as
+candidates for the human ([ADR-0006](../../../docs/adr/0006-feature-layer.md)); a ticket made
+from one deletes the entry in the same commit. Where the
+revision took the count, move the `Last design revision` line of
+[`docs/ARCHITECTURE.md`](../../../docs/ARCHITECTURE.md) to today's date; where it reads today's
+date already, add this revision's ordinal of the day after it, `(2)` for the second. Then delete
+the `spec.md` of a spec in scope: it is closed.

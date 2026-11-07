@@ -36,6 +36,12 @@ Every project decides both at setup; neither has a template default.
 The entries combine: a modular monolith whose modules are each ports and adapters, a pipeline
 whose filters are each a functional core. Each part of a combination is a decision of its own.
 
+## Planning
+
+| Concept | One sentence | Think of it when |
+|---|---|---|
+| [Backlog](backlog.md) | Where a finding goes that no ticket covers: one file per entry in the tree, or the host's issues | a session finds something outside its ticket, or reports arrive from outside |
+
 ## Environment
 
 | Concept | One sentence | Think of it when |

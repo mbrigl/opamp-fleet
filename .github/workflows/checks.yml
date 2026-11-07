@@ -4,13 +4,13 @@ name: Checks
 # toolchain of the Rust jobs and the stores the two store jobs start (ShellCheck, used by the shell
 # job, ships preinstalled on the GitHub-hosted runner image).
 # scripts/check-all.sh is the local equivalent; check 9 of scripts/check-docs.sh holds its list,
-# the jobs of this workflow, and the required checks named in README.md together. A job runs each
-# check after its self-test where it has one, and each script's header says what it checks and
-# which ADR it holds, or that the check is the rule.
+# the jobs of this workflow, and the required checks named in CONTRIBUTING.md together. A job runs
+# each check after its self-test where it has one, and each script's header says what it checks
+# and which ADR it holds, or that the check is the rule.
 #
 # The sensors report for the reviewer and fail on nothing they count, except the action
 # references once a project runs that sensor with --require; their self-tests fail like any
-# check's. The sensors job checks out the full history because three sensors read it. The review
+# check's. The sensors job checks out the full history because five sensors read it. The review
 # binding sensor runs in review-binding.yml, the repository settings sensor on a human's
 # instruction (ADR-0002); this workflow runs the self-test of each.
 #
@@ -174,6 +174,12 @@ jobs:
         run: bash scripts/sensor-binding-adrs.sh "$BASE"
         env:
           BASE: ${{ github.event.pull_request.base.sha || (!github.event.forced && github.event.before) || '' }}
+      - name: Self-test the plain rules sensor
+        run: bash scripts/test-sensor-plain-rules.sh
+      - name: Report long sentences and soft modal verbs the change adds to the rules
+        run: bash scripts/sensor-plain-rules.sh "$BASE"
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || (!github.event.forced && github.event.before) || '' }}
       - name: Self-test the revision-due sensor
         run: bash scripts/test-sensor-revision-due.sh
       - name: Report the changes since the last design revision
@@ -182,6 +188,10 @@ jobs:
         run: bash scripts/test-sensor-plan-frontier.sh
       - name: Report the tickets that may be claimed, the claimed, and the blocked
         run: bash scripts/sensor-plan-frontier.sh
+      - name: Self-test the backlog sensor
+        run: bash scripts/test-sensor-backlog.sh
+      - name: Report the backlog entries on main and on unmerged local branches
+        run: bash scripts/sensor-backlog.sh
       - name: Self-test the action references sensor
         run: bash scripts/test-sensor-action-refs.sh
       - name: Report the forms of the action references the workflows use
@@ -227,10 +237,10 @@ jobs:
   # real platforms. Actual service registration still needs the manual smoke checklist
   # (README.md → "The service smoke test") — CI runners cannot exercise systemd/launchd/SCM.
   #
-  # Both are required status checks (README.md → "Repository settings"), like every job of this
-  # workflow, so these two are plain jobs without a 'name:' or a matrix: a ruleset names a check
-  # by the job's rendered name, and the job id is what scripts/check-docs.sh compares with the
-  # README.
+  # Both are required status checks (CONTRIBUTING.md → "Repository settings"), like every job of
+  # this workflow, so these two are plain jobs without a 'name:' or a matrix: a ruleset names a
+  # check by the job's rendered name, and the job id is what scripts/check-docs.sh compares with
+  # the contributing guide.
   # fleet-tools too: the release packs every Client archive with `opamp-fleetctl`, Windows
   # included, and publishes it for macOS (ADR-0032).
   client-windows:

@@ -21,10 +21,14 @@
 #      which is how host containers are managed without the socket.
 #   5. Git settings: the postStartCommand of devcontainer.json runs 'git config core.hooksPath
 #      .githooks', 'git config merge.ff false', 'git config pull.ff only', and 'git config
-#      merge.adr-index.driver' with the driver's command as the README writes it. The git hooks of
-#      the README and SECURITY.md hold in the container because it enables them on every start,
-#      the container's share of the local gate (ADR-0002, ADR-0004). The value is read from its
-#      key to the next top-level key, whatever its form: a string, an array, or an object.
+#      merge.adr-index.driver' with the driver's command as CONTRIBUTING.md writes it. The git hooks
+#      of CONTRIBUTING.md and SECURITY.md hold in the container because it enables them on every
+#      start, the container's share of the local gate (ADR-0002, ADR-0004). The value is read from
+#      its key to the next top-level key, whatever its form: a string, an array, or an object.
+#   6. Mount path: 'workspaceFolder' and the target of 'workspaceMount', where the file sets them,
+#      are '/workspaces/${localWorkspaceFolderBasename}', the default of Dev Containers, so that
+#      every project sits under a path of its own and an agent's memory, keyed by that path,
+#      stays with it (ADR-0004).
 #
 # Only the default definition is read; a variant under a subdirectory of .devcontainer/ is not.
 # devcontainer.json allows comments, so full-line '//' comments are dropped before reading; a
@@ -109,7 +113,7 @@ if [[ ! -f "$ROOT/$CONFIG" ]]; then
   add_error "$CONFIG: not found — the Dev Container ADR-0004 governs has nothing to check"
 else
   # 1. Socket.
-  if uncommented "$ROOT/$CONFIG" | grep -qE 'docker\.sock|/var/run/docker'; then
+  if grep -qE 'docker\.sock|/var/run/docker' <<< "$(uncommented "$ROOT/$CONFIG")"; then
     add_error "$CONFIG: mounts the host Docker socket — the Dev Container never reaches the host engine (ADR-0004); manage host containers from the host-side extension instead"
   fi
 
@@ -144,16 +148,33 @@ else
   for setting in "core.hooksPath .githooks" "merge.ff false" "pull.ff only" \
     "merge.adr-index.driver '.githooks/merge-adr-index %O %A %B %S %X %Y'"; do
     [[ "$post" == *"git config $setting"* ]] \
-      || add_error "$CONFIG: postStartCommand does not run 'git config $setting' — the git hooks and the merge settings they rely on are enabled on every start (README, Git hooks)"
+      || add_error "$CONFIG: postStartCommand does not run 'git config $setting' — the git hooks and the merge settings they rely on are enabled on every start (CONTRIBUTING.md, Git hooks)"
   done
+
+  # 6. Mount path: a key the file leaves out takes the default, which is the path itself.
+  # shellcheck disable=SC2016  # the variable is devcontainer.json's, not the shell's
+  own='/workspaces/${localWorkspaceFolderBasename}'
+  folder="$(top_level_value "$ROOT/$CONFIG" workspaceFolder)"
+  [[ -z "$folder" || "$folder" == *"\"$own\""* ]] \
+    || add_error "$CONFIG: workspaceFolder is not '$own' — a path every project shares gives every project one agent memory (ADR-0004)"
+  # The target is one of the mount's comma-separated options, under any of its names.
+  mount="$(top_level_value "$ROOT/$CONFIG" workspaceMount | tr -d '" \t\n')"
+  mount_own=0
+  [[ -z "$mount" ]] && mount_own=1
+  IFS=',' read -ra options <<< "$mount"
+  for option in "${options[@]}"; do
+    case "${option#:}" in target="$own" | dst="$own" | destination="$own") mount_own=1 ;; esac
+  done
+  ((mount_own)) \
+    || add_error "$CONFIG: workspaceMount does not target '$own' — a path every project shares gives every project one agent memory (ADR-0004)"
 fi
 
 # 4. Host side: the pair has to sit inside the 'remote.extensionKind' object, so the text is
 # flattened and matched from that key up to the first closing brace.
 if [[ ! -f "$ROOT/$SETTINGS" ]]; then
   add_error "$SETTINGS: not found — it pins the container-management extension to the host side (ADR-0004)"
-elif ! uncommented "$ROOT/$SETTINGS" | tr -d ' \t\n' \
-       | grep -qE '"remote\.extensionKind":\{[^}]*"ms-azuretools\.vscode-containers":\["ui"\]'; then
+elif ! grep -qE '"remote\.extensionKind":\{[^}]*"ms-azuretools\.vscode-containers":\["ui"\]' \
+       <<< "$(uncommented "$ROOT/$SETTINGS" | tr -d ' \t\n')"; then
   add_error "$SETTINGS: does not pin 'ms-azuretools.vscode-containers' to [\"ui\"] under 'remote.extensionKind' — without it the extension runs in the container and asks for the socket (ADR-0004)"
 fi
 
@@ -163,5 +184,5 @@ if ((${#errors[@]})); then
   exit 1
 fi
 
-echo "Dev Container check passed (${#features[@]} Features pinned and locked, no host socket, git hooks enabled)."
+echo "Dev Container check passed (${#features[@]} Features pinned and locked, no host socket, git hooks enabled, a path of its own)."
 exit 0

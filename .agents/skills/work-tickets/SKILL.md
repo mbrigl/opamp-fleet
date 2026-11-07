@@ -1,6 +1,6 @@
 ---
 name: work-tickets
-description: Work the tickets under docs/plan/ — one ticket in a session of its own, or several at once, each claimed by its branch in a worktree of its own and worked by a fresh agent session. Use when a session is to pick up a ticket, when the human asks to work the plan or to run agents in parallel, or when you are started in a worktree with a ticket path.
+description: Work the tickets under docs/plan/, each claimed by its branch and worked in a fresh session, alone or several in parallel worktrees. Use when a session is to pick up a ticket, when the human asks to work the plan or to run agents in parallel, or when you are started in a worktree with a ticket path.
 ---
 
 # Work tickets
@@ -22,10 +22,14 @@ Two roles: the **dispatcher** claims tickets and starts the sessions that work t
    (`git fetch --prune <remote>`), so that the claims of other clones are seen. Run
    [`scripts/sensor-plan-frontier.sh`](../../../scripts/sensor-plan-frontier.sh). Its
    frontier is what may be claimed; the claimed and the blocked are not.
-2. Choose. Alone, one ticket. In parallel, only tickets whose *Mode* says unattended and that
-   touch nothing the harness ADR keeps with the human, and no more than its cap on open agent
-   work allows, counting the branches of agents whose work is not yet on `main`, claims included. A
-   ticket "with the human" is worked in a session the human sits in, never dispatched.
+2. Choose. Alone, one ticket. In parallel, only tickets whose *Mode* says unattended and that touch
+   nothing the harness ADR keeps with the human, and no more than its cap on open agent work allows,
+   counting the branches of agents whose work is not yet on `main`, claims included. Among those,
+   only tickets whose `Touches:` lines share no path with each other, with those of the tickets
+   other `ticket/` branches claim, as each branch's ticket file says, or with the diff of any other
+   branch still open, since two that collide cost a rework and its review; a ticket whose *Read
+   first* names no paths is dispatched only while no other ticket is claimed. A ticket "with the
+   human" is worked in a session the human sits in, never dispatched.
 3. Claim each with [`claim.sh`](claim.sh): `.agents/skills/work-tickets/claim.sh <ticket path>`
    creates the branch `ticket/<spec>/<NN>-<slug>` at `main`, and with the remote the harness
    ADR names as a second argument creates it on that remote first, so the claim holds across
@@ -39,11 +43,17 @@ Two roles: the **dispatcher** claims tickets and starts the sessions that work t
    names for implementing, with the command it gives for that agent, inside the worktree and
    handed only the ticket's path and this skill. The dispatcher's session does no ticket's
    work, so the review of each stays with a session that did not write it
-   ([§5](../../../AGENTS.md#5-quality-bar--definition-of-done)).
+   ([§5](../../../AGENTS.md#5-quality-bar--definition-of-done)). It waits for each session to
+   end rather than asking after it, and reads its hand-off, never its transcript. A session that
+   ends without one has handed its ticket back: the dispatcher leaves the claim for the human.
 
 ## 2. Work one ticket
 
-1. Read the ticket and what its *Read first* names, and nothing else up front.
+1. Read the ticket and what its *Read first* names, and nothing else up front. Check the paths it
+   touches against the tree first, since a path goes stale where the behaviour it serves does
+   not, and correct them in the ticket file; then read the ADRs that bind them through
+   [`scripts/sensor-binding-adrs.sh`](../../../scripts/sensor-binding-adrs.sh) `--sections`,
+   with a `--path` for each, the rest by the sections it names.
 2. Turn each acceptance criterion into a failing test at the seam the ticket names, then make it
    pass, along the golden path of [`docs/ARCHITECTURE.md`](../../../docs/ARCHITECTURE.md).
 3. Stop where the *Mode* says. A session past its stop writes what it found and where it stands

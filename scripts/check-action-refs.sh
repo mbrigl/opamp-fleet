@@ -143,8 +143,8 @@ fi
 # 2. Dependabot.
 if [[ ! -f "$ROOT/$DEPENDABOT" ]]; then
   add_error "$DEPENDABOT: not found — Dependabot raises the pull request for a new major of a first-party action and a new release of a pinned one (ADR-0010 clause 5)"
-elif ! grep -vE '^[[:space:]]*#' "$ROOT/$DEPENDABOT" \
-       | grep -qE "^[[:space:]]*(- )?package-ecosystem:[[:space:]]*[\"']?github-actions[\"']?[[:space:]]*(#.*)?$"; then
+elif ! grep -qE "^[[:space:]]*(- )?package-ecosystem:[[:space:]]*[\"']?github-actions[\"']?[[:space:]]*(#.*)?$" \
+       <<< "$(grep -vE '^[[:space:]]*#' "$ROOT/$DEPENDABOT")"; then
   add_error "$DEPENDABOT: has no 'package-ecosystem: github-actions' entry — without it no pull request arrives when an action publishes a new release (ADR-0010 clause 5)"
 fi
 

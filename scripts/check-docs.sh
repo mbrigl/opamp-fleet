@@ -60,7 +60,7 @@
 #      see a missing half: it only mirrors the index against whatever status the file carries.
 #      Every name of a Supersedes field counts, on whichever line it sits.
 #   9. Check-list agreement: the jobs of .github/workflows/checks.yml and the required status
-#      checks named between the 'required-checks' markers in README.md list the same jobs, and
+#      checks named between the 'required-checks' markers in CONTRIBUTING.md list the same jobs, and
 #      the workflows under .github/workflows/ and scripts/check-all.sh run the same scripts. A
 #      check that runs in only one of them is a gate somebody believes in and does not have
 #      (AGENTS.md, section 5). A job that runs no script under scripts/ fails too: its commands
@@ -68,8 +68,8 @@
 #      line, one that publishes rather than checks, is exempt, while the scripts it runs still
 #      count. So does a script under scripts/ that neither list runs, unless check-all.sh names
 #      it on an '# On instruction:' line. A job with a matrix reports one check run per entry, so
-#      the README names it by those, '<job> (<values>)', and never by its bare name.
-#  10. Project Layout integrity: every path listed in the 'Project Layout' block of README.md
+#      CONTRIBUTING.md names it by those, '<job> (<values>)', and never by its bare name.
+#  10. Project Layout integrity: every path listed in the 'Project Layout' block of CONTRIBUTING.md
 #      exists, a trailing '/' meaning a directory. The block is written by hand and nothing else
 #      tells a reader that one of its lines has gone stale. A path with a '*' matches at least one
 #      file, and docs/plan/ may be absent, since open work lives there only while there is some
@@ -172,17 +172,6 @@ trim() {
   TRIMMED="${TRIMMED%"${TRIMMED##*[![:space:]]}"}"
 }
 
-# key_of <file> — sets KEY to what follows 'ADR-' in the identifier of the ADR file, as adr_key
-# prints it.
-KEY=""
-key_of() {
-  local base="${1##*/}"
-  case "$base" in
-    draft-*) KEY="${base%.md}" ;;
-    *) KEY="${base%%-*}" ;;
-  esac
-}
-
 # The header of every ADR, read by one awk pass over the record instead of a grep per field, per
 # ADR, and per check. Keyed by the ADR's path: the first line of each header field anywhere in the
 # file, as adr_field_line reads it (ADR_STATUS, ADR_APPLIES); the Supersedes and Deciders fields
@@ -201,8 +190,8 @@ read_adr_headers() {
   ((${#ADR_LIST[@]})) || return 0
   for file in "${ADR_LIST[@]}"; do
     ADR_KNOWN["$file"]=1
-    key_of "$file"
-    [[ -v ADR_BY_KEY["$KEY"] ]] || ADR_BY_KEY["$KEY"]="$file"
+    adr_key_of "$file"
+    [[ -v ADR_BY_KEY["$ADR_KEY"] ]] || ADR_BY_KEY["$ADR_KEY"]="$file"
   done
   while IFS=$'\x1f' read -r file field value; do
     case "$field" in
@@ -214,17 +203,17 @@ read_adr_headers() {
       stray) ADR_STRAY["$file"]+="$value"$'\n' ;;
       needle) ADR_NEEDLE["$file"]=1 ;;
     esac
-  done < <(awk -v fields="$ADR_FIELDS" -v needle="$(instruction_needle)" '
+  done < <(awk -v mark="$ADR_FIELD_MARK_RE" -v item="$ADR_ITEM_RE" -v field="$ADR_FIELD_ITEM_RE" -v needle="$(instruction_needle)" '
     function out(k, v) { printf "%s\037%s\037%s\n", FILENAME, k, v }
     FNR == 1 { head = 1; cont = ""; split("", seen) }
     {
       if (head && /^## /) head = 0
-      if (head && $0 ~ ("\\*\\*(" fields "):\\*\\*") && $0 !~ /^- \*\*/) out("stray", FNR ":" $0)
+      if (head && $0 ~ mark && $0 !~ item) out("stray", FNR ":" $0)
       if (needle != "" && !("needle" in seen) && index($0, needle)) { seen["needle"]; out("needle", 1) }
       if (!("heading" in seen) && /^# ADR-/) { seen["heading"]; out("heading", $0) }
       if (cont != "" && /^[[:space:]]+[^[:space:]]/) { out(cont, $0); next }
       cont = ""
-      if (match($0, /^- \*\*[A-Za-z ]+:\*\*/)) {
+      if (match($0, field)) {
         name = substr($0, 5, RLENGTH - 7)
         if (!(name in seen)) {
           seen[name]; out(name, $0)
@@ -250,7 +239,7 @@ adr_header() {
 
 # applies_to_of — sets TRIMMED to the content of the '**Applies to:**' line adr_header read,
 # trimmed; empty when the line is missing or blank.
-applies_to_of() { trim "${HEADER_APPLIES##*\*\*Applies to:\*\*}"; }
+applies_to_of() { adr_field_value "$HEADER_APPLIES" 'Applies to'; trim "$ADR_VALUE"; }
 
 # TEXT_FILES — every text file the repository consists of, absolute paths, sorted. Collected once
 # by collect_text_files below and then iterated by each check: building the list reads every
@@ -325,7 +314,7 @@ check_adr_index() {
   local indexed_files=() indexed_applies=() indexed_status=()
   local line number target filename applies status archive=0
   local -a cells
-  local row_re='^\|[[:space:]]*\[([0-9]{4}|draft-[^]]+)\]\(([^)]+)\)'
+  local row_re="^\\|[[:space:]]*\\[($ADR_NUMBER_RE|draft-[^]]+)\\]\\(([^)]+)\\)"
   while IFS= read -r line; do
     [[ "$line" =~ ^#+[[:space:]]+Superseded\ and\ rejected[[:space:]]*$ ]] && { archive=1; continue; }
     [[ "$line" =~ $row_re ]] || continue
@@ -341,7 +330,7 @@ check_adr_index() {
     indexed_files+=("$filename")
     indexed_applies+=("$applies")
     indexed_status+=("$status")
-    if [[ "$number" == draft-* ]]; then
+    if adr_is_draft "$number"; then
       [[ "$filename" == "$number.md" ]] \
         || add_error "ADR index: row for $number links to '$filename', not to '$number.md'"
     elif [[ "$filename" != "$number"-* ]]; then
@@ -406,28 +395,28 @@ check_adr_index() {
 # ADR numbers run 0001..N without gaps, and each file's heading carries its own number.
 # Superseded ADRs stay on disk, so a gap can only ever mean a deleted ADR or a botched rename.
 check_adr_numbering() {
-  local f base number expected heading key n=0
+  local f base expected heading key n=0
   for f in "${ADR_LIST[@]}"; do
     base="${f##*/}"
-    [[ "$base" == draft-* ]] && continue
-    number="${base%%-*}"
+    adr_is_draft "$base" && continue
+    adr_key_of "$base"
     n=$((n + 1))
     printf -v expected '%04d' "$n"
-    if [[ "$number" != "$expected" ]]; then
+    if [[ "$ADR_KEY" != "$expected" ]]; then
       add_error "ADR numbering: expected '$expected-*.md' at position $n, found '$base' — numbers must run 0001..N without gaps"
       break
     fi
     heading=""
-    [[ "${ADR_HEADING["$f"]-}" =~ ^#\ ADR-[0-9]{4} ]] && heading="${BASH_REMATCH[0]}"
-    if [[ "$heading" != "# ADR-$number" ]]; then
-      add_error "$base: heading says '${heading:-<none>}', but the filename says ADR-$number"
+    [[ "${ADR_HEADING["$f"]-}" =~ ^#\ ADR-$ADR_NUMBER_RE ]] && heading="${BASH_REMATCH[0]}"
+    if [[ "$heading" != "# ADR-$ADR_KEY" ]]; then
+      add_error "$base: heading says '${heading:-<none>}', but the filename says ADR-$ADR_KEY"
     fi
   done
 
   # A draft stands outside the count; its slug and heading follow its file name (ADR-0002).
   for f in "${ADR_LIST[@]}"; do
     base="${f##*/}"
-    [[ "$base" == draft-* ]] || continue
+    adr_is_draft "$base" || continue
     key="${base%.md}"
     if [[ ! "$key" =~ ^draft-$ADR_SLUG_RE$ ]]; then
       add_error "$base: a draft's slug is lower case letters and digits joined by single hyphens"
@@ -458,7 +447,7 @@ check_no_draft_on_main() {
   local f
   while IFS= read -r f; do
     add_error "$(basename "$f"): a draft lands on main — give it its number first with scripts/number-adrs.sh (ADR-0002)"
-  done < <(find "$ADR_DIR" -maxdepth 1 -type f -name 'draft-*.md' | LC_ALL=C sort)
+  done < <(adr_files "$ADR_DIR" draft)
 }
 
 # instruction_needle — the opening of the instruction paragraph in docs/adr/template.md: the first
@@ -542,8 +531,8 @@ check_adr_supersessions() {
   local f base nr line target target_file succ_file named accepted
   for f in "${ADR_LIST[@]}"; do
     base="${f##*/}"
-    key_of "$f"
-    nr="$KEY"
+    adr_key_of "$f"
+    nr="$ADR_KEY"
     line="${ADR_STATUS["$f"]-}"
 
     # Forward: once this one is accepted, every ADR it claims to supersede — one, or several
@@ -917,8 +906,8 @@ check_adr_link_targets() {
       target="${LINK_TARGET%%#*}"
       base="${target##*/}"
       # Compare only against ADR filenames; anything else is not a claim about which ADR it is.
-      case "$base" in [0-9][0-9][0-9][0-9]-*.md | draft-*.md) ;; *) continue ;; esac
-      if [[ "$number" == draft-* ]]; then
+      adr_is_file "$base" || continue
+      if adr_is_draft "$number"; then
         [[ "$base" == "$number.md" ]]
       else
         [[ "$base" == "$number"-* ]]
@@ -929,14 +918,14 @@ check_adr_link_targets() {
 
 # The three places that list this repository's checks have to agree: the jobs in
 # .github/workflows/checks.yml, the invocations in scripts/check-all.sh, and the required status
-# checks named in README.md. AGENTS.md, section 5 makes check-all.sh the local equivalent of the
-# workflow, and the README list is what a maintainer configures the ruleset from — a check that
-# runs in only one of the three is a gate somebody believes in and does not have. Both files say
-# in their own header that a check added to one is added to the other in the same change; this is
-# that sentence, verified.
+# checks named in CONTRIBUTING.md. AGENTS.md, section 5 makes check-all.sh the local equivalent of
+# the workflow, and that list is what a maintainer configures the ruleset from — a check that runs
+# in only one of the three is a gate somebody believes in and does not have. Both files say in their
+# own header that a check added to one is added to the other in the same change; this is that
+# sentence, verified.
 check_check_lists() {
   local rel_wf=".github/workflows/checks.yml" rel_all="scripts/check-all.sh"
-  local wf="$ROOT/$rel_wf" all="$ROOT/$rel_all" readme="$ROOT/README.md"
+  local wf="$ROOT/$rel_wf" all="$ROOT/$rel_all" readme="$ROOT/CONTRIBUTING.md"
   local f
   for f in "$wf" "$all" "$readme"; do
     if [[ ! -f "$f" ]]; then
@@ -1040,7 +1029,7 @@ check_check_lists() {
       || add_error "$s: no workflow and not $rel_all runs it — add it to both lists, or name it on an '# On instruction:' line of $rel_all"
   done < <(find "$ROOT/scripts" -maxdepth 1 -type f -name '*.sh' | LC_ALL=C sort)
 
-  # The README: the check names fenced by the 'required-checks' markers, which a maintainer copies
+  # The contributing guide: the check names fenced by the 'required-checks' markers, which a maintainer copies
   # into the ruleset. Rulesets name checks as they report: a job by its name, a job with a matrix
   # by one check run per entry, '<job> (<values>)'. A name that does not report is a required
   # check that never arrives and blocks every pull request. Which values a matrix has is the
@@ -1056,7 +1045,7 @@ check_check_lists() {
     done < <(grep -oE '`[a-z][a-z0-9-]*( \([^`()]+\))?`' <<< "$line" | tr -d '`')
   done < "$readme"
   if ((${#readme_names[@]} == 0)); then
-    add_error "README.md: no job names between the 'required-checks' markers — the required status checks are unverifiable"
+    add_error "CONTRIBUTING.md: no job names between the 'required-checks' markers — the required status checks are unverifiable"
     return
   fi
 
@@ -1064,30 +1053,30 @@ check_check_lists() {
     base="${name%% (*}"
     readme_jobs+=("$base")
     if ! _contains "$base" "${wf_jobs[@]}"; then
-      add_error "README.md: required check '$name' is not a job of $rel_wf — a ruleset would wait for a check that never reports"
+      add_error "CONTRIBUTING.md: required check '$name' is not a job of $rel_wf — a ruleset would wait for a check that never reports"
     elif [[ "$name" == "$base" ]] && _contains "$base" "${matrix_jobs[@]}"; then
-      add_error "README.md: required check '$name' is a job with a matrix, which reports as '$name (<values>)' — name each check run"
+      add_error "CONTRIBUTING.md: required check '$name' is a job with a matrix, which reports as '$name (<values>)' — name each check run"
     elif [[ "$name" != "$base" ]] && ! _contains "$base" "${matrix_jobs[@]}"; then
-      add_error "README.md: required check '$name' names a check run of '$base', which has no matrix and reports as '$base'"
+      add_error "CONTRIBUTING.md: required check '$name' names a check run of '$base', which has no matrix and reports as '$base'"
     fi
   done
   for job in "${wf_jobs[@]}"; do
     _contains "$job" "${readme_jobs[@]}" \
-      || add_error "README.md: job '$job' of $rel_wf is missing from the required checks — it would run without gating a merge"
+      || add_error "CONTRIBUTING.md: job '$job' of $rel_wf is missing from the required checks — it would run without gating a merge"
   done
 }
 
-# The Project Layout block in README.md is a hand-written inventory, and nothing tells a reader
-# that a line of it has gone stale: a renamed or deleted path leaves the block describing a
+# The Project Layout block in CONTRIBUTING.md is a hand-written inventory, and nothing tells a
+# reader that a line of it has gone stale: a renamed or deleted path leaves the block describing a
 # repository that no longer exists. Every path it lists therefore has to exist, a trailing '/'
 # meaning a directory.
 #
 # Only that direction is checked. The block is a tour of the parts a newcomer needs, not a listing
 # of every file, so a path missing from it is an editorial judgment rather than a defect.
 check_project_layout() {
-  local readme="$ROOT/README.md"
+  local readme="$ROOT/CONTRIBUTING.md"
   if [[ ! -f "$readme" ]]; then
-    add_error "README.md: not found — the Project Layout block cannot be checked"
+    add_error "CONTRIBUTING.md: not found — the Project Layout block cannot be checked"
     return
   fi
 
@@ -1111,19 +1100,19 @@ check_project_layout() {
     listed+=("$path")
     if [[ "$path" == *"*"* ]]; then
       compgen -G "$ROOT/$path" >/dev/null \
-        || add_error "README.md: Project Layout lists '$path', which matches nothing in this repository"
+        || add_error "CONTRIBUTING.md: Project Layout lists '$path', which matches nothing in this repository"
     elif [[ "$path" == */ ]]; then
       # Open work lives under docs/plan/ only while there is some (ADR-0006).
       [[ -d "$ROOT/${path%/}" || "$path" == "docs/plan/" ]] \
-        || add_error "README.md: Project Layout lists '$path', which is not a directory of this repository"
+        || add_error "CONTRIBUTING.md: Project Layout lists '$path', which is not a directory of this repository"
     else
       [[ -f "$ROOT/$path" ]] \
-        || add_error "README.md: Project Layout lists '$path', which does not exist"
+        || add_error "CONTRIBUTING.md: Project Layout lists '$path', which does not exist"
     fi
   done < "$readme"
 
   if ((entries == 0)); then
-    add_error "README.md: no paths found under '## Project Layout' — the inventory is unverifiable"
+    add_error "CONTRIBUTING.md: no paths found under '## Project Layout' — the inventory is unverifiable"
     return
   fi
 
@@ -1134,7 +1123,7 @@ check_project_layout() {
     for path in "${listed[@]}"; do
       [[ "$path" == "$top" || "$path" == "$top/"* ]] && { covered=1; break; }
     done
-    ((covered)) || add_error "README.md: Project Layout does not name '$top', a top-level part of this repository"
+    ((covered)) || add_error "CONTRIBUTING.md: Project Layout does not name '$top', a top-level part of this repository"
   done < <(git -C "$ROOT" ls-files --cached 2>/dev/null | cut -d/ -f1 | LC_ALL=C sort -u)
 }
 
@@ -1187,7 +1176,7 @@ check_inherited_adrs() {
     status="$EMOJI"
     [[ "$status" == "⚪" || "$status" == "🔴" ]] && continue
     base="${f##*/}"
-    others="$(sed -E 's/^- \*\*Deciders:\*\*//; s/NUC maintainer//g; s/(^|[[:space:],])and([[:space:],]|$)/ /g; s/[[:space:],]//g' <<< "$deciders" | tr -d '\n')"
+    others="$(sed -E "s/${ADR_ITEM_RE}Deciders:[*][*]//"'; s/NUC maintainer//g; s/(^|[[:space:],])and([[:space:],]|$)/ /g; s/[[:space:],]//g' <<< "$deciders" | tr -d '\n')"
     if [[ -z "$others" ]]; then
       add_error "$base: inherited from the template and not decided by this project — add your name to Deciders and accept it, or supersede it (docs/adr/README.md)"
     elif [[ "$status" == "🟡" ]]; then
@@ -1264,7 +1253,7 @@ check_prose_width() {
       ((${#line} > 100)) || continue
       # A table row, a heading, and an ADR header field are one line by their syntax.
       [[ "$line" =~ ^[[:space:]]*\| || "$line" =~ ^# ]] && continue
-      [[ in_adr -eq 1 && "$line" =~ ^-\ \*\*[A-Za-z\ ]+:\*\* ]] && continue
+      [[ in_adr -eq 1 && "$line" =~ $ADR_FIELD_ITEM_RE ]] && continue
       # A link is one word, whatever its text holds. A line without a space outside its links
       # cannot break; any other line can.
       indent="${line%%[! ]*}"
@@ -1285,7 +1274,10 @@ check_prose_width() {
 # number are not a tag ADR-0005 cuts, and SemVer allows no leading zero.
 check_template_release() {
   local readme="$ROOT/README.md"
-  [[ -f "$readme" ]] || return   # check 10 reports the missing README
+  if [[ ! -f "$readme" ]]; then
+    add_error "README.md: not found — the Template section names the release this repository carries (ADR-0005)"
+    return
+  fi
   local line value
   line="$(grep -m1 -E '^[[:space:]]*([-*] )?\*\*Template release:\*\*' "$readme")"
   if [[ -z "$line" ]]; then

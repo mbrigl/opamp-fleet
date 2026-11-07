@@ -20,6 +20,8 @@ verifies.
   [`scripts/number-adrs.sh`](../../scripts/number-adrs.sh) gives it the next free number. A
   numbered ADR is `NNNN-short-title.md`, its `# ADR-NNNN` heading matches the filename, and the
   numbers run `0001..N` without gaps.
+- **Wording.** The *Decision* and the *Enforcement* follow the writing rule of
+  [`AGENTS.md` §4](../../AGENTS.md#4-working-style).
 - **Index.** The tables below change in the same commit as the ADR they describe, for
   additions, supersessions, and status flips alike. The status is shown via the legend's bullet
   and the ADR's `Applies to` header is mirrored verbatim in its own column. The index routes a

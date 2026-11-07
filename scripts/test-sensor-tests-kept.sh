@@ -115,14 +115,57 @@ commit "$d" "three toolchains"
 expect 0 "the Go, Rust, and Java markers" "$d" "3 finding(s)"
 
 # The catalogue's table names the markers a diff rule catches, for a reader choosing a toolchain;
-# MARKERS above is what the sensor matches. Every marker the table names is one the sensor finds.
+# MARKERS of the sensor is what it matches, in the files of each toolchain. Every marker the table
+# names is one the sensor finds in a file of its row's toolchain; a row this case knows no file of
+# fails it, rather than leave its markers unchecked.
 d="$(repo catalogue-markers)"
-# shellcheck disable=SC2016  # the backticks are literal Markdown, not a command substitution
-mapfile -t named < <(awk -F'|' '/^\| / { print $7 }' "$ROOT/.agents/skills/propose-adr/concepts/toolchain.md" \
-  | grep -o 'diff rule ([^)]*)' | grep -oE '`[^`]+`' | tr -d '`')
-printf '%s\n' "${named[@]}" > "$d/tests/catalogue_test.txt"
-commit "$d" "every marker the catalogue names"
-expect 0 "every marker the catalogue's table names is one the sensor finds" "$d" "${#named[@]} finding(s)"
+named=0
+unknown=()
+while IFS='|' read -r _ toolchain _ _ _ _ skipped _; do
+  toolchain="${toolchain# }"
+  # shellcheck disable=SC2016  # the backticks are literal Markdown, not a command substitution
+  mapfile -t markers < <(grep -o 'diff rule ([^)]*)' <<< "$skipped" | grep -oE '`[^`]+`' | tr -d '`')
+  ((${#markers[@]})) || continue
+  case "$toolchain" in
+    *TypeScript*) file=tests/catalogue.test.ts ;;
+    *Java*) file=tests/CatalogueTest.java ;;
+    *Python*) file=tests/catalogue_test.py ;;
+    Go*) file=tests/catalogue_test.go ;;
+    *Rust*) file=tests/catalogue_test.rs ;;
+    *C#*) file=tests/CatalogueTest.cs ;;
+    *) unknown+=("$toolchain"); continue ;;
+  esac
+  printf '%s\n' "${markers[@]}" >> "$d/$file"
+  named=$((named + ${#markers[@]}))
+done < <(grep '^| ' "$ROOT/.agents/skills/propose-adr/concepts/toolchain.md" | grep -v '^| Toolchain |')
+commit "$d" "every marker the catalogue names, each in a file of its toolchain"
+if ((${#unknown[@]})); then
+  failed=$((failed + 1)); echo "FAIL: catalogue rows with a diff rule and no file here:${unknown[*]}" >&2
+else
+  expect 0 "every marker the catalogue's table names is one the sensor finds" "$d" "$named finding(s)"
+fi
+
+# A marker is read only in the files of its toolchain: a Rust method named fit is no focused
+# JavaScript test, nor is a method call on an object in TypeScript; the same names where they
+# are markers are reported.
+d="$(repo marker-in-another-language)"
+printf 'fn g() {\n    let fits = self.content.fit(count);\n}\n' > "$d/src/g.rs"
+printf 'const h = shape.fit(box);\n' > "$d/src/h.ts"
+printf 'fit("x", () => {})\n' >> "$d/src/b.spec.ts"
+printf '#[ignore]\nfn y() {}\n' > "$d/tests/y_test.rs"
+printf '#[ignore]\n' > "$d/src/notes.md"
+commit "$d" "fit in Rust and as a method, a focus and an ignore where they are markers"
+expect 0 "a marker is read only in the files of its toolchain" "$d" "2 finding(s)"
+expect 0 "a focus marker in TypeScript is reported" "$d" "src/b.spec.ts:2: fit("
+expect 0 "an ignore in Rust is reported" "$d" "tests/y_test.rs:1: #[ignore]"
+
+# The extension of a path git quotes or ends with a tab, a name with a space or a letter beyond
+# ASCII, is read as the path's own.
+d="$(repo marker-in-an-odd-path)"
+printf '#[ignore]\nfn y() {}\n' > "$d/tests/a b_test.rs"
+printf '#[ignore]\nfn z() {}\n' > "$d/tests/ü_test.rs"
+commit "$d" "ignores in paths with a space and beyond ASCII"
+expect 0 "a marker in a path with a space or beyond ASCII is reported" "$d" "2 finding(s)"
 
 # Called by its path from a subdirectory of another repository, the sensor reads the one it lives
 # in, as the checks do: the tag 'base' exists only there.

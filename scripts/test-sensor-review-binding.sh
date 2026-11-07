@@ -312,6 +312,7 @@ change "$d" src/b.py "second linear"
 expect 0 "linear commits are counted" "$d" "2 commits landed outside a merge, named by no review:"
 expect 0 "linear commits are listed" "$d" "second linear"
 reject "linear commits leave nothing that reads as clean" "$d" "nothing to read"
+expect 0 "the headline counts the findings below it" "$d" "no merge since $(g "$d" rev-parse --short base); 1 finding below."
 hand_off 0 "a hand-off reviewed at the head covers the linear commits" "$d" \
   "the hand-off was reviewed at the head" "outside a merge" "- Reviewed at: $(g "$d" rev-parse HEAD)"
 hand_off 0 "a hand-off reviewed before the head lists the linear commits after the review" "$d" \
@@ -418,6 +419,8 @@ expect 0 "a mixed commit of a merged branch is listed" "$d" "mixed on the topic:
 reject "the merge itself is not listed as mixed" "$d" "Merge topic: changes"
 hand_off 0 "a hand-off reviewed at the head still lists the mixed commit" "$d" \
   "mixed on the topic: changes the text" "" "- Reviewed at: $(g "$d" rev-parse HEAD)"
+hand_off 0 "a hand-off reviewed at the head counts the mixed commits in its headline" "$d" \
+  "carries; 1 finding below." "" "- Reviewed at: $(g "$d" rev-parse HEAD)"
 
 d="$(repo bad-base)"
 expect 2 "a base that does not resolve" "$d" "does not resolve to a commit" "no-such-ref"

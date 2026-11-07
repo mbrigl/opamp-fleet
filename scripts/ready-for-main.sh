@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# Prepares a branch for its pull request into main to be made ready: step 7 of the README's
-# Integration branches, in the order the step needs.
+# Prepares a branch for its pull request into main to be made ready: step 7 of
+# Integration branches in CONTRIBUTING.md, in the order the step needs.
 #
 #   1. Fetches origin and refuses while the branch carries a fixup the rework has not folded in
 #      (a subject starting 'fixup!', 'squash!', or 'amend!'), since main keeps what it merges.
@@ -57,7 +57,7 @@ git rev-parse -q --verify 'origin/main^{commit}' > /dev/null \
 # 1. The fixups, folded in before anything else moves.
 mapfile -t fixups < <(git log --format='%h %s' origin/main..HEAD | grep -E '^[0-9a-f]+ (fixup|squash|amend)! ')
 if ((${#fixups[@]})); then
-  echo "ready-for-main: refused — the branch carries ${#fixups[@]} fixup(s) its rework has not folded in (README, Integration branches, step 4):" >&2
+  echo "ready-for-main: refused — the branch carries ${#fixups[@]} fixup(s) its rework has not folded in (CONTRIBUTING.md, Integration branches, step 4):" >&2
   printf '  %s\n' "${fixups[@]}" >&2
   exit 1
 fi

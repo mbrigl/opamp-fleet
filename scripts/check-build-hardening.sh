@@ -150,7 +150,7 @@ fi
 toolchain="$ROOT/rust-toolchain.toml"
 if [[ ! -f "$toolchain" ]]; then
   add_error "rust-toolchain.toml: not found — ADR-0008 clause 11 pins the compiler there"
-elif ! uncommented "$toolchain" | grep -qE '^[[:space:]]*channel[[:space:]]*=[[:space:]]*"[0-9]+\.[0-9]+\.[0-9]+"[[:space:]]*$'; then
+elif ! grep -qE '^[[:space:]]*channel[[:space:]]*=[[:space:]]*"[0-9]+\.[0-9]+\.[0-9]+"[[:space:]]*$' <<< "$(uncommented "$toolchain")"; then
   add_error "rust-toolchain.toml: 'channel' is not an exact 'MAJOR.MINOR.PATCH' — a channel name moves under every build (ADR-0008 clause 11)"
 fi
 
