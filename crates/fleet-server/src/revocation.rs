@@ -703,8 +703,13 @@ pub enum RevokeError {
     Invalid(String),
     /// The list is at [`MAX_REVOCATIONS`].
     Full,
-    /// The store could not write it.
-    Store(String),
+    /// The store answered an error. Whether it holds `attempted` is unknown: a write whose answer
+    /// was lost, or a file renamed into place before its directory failed to sync, may have
+    /// landed.
+    Store {
+        error: String,
+        attempted: Box<Revocation>,
+    },
 }
 
 /// The register and the list, in memory and in their store.
@@ -1756,11 +1761,16 @@ impl Revocations {
             revoked,
             revoked_ms: self.clock.now_ms(),
         };
-        let (entry, written) = match self
-            .store
-            .add_revocation(&entry, MAX_REVOCATIONS)
-            .map_err(RevokeError::Store)?
-        {
+        let added = match self.store.add_revocation(&entry, MAX_REVOCATIONS) {
+            Ok(added) => added,
+            Err(error) => {
+                return Err(RevokeError::Store {
+                    error,
+                    attempted: Box::new(entry),
+                })
+            }
+        };
+        let (entry, written) = match added {
             Added::Added => (entry, true),
             Added::Present(existing) => (existing, false),
             Added::Widened(wider) => (wider, true),

@@ -913,8 +913,10 @@ instance's Operator plane:
    `revocation.revoked` or a `revocation.lifted` names, take the later of them: where it is
    `revocation.revoked`, revoke again by its `authority` and `serial`, which changes nothing
    where `GET /api/v1/revocations` lists it already; where it is `revocation.lifted`, lift it
-   where that list holds it. Where a lift and a revocation of one `id` lie within a minute of each
-   other, their order is not certain: keep it revoked.
+   where that list holds it. A `revocation.revoked` with the outcome `unknown` counts as
+   `revocation.revoked`: its store answered an error, and may have made it all the same. Where a
+   lift and a revocation of one `id` lie within a minute of each other, their order is not
+   certain: keep it revoked.
 2. **Revoke the renewals signed since the backup.** With [`[client_ca]`](#client_ca) the register
    resolves a revocation to the renewals of its certificate, but a renewal signed since the backup
    is not in the restored register, and a certificate the register does not hold is admitted
@@ -944,38 +946,37 @@ instance's Operator plane:
    Where that first certificate is a provisioned one the query finds no row for, it alone is the
    chain's rest. Where the serials of the lines since the backup or the query's answer name a
    certificate step 1 revoked, revoke the renewal by its own serial.
-3. **Withdraw again the other trust withdrawn since the backup**, each by its last line:
-   - a Gateway mark a `host.gateway` names: clear it again where the outcome is `cleared`, and
-     set it again where it is `set`, with `PUT /api/v1/hosts/{host}/gateway`. A host enrolled
-     since the backup is answered `404` until it has reported again; set its mark then;
-   - a floor a `package_floor.set` names, unless a later `package_floor.removed` names its Agent
-     type: set it again where the restored floor is lower or absent. The line names the version
-     but not the signature; `opamp-fleetctl package floor` signs the same version with the same
-     key into the same signature again ([the tools](tools.md#keeping-old-builds-off-the-fleet));
+3. **Withdraw again the other trust withdrawn since the backup**, each by its last line. A line
+   with the outcome `unknown` is an act whose store answered an error, and which may have been
+   made all the same:
+   - a Gateway mark a `host.gateway` names: clear it again where the outcome is `cleared` or
+     `unknown`, whichever its `gateway` asked for, and set it again where it is `set`, with
+     `PUT /api/v1/hosts/{host}/gateway`. A host enrolled since the backup is answered `404` until
+     it has reported again; set its mark then;
+   - a floor a `package_floor.set` names, `set` or `unknown`, unless a later
+     `package_floor.removed` names its Agent type: set it again where the restored floor is lower
+     or absent. The line names the version but not the signature; `opamp-fleetctl package floor`
+     signs the same version with the same key into the same signature again
+     ([the tools](tools.md#keeping-old-builds-off-the-fleet));
    - the enrolment window, by the last `enrolment.window`: where it is `closed` or `expired` and
      `GET /api/v1/enrolment/window` shows the window open, close it with
      `DELETE /api/v1/enrolment/window`; where it is `opened` and the window shows a later end
      than the line's `until_ms`, close it, or open it again for the time left to that end;
    - the requests decided since the backup: while the window is open, reject with
      `POST /api/v1/enrolments/{id}/reject` each request `GET /api/v1/enrolments` lists, now and
-     as hosts send them again, whose `id` an `enrolment.rejected` names, or an `issuance.signed`
-     names as its `request`. A request's `id` stands for its key, so one approved since the
-     backup comes back pending, and approved again it would sign a certificate for that key that
-     no revocation names.
+     as hosts send them again, whose `id` an `enrolment.rejected` names, `rejected` or `unknown`,
+     or an `issuance.signed` names as its `request`. A request's `id` stands for its key, so one
+     approved since the backup comes back pending, and approved again it would sign a certificate
+     for that key that no revocation names.
 
 The enrolment requests queued and not yet decided since the backup are gone, so such a host
 enrols again. Then put the instance into the balancer's pool and start the others.
 
-**A revocation without its line** cannot be set again from the record. The entry that names a
-revocation's certificate follows the revocation, and is dropped where the audit record cannot
-take it by then ([The audit record](#the-audit-record)). Such a revocation shows as an
-`operator.act` for `POST /api/v1/revocations` with no `revocation.revoked` after it, and its
-certificate has to be known from elsewhere; a revocation request that failed shows the same way,
-and its `operator.act` with the outcome `completed`, where it was written, tells the two apart by
-its `status`. The same holds for the other acts of step 3: their `operator.act` names the host,
-the Agent type or the request in its path, but not a floor's version, nor whether a Gateway mark
-was set or cleared, so clear a mark until it is known. And the last entries before the database
-was lost are in neither copy, since an entry reaches the log only once the database holds it.
+**An act of steps 1 and 3 is made only with its line queued**
+([The audit record](#the-audit-record)), so the record misses one only where its line was lost
+after that: on the filesystem store, in a write that failed, which the next line counts as
+`unrecorded_before`; and among the last lines before the database was lost, which are in neither
+copy, since a line reaches the log only once the database holds it.
 
 ### A CA key in a file means a standby
 
@@ -1722,10 +1723,20 @@ the host. The record also goes to the Server's log under the target `audit`.
 The Server takes no decision whose entry it cannot queue: when the record cannot be written — a
 full disk, a failed device — or its queue of 10 000 entries is full, it admits no Agent and runs
 no operator act, answering `503`, until it can. An operator act is recorded before it runs, as
-`operator.act` with its method and path; the entry that says what it did, such as the
-certificate a revocation names, follows the act and is dropped where the queue is full or the
-record cannot be written by then.
-The next entry that is written counts what was dropped as `unrecorded_before`. A certificate
+`operator.act` with its method and path. The acts a restore repeats also hold a place in the
+queue before they run, and are not made, answering `503`, where none is free: a revocation, a
+Gateway mark set or cleared, a floor set, a request rejected, and the enrolment window closed.
+Once made, the act writes its entry into that place: `revocation.revoked` names the certificate
+by `authority` and `serial`, `host.gateway` the host and, as `gateway`, whether it is marked,
+`package_floor.set` the Agent type and version. Where the store answered an error and may have
+made it all the same, the entry has the outcome `unknown`; a window closed is closed on the
+instance whatever its store answers, and its entry says `closed`. An orderly shutdown gives no
+place once it begins to close the record, and waits up to its five seconds for those held. The
+entry that says what another act did follows the act, and is dropped where the queue is full or
+the record cannot be written by then; each of them grants trust, so a restore that misses it
+errs toward withdrawing. On the filesystem store an entry in the queue is still lost when the
+write it goes into fails, a held place's as well. The next entry that is written counts
+what was dropped or lost as `unrecorded_before`. A certificate
 request in that time is answered `Unavailable` with a time to retry, and the
 Agent asks again. Refusals past ten a second from one address are counted into one line, not
 dropped.

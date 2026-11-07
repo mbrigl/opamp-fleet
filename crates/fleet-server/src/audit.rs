@@ -11,6 +11,8 @@ pub enum Field {
     Text(String),
     Unsigned(u64),
     Signed(i64),
+    /// A yes or no, written as JSON's `true` or `false`.
+    Flag(bool),
 }
 
 /// What can be a field; `None` is no field at all.
@@ -67,6 +69,12 @@ macro_rules! signed {
 }
 signed!(i64, i32);
 
+impl IntoField for bool {
+    fn into_field(self) -> Option<Field> {
+        Some(Field::Flag(self))
+    }
+}
+
 impl<T: IntoField> IntoField for Option<T> {
     fn into_field(self) -> Option<Field> {
         self.and_then(IntoField::into_field)
@@ -117,6 +125,26 @@ impl Entry {
 #[derive(Debug, PartialEq, Eq)]
 pub struct Unavailable;
 
+/// A place held in the record for the entry of one act, whose fields are known only once the act
+/// has run: the act runs only with the place held, and writes into it what it did. Dropped
+/// unwritten, as by an act that failed, it gives the place back
+/// (ADR-draft-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again
+/// clause 5).
+pub struct Permit(Box<dyn FnOnce(Entry) + Send>);
+
+impl Permit {
+    /// A place that `write` fills; whatever `write` holds is dropped with it when it is not.
+    #[must_use]
+    pub fn new(write: impl FnOnce(Entry) + Send + 'static) -> Self {
+        Permit(Box::new(write))
+    }
+
+    /// Writes into the place what the act did.
+    pub fn write(self, entry: Entry) {
+        (self.0)(entry);
+    }
+}
+
 /// The record every security decision goes to (ADR-0039 clause 5).
 pub trait Audit: Send + Sync {
     /// Records one decision; without a record the caller does not take it.
@@ -124,6 +152,13 @@ pub trait Audit: Send + Sync {
     /// # Errors
     /// Answers [`Unavailable`] while recording is not possible.
     fn record(&self, entry: Entry) -> Result<(), Unavailable>;
+
+    /// Holds a place for the entry of an act that is about to run; without one the act does not
+    /// run.
+    ///
+    /// # Errors
+    /// Answers [`Unavailable`] while recording is not possible.
+    fn reserve(&self) -> Result<Permit, Unavailable>;
 
     /// Records a refusal; the caller refuses either way.
     fn refusal(&self, entry: Entry) {

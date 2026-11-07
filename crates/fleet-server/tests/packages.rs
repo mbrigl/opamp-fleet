@@ -3064,7 +3064,7 @@ async fn spawn_with_floors(
 
 /// The audit entries a test Server records.
 #[derive(Default)]
-struct Recorded(std::sync::Mutex<Vec<fleet_server::audit::Entry>>);
+struct Recorded(Arc<std::sync::Mutex<Vec<fleet_server::audit::Entry>>>);
 
 impl fleet_server::audit::Audit for Recorded {
     fn record(
@@ -3073,6 +3073,13 @@ impl fleet_server::audit::Audit for Recorded {
     ) -> Result<(), fleet_server::audit::Unavailable> {
         self.0.lock().expect("lock").push(entry);
         Ok(())
+    }
+
+    fn reserve(&self) -> Result<fleet_server::audit::Permit, fleet_server::audit::Unavailable> {
+        let entries = self.0.clone();
+        Ok(fleet_server::audit::Permit::new(move |entry| {
+            entries.lock().expect("lock").push(entry);
+        }))
     }
 }
 

@@ -177,7 +177,10 @@ no module.
   ([ADR-0045](adr/0045-tls-1-3-two-planes-and-bounded-input.md)).
 - **Audit record** — `audit` is the port every security decision is recorded through;
   `audit_log` chains the entries by hash and `fs::FsAuditStore` keeps them under
-  `data_dir/audit/` ([ADR-0039](adr/0039-an-append-only-audit-record.md)). On PostgreSQL
+  `data_dir/audit/` ([ADR-0039](adr/0039-an-append-only-audit-record.md)). An act a restore
+  repeats by its entry — a revocation, a Gateway mark, a floor set, a rejection, the window
+  closed — holds a place in the writer's channel first, an `audit::Permit`, and writes the entry
+  into it once it has run. On PostgreSQL
   `postgres::audit::PgAuditStore` keeps one chain per lease; the lease's take opens it and closes
   the chains of the lapsed leases it removes, as each renewal does, and an orderly shutdown closes
   the instance's own
