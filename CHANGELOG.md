@@ -65,6 +65,25 @@ once its tag exists.
 
 ### Fixed
 
+- **A new Agent is not sent away while a connecting fleet holds the database's pool**
+  ([ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision](docs/adr/draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
+  clause 24). On PostgreSQL, a new Agent's first report gave up after 5 s without a pooled
+  connection and was answered `Unavailable`, which kept an Agent away 30 to 60 s; while a large
+  fleet connected, the pool was held that long at times. Creating an Agent's record now waits up to
+  the 15 s bound of its call for a connection; every other call keeps its 5 s.
+  **What to do:** nothing.
+
+- **A Client the Server answered `Unavailable` on a WebSocket comes back after the wait it was
+  told** ([ADR-0045](docs/adr/0045-tls-1-3-two-planes-and-bounded-input.md), its *Context*: the
+  Client closes the connection, waits, and reconnects). It closed the connection, waited the wait
+  the Server named and then drew the delay of a lost connection, up to 30 s more, on top: an Agent
+  told 30 s stayed away 30 to 60 s. It now waits the named wait, or the next backoff step when that
+  is longer, as after a refused upgrade, and nothing on top. `Unavailable`s in a row grow along
+  the backoff, up to a minute, until a connection handles a reply, so a named wait of zero is no
+  reconnect a second. Agents told `Unavailable` at the same moment now come back at the same
+  moment, no longer spread over 30 s. Plain HTTP waited the named wait already.
+  **What to do:** nothing.
+
 - **An Agent that comes back on a new connection of its host keeps its identity**
   ([ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side](docs/adr/draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
   clause 8). A peer whose reports waited for the database longer than one heartbeat interval

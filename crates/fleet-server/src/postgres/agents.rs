@@ -13,7 +13,7 @@ use opamp::uid::InstanceUid;
 use prost::Message;
 
 use super::notify::{notify, ASSIGNMENT, CONFIGURATION, FORGOTTEN, LABELS, RESTART, TAKEN};
-use super::{client, signed, sql, unsigned, Database};
+use super::{client, creating_client, signed, sql, unsigned, Database};
 use crate::agent_store::{
     AgentPage, AgentStore, Creation, Holder, PageQuery, PersistedAgent, Pin, Presence, StoredAgent,
     Taken,
@@ -449,7 +449,8 @@ impl AgentStore for PgAgentStore {
         let max = i64::try_from(max_records).unwrap_or(i64::MAX);
         let creating = self.creating.enter();
         let creation = self.database.run(move |pool| async move {
-            let mut client = client(&pool).await?;
+            // A creation waits for a connection up to its call's bound (ADR-0044 clause 24).
+            let mut client = creating_client(&pool).await?;
             let key = uid.to_string();
             // One transaction that commits without waiting for its flush, so the count's row is
             // let go at once (ADR-0044 clause 21); the record's Configurations, where it names
@@ -2212,6 +2213,75 @@ mod tests {
             drop(store);
             drop(database);
         }
+    }
+
+    /// While every pooled connection is busy for longer than the five seconds any other call waits
+    /// for one, a creation waits on and creates the record once a connection is free, and a read
+    /// fails after its five seconds: a new Agent is not answered `Unavailable` while a connecting
+    /// fleet holds the pool for a few seconds (ADR-0044 clause 24).
+    /// Verifies: ADR-0044
+    #[test]
+    fn a_creation_waits_for_a_pooled_connection_longer_than_any_other_call() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let mut config = test.config();
+        config.pool_size = 2;
+        let database = Database::open_in(
+            &config,
+            super::super::Exclusive::Alone("the test".to_string()),
+            Some(&test.schema),
+        )
+        .expect("open");
+        let store = Arc::new(PgAgentStore::open(database.clone()).expect("open"));
+        // Both connections of the pool, held past the five seconds and well within the call's
+        // bound.
+        use std::time::Duration;
+        const BUSY: Duration = Duration::from_secs(7);
+        let (held, holding) = std::sync::mpsc::channel();
+        let busy = {
+            let database = database.clone();
+            std::thread::spawn(move || {
+                database.run(move |pool| async move {
+                    let one = client(&pool).await?;
+                    let other = client(&pool).await?;
+                    let _ = held.send(());
+                    tokio::time::sleep(BUSY).await;
+                    drop((one, other));
+                    Ok(())
+                })
+            })
+        };
+        holding
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the pool is held");
+        let started = std::time::Instant::now();
+        let creating = {
+            let store = store.clone();
+            std::thread::spawn(move || {
+                let mut bare = record();
+                bare.assignment = None;
+                store.create_within(&InstanceUid([0x61; 16]), &bare, 100)
+            })
+        };
+        let read = store.get(&InstanceUid([0x62; 16]));
+        assert!(
+            read.as_ref()
+                .is_err_and(|e| e.contains("waiting for a slot")),
+            "a read waits five seconds for a connection: {read:?}"
+        );
+        assert!(
+            started.elapsed() < BUSY,
+            "the read gave up before the pool was free: {:?}",
+            started.elapsed()
+        );
+        let created = creating.join().expect("the creation");
+        assert!(
+            matches!(created, Ok(Creation::Created)),
+            "the creation waited for a connection: {created:?}"
+        );
+        assert!(started.elapsed() >= BUSY - Duration::from_secs(1));
+        busy.join().expect("the holder").expect("held");
     }
 
     /// Creations that wait for the count's row, which a creation elsewhere holds, hold no

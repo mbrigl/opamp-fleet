@@ -999,6 +999,18 @@ pub(crate) async fn client(pool: &Pool) -> Result<Object, String> {
         .map_err(|e| format!("cannot reach the database: {e}"))
 }
 
+/// [`client`] for a creation of an Agent's record, which waits for a pooled connection up to the
+/// bound of its whole call, [`CALL_TIMEOUT`], rather than [`WAIT_TIMEOUT`]: a new Agent is not
+/// answered `Unavailable` while the calls of a connecting fleet hold every connection for a few
+/// seconds (ADR-0044 clause 24).
+pub(crate) async fn creating_client(pool: &Pool) -> Result<Object, String> {
+    let mut timeouts = pool.timeouts();
+    timeouts.wait = Some(CALL_TIMEOUT);
+    pool.timeout_get(&timeouts)
+        .await
+        .map_err(|e| format!("cannot reach the database: {e}"))
+}
+
 /// A database error as text: the server's own message where it sent one.
 pub(crate) fn sql(error: tokio_postgres::Error) -> String {
     match error.as_db_error() {

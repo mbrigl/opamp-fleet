@@ -89,6 +89,13 @@ impl Silence {
 enum Served {
     Stopped,
     ConnectionLost,
+    /// The Server answered `Unavailable` and the connection was closed to honour it: the Client
+    /// stays away the wait it named, as after a refused upgrade, and draws nothing on top.
+    /// `answered` says whether a reply was handled on the connection before it.
+    Throttled {
+        wait: Duration,
+        answered: bool,
+    },
     Reconnect,
     End,
 }
@@ -119,17 +126,25 @@ pub async fn run_from<S: Session, X: StopSignal>(
     stop: &mut X,
 ) -> Result<Ended, String> {
     let mut backoff = Backoff::new();
+    // Whether the last connection ended on an `Unavailable` before any reply was handled on it:
+    // the next connection does not start the steps again, so consecutive `Unavailable`s grow
+    // along the backoff rather than come back every first step.
+    let mut throttled = false;
     loop {
         // What to wait before the next attempt: drawn over the first window when a connection
         // that stood was lost, the next exponential step when an attempt failed, and no less
-        // than a refusal's `Retry-After`.
+        // than a refusal's `Retry-After` or the wait an `Unavailable` named.
         let mut lost = false;
         let mut retry_after = None;
         match open(settings, local).await {
             Ok(socket) => {
                 info!(endpoint = %settings.endpoint, "connected");
-                backoff.reset();
-                match serve(socket, settings, session, stop).await {
+                if !throttled {
+                    backoff.reset();
+                }
+                let served = serve(socket, settings, session, stop).await;
+                throttled = matches!(served, Served::Throttled { .. });
+                match served {
                     Served::Stopped => {
                         // Usually already stopped before the goodbyes went out; idempotent.
                         session.stop().await;
@@ -138,6 +153,19 @@ pub async fn run_from<S: Session, X: StopSignal>(
                     Served::Reconnect => return Ok(Ended::Reconnect),
                     Served::End => return Ok(Ended::End),
                     Served::ConnectionLost => lost = true,
+                    Served::Throttled { wait, answered } => {
+                        // A connection that handled a reply first was a working one: the steps
+                        // start again from it.
+                        if answered {
+                            backoff.reset();
+                        }
+                        warn!(
+                            endpoint = %settings.endpoint,
+                            retry_after = ?wait,
+                            "the server answered unavailable; waiting"
+                        );
+                        retry_after = Some(wait);
+                    }
                 }
             }
             Err(Connect::Refused(WsError::Http(response)))
@@ -220,8 +248,9 @@ async fn open(settings: &Settings, local: Option<IpAddr>) -> Result<Socket, Conn
 }
 
 /// What to wait before the next attempt: the first reconnect after a connection that stood was
-/// lost is drawn over `[0, 30 s)`; an attempt that failed waits the next exponential step, or the
-/// `Retry-After` it was refused with when that is longer.
+/// lost is drawn over `[0, 30 s)`; an attempt that failed, or a connection closed to honour an
+/// `Unavailable`, waits the next exponential step, or the `Retry-After` it was refused with or the
+/// wait the `Unavailable` named when that is longer.
 fn next_delay(backoff: &mut Backoff, lost: bool, retry_after: Option<Duration>) -> Duration {
     if lost {
         return backoff.after_loss();
@@ -369,6 +398,8 @@ async fn serve<S: Session, X: StopSignal>(
     let silence = Silence::of(settings.heartbeat);
     let mut heard = tokio::time::Instant::now();
     let mut pinged = None;
+    // Whether a reply has been handled on this connection, not one that throttled.
+    let mut answered = false;
 
     loop {
         let quiet_until = silence.next(heard, pinged);
@@ -414,14 +445,15 @@ async fn serve<S: Session, X: StopSignal>(
                             }
                         };
                         if let Some(delay) = session.on_reply(&reply) {
-                            // The server is throttling: drop the connection and come back later.
+                            // The server is throttling: drop the connection and come back after
+                            // the wait it named (ADR-0045's *Context*).
                             let _ = socket.close(None).await;
-                            tokio::select! {
-                                () = tokio::time::sleep(delay) => {}
-                                () = stop.requested() => return Served::Stopped,
-                            }
-                            return Served::ConnectionLost;
+                            return Served::Throttled {
+                                wait: delay,
+                                answered,
+                            };
                         }
+                        answered = true;
                         if send_all(&mut socket, session.owed(), limit).await.is_err() {
                             return Served::ConnectionLost;
                         }
@@ -715,6 +747,205 @@ mod tests {
         assert!(
             back >= Duration::from_millis(drawn),
             "back after {back:?}, before the {drawn} ms drawn"
+        );
+    }
+
+    /// A session whose Server is throttling it: every reply asks it to stay away `wait`.
+    /// Each reply, in turn, asks it to stay away the wait it names, or nothing for `None`; past
+    /// the list, `wait`.
+    struct Throttled {
+        wait: Duration,
+        script: std::collections::VecDeque<Option<Duration>>,
+    }
+
+    impl Session for Throttled {
+        fn connected(&mut self) -> Vec<AgentToServer> {
+            vec![AgentToServer::default()]
+        }
+        fn routine(&mut self) -> Vec<AgentToServer> {
+            Vec::new()
+        }
+        fn owed(&mut self) -> Vec<AgentToServer> {
+            Vec::new()
+        }
+        fn on_reply(&mut self, _: &ServerToAgent) -> Option<Duration> {
+            self.script.pop_front().unwrap_or(Some(self.wait))
+        }
+        async fn after_reply<K: ReportSink>(&mut self, _: &mut K) -> AfterReply {
+            AfterReply::Continue
+        }
+        async fn changed(&mut self) {
+            std::future::pending().await
+        }
+        fn exchange_failed(&mut self) {}
+        async fn stop(&mut self) {}
+        fn goodbyes(&mut self) -> Vec<AgentToServer> {
+            Vec::new()
+        }
+    }
+
+    /// An `Unavailable` the Client honours keeps it away the wait the Server named, or the next
+    /// backoff step when that is longer, and no draw over the window after a lost connection is
+    /// added on top: the Client closed the connection itself, the Server did not lose it, so the
+    /// wait is the one a refused upgrade waits (ADR-0045's *Context* and clause 4's refused upgrade). Twice in a
+    /// row, so a draw over `[0, 30 s)` on top cannot pass by landing low; each connection handles
+    /// a reply first, so each starts the steps again.
+    /// Verifies: ADR-0045
+    #[tokio::test]
+    async fn an_honoured_unavailable_waits_the_named_wait_and_draws_nothing_on_top() {
+        const WAIT: Duration = Duration::from_secs(1);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        // Each connection's snapshot is answered twice, the second answer an `Unavailable`; the
+        // time from it to the next connection is how long the Client stayed away.
+        let server = async move {
+            let mut away = Vec::new();
+            for _ in 0..2 {
+                let (stream, _) = listener.accept().await.expect("accept");
+                let mut socket = accept_async(stream).await.expect("handshake");
+                let _ = socket.next().await;
+                for _ in 0..2 {
+                    let reply =
+                        frame::encode_within(&ServerToAgent::default(), 4096).expect("frame");
+                    socket
+                        .send(Message::Binary(reply.into()))
+                        .await
+                        .expect("reply");
+                }
+                let answered = std::time::Instant::now();
+                let (stream, _) = listener.accept().await.expect("accept again");
+                away.push(answered.elapsed());
+                // The connection that came back is the next round's.
+                drop(stream);
+            }
+            away
+        };
+        let settings = Settings {
+            endpoint: format!("ws://{addr}/v1/opamp"),
+            headers: HeaderMap::new(),
+            connector: None,
+            max_message_size: 4096,
+            heartbeat: None,
+        };
+        let (mut throttled, mut never) = (
+            Throttled {
+                wait: WAIT,
+                script: [None, Some(WAIT), None, Some(WAIT)].into_iter().collect(),
+            },
+            Never,
+        );
+        let away = tokio::time::timeout(Duration::from_secs(70), async {
+            tokio::select! {
+                away = server => away,
+                _ = run(&settings, &mut throttled, &mut never) => panic!("the run ended"),
+            }
+        })
+        .await
+        .expect("the Client comes back twice");
+        for away in away {
+            assert!(
+                away >= WAIT,
+                "back after {away:?}, before the named {WAIT:?}"
+            );
+            assert!(
+                away < WAIT + Duration::from_millis(1500),
+                "back after {away:?}: more than the named {WAIT:?} or the first step"
+            );
+        }
+    }
+
+    /// Consecutive `Unavailable`s grow along the backoff: a named wait of zero, as a Server that
+    /// leaves `retry_after_nanoseconds` unset sends, is not a reconnect a second for ever. A named
+    /// wait longer than the step is waited, not added to it. A connection whose reply was handled
+    /// before the next `Unavailable` starts the steps again (ADR-0045 clause 4).
+    /// Verifies: ADR-0045
+    #[tokio::test]
+    async fn consecutive_unavailables_grow_along_the_backoff_until_a_reply_is_handled() {
+        const NAMED: Duration = Duration::from_millis(2500);
+        // Per connection, the replies it is sent; the session's script answers them in order.
+        let rounds: [usize; 4] = [1, 1, 1, 2];
+        let script = [
+            Some(Duration::ZERO),
+            Some(Duration::ZERO),
+            Some(NAMED),
+            None,
+            Some(Duration::ZERO),
+        ];
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let server = async move {
+            let mut away = Vec::new();
+            let mut answered = None;
+            for replies in rounds {
+                let (stream, _) = listener.accept().await.expect("accept");
+                if let Some(answered) = answered.take() {
+                    away.push(std::time::Instant::elapsed(&answered));
+                }
+                let mut socket = accept_async(stream).await.expect("handshake");
+                let _ = socket.next().await;
+                for _ in 0..replies {
+                    let reply =
+                        frame::encode_within(&ServerToAgent::default(), 4096).expect("frame");
+                    socket
+                        .send(Message::Binary(reply.into()))
+                        .await
+                        .expect("reply");
+                }
+                answered = Some(std::time::Instant::now());
+                // The Client closes the connection once it is told to stay away.
+                let _ = tokio::time::timeout(Duration::from_secs(5), async {
+                    while let Some(Ok(_)) = socket.next().await {}
+                })
+                .await;
+            }
+            let (_, _) = listener.accept().await.expect("the last accept");
+            away.push(answered.expect("answered").elapsed());
+            away
+        };
+        let settings = Settings {
+            endpoint: format!("ws://{addr}/v1/opamp"),
+            headers: HeaderMap::new(),
+            connector: None,
+            max_message_size: 4096,
+            heartbeat: None,
+        };
+        let (mut throttled, mut never) = (
+            Throttled {
+                wait: Duration::from_secs(60),
+                script: script.into_iter().collect(),
+            },
+            Never,
+        );
+        let away = tokio::time::timeout(Duration::from_secs(60), async {
+            tokio::select! {
+                away = server => away,
+                _ = run(&settings, &mut throttled, &mut never) => panic!("the run ended"),
+            }
+        })
+        .await
+        .expect("the Client comes back four times");
+        let margin = Duration::from_millis(400);
+        let within =
+            |away: Duration, from: Duration, to: Duration| away >= from && away < to + margin;
+        assert!(
+            within(away[0], Duration::from_millis(500), Duration::from_secs(1)),
+            "the first step: {away:?}"
+        );
+        assert!(
+            within(away[1], Duration::from_secs(1), Duration::from_secs(2)),
+            "the second step, not the first again: {away:?}"
+        );
+        assert!(
+            within(away[2], NAMED, Duration::from_secs(4)),
+            "the named wait or the third step, not their sum: {away:?}"
+        );
+        assert!(
+            within(away[3], Duration::from_millis(500), Duration::from_secs(1)),
+            "the first step again after a handled reply: {away:?}"
         );
     }
 
