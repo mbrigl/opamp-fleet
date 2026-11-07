@@ -9,6 +9,7 @@
 use std::sync::Arc;
 
 use serde_json::Value;
+use tokio_postgres::error::Severity;
 use tokio_postgres::GenericClient;
 
 use deadpool_postgres::Object;
@@ -16,7 +17,8 @@ use deadpool_postgres::Object;
 use super::notify::{notify, ENROLMENT, WINDOW};
 use super::{client, signed, sql, unsigned, Database};
 use crate::enrolment::{
-    Approval, Decided, Decision, DecisionError, EnrolmentStore, Persisted, PersistedRequest, Took,
+    Approval, Decided, Decision, DecisionError, EnrolmentStore, Persisted, PersistedRequest,
+    Registrar, Signing, Took,
 };
 use crate::revocation::CertId;
 
@@ -59,6 +61,54 @@ enum Found {
 /// is not known yet.
 fn held_elsewhere(error: &tokio_postgres::Error) -> bool {
     error.code() == Some(&tokio_postgres::error::SqlState::LOCK_NOT_AVAILABLE)
+}
+
+/// How the transaction that decides an approved request ended.
+enum Ended {
+    Committed,
+    /// The register refused the entry; the transaction was rolled back.
+    Refused(String),
+    /// The database server answered an error at the commit or at the statement before it: the
+    /// transaction was rolled back, for certain.
+    NotCommitted(String),
+}
+
+/// The statement of the decision that failed.
+#[derive(Clone, Copy, Debug)]
+enum At {
+    /// The UPDATE that writes the decision: nothing is committed when it fails.
+    Update,
+    /// The COMMIT.
+    Commit,
+}
+
+/// Whether an error of the decision's statement `at` ended the transaction without its decision,
+/// for certain, given what the database server answered: `None` when it answered nothing, else
+/// the severity it gave, where it gave one. At the UPDATE any answer of the server is certain.
+/// At the COMMIT only an `ERROR` is: a `FATAL` or a `PANIC` may end a backend whose commit is
+/// already durable, as a terminate during the wait for a synchronous standby does, so it is read
+/// back as a lost connection is.
+fn rolled_back_for_certain(server: Option<Option<Severity>>, at: At) -> bool {
+    match (server, at) {
+        (None, _) => false,
+        (Some(_), At::Update) => true,
+        (Some(severity), At::Commit) => severity == Some(Severity::Error),
+    }
+}
+
+/// What an error of the decision's own statement `at` comes to: one that ended the transaction
+/// without its decision for certain ([`rolled_back_for_certain`]) is a refusal; any other — a
+/// lost connection, a cancelled call, a `FATAL` at the commit — leaves the outcome to be read
+/// back, and is the call's error.
+fn refused_by_the_server(error: tokio_postgres::Error, at: At) -> Result<Ended, String> {
+    let server = error
+        .as_db_error()
+        .map(tokio_postgres::error::DbError::parsed_severity);
+    if rolled_back_for_certain(server, at) {
+        Ok(Ended::NotCommitted(sql(error)))
+    } else {
+        Err(sql(error))
+    }
 }
 
 /// The window in `enrolment_window`, its requests in `enrolment_requests`.
@@ -208,12 +258,16 @@ impl EnrolmentStore for PgEnrolmentStore {
     /// instances approving one request, the second waits for the first and then finds it decided,
     /// signing nothing. A wait for the row that outlasts the session's `lock_timeout` is answered
     /// [`Approval::Deciding`], signing nothing. The bootstrap certificate is looked up in the list
-    /// once the row is held; the register's write looks again, under its hold of the list.
+    /// once the row is held; the register's write looks again, under its hold of the list. The
+    /// register entry and the Host the signature prepared are written in the same transaction as
+    /// the decision, and handed to `registrar` once it committed (ADR-0044 clause 9): a commit
+    /// that fails leaves neither, and a refusal of the register rolls the decision back.
     fn approve(
         &self,
         id: &str,
         bootstrap: &CertId,
-        sign: &mut dyn FnMut() -> Result<Decision, DecisionError>,
+        sign: &mut dyn FnMut() -> Result<Signing, DecisionError>,
+        registrar: &dyn Registrar,
     ) -> Result<Approval, String> {
         let request_id = id.to_string();
         let bootstrap = bootstrap.clone();
@@ -258,23 +312,63 @@ impl EnrolmentStore for PgEnrolmentStore {
             Found::Revoked => ("COMMIT", Ok(Approval::Revoked)),
             Found::Waiting(mut request) => match sign() {
                 Err(e) => ("ROLLBACK", Ok(Approval::Refused(e))),
-                Ok(decision) => {
+                Ok((decision, approved)) => {
                     request["decision"] =
                         serde_json::to_value(&decision).expect("a decision serializes");
                     let id = id.to_string();
-                    return self.database.run(move |_| async move {
-                        held.client()
+                    let registering = approved.clone();
+                    let ended = self.database.run(move |_| async move {
+                        if let Some(approved) = &registering {
+                            let registered = super::ledger::register_in(
+                                &***held.client(),
+                                approved.issued(),
+                                &approved.bounds,
+                                approved.mint(),
+                                Some(&approved.bootstrap),
+                            )
+                            .await?;
+                            if let Err(refused) = crate::revocation::refusal(registered) {
+                                held.client().batch_execute("ROLLBACK").await.map_err(sql)?;
+                                drop(held.let_go());
+                                return Ok(Ended::Refused(refused));
+                            }
+                        }
+                        if let Err(e) = held
+                            .client()
                             .execute(
                                 "UPDATE enrolment_requests SET request = $2 WHERE id = $1",
                                 &[&id, &request],
                             )
                             .await
-                            .map_err(sql)?;
+                        {
+                            return refused_by_the_server(e, At::Update);
+                        }
                         notify(&***held.client(), ENROLMENT, &id).await?;
-                        held.client().batch_execute("COMMIT").await.map_err(sql)?;
+                        if let Err(e) = held.client().batch_execute("COMMIT").await {
+                            return refused_by_the_server(e, At::Commit);
+                        }
                         drop(held.let_go());
-                        Ok(Approval::Approved(decision))
-                    });
+                        Ok(Ended::Committed)
+                    })?;
+                    match ended {
+                        Ended::Committed => {}
+                        Ended::NotCommitted(e) => return Ok(Approval::NotCommitted(e)),
+                        Ended::Refused(refused) => {
+                            return Ok(Approval::Refused(
+                                if refused == crate::revocation::BOOTSTRAP_REVOKED {
+                                    DecisionError::Revoked
+                                } else {
+                                    DecisionError::Sign(format!(
+                                        "cannot record the issued certificate: {refused}"
+                                    ))
+                                },
+                            ));
+                        }
+                    }
+                    if let Some(approved) = &approved {
+                        registrar.committed(approved);
+                    }
+                    return Ok(Approval::Approved(decision));
                 }
             },
         };
@@ -282,6 +376,52 @@ impl EnrolmentStore for PgEnrolmentStore {
             held.client().batch_execute(finish).await.map_err(sql)?;
             drop(held.let_go());
             answer
+        })
+    }
+
+    fn registers_with_its_decision(&self) -> bool {
+        true
+    }
+
+    /// Read under a share lock on the request's row, so it waits until a transaction that holds
+    /// the row, the approval whose outcome is not known among them, has ended, and answers what
+    /// it left (ADR-0044 clause 9). A wait past the session's `lock_timeout` is an error.
+    fn read_back(&self, id: &str) -> Result<Option<PersistedRequest>, String> {
+        let id = id.to_string();
+        self.database.run(move |pool| async move {
+            let client = client(&pool).await?;
+            client
+                .query_opt(
+                    "SELECT request FROM enrolment_requests WHERE id = $1 FOR SHARE",
+                    &[&id],
+                )
+                .await
+                .map_err(sql)?
+                .map(|row| {
+                    serde_json::from_value(row.get::<_, Value>(0))
+                        .map_err(|e| format!("enrolment request {id:?} does not decode: {e}"))
+                })
+                .transpose()
+        })
+    }
+
+    fn take_back(&self, id: &str) -> Result<(), String> {
+        let id = id.to_string();
+        self.database.run(move |pool| async move {
+            let mut client = client(&pool).await?;
+            let transaction = client.transaction().await.map_err(sql)?;
+            let taken = transaction
+                .execute(
+                    "UPDATE enrolment_requests SET request = (request::jsonb - 'decision')::json \
+                     WHERE id = $1 AND request -> 'decision' IS NOT NULL",
+                    &[&id],
+                )
+                .await
+                .map_err(sql)?;
+            if taken > 0 {
+                notify(&*transaction, ENROLMENT, &id).await?;
+            }
+            transaction.commit().await.map_err(sql)
         })
     }
 
@@ -706,7 +846,8 @@ mod tests {
 
     /// The approvals' contract on either store: a waiting request is signed once and approved
     /// with what was signed, a request no longer waiting signs nothing, a refused signature leaves
-    /// the request waiting, and withdrawing a bootstrap certificate's requests keeps a decided one.
+    /// the request waiting, withdrawing a bootstrap certificate's requests keeps a decided one, and
+    /// a decision taken back leaves its request waiting.
     fn approvals(open: &dyn Fn() -> Box<dyn EnrolmentStore>) {
         let store = open();
         store.open_window(10_000).expect("open");
@@ -717,24 +858,44 @@ mod tests {
         let approved = Decision::Approved("-----BEGIN CERTIFICATE-----".to_string());
         let mut sign = || {
             signed.set(signed.get() + 1);
-            Ok(approved.clone())
+            Ok((approved.clone(), None))
         };
         assert_eq!(
-            store.approve("a", &bootstrap("1"), &mut sign),
+            store.approve(
+                "a",
+                &bootstrap("1"),
+                &mut sign,
+                &crate::enrolment::tests::kept()
+            ),
             Ok(Approval::Approved(approved.clone()))
         );
         assert_eq!(
-            store.approve("a", &bootstrap("1"), &mut sign),
+            store.approve(
+                "a",
+                &bootstrap("1"),
+                &mut sign,
+                &crate::enrolment::tests::kept()
+            ),
             Ok(Approval::NotWaiting)
         );
         assert_eq!(
-            store.approve("none", &bootstrap("1"), &mut sign),
+            store.approve(
+                "none",
+                &bootstrap("1"),
+                &mut sign,
+                &crate::enrolment::tests::kept()
+            ),
             Ok(Approval::NotWaiting)
         );
         assert_eq!(signed.get(), 1, "signed once");
         let mut refuse = || Err(DecisionError::Sign("refused".to_string()));
         assert_eq!(
-            store.approve("b", &bootstrap("2"), &mut refuse),
+            store.approve(
+                "b",
+                &bootstrap("2"),
+                &mut refuse,
+                &crate::enrolment::tests::kept()
+            ),
             Ok(Approval::Refused(DecisionError::Sign(
                 "refused".to_string()
             )))
@@ -759,6 +920,13 @@ mod tests {
             decisions(&*open()),
             [("a".into(), true), ("b".into(), false)],
             "the decided request of that bootstrap certificate is kept"
+        );
+        store.take_back("a").expect("take back");
+        store.take_back("none").expect("nothing to take back");
+        assert_eq!(
+            decisions(&*open()),
+            [("a".into(), false), ("b".into(), false)],
+            "a decision taken back waits again"
         );
     }
 
@@ -810,11 +978,16 @@ mod tests {
                         scope.spawn(move || {
                             barrier.wait();
                             store
-                                .approve(&id, &bootstrap("1"), &mut || {
-                                    signed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                                    std::thread::sleep(std::time::Duration::from_millis(20));
-                                    Ok(Decision::Approved(format!("pem {id}")))
-                                })
+                                .approve(
+                                    &id,
+                                    &bootstrap("1"),
+                                    &mut || {
+                                        signed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                        std::thread::sleep(std::time::Duration::from_millis(20));
+                                        Ok((Decision::Approved(format!("pem {id}")), None))
+                                    },
+                                    &crate::enrolment::tests::kept(),
+                                )
                                 .expect("approve")
                         })
                     })
@@ -873,10 +1046,15 @@ mod tests {
         let signed = std::cell::Cell::new(0);
         let mut sign = || {
             signed.set(signed.get() + 1);
-            Ok(Decision::Approved("pem".to_string()))
+            Ok((Decision::Approved("pem".to_string()), None))
         };
         assert_eq!(
-            store.approve("a", &bootstrap("1"), &mut sign),
+            store.approve(
+                "a",
+                &bootstrap("1"),
+                &mut sign,
+                &crate::enrolment::tests::kept()
+            ),
             Ok(Approval::Revoked)
         );
         assert_eq!(signed.get(), 0, "nothing signed");
@@ -890,7 +1068,12 @@ mod tests {
             .collect();
         assert_eq!(held, ["b"], "the request is withdrawn");
         assert!(matches!(
-            store.approve("b", &bootstrap("2"), &mut sign),
+            store.approve(
+                "b",
+                &bootstrap("2"),
+                &mut sign,
+                &crate::enrolment::tests::kept()
+            ),
             Ok(Approval::Approved(_))
         ));
     }
@@ -930,14 +1113,20 @@ mod tests {
                 Ok(())
             };
             let barrier = std::sync::Barrier::new(2);
-            let answers: Vec<Result<(), DecisionError>> = std::thread::scope(|scope| {
+            let answers: Vec<Result<String, DecisionError>> = std::thread::scope(|scope| {
                 let racers: Vec<_> = [&a, &b]
                     .into_iter()
                     .map(|enrolment| {
                         let (barrier, key, record) = (&barrier, key.clone(), &record);
                         scope.spawn(move || {
                             barrier.wait();
-                            enrolment.approve(&key, &Echo, "host", record, &|_| false)
+                            enrolment.approve(
+                                &key,
+                                &Echo,
+                                "host",
+                                &crate::enrolment::tests::Recording::new(record),
+                                &|_| false,
+                            )
                         })
                     })
                     .collect();
@@ -946,7 +1135,10 @@ mod tests {
                     .map(|r| r.join().expect("racer"))
                     .collect()
             });
-            assert!(answers.contains(&Ok(())), "round {round}: {answers:?}");
+            assert!(
+                answers.iter().any(Result::is_ok),
+                "round {round}: {answers:?}"
+            );
             assert!(
                 answers.contains(&Err(DecisionError::NotFound))
                     || answers.contains(&Err(DecisionError::Deciding)),
@@ -1147,17 +1339,25 @@ mod tests {
         let (b_approved, b_decided) = std::thread::scope(|scope| {
             // A signs until B has answered, however long B waits.
             let first = scope.spawn(move || {
-                a.approve("p", &bootstrap("1"), &mut || {
-                    signing.send(()).expect("signing");
-                    answers.recv().expect("B answers");
-                    Ok(Decision::Approved("pem a".to_string()))
-                })
+                a.approve(
+                    "p",
+                    &bootstrap("1"),
+                    &mut || {
+                        signing.send(()).expect("signing");
+                        answers.recv().expect("B answers");
+                        Ok((Decision::Approved("pem a".to_string()), None))
+                    },
+                    &crate::enrolment::tests::kept(),
+                )
             });
             signs.recv().expect("A signs");
             let answer = (
-                b.approve("p", &bootstrap("1"), &mut || {
-                    Ok(Decision::Approved("pem b".to_string()))
-                }),
+                b.approve(
+                    "p",
+                    &bootstrap("1"),
+                    &mut || Ok((Decision::Approved("pem b".to_string()), None)),
+                    &crate::enrolment::tests::kept(),
+                ),
                 b.decide("p", &Decision::Rejected),
             );
             answered.send(()).expect("A waits");
@@ -1170,11 +1370,443 @@ mod tests {
         assert_eq!(b_approved, Ok(Approval::Deciding));
         assert_eq!(b_decided, Ok(Decided::Deciding));
         assert_eq!(
-            b.approve("p", &bootstrap("1"), &mut || {
-                Ok(Decision::Approved("pem b".to_string()))
-            }),
+            b.approve(
+                "p",
+                &bootstrap("1"),
+                &mut || { Ok((Decision::Approved("pem b".to_string()), None)) },
+                &crate::enrolment::tests::kept()
+            ),
             Ok(Approval::NotWaiting)
         );
         assert_eq!(b.decide("p", &Decision::Rejected), Ok(Decided::NotWaiting));
+    }
+
+    /// The register on `database`, as an instance opens it.
+    fn register_on(database: &Arc<Database>) -> crate::revocation::Revocations {
+        crate::revocation::Revocations::open(
+            Box::new(crate::postgres::ledger::PgLedgerStore::new(
+                database.clone(),
+            )),
+            Arc::new(crate::clock::SystemClock),
+            Vec::new(),
+        )
+        .expect("register")
+    }
+
+    /// An instance's window and queue on `database`, the window open.
+    fn enrolment_on(database: &Arc<Database>) -> crate::enrolment::Enrolment {
+        let clock = Arc::new(crate::enrolment::tests::Manual(
+            std::sync::atomic::AtomicU64::new(1_000_000),
+        ));
+        crate::enrolment::Enrolment::open_on(
+            clock,
+            Box::new(PgEnrolmentStore::new(database.clone())),
+        )
+        .expect("enrolment")
+    }
+
+    /// How many rows `table` holds in the test's schema.
+    fn count(test: &TestDatabase, table: &str) -> usize {
+        test.rows(&format!("SELECT count(*) FROM {table}"))[0][0]
+            .as_deref()
+            .expect("a count")
+            .parse()
+            .expect("a number")
+    }
+
+    /// An approval whose decision fails to commit after the certificate is signed leaves neither
+    /// its register entry nor its Host, in the database or in memory, and its signature is
+    /// recorded as rolled back; approved again, the request is signed once more, and one
+    /// certificate for its key is in the register beside one Host (ADR-0044 clause 9).
+    /// Verifies: ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision
+    #[test]
+    fn an_approval_whose_commit_fails_records_nothing_and_a_second_records_one_certificate() {
+        use crate::enrolment::tests::{request as submitted, requester, Counting, Registering};
+        use crate::enrolment::{Submitted, Undecided};
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let register = register_on(&database);
+        let enrolment = enrolment_on(&database);
+        enrolment.open(600).expect("window");
+        assert_eq!(
+            enrolment.submit(submitted("k"), requester()),
+            Submitted::Waiting
+        );
+        let recorder = Registering::on(&register);
+        let signer = Counting::default();
+        test.fail_commits("enrolment_requests", 1);
+
+        let failed = enrolment.approve("k", &signer, "host-1", &recorder, &|_| false);
+        assert!(matches!(failed, Err(DecisionError::Store(_))), "{failed:?}");
+        assert_eq!(
+            (count(&test, "certificates"), count(&test, "hosts")),
+            (0, 0),
+            "a decision that did not commit left a certificate or a Host"
+        );
+        assert!(register.issued().is_empty(), "taken up in memory");
+        assert!(register.hosts().is_empty(), "a Host taken up in memory");
+        assert_eq!(
+            *recorder.undecided.lock().expect("undecided"),
+            [("k".to_string(), "1".to_string(), Undecided::RolledBack)]
+        );
+        assert_eq!(enrolment.pending().len(), 1, "the request still waits");
+
+        let serial = enrolment
+            .approve("k", &signer, "host-2", &recorder, &|_| false)
+            .expect("approved again");
+        assert_eq!(serial, "2");
+        assert_eq!(
+            test.rows("SELECT serial FROM certificates"),
+            [[Some("2".to_string())]],
+            "one certificate for the key"
+        );
+        assert_eq!(
+            test.rows("SELECT host FROM hosts"),
+            [[Some("host-2".to_string())]],
+            "one Host"
+        );
+        let held: Vec<String> = register
+            .issued()
+            .into_iter()
+            .map(|issued| issued.facts.id.serial)
+            .collect();
+        assert_eq!(held, ["2"]);
+        assert_eq!(*recorder.committed.lock().expect("committed"), ["2"]);
+        assert_eq!(
+            enrolment.submit(submitted("k"), requester()),
+            Submitted::Issued("serial 2 for csr-k".to_string())
+        );
+        assert_eq!(recorder.undecided.lock().expect("undecided").len(), 1);
+    }
+
+    /// Two instances approve one request, and the first one's commit fails: the second, which
+    /// waited for the request's row, signs it once when the first rolls back, and the request ends
+    /// decided once, with one certificate in the register (ADR-0044 clause 9, ADR-0041 clause 19).
+    /// Verifies: ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision
+    #[test]
+    fn two_instances_approving_one_request_whose_first_commit_fails_sign_it_once_more() {
+        use crate::enrolment::tests::{request as submitted, requester, Counting, Registering};
+        use crate::enrolment::{Submitted, Undecided};
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let (register_a, register_b) = (register_on(&database), register_on(&database));
+        let (a, b) = (enrolment_on(&database), enrolment_on(&database));
+        a.open(600).expect("window");
+        b.reload().expect("B reads the window");
+        assert_eq!(a.submit(submitted("k"), requester()), Submitted::Waiting);
+        assert_eq!(b.submit(submitted("k"), requester()), Submitted::Waiting);
+        test.fail_commits("enrolment_requests", 1);
+        let (recorder_a, recorder_b) = (Registering::on(&register_a), Registering::on(&register_b));
+
+        /// Signs as `Counting` does, once the test lets it go.
+        struct Held<'a> {
+            signs: Counting,
+            signing: std::sync::mpsc::Sender<()>,
+            go: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+            _lifetime: std::marker::PhantomData<&'a ()>,
+        }
+        impl crate::fleet::CertificateSigner for Held<'_> {
+            fn sign(
+                &self,
+                csr_pem: &str,
+                host: &str,
+                subject: &crate::revocation::SubjectValues,
+            ) -> Result<crate::revocation::Signed, String> {
+                self.signing.send(()).expect("signing");
+                self.go.lock().expect("go").recv().expect("let go");
+                self.signs.sign(csr_pem, host, subject)
+            }
+            fn check_claims(&self, csr_pem: &str, sender: &[u8]) -> Result<(), String> {
+                self.signs.check_claims(csr_pem, sender)
+            }
+            fn renewal_proof(
+                &self,
+                csr_pem: &str,
+            ) -> Result<Option<crate::revocation::Facts>, String> {
+                self.signs.renewal_proof(csr_pem)
+            }
+            fn bootstrap_proof_id(&self, csr_pem: &str) -> Result<Option<CertId>, String> {
+                self.signs.bootstrap_proof_id(csr_pem)
+            }
+        }
+        let (signing, signs) = std::sync::mpsc::channel();
+        let (go, gone) = std::sync::mpsc::channel();
+        let held = Held {
+            signs: Counting::default(),
+            signing,
+            go: std::sync::Mutex::new(gone),
+            _lifetime: std::marker::PhantomData,
+        };
+        let signer_b = Counting(std::sync::atomic::AtomicU64::new(100));
+        let tuple_waits = format!(
+            "SELECT count(*) FROM pg_locks WHERE locktype = 'tuple' \
+             AND relation = '{}.enrolment_requests'::regclass",
+            test.schema
+        );
+        let (first, second) = std::thread::scope(|scope| {
+            let first = scope.spawn(|| a.approve("k", &held, "host-a", &recorder_a, &|_| false));
+            signs.recv().expect("A signs while it holds the request");
+            let second =
+                scope.spawn(|| b.approve("k", &signer_b, "host-b", &recorder_b, &|_| false));
+            // B waits for the row A holds before A's commit fails.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
+            while test.rows(&tuple_waits)[0][0].as_deref() != Some("1") {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "B never waited for the row"
+                );
+                std::thread::yield_now();
+            }
+            go.send(()).expect("A goes on");
+            (first.join().expect("A"), second.join().expect("B"))
+        });
+        assert!(matches!(first, Err(DecisionError::Store(_))), "{first:?}");
+        assert_eq!(
+            second,
+            Ok("101".to_string()),
+            "B signed once, after A rolled back"
+        );
+        assert_eq!(*recorder_b.signed.lock().expect("signed"), ["101"]);
+        assert_eq!(
+            *recorder_a.undecided.lock().expect("undecided"),
+            [("k".to_string(), "1".to_string(), Undecided::RolledBack)]
+        );
+        assert_eq!(
+            test.rows("SELECT serial FROM certificates"),
+            [[Some("101".to_string())]]
+        );
+        assert_eq!(count(&test, "hosts"), 1);
+        let decided = PgEnrolmentStore::new(database.clone())
+            .read_back("k")
+            .expect("read")
+            .expect("held")
+            .decision;
+        assert_eq!(
+            decided,
+            Some(Decision::Approved("serial 101 for csr-k".to_string()))
+        );
+        assert_eq!(
+            a.approve("k", &Counting::default(), "host-a", &recorder_a, &|_| false),
+            Err(DecisionError::NotFound),
+            "decided once"
+        );
+    }
+
+    /// A register entry that its write refuses in the transaction that decides the request, here
+    /// because another instance revoked the bootstrap certificate while the request was signed,
+    /// rolls the decision back with it: nothing is registered or decided, the request is
+    /// withdrawn, and the signature is recorded as rolled back (ADR-0044 clause 9, ADR-0038
+    /// clause 28).
+    /// Verifies: ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision
+    #[test]
+    fn an_approval_whose_register_entry_is_refused_rolls_its_decision_back() {
+        use crate::enrolment::tests::{request as submitted, requester, Counting, Registering};
+        use crate::enrolment::{Submitted, Undecided};
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let register = register_on(&database);
+        let enrolment = enrolment_on(&database);
+        enrolment.open(600).expect("window");
+        assert_eq!(
+            enrolment.submit(submitted("k"), requester()),
+            Submitted::Waiting
+        );
+        let recorder = Registering::on(&register);
+
+        /// Signs as `Counting` does, after another instance revoked the bootstrap certificate.
+        struct Revoking<'a>(Counting, &'a Arc<Database>);
+        impl crate::fleet::CertificateSigner for Revoking<'_> {
+            fn sign(
+                &self,
+                csr_pem: &str,
+                host: &str,
+                subject: &crate::revocation::SubjectValues,
+            ) -> Result<crate::revocation::Signed, String> {
+                let bootstrap = requester().bootstrap;
+                crate::revocation::LedgerStore::add_revocation(
+                    &crate::postgres::ledger::PgLedgerStore::new(self.1.clone()),
+                    &crate::revocation::Revocation {
+                        id: "r1".to_string(),
+                        revoked: crate::revocation::Revoked::Certificate {
+                            authority: "bootstrap".to_string(),
+                            issuers: vec![bootstrap.issuer],
+                            serial: bootstrap.serial,
+                        },
+                        revoked_ms: 1,
+                    },
+                    100,
+                )
+                .expect("revoked elsewhere");
+                self.0.sign(csr_pem, host, subject)
+            }
+            fn check_claims(&self, csr_pem: &str, sender: &[u8]) -> Result<(), String> {
+                self.0.check_claims(csr_pem, sender)
+            }
+            fn renewal_proof(
+                &self,
+                csr_pem: &str,
+            ) -> Result<Option<crate::revocation::Facts>, String> {
+                self.0.renewal_proof(csr_pem)
+            }
+            fn bootstrap_proof_id(&self, csr_pem: &str) -> Result<Option<CertId>, String> {
+                self.0.bootstrap_proof_id(csr_pem)
+            }
+        }
+        let refused = enrolment.approve(
+            "k",
+            &Revoking(Counting::default(), &database),
+            "host-1",
+            &recorder,
+            &|_| false,
+        );
+        assert_eq!(refused, Err(DecisionError::Revoked));
+        assert_eq!(
+            (count(&test, "certificates"), count(&test, "hosts")),
+            (0, 0)
+        );
+        assert_eq!(count(&test, "enrolment_requests"), 0, "withdrawn");
+        assert!(register.issued().is_empty());
+        assert!(recorder.committed.lock().expect("committed").is_empty());
+        assert_eq!(
+            *recorder.undecided.lock().expect("undecided"),
+            [("k".to_string(), "1".to_string(), Undecided::RolledBack)]
+        );
+    }
+
+    /// A commit the database server itself refuses is answered as a refusal, not as an outcome
+    /// the instance would have to read back (ADR-0044 clause 9).
+    /// Verifies: ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision
+    #[test]
+    fn a_commit_the_database_refuses_is_answered_as_a_refusal() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let store = PgEnrolmentStore::new(test.open());
+        store.open_window(u64::MAX / 4).expect("open");
+        store.take(&request("p", "1"), 1_000, 8, 8).expect("take");
+        test.fail_commits("enrolment_requests", 1);
+        let answer = store.approve(
+            "p",
+            &bootstrap("1"),
+            &mut || Ok((Decision::Approved("pem".to_string()), None)),
+            &crate::enrolment::tests::kept(),
+        );
+        assert!(
+            matches!(&answer, Ok(Approval::NotCommitted(e)) if e.contains("refused by the test")),
+            "{answer:?}"
+        );
+        assert_eq!(
+            store.read_back("p").expect("read").expect("held").decision,
+            None,
+            "the request still waits"
+        );
+    }
+
+    /// The read back of an approval whose outcome is not known waits for the transaction that
+    /// holds the request to end, and answers what it committed, not what was committed before
+    /// (ADR-0044 clause 9).
+    /// Verifies: ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision
+    #[test]
+    fn a_read_back_waits_for_the_transaction_that_holds_the_request() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let store = PgEnrolmentStore::new(database.clone());
+        store.open_window(u64::MAX / 4).expect("open");
+        store.take(&request("p", "1"), 1_000, 8, 8).expect("take");
+        let mut decided = serde_json::to_value(request("p", "1")).expect("request");
+        decided["decision"] =
+            serde_json::to_value(Decision::Approved("pem held".to_string())).expect("decision");
+        // A decision written and not yet committed, as an approval in its commit leaves it.
+        let holding = database
+            .run(move |pool| async move {
+                let held = Held(Some(client(&pool).await?));
+                held.client()
+                    .batch_execute(
+                        "BEGIN; SELECT request FROM enrolment_requests WHERE id = 'p' FOR UPDATE",
+                    )
+                    .await
+                    .map_err(sql)?;
+                held.client()
+                    .execute(
+                        "UPDATE enrolment_requests SET request = $1 WHERE id = 'p'",
+                        &[&decided],
+                    )
+                    .await
+                    .map_err(sql)?;
+                Ok(held)
+            })
+            .expect("holding");
+        let tuple_waits = format!(
+            "SELECT count(*) FROM pg_locks WHERE locktype = 'tuple' \
+             AND relation = '{}.enrolment_requests'::regclass",
+            test.schema
+        );
+        let read = std::thread::scope(|scope| {
+            let reader = scope.spawn(|| store.read_back("p"));
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
+            while test.rows(&tuple_waits)[0][0].as_deref() != Some("1") {
+                assert!(
+                    std::time::Instant::now() < deadline && !reader.is_finished(),
+                    "the read back did not wait for the transaction"
+                );
+                std::thread::yield_now();
+            }
+            database
+                .run(move |_| async move {
+                    holding
+                        .client()
+                        .batch_execute("COMMIT")
+                        .await
+                        .map_err(sql)?;
+                    drop(holding.let_go());
+                    Ok(())
+                })
+                .expect("commit");
+            reader.join().expect("reader")
+        });
+        assert_eq!(
+            read.expect("read").expect("held").decision,
+            Some(Decision::Approved("pem held".to_string()))
+        );
+    }
+
+    /// Only an `ERROR` the server answers at the commit is a certain rollback: a `FATAL` or a
+    /// `PANIC` there, and an error the server did not answer, are read back; at the UPDATE any
+    /// answer of the server is certain (ADR-0044 clause 9). A real `FATAL` after a commit durable
+    /// on its own, as a terminate during the wait for a synchronous standby gives, needs a
+    /// replica, so the classification is decided here from the severity alone.
+    /// Verifies: ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision
+    #[test]
+    fn only_an_error_at_the_commit_is_a_certain_rollback() {
+        assert!(rolled_back_for_certain(
+            Some(Some(Severity::Error)),
+            At::Commit
+        ));
+        for severity in [Some(Severity::Fatal), Some(Severity::Panic), None] {
+            assert!(
+                !rolled_back_for_certain(Some(severity), At::Commit),
+                "{severity:?} at the commit"
+            );
+            assert!(
+                rolled_back_for_certain(Some(severity), At::Update),
+                "{severity:?} at the UPDATE"
+            );
+        }
+        assert!(
+            !rolled_back_for_certain(None, At::Commit),
+            "no answer of the server"
+        );
+        assert!(
+            !rolled_back_for_certain(None, At::Update),
+            "no answer of the server"
+        );
     }
 }

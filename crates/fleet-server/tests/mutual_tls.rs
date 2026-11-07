@@ -5410,7 +5410,7 @@ async fn gateway_presenting(
 /// waits in the queue naming the Gateway's host in place of a peer address, there and in the audit,
 /// becomes no Agent, and its approval mints a host of its own — never the Gateway's — whose
 /// certificate the enrolling host collects in a later reply, addressed to it.
-/// Verifies: ADR-0015
+/// Verifies: ADR-0015, ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision
 #[tokio::test]
 async fn an_enrolment_through_a_gateway_is_decided_as_any_enrolment() {
     let pki = Pki::new();
@@ -5464,12 +5464,11 @@ async fn an_enrolment_through_a_gateway_is_decided_as_any_enrolment() {
     let reply = decode(post(&gateway, &served.endpoint, with_csr(&uid, csr)).await).await;
     assert_eq!(reply.instance_uid, uid.as_bytes());
     let certificate = issued(reply).expect("the issued certificate");
-    let host = fleet_server::ca::facts(
+    let facts = fleet_server::ca::facts(
         opamp::tls::certificates(certificate.as_bytes()).expect("pem")[0].as_ref(),
     )
-    .expect("facts")
-    .host
-    .expect("a host");
+    .expect("facts");
+    let host = facts.host.expect("a host");
     assert_ne!(host, "gw", "the Gateway's host was handed out");
 
     let all = entries(dir.path(), "enrolment.approved", 1).await;
@@ -5478,6 +5477,16 @@ async fn an_enrolment_through_a_gateway_is_decided_as_any_enrolment() {
         assert_eq!(entry.len(), 1, "{event}: {all:#?}");
         assert_eq!(entry[0]["gateway"], "gw", "{event}");
     }
+    // The signature names the request it approves, and the approval the certificate it issued
+    // (ADR-0044 clause 9).
+    assert_eq!(
+        named(&all, "enrolment.approved")[0]["serial"],
+        facts.id.serial.as_str()
+    );
+    let signed = named(&all, "issuance.signed");
+    assert_eq!(signed.len(), 1, "{all:#?}");
+    assert_eq!(signed[0]["request"], pending[0].id.as_str());
+    assert_eq!(signed[0]["serial"], facts.id.serial.as_str());
 }
 
 /// Through a Gateway, without an open window the request is answered `Unavailable`; a bootstrap

@@ -820,14 +820,21 @@ instance that carries an Agent, two cases do not inherit yet:
 
 ### An approval whose commit fails
 
-An approval signs the host's certificate and records it in the register and the audit record
-before its decision commits. When that commit fails, on a lost connection to the database, a
-timeout, or a commit elsewhere on the database server that holds the notification lock for more
-than five seconds, the approval answers `500` and the request still waits. Approving it again
-signs a second certificate for the same key. The first is never handed to the host, so no one
-holds it, but it stays in the register as valid, beside a Host with no binding. When the audit
-record shows two `issuance.signed` entries with one `key_fingerprint`, revoke the first by its
-serial.
+An approval writes the certificate it signed into the register, with the Host it mints, in the
+transaction that decides the request. When that commit fails, on a lost connection to the
+database, a timeout, or a commit elsewhere on the database server that holds the notification lock
+for more than five seconds, the approval answers `500`, nothing is registered, and the request
+still waits. Approving it again signs it once more, so one certificate for its key is valid. An
+instance that cannot tell whether its commit landed reads the request back under a lock on its
+row: decided with its certificate, the approval stands. A refusal the database answers with an
+`ERROR` at the commit needs no read back; a `FATAL` there is read back, as the commit may have
+landed.
+
+The audit record says what came of each signature. `enrolment.approved` names a certificate that
+was issued by its `serial`. `issuance.undecided` names one that was not with the outcome
+`rolled_back`, with its `serial` and its `request`. For a signature neither names, or one named
+with the outcome `unknown`, `GET /api/v1/certificates` answers while the certificate is valid:
+it was issued if it is listed.
 
 ### From one Server on files to two instances
 

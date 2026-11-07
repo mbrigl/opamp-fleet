@@ -14,6 +14,29 @@ once its tag exists.
 > rest — is not backfilled here; it is in the git log and in the ADRs. The first four releases were
 > all cut on 2026-08-09, so the dates below say less than the order does.
 
+## [Unreleased]
+
+### Fixed
+
+- **An approval records its certificate only with its decision**
+  ([ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision](docs/adr/draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)).
+  This removes the 0.8.0 bound *An approval whose commit fails leaves its certificate recorded*.
+  On PostgreSQL the register entry and the Host an approval mints are written in the transaction
+  that decides the request. When that commit fails, nothing is registered, the request still
+  waits, and approved again it is signed once more, so one certificate for its key is valid. An
+  approval that cannot tell whether its commit landed reads the request back under a lock on its
+  row. On files the decision is written first and taken back when the register entry cannot be
+  written, and a start puts a decided request whose certificate the register does not hold back
+  to waiting. In the audit record `issuance.signed` names the request under `request`,
+  `enrolment.approved` names the certificate under `serial` and is recorded before the approval
+  is answered, and a signature whose decision was not written is recorded as
+  `issuance.undecided` with the outcome `rolled_back`, or `unknown` when the outcome could not be
+  read back.
+  **What to do:** nothing. A certificate of an enrolment was issued where `enrolment.approved`
+  names its serial, and not where `issuance.undecided` names it `rolled_back`; for a signature
+  neither names, or one named `unknown`, `GET /api/v1/certificates` answers while the
+  certificate is valid.
+
 ## [0.8.0]
 
 ### Added

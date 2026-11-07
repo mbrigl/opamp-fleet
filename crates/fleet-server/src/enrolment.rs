@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
 use crate::fleet::{CertificateSigner, Clock};
-use crate::revocation::{CertId, Signed, SubjectValues};
+use crate::revocation::{Approved, CertId, Signed, SubjectValues};
 
 /// The longest an enrolment window may stay open.
 pub const MAX_WINDOW_SECS: u64 = 86_400;
@@ -79,10 +79,70 @@ pub struct Pending {
     pub requester: Requester,
 }
 
-/// Keeps what was signed, the `instance_uid` it was asked under and the bootstrap certificate the
-/// request came with, before a host can collect it. A revoked bootstrap certificate is answered
-/// [`DecisionError::Revoked`].
-pub type Record<'a> = dyn Fn(&Signed, &[u8], &CertId) -> Result<(), DecisionError> + 'a;
+/// Writes the register entry and the Host an approval prepared, and takes them up, for the
+/// enrolment store that writes them with the decision on its request (ADR-0044 clause 9).
+pub trait Registrar {
+    /// Writes `approved` through the register's own store and takes it up: what a store calls
+    /// once it has written the decision, when it cannot write the register in the same write. A
+    /// revoked bootstrap certificate is answered [`DecisionError::Revoked`].
+    ///
+    /// # Errors
+    /// Returns the refusal, or why it could not be written; nothing is then taken up.
+    fn register(&self, approved: &Approved) -> Result<(), DecisionError>;
+
+    /// Takes up `approved` once the store wrote it in the transaction that decided its request,
+    /// and that transaction committed.
+    fn committed(&self, approved: &Approved);
+}
+
+/// What an approval keeps of what it signed (ADR-0044 clause 9): it records the signature in the
+/// audit record and prepares the register entry, before the decision is written, and records a
+/// signature whose decision was not written.
+pub trait Recorder: Registrar {
+    /// Records the signature of `signed`, asked under `instance_uid` for the request `request`,
+    /// and prepares its register entry and Host: `None` when the Server keeps no register. A
+    /// revoked bootstrap certificate is answered [`DecisionError::Revoked`]. Nothing is recorded
+    /// when this fails.
+    ///
+    /// # Errors
+    /// Returns the refusal: a bound, a revoked bootstrap certificate, or an audit record that
+    /// cannot take the entry.
+    fn signed(
+        &self,
+        signed: &Signed,
+        request: &str,
+        instance_uid: &[u8],
+        bootstrap: &CertId,
+    ) -> Result<Option<Approved>, DecisionError>;
+
+    /// Records that the decision on `request`, which would have handed out `signed`, was not
+    /// written.
+    fn undecided(&self, signed: &Signed, request: &str, outcome: Undecided);
+}
+
+/// What came of a signature whose decision was not written, as the audit record names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Undecided {
+    /// The decision was not written, and nothing of it was kept.
+    RolledBack,
+    /// Whether it was written could not be read back; the register answers.
+    Unknown,
+}
+
+impl Undecided {
+    /// The outcome as the audit record names it.
+    #[must_use]
+    pub fn outcome(self) -> &'static str {
+        match self {
+            Undecided::RolledBack => "rolled_back",
+            Undecided::Unknown => "unknown",
+        }
+    }
+}
+
+/// What an approval's signature comes to: the decision, and the register entry and Host it
+/// prepared, to be written with it.
+pub type Signing = (Decision, Option<Approved>);
 
 /// What an approval comes to in the store.
 #[derive(Debug, PartialEq, Eq)]
@@ -97,6 +157,9 @@ pub enum Approval {
     Revoked,
     /// Signing or recording refused it; the request still waits.
     Refused(DecisionError),
+    /// The database server refused the transaction that would have decided it, at its commit or
+    /// at a statement before it: nothing of it was written, and the request still waits.
+    NotCommitted(String),
     /// Another instance holds the request while it decides it, for longer than a wait for a lock
     /// lasts. Nothing was signed here, and the request may still wait.
     Deciding,
@@ -292,23 +355,35 @@ pub trait EnrolmentStore: Send + Sync {
         Ok(Decided::Written)
     }
 
-    /// Approves the waiting request `id`: `sign` signs and records it while the request is held,
-    /// and its answer is written as the request's decision. A request the store holds no longer
-    /// waiting is answered [`Approval::NotWaiting`] before anything is signed, so of two instances
-    /// approving one request one signs and records it and the other nothing
+    /// Approves the waiting request `id`: `sign` signs it while the request is held, and its
+    /// answer is written as the request's decision, with the register entry and the Host it
+    /// prepared (ADR-0044 clause 9). A request the store holds no longer waiting is answered
+    /// [`Approval::NotWaiting`] before anything is signed, so of two instances approving one
+    /// request one signs and records it and the other nothing
     /// (ADR-0041
     /// clause 19). A store other instances share also refuses a request whose bootstrap
     /// certificate, `bootstrap`, the list names, and withdraws it; a store that is its only writer
     /// leaves that to the list in memory. Such a store answers [`Approval::Deciding`] for a
     /// request another instance holds while it decides it, longer than a wait for a lock lasts.
     ///
+    /// A store that writes the register in the transaction that decides the request
+    /// ([`registers_with_its_decision`](Self::registers_with_its_decision)) does so, and hands what
+    /// it committed to `registrar` to take up. This body, for a store that is its only writer,
+    /// writes the decision first and then has `registrar` write the register entry and the Host;
+    /// one that cannot be written takes the decision back.
+    ///
+    /// A store that writes the register with its decision answers [`Approval::NotCommitted`] when
+    /// the database refused the transaction, so nothing of it was written.
+    ///
     /// # Errors
-    /// Returns an error when the store cannot be read or written; nothing is then decided.
+    /// Returns an error when the store cannot be read or written; nothing is then decided, unless
+    /// a store that writes the register with its decision cannot tell whether its commit landed.
     fn approve(
         &self,
         id: &str,
         bootstrap: &CertId,
-        sign: &mut dyn FnMut() -> Result<Decision, DecisionError>,
+        sign: &mut dyn FnMut() -> Result<Signing, DecisionError>,
+        registrar: &dyn Registrar,
     ) -> Result<Approval, String> {
         let _ = bootstrap;
         let mut persisted = self.load()?.unwrap_or_default();
@@ -319,13 +394,70 @@ pub trait EnrolmentStore: Send + Sync {
         else {
             return Ok(Approval::NotWaiting);
         };
-        let decision = match sign() {
-            Ok(decision) => decision,
+        let (decision, approved) = match sign() {
+            Ok(signing) => signing,
             Err(e) => return Ok(Approval::Refused(e)),
         };
         request.decision = Some(decision.clone());
-        self.save(&persisted)?;
+        if let Err(e) = self.save(&persisted) {
+            // What a save that failed left is not known: the request is put back as it was.
+            if let Err(again) = self.take_back(id) {
+                tracing::warn!(error = %again, "cannot take back an approval that was not written");
+            }
+            return Err(e);
+        }
+        if let Some(approved) = &approved {
+            if let Err(refused) = registrar.register(approved) {
+                // The register entry was not written: the decision is taken back. When that fails
+                // too, the next start puts the request back to waiting.
+                if let Err(e) = self.take_back(id) {
+                    tracing::warn!(error = %e, "cannot take back an approval whose certificate was not registered");
+                }
+                return Ok(Approval::Refused(refused));
+            }
+        }
         Ok(Approval::Approved(decision))
+    }
+
+    /// Whether [`approve`](Self::approve) writes the register entry and the Host in the
+    /// transaction that decides the request, so a decision that does not commit leaves neither:
+    /// what PostgreSQL does. A store that is its only writer writes the decision first and has the
+    /// register written after it.
+    fn registers_with_its_decision(&self) -> bool {
+        false
+    }
+
+    /// The request `id` as the store holds it now: what an approval whose commit failed reads
+    /// back, to tell whether it landed. `None` when the store does not hold it.
+    ///
+    /// # Errors
+    /// Returns an error when the store cannot be read.
+    fn read_back(&self, id: &str) -> Result<Option<PersistedRequest>, String> {
+        Ok(self
+            .load()?
+            .and_then(|persisted| persisted.requests.into_iter().find(|r| r.id == id)))
+    }
+
+    /// Takes the decision on the request `id` back, so it waits again: what an approval whose
+    /// certificate could not be registered does, and what a start does for a decided request
+    /// whose certificate the register does not hold (ADR-0044 clause 9). A request the store does
+    /// not hold is left.
+    ///
+    /// # Errors
+    /// Returns an error when the store cannot be read or written.
+    fn take_back(&self, id: &str) -> Result<(), String> {
+        let Some(mut persisted) = self.load()? else {
+            return Ok(());
+        };
+        let Some(request) = persisted
+            .requests
+            .iter_mut()
+            .find(|r| r.id == id && r.decision.is_some())
+        else {
+            return Ok(());
+        };
+        request.decision = None;
+        self.save(&persisted)
     }
 
     /// Withdraws every waiting request whose bootstrap certificate is `serial` under one of
@@ -714,15 +846,21 @@ impl Enrolment {
     }
 
     /// Approves one request: the CA signs it, and the certificate waits for the Agent to collect.
+    /// Answers the serial of the certificate signed.
     ///
     /// # Errors
     /// Returns [`DecisionError::NotFound`] for an unknown, decided or expired id,
     /// [`DecisionError::Revoked`] when the request's bootstrap certificate is revoked,
     /// [`DecisionError::Subject`] when its subject cannot be carried into the host certificate
-    /// (ADR-0015 clause 23), and [`DecisionError::Sign`] when the CA refuses the request.
-    /// Answers what was signed, and the `instance_uid` the request arrived under, for the register.
-    /// `record` keeps what was signed before the host can collect it (ADR-0044 clause 9); a
-    /// failure there leaves the request pending.
+    /// (ADR-0015 clause 23), [`DecisionError::Sign`] when the CA or the register refuses the
+    /// request, and [`DecisionError::Store`] when the decision could not be written; the request
+    /// then still waits.
+    ///
+    /// `recorder` records the signature and prepares its register entry and Host, which are
+    /// written with the decision (ADR-0044 clause 9): a decision that is not written leaves
+    /// neither, and `recorder` records the signature as undecided. When a store that writes the
+    /// register with its decision cannot tell whether its commit landed, the request is read
+    /// back: decided with the certificate signed here, the approval stands.
     ///
     /// The bootstrap certificate the request came with is checked against `revoked` under the same
     /// lock that signs, so a revocation that lands before the approval always wins (ADR-0038
@@ -732,9 +870,9 @@ impl Enrolment {
         id: &str,
         signer: &dyn CertificateSigner,
         host: &str,
-        record: &Record<'_>,
+        recorder: &dyn Recorder,
         revoked: &dyn Fn(&CertId) -> bool,
-    ) -> Result<(), DecisionError> {
+    ) -> Result<String, DecisionError> {
         let mut state = self.state.lock().expect("enrolment lock");
         self.expire(&mut state);
         let entry = state
@@ -755,25 +893,56 @@ impl Enrolment {
             ))
         })?;
         let (csr_pem, instance_uid) = (entry.csr_pem.clone(), entry.instance_uid.clone());
-        let mut sign = || -> Result<Decision, DecisionError> {
+        // What was signed and recorded, once it is: a decision that is not written after it
+        // leaves it undecided.
+        let recorded: std::cell::RefCell<Option<(Signed, Option<Approved>)>> =
+            std::cell::RefCell::new(None);
+        let mut sign = || -> Result<Signing, DecisionError> {
             let signed = signer
                 .sign(&csr_pem, host, &subject)
                 .map_err(DecisionError::Sign)?;
-            record(&signed, &instance_uid, &bootstrap)?;
-            Ok(Decision::Approved(signed.pem))
+            let approved = recorder.signed(&signed, id, &instance_uid, &bootstrap)?;
+            let decision = Decision::Approved(signed.pem.clone());
+            *recorded.borrow_mut() = Some((signed, approved.clone()));
+            Ok((decision, approved))
         };
         // Persisted before it is answered, the certificate included, so a restart before the host
         // collects it hands it over all the same (ADR-0044 clause 8). The store signs only a
         // request that still waits there, and holds it meanwhile: one another instance decided or
         // withdrew is gone, and nothing is signed for it.
         let approval = match &self.store {
-            Some(store) => store
-                .approve(id, &bootstrap, &mut sign)
-                .map_err(DecisionError::Store)?,
-            None => match sign() {
-                Ok(decision) => Approval::Approved(decision),
+            Some(store) => store.approve(id, &bootstrap, &mut sign, recorder),
+            None => Ok(match sign() {
                 Err(e) => Approval::Refused(e),
-            },
+                Ok((decision, approved)) => {
+                    match approved
+                        .as_ref()
+                        .map(|approved| recorder.register(approved))
+                    {
+                        Some(Err(e)) => Approval::Refused(e),
+                        _ => Approval::Approved(decision),
+                    }
+                }
+            }),
+        };
+        let recorded = recorded.into_inner();
+        let approval = match (approval, &recorded) {
+            (Err(e), Some((signed, approved))) => {
+                match self.read_back(id, signed, approved.as_ref(), recorder) {
+                    Some(decision) => Ok(Approval::Approved(decision)),
+                    None => Err(e),
+                }
+            }
+            (approval, _) => approval,
+        };
+        let undecided = |outcome| {
+            if let Some((signed, _)) = &recorded {
+                recorder.undecided(signed, id, outcome);
+            }
+        };
+        let approval = match approval {
+            Ok(approval) => approval,
+            Err(e) => return Err(DecisionError::Store(e)),
         };
         match approval {
             Approval::Approved(decision) => {
@@ -782,18 +951,104 @@ impl Enrolment {
                 }
                 drop(state);
                 self.changed();
-                Ok(())
+                Ok(recorded
+                    .map(|(signed, _)| signed.facts.id.serial)
+                    .unwrap_or_default())
             }
             Approval::NotWaiting => {
                 state.entries.remove(id);
                 Err(DecisionError::NotFound)
             }
             Approval::Revoked | Approval::Refused(DecisionError::Revoked) => {
+                undecided(Undecided::RolledBack);
                 Err(self.withdrawn(state, id))
             }
-            Approval::Refused(e) => Err(e),
+            Approval::Refused(e) => {
+                undecided(Undecided::RolledBack);
+                Err(e)
+            }
+            Approval::NotCommitted(e) => {
+                undecided(Undecided::RolledBack);
+                Err(DecisionError::Store(e))
+            }
             Approval::Deciding => Err(DecisionError::Deciding),
         }
+    }
+
+    /// Reads back the request `id` after an approval whose store answered an error, when that
+    /// store writes the register with its decision and so may have committed it all the same: the
+    /// decision when it holds the certificate signed here, taken up through `recorder`; `None`
+    /// otherwise, the signature recorded as undecided — rolled back when the request is read back
+    /// without it, unknown when it cannot be read back. A store that writes the register after the
+    /// decision took the decision back when it answered an error, so its signature is rolled back.
+    fn read_back(
+        &self,
+        id: &str,
+        signed: &Signed,
+        approved: Option<&Approved>,
+        recorder: &dyn Recorder,
+    ) -> Option<Decision> {
+        let store = self.store.as_ref()?;
+        if !store.registers_with_its_decision() {
+            recorder.undecided(signed, id, Undecided::RolledBack);
+            return None;
+        }
+        let ours = Decision::Approved(signed.pem.clone());
+        match store.read_back(id) {
+            Ok(Some(request)) if request.decision.as_ref() == Some(&ours) => {
+                tracing::warn!(request = %id, "an approval whose commit answered an error had committed");
+                if let Some(approved) = approved {
+                    recorder.committed(approved);
+                }
+                Some(ours)
+            }
+            Ok(_) => {
+                recorder.undecided(signed, id, Undecided::RolledBack);
+                None
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, request = %id, "cannot read back an approval whose commit answered an error");
+                recorder.undecided(signed, id, Undecided::Unknown);
+                None
+            }
+        }
+    }
+
+    /// Whether the store writes an approval's register entry with its decision, in one
+    /// transaction; a start then has nothing to take back (ADR-0044 clause 9).
+    pub fn registers_with_its_decision(&self) -> bool {
+        self.store
+            .as_ref()
+            .is_some_and(|store| store.registers_with_its_decision())
+    }
+
+    /// The requests approved and not yet collected, each with its certificate, PEM.
+    pub fn approved(&self) -> Vec<(String, String)> {
+        let state = self.state.lock().expect("enrolment lock");
+        state
+            .entries
+            .values()
+            .filter_map(|entry| match &entry.decision {
+                Some(Decision::Approved(pem)) => Some((entry.pending.id.clone(), pem.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Takes the decision on the request `id` back, so it waits again: what a start does for an
+    /// approved request whose certificate the register does not hold (ADR-0044 clause 9).
+    ///
+    /// # Errors
+    /// Returns an error when the store cannot be written; the request is then left decided.
+    pub fn take_back(&self, id: &str) -> Result<(), String> {
+        let mut state = self.state.lock().expect("enrolment lock");
+        self.on_store(|store| store.take_back(id))?;
+        if let Some(entry) = state.entries.get_mut(id) {
+            entry.decision = None;
+        }
+        drop(state);
+        self.changed();
+        Ok(())
     }
 
     /// Withdraws the waiting request `id`, whose bootstrap certificate is revoked, and answers
@@ -1065,6 +1320,162 @@ pub(crate) mod tests {
         }
     }
 
+    /// Records each signature through its closure and keeps no register, as a Server without one:
+    /// nothing is prepared, registered or taken up, and what was not decided is counted.
+    pub(crate) struct Recording<F> {
+        pub(crate) record: F,
+        pub(crate) undecided: std::sync::Mutex<Vec<(String, Undecided)>>,
+    }
+
+    impl<F> Recording<F> {
+        pub(crate) fn new(record: F) -> Self {
+            Recording {
+                record,
+                undecided: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    /// Prepares an approval's register entry and Host on `revocations`, writes and takes them up
+    /// as the Server does, and counts what it signed, took up and left undecided.
+    pub(crate) struct Registering<'a> {
+        pub(crate) revocations: &'a crate::revocation::Revocations,
+        pub(crate) signed: std::sync::Mutex<Vec<String>>,
+        pub(crate) committed: std::sync::Mutex<Vec<String>>,
+        pub(crate) undecided: std::sync::Mutex<Vec<(String, String, Undecided)>>,
+    }
+
+    impl<'a> Registering<'a> {
+        pub(crate) fn on(revocations: &'a crate::revocation::Revocations) -> Self {
+            Registering {
+                revocations,
+                signed: std::sync::Mutex::new(Vec::new()),
+                committed: std::sync::Mutex::new(Vec::new()),
+                undecided: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl Registrar for Registering<'_> {
+        fn register(&self, approved: &Approved) -> Result<(), DecisionError> {
+            self.revocations
+                .register_approved(approved)
+                .map_err(DecisionError::Sign)
+        }
+        fn committed(&self, approved: &Approved) {
+            self.committed
+                .lock()
+                .expect("committed")
+                .push(approved.issued().facts.id.serial.clone());
+            self.revocations.took_up_approved(approved);
+        }
+    }
+
+    impl Recorder for Registering<'_> {
+        fn signed(
+            &self,
+            signed: &Signed,
+            _: &str,
+            instance_uid: &[u8],
+            bootstrap: &CertId,
+        ) -> Result<Option<Approved>, DecisionError> {
+            let approved = self
+                .revocations
+                .prepare_approved(signed.facts.clone(), instance_uid, bootstrap)
+                .map_err(DecisionError::Sign)?;
+            self.signed
+                .lock()
+                .expect("signed")
+                .push(signed.facts.id.serial.clone());
+            Ok(Some(approved))
+        }
+        fn undecided(&self, signed: &Signed, request: &str, outcome: Undecided) {
+            self.undecided.lock().expect("undecided").push((
+                request.to_string(),
+                signed.facts.id.serial.clone(),
+                outcome,
+            ));
+        }
+    }
+
+    /// Signs each request with a serial of its own, counting from 1, for the host it is asked for.
+    #[derive(Default)]
+    pub(crate) struct Counting(pub(crate) AtomicU64);
+
+    impl CertificateSigner for Counting {
+        fn sign(
+            &self,
+            csr_pem: &str,
+            host: &str,
+            subject: &SubjectValues,
+        ) -> Result<Signed, String> {
+            let serial = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            Ok(Signed {
+                pem: format!("serial {serial} for {csr_pem}"),
+                facts: crate::revocation::Facts {
+                    id: crate::revocation::CertId::new(b"test CA", &serial.to_string()),
+                    issuer_name: "CN=test CA".to_string(),
+                    subject: String::new(),
+                    key_fingerprint: csr_pem.to_string(),
+                    not_after_ms: u64::MAX / 2,
+                    host: Some(host.to_string()),
+                    subject_values: subject.clone(),
+                },
+            })
+        }
+
+        fn check_claims(&self, _csr_pem: &str, _sender: &[u8]) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn renewal_proof(
+            &self,
+            _csr_pem: &str,
+        ) -> Result<Option<crate::revocation::Facts>, String> {
+            Ok(None)
+        }
+
+        fn bootstrap_proof_id(
+            &self,
+            _csr_pem: &str,
+        ) -> Result<Option<crate::revocation::CertId>, String> {
+            Ok(None)
+        }
+    }
+
+    /// What a test records of a signature: nothing, or a refusal.
+    pub(crate) type Record = fn(&Signed, &[u8], &CertId) -> Result<(), DecisionError>;
+
+    /// A [`Recording`] that records nothing and refuses nothing.
+    pub(crate) fn kept() -> Recording<Record> {
+        Recording::new(|_, _, _| Ok(()))
+    }
+
+    impl<F> Registrar for Recording<F> {
+        fn register(&self, _: &Approved) -> Result<(), DecisionError> {
+            Ok(())
+        }
+        fn committed(&self, _: &Approved) {}
+    }
+
+    impl<F: Fn(&Signed, &[u8], &CertId) -> Result<(), DecisionError>> Recorder for Recording<F> {
+        fn signed(
+            &self,
+            signed: &Signed,
+            _: &str,
+            instance_uid: &[u8],
+            bootstrap: &CertId,
+        ) -> Result<Option<Approved>, DecisionError> {
+            (self.record)(signed, instance_uid, bootstrap).map(|()| None)
+        }
+        fn undecided(&self, _: &Signed, request: &str, outcome: Undecided) {
+            self.undecided
+                .lock()
+                .expect("undecided")
+                .push((request.to_string(), outcome));
+        }
+    }
+
     pub(crate) fn requester() -> Requester {
         Requester {
             bootstrap_subject: "CN=bootstrap".to_string(),
@@ -1094,7 +1505,7 @@ pub(crate) mod tests {
         };
 
         assert_eq!(a.submit(request("k1"), requester()), Submitted::Waiting);
-        a.approve("k1", &Echo, "host", &record, &|_| false)
+        a.approve("k1", &Echo, "host", &Recording::new(&record), &|_| false)
             .expect("approve on A");
         assert_eq!(
             b.submit(request("k1"), requester()),
@@ -1111,9 +1522,10 @@ pub(crate) mod tests {
             );
             match decide {
                 "reject" => a.reject(key).expect("reject on A"),
-                "approve" => a
-                    .approve(key, &Echo, "host", &record, &|_| false)
-                    .expect("approve on A"),
+                "approve" => {
+                    a.approve(key, &Echo, "host", &Recording::new(&record), &|_| false)
+                        .expect("approve on A");
+                }
                 _ => {
                     let bootstrap = requester().bootstrap;
                     assert_eq!(
@@ -1139,7 +1551,7 @@ pub(crate) mod tests {
             );
             if decide == "approve" {
                 assert_eq!(
-                    b.approve(key, &Echo, "host", &record, &|_| false),
+                    b.approve(key, &Echo, "host", &Recording::new(&record), &|_| false),
                     Err(DecisionError::NotFound)
                 );
             }
@@ -1181,7 +1593,7 @@ pub(crate) mod tests {
             enrolment.submit(request("b"), requester());
             enrolment.submit(request("c"), requester());
             enrolment
-                .approve("a", &Echo, "host", &|_, _, _| Ok(()), &|_| false)
+                .approve("a", &Echo, "host", &kept(), &|_| false)
                 .expect("approve");
             enrolment.reject("c").expect("reject");
             until
@@ -1206,7 +1618,7 @@ pub(crate) mod tests {
         );
         assert!(restarted.is_rejected("c"));
         restarted
-            .approve("b", &Echo, "host", &|_, _, _| Ok(()), &|_| false)
+            .approve("b", &Echo, "host", &kept(), &|_| false)
             .expect("the waiting request can still be approved");
     }
 
@@ -1223,7 +1635,7 @@ pub(crate) mod tests {
             enrolment.open(60).expect("open the window");
             enrolment.submit(request("a"), requester());
             enrolment
-                .approve("a", &Echo, "host", &|_, _, _| Ok(()), &|_| false)
+                .approve("a", &Echo, "host", &kept(), &|_| false)
                 .expect("approve");
         }
         clock.0.fetch_add(61_000, Ordering::SeqCst);
@@ -1276,7 +1688,7 @@ pub(crate) mod tests {
             "a request that cannot be kept is not taken in"
         );
         assert!(matches!(
-            enrolment.approve("a", &Echo, "host", &|_, _, _| Ok(()), &|_| false),
+            enrolment.approve("a", &Echo, "host", &kept(), &|_| false),
             Err(DecisionError::Store(_))
         ));
         assert!(matches!(
@@ -1309,7 +1721,8 @@ pub(crate) mod tests {
                 &self,
                 _: &str,
                 _: &CertId,
-                _: &mut dyn FnMut() -> Result<Decision, DecisionError>,
+                _: &mut dyn FnMut() -> Result<Signing, DecisionError>,
+                _: &dyn Registrar,
             ) -> Result<Approval, String> {
                 Ok(Approval::Deciding)
             }
@@ -1319,7 +1732,7 @@ pub(crate) mod tests {
         enrolment.open(600).expect("open the window");
         enrolment.submit(request("a"), requester());
         assert_eq!(
-            enrolment.approve("a", &Echo, "host", &|_, _, _| Ok(()), &|_| false),
+            enrolment.approve("a", &Echo, "host", &kept(), &|_| false),
             Err(DecisionError::Deciding)
         );
         assert_eq!(enrolment.reject("a"), Err(DecisionError::Deciding));
@@ -1360,7 +1773,7 @@ pub(crate) mod tests {
         );
         assert_eq!(enrolment.pending().len(), 1);
         enrolment
-            .approve("a", &Echo, "host", &|_, _, _| Ok(()), &|_| false)
+            .approve("a", &Echo, "host", &kept(), &|_| false)
             .expect("approve");
         assert_eq!(
             enrolment.submit(request("a"), requester()),
@@ -1371,7 +1784,7 @@ pub(crate) mod tests {
             "a decided request is no longer pending"
         );
         assert_eq!(
-            enrolment.approve("a", &Echo, "host", &|_, _, _| Ok(()), &|_| false),
+            enrolment.approve("a", &Echo, "host", &kept(), &|_| false),
             Err(DecisionError::NotFound)
         );
 
@@ -1396,7 +1809,7 @@ pub(crate) mod tests {
         enrolment.submit(request("b"), requester());
         clock.0.fetch_add(61_000, Ordering::SeqCst);
         assert_eq!(
-            enrolment.approve("b", &Echo, "host", &|_, _, _| Ok(()), &|_| false),
+            enrolment.approve("b", &Echo, "host", &kept(), &|_| false),
             Err(DecisionError::NotFound)
         );
     }
@@ -1521,12 +1934,12 @@ pub(crate) mod tests {
         let bootstrap = requester().bootstrap;
         let revoked = |id: &CertId| *id == bootstrap;
         assert_eq!(
-            enrolment.approve("a", &Never, "host", &|_, _, _| Ok(()), &revoked),
+            enrolment.approve("a", &Never, "host", &kept(), &revoked),
             Err(DecisionError::Revoked)
         );
         assert!(enrolment.pending().is_empty(), "the request is withdrawn");
         assert_eq!(
-            enrolment.approve("a", &Never, "host", &|_, _, _| Ok(()), &revoked),
+            enrolment.approve("a", &Never, "host", &kept(), &revoked),
             Err(DecisionError::NotFound),
             "a second approval finds nothing to sign"
         );
@@ -1555,10 +1968,10 @@ pub(crate) mod tests {
                 "good",
                 &Echo,
                 "host",
-                &|issued, _, _| {
+                &Recording::new(|issued: &Signed, _: &[u8], _: &CertId| {
                     *signed.borrow_mut() = Some(issued.facts.subject_values.clone());
                     Ok(())
-                },
+                }),
                 &|_| false,
             )
             .expect("approve");
@@ -1569,7 +1982,7 @@ pub(crate) mod tests {
             ..requester()
         };
         enrolment.submit(request("bad"), malformed);
-        let refused = enrolment.approve("bad", &Never, "host", &|_, _, _| Ok(()), &|_| false);
+        let refused = enrolment.approve("bad", &Never, "host", &kept(), &|_| false);
         assert!(
             matches!(&refused, Err(DecisionError::Subject(e)) if e.contains("organizational_unit")),
             "{refused:?}"
@@ -1590,9 +2003,7 @@ pub(crate) mod tests {
         enrolment.submit(request("revoked-decided"), requester());
         enrolment.submit(request("other"), other);
         enrolment
-            .approve("revoked-decided", &Echo, "host", &|_, _, _| Ok(()), &|_| {
-                false
-            })
+            .approve("revoked-decided", &Echo, "host", &kept(), &|_| false)
             .expect("approve");
         let bootstrap = requester().bootstrap;
         assert_eq!(enrolment.withdraw(&|id| *id == bootstrap), 1);
@@ -1609,5 +2020,222 @@ pub(crate) mod tests {
             ),
             "a decided request is left to its connection, which the revocation refuses"
         );
+    }
+
+    /// How a store that writes the register with its decision answers an approval, for the
+    /// read-back tests: the decision written and its answer lost, nothing written and an error,
+    /// the register's write refused, or an error and no read back either.
+    #[derive(Clone, Copy)]
+    enum Commit {
+        Landed,
+        Lost,
+        Refused,
+        Unreadable,
+        /// The answer lost, and the request decided by another instance meanwhile.
+        Foreign,
+        /// The database server refused the commit; reading back would fail.
+        NotCommitted,
+    }
+
+    #[derive(Clone)]
+    struct Committing(Memory, Commit);
+
+    impl EnrolmentStore for Committing {
+        fn load(&self) -> Result<Option<Persisted>, String> {
+            self.0.load()
+        }
+        fn save(&self, persisted: &Persisted) -> Result<(), String> {
+            self.0.save(persisted)
+        }
+        fn registers_with_its_decision(&self) -> bool {
+            true
+        }
+        fn approve(
+            &self,
+            id: &str,
+            _: &CertId,
+            sign: &mut dyn FnMut() -> Result<Signing, DecisionError>,
+            _: &dyn Registrar,
+        ) -> Result<Approval, String> {
+            let (decision, _) = match sign() {
+                Ok(signing) => signing,
+                Err(e) => return Ok(Approval::Refused(e)),
+            };
+            match self.1 {
+                Commit::Landed => {
+                    assert_eq!(self.0.decide(id, &decision), Ok(Decided::Written));
+                    Err("the commit's answer was lost".to_string())
+                }
+                Commit::Lost | Commit::Unreadable => Err("the commit failed".to_string()),
+                Commit::Foreign => {
+                    let theirs = Decision::Approved("another instance's certificate".to_string());
+                    assert_eq!(self.0.decide(id, &theirs), Ok(Decided::Written));
+                    Err("the commit's answer was lost".to_string())
+                }
+                Commit::NotCommitted => {
+                    Ok(Approval::NotCommitted("the commit is refused".to_string()))
+                }
+                Commit::Refused => Ok(Approval::Refused(DecisionError::Sign(
+                    "the register is full".to_string(),
+                ))),
+            }
+        }
+        fn read_back(&self, id: &str) -> Result<Option<PersistedRequest>, String> {
+            match self.1 {
+                Commit::Unreadable | Commit::NotCommitted => {
+                    Err("the database does not answer".to_string())
+                }
+                _ => Ok(self
+                    .load()?
+                    .and_then(|persisted| persisted.requests.into_iter().find(|r| r.id == id))),
+            }
+        }
+    }
+
+    /// A register in `dir`, as the Server on files opens it.
+    fn register_in(dir: &std::path::Path) -> crate::revocation::Revocations {
+        crate::revocation::Revocations::open(
+            Box::new(crate::fs::FsLedgerStore::open(dir).expect("ledger")),
+            Arc::new(crate::clock::SystemClock),
+            Vec::new(),
+        )
+        .expect("register")
+    }
+
+    /// A window open on a store that answers approvals as `commit` says, with the request `k`
+    /// waiting.
+    fn committing(commit: Commit) -> Enrolment {
+        let clock = Arc::new(Manual(AtomicU64::new(1_000_000)));
+        let enrolment = Enrolment::open_on(clock, Box::new(Committing(Memory::default(), commit)))
+            .expect("open");
+        enrolment.open(600).expect("window");
+        assert_eq!(
+            enrolment.submit(request("k"), requester()),
+            Submitted::Waiting
+        );
+        enrolment
+    }
+
+    /// An approval whose commit landed but whose answer was lost is read back: decided with the
+    /// certificate signed here, it stands, its register entry is taken up, and nothing is recorded
+    /// as undecided (ADR-0044 clause 9).
+    /// Verifies: ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision
+    #[test]
+    fn a_commit_that_landed_and_whose_answer_was_lost_is_read_back_as_approved() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let register = register_in(dir.path());
+        let recorder = Registering::on(&register);
+        let enrolment = committing(Commit::Landed);
+        assert_eq!(
+            enrolment.approve("k", &Counting::default(), "host-1", &recorder, &|_| false),
+            Ok("1".to_string())
+        );
+        assert_eq!(*recorder.committed.lock().expect("committed"), ["1"]);
+        assert!(recorder.undecided.lock().expect("undecided").is_empty());
+        assert_eq!(register.issued().len(), 1, "taken up");
+        assert_eq!(
+            enrolment.submit(request("k"), requester()),
+            Submitted::Issued("serial 1 for csr-k".to_string())
+        );
+    }
+
+    /// A signature whose decision was not written is recorded as undecided: rolled back when the
+    /// store refused the register's write or the request is read back waiting, unknown when it
+    /// cannot be read back. The request still waits, and nothing is taken up. A signature the
+    /// audit record did not take is not recorded as undecided either (ADR-0044 clause 9).
+    /// Verifies: ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision
+    #[test]
+    fn a_signature_whose_decision_was_not_written_is_recorded_undecided() {
+        for (commit, outcome, error) in [
+            (
+                Commit::Lost,
+                Undecided::RolledBack,
+                DecisionError::Store("the commit failed".to_string()),
+            ),
+            (
+                Commit::Unreadable,
+                Undecided::Unknown,
+                DecisionError::Store("the commit failed".to_string()),
+            ),
+            (
+                Commit::Refused,
+                Undecided::RolledBack,
+                DecisionError::Sign("the register is full".to_string()),
+            ),
+        ] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let register = register_in(dir.path());
+            let recorder = Registering::on(&register);
+            let enrolment = committing(commit);
+            assert_eq!(
+                enrolment.approve("k", &Counting::default(), "host-1", &recorder, &|_| false),
+                Err(error)
+            );
+            assert_eq!(
+                *recorder.undecided.lock().expect("undecided"),
+                [("k".to_string(), "1".to_string(), outcome)]
+            );
+            assert!(recorder.committed.lock().expect("committed").is_empty());
+            assert!(register.issued().is_empty());
+            assert_eq!(enrolment.pending().len(), 1, "the request still waits");
+        }
+        let unrecorded = Recording::new(|_: &Signed, _: &[u8], _: &CertId| {
+            Err(DecisionError::Sign(
+                "the audit record is unavailable".to_string(),
+            ))
+        });
+        let enrolment = committing(Commit::Lost);
+        assert_eq!(
+            enrolment.approve("k", &Counting::default(), "host-1", &unrecorded, &|_| false),
+            Err(DecisionError::Sign(
+                "the audit record is unavailable".to_string()
+            ))
+        );
+        assert!(unrecorded.undecided.lock().expect("undecided").is_empty());
+    }
+
+    /// An approval whose answer was lost while another instance decided the request with a
+    /// certificate of its own is not taken for its own: the read back finds another certificate,
+    /// so the signature is rolled back and nothing is taken up (ADR-0044 clause 9).
+    /// Verifies: ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision
+    #[test]
+    fn a_read_back_that_finds_another_certificate_rolls_the_signature_back() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let register = register_in(dir.path());
+        let recorder = Registering::on(&register);
+        let enrolment = committing(Commit::Foreign);
+        assert_eq!(
+            enrolment.approve("k", &Counting::default(), "host-1", &recorder, &|_| false),
+            Err(DecisionError::Store(
+                "the commit's answer was lost".to_string()
+            ))
+        );
+        assert_eq!(
+            *recorder.undecided.lock().expect("undecided"),
+            [("k".to_string(), "1".to_string(), Undecided::RolledBack)]
+        );
+        assert!(recorder.committed.lock().expect("committed").is_empty());
+        assert!(register.issued().is_empty(), "nothing taken up");
+    }
+
+    /// A commit the database server itself refused is rolled back as it stands: no read back is
+    /// asked, so one that would fail cannot leave it unknown (ADR-0044 clause 9).
+    /// Verifies: ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision
+    #[test]
+    fn a_refusal_the_database_answers_is_rolled_back_without_a_read_back() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let register = register_in(dir.path());
+        let recorder = Registering::on(&register);
+        let enrolment = committing(Commit::NotCommitted);
+        assert_eq!(
+            enrolment.approve("k", &Counting::default(), "host-1", &recorder, &|_| false),
+            Err(DecisionError::Store("the commit is refused".to_string()))
+        );
+        assert_eq!(
+            *recorder.undecided.lock().expect("undecided"),
+            [("k".to_string(), "1".to_string(), Undecided::RolledBack)]
+        );
+        assert!(register.issued().is_empty());
+        assert_eq!(enrolment.pending().len(), 1, "the request still waits");
     }
 }
