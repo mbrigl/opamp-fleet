@@ -16,6 +16,28 @@ once its tag exists.
 
 ## [Unreleased]
 
+### Added
+
+- **The lists that grow with the fleet page, filter on the Server, and name the holder**
+  ([ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server](docs/adr/draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server.md)).
+  `GET /api/v1/agents`, `/hosts`, `/certificates` and `/revocations` take `limit` (1 to 1000)
+  and answer one page with `X-Total-Count` and a `Link` to the next; the Agents take `q`,
+  `selector`, `connected`, `stale`, `service_name`, `sort`, `order` and, on PostgreSQL, `holder`.
+  A parameter a route does not take is answered `400`. Each Agent's view carries `holder` and
+  `holder_host`, the instance that carries it on PostgreSQL, empty on files.
+  `GET /api/v1/agents/attributes` answers the pairs and types the forms suggest. The Agents tab
+  asks for one page at a time, and selecting all selects that page. On PostgreSQL an Agent behind
+  a Gateway now inherits the labels of its Client Agent in the memory of its instance too,
+  whichever instance carries the Client Agent, and follows a change of them. A Client Agent that
+  arrives behind the Gateway after its fellow Agent was placed is still inherited only once the
+  group is placed again, as the manual's *Labels on several instances* says. The schema gains
+  migration 11, which a Server of 0.8.0 serves on; the rows such a Server writes are read
+  correctly by this release.
+  **What to do:** a script that reads one of the four lists whole keeps working while it holds at
+  most 10 000 entries after its filters; past that it is answered `400` naming `limit`, and must
+  page by `limit` and the `Link` header. A script that sends a query parameter these routes do not
+  name gets `400` now.
+
 ### Fixed
 
 - **An approval records its certificate only with its decision**

@@ -14,6 +14,7 @@
 //! the S3 store does ([`Bridge`]): the pool lives on a runtime of its own, and every call waits on
 //! a channel for its work there.
 
+pub mod agent_page;
 pub mod agents;
 pub mod audit;
 pub mod audit_prune;

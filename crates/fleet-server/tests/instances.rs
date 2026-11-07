@@ -3830,3 +3830,291 @@ async fn an_agent_inherits_the_labels_of_its_client_agent_that_another_instance_
         "B followed the Client Agent's labels"
     );
 }
+
+/// The list of Agents as `instance` answers it: those `filter` admits, by name, a page of `limit`
+/// after `after`.
+fn page_on(
+    instance: &Instance,
+    filter: fleet_server::listing::AgentFilter,
+    after: Option<fleet_server::listing::Position>,
+    limit: usize,
+) -> fleet_server::fleet::AgentListing {
+    instance
+        .state
+        .list_agents(&fleet_server::fleet::AgentQuery {
+            filter,
+            after,
+            limit,
+            ..fleet_server::fleet::AgentQuery::default()
+        })
+        .expect("a page")
+}
+
+/// The Instance UIDs a filter admits on `instance`.
+fn holding(instance: &Instance, holder: fleet_server::listing::HolderFilter) -> Vec<String> {
+    page_on(
+        instance,
+        fleet_server::listing::AgentFilter {
+            holder: Some(holder),
+            ..Default::default()
+        },
+        None,
+        100,
+    )
+    .agents
+    .into_iter()
+    .map(|view| view.instance_uid)
+    .collect()
+}
+
+/// An Agent's view names the instance that carries it and the host its lease records, read
+/// through any instance; the list filters by it, `none` naming the Agents no instance with a live
+/// lease holds; a page's cursor from one instance continues the list on another; and once the
+/// holder's lease is gone the Agent is held by none.
+/// Verifies: ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server, ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_agents_view_names_its_holder_and_the_list_filters_by_it() {
+    use fleet_server::listing::HolderFilter;
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let a = Instance::start(&pki, &schema, schema.config_on(schema.config.port)).await;
+    let b = Instance::start(&pki, &schema, schema.config_on(schema.config.port)).await;
+    let (on_a, on_b) = (InstanceUid([0x41; 16]), InstanceUid([0x42; 16]));
+    let (cert, key) = pki.issue_to_host("h1");
+    let mut session_a = websocket(&a, &pki, &cert, &key).await;
+    report_as(&mut session_a, on_a, 1, 0, PACKAGED, true).await;
+    let (other_cert, other_key) = pki.issue_to_host("h2");
+    let mut session_b = websocket(&b, &pki, &other_cert, &other_key).await;
+    report_as(&mut session_b, on_b, 1, 0, PACKAGED, true).await;
+    let (a_id, b_id) = (
+        a.instance_id().expect("A's lease"),
+        b.instance_id().expect("B's lease"),
+    );
+
+    let read = b.state.clone();
+    let view = tokio::task::spawn_blocking(move || read.agent_view(&on_a))
+        .await
+        .expect("read")
+        .expect("readable")
+        .expect("known");
+    assert_eq!(
+        (view.holder.as_str(), view.holder_host.as_str()),
+        (a_id.as_str(), "test-host"),
+        "read through B, the Agent A carries names A"
+    );
+    let all = page_on(&b, Default::default(), None, 100);
+    let held: std::collections::BTreeMap<String, String> = all
+        .agents
+        .into_iter()
+        .map(|view| (view.instance_uid, view.holder))
+        .collect();
+    assert_eq!(held[&on_a.to_string()], a_id);
+    assert_eq!(held[&on_b.to_string()], b_id);
+    assert_eq!(
+        holding(&b, HolderFilter::Instance(a_id.clone())),
+        [on_a.to_string()]
+    );
+    assert_eq!(
+        holding(&a, HolderFilter::Instance(b_id.clone())),
+        [on_b.to_string()]
+    );
+    assert!(holding(&b, HolderFilter::None).is_empty(), "each is held");
+
+    let first = page_on(&a, Default::default(), None, 1);
+    let rest = page_on(&b, Default::default(), first.next.clone(), 1);
+    assert_eq!((first.total, rest.total), (2, 2));
+    assert!(rest.next.is_none());
+    let mut both: Vec<String> = first
+        .agents
+        .into_iter()
+        .chain(rest.agents)
+        .map(|view| view.instance_uid)
+        .collect();
+    both.sort();
+    let mut expected = vec![on_a.to_string(), on_b.to_string()];
+    expected.sort();
+    assert_eq!(both, expected, "A's cursor continues the list on B");
+
+    // The same through the REST API of each instance's Operator plane.
+    let operator = reqwest::Client::builder()
+        .use_rustls_tls()
+        .tls_certs_only([reqwest::Certificate::from_pem(pki.ca_pem.as_bytes()).expect("ca")])
+        .resolve(
+            "localhost",
+            "127.0.0.1:0".parse::<SocketAddr>().expect("address"),
+        )
+        .build()
+        .expect("client");
+    let rest = |instance: &Instance, path: String| {
+        let (operator, port) = (operator.clone(), instance.operator.port());
+        async move {
+            let response = operator
+                .get(format!("https://localhost:{port}{path}"))
+                .send()
+                .await
+                .expect("send");
+            let status = response.status().as_u16();
+            let total = response
+                .headers()
+                .get("x-total-count")
+                .map(|v| v.to_str().expect("text").to_string());
+            let next = response.headers().get("link").map(|link| {
+                link.to_str()
+                    .expect("text")
+                    .trim_start_matches('<')
+                    .split('>')
+                    .next()
+                    .expect("a target")
+                    .to_string()
+            });
+            let body: serde_json::Value = response.json().await.expect("json");
+            (status, total, next, body)
+        }
+    };
+    let uids = |body: &serde_json::Value| -> Vec<String> {
+        body.as_array()
+            .expect("an array")
+            .iter()
+            .map(|agent| agent["instance_uid"].as_str().expect("uid").to_string())
+            .collect()
+    };
+    let (status, _, _, body) = rest(&b, format!("/api/v1/agents?holder={a_id}")).await;
+    assert_eq!(
+        (status, uids(&body)),
+        (200, vec![on_a.to_string()]),
+        "{body}"
+    );
+    assert_eq!(body[0]["holder"], a_id.as_str());
+    assert_eq!(body[0]["holder_host"], "test-host");
+    let (status, total, _, body) = rest(&b, "/api/v1/agents?holder=none".to_string()).await;
+    assert_eq!(
+        (status, total.as_deref(), uids(&body).len()),
+        (200, Some("0"), 0)
+    );
+    let (status, total, next, first) = rest(&a, "/api/v1/agents?limit=1".to_string()).await;
+    assert_eq!((status, total.as_deref()), (200, Some("2")));
+    let next = next.expect("a next page");
+    let (status, _, last, rest_of) = rest(&b, next).await;
+    assert_eq!((status, last), (200, None), "{rest_of}");
+    let mut through_rest: Vec<String> = uids(&first).into_iter().chain(uids(&rest_of)).collect();
+    through_rest.sort();
+    assert_eq!(through_rest, expected, "A's Link continues on B");
+    let (status, _, _, body) = rest(&b, "/api/v1/agents?q=a%00".to_string()).await;
+    assert_eq!(status, 400, "a NUL is refused on PostgreSQL too: {body}");
+    assert!(
+        !body.to_string().contains("database"),
+        "the refusal names no database: {body}"
+    );
+
+    drop(session_a);
+    drop(a);
+    assert!(
+        eventually(Duration::from_secs(10), || {
+            holding(&b, HolderFilter::None) == [on_a.to_string()]
+        })
+        .await,
+        "once A's lease is gone none holds what it carried"
+    );
+    let (status, _, _, body) = rest(&b, "/api/v1/agents?holder=none".to_string()).await;
+    assert_eq!(
+        (status, uids(&body)),
+        (200, vec![on_a.to_string()]),
+        "{body}"
+    );
+    let read = b.state.clone();
+    let view = tokio::task::spawn_blocking(move || read.agent_view(&on_a))
+        .await
+        .expect("read")
+        .expect("readable")
+        .expect("known");
+    assert_eq!((view.holder.as_str(), view.holder_host.as_str()), ("", ""));
+}
+
+/// An Agent behind a Gateway that B carries inherits, in B's memory, the labels of its Client
+/// Agent behind the same Gateway, which A carries: B reads the Agents that arrived over the
+/// Gateway's Host through the port's `query_page` when it places the Agent, and places it again
+/// when A changes that Client Agent's labels.
+/// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side, ADR-0043
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_agent_behind_a_gateway_inherits_the_labels_of_its_client_agent_another_instance_carries(
+) {
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let a = Instance::start(&pki, &schema, schema.config_on(schema.config.port)).await;
+    let dir = tempfile::tempdir().expect("dir");
+    mark_gateway(&a, &pki, dir.path());
+    let b = Instance::start(&pki, &schema, schema.config_on(schema.config.port)).await;
+    let read = |file: &str| std::fs::read_to_string(dir.path().join(file)).expect("read");
+    let (cert, key) = (read("gateway.pem"), read("gateway-key.pem"));
+    let (client, agent) = (InstanceUid([0x51; 16]), InstanceUid([0x52; 16]));
+    let mut client_session = websocket(&a, &pki, &cert, &key).await;
+    report_as(
+        &mut client_session,
+        client,
+        1,
+        0,
+        (
+            &[("service.name", "fleet-agent")],
+            &[("supervisor.kind.otelcol", "true"), ("host.name", "m1")],
+        ),
+        true,
+    )
+    .await;
+    let on_a = a.state.clone();
+    tokio::task::spawn_blocking(move || {
+        on_a.set_labels(
+            &client,
+            std::collections::BTreeMap::from([("tier".to_string(), "edge".to_string())]),
+        )
+        .is_ok()
+    })
+    .await
+    .expect("labels")
+    .then_some(())
+    .expect("A labels the Client Agent");
+
+    let mut session = websocket(&b, &pki, &cert, &key).await;
+    report_as(
+        &mut session,
+        agent,
+        1,
+        0,
+        (&[("service.name", "otelcol")], &[("host.name", "m1")]),
+        true,
+    )
+    .await;
+    let inherits = |tier: &str| {
+        view_of(&b, agent).is_some_and(|view| {
+            view.inherited_labels.get("tier").map(String::as_str) == Some(tier)
+                && view.client_agent == client.to_string()
+        })
+    };
+    assert!(
+        eventually(Duration::from_secs(10), || inherits("edge")).await,
+        "B placed the Agent under the Client Agent A carries behind the Gateway: {:?}",
+        view_of(&b, agent).map(|view| (view.inherited_labels, view.client_agent))
+    );
+
+    // A labels the Client Agent anew: B, which placed the Agent under it, follows.
+    let on_a = a.state.clone();
+    tokio::task::spawn_blocking(move || {
+        on_a.set_labels(
+            &client,
+            std::collections::BTreeMap::from([("tier".to_string(), "core".to_string())]),
+        )
+        .is_ok()
+    })
+    .await
+    .expect("labels")
+    .then_some(())
+    .expect("A labels the Client Agent anew");
+    assert!(
+        eventually(Duration::from_secs(10), || inherits("core")).await,
+        "B followed the labels of the Client Agent behind the Gateway: {:?}",
+        view_of(&b, agent).map(|view| view.inherited_labels)
+    );
+}

@@ -110,7 +110,10 @@ no module.
   an object store could implement it, and speaking in domain types, never paths
   ([ADR-0044](adr/0044-the-servers-state-and-its-stores.md)):
   `AgentStore` in `agent_store`, which holds each Agent's labels in its record, writes a rollout's
-  revisions and assignments as one operation, and answers what an assignment pins;
+  revisions and assignments as one operation, answers what an assignment pins, and answers a page
+  of the list of Agents (`query_page`) and the values the fleet reports (`reported_values`), with
+  the filter, the order and what is derived from each record defined in the core module `listing`
+  ([ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server](adr/draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server.md));
   `ConfigBackend` under the `ConfigStore` in `configs`; `DeploymentBackend` under the
   `DeploymentStore` in `deployments`; `PackageBackend` and `BlobStore` (`blobs`, artifact bytes by
   SHA-256) under the `PackageStore` in `packages`, the bytes in `data_dir` or, with
@@ -123,8 +126,9 @@ no module.
   `LedgerStore` in `revocation`; `AuditStore` in `audit_log`. The filesystem adapters are in `fs`,
   which also opens the data directory and refuses anything its layout does not name. With
   `[database] store = "postgres"` every port but the blob port has its PostgreSQL adapter in
-  `postgres` instead (`postgres::agents`, `configs`, `deployments`, `packages`, `ledger`,
-  `bootstrap`, `enrolment`, `floors`, `audit`), each call one transaction; `postgres` holds the
+  `postgres` instead (`postgres::agents`, with the query of a page in `postgres::agent_page`,
+  `configs`, `deployments`, `packages`, `ledger`, `bootstrap`, `enrolment`, `floors`, `audit`),
+  each call one transaction; `postgres` holds the
   connection
   they share — TLS 1.3 on *ring*, a pool on a `bridge` runtime of its own, the advisory lock that
   keeps one Server per database — and applies the schema embedded in `postgres::schema` as
@@ -196,7 +200,9 @@ no module.
   ([ADR-0030](adr/0030-the-servers-configuration.md)).
 - **REST views** — what the REST API reads and returns is shaped in `api`, which derives its
   OpenAPI schema ([ADR-0025](adr/0025-configurations-and-the-rest-api.md)); the core's types —
-  among them the fleet view `AgentView` — carry no schema, and `api` converts them.
+  among them the fleet view `AgentView` — carry no schema, and `api` converts them. `api::paging`
+  reads `limit` and `cursor`, encodes the opaque cursor, and writes `X-Total-Count` and the `Link`
+  of the four lists that page.
 - **Client supervision** — `supervisor::ports` is the Port a Plugin implements
   ([ADR-0017](adr/0017-supervisor-mode-and-its-kinds.md)), and `shutdown` the handle every task
   stops on; the Plugins and the process runner are its adapters. How a `[[supervisor]]` block is
