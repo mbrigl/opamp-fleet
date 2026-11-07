@@ -1,4 +1,4 @@
-//! Agent records in PostgreSQL (ADR-0044 clauses 4 and 21): the PostgreSQL adapter behind
+//! Agent records in PostgreSQL (ADR-0050 clauses 4 and 21): the PostgreSQL adapter behind
 //! [`AgentStore`](crate::agent_store::AgentStore) — one row per Agent, its scalars as columns, the
 //! wire-typed fields as their protobuf bytes, its labels, and its assignment's Configurations in
 //! rows of their own. A rollout's revisions and assignments commit together or not at all. Each
@@ -8,13 +8,16 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 
+use super::Cached as GenericClient;
 use opamp::uid::InstanceUid;
 use prost::Message;
-use tokio_postgres::GenericClient;
 
 use super::notify::{notify, ASSIGNMENT, CONFIGURATION, FORGOTTEN, LABELS, RESTART, TAKEN};
-use super::{client, signed, sql, unsigned, Database};
-use crate::agent_store::{AgentStore, Creation, PersistedAgent, Pin, Presence, StoredAgent, Taken};
+use super::{client, creating_client, signed, sql, unsigned, Database};
+use crate::agent_store::{
+    AgentPage, AgentStore, Creation, Holder, PageQuery, PersistedAgent, Pin, Presence, StoredAgent,
+    Taken,
+};
 use crate::configs::Pinned;
 use crate::fleet::{Assignment, Transport};
 use crate::packages::PackageId;
@@ -27,6 +30,11 @@ pub struct PgAgentStore {
     database: Arc<Database>,
     /// Every stored record's assignment, as committed.
     assignments: Mutex<Pins>,
+    /// The creations of this instance under way, at most half the pool: the creations of every
+    /// instance wait for the count's row, which a Server of 0.8.0 holds across its whole creation,
+    /// and those past the bound wait here, each on its own thread, rather than on a connection of
+    /// the pool, which every other call needs.
+    creating: Creating,
     /// Run between a read's rows and its taking them into [`Pins`], in tests.
     #[cfg(test)]
     after_read: Mutex<Option<Box<dyn FnOnce() + Send>>>,
@@ -103,6 +111,7 @@ impl PgAgentStore {
     #[must_use]
     pub fn new(database: Arc<Database>) -> Self {
         PgAgentStore {
+            creating: Creating::of(database.pool_size()),
             database,
             assignments: Mutex::new(Pins::default()),
             #[cfg(test)]
@@ -112,7 +121,7 @@ impl PgAgentStore {
 
     /// The adapter on `database`, holding what the stored assignments pin, read alone: what a
     /// deletion and a collection ask of the pins is answered from them, and no record is loaded
-    /// (ADR-0044 clause 3).
+    /// (ADR-0050 clause 3).
     ///
     /// # Errors
     /// Returns an error when the assignments cannot be read, or one names a Package that does not
@@ -121,7 +130,7 @@ impl PgAgentStore {
         let store = Self::new(database);
         let assignments = store.database.run(|pool| async move {
             let client = client(&pool).await?;
-            read_assignments(&**client).await
+            read_assignments(&client).await
         })?;
         store
             .assignments
@@ -216,7 +225,7 @@ impl AgentStore for PgAgentStore {
         let began = self.began();
         let records = self.database.run(|pool| async move {
             let client = client(&pool).await?;
-            read_all(&**client).await
+            read_all(&client).await
         })?;
         self.refresh(
             began,
@@ -235,7 +244,7 @@ impl AgentStore for PgAgentStore {
         Ok(self.get_many(std::slice::from_ref(uid))?.remove(uid))
     }
 
-    /// One query for the rows, one for their Configurations, however many records it reads.
+    /// One query for the rows and their Configurations, however many records it reads.
     fn get_many(
         &self,
         uids: &[InstanceUid],
@@ -244,7 +253,7 @@ impl AgentStore for PgAgentStore {
         let keys: Vec<String> = uids.iter().map(ToString::to_string).collect();
         let found = self.database.run(move |pool| async move {
             let client = client(&pool).await?;
-            read(&**client, Some(&keys)).await
+            read(&client, Some(&keys)).await
         })?;
         self.refresh(
             began,
@@ -263,37 +272,42 @@ impl AgentStore for PgAgentStore {
         let began = self.began();
         let keys: Option<Vec<String>> =
             only.map(|uids| uids.iter().map(ToString::to_string).collect());
-        let (records, connected) = self.database.run(move |pool| async move {
+        let (records, mut presence) = self.database.run(move |pool| async move {
             let mut client = client(&pool).await?;
-            let transaction = client
-                .build_transaction()
-                .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
-                .read_only(true)
-                .start()
-                .await
-                .map_err(sql)?;
-            let records = read(&*transaction, keys.as_deref()).await?;
+            let transaction = snapshot(&mut client).await?;
+            let records = read(&transaction, keys.as_deref()).await?;
             let (filter, params): (&str, Vec<&(dyn tokio_postgres::types::ToSql + Sync)>) =
                 match &keys {
                     Some(keys) => (" AND a.instance_uid = ANY($1)", vec![keys]),
                     None => ("", Vec::new()),
                 };
-            let connected: BTreeSet<String> = transaction
+            let presence: HashMap<String, (bool, Holder)> = transaction
                 .query(
                     &format!(
-                        "SELECT a.instance_uid FROM agents AS a WHERE a.connected AND EXISTS \
-                         (SELECT 1 FROM leases AS l WHERE l.instance_id = a.holder \
-                         AND l.expires_at > now()){filter}"
+                        "SELECT a.instance_uid, a.connected, l.instance_id::text, l.host \
+                         FROM agents AS a JOIN leases AS l ON l.instance_id = a.holder \
+                         AND l.expires_at > now(){filter}"
                     ),
                     &params,
                 )
                 .await
                 .map_err(sql)?
                 .into_iter()
-                .map(|row| row.get(0))
+                .map(|row| {
+                    (
+                        row.get(0),
+                        (
+                            row.get(1),
+                            Holder {
+                                instance_id: row.get(2),
+                                host: row.get(3),
+                            },
+                        ),
+                    )
+                })
                 .collect();
             transaction.commit().await.map_err(sql)?;
-            Ok((records, connected))
+            Ok((records, presence))
         })?;
         self.refresh(
             began,
@@ -308,8 +322,19 @@ impl AgentStore for PgAgentStore {
         let mut all: Vec<(InstanceUid, StoredAgent)> = records
             .into_iter()
             .map(|(uid, record)| {
-                let connected = connected.contains(&uid.to_string());
-                (uid, StoredAgent { record, connected })
+                let (connected, holder) = presence
+                    .remove(&uid.to_string())
+                    .map_or((false, None), |(connected, holder)| {
+                        (connected, Some(holder))
+                    });
+                (
+                    uid,
+                    StoredAgent {
+                        record,
+                        connected,
+                        holder,
+                    },
+                )
             })
             .collect();
         all.sort_by_key(|(uid, _)| uid.0);
@@ -318,6 +343,32 @@ impl AgentStore for PgAgentStore {
 
     fn is_shared(&self) -> bool {
         true
+    }
+
+    /// The rows written without their derived columns derived again first, then one
+    /// `SELECT DISTINCT` over those columns for each.
+    fn reported_values(&self, limit: usize) -> Result<crate::agent_store::ReportedValues, String> {
+        super::agent_page::reported_values(&self.database, limit)
+    }
+
+    /// The rows written without their derived columns derived again first, then the count and
+    /// the page in one snapshot of the database.
+    fn query_page(&self, query: &PageQuery<'_>) -> Result<AgentPage, String> {
+        let began = self.began();
+        let page = super::agent_page::query_page(&self.database, query)?;
+        let uids: Vec<InstanceUid> = page.agents.iter().map(|agent| agent.uid).collect();
+        let found: HashMap<InstanceUid, Option<&Assignment>> = page
+            .agents
+            .iter()
+            .map(|agent| (agent.uid, agent.stored.record.assignment.as_ref()))
+            .collect();
+        self.refresh(
+            began,
+            Read::Only(&uids),
+            |uid| found.get(uid).copied().flatten(),
+            uids.iter(),
+        );
+        Ok(page)
     }
 
     /// A new record whole; of one that exists, the columns a report decides alone, so a label
@@ -330,10 +381,10 @@ impl AgentStore for PgAgentStore {
             // One another instance created in between the two is written to again, the columns a
             // report decides alone.
             let created = loop {
-                if write_reported(&*transaction, &uid, &record, None).await? {
+                if write_reported(&transaction, &uid, &record, None).await? {
                     break false;
                 }
-                if insert(&*transaction, &uid, &record, "DO NOTHING").await? {
+                if insert(&transaction, &uid, &record, "DO NOTHING").await? {
                     break true;
                 }
             };
@@ -351,12 +402,13 @@ impl AgentStore for PgAgentStore {
         let (uid, record) = (*uid, record.clone());
         self.database.run(move |pool| async move {
             let client = client(&pool).await?;
-            write_reported(&**client, &uid, &record, None).await
+            write_reported(&client, &uid, &record, None).await
         })
     }
 
     /// [`write_report`](AgentStore::write_report), of a row whose holder is `holder`, or none and
-    /// whose count of takes is still `take`.
+    /// whose count of takes is still `take`, and whose sequence number is not higher than the
+    /// record's.
     fn write_report_unless_held_elsewhere(
         &self,
         uid: &InstanceUid,
@@ -369,7 +421,7 @@ impl AgentStore for PgAgentStore {
         self.database.run(move |pool| async move {
             let client = client(&pool).await?;
             write_reported(
-                &**client,
+                &client,
                 &uid,
                 &record,
                 Some(Held {
@@ -381,8 +433,12 @@ impl AgentStore for PgAgentStore {
         })
     }
 
-    /// One transaction under a lock only creations take, so two instances creating at once count
-    /// each other's rows; a report's write of a record that exists waits for none of it.
+    /// One statement that locks the row the triggers on `agents` keep the count in and inserts
+    /// only while the count is below `max_records`, so creations on every instance count each
+    /// other's rows one after another, the ceiling is decided without reading every row, and no
+    /// creation waits for a client round trip of another (ADR-0050 clause 22). Its transaction
+    /// commits without waiting for the flush, so neither does any for a flush of another
+    /// (ADR-0050 clause 21). A report's write of a record that exists waits for none of it.
     fn create_within(
         &self,
         uid: &InstanceUid,
@@ -392,36 +448,37 @@ impl AgentStore for PgAgentStore {
         let (uid, record) = (*uid, record.clone());
         let assignment = record.assignment.clone();
         let max = i64::try_from(max_records).unwrap_or(i64::MAX);
+        let creating = self.creating.enter();
         let creation = self.database.run(move |pool| async move {
-            let mut client = client(&pool).await?;
+            // A creation waits for a connection up to its call's bound (ADR-0050 clause 24).
+            let mut client = creating_client(&pool).await?;
+            let key = uid.to_string();
+            // One transaction that commits without waiting for its flush, so the count's row is
+            // let go at once (ADR-0050 clause 21); the record's Configurations, where it names
+            // any, are written in it.
             let transaction = client.transaction().await.map_err(sql)?;
             transaction
-                .execute(&format!("SELECT pg_advisory_xact_lock({CREATE_LOCK})"), &[])
+                .batch_execute(ASYNCHRONOUS_COMMIT)
                 .await
                 .map_err(sql)?;
-            let key = uid.to_string();
-            let stored = transaction
-                .query_one(
-                    "SELECT count(*), count(*) FILTER (WHERE instance_uid = $1) FROM agents",
-                    &[&key],
-                )
-                .await
-                .map_err(sql)?;
-            let (count, there): (i64, i64) = (stored.get(0), stored.get(1));
-            if there > 0 {
-                let found = read(&*transaction, Some(std::slice::from_ref(&key)))
+            let created = insert_as(&transaction, &uid, &record, "DO NOTHING", Some(max)).await?;
+            transaction.commit().await.map_err(sql)?;
+            if created {
+                return Ok(Creation::Created);
+            }
+            // Stored already, or the count is at the ceiling.
+            Ok(
+                match read(&client, Some(std::slice::from_ref(&key)))
                     .await?
                     .remove(&uid)
-                    .ok_or_else(|| format!("agent {key} was counted, and is not there"))?;
-                return Ok(Creation::Found(Box::new(found)));
-            }
-            if count >= max {
-                return Ok(Creation::Full);
-            }
-            insert(&*transaction, &uid, &record, "DO NOTHING").await?;
-            transaction.commit().await.map_err(sql)?;
-            Ok(Creation::Created)
-        })?;
+                {
+                    Some(found) => Creation::Found(Box::new(found)),
+                    None => Creation::Full,
+                },
+            )
+        });
+        drop(creating);
+        let creation = creation?;
         match &creation {
             Creation::Created => self.stored([(&uid, assignment.as_ref())]),
             Creation::Found(found) => self.stored([(&uid, found.assignment.as_ref())]),
@@ -449,7 +506,7 @@ impl AgentStore for PgAgentStore {
                 .map_err(sql)?
                 > 0;
             if set {
-                notify(&*transaction, LABELS, &key).await?;
+                notify(&transaction, LABELS, &key).await?;
             }
             transaction.commit().await.map_err(sql)?;
             Ok(set)
@@ -488,7 +545,7 @@ impl AgentStore for PgAgentStore {
                     .map_err(sql)?;
             }
             if pending {
-                notify(&*transaction, RESTART, &key).await?;
+                notify(&transaction, RESTART, &key).await?;
             }
             transaction.commit().await.map_err(sql)?;
             Ok(Some(was))
@@ -507,7 +564,7 @@ impl AgentStore for PgAgentStore {
                 .await
                 .map_err(sql)?;
             if removed > 0 {
-                notify(&*transaction, FORGOTTEN, &uid.to_string()).await?;
+                notify(&transaction, FORGOTTEN, &uid.to_string()).await?;
             }
             transaction.commit().await.map_err(sql)
         })?;
@@ -516,9 +573,9 @@ impl AgentStore for PgAgentStore {
     }
 
     /// One transaction: the rows locked in the order of their `instance_uid`, byte by byte as the
-    /// release orders them, then the batch written in one statement. A connected Agent whose row
-    /// names another instance with a live lease is not written: that instance took it after this
-    /// one read the batch. A disconnect whose row holds another count of takes than it comes with
+    /// release orders them, then the batch written in one statement. A connected Agent is named
+    /// anew only where the row names no instance with a live lease, and where it comes with a count
+    /// only while the row still holds it: another instance took it after this one read the batch. A disconnect whose row holds another count of takes than it comes with
     /// is not written: the Agent was taken since, by this instance or another, and the take wrote
     /// its presence.
     fn write_presence(
@@ -576,10 +633,12 @@ impl AgentStore for PgAgentStore {
                      FROM unnest($1::text[], $2::boolean[], $3::bigint[], $5::bigint[]) \
                          AS p(instance_uid, connected, last_seen_ms, take) \
                      WHERE a.instance_uid = p.instance_uid \
-                         AND (NOT p.connected OR a.holder IS NULL \
-                             OR a.holder = $4::text::uuid \
-                             OR NOT EXISTS (SELECT 1 FROM leases AS l \
-                                 WHERE l.instance_id = a.holder AND l.expires_at > now())) \
+                         AND (NOT p.connected OR a.holder = $4::text::uuid \
+                             OR ((p.take IS NULL OR a.takes = p.take) \
+                                 AND (a.holder IS NULL \
+                                     OR NOT EXISTS (SELECT 1 FROM leases AS l \
+                                         WHERE l.instance_id = a.holder \
+                                             AND l.expires_at > now())))) \
                      RETURNING a.instance_uid, p.connected, a.takes",
                     &[&uids, &connected, &last_seen, &holder, &takes],
                 )
@@ -645,7 +704,7 @@ impl AgentStore for PgAgentStore {
                 .map_err(sql)?
                 .get(0);
             if changed {
-                notify(&*transaction, TAKEN, &key).await?;
+                notify(&transaction, TAKEN, &key).await?;
             }
             transaction.commit().await.map_err(sql)?;
             Ok(Some(Taken {
@@ -677,6 +736,35 @@ impl AgentStore for PgAgentStore {
                 let uid = InstanceUid::parse(&key)
                     .ok_or_else(|| format!("agents: {key} is not an instance_uid"))?;
                 Ok((uid, row.get(1)))
+            })
+            .collect()
+    }
+
+    fn takes(
+        &self,
+        uids: &[InstanceUid],
+    ) -> Result<HashMap<InstanceUid, (Option<String>, u64)>, String> {
+        let keys: Vec<String> = uids.iter().map(ToString::to_string).collect();
+        let rows = self.database.run(move |pool| async move {
+            let client = client(&pool).await?;
+            client
+                // Under a share lock, taken in the order the batches lock, so a take still in
+                // flight is waited for and its count read.
+                .query(
+                    "SELECT instance_uid, holder::text, takes FROM agents \
+                     WHERE instance_uid = ANY($1) \
+                     ORDER BY instance_uid COLLATE \"C\" FOR SHARE",
+                    &[&keys],
+                )
+                .await
+                .map_err(sql)
+        })?;
+        rows.into_iter()
+            .map(|row| {
+                let key: String = row.get(0);
+                let uid = InstanceUid::parse(&key)
+                    .ok_or_else(|| format!("agents: {key} is not an instance_uid"))?;
+                Ok((uid, (row.get(1), unsigned(row.get(2)))))
             })
             .collect()
     }
@@ -713,7 +801,7 @@ impl AgentStore for PgAgentStore {
                 .execute("DELETE FROM agents WHERE instance_uid = $1", &[&key])
                 .await
                 .map_err(sql)?;
-            notify(&*transaction, FORGOTTEN, &key).await?;
+            notify(&transaction, FORGOTTEN, &key).await?;
             transaction.commit().await.map_err(sql)?;
             Ok(Some(true))
         })?;
@@ -721,6 +809,29 @@ impl AgentStore for PgAgentStore {
             self.stored([(uid, None)]);
         }
         Ok(forgotten)
+    }
+
+    /// The old row under a share lock first, which waits for a move still in flight and then
+    /// finds it gone, and the new row read after it, by a statement that sees that move's commit.
+    fn moved(&self, old: &InstanceUid, new: &InstanceUid) -> Result<bool, String> {
+        let (old, new) = (old.to_string(), new.to_string());
+        self.database.run(move |pool| async move {
+            let client = client(&pool).await?;
+            let old_stored = client
+                .query_opt(
+                    "SELECT 1 FROM agents WHERE instance_uid = $1 FOR SHARE",
+                    &[&old],
+                )
+                .await
+                .map_err(sql)?
+                .is_some();
+            let new_stored = client
+                .query_opt("SELECT 1 FROM agents WHERE instance_uid = $1", &[&new])
+                .await
+                .map_err(sql)?
+                .is_some();
+            Ok(new_stored && !old_stored)
+        })
     }
 
     /// One transaction: the row as it is stored moved to its new key, its assignment's
@@ -776,7 +887,7 @@ impl AgentStore for PgAgentStore {
                     .execute("DELETE FROM agents WHERE instance_uid = $1", &[&old])
                     .await
                     .map_err(sql)?;
-                notify(&*transaction, FORGOTTEN, &old).await?;
+                notify(&transaction, FORGOTTEN, &old).await?;
             }
             transaction.commit().await.map_err(sql)?;
             Ok(moved)
@@ -795,7 +906,7 @@ impl AgentStore for PgAgentStore {
     }
 
     /// One transaction: the revisions and the assignments that pin them commit together or not at
-    /// all (ADR-0044 clause 21). Each record's assignment is written alone, in the order of the
+    /// all (ADR-0050 clause 21). Each record's assignment is written alone, in the order of the
     /// `instance_uid`, so two releases over the same Agents lock their rows in one order; a record
     /// forgotten meanwhile is written nothing. The row of each Package an assignment pins is held
     /// `FOR KEY SHARE` until the commit, as each pinned Configuration's is, so a write to the
@@ -816,32 +927,32 @@ impl AgentStore for PgAgentStore {
             self.database.run_writing(written, move |pool| async move {
                 let mut client = client(&pool).await?;
                 let transaction = client.transaction().await.map_err(sql)?;
-                super::configs::retain(&*transaction, &revisions).await?;
+                super::configs::retain(&transaction, &revisions).await?;
                 let packages: BTreeSet<&PackageId> = records
                     .iter()
                     .filter_map(|(_, assignment)| assignment.as_ref()?.package.as_ref())
                     .collect();
                 for id in packages {
-                    hold_pinned_package(&*transaction, id).await?;
+                    hold_pinned_package(&transaction, id).await?;
                 }
                 let deployments: BTreeSet<&str> = records
                     .iter()
                     .filter_map(|(_, assignment)| Some(assignment.as_ref()?.deployment.as_str()))
                     .collect();
                 for name in deployments {
-                    hold_released_through(&*transaction, name).await?;
+                    hold_released_through(&transaction, name).await?;
                 }
                 let pinned: BTreeSet<&str> = revisions
                     .iter()
                     .map(|pinned| pinned.configuration.as_str())
                     .collect();
                 for configuration in pinned {
-                    notify(&*transaction, CONFIGURATION, configuration).await?;
+                    notify(&transaction, CONFIGURATION, configuration).await?;
                 }
                 let mut wrote = BTreeSet::new();
                 for (key, assignment) in records {
-                    if write_assignment(&*transaction, &key, assignment.as_ref()).await? {
-                        notify(&*transaction, ASSIGNMENT, &key).await?;
+                    if write_assignment(&transaction, &key, assignment.as_ref()).await? {
+                        notify(&transaction, ASSIGNMENT, &key).await?;
                         wrote.insert(key);
                     }
                 }
@@ -912,9 +1023,59 @@ async fn hold_released_through(client: &impl GenericClient, name: &str) -> Resul
         .ok_or_else(|| format!("no deployment {name:?}"))
 }
 
-/// The lock the creation of a record is counted under, by the key its schema gives it.
-const CREATE_LOCK: &str =
-    "hashtextextended('opamp-fleet-server-agents:' || coalesce(current_schema(), ''), 0)";
+/// What a creation's transaction runs first: its commit does not wait for the database to flush
+/// it, and no other transaction on the connection is affected (ADR-0050 clause 21).
+const ASYNCHRONOUS_COMMIT: &str = "SET LOCAL synchronous_commit = off";
+
+/// A count of the creations under way, bounded by half the pool, so the other half serves every
+/// other call while creations wait for the count's row (ADR-0050 clause 24).
+struct Creating {
+    at_most: usize,
+    under_way: Mutex<usize>,
+    freed: std::sync::Condvar,
+}
+
+impl Creating {
+    /// Half of a pool of `pool_size` connections, at least one.
+    fn of(pool_size: usize) -> Self {
+        Creating {
+            at_most: (pool_size / 2).max(1),
+            under_way: Mutex::new(0),
+            freed: std::sync::Condvar::new(),
+        }
+    }
+
+    /// Waits until fewer than its bound are under way, and counts this one until the answer is
+    /// dropped.
+    fn enter(&self) -> Entered<'_> {
+        let mut under_way = self
+            .under_way
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while *under_way >= self.at_most {
+            under_way = self
+                .freed
+                .wait(under_way)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        *under_way += 1;
+        Entered(self)
+    }
+}
+
+/// One creation under way.
+struct Entered<'a>(&'a Creating);
+
+impl Drop for Entered<'_> {
+    fn drop(&mut self) {
+        *self
+            .0
+            .under_way
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) -= 1;
+        self.0.freed.notify_one();
+    }
+}
 
 /// The columns of a row, in the order [`read_all`] selects and [`write`] inserts them.
 const COLUMNS: &str = "instance_uid, sequence_num, capabilities, transport, last_seen_ms, \
@@ -922,13 +1083,22 @@ const COLUMNS: &str = "instance_uid, sequence_num, capabilities, transport, last
      connection_settings_status, package_statuses, available_components, labels, host, \
      deployment, package_agent_type, package_version";
 
+/// The assignment's Configurations of the `agents` row a query selects, by name to revision, in
+/// the statement that reads the row: one statement reads one committed state whatever the
+/// transaction's isolation, so no rollout that commits meanwhile is read in part.
+const CONFIGURATIONS: &str = "(SELECT json_object_agg(c.configuration, c.revision) \
+     FROM agent_assignment_configurations AS c WHERE c.instance_uid = agents.instance_uid)";
+
 /// A wire-typed field as its protobuf bytes, the encoding whose compatibility rules the Baseline
-/// already governs (ADR-0044 clause 4).
+/// already governs (ADR-0050 clause 4).
 fn encode<M: Message>(message: Option<&M>) -> Option<Vec<u8>> {
     message.map(Message::encode_to_vec)
 }
 
-fn decode<M: Message + Default>(bytes: Option<Vec<u8>>, what: &str) -> Result<Option<M>, String> {
+pub(super) fn decode<M: Message + Default>(
+    bytes: Option<Vec<u8>>,
+    what: &str,
+) -> Result<Option<M>, String> {
     bytes
         .map(|bytes| {
             M::decode(bytes.as_slice()).map_err(|e| format!("{what} does not decode: {e}"))
@@ -937,15 +1107,30 @@ fn decode<M: Message + Default>(bytes: Option<Vec<u8>>, what: &str) -> Result<Op
 }
 
 /// Every Agent record. A row that does not decode fails, naming its `instance_uid`
-/// (ADR-0044 clause 4).
+/// (ADR-0050 clause 4).
 pub(crate) async fn read_all(
     client: &impl GenericClient,
 ) -> Result<HashMap<InstanceUid, PersistedAgent>, String> {
     read(client, None).await
 }
 
-/// The records of the keys `only` names, or of every Agent where it names none.
-async fn read(
+/// A transaction that reads one committed state of the database and writes nothing: the
+/// statements of a read in it see no commit made between them, such as an Agent's row without
+/// its presence.
+async fn snapshot(
+    client: &mut deadpool_postgres::Object,
+) -> Result<deadpool_postgres::Transaction<'_>, String> {
+    client
+        .build_transaction()
+        .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
+        .read_only(true)
+        .start()
+        .await
+        .map_err(sql)
+}
+
+/// The records of the keys `only` names, or of every Agent where it names none, in one statement.
+pub(super) async fn read(
     client: &impl GenericClient,
     only: Option<&[String]>,
 ) -> Result<HashMap<InstanceUid, PersistedAgent>, String> {
@@ -953,10 +1138,12 @@ async fn read(
         Some(uids) => (" WHERE instance_uid = ANY($1)", vec![uids]),
         None => ("", Vec::new()),
     };
-    let mut released = released_configurations(client, filter, &params).await?;
     let mut records = HashMap::new();
     for row in client
-        .query(&format!("SELECT {COLUMNS} FROM agents{filter}"), &params)
+        .query(
+            &format!("SELECT {COLUMNS}, {CONFIGURATIONS} FROM agents{filter}"),
+            &params,
+        )
         .await
         .map_err(sql)?
     {
@@ -970,7 +1157,7 @@ async fn read(
             row.get(15),
             row.get(16),
             row.get(17),
-            released.remove(&key).unwrap_or_default(),
+            configurations_of(row.get(18)).map_err(named)?,
         )
         .map_err(named)?;
         let record = PersistedAgent {
@@ -997,37 +1184,18 @@ async fn read(
         };
         records.insert(uid, record);
     }
-    if let Some(key) = released.keys().next() {
-        return Err(format!(
-            "an assignment in the database names agent {key}, which is not there"
-        ));
-    }
     Ok(records)
 }
 
-/// The assignment's Configurations of the rows `filter` selects, by `instance_uid`.
-async fn released_configurations(
-    client: &impl GenericClient,
-    filter: &str,
-    params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
-) -> Result<HashMap<String, BTreeMap<String, String>>, String> {
-    let mut released: HashMap<String, BTreeMap<String, String>> = HashMap::new();
-    for row in client
-        .query(
-            &format!(
-                "SELECT instance_uid, configuration, revision FROM agent_assignment_configurations{filter}"
-            ),
-            params,
-        )
-        .await
-        .map_err(sql)?
-    {
-        released
-            .entry(row.get(0))
-            .or_default()
-            .insert(row.get(1), row.get(2));
-    }
-    Ok(released)
+/// The assignment's Configurations of a row, as [`CONFIGURATIONS`] selects them.
+fn configurations_of(
+    configurations: Option<serde_json::Value>,
+) -> Result<BTreeMap<String, String>, String> {
+    configurations
+        .map(serde_json::from_value)
+        .transpose()
+        .map(Option::unwrap_or_default)
+        .map_err(|e| format!("the assignment's Configurations: {e}"))
 }
 
 /// The assignment the assignment's columns of one row and its Configurations make.
@@ -1061,11 +1229,13 @@ fn assignment_of(
 async fn read_assignments(
     client: &impl GenericClient,
 ) -> Result<HashMap<InstanceUid, Assignment>, String> {
-    let mut released = released_configurations(client, "", &[]).await?;
     let mut assignments = HashMap::new();
     for row in client
         .query(
-            "SELECT instance_uid, deployment, package_agent_type, package_version FROM agents",
+            &format!(
+                "SELECT instance_uid, deployment, package_agent_type, package_version, \
+                 {CONFIGURATIONS} FROM agents"
+            ),
             &[],
         )
         .await
@@ -1079,17 +1249,12 @@ async fn read_assignments(
             row.get(1),
             row.get(2),
             row.get(3),
-            released.remove(&key).unwrap_or_default(),
+            configurations_of(row.get(4)).map_err(named)?,
         )
         .map_err(named)?;
         if let Some(assignment) = assignment {
             assignments.insert(uid, assignment);
         }
-    }
-    if let Some(key) = released.keys().next() {
-        return Err(format!(
-            "an assignment in the database names agent {key}, which is not there"
-        ));
     }
     Ok(assignments)
 }
@@ -1119,8 +1284,8 @@ struct Held<'a> {
 
 /// Writes the columns a report decides of one Agent record, inside the caller's transaction,
 /// `last_seen_ms` only forward. Where `unless_held_elsewhere` is given, only of a row whose holder
-/// is the one it names, or of one no instance holds whose count of takes is the one it names.
-/// Answers whether it wrote a record.
+/// is the one it names, or of one no instance holds whose count of takes is the one it names, and
+/// whose sequence number is not higher than the record's. Answers whether it wrote a record.
 async fn write_reported(
     client: &impl GenericClient,
     uid: &InstanceUid,
@@ -1140,16 +1305,44 @@ async fn write_reported(
         .join(", ");
     // A row no instance holds is written only where no instance took the Agent since this one
     // was last answered its count of takes: another instance that carried the Agent since clears
-    // the holder at its disconnect, and what it wrote stays. No clock is compared.
+    // the holder at its disconnect, and what it wrote stays. A row whose sequence number is higher
+    // holds a newer report another instance wrote while this one still held the row, and stays
+    // too; an Agent that started again and counts from the start misses this one flush, and the
+    // instance that carries it, with no count answered, writes its record again at its next
+    // report. No clock is compared.
     let held = match unless_held_elsewhere {
         Some(_) => format!(
-            " AND (holder = ${}::text::uuid OR (holder IS NULL AND takes = ${}))",
+            " AND (holder = ${}::text::uuid OR (holder IS NULL AND takes = ${})) \
+             AND sequence_num <= $2",
             REPORTED.len() + 2,
             REPORTED.len() + 3
         ),
         None => String::new(),
     };
-    let update = format!("UPDATE agents SET {sets} WHERE instance_uid = $1{held}");
+    // The derived columns and their digest in the same statement, the digest over the values bound.
+    let first = REPORTED.len()
+        + 2
+        + if unless_held_elsewhere.is_some() {
+            2
+        } else {
+            0
+        };
+    let derived_sets = derived_sets(first, |column| {
+        Some(
+            match column {
+                "instance_uid" => "$1::text",
+                "capabilities" => "$3::bigint",
+                "transport" => "$4::text",
+                "description" => "$7::bytea",
+                "health" => "$8::bytea",
+                "remote_config_status" => "$9::bytea",
+                "package_statuses" => "$11::bytea",
+                _ => return None,
+            }
+            .to_string(),
+        )
+    });
+    let update = format!("UPDATE agents SET {sets}, {derived_sets} WHERE instance_uid = $1{held}");
     let (sequence_num, capabilities, last_seen_ms) = (
         signed(record.sequence_num),
         signed(record.capabilities),
@@ -1189,7 +1382,41 @@ async fn write_reported(
         params.push(&holder);
         params.push(&take);
     }
+    let derived = derived_of(uid, record);
+    params.extend(
+        derived
+            .iter()
+            .map(|p| p.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync)),
+    );
     Ok(client.execute(&update, &params).await.map_err(sql)? > 0)
+}
+
+/// The values of the columns the list of Agents reads, derived from `record`, which every write
+/// of it writes in the same statement
+/// (ADR-0049
+/// clause 8).
+fn derived_of(
+    uid: &InstanceUid,
+    record: &PersistedAgent,
+) -> Vec<Box<dyn tokio_postgres::types::ToSql + Sync + Send>> {
+    super::agent_page::derived_params(&crate::listing::derive(&crate::agent_store::source_of(
+        uid, record,
+    )))
+}
+
+/// `SET` of the derived columns, their values bound from `$first` on, and of their digest over
+/// the values the statement binds for the columns it is the digest of, `column` naming each.
+fn derived_sets(first: usize, column: impl Fn(&str) -> Option<String>) -> String {
+    let mut sets: Vec<String> = super::agent_page::DERIVED_COLUMNS
+        .iter()
+        .enumerate()
+        .map(|(i, name)| format!("{name} = ${}", first + i))
+        .collect();
+    sets.push(format!(
+        "derived_from = {}",
+        super::agent_page::stamp_of(column)
+    ));
+    sets.join(", ")
 }
 
 /// Writes the assignment of one Agent record alone, its Configurations exactly the assignment's,
@@ -1260,6 +1487,8 @@ pub(crate) async fn write(
     let updates = COLUMNS
         .split(", ")
         .skip(1)
+        .chain(super::agent_page::DERIVED_COLUMNS)
+        .chain(["derived_from"])
         .map(|column| format!("{column} = EXCLUDED.{column}"))
         .collect::<Vec<_>>()
         .join(", ");
@@ -1275,41 +1504,117 @@ async fn insert(
     record: &PersistedAgent,
     on_conflict: &str,
 ) -> Result<bool, String> {
+    insert_as(client, uid, record, on_conflict, None).await
+}
+
+/// The types of the columns [`insert`] writes, in the order of its parameters: what a row
+/// selected rather than given as values names, so each parameter takes its column's type.
+const INSERTED_TYPES: [&str; 28] = [
+    "text", "bigint", "bigint", "text", "bigint", "boolean", "bytea", "bytea", "bytea", "bytea",
+    "bytea", "bytea", "bytea", "json", "text", "text", "text", "text", "text", "bigint", "text",
+    "text", "text", "text", "json", "text", "boolean", "text",
+];
+
+/// [`insert`], or with `within` the creation of a record only while the count of the records,
+/// kept by the triggers of migration 14, is below `within`: one statement that locks the count's
+/// row, so creations of every instance are counted one after another and none waits for a round
+/// trip of another (ADR-0050 clause 22).
+async fn insert_as(
+    client: &impl GenericClient,
+    uid: &InstanceUid,
+    record: &PersistedAgent,
+    on_conflict: &str,
+    within: Option<i64>,
+) -> Result<bool, String> {
     let key = uid.to_string();
     let labels = serde_json::to_value(&record.labels).expect("labels serialize");
     let assignment = record.assignment.as_ref();
     let package = assignment.and_then(|assignment| assignment.package.as_ref());
+    let derived = derived_of(uid, record);
+    let derived_names = super::agent_page::DERIVED_COLUMNS.join(", ");
+    let derived_values = (19..19 + derived.len())
+        .map(|n| format!("${n}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let stamp = super::agent_page::stamp_of(|column| {
+        Some(
+            match column {
+                "instance_uid" => "$1::text",
+                "capabilities" => "$3::bigint",
+                "transport" => "$4::text",
+                "description" => "$8::bytea",
+                "health" => "$9::bytea",
+                "remote_config_status" => "$10::bytea",
+                "package_statuses" => "$12::bytea",
+                _ => return None,
+            }
+            .to_string(),
+        )
+    });
+    let mut values: Vec<Box<dyn tokio_postgres::types::ToSql + Sync + Send>> = vec![
+        Box::new(key.clone()),
+        Box::new(signed(record.sequence_num)),
+        Box::new(signed(record.capabilities)),
+        Box::new(record.transport.as_str()),
+        Box::new(signed(record.last_seen_ms)),
+        Box::new(record.restart_pending),
+        Box::new(
+            record
+                .effective_config
+                .as_ref()
+                .map(|text| text.as_bytes().to_vec()),
+        ),
+        Box::new(encode(record.description.as_ref())),
+        Box::new(encode(record.health.as_ref())),
+        Box::new(encode(record.remote_config_status.as_ref())),
+        Box::new(encode(record.connection_settings_status.as_ref())),
+        Box::new(encode(record.package_statuses.as_ref())),
+        Box::new(encode(record.available_components.as_ref())),
+        Box::new(labels),
+        Box::new(record.host.clone()),
+        Box::new(assignment.map(|assignment| assignment.deployment.clone())),
+        Box::new(package.map(|id| id.agent_type.clone())),
+        Box::new(package.map(|id| id.version.clone())),
+    ];
+    values.extend(derived);
+    let rows = match within {
+        None => format!(
+            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, \
+             $18, {derived_values}, {stamp})"
+        ),
+        Some(within) => {
+            let typed: Vec<String> = INSERTED_TYPES
+                .iter()
+                .enumerate()
+                .map(|(i, kind)| format!("${}::{kind}", i + 1))
+                .collect();
+            let bound = typed.len() + 1;
+            values.push(Box::new(within));
+            format!(
+                "SELECT {}, {stamp} FROM agent_count WHERE agents < ${bound} FOR UPDATE",
+                typed.join(", ")
+            )
+        }
+    };
+    let params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = values
+        .iter()
+        .map(|p| p.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync))
+        .collect();
     let written = client
         .execute(
             &format!(
-                "INSERT INTO agents ({COLUMNS}) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, \
-                 $11, $12, $13, $14, $15, $16, $17, $18) ON CONFLICT (instance_uid) {on_conflict}"
+                "INSERT INTO agents ({COLUMNS}, {derived_names}, derived_from) {rows} \
+                 ON CONFLICT (instance_uid) {on_conflict}"
             ),
-            &[
-                &key,
-                &signed(record.sequence_num),
-                &signed(record.capabilities),
-                &record.transport.as_str(),
-                &signed(record.last_seen_ms),
-                &record.restart_pending,
-                &record.effective_config.as_deref().map(str::as_bytes),
-                &encode(record.description.as_ref()),
-                &encode(record.health.as_ref()),
-                &encode(record.remote_config_status.as_ref()),
-                &encode(record.connection_settings_status.as_ref()),
-                &encode(record.package_statuses.as_ref()),
-                &encode(record.available_components.as_ref()),
-                &labels,
-                &record.host,
-                &assignment.map(|assignment| assignment.deployment.as_str()),
-                &package.map(|id| id.agent_type.as_str()),
-                &package.map(|id| id.version.as_str()),
-            ],
+            &params,
         )
         .await
         .map_err(sql)?
         > 0;
-    if written {
+    // A record created anew has no Configurations to replace: none is written for one whose
+    // assignment names none.
+    let configurations = assignment.is_some_and(|assignment| !assignment.configurations.is_empty());
+    if written && (within.is_none() || configurations) {
         write_configurations(client, &key, assignment).await?;
     }
     Ok(written)
@@ -1413,6 +1718,15 @@ mod tests {
         assert_eq!(store.set_restart_pending(&three, false), Ok(Some(true)));
         assert_eq!(store.set_restart_pending(&three, false), Ok(Some(false)));
         assert_eq!(store.set_restart_pending(&three, true), Ok(Some(false)));
+        // A restart taken for a send that failed is put back, and the next take finds it queued
+        // (ADR-0048
+        // clause 8).
+        assert_eq!(store.set_restart_pending(&three, false), Ok(Some(true)));
+        assert_eq!(store.set_restart_pending(&three, true), Ok(Some(false)));
+        assert_eq!(
+            open().0.get(&three).map(|r| r.map(|r| r.restart_pending)),
+            Ok(Some(true))
+        );
         let got = open().0.get(&three).expect("get").expect("stored");
         assert_eq!(got.labels, labels);
         assert!(got.restart_pending);
@@ -1430,12 +1744,76 @@ mod tests {
         store.remove(&one).expect("removing the absent is fine");
         assert_eq!(store.pinning(Pin::Configuration("base")), 1);
         assert_eq!(all(&*open().0).len(), 1);
+
+        // The read the Server makes of the Agents behind a Gateway: those that arrived over its
+        // Host, and no other.
+        let behind = [InstanceUid([0x0b; 16]), InstanceUid([0x0c; 16])];
+        let mut gatewayed = record();
+        gatewayed.host = Some("gateway".to_string());
+        gatewayed
+            .description
+            .get_or_insert_with(Default::default)
+            .non_identifying_attributes
+            .extend([
+                opamp::attributes::string_attr("zone", "b"),
+                // Taken, and no value a Selector matches: no pair to suggest.
+                opamp::proto::KeyValue {
+                    key: "port".to_string(),
+                    value: Some(opamp::proto::AnyValue {
+                        value: Some(opamp::proto::any_value::Value::IntValue(8)),
+                    }),
+                },
+            ]);
+        for uid in &behind {
+            store.put(uid, &gatewayed).expect("put");
+        }
+        let filter = crate::listing::AgentFilter {
+            arrived_over: Some("gateway".to_string()),
+            ..crate::listing::AgentFilter::default()
+        };
+        let page = open()
+            .0
+            .query_page(&crate::agent_store::PageQuery {
+                filter: &filter,
+                sort: crate::listing::AgentSort::Name,
+                descending: false,
+                after: None,
+                limit: 10,
+                seen_before_ms: 0,
+            })
+            .expect("page");
+        let found: Vec<InstanceUid> = page.agents.iter().map(|agent| agent.uid).collect();
+        assert_eq!(
+            found, behind,
+            "the Agents that arrived over the Host, by name and UID"
+        );
+        assert_eq!(page.total, 2);
+        assert!(page
+            .agents
+            .iter()
+            .all(|agent| agent.stored.record == gatewayed));
+
+        // What the UI suggests: the distinct reported pairs and types, each sorted, bounded.
+        let derived: Vec<crate::listing::Derived> = all(&*open().0)
+            .iter()
+            .map(|(uid, record)| {
+                crate::listing::derive(&crate::agent_store::source_of(uid, record))
+            })
+            .collect();
+        let expected = crate::agent_store::ReportedValues::of(&derived, 1000);
+        assert!(expected.pairs.len() > 1 && !expected.service_names.is_empty());
+        assert_eq!(open().0.reported_values(1000).expect("values"), expected);
+        let one = open().0.reported_values(1).expect("values");
+        assert_eq!(
+            (one.pairs.as_slice(), one.service_names.as_slice()),
+            (&expected.pairs[..1], &expected.service_names[..1])
+        );
     }
 
     /// A report's write on PostgreSQL leaves what the acts wrote through another instance: the
     /// labels, a queued restart and the assignment stay as they are stored, while what the report
     /// decides is written; a record that is not there is not written.
-    /// Verifies: ADR-0043, ADR-0041
+    /// Verifies: ADR-0043, ADR-0048
     #[test]
     fn a_report_written_on_postgres_keeps_what_the_acts_wrote() {
         let Some(test) = TestDatabase::named() else {
@@ -1621,7 +1999,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0044
+    /// Verifies: ADR-0050, ADR-0049
     #[test]
     fn the_agent_port_contract_holds_on_the_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1636,7 +2014,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0044
+    /// Verifies: ADR-0050, ADR-0049
     #[test]
     fn the_agent_port_contract_holds_on_postgres() {
         let Some(test) = TestDatabase::named() else {
@@ -1667,11 +2045,291 @@ mod tests {
         );
     }
 
+    /// The count of the Agents' records follows every row added and removed, whichever call adds
+    /// or removes it, and the ceiling is decided from it and not from the rows: a count that says
+    /// full refuses a new Agent though fewer rows are stored.
+    /// Verifies: ADR-0050, ADR-0043
+    #[test]
+    fn the_count_of_agents_follows_every_addition_and_removal_and_decides_the_ceiling() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let store = PgAgentStore::open(database.clone()).expect("open");
+        let counted = || {
+            let rows = test.rows("SELECT (SELECT agents FROM agent_count), count(*) FROM agents");
+            let (kept, stored) = (rows[0][0].clone(), rows[0][1].clone());
+            assert_eq!(kept, stored, "the count is the rows'");
+            kept.expect("a count").parse::<usize>().expect("a number")
+        };
+        assert_eq!(counted(), 0);
+        let uids = [1u8, 2, 3].map(|byte| InstanceUid([byte; 16]));
+        for uid in &uids[..2] {
+            assert!(matches!(
+                store.create_within(uid, &record(), 10).expect("create"),
+                Creation::Created
+            ));
+        }
+        assert!(matches!(
+            store
+                .create_within(&uids[0], &record(), 10)
+                .expect("create"),
+            Creation::Found(_)
+        ));
+        assert_eq!(counted(), 2, "a record created, not one found");
+        store.put(&uids[2], &record()).expect("put");
+        assert_eq!(counted(), 3, "a record put");
+        let moved = InstanceUid([4; 16]);
+        store.rekey(&uids[2], &moved, &record()).expect("rekey");
+        assert_eq!(counted(), 3, "a record moved");
+        store.remove(&moved).expect("remove");
+        assert_eq!(counted(), 2, "a record removed");
+
+        test.sql("UPDATE agent_count SET agents = 10");
+        assert!(
+            matches!(
+                store.create_within(&moved, &record(), 10).expect("create"),
+                Creation::Full
+            ),
+            "decided by the count"
+        );
+        test.sql("UPDATE agent_count SET agents = 2");
+        assert!(matches!(
+            store.create_within(&moved, &record(), 3).expect("create"),
+            Creation::Created
+        ));
+        assert_eq!(counted(), 3);
+    }
+
+    /// The count follows the Agents' records of its own schema whatever the search path of the
+    /// session that writes them: the triggers' functions are pinned to the schema the migration
+    /// ran in, not to the search path it ran under. Here that path starts with `"$user"` and names
+    /// a schema created only afterwards, which a function keeping the path would count in.
+    /// Verifies: ADR-0050
+    #[test]
+    fn the_count_is_kept_in_its_own_schema_whatever_the_writing_session_names_first() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let decoy = format!("fleet_test_decoy_{}", hex::encode(InstanceUid::default().0));
+        let database = crate::postgres::Database::open_in(
+            &test.config(),
+            crate::postgres::Exclusive::Alone("the test".to_string()),
+            Some(&format!("\"$user\",{decoy},{}", test.schema)),
+        )
+        .expect("open under a path naming $user first");
+        let store = PgAgentStore::open(database.clone()).expect("open");
+        store.put(&InstanceUid([1; 16]), &record()).expect("put");
+        let copied = InstanceUid([2; 16]);
+        test.sql(&format!(
+            "CREATE SCHEMA {decoy};
+             CREATE TABLE {decoy}.agent_count (
+                 one boolean PRIMARY KEY DEFAULT true, agents bigint NOT NULL);
+             INSERT INTO {decoy}.agent_count (agents) VALUES (100);
+             CREATE TEMP TABLE copied AS SELECT * FROM agents;
+             UPDATE copied SET instance_uid = '{copied}';
+             SELECT set_config('search_path', '{decoy},' || current_schema(), false);
+             INSERT INTO agents SELECT * FROM copied;
+             DELETE FROM agents WHERE instance_uid = '{copied}';
+             INSERT INTO agents SELECT * FROM copied;"
+        ));
+        let decoyed = test.rows(&format!("SELECT agents FROM {decoy}.agent_count"));
+        test.sql(&format!("DROP SCHEMA {decoy} CASCADE"));
+        let rows = test.rows("SELECT (SELECT agents FROM agent_count), count(*) FROM agents");
+        assert_eq!(rows[0][0], rows[0][1], "the count is the rows'");
+        assert_eq!(rows[0][1].as_deref(), Some("2"));
+        assert_eq!(
+            decoyed[0][0].as_deref(),
+            Some("100"),
+            "the decoy is untouched"
+        );
+    }
+
+    /// A creation commits without waiting for its flush, and the calls made after it on the same
+    /// connections commit synchronously again: a take, a report's write and a binding after it
+    /// wait for the flush, of the creation's too.
+    /// Verifies: ADR-0050
+    #[test]
+    fn a_creation_commits_without_its_flush_and_no_other_call_does() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        test.sql(
+            "CREATE TABLE commits_seen (statement text, setting text);
+             CREATE FUNCTION commit_seen() RETURNS trigger LANGUAGE plpgsql AS $$
+             BEGIN
+                 INSERT INTO commits_seen VALUES (TG_OP, current_setting('synchronous_commit'));
+                 RETURN NULL;
+             END $$;
+             CREATE TRIGGER commit_seen AFTER INSERT OR UPDATE ON agents
+                 FOR EACH ROW EXECUTE FUNCTION commit_seen();",
+        );
+        let store = PgAgentStore::open(database.clone()).expect("open");
+        let mut bare = record();
+        bare.assignment = None;
+        let uids: Vec<InstanceUid> = (0..20u8).map(|n| InstanceUid([0x50 + n; 16])).collect();
+        for uid in &uids {
+            store.create_within(uid, &bare, 1_000).expect("create");
+        }
+        for uid in &uids {
+            store
+                .take(uid, "00000000-0000-7000-8000-00000000000a", 5)
+                .expect("take");
+            let mut reported = bare.clone();
+            reported.sequence_num = 9;
+            store.write_report(uid, &reported).expect("write");
+        }
+        let seen = |statement: &str| -> Vec<String> {
+            let mut settings: Vec<String> = test
+                .rows(&format!(
+                    "SELECT DISTINCT setting FROM commits_seen WHERE statement = '{statement}'"
+                ))
+                .into_iter()
+                .flatten()
+                .flatten()
+                .collect();
+            settings.sort();
+            settings
+        };
+        assert_eq!(seen("INSERT"), ["off"], "a creation waits for no flush");
+        assert_eq!(seen("UPDATE"), ["on"], "a take and a write wait for theirs");
+    }
+
+    /// The pool holds the connections `[database] pool_size` names, and the store creates half of
+    /// them at once.
+    /// Verifies: ADR-0050
+    #[test]
+    fn the_pool_holds_what_pool_size_names_and_half_of_it_creates() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        for (size, creating) in [(2, 1), (6, 3), (40, 20)] {
+            let mut config = test.config();
+            config.pool_size = size;
+            let database = Database::open_in(
+                &config,
+                super::super::Exclusive::Alone("the test".to_string()),
+                Some(&test.schema),
+            )
+            .expect("open");
+            assert_eq!(database.pool_size(), size, "the pool");
+            let store = PgAgentStore::new(database.clone());
+            assert_eq!(store.creating.at_most, creating, "the creations at once");
+            drop(store);
+            drop(database);
+        }
+    }
+
+    /// While every pooled connection is busy for longer than the five seconds any other call waits
+    /// for one, a creation waits on and creates the record once a connection is free, and a read
+    /// fails after its five seconds: a new Agent is not answered `Unavailable` while a connecting
+    /// fleet holds the pool for a few seconds (ADR-0050 clause 24).
+    /// Verifies: ADR-0050
+    #[test]
+    fn a_creation_waits_for_a_pooled_connection_longer_than_any_other_call() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let mut config = test.config();
+        config.pool_size = 2;
+        let database = Database::open_in(
+            &config,
+            super::super::Exclusive::Alone("the test".to_string()),
+            Some(&test.schema),
+        )
+        .expect("open");
+        let store = Arc::new(PgAgentStore::open(database.clone()).expect("open"));
+        // Both connections of the pool, held past the five seconds and well within the call's
+        // bound.
+        use std::time::Duration;
+        const BUSY: Duration = Duration::from_secs(7);
+        let (held, holding) = std::sync::mpsc::channel();
+        let busy = {
+            let database = database.clone();
+            std::thread::spawn(move || {
+                database.run(move |pool| async move {
+                    let one = client(&pool).await?;
+                    let other = client(&pool).await?;
+                    let _ = held.send(());
+                    tokio::time::sleep(BUSY).await;
+                    drop((one, other));
+                    Ok(())
+                })
+            })
+        };
+        holding
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the pool is held");
+        let started = std::time::Instant::now();
+        let creating = {
+            let store = store.clone();
+            std::thread::spawn(move || {
+                let mut bare = record();
+                bare.assignment = None;
+                store.create_within(&InstanceUid([0x61; 16]), &bare, 100)
+            })
+        };
+        let read = store.get(&InstanceUid([0x62; 16]));
+        assert!(
+            read.as_ref()
+                .is_err_and(|e| e.contains("waiting for a slot")),
+            "a read waits five seconds for a connection: {read:?}"
+        );
+        assert!(
+            started.elapsed() < BUSY,
+            "the read gave up before the pool was free: {:?}",
+            started.elapsed()
+        );
+        let created = creating.join().expect("the creation");
+        assert!(
+            matches!(created, Ok(Creation::Created)),
+            "the creation waited for a connection: {created:?}"
+        );
+        assert!(started.elapsed() >= BUSY - Duration::from_secs(1));
+        busy.join().expect("the holder").expect("held");
+    }
+
+    /// Creations that wait for the count's row, which a creation elsewhere holds, hold no
+    /// connection of the pool meanwhile, so the other calls of the instance are answered.
+    /// Verifies: ADR-0050
+    #[test]
+    fn creations_waiting_for_their_lock_leave_the_pool_to_the_other_calls() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let store = Arc::new(PgAgentStore::open(database.clone()).expect("open"));
+        let gate = test.hold("SELECT agents FROM agent_count FOR UPDATE;");
+        // More than the whole pool.
+        let waiting: Vec<_> = (0..24u8)
+            .map(|n| {
+                let store = store.clone();
+                std::thread::spawn(move || {
+                    store.create_within(&InstanceUid([0x40 + n; 16]), &record(), 100)
+                })
+            })
+            .collect();
+        // However many creations wait, a read is answered within the pool's wait.
+        for _ in 0..3 {
+            store
+                .get(&InstanceUid([0x3f; 16]))
+                .expect("a read while creations wait");
+        }
+        gate.open();
+        for creation in waiting {
+            assert!(matches!(
+                creation.join().expect("a creation").expect("created"),
+                Creation::Created
+            ));
+        }
+    }
+
     /// A read that began before this instance committed a release never takes the older
     /// assignment over it: the release pins what it pins after the query and the read of the
     /// records that began before it, so a deletion it pins stays refused. A read that began after
     /// it takes up what another instance committed.
-    /// Verifies: ADR-0026, ADR-0044
+    /// Verifies: ADR-0026, ADR-0050
     #[test]
     fn a_read_that_began_before_a_release_does_not_undo_what_it_pins() {
         let Some(test) = TestDatabase::named() else {
@@ -1734,7 +2392,7 @@ mod tests {
 
     /// What the adapter keeps of its commits for the reads in flight does not grow with an Agent's
     /// re-keys or releases while no read is in flight, and leaves with the last read in flight.
-    /// Verifies: ADR-0044
+    /// Verifies: ADR-0050
     #[test]
     fn the_commits_kept_for_reads_in_flight_do_not_grow_without_one() {
         let Some(test) = TestDatabase::named() else {
@@ -1773,7 +2431,7 @@ mod tests {
     /// Of two reads in flight, the one that ends first leaves what the other is decided by: a
     /// release committed while both were in flight is still noted when the older read takes up its
     /// snapshot, so it does not take the older assignment over the release.
-    /// Verifies: ADR-0026, ADR-0044
+    /// Verifies: ADR-0026, ADR-0050
     #[test]
     fn a_read_that_ends_first_leaves_what_an_older_read_in_flight_is_decided_by() {
         let Some(test) = TestDatabase::named() else {
@@ -1813,7 +2471,7 @@ mod tests {
 
     /// Under reads that always overlap, what is kept of the commits is only what the oldest read
     /// in flight can be decided by: an Agent that re-keys on every report does not grow it.
-    /// Verifies: ADR-0044
+    /// Verifies: ADR-0050
     #[test]
     fn under_overlapping_reads_the_commits_kept_follow_the_oldest_read_in_flight() {
         let Some(test) = TestDatabase::named() else {
@@ -1844,7 +2502,7 @@ mod tests {
     /// The query reads each record with its stored presence: connected only while the instance
     /// its presence names holds a live lease. Opening the adapter reads the stored assignments
     /// alone, so what pins what is answered without a record loaded.
-    /// Verifies: ADR-0043, ADR-0044
+    /// Verifies: ADR-0043, ADR-0050
     #[test]
     fn the_query_reads_the_stored_presence_and_opening_reads_the_assignments_alone() {
         let Some(test) = TestDatabase::named() else {
@@ -1891,8 +2549,318 @@ mod tests {
         );
     }
 
+    /// What a read found of the Agent's assignment: its Deployment and its revision of `base`.
+    fn found(assignment: Option<Assignment>) -> Option<(String, String)> {
+        assignment.map(|assignment| {
+            (
+                assignment.deployment,
+                assignment.configurations["base"].clone(),
+            )
+        })
+    }
+
+    fn pair(deployment: &str, revision: &str) -> (String, String) {
+        (deployment.to_string(), revision.to_string())
+    }
+
+    /// Runs `read` on a thread of its own, and its answer within 30 seconds.
+    fn answer_of<T: Send + 'static>(
+        label: &str,
+        read: impl FnOnce() -> T + Send + 'static,
+    ) -> impl FnOnce() -> T {
+        let (sent, answer) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sent.send(read());
+        });
+        let label = label.to_string();
+        move || {
+            answer
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .unwrap_or_else(|_| panic!("{label}: no answer"))
+        }
+    }
+
+    /// A read of an Agent reads its row and its Configurations from one committed state: a
+    /// rollout that commits while the read waits for the row is read whole or not at all, by
+    /// `get_many`, `load`, `query` and opening the adapter, never one rollout's revisions with
+    /// another's Deployment. The rollout commits from a session that holds `agents` against reads
+    /// until the read waits for it. A read in one statement waits before it reads anything, and
+    /// reads what the rollout committed; `query` reads in a snapshot taken before it waits, and
+    /// reads what was there before.
+    /// Verifies: ADR-0043, ADR-0048
+    #[test]
+    fn an_agent_is_read_in_one_snapshot_whatever_commits_while_it_waits() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let store = Arc::new(PgAgentStore::new(database.clone()));
+        let uid = InstanceUid([7; 16]);
+        store.put(&uid, &record()).expect("put");
+        let mut states = [pair("stable", "0123abcd"), pair("canary", "4567cdef")];
+        // Each race rolls the Agent over to the other state.
+        let mut race =
+            |label: &str,
+             reads_after: bool,
+             read: Box<dyn FnOnce() -> Option<(String, String)> + Send>| {
+                let [before, after] = states.clone();
+                let held = test.hold_reads(
+                    "agents",
+                    &format!(
+                        "UPDATE agents SET deployment = '{}'; \
+                     UPDATE agent_assignment_configurations SET revision = '{}'",
+                        after.0, after.1
+                    ),
+                );
+                let answer = answer_of(label, read);
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                while test.sessions(
+                    "wait_event_type = 'Lock' AND query LIKE 'SELECT instance_uid%FROM agents%'",
+                ) == 0
+                {
+                    assert!(std::time::Instant::now() < deadline, "{label}: never waits");
+                }
+                held.open();
+                let expected = if reads_after { &after } else { &before };
+                assert_eq!(answer().as_ref(), Some(expected), "{label}");
+                states = [after, before];
+            };
+
+        let reading = store.clone();
+        race(
+            "get_many",
+            true,
+            Box::new(move || {
+                found(
+                    reading
+                        .get_many(&[uid])
+                        .expect("get_many")
+                        .remove(&uid)
+                        .and_then(|record| record.assignment),
+                )
+            }),
+        );
+        let reading = store.clone();
+        race(
+            "load",
+            true,
+            Box::new(move || {
+                found(
+                    reading
+                        .load()
+                        .expect("load")
+                        .remove(&uid)
+                        .and_then(|record| record.assignment),
+                )
+            }),
+        );
+        let reading = store.clone();
+        race(
+            "query",
+            false,
+            Box::new(move || {
+                found(
+                    reading
+                        .query(None)
+                        .expect("query")
+                        .pop()
+                        .and_then(|(_, stored)| stored.record.assignment),
+                )
+            }),
+        );
+        race(
+            "open",
+            true,
+            Box::new(move || {
+                let opened = PgAgentStore::open(database).expect("open");
+                let deployment = ["stable", "canary"]
+                    .into_iter()
+                    .find(|name| opened.pinning(Pin::Deployment(name)) == 1)?;
+                let revisions = opened.referenced_revisions("base");
+                let [revision] =
+                    <[String; 1]>::try_from(revisions.into_iter().collect::<Vec<_>>()).ok()?;
+                Some(pair(deployment, &revision))
+            }),
+        );
+    }
+
+    /// A creation that finds the Agent stored reads it from one committed state: a rollout that
+    /// commits while the read is part-way, its Configurations held at a gate, is not read in part.
+    /// The creation counts the rows of `agents` first, so the gate stands in the Configurations,
+    /// behind a view in place of their table.
+    /// Verifies: ADR-0043, ADR-0048
+    #[test]
+    fn a_creation_that_finds_the_agent_reads_it_in_one_snapshot() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let store = Arc::new(PgAgentStore::new(test.open()));
+        let uid = InstanceUid([8; 16]);
+        store.put(&uid, &record()).expect("put");
+        let key = 0x2900_2900;
+        test.sql(&format!(
+            "ALTER TABLE agent_assignment_configurations RENAME TO held_configurations; \
+             CREATE FUNCTION fleet_test_held() RETURNS boolean LANGUAGE plpgsql AS $$ BEGIN \
+                 PERFORM pg_advisory_lock_shared({key}); \
+                 PERFORM pg_advisory_unlock_shared({key}); RETURN true; END $$; \
+             CREATE VIEW agent_assignment_configurations AS \
+                 SELECT * FROM held_configurations WHERE fleet_test_held();"
+        ));
+        let gate = test.gate(key);
+        let creating = store.clone();
+        let answer = answer_of("create_within", move || {
+            match creating.create_within(&uid, &record(), 10).expect("create") {
+                Creation::Found(record) => found(record.assignment),
+                _ => None,
+            }
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !test.waits_for(key) {
+            assert!(std::time::Instant::now() < deadline, "never waits");
+        }
+        test.sql(
+            "UPDATE agents SET deployment = 'canary'; \
+             UPDATE held_configurations SET revision = '4567cdef'",
+        );
+        gate.open();
+        assert_eq!(answer(), Some(pair("stable", "0123abcd")));
+    }
+
+    /// A record created, a report written and a record imported each carry their derived columns
+    /// and the digest of what they derive from, written in the statement that writes the record,
+    /// so no row a Server of this release writes needs deriving again.
+    /// Verifies: ADR-0049
+    #[test]
+    fn every_write_of_a_record_writes_its_derived_columns_with_it() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let store = PgAgentStore::new(database.clone());
+        let stale = || {
+            test.once(&format!(
+                "SELECT count(*)::text FROM agents WHERE derived_from IS DISTINCT FROM {}",
+                crate::postgres::schema::stamp!()
+            ))
+        };
+        let mut full = record();
+        full.package_statuses = Some(opamp::proto::PackageStatuses {
+            error_message: "a package".to_string(),
+            ..Default::default()
+        });
+        assert!(
+            full.health.is_some() && full.description.is_some() && full.package_statuses.is_some()
+        );
+        let (created, imported) = (InstanceUid([0x31; 16]), InstanceUid([0x32; 16]));
+        store.put(&created, &full).expect("create");
+        assert_eq!(stale(), "0", "created");
+        let mut reported = full.clone();
+        reported.health = None;
+        reported.capabilities ^= 1;
+        assert!(store.write_report(&created, &reported).expect("report"));
+        assert_eq!(stale(), "0", "reported");
+        let import = |uid: InstanceUid, record: PersistedAgent| {
+            database
+                .run(move |pool| async move {
+                    let client = client(&pool).await?;
+                    write(&client, &uid, &record).await
+                })
+                .expect("import");
+        };
+        import(imported, full.clone());
+        assert_eq!(stale(), "0", "imported");
+        let mut over = full.clone();
+        over.health = None;
+        import(created, over);
+        assert_eq!(stale(), "0", "imported over a record");
+        let names = test.once(&format!(
+            "SELECT display_name || '/' || search_text FROM agents WHERE instance_uid = '{created}'"
+        ));
+        assert!(names.contains(&created.to_string()), "{names}");
+    }
+
+    /// A page names the holder of an Agent only while its lease is live: `holder=<id>` lists the
+    /// Agent and `holder=none` does not, `connected=true` lists it; once the lease has lapsed,
+    /// without being released, `holder=none` lists it, and neither `holder=<id>` nor
+    /// `connected=true` does. The read of the Agents behind a Gateway's Host says the same.
+    /// Verifies: ADR-0049
+    #[test]
+    fn a_page_names_a_holder_only_while_its_lease_is_live() {
+        use crate::listing::{AgentFilter, AgentSort, HolderFilter};
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let a = database
+            .take_lease("host-a", std::time::Duration::from_secs(60))
+            .expect("lease")
+            .instance_id;
+        let store = PgAgentStore::new(database.clone());
+        let held = InstanceUid([7; 16]);
+        store.put(&held, &record()).expect("put");
+        store
+            .take(&held, &a, 5_000)
+            .expect("take")
+            .expect("a record");
+        let host = record().host;
+        let page = |filter: AgentFilter| {
+            store
+                .query_page(&crate::agent_store::PageQuery {
+                    filter: &filter,
+                    sort: AgentSort::Name,
+                    descending: false,
+                    after: None,
+                    limit: 10,
+                    seen_before_ms: 0,
+                })
+                .expect("page")
+                .agents
+        };
+        let uids = |filter: AgentFilter| -> Vec<InstanceUid> {
+            page(filter).iter().map(|agent| agent.uid).collect()
+        };
+        let holder = |holder: HolderFilter| AgentFilter {
+            holder: Some(holder),
+            ..AgentFilter::default()
+        };
+        let connected = AgentFilter {
+            connected: Some(true),
+            ..AgentFilter::default()
+        };
+        let behind = AgentFilter {
+            arrived_over: host.clone(),
+            ..AgentFilter::default()
+        };
+        assert_eq!(uids(holder(HolderFilter::Instance(a.clone()))), [held]);
+        assert_eq!(uids(holder(HolderFilter::None)), []);
+        assert_eq!(uids(connected.clone()), [held]);
+        let found = page(behind.clone());
+        assert_eq!(
+            found[0]
+                .stored
+                .holder
+                .as_ref()
+                .map(|h| (h.instance_id.as_str(), h.host.as_str())),
+            Some((a.as_str(), "host-a"))
+        );
+        assert!(found[0].stored.connected);
+        test.sql(&format!(
+            "UPDATE leases SET expires_at = now() - interval '1 second' WHERE instance_id = '{a}'"
+        ));
+        assert_eq!(uids(holder(HolderFilter::Instance(a.clone()))), []);
+        assert_eq!(
+            uids(holder(HolderFilter::None)),
+            [held],
+            "a lapsed lease holds nothing"
+        );
+        assert_eq!(uids(connected), []);
+        let found = page(behind);
+        assert_eq!(found[0].stored.holder, None);
+        assert!(!found[0].stored.connected);
+    }
+
     /// A rollout whose last record cannot be written leaves none of its assignments behind, on
-    /// either store, and what the store answers about pins stays as it was (ADR-0044 clause 21):
+    /// either store, and what the store answers about pins stays as it was (ADR-0050 clause 21):
     /// the records already written are put back, or never committed. `refuse(uid)` makes the
     /// write of that Agent's record fail; `mend` takes that away. Answers the retained revisions
     /// the store holds afterwards, which the caller judges: none with PostgreSQL, at most one
@@ -1945,7 +2913,7 @@ mod tests {
             .collect()
     }
 
-    /// Verifies: ADR-0044
+    /// Verifies: ADR-0050
     #[test]
     fn a_rollout_that_fails_leaves_no_assignment_on_the_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1965,7 +2933,7 @@ mod tests {
     }
 
     /// With PostgreSQL the revisions and the assignments commit together or not at all.
-    /// Verifies: ADR-0044
+    /// Verifies: ADR-0050
     #[test]
     fn a_rollout_that_fails_leaves_neither_revisions_nor_assignments_on_postgres() {
         let Some(test) = TestDatabase::named() else {
@@ -1993,7 +2961,7 @@ mod tests {
     /// database after its first row; the gate opens once the second waits for that row's lock, or
     /// has reached the gate itself, which only a release that writes in the order given does, and
     /// then the two would deadlock.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0048
     #[test]
     fn two_releases_over_the_same_agents_in_opposite_orders_both_commit() {
         let Some(test) = TestDatabase::named() else {
@@ -2068,7 +3036,7 @@ mod tests {
     /// presence, and one under an earlier take leaves the presence a take wrote since. Forgetting decides from it: an Agent a live
     /// lease holds and that was heard from recently is kept; one whose holder holds no live lease
     /// reads as disconnected and goes, announced; one silent past the bound goes too.
-    /// Verifies: ADR-0043, ADR-0041
+    /// Verifies: ADR-0043, ADR-0048
     #[test]
     fn a_presence_batch_names_the_holder_and_forgetting_decides_from_it() {
         let Some(test) = TestDatabase::named() else {
@@ -2178,9 +3146,12 @@ mod tests {
 
     /// The newest connection takes an Agent: a take names its instance as the holder and answers
     /// the one it replaced. A presence batch of the instance it was taken from, read before the
-    /// take and written after it, leaves the row as the take wrote it; once the taker's lease has
-    /// lapsed, the batch names its own instance again, as it does over a row that names none.
-    /// Verifies: ADR-0041
+    /// take and written after it, leaves the row as the take wrote it, also once the taker's lease
+    /// has lapsed, since a take was counted after its own; a batch that was answered no count
+    /// names its own instance over a row that names none, or an instance without a live lease, and
+    /// one answered a count over such a row only while it still holds that count, never over a
+    /// live holder.
+    /// Verifies: ADR-0048
     #[test]
     fn a_batch_read_before_another_instance_took_the_agent_does_not_undo_the_take() {
         let Some(test) = TestDatabase::named() else {
@@ -2242,8 +3213,68 @@ mod tests {
         store.write_presence(&a, &due).expect("A's batch again");
         assert_eq!(
             presence(one),
+            [[Some(format!("{b} true 2000"))]],
+            "a take was counted since A's"
+        );
+        store
+            .write_presence(&a, &[(one, connected(3_000), None)])
+            .expect("A's batch answered no count");
+        assert_eq!(
+            presence(one),
             [[Some(format!("{a} true 3000"))]],
             "a holder without a live lease holds no connection"
+        );
+        assert_eq!(
+            store.takes(&[one, two, InstanceUid([9; 16])]),
+            Ok(HashMap::from([
+                (one, (Some(a.clone()), 3)),
+                (two, (Some(a.clone()), 1)),
+            ])),
+            "the holders and counts, none of a record not stored"
+        );
+        test.sql(&format!(
+            "UPDATE agents SET holder = NULL, connected = false WHERE instance_uid = '{two}'"
+        ));
+        store
+            .write_presence(&a, &[(two, connected(4_000), Some(1))])
+            .expect("A's batch under the count it holds");
+        assert_eq!(
+            presence(two),
+            [[Some(format!("{a} true 4000"))]],
+            "a row that still holds the count is taken back"
+        );
+        store
+            .write_presence(&b, &[(two, connected(5_000), Some(1))])
+            .expect("B's batch under a count taken since");
+        assert_eq!(
+            presence(two),
+            [[Some(format!("{a} true 4000"))]],
+            "not under a count a take raised since"
+        );
+        test.sql(&format!(
+            "INSERT INTO leases (instance_id, host, must_be_alone, taken_at, renewed_at, \
+             expires_at) VALUES ('{b}', 'b', false, now(), now(), now() + interval '1 hour'); \
+             UPDATE agents SET holder = '{b}'::uuid WHERE instance_uid = '{two}'"
+        ));
+        store
+            .write_presence(&a, &[(two, connected(6_000), Some(2))])
+            .expect("A's batch under its count, over a live holder");
+        assert_eq!(
+            presence(two),
+            [[Some(format!("{b} true 4000"))]],
+            "a live holder is never undone, whatever the count"
+        );
+        let gone = "00000000-0000-7000-8000-0000000000ff";
+        test.sql(&format!(
+            "UPDATE agents SET holder = '{gone}'::uuid WHERE instance_uid = '{two}'"
+        ));
+        store
+            .write_presence(&a, &[(two, connected(7_000), Some(2))])
+            .expect("A's batch under its count, over a holder without a live lease");
+        assert_eq!(
+            presence(two),
+            [[Some(format!("{a} true 7000"))]],
+            "a holder without a live lease is taken back under the count"
         );
     }
 
@@ -2254,7 +3285,7 @@ mod tests {
     /// the same millisecond is not written, although its `last_seen_ms` is the stored one. A batch
     /// that names its instance anew answers the count it raised, and a disconnect under that count
     /// is written.
-    /// Verifies: ADR-0043, ADR-0041
+    /// Verifies: ADR-0043, ADR-0048
     #[test]
     fn a_disconnect_is_written_under_the_take_it_was_carried_by_whatever_the_clocks_say() {
         let Some(test) = TestDatabase::named() else {
@@ -2336,7 +3367,7 @@ mod tests {
 
     /// A take that replaces another holder is announced, whether or not that holder's lease is
     /// live, and one that replaces none is not.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0048
     #[test]
     fn a_take_that_replaces_another_holder_is_announced_whatever_its_lease() {
         let Some(test) = TestDatabase::named() else {
@@ -2385,7 +3416,7 @@ mod tests {
     /// The take that makes an Agent's holder change for the eleventh time within a minute, and no
     /// other, says it is likely a duplicate; a change more than a minute old counts no more, and a
     /// take that keeps the holder, or replaces none, is no change.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0048
     #[test]
     fn the_eleventh_change_of_holder_within_a_minute_is_a_likely_duplicate() {
         let Some(test) = TestDatabase::named() else {
@@ -2516,7 +3547,7 @@ mod tests {
     /// The ceiling on records holds for every instance on the store: the store counts its rows as
     /// it creates one, so a record past it is not created through any of them, and one stored
     /// already passes none.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0048
     #[test]
     fn the_records_are_bounded_where_they_are_stored() {
         let Some(test) = TestDatabase::named() else {
@@ -2562,8 +3593,8 @@ mod tests {
 
     /// A row that does not decode fails the read that meets it, naming its `instance_uid`: the
     /// load, the query, the query of it and the read of it. Opening the adapter, which reads the
-    /// assignments alone, does not meet it (ADR-0044 clause 4).
-    /// Verifies: ADR-0044, ADR-0044
+    /// assignments alone, does not meet it (ADR-0050 clause 4).
+    /// Verifies: ADR-0050
     #[test]
     fn an_agent_row_that_does_not_decode_fails_the_read_that_meets_it_naming_it() {
         let Some(test) = TestDatabase::named() else {

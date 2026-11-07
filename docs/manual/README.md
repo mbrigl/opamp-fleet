@@ -218,8 +218,7 @@ authority on all of it.
 - **`tls` and `proxy` in connection settings** — a Server offering either is told, in
   its status report, that the Client dropped them. Mutual TLS itself *is* built, and required: see
   [the Server](server.md#mutual-tls-proving-who-is-on-the-connection).
-- **Several Server instances of two releases, or holding the CA keys** — the instances on one
-  database run one release and are upgraded together, and an instance with a CA key in a file runs
+- **Several Server instances holding the CA keys** — an instance with a CA key in a file runs
   alone: see [Several instances](server.md#several-instances).
 - **Custom messages** (`CustomCapabilities` / `CustomMessage`) — planned, not implemented.
 - **Other connection settings** (`AcceptsOtherConnectionSettings`) — deliberately not implemented:

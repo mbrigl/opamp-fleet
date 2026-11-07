@@ -1,5 +1,5 @@
 //! Several Server instances on one PostgreSQL database, each through its real listeners
-//! (ADR-0041):
+//! (ADR-0048):
 //! both hold a lease and serve, a revocation committed on one ends the session it concerns on the
 //! other, and an instance whose database stops answering closes its listeners until it holds a new
 //! lease.
@@ -10,13 +10,14 @@
 //! `scripts/check-store.sh postgres` runs them, and fails on a skip.
 
 use std::net::{SocketAddr, TcpListener};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use fleet_server::config::{LeaseTimes, PostgresConfig};
 use fleet_server::enrolment::Enrolment;
 use fleet_server::floors::PackageFloors;
+use fleet_server::postgres::schema::{Migration, MIGRATIONS};
 use fleet_server::postgres::{Database, Exclusive};
 use fleet_server::revocation::{CertId, Revocations};
 use fleet_server::Records;
@@ -38,8 +39,11 @@ struct Schema {
     _slot: Slot,
 }
 
-/// How many tests work in a schema at once. Each runs instances whose pools, listening
-/// connections and leases hold up to eight connections together, and the test database, like
+/// How many tests work in a schema at once. A pool opens a connection only for a call in flight
+/// and keeps it, up to its `pool_size` (16 by default), so a test holds as many as it makes calls
+/// at once, beside a listening connection and a lease's session per instance it serves: about
+/// eight for most tests, up to the 24 calls at once of
+/// `many_creations_at_once_on_many_instances_never_pass_the_ceiling`. The test database, like
 /// CI's, admits 100 (three of them reserved), so the tests the harness would otherwise run at
 /// once, one per core, can exhaust it.
 const SCHEMAS_AT_ONCE: usize = 8;
@@ -75,6 +79,51 @@ impl Drop for Slot {
     }
 }
 
+/// What a session of a test's own connects with: the database's settings and, over TLS, its roots.
+struct Session {
+    pg: tokio_postgres::Config,
+    roots: Option<rustls::RootCertStore>,
+}
+
+impl Session {
+    async fn open(self) -> tokio_postgres::Client {
+        match self.roots {
+            Some(roots) => {
+                opamp::tls::install_ring_provider();
+                let tls = tokio_postgres_rustls::MakeRustlsConnect::new(
+                    opamp::tls::client_builder()
+                        .with_root_certificates(roots)
+                        .with_no_client_auth(),
+                );
+                let (client, connection) = self.pg.connect(tls).await.expect("db");
+                tokio::spawn(connection);
+                client
+            }
+            None => {
+                let (client, connection) =
+                    self.pg.connect(tokio_postgres::NoTls).await.expect("db");
+                tokio::spawn(connection);
+                client
+            }
+        }
+    }
+}
+
+/// A transaction [`Schema::hold`] holds open, rolled back once this is dropped.
+struct Held {
+    release: Option<std::sync::mpsc::Sender<()>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        drop(self.release.take());
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
 impl Schema {
     fn named() -> Option<Self> {
         let variable = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
@@ -101,6 +150,7 @@ impl Schema {
             user,
             password_file: password_file.into(),
             tls: ca_file.is_some(),
+            pool_size: fleet_server::config::DEFAULT_POOL_SIZE,
             ca_file,
         };
         let mut random = [0u8; 8];
@@ -125,6 +175,7 @@ impl Schema {
             password_file: self.config.password_file.clone(),
             ca_file: self.config.ca_file.clone(),
             tls: self.config.tls,
+            pool_size: self.config.pool_size,
         }
     }
 
@@ -135,47 +186,17 @@ impl Schema {
 
     /// The first column of every row `query` answers in this schema, as text.
     fn query(&self, query: &str) -> Vec<String> {
-        let password = std::fs::read_to_string(&self.config.password_file).expect("password");
-        let mut pg = tokio_postgres::Config::new();
-        pg.host(&self.config.host)
-            .port(self.config.port)
-            .dbname(&self.config.dbname)
-            .user(&self.config.user)
-            .password(password.trim());
         let query = format!("SET search_path = {};", self.name) + query;
-        let roots = self.config.ca_file.as_ref().map(|path| {
-            opamp::tls::root_store(&std::fs::read(path).expect("FLEET_TEST_POSTGRES_CA_FILE"))
-                .expect("roots")
-        });
-        if roots.is_some() {
-            pg.ssl_mode(tokio_postgres::config::SslMode::Require);
-        }
+        let session = self.session();
         std::thread::spawn(move || {
             tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .expect("runtime")
                 .block_on(async move {
-                    let client = match roots {
-                        Some(roots) => {
-                            opamp::tls::install_ring_provider();
-                            let tls = tokio_postgres_rustls::MakeRustlsConnect::new(
-                                opamp::tls::client_builder()
-                                    .with_root_certificates(roots)
-                                    .with_no_client_auth(),
-                            );
-                            let (client, connection) = pg.connect(tls).await.expect("db");
-                            tokio::spawn(connection);
-                            client
-                        }
-                        None => {
-                            let (client, connection) =
-                                pg.connect(tokio_postgres::NoTls).await.expect("db");
-                            tokio::spawn(connection);
-                            client
-                        }
-                    };
-                    client
+                    session
+                        .open()
+                        .await
                         .simple_query(&query)
                         .await
                         .expect("query")
@@ -191,6 +212,55 @@ impl Schema {
         })
         .join()
         .expect("the query's thread")
+    }
+
+    /// Runs `statements` in a transaction on a session of its own, in this schema, and holds the
+    /// transaction open, with the locks it took, until the [`Held`] is dropped; then rolls it back.
+    fn hold(&self, statements: &str) -> Held {
+        let statements = format!("SET search_path = {};\nBEGIN;\n{statements}", self.name);
+        let session = self.session();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let (taken, takes) = std::sync::mpsc::channel::<()>();
+        let thread = std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime")
+                .block_on(async move {
+                    let client = session.open().await;
+                    client.batch_execute(&statements).await.expect("the hold");
+                    let _ = taken.send(());
+                    let _ = tokio::task::spawn_blocking(move || released.recv()).await;
+                    client
+                        .batch_execute("ROLLBACK")
+                        .await
+                        .expect("the rollback");
+                });
+        });
+        takes.recv().expect("the hold is held");
+        Held {
+            release: Some(release),
+            thread: Some(thread),
+        }
+    }
+
+    /// What a session of this test's own, past every adapter, connects with.
+    fn session(&self) -> Session {
+        let password = std::fs::read_to_string(&self.config.password_file).expect("password");
+        let mut pg = tokio_postgres::Config::new();
+        pg.host(&self.config.host)
+            .port(self.config.port)
+            .dbname(&self.config.dbname)
+            .user(&self.config.user)
+            .password(password.trim());
+        let roots = self.config.ca_file.as_ref().map(|path| {
+            opamp::tls::root_store(&std::fs::read(path).expect("FLEET_TEST_POSTGRES_CA_FILE"))
+                .expect("roots")
+        });
+        if roots.is_some() {
+            pg.ssl_mode(tokio_postgres::config::SslMode::Require);
+        }
+        Session { pg, roots }
     }
 }
 
@@ -268,6 +338,9 @@ struct Instance {
     throttle: Option<Arc<fleet_server::throttle::Throttle>>,
     database: Arc<Database>,
     held: fleet_server::instance::Held,
+    /// The time, in nanoseconds, the lease's clock counts beyond what passed: a suspend of the
+    /// host, which the clock counts though the process did not run.
+    suspended: Arc<AtomicU64>,
     stop: Option<tokio::sync::oneshot::Sender<()>>,
     _dir: tempfile::TempDir,
 }
@@ -281,7 +354,7 @@ impl Instance {
     /// [`start`](Self::start), taking up nothing another instance commits until
     /// [`follow`](Self::follow) is called: what it hears is held back until then.
     async fn start_deaf(pki: &Pki, schema: &Schema, config: PostgresConfig) -> Self {
-        Self::start_with(pki, schema, config, true, false, None, None).await
+        Self::start_with(pki, schema, config, true, false, None, None, None).await
     }
 
     /// [`start`](Self::start), its Agent plane's admission counted by a throttle of `limits`, as
@@ -292,7 +365,7 @@ impl Instance {
         config: PostgresConfig,
         limits: fleet_server::throttle::Limits,
     ) -> Self {
-        Self::start_with(pki, schema, config, true, true, Some(limits), None).await
+        Self::start_with(pki, schema, config, true, true, Some(limits), None, None).await
     }
 
     /// Starts taking up what other instances commit, for an instance started deaf.
@@ -309,7 +382,7 @@ impl Instance {
         config: PostgresConfig,
         renewals: bool,
     ) -> Self {
-        Self::start_with(pki, schema, config, renewals, true, None, None).await
+        Self::start_with(pki, schema, config, renewals, true, None, None, None).await
     }
 
     /// [`start`](Self::start), its package blobs on the filesystem in `blobs`, which other
@@ -320,12 +393,36 @@ impl Instance {
         config: PostgresConfig,
         blobs: &std::path::Path,
     ) -> Self {
-        Self::start_with(pki, schema, config, true, true, None, Some(blobs)).await
+        Self::start_with(pki, schema, config, true, true, None, Some(blobs), None).await
+    }
+
+    /// [`start`](Self::start), as a Server of `release` whose schema is `migrations`: one of two
+    /// versions side by side.
+    async fn start_as(
+        pki: &Pki,
+        schema: &Schema,
+        config: PostgresConfig,
+        release: &'static str,
+        migrations: &'static [Migration],
+    ) -> Self {
+        Self::start_with(
+            pki,
+            schema,
+            config,
+            true,
+            true,
+            None,
+            None,
+            Some((release, migrations)),
+        )
+        .await
     }
 
     /// [`start_following`](Self::start_following), following other instances where `follows`
-    /// says so, its admission throttled where `throttle` names limits, and its package blobs in
-    /// `blobs` where it names a directory.
+    /// says so, its admission throttled where `throttle` names limits, its package blobs in
+    /// `blobs` where it names a directory, and as the release and schema `version` names, or
+    /// this build's.
+    #[allow(clippy::too_many_arguments)]
     async fn start_with(
         pki: &Pki,
         schema: &Schema,
@@ -334,12 +431,16 @@ impl Instance {
         follows: bool,
         throttle: Option<fleet_server::throttle::Limits>,
         blobs: Option<&std::path::Path>,
+        version: Option<(&'static str, &'static [Migration])>,
     ) -> Self {
         opamp::tls::install_ring_provider();
         let dir = tempfile::tempdir().expect("tempdir");
         let name = schema.name.clone();
-        let database = tokio::task::spawn_blocking(move || {
-            Database::open_in(&config, Exclusive::Shared, Some(&name))
+        let database = tokio::task::spawn_blocking(move || match version {
+            Some((release, migrations)) => {
+                Database::open_as(&config, Exclusive::Shared, Some(&name), release, migrations)
+            }
+            None => Database::open_in(&config, Exclusive::Shared, Some(&name)),
         })
         .await
         .expect("open")
@@ -361,6 +462,7 @@ impl Instance {
             &records,
             Some(blobs.unwrap_or(dir.path())),
             &toml::from_str::<fleet_server::config::BlobsConfig>("").expect("blobs"),
+            fleet_server::clock::Elapsed::monotonic(),
         )
         .expect("packages");
         let state = Arc::new(
@@ -400,11 +502,26 @@ impl Instance {
         let agents = fleet_server::agent_app(state.clone(), admission);
         let operators = fleet_server::operator_app(state.clone(), None);
 
+        let suspended = Arc::new(AtomicU64::new(0));
         let lease = {
             let database = database.clone();
-            fleet_server::instance::Lease::take(database, TIMES, "test-host").expect("lease")
+            let monotonic = fleet_server::clock::Elapsed::monotonic();
+            let suspended = suspended.clone();
+            let clock = fleet_server::clock::Elapsed::new(move || {
+                monotonic.now() + Duration::from_nanos(suspended.load(Ordering::SeqCst))
+            });
+            fleet_server::instance::Lease::take_as(
+                database,
+                TIMES,
+                "test-host",
+                fleet_server::postgres::lease::new_instance_id().expect("id"),
+                clock,
+            )
+            .expect("lease")
         };
         state.serve_under(lease.held());
+        let proof = lease.proof();
+        state.answer_while(move || proof.holds());
         let following = if follows {
             fleet_server::instance::follow(
                 &database,
@@ -435,6 +552,7 @@ impl Instance {
                 },
                 (agent_listener, operator_listener),
                 Some(lease.held()),
+                Some(lease.proof()),
                 async move {
                     let _ = stopped.await;
                 },
@@ -454,6 +572,7 @@ impl Instance {
             throttle,
             database,
             held,
+            suspended,
             stop: Some(stop),
             _dir: dir,
         }
@@ -462,6 +581,13 @@ impl Instance {
     /// The instance id of the lease it holds, if it holds one.
     fn instance_id(&self) -> Option<String> {
         self.held.borrow().clone()
+    }
+
+    /// The host is suspended for `pause` and runs again: the lease's clock counts it, though the
+    /// process did not run.
+    fn suspend_for(&self, pause: Duration) {
+        let nanos = u64::try_from(pause.as_nanos()).expect("a pause in nanoseconds");
+        self.suspended.fetch_add(nanos, Ordering::SeqCst);
     }
 
     /// Whether the Agent plane takes a TCP connection: what a probe sees.
@@ -583,7 +709,7 @@ async fn eventually(within: Duration, condition: impl Fn() -> bool) -> bool {
 /// Two instances on one database both hold a live lease and both answer the probe on the Agent
 /// plane; a revocation committed on A ends the session of that certificate on B within one
 /// renewal interval, and no other session.
-/// Verifies: ADR-0041, ADR-0038
+/// Verifies: ADR-0048, ADR-0038
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_revocation_on_one_instance_ends_the_session_on_the_other() {
     let Some(schema) = Schema::named() else {
@@ -671,7 +797,7 @@ fn freezable_proxy(target: SocketAddr) -> (u16, Arc<AtomicBool>) {
 /// An instance whose database stops answering past its lease closes both listeners, so the probe
 /// fails; once the database answers again it takes a new lease under a new instance id and opens
 /// them again.
-/// Verifies: ADR-0041
+/// Verifies: ADR-0048
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_instance_without_a_lease_closes_its_listeners_until_it_holds_a_new_one() {
     let Some(schema) = Schema::named() else {
@@ -716,6 +842,100 @@ async fn an_instance_without_a_lease_closes_its_listeners_until_it_holds_a_new_o
     );
 }
 
+/// An instance whose clock jumps past its lease's lapse while it did not run, as after a suspend
+/// of its host, answers nothing more: its next request is not served, a message on a session it
+/// carried is not answered and the session is cut, and it holds no lease until it takes a new one
+/// under a new instance id, with both listeners open again.
+/// Verifies: ADR-0048
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_instance_whose_clock_jumps_past_its_lapse_serves_nothing_until_it_holds_a_new_lease() {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message as Ws;
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let instance = Instance::start(&pki, &schema, schema.config_on(schema.config.port)).await;
+    let first = instance.instance_id().expect("a lease");
+    let (cert, key) = pki.issue("agent-a");
+    let mut session = websocket(&instance, &pki, &cert, &key).await;
+    exchange(&mut session).await;
+    let client = agent_client(&pki, &cert, &key);
+    let url = agent_url(&instance, fleet_server::transport::PACKAGE_FLOORS_PATH);
+    let answered = tokio::time::timeout(Duration::from_secs(5), client.get(&url).send())
+        .await
+        .expect("an answer in time")
+        .expect("served")
+        .status();
+    assert!(
+        answered.is_success(),
+        "served before the suspend: {answered}"
+    );
+
+    // Every lease change from now on, as the planes see it.
+    let mut held = instance.held.clone();
+    held.borrow_and_update();
+    let (seen, mut changes) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while held.changed().await.is_ok() {
+            if seen.send(held.borrow_and_update().clone()).is_err() {
+                return;
+            }
+        }
+    });
+
+    instance.suspend_for(TIMES.lapse + Duration::from_secs(1));
+    let report = AgentToServer {
+        instance_uid: InstanceUid::default().as_bytes().to_vec(),
+        sequence_num: 2,
+        capabilities: AgentCapabilities::ReportsStatus as u64,
+        ..Default::default()
+    };
+    let framed = opamp::frame::encode_within(&report, usize::MAX).expect("frame");
+    // The send may already find the session cut.
+    let _ = session.send(Ws::Binary(framed.into())).await;
+    match tokio::time::timeout(Duration::from_secs(5), client.get(&url).send()).await {
+        Ok(Ok(response)) => assert_eq!(
+            response.status(),
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            "a request after the suspend was served"
+        ),
+        Ok(Err(_)) => {} // The listener was closed already.
+        Err(_) => panic!("the request after the suspend hung"),
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        match tokio::time::timeout_at(deadline, session.next()).await {
+            Err(_) => panic!("the session outlived the lease"),
+            Ok(Some(Ok(Ws::Binary(_)))) => panic!("a message after the suspend was answered"),
+            Ok(Some(Ok(Ws::Close(_))) | Some(Err(_)) | None) => break,
+            Ok(Some(Ok(_))) => continue,
+        }
+    }
+
+    let lost = tokio::time::timeout(Duration::from_secs(5), changes.recv())
+        .await
+        .expect("the lease was not given up after the suspend")
+        .expect("the lease is watched");
+    assert_eq!(lost, None, "the lease was given up before anything else");
+    let again = tokio::time::timeout(Duration::from_secs(20), changes.recv())
+        .await
+        .expect("no new lease was taken")
+        .expect("the lease is watched")
+        .expect("a new lease");
+    assert_ne!(first, again, "a new lease is held under a new instance id");
+    assert!(
+        eventually(Duration::from_secs(5), || instance.both_planes().0).await,
+        "the listeners were not opened again"
+    );
+    let served = tokio::time::timeout(Duration::from_secs(5), client.get(&url).send())
+        .await
+        .expect("an answer in time")
+        .expect("served")
+        .status();
+    assert!(served.is_success(), "served under the new lease: {served}");
+}
+
 /// The store as one instance opens it, in the test's schema: what each instance writes through.
 fn records(schema: &Schema) -> Records {
     Records::Postgres(
@@ -726,7 +946,7 @@ fn records(schema: &Schema) -> Records {
 
 /// Two instances that each revoke a certificate at the same moment keep both revocations: each
 /// adds its own row, and neither writes the list it holds over the other's.
-/// Verifies: ADR-0041, Q-1
+/// Verifies: ADR-0048, Q-1
 #[test]
 fn two_revocations_committed_at_once_on_two_instances_are_both_kept() {
     let Some(schema) = Schema::named() else {
@@ -780,7 +1000,7 @@ fn two_revocations_committed_at_once_on_two_instances_are_both_kept() {
 /// An instance that holds an older floor in memory cannot lower the one another instance stored:
 /// the floor is decided from the stored row, and the answer is the `409` of a lower floor, naming
 /// the stored version, which the instance then holds.
-/// Verifies: ADR-0041, ADR-0028, Q-6
+/// Verifies: ADR-0048, ADR-0028, Q-6
 #[test]
 fn an_instance_with_an_older_floor_in_memory_cannot_lower_the_stored_one() {
     use fleet_server::floors::FloorError;
@@ -861,7 +1081,7 @@ fn released(configuration: &str, hash: &str) -> fleet_server::agent_store::Persi
 /// revisions: each adds the row it pins and deletes none, and the collection each runs after its
 /// rollout reckons what the Configuration keeps from the stored assignments, in its own
 /// transaction, not from the one assignment the instance knows of.
-/// Verifies: ADR-0041, ADR-0026
+/// Verifies: ADR-0048, ADR-0026
 #[test]
 fn two_revisions_rolled_out_at_once_on_two_instances_are_both_kept() {
     use fleet_server::configs::{revision_hash, ConfigStore, Revision};
@@ -940,7 +1160,7 @@ fn two_revisions_rolled_out_at_once_on_two_instances_are_both_kept() {
 /// Two instances that each add an entry of another platform to one Package at the same moment
 /// keep both: each writes the row of its platform, and neither writes the Package it holds over
 /// the other's.
-/// Verifies: ADR-0041, ADR-0027
+/// Verifies: ADR-0048, ADR-0027
 #[test]
 fn two_entries_added_at_once_on_two_instances_are_both_kept() {
     use fleet_server::packages::{PackageId, PackageStore, Platform};
@@ -956,6 +1176,7 @@ fn two_entries_added_at_once_on_two_instances_are_both_kept() {
                 PackageStore::with_backend(
                     records(&schema).packages().expect("packages"),
                     Box::new(fleet_server::fs::FsBlobStore::open(&root).expect("blobs")),
+                    fleet_server::clock::Elapsed::monotonic(),
                 )
                 .expect("open"),
             )
@@ -997,7 +1218,7 @@ fn two_entries_added_at_once_on_two_instances_are_both_kept() {
 /// writes the row of its member under the Deployment's row lock, and neither writes the
 /// Deployment it holds over the other's. A type another instance filled is refused from what is
 /// stored, whatever the refusing instance holds in memory.
-/// Verifies: ADR-0041, ADR-0026, ADR-0027
+/// Verifies: ADR-0048, ADR-0026, ADR-0027
 #[test]
 fn two_members_added_at_once_on_two_instances_are_both_kept() {
     use fleet_server::deployments::{DeploymentError, DeploymentStore};
@@ -1013,6 +1234,19 @@ fn two_members_added_at_once_on_two_instances_are_both_kept() {
             )
         })
         .collect();
+    // An add refuses a member that is not stored: every one this test adds is.
+    for side in ["a", "b"] {
+        schema.query(&format!(
+            "INSERT INTO configurations (name, body, role, service_name) \
+             SELECT '{side}-' || round, '', '', 'otelcol' FROM generate_series(0, 7) AS round; \
+             INSERT INTO packages (agent_type, version) \
+             SELECT '{side}-type-' || round, '1.0.0' FROM generate_series(0, 7) AS round"
+        ));
+    }
+    schema.query(
+        "INSERT INTO packages (agent_type, version) VALUES ('otelcol', '1.0.0'), \
+         ('otelcol', '2.0.0')",
+    );
     let channel = std::collections::BTreeMap::from([("channel".to_string(), "stable".to_string())]);
     instances[0].put("stable", channel.clone()).expect("save");
     instances[1]
@@ -1103,7 +1337,7 @@ impl Instance {
 }
 
 impl Pki {
-    /// A certificate and key naming `host` the way the Server's own signer does (ADR-0022 clause
+    /// A certificate and key naming `host` the way the Server's own signer does (ADR-0052 clause
     /// 11), and no other name.
     fn issue_to_host(&self, host: &str) -> (String, String) {
         let ca_key = KeyPair::from_pem(&self.ca_key_pem).expect("ca key");
@@ -1221,7 +1455,7 @@ fn database_address(schema: &Schema) -> SocketAddr {
 /// An instance whose listening connection is cut and restored acts as if everything had changed:
 /// a revocation committed on A while B heard nothing ends B's session of that certificate once B
 /// listens again.
-/// Verifies: ADR-0041, ADR-0038
+/// Verifies: ADR-0048, ADR-0038
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_revocation_committed_while_the_listening_connection_was_cut_ends_its_session_once_back()
 {
@@ -1257,7 +1491,7 @@ async fn a_revocation_committed_while_the_listening_connection_was_cut_ends_its_
 
 /// A notification of a kind the instance does not know, as a newer version sends, has it read
 /// everything again: a revocation it was not told of ends its session.
-/// Verifies: ADR-0041
+/// Verifies: ADR-0048
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_notification_of_an_unknown_kind_has_everything_read_again() {
     let Some(schema) = Schema::named() else {
@@ -1290,7 +1524,7 @@ async fn a_notification_of_an_unknown_kind_has_everything_read_again() {
 
 /// The `ETag` of the Gateways' revocation list one instance answered is answered `304` by
 /// another, and a revocation on either moves it on both.
-/// Verifies: ADR-0041, ADR-0038
+/// Verifies: ADR-0048, ADR-0038
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_etag_one_instance_answered_is_answered_304_by_another() {
     let Some(schema) = Schema::named() else {
@@ -1368,7 +1602,7 @@ async fn an_etag_one_instance_answered_is_answered_304_by_another() {
 }
 
 /// A floor set on A is what B serves the next Agent that asks for the floors.
-/// Verifies: ADR-0041, ADR-0028
+/// Verifies: ADR-0048, ADR-0028
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_floor_set_on_one_instance_is_served_by_the_other() {
     let Some(schema) = Schema::named() else {
@@ -1477,23 +1711,64 @@ fn approve(instance: &Instance, pki: &Pki, key: &str) {
         ca_pem: pki.ca_pem.clone(),
         ca_key_pem: pki.ca_key_pem.clone(),
     };
-    let revocations = instance.revocations.clone();
-    let record = move |signed: &fleet_server::revocation::Signed,
-                       instance_uid: &[u8],
-                       bootstrap: &CertId| {
-        revocations
-            .record_approved(signed.facts.clone(), instance_uid, bootstrap)
-            .map_err(fleet_server::enrolment::DecisionError::Store)
-    };
     instance
         .enrolment
-        .approve(key, &signer, &format!("host-{key}"), &record, &|_| false)
+        .approve(
+            key,
+            &signer,
+            &format!("host-{key}"),
+            &Registering(&instance.revocations),
+            &|_| false,
+        )
         .expect("approve");
+}
+
+/// Prepares an approval's register entry and Host on the instance's register, which the store
+/// writes with the decision, and takes them up once it is written, as the Server does.
+struct Registering<'a>(&'a Revocations);
+
+impl fleet_server::enrolment::Registrar for Registering<'_> {
+    fn register(
+        &self,
+        approved: &fleet_server::revocation::Approved,
+    ) -> Result<(), fleet_server::enrolment::DecisionError> {
+        self.0
+            .register_approved(approved)
+            .map_err(fleet_server::enrolment::DecisionError::Store)
+    }
+
+    fn committed(&self, approved: &fleet_server::revocation::Approved, written: Option<u64>) {
+        self.0.took_up_approved(approved, written);
+    }
+}
+
+impl fleet_server::enrolment::Recorder for Registering<'_> {
+    fn signed(
+        &self,
+        signed: &fleet_server::revocation::Signed,
+        _: &str,
+        instance_uid: &[u8],
+        bootstrap: &CertId,
+    ) -> Result<Option<fleet_server::revocation::Approved>, fleet_server::enrolment::DecisionError>
+    {
+        self.0
+            .prepare_approved(signed.facts.clone(), instance_uid, bootstrap)
+            .map(Some)
+            .map_err(fleet_server::enrolment::DecisionError::Store)
+    }
+
+    fn undecided(
+        &self,
+        _: &fleet_server::revocation::Signed,
+        _: &str,
+        _: fleet_server::enrolment::Undecided,
+    ) {
+    }
 }
 
 /// An enrolment request waiting on B, approved on A, is answered with its certificate on B, which
 /// wakes the connection that asked: B takes up the window A opened and the decision A took.
-/// Verifies: ADR-0041, ADR-0022
+/// Verifies: ADR-0048, ADR-0052
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_enrolment_approved_on_one_instance_is_handed_out_by_the_other() {
     use fleet_server::enrolment::Submitted;
@@ -1559,7 +1834,7 @@ async fn an_enrolment_approved_on_one_instance_is_handed_out_by_the_other() {
 /// During an enrolment wave on A, A reads nothing again for its own notifications, and B takes up
 /// every certificate and Host the wave registered. A then takes up the one change B commits, and
 /// that once: what it heard of its own acts before was passed over.
-/// Verifies: ADR-0041
+/// Verifies: ADR-0048
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_instance_reads_nothing_again_for_its_own_notifications() {
     let Some(schema) = Schema::named() else {
@@ -1662,7 +1937,7 @@ async fn next_message(
 
 /// A rollout committed on A reaches an Agent B carries: B takes up the Configuration A saved and
 /// the assignment A released, and offers the Agent the new configuration within one second.
-/// Verifies: ADR-0041, ADR-0026
+/// Verifies: ADR-0048, ADR-0026
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_rollout_on_one_instance_is_offered_by_the_instance_that_carries_the_agent() {
     use futures_util::SinkExt;
@@ -1755,7 +2030,7 @@ async fn a_rollout_on_one_instance_is_offered_by_the_instance_that_carries_the_a
 
 /// A Package created on A, and one deleted there, is what B lists next: B drops the Packages it
 /// holds for each notification and reads them again.
-/// Verifies: ADR-0041
+/// Verifies: ADR-0048
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_package_published_on_one_instance_is_listed_by_the_other() {
     use fleet_server::packages::PackageId;
@@ -1799,10 +2074,98 @@ async fn a_package_published_on_one_instance_is_listed_by_the_other() {
     );
 }
 
+/// A Configuration and a Package deleted through B leave the Deployment that held them in A's
+/// memory too: the transaction that deletes them announces each Deployment it took them out of,
+/// and A reads the Deployments again for it.
+/// Verifies: ADR-0048, ADR-0026
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_member_deleted_through_one_instance_leaves_the_deployments_the_other_holds() {
+    use fleet_server::packages::PackageId;
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let a = Instance::start(&pki, &schema, schema.config_on(schema.config.port)).await;
+    let b = Instance::start(&pki, &schema, schema.config_on(schema.config.port)).await;
+    assert!(a.has_read(1).await, "A never listened");
+    assert!(b.has_read(1).await, "B never listened");
+    let id = PackageId::new("otelcol", "1.0.0").expect("id");
+    let on_a = a.state.clone();
+    let held = id.clone();
+    tokio::task::spawn_blocking(move || {
+        on_a.save_configuration(
+            "base",
+            fleet_server::configs::Revision {
+                body: "receivers: {}\n".to_string(),
+                role: String::new(),
+                service_name: "otelcol".to_string(),
+            },
+        )?;
+        on_a.create_package_set(&held)?;
+        on_a.deployment_store()
+            .expect("deployments")
+            .put(
+                "canary",
+                std::collections::BTreeMap::from([("ring".to_string(), "canary".to_string())]),
+            )
+            .map_err(|e| format!("{e:?}"))?;
+        on_a.put_deployment_configuration("canary", "base")
+            .map_err(|e| format!("{e:?}"))?;
+        on_a.put_deployment_package("canary", &held, false)
+            .map_err(|e| format!("{e:?}"))
+    })
+    .await
+    .expect("hold them")
+    .expect("A puts both into canary");
+    let members = |instance: &Instance| {
+        instance
+            .state
+            .deployment_store()
+            .expect("deployments")
+            .get("canary")
+            .map(|canary| (canary.configurations.len(), canary.packages.len()))
+    };
+    assert!(
+        eventually(Duration::from_secs(10), || members(&b) == Some((1, 1))).await,
+        "B never held canary with both"
+    );
+    assert!(
+        eventually(Duration::from_secs(10), || b
+            .state
+            .packages()
+            .expect("packages")
+            .list()
+            .iter()
+            .any(|package| package.id == id))
+        .await,
+        "B never listed the Package"
+    );
+    let on_b = b.state.clone();
+    let deleted = id.clone();
+    tokio::task::spawn_blocking(move || {
+        assert!(
+            on_b.delete_configuration("base").expect("B deletes it"),
+            "B deletes the Configuration"
+        );
+        assert_eq!(
+            on_b.delete_package_set(&deleted),
+            Ok(true),
+            "B deletes the Package"
+        );
+    })
+    .await
+    .expect("delete");
+    assert!(
+        eventually(Duration::from_secs(10), || members(&a) == Some((0, 0))).await,
+        "A's canary still holds what B deleted: {:?}",
+        members(&a)
+    );
+}
+
 /// A revocation whose notification never arrives, while the listening connection stays up, is
 /// caught by the next lease renewal: it finds the list's version moved, and the instance reads the
 /// ledger again and ends the session it concerns.
-/// Verifies: ADR-0041
+/// Verifies: ADR-0048
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_revocation_whose_notification_is_missed_is_caught_at_the_next_renewal() {
     let Some(schema) = Schema::named() else {
@@ -1834,12 +2197,109 @@ async fn a_revocation_whose_notification_is_missed_is_caught_at_the_next_renewal
     );
 }
 
+/// A binding and its Host committed by another instance that ended before it sent the notice
+/// that follows the commit are taken up by the next lease renewal, which reads the ledger again
+/// (ADR-0048 clauses 9 and 10).
+/// Verifies: ADR-0048
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_binding_whose_notice_after_its_commit_is_lost_is_taken_up_at_the_next_renewal() {
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let b = Instance::start(&pki, &schema, schema.config_on(schema.config.port)).await;
+    assert!(b.has_read(1).await, "B never listened");
+    // Committed as an instance commits a first report's binding, its notice never sent.
+    schema.sql(
+        "INSERT INTO hosts (host, gateway, instance_uids, subject, valid_until_ms) \
+         VALUES ('edge-missed', false, '{}', '{}', 9000000000000); \
+         INSERT INTO host_bindings (instance_uid, host) VALUES ('0a', 'edge-missed')",
+    );
+    assert!(
+        eventually(TIMES.renew * 3, || b
+            .revocations
+            .bound_host(&[0x0a])
+            .as_deref()
+            == Some("edge-missed"))
+        .await,
+        "B did not take up the binding at a renewal"
+    );
+    assert!(
+        b.revocations
+            .hosts()
+            .iter()
+            .any(|(host, _, _)| host == "edge-missed"),
+        "nor its Host"
+    );
+}
+
+/// A renewal registered by another writer, whose notification never arrives while the listening
+/// connection stays up, is taken up by the next lease renewal: so a revocation of the certificate
+/// it renewed, committed by this instance afterwards, refuses the renewal too (ADR-0038 clause 28,
+/// ADR-0050 clause 10).
+/// Verifies: ADR-0048, ADR-0050
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_renewal_whose_notification_is_missed_is_refused_once_its_predecessor_is_revoked() {
+    use fleet_server::revocation::{Issued, LedgerStore, RegisterBounds, Registered};
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let b = Instance::start(&pki, &schema, schema.config_on(schema.config.port)).await;
+    assert!(b.has_read(1).await, "B never listened");
+    let (old, _) = pki.issue("edge-01");
+    let (renewed, _) = pki.issue("edge-01");
+    let old = cert_id(&old);
+    let renewed = {
+        let der = opamp::tls::certificates(renewed.as_bytes()).expect("pem");
+        fleet_server::ca::facts(der[0].as_ref()).expect("facts")
+    };
+    let renewed_id = renewed.id.clone();
+
+    // Registered as an instance registers it, through a writer whose notification B takes for its
+    // own and so never takes up: a notification missed.
+    let writer = fleet_server::postgres::ledger::PgLedgerStore::new(b.database.clone());
+    let predecessor = old.clone();
+    let registered = tokio::task::spawn_blocking(move || {
+        writer.register_issued(
+            &Issued {
+                facts: renewed,
+                instance_uid: "01".into(),
+                predecessor: Some(predecessor),
+                issued_ms: 1,
+            },
+            &RegisterBounds {
+                size: 100,
+                per_root: 100,
+            },
+        )
+    })
+    .await
+    .expect("register")
+    .expect("register the renewal");
+    assert_eq!(registered, Registered::Registered);
+    let on_b = b.revocations.clone();
+    let serial = old.serial.clone();
+    tokio::task::spawn_blocking(move || on_b.revoke_certificate("client", &serial))
+        .await
+        .expect("revoke")
+        .expect("revoke on B");
+    assert!(b.revocations.is_certificate_revoked(&old));
+    assert!(
+        eventually(TIMES.renew * 3, || b
+            .revocations
+            .is_certificate_revoked(&renewed_id))
+        .await,
+        "B admits the renewal of the certificate it revoked"
+    );
+}
+
 /// An instance killed without a shutdown leaves its lease and its audit chain behind; a running
 /// instance takes the lease over at one of its renewals once it lapsed, and the dead chain ends
 /// with `audit.chain_closed`, `reason` `lease_lapsed`, `closed_by` the running instance's chain
-/// (ADR-0041
+/// (ADR-0048
 /// clause 18).
-/// Verifies: ADR-0042, ADR-0041
+/// Verifies: ADR-0047, ADR-0048
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_running_instance_closes_the_chain_of_one_killed_at_its_renewal() {
     let Some(schema) = Schema::named() else {
@@ -1952,7 +2412,7 @@ fn view_of(instance: &Instance, uid: InstanceUid) -> Option<fleet_server::fleet:
 /// Labels set through B on a Client Agent A carries stay as B set them when A writes the Agent's
 /// next report before it heard of them, since A's write is of what a report decides alone; A then
 /// takes them up, and a later change through B reaches A's view within one second.
-/// Verifies: ADR-0043, ADR-0041
+/// Verifies: ADR-0043, ADR-0048
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn labels_set_through_one_instance_stay_and_reach_the_instance_that_carries_the_agent() {
     let Some(schema) = Schema::named() else {
@@ -2025,7 +2485,7 @@ async fn labels_set_through_one_instance_stay_and_reach_the_instance_that_carrie
 /// A restart requested through B for an Agent A carries stays queued when A writes the Agent's
 /// next report before it heard of it; A then takes it up and sends the restart, which clears it,
 /// and a request made after that is queued again and sent within one second.
-/// Verifies: ADR-0043, ADR-0041
+/// Verifies: ADR-0043, ADR-0048
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_restart_requested_through_one_instance_stays_until_the_carrying_instance_sends_it() {
     let Some(schema) = Schema::named() else {
@@ -2085,7 +2545,7 @@ async fn a_restart_requested_through_one_instance_stays_until_the_carrying_insta
 
 /// The ceiling on Agent records holds for the fleet: with room for one, an Agent first heard of
 /// through B is refused once A stored another, and the one A stored keeps reporting through B.
-/// Verifies: ADR-0041, ADR-0038
+/// Verifies: ADR-0048, ADR-0038
 #[test]
 fn the_ceiling_on_agent_records_holds_across_instances() {
     use fleet_server::fleet::{AppState, Transport};
@@ -2125,10 +2585,65 @@ fn the_ceiling_on_agent_records_holds_across_instances() {
     );
 }
 
+/// Many Agents created at once through twelve instances leave no more records than `max_agents`:
+/// each creation counts the records the others created, however many are made at once.
+/// Verifies: ADR-0048, ADR-0043
+#[test]
+fn many_creations_at_once_on_many_instances_never_pass_the_ceiling() {
+    use fleet_server::fleet::{AppState, Transport};
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    const CEILING: usize = 40;
+    let states: Vec<Arc<AppState>> = (0..12)
+        .map(|_| {
+            Arc::new(
+                AppState::on(&records(&schema))
+                    .expect("state")
+                    .with_max_agents(CEILING),
+            )
+        })
+        .collect();
+    let creating: Vec<_> = (0..24u8)
+        .map(|thread| {
+            let state = states[usize::from(thread) % 12].clone();
+            std::thread::spawn(move || {
+                for n in 0..10u8 {
+                    let mut uid = [0x70; 16];
+                    (uid[1], uid[2]) = (thread, n);
+                    state.process(
+                        AgentToServer {
+                            instance_uid: uid.to_vec(),
+                            sequence_num: 1,
+                            capabilities: AgentCapabilities::ReportsStatus as u64,
+                            ..Default::default()
+                        },
+                        Transport::Http,
+                        None,
+                    );
+                }
+            })
+        })
+        .collect();
+    for thread in creating {
+        thread.join().expect("the creations");
+    }
+    assert_eq!(
+        schema.query("SELECT count(*)::text FROM agents"),
+        [CEILING.to_string()],
+        "the records stored"
+    );
+    assert_eq!(
+        schema.query("SELECT agents::text FROM agent_count"),
+        [CEILING.to_string()],
+        "the count kept"
+    );
+}
+
 /// An Agent carried by A that went quiet is forgotten through B, which decides from the presence
 /// A wrote: refused while it reports, forgotten once it is silent past the budget, and A then ends
 /// its session within one second.
-/// Verifies: ADR-0043, ADR-0041
+/// Verifies: ADR-0043, ADR-0048
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_agent_forgotten_through_one_instance_has_its_session_ended_by_the_one_that_carries_it()
 {
@@ -2178,7 +2693,7 @@ async fn an_agent_forgotten_through_one_instance_has_its_session_ended_by_the_on
 /// An Agent forgotten through B stays forgotten when A, which holds it and has not heard of it
 /// yet, writes its next report or flushes at shutdown: A writes nothing of it again, neither the
 /// record nor the labels it held, and drops the Agent it reported for and ends its session.
-/// Verifies: ADR-0043, ADR-0043
+/// Verifies: ADR-0043
 #[test]
 fn an_agent_forgotten_through_one_instance_is_not_written_again_by_another() {
     use fleet_server::fleet::{AppState, Transport};
@@ -2283,7 +2798,7 @@ fn an_agent_rekeyed_at_its_request_keeps_its_stored_record() {
 /// An Agent rekeyed at its request through A is dropped under its old identity by B, which
 /// held it: the move announces the old identity forgotten, so B holds no record of it under a
 /// name no store keeps.
-/// Verifies: ADR-0043, ADR-0043
+/// Verifies: ADR-0043
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_agent_rekeyed_through_one_instance_is_dropped_under_its_old_identity_by_another() {
     use fleet_server::fleet::{AppState, Transport};
@@ -2579,7 +3094,7 @@ fn the_shutdown_flush_leaves_an_agent_that_moved_away_and_disconnected_as_last_w
 /// A's presence batch writes the disconnect of an Agent A took back from B, whose clock runs
 /// ahead of A's: the row still holds the count of takes A was answered, whatever `last_seen_ms` B
 /// stamped it with.
-/// Verifies: ADR-0043, ADR-0041
+/// Verifies: ADR-0043, ADR-0048
 #[test]
 fn a_disconnect_is_written_after_an_instance_whose_clock_runs_ahead_held_the_agent() {
     use fleet_server::fleet::{AppState, Transport};
@@ -2627,7 +3142,7 @@ fn a_disconnect_is_written_after_an_instance_whose_clock_runs_ahead_held_the_age
 /// A presence batch that names A anew, over an Agent B took and disconnected, counts as a take:
 /// A's disconnect is written under the count it answered, the shutdown flush of B, which took the
 /// Agent before, leaves what A wrote, and that of A, which disconnected the Agent last, writes it.
-/// Verifies: ADR-0043, ADR-0041
+/// Verifies: ADR-0043, ADR-0048
 #[test]
 fn a_batch_that_names_its_instance_anew_counts_as_a_take() {
     use fleet_server::fleet::{AppState, Transport};
@@ -2781,7 +3296,7 @@ fn the_goodbye_of_an_agent_forgotten_through_another_instance_is_written_where_i
 /// the Agent's next report: A's take for the Agent's old connection commits after B's for its
 /// new one, B stops carrying it on hearing of the take, A writes the disconnect when the old
 /// connection closes, and the Agent's next report on B makes B its holder again.
-/// Verifies: ADR-0041
+/// Verifies: ADR-0048
 #[test]
 fn an_instance_displaced_by_a_take_that_commits_later_takes_the_agent_back_at_its_next_report() {
     use fleet_server::fleet::{AppState, Transport};
@@ -2869,7 +3384,7 @@ async fn an_agent_just_connected_is_not_forgotten_through_another_instance() {
 /// reads the holder again and stops carrying it, though its old connection has not closed yet.
 /// When that connection closes and A writes its next batch, the row still names B as the holder,
 /// connected, and B still carries it.
-/// Verifies: ADR-0041
+/// Verifies: ADR-0048
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_agent_whose_connection_moves_is_held_by_the_new_instance_and_no_longer_by_the_old() {
     let Some(schema) = Schema::named() else {
@@ -2921,7 +3436,7 @@ async fn an_agent_whose_connection_moves_is_held_by_the_new_instance_and_no_long
 /// Of two instances that take one Agent at once, each hearing of the other's take only after its
 /// own, only the one the row no longer names stops carrying it: each reads the holder again
 /// rather than drop the Agent on hearing of a take.
-/// Verifies: ADR-0041
+/// Verifies: ADR-0048
 #[test]
 fn of_two_instances_that_take_one_agent_at_once_only_the_one_the_row_names_carries_it() {
     use fleet_server::fleet::{AppState, Transport};
@@ -2962,7 +3477,7 @@ fn of_two_instances_that_take_one_agent_at_once_only_the_one_the_row_names_carri
 /// An Agent whose holder changes eleven times within a minute, as two connections of one
 /// `instance_uid` on two instances take it in turn, is logged as a likely duplicate once, when
 /// the eleventh change lands, and not before.
-/// Verifies: ADR-0041
+/// Verifies: ADR-0048
 #[test]
 fn an_agent_whose_holder_changes_eleven_times_in_a_minute_is_logged_once_as_a_likely_duplicate() {
     use fleet_server::fleet::{AppState, Transport};
@@ -3016,6 +3531,217 @@ fn an_agent_whose_holder_changes_eleven_times_in_a_minute_is_logged_once_as_a_li
             assert_eq!(likely(), usize::from(change == 11), "after change {change}");
         }
     });
+}
+
+/// A first report of `uid`, framed, its answer not awaited: what a peer sends when it connects.
+fn first_report(uid: InstanceUid, sequence_num: u64) -> tokio_tungstenite::tungstenite::Message {
+    use opamp::proto::{AgentDescription, AnyValue, KeyValue};
+    let report = AgentToServer {
+        instance_uid: uid.as_bytes().to_vec(),
+        sequence_num,
+        capabilities: AgentCapabilities::ReportsStatus as u64,
+        agent_description: Some(AgentDescription {
+            identifying_attributes: vec![KeyValue {
+                key: "service.name".to_string(),
+                value: Some(AnyValue {
+                    value: Some(opamp::proto::any_value::Value::StringValue(
+                        "otelcol".to_string(),
+                    )),
+                }),
+            }],
+            non_identifying_attributes: Vec::new(),
+        }),
+        ..Default::default()
+    };
+    tokio_tungstenite::tungstenite::Message::Binary(
+        opamp::frame::encode_within(&report, usize::MAX)
+            .expect("frame")
+            .into(),
+    )
+}
+
+/// The identities the next `count` answers on `session` assign, each within ten seconds.
+async fn assigned(session: &mut Socket, count: usize) -> Vec<Option<Vec<u8>>> {
+    let mut assigned = Vec::new();
+    for _ in 0..count {
+        let reply = next_message(session, Duration::from_secs(10))
+            .await
+            .expect("an answer to each report");
+        assert!(
+            reply.error_response.is_none(),
+            "each report is taken up: {:?}",
+            reply.error_response
+        );
+        assigned.push(
+            reply
+                .agent_identification
+                .map(|identification| identification.new_instance_uid),
+        );
+    }
+    assigned
+}
+
+/// A peer of ten Agents whose first reports wait for the database longer than its heartbeat
+/// interval gives its connection up and comes back on a new one with the same certificate, while
+/// the Server still handles the old one's reports: its Agents keep their identities, one record
+/// each, and the newest connection carries them. A report or a goodbye the older connection
+/// delivers after that does not take its Agent back or end it, so the older connection's close
+/// leaves every Agent connected.
+/// Verifies: ADR-0048
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_peer_whose_first_reports_wait_keeps_its_agents_identities_on_its_new_connection() {
+    use futures_util::{SinkExt, StreamExt};
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let a = Instance::start(&pki, &schema, schema.config_on(schema.config.port)).await;
+    let (cert, key) = pki.issue_to_host("edge-36");
+    let uids: Vec<InstanceUid> = (0..10u8)
+        .map(|i| {
+            let mut uid = [0x36; 16];
+            uid[15] = i;
+            InstanceUid(uid)
+        })
+        .collect();
+
+    // Every report's first read of the store waits while the agents' table is locked.
+    let held = schema.hold("LOCK TABLE agents IN ACCESS EXCLUSIVE MODE");
+    let mut old = websocket(&a, &pki, &cert, &key).await;
+    for uid in &uids {
+        old.send(first_report(*uid, 1)).await.expect("send");
+    }
+    let waits = || {
+        schema.query(
+            "SELECT count(*) FROM pg_locks WHERE relation = 'agents'::regclass AND NOT granted",
+        ) != ["0"]
+    };
+    assert!(
+        eventually(Duration::from_secs(10), waits).await,
+        "the old connection's first report waits for the database"
+    );
+    // Its peer heard nothing for an interval, gave the connection up and comes back on a new one.
+    let mut new = websocket(&a, &pki, &cert, &key).await;
+    for uid in &uids {
+        new.send(first_report(*uid, 2)).await.expect("send");
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    drop(held);
+
+    assert_eq!(
+        assigned(&mut new, uids.len()).await,
+        vec![None; uids.len()],
+        "no Agent on the new connection is re-keyed"
+    );
+    assert_eq!(
+        assigned(&mut old, uids.len()).await,
+        vec![None; uids.len()],
+        "the old connection's first reports assign nothing either"
+    );
+    // A report the old connection delivers late does not take its Agent back from the new one,
+    // nor writes a take.
+    let takes = || {
+        schema.query(&format!(
+            "SELECT takes FROM agents WHERE instance_uid = '{}'",
+            uids[0]
+        ))
+    };
+    let before = takes();
+    old.send(first_report(uids[0], 3)).await.expect("send");
+    assert_eq!(assigned(&mut old, 1).await, vec![None]);
+    assert_eq!(takes(), before, "the late report writes no take");
+    // Nor does a goodbye it delivers late end its Agent's connection on the new one.
+    let goodbye = {
+        let mut report = AgentToServer {
+            instance_uid: uids[1].as_bytes().to_vec(),
+            sequence_num: 3,
+            capabilities: AgentCapabilities::ReportsStatus as u64,
+            ..Default::default()
+        };
+        report.agent_disconnect = Some(opamp::proto::AgentDisconnect {});
+        tokio_tungstenite::tungstenite::Message::Binary(
+            opamp::frame::encode_within(&report, usize::MAX)
+                .expect("frame")
+                .into(),
+        )
+    };
+    old.send(goodbye).await.expect("send");
+    assert_eq!(assigned(&mut old, 1).await, vec![None]);
+    old.close(None).await.expect("close");
+    while let Ok(Some(Ok(_))) = tokio::time::timeout(Duration::from_secs(5), old.next()).await {}
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    for uid in &uids {
+        assert!(
+            view_of(&a, *uid).is_some_and(|view| view.connected),
+            "{uid} is carried by the new connection"
+        );
+    }
+    assert_eq!(a.state.snapshot().len(), uids.len(), "one record an Agent");
+    assert_eq!(
+        schema.query("SELECT count(*) FROM agents"),
+        [uids.len().to_string()]
+    );
+}
+
+/// A duplicate `instance_uid` on two live connections of different peers is re-keyed as before:
+/// on two Gateways' connections, whose certificates bind no Agent, and on two connections that
+/// present no host, by the duplicate detection; on two hosts' connections by the binding of the
+/// identity to the host that reported it first. The incumbent keeps its identity each time.
+/// Verifies: ADR-0048, ADR-0038
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_duplicate_on_live_connections_of_different_peers_is_rekeyed() {
+    use futures_util::SinkExt;
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let a = Instance::start(&pki, &schema, schema.config_on(schema.config.port)).await;
+    let gateways = [pki.issue_to_host("gw-a"), pki.issue_to_host("gw-b")];
+    let unnamed = pki.issue("no-host");
+    let hosts = [pki.issue_to_host("host-a"), pki.issue_to_host("host-b")];
+    let mut gateway_sessions = Vec::new();
+    for (cert, key) in &gateways {
+        let mut session = websocket(&a, &pki, cert, key).await;
+        exchange(&mut session).await;
+        gateway_sessions.push(session);
+    }
+    for host in ["gw-a", "gw-b"] {
+        assert!(a.revocations.set_gateway(host, true).expect("mark"));
+    }
+    let pairs = [
+        (
+            "two Gateways",
+            gateway_sessions.remove(0),
+            gateway_sessions.remove(0),
+        ),
+        (
+            "two connections without a host",
+            websocket(&a, &pki, &unnamed.0, &unnamed.1).await,
+            websocket(&a, &pki, &unnamed.0, &unnamed.1).await,
+        ),
+        (
+            "two hosts",
+            websocket(&a, &pki, &hosts[0].0, &hosts[0].1).await,
+            websocket(&a, &pki, &hosts[1].0, &hosts[1].1).await,
+        ),
+    ];
+    for (i, (case, mut first, mut second)) in pairs.into_iter().enumerate() {
+        let uid = InstanceUid([0x60 + u8::try_from(i).expect("few"); 16]);
+        first.send(first_report(uid, 1)).await.expect("send");
+        assert_eq!(assigned(&mut first, 1).await, vec![None], "{case}");
+        second.send(first_report(uid, 1)).await.expect("send");
+        let new = assigned(&mut second, 1).await.remove(0);
+        assert!(
+            new.as_ref().is_some_and(|new| new != uid.as_bytes()),
+            "{case}: the second is re-keyed"
+        );
+        assert!(
+            view_of(&a, uid).is_some_and(|view| view.connected),
+            "{case}: the incumbent keeps its identity"
+        );
+        drop((first, second));
+    }
 }
 
 /// A log line sink for a test's own subscriber.
@@ -3217,7 +3943,7 @@ async fn reported(
 /// stops, each downstream Agent A held is taken over by B once, at its next report, and stays
 /// connected to the Gateway; B refuses none of the pool's connections, and the Gateway goes on
 /// admitting downstream peers.
-/// Verifies: ADR-0041, ADR-0015
+/// Verifies: ADR-0048, ADR-0015
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_gateway_keeps_its_agents_on_one_instance_and_moves_those_of_a_stopped_one_once() {
     let Some(schema) = Schema::named() else {
@@ -3336,7 +4062,7 @@ async fn a_gateway_keeps_its_agents_on_one_instance_and_moves_those_of_a_stopped
 /// A Configuration whose revision was pinned through one instance is not deleted through another
 /// that holds no such pin in memory: the deletion counts the stored assignments in its own
 /// transaction, under the Configuration's row lock.
-/// Verifies: ADR-0041, ADR-0026
+/// Verifies: ADR-0048, ADR-0026
 #[test]
 fn a_configuration_pinned_through_one_instance_is_not_deleted_through_another() {
     use fleet_server::agent_store::Pin;
@@ -3413,7 +4139,7 @@ fn refused_with<T: std::fmt::Debug>(answer: Result<T, String>, refusal: &str) ->
 /// A Package pinned through one instance is not changed or deleted through another that holds no
 /// such pin: each write to it counts the stored assignments in its own transaction, under the
 /// Package's row lock, and is refused, leaving the Package as stored.
-/// Verifies: ADR-0041, ADR-0026
+/// Verifies: ADR-0048, ADR-0026
 #[test]
 fn a_package_pinned_through_one_instance_is_not_changed_through_another() {
     use fleet_server::packages::{PackageId, PackageStore, Platform};
@@ -3427,6 +4153,7 @@ fn a_package_pinned_through_one_instance_is_not_changed_through_another() {
         PackageStore::with_backend(
             records(&schema).packages().expect("packages"),
             Box::new(fleet_server::fs::FsBlobStore::open(blobs.path()).expect("blobs")),
+            fleet_server::clock::Elapsed::monotonic(),
         )
         .expect("open")
     };
@@ -3502,7 +4229,7 @@ fn a_package_pinned_through_one_instance_is_not_changed_through_another() {
 /// A Deployment an Agent was released through on one instance is not deleted through another
 /// that holds no such assignment: the deletion counts the stored assignments in its own
 /// transaction, under the Deployment's row lock.
-/// Verifies: ADR-0041, ADR-0026
+/// Verifies: ADR-0048, ADR-0026
 #[test]
 fn a_deployment_released_through_on_one_instance_is_not_deleted_through_another() {
     use fleet_server::agent_store::Pin;
@@ -3602,7 +4329,7 @@ async fn release_a_package(instance: &Instance) -> usize {
 /// deployment reach through B name the Agent A carries with its labels, its assignment and A's
 /// presence, B serves its host the artifact released to it, and once A's lease is gone the Agent
 /// reads as disconnected.
-/// Verifies: ADR-0043, ADR-0041, ADR-0044, ADR-0027
+/// Verifies: ADR-0043, ADR-0048, ADR-0050, ADR-0027
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_agent_carried_by_one_instance_is_read_through_another_that_holds_none_of_it() {
     let Some(schema) = Schema::named() else {
@@ -3723,7 +4450,7 @@ async fn an_agent_carried_by_one_instance_is_read_through_another_that_holds_non
 /// An Agent B carries inherits the labels of its Client Agent, which A carries: B reads the Client
 /// Agent from the database when it places the Agent, once it has taken up the host register
 /// another instance wrote, and follows a change of its labels made through A.
-/// Verifies: ADR-0041, ADR-0043
+/// Verifies: ADR-0048, ADR-0043
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_agent_inherits_the_labels_of_its_client_agent_that_another_instance_carries() {
     let Some(schema) = Schema::named() else {
@@ -3787,5 +4514,516 @@ async fn an_agent_inherits_the_labels_of_its_client_agent_that_another_instance_
     assert!(
         eventually(Duration::from_secs(10), || inherits("core")).await,
         "B followed the Client Agent's labels"
+    );
+}
+
+/// The list of Agents as `instance` answers it: those `filter` admits, by name, a page of `limit`
+/// after `after`.
+fn page_on(
+    instance: &Instance,
+    filter: fleet_server::listing::AgentFilter,
+    after: Option<fleet_server::listing::Position>,
+    limit: usize,
+) -> fleet_server::fleet::AgentListing {
+    instance
+        .state
+        .list_agents(&fleet_server::fleet::AgentQuery {
+            filter,
+            after,
+            limit,
+            ..fleet_server::fleet::AgentQuery::default()
+        })
+        .expect("a page")
+}
+
+/// The Instance UIDs a filter admits on `instance`.
+fn holding(instance: &Instance, holder: fleet_server::listing::HolderFilter) -> Vec<String> {
+    page_on(
+        instance,
+        fleet_server::listing::AgentFilter {
+            holder: Some(holder),
+            ..Default::default()
+        },
+        None,
+        100,
+    )
+    .agents
+    .into_iter()
+    .map(|view| view.instance_uid)
+    .collect()
+}
+
+/// An Agent's view names the instance that carries it and the host its lease records, read
+/// through any instance; the list filters by it, `none` naming the Agents no instance with a live
+/// lease holds; a page's cursor from one instance continues the list on another; and once the
+/// holder's lease is gone the Agent is held by none.
+/// Verifies: ADR-0049, ADR-0048
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_agents_view_names_its_holder_and_the_list_filters_by_it() {
+    use fleet_server::listing::HolderFilter;
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let a = Instance::start(&pki, &schema, schema.config_on(schema.config.port)).await;
+    let b = Instance::start(&pki, &schema, schema.config_on(schema.config.port)).await;
+    let (on_a, on_b) = (InstanceUid([0x41; 16]), InstanceUid([0x42; 16]));
+    let (cert, key) = pki.issue_to_host("h1");
+    let mut session_a = websocket(&a, &pki, &cert, &key).await;
+    report_as(&mut session_a, on_a, 1, 0, PACKAGED, true).await;
+    let (other_cert, other_key) = pki.issue_to_host("h2");
+    let mut session_b = websocket(&b, &pki, &other_cert, &other_key).await;
+    report_as(&mut session_b, on_b, 1, 0, PACKAGED, true).await;
+    let (a_id, b_id) = (
+        a.instance_id().expect("A's lease"),
+        b.instance_id().expect("B's lease"),
+    );
+
+    let read = b.state.clone();
+    let view = tokio::task::spawn_blocking(move || read.agent_view(&on_a))
+        .await
+        .expect("read")
+        .expect("readable")
+        .expect("known");
+    assert_eq!(
+        (view.holder.as_str(), view.holder_host.as_str()),
+        (a_id.as_str(), "test-host"),
+        "read through B, the Agent A carries names A"
+    );
+    let all = page_on(&b, Default::default(), None, 100);
+    let held: std::collections::BTreeMap<String, String> = all
+        .agents
+        .into_iter()
+        .map(|view| (view.instance_uid, view.holder))
+        .collect();
+    assert_eq!(held[&on_a.to_string()], a_id);
+    assert_eq!(held[&on_b.to_string()], b_id);
+    assert_eq!(
+        holding(&b, HolderFilter::Instance(a_id.clone())),
+        [on_a.to_string()]
+    );
+    assert_eq!(
+        holding(&a, HolderFilter::Instance(b_id.clone())),
+        [on_b.to_string()]
+    );
+    assert!(holding(&b, HolderFilter::None).is_empty(), "each is held");
+
+    let first = page_on(&a, Default::default(), None, 1);
+    let rest = page_on(&b, Default::default(), first.next.clone(), 1);
+    assert_eq!((first.total, rest.total), (2, 2));
+    assert!(rest.next.is_none());
+    let mut both: Vec<String> = first
+        .agents
+        .into_iter()
+        .chain(rest.agents)
+        .map(|view| view.instance_uid)
+        .collect();
+    both.sort();
+    let mut expected = vec![on_a.to_string(), on_b.to_string()];
+    expected.sort();
+    assert_eq!(both, expected, "A's cursor continues the list on B");
+
+    // The same through the REST API of each instance's Operator plane.
+    let operator = reqwest::Client::builder()
+        .use_rustls_tls()
+        .tls_certs_only([reqwest::Certificate::from_pem(pki.ca_pem.as_bytes()).expect("ca")])
+        .resolve(
+            "localhost",
+            "127.0.0.1:0".parse::<SocketAddr>().expect("address"),
+        )
+        .build()
+        .expect("client");
+    let rest = |instance: &Instance, path: String| {
+        let (operator, port) = (operator.clone(), instance.operator.port());
+        async move {
+            let response = operator
+                .get(format!("https://localhost:{port}{path}"))
+                .send()
+                .await
+                .expect("send");
+            let status = response.status().as_u16();
+            let total = response
+                .headers()
+                .get("x-total-count")
+                .map(|v| v.to_str().expect("text").to_string());
+            let next = response.headers().get("link").map(|link| {
+                link.to_str()
+                    .expect("text")
+                    .trim_start_matches('<')
+                    .split('>')
+                    .next()
+                    .expect("a target")
+                    .to_string()
+            });
+            let body: serde_json::Value = response.json().await.expect("json");
+            (status, total, next, body)
+        }
+    };
+    let uids = |body: &serde_json::Value| -> Vec<String> {
+        body.as_array()
+            .expect("an array")
+            .iter()
+            .map(|agent| agent["instance_uid"].as_str().expect("uid").to_string())
+            .collect()
+    };
+    let (status, _, _, body) = rest(&b, format!("/api/v1/agents?holder={a_id}")).await;
+    assert_eq!(
+        (status, uids(&body)),
+        (200, vec![on_a.to_string()]),
+        "{body}"
+    );
+    assert_eq!(body[0]["holder"], a_id.as_str());
+    assert_eq!(body[0]["holder_host"], "test-host");
+    let (status, total, _, body) = rest(&b, "/api/v1/agents?holder=none".to_string()).await;
+    assert_eq!(
+        (status, total.as_deref(), uids(&body).len()),
+        (200, Some("0"), 0)
+    );
+    let (status, total, next, first) = rest(&a, "/api/v1/agents?limit=1".to_string()).await;
+    assert_eq!((status, total.as_deref()), (200, Some("2")));
+    let next = next.expect("a next page");
+    let (status, _, last, rest_of) = rest(&b, next).await;
+    assert_eq!((status, last), (200, None), "{rest_of}");
+    let mut through_rest: Vec<String> = uids(&first).into_iter().chain(uids(&rest_of)).collect();
+    through_rest.sort();
+    assert_eq!(through_rest, expected, "A's Link continues on B");
+    let (status, _, _, body) = rest(&b, "/api/v1/agents?q=a%00".to_string()).await;
+    assert_eq!(status, 400, "a NUL is refused on PostgreSQL too: {body}");
+    assert!(
+        !body.to_string().contains("database"),
+        "the refusal names no database: {body}"
+    );
+
+    drop(session_a);
+    drop(a);
+    assert!(
+        eventually(Duration::from_secs(10), || {
+            holding(&b, HolderFilter::None) == [on_a.to_string()]
+        })
+        .await,
+        "once A's lease is gone none holds what it carried"
+    );
+    let (status, _, _, body) = rest(&b, "/api/v1/agents?holder=none".to_string()).await;
+    assert_eq!(
+        (status, uids(&body)),
+        (200, vec![on_a.to_string()]),
+        "{body}"
+    );
+    let read = b.state.clone();
+    let view = tokio::task::spawn_blocking(move || read.agent_view(&on_a))
+        .await
+        .expect("read")
+        .expect("readable")
+        .expect("known");
+    assert_eq!((view.holder.as_str(), view.holder_host.as_str()), ("", ""));
+}
+
+/// An Agent behind a Gateway that B carries inherits, in B's memory, the labels of its Client
+/// Agent behind the same Gateway, which A carries: B reads the Agents that arrived over the
+/// Gateway's Host through the port's `query_page` when it places the Agent, and places it again
+/// when A changes that Client Agent's labels.
+/// Verifies: ADR-0048, ADR-0043
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_agent_behind_a_gateway_inherits_the_labels_of_its_client_agent_another_instance_carries(
+) {
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let a = Instance::start(&pki, &schema, schema.config_on(schema.config.port)).await;
+    let dir = tempfile::tempdir().expect("dir");
+    mark_gateway(&a, &pki, dir.path());
+    let b = Instance::start(&pki, &schema, schema.config_on(schema.config.port)).await;
+    let read = |file: &str| std::fs::read_to_string(dir.path().join(file)).expect("read");
+    let (cert, key) = (read("gateway.pem"), read("gateway-key.pem"));
+    let (client, agent) = (InstanceUid([0x51; 16]), InstanceUid([0x52; 16]));
+    let mut client_session = websocket(&a, &pki, &cert, &key).await;
+    report_as(
+        &mut client_session,
+        client,
+        1,
+        0,
+        (
+            &[("service.name", "fleet-agent")],
+            &[("supervisor.kind.otelcol", "true"), ("host.name", "m1")],
+        ),
+        true,
+    )
+    .await;
+    let on_a = a.state.clone();
+    tokio::task::spawn_blocking(move || {
+        on_a.set_labels(
+            &client,
+            std::collections::BTreeMap::from([("tier".to_string(), "edge".to_string())]),
+        )
+        .is_ok()
+    })
+    .await
+    .expect("labels")
+    .then_some(())
+    .expect("A labels the Client Agent");
+
+    let mut session = websocket(&b, &pki, &cert, &key).await;
+    report_as(
+        &mut session,
+        agent,
+        1,
+        0,
+        (&[("service.name", "otelcol")], &[("host.name", "m1")]),
+        true,
+    )
+    .await;
+    let inherits = |tier: &str| {
+        view_of(&b, agent).is_some_and(|view| {
+            view.inherited_labels.get("tier").map(String::as_str) == Some(tier)
+                && view.client_agent == client.to_string()
+        })
+    };
+    assert!(
+        eventually(Duration::from_secs(10), || inherits("edge")).await,
+        "B placed the Agent under the Client Agent A carries behind the Gateway: {:?}",
+        view_of(&b, agent).map(|view| (view.inherited_labels, view.client_agent))
+    );
+
+    // A labels the Client Agent anew: B, which placed the Agent under it, follows.
+    let on_a = a.state.clone();
+    tokio::task::spawn_blocking(move || {
+        on_a.set_labels(
+            &client,
+            std::collections::BTreeMap::from([("tier".to_string(), "core".to_string())]),
+        )
+        .is_ok()
+    })
+    .await
+    .expect("labels")
+    .then_some(())
+    .expect("A labels the Client Agent anew");
+    assert!(
+        eventually(Duration::from_secs(10), || inherits("core")).await,
+        "B followed the labels of the Client Agent behind the Gateway: {:?}",
+        view_of(&b, agent).map(|view| view.inherited_labels)
+    );
+}
+
+/// The schema of a Server two releases on: this release's migrations and one more, which names
+/// 0.9.0 as the oldest Server that understands what it leaves.
+fn two_releases_on() -> &'static [Migration] {
+    let mut migrations = MIGRATIONS.to_vec();
+    migrations.push(Migration {
+        version: i32::try_from(migrations.len() + 1).expect("few"),
+        oldest_server: "0.9.0",
+        sql: "CREATE TABLE fleet_test_ahead (n integer)",
+    });
+    Box::leak(migrations.into_boxed_slice())
+}
+
+/// The upgrade from 0.8.0 itself: on the schema 0.8.0 leaves, migrations 1 to 11, with a live lease
+/// as an instance of 0.8.0 takes one, writing no release, two instances of this release that start
+/// at once apply migration 12 once beside it and both serve, and that lease reads 0.8.0
+/// (ADR-0048
+/// clause 16).
+/// Verifies: ADR-0048
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn this_release_starts_beside_a_live_lease_of_0_8_0_and_migrates_once() {
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let config = || schema.config_on(schema.config.port);
+    let (before, name) = (config(), schema.name.clone());
+    tokio::task::spawn_blocking(move || {
+        Database::open_as(
+            &before,
+            Exclusive::Shared,
+            Some(&name),
+            "0.8.0",
+            &MIGRATIONS[..11],
+        )
+        .map(|_| ())
+    })
+    .await
+    .expect("open")
+    .expect("the schema of 0.8.0");
+    // A lease as 0.8.0 takes one: no `release` column yet, and none written.
+    let old = "00000000-0000-4000-8000-000000000080";
+    schema.sql(&format!(
+        "INSERT INTO leases (instance_id, host, must_be_alone, taken_at, renewed_at, expires_at) \
+         VALUES ('{old}', 'host-0.8.0', false, now(), now(), now() + interval '1 hour')"
+    ));
+    let (newer, other) = tokio::join!(
+        Instance::start_as(&pki, &schema, config(), "0.8.1", MIGRATIONS),
+        Instance::start_as(&pki, &schema, config(), "0.8.1", MIGRATIONS),
+    );
+    assert_eq!(
+        schema.query("SELECT count(*)::text FROM fleet_schema WHERE version = 12"),
+        ["1"],
+        "migration 12 applied once"
+    );
+    for instance in [&newer, &other] {
+        assert!(instance.both_planes().0, "both serve beside 0.8.0");
+    }
+    assert_eq!(
+        schema.query(&format!(
+            "SELECT release FROM leases WHERE instance_id = '{old}' AND expires_at > now()"
+        )),
+        ["0.8.0"],
+        "the lease of 0.8.0 reads 0.8.0"
+    );
+}
+
+/// The schema of the next patch release: this release's migrations and one more, which names
+/// 0.8.0, so the instances of 0.8.0 serve on what it leaves.
+fn the_next_patch_release() -> &'static [Migration] {
+    let mut migrations = MIGRATIONS.to_vec();
+    migrations.push(Migration {
+        version: i32::try_from(migrations.len() + 1).expect("few"),
+        oldest_server: "0.8.0",
+        sql: "CREATE TABLE fleet_test_next (n integer)",
+    });
+    Box::leak(migrations.into_boxed_slice())
+}
+
+/// With an instance of N on its schema, two instances of N+1 that start at once apply N+1's
+/// migration once and both serve; the instances of N and N+1 both serve the Agents that report
+/// to either, each reading the other's; and each lease names the release of its instance
+/// (ADR-0048
+/// clause 16).
+/// Verifies: ADR-0048
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_versions_serve_side_by_side_and_the_newer_migrates_once() {
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let config = || schema.config_on(schema.config.port);
+    let next = the_next_patch_release();
+    let older = Instance::start_as(&pki, &schema, config(), "0.8.0", MIGRATIONS).await;
+    assert_eq!(
+        schema.query("SELECT max(version)::text FROM fleet_schema"),
+        [MIGRATIONS.len().to_string()]
+    );
+    let (newer, other) = tokio::join!(
+        Instance::start_as(&pki, &schema, config(), "0.8.1", next),
+        Instance::start_as(&pki, &schema, config(), "0.8.1", next),
+    );
+    assert_eq!(
+        schema.query(&format!(
+            "SELECT count(*)::text FROM fleet_schema WHERE version = {}",
+            next.len()
+        )),
+        ["1"],
+        "migrated once"
+    );
+    for instance in [&older, &newer, &other] {
+        assert!(instance.both_planes().0, "every instance serves");
+    }
+    let mut releases = schema.query("SELECT release FROM leases WHERE expires_at > now()");
+    releases.sort();
+    assert_eq!(
+        releases,
+        ["0.8.0", "0.8.1", "0.8.1"],
+        "each lease names its release"
+    );
+
+    let (on_older, on_newer) = (InstanceUid([0x51; 16]), InstanceUid([0x52; 16]));
+    let (cert, key) = pki.issue_to_host("h1");
+    let mut session = websocket(&older, &pki, &cert, &key).await;
+    report_as(&mut session, on_older, 1, 0, PACKAGED, true).await;
+    let (cert, key) = pki.issue_to_host("h2");
+    let mut session = websocket(&newer, &pki, &cert, &key).await;
+    report_as(&mut session, on_newer, 1, 0, PACKAGED, true).await;
+    for (reader, uid, carrier) in [(&newer, on_older, &older), (&older, on_newer, &newer)] {
+        let state = reader.state.clone();
+        let view = tokio::task::spawn_blocking(move || state.agent_view(&uid))
+            .await
+            .expect("read")
+            .expect("readable")
+            .expect("known on the other version");
+        assert_eq!(
+            Some(view.holder),
+            carrier.instance_id(),
+            "read through the other version, the Agent names its carrier"
+        );
+    }
+}
+
+/// An instance whose lease lapsed while a Server two releases on migrated checks the schema as
+/// it takes its new lease, and stops: it takes none, keeps the refusal naming both versions, and
+/// ends what its lease sends, so its planes stay closed and the Server exits
+/// (ADR-0048
+/// clause 16).
+/// Verifies: ADR-0048
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_instance_whose_lease_lapsed_while_a_newer_server_migrated_stops_at_its_new_lease() {
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let target = std::net::ToSocketAddrs::to_socket_addrs(&(
+        schema.config.host.as_str(),
+        schema.config.port,
+    ))
+    .expect("resolve")
+    .next()
+    .expect("an address");
+    let (port, frozen) = freezable_proxy(target);
+    let (config, name) = (schema.config_on(port), schema.name.clone());
+    let older = tokio::task::spawn_blocking(move || {
+        Database::open_as(&config, Exclusive::Shared, Some(&name), "0.8.0", MIGRATIONS)
+    })
+    .await
+    .expect("open")
+    .expect("0.8.0 opens");
+    let lease = {
+        let older = older.clone();
+        tokio::task::spawn_blocking(move || {
+            fleet_server::instance::Lease::take(older, TIMES, "host-older")
+        })
+        .await
+        .expect("take")
+        .expect("a lease")
+    };
+    let mut held = lease.held();
+
+    frozen.store(true, Ordering::SeqCst);
+    assert!(
+        eventually(TIMES.lapse + Duration::from_secs(2), || held
+            .borrow()
+            .is_none())
+        .await,
+        "the lease was not given up"
+    );
+    // Lapsed in the database too, so the newer Server sees no live lease and migrates.
+    schema.sql("UPDATE leases SET expires_at = now() - interval '1 second'");
+    let (config, name) = (schema.config_on(schema.config.port), schema.name.clone());
+    tokio::task::spawn_blocking(move || {
+        Database::open_as(
+            &config,
+            Exclusive::Shared,
+            Some(&name),
+            "0.10.0",
+            two_releases_on(),
+        )
+        .map(|_| ())
+    })
+    .await
+    .expect("open")
+    .expect("the newer Server migrates");
+
+    frozen.store(false, Ordering::SeqCst);
+    let ended = tokio::time::timeout(Duration::from_secs(30), async {
+        while held.changed().await.is_ok() {}
+    })
+    .await;
+    assert!(ended.is_ok(), "the instance did not stop");
+    assert!(held.borrow().is_none(), "it holds no lease");
+    let refusal = older.outdated().expect("the refusal is kept");
+    for named in ["needs Server 0.9.0", "this Server is 0.8.0"] {
+        assert!(refusal.contains(named), "{named}: {refusal}");
+    }
+    assert!(
+        schema
+            .query("SELECT instance_id::text FROM leases WHERE expires_at > now()")
+            .is_empty(),
+        "no new lease"
     );
 }

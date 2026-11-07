@@ -180,7 +180,7 @@ pub struct Pinned {
     pub revision: Revision,
 }
 
-/// The Configuration store's port (ADR-0009, ADR-0044 clause 2): where Configurations persist so a
+/// The Configuration store's port (ADR-0009, ADR-0050 clause 2): where Configurations persist so a
 /// Server restart does not lose what the fleet should run. It speaks in parts: the saved revision
 /// is written on its own, a retained revision is added by its hash only by the rollout that pins
 /// it ([`AgentStore::release`](crate::agent_store::AgentStore::release)) and removed by its hash
@@ -196,7 +196,7 @@ pub trait ConfigBackend: Send + Sync {
     fn save(&self, name: &str, saved: &Revision) -> Result<(), String>;
 
     /// Removes every retained revision of `name` that `referenced` does not name and no stored
-    /// assignment pins, and answers the ones kept (ADR-0026, ADR-0044 clause 2). A database
+    /// assignment pins, and answers the ones kept (ADR-0026, ADR-0050 clause 2). A database
     /// adapter reckons it in one transaction from the revisions and the assignments it stores,
     /// holding the Configuration's row against every rollout that pins one of its revisions; the
     /// filesystem adapter, its only writer, from `referenced`, which the Agent store answered. A
@@ -210,8 +210,10 @@ pub trait ConfigBackend: Send + Sync {
     /// Deletes one Configuration, its retained revisions with it, unless a stored assignment pins
     /// it (ADR-0026 clause 12). A database adapter counts the assignments in the transaction that
     /// deletes, holding the Configuration's row against every rollout that pins one of its
-    /// revisions, so a pin written through another instance refuses it; the filesystem adapter,
-    /// whose one Server asked its Agent store first, deletes.
+    /// revisions, so a pin written through another instance refuses it, and takes the
+    /// Configuration out of every Deployment that holds it in the same transaction; the
+    /// filesystem adapter, whose one Server asked its Agent store first, deletes, and the fleet
+    /// takes it out of the Deployments after.
     fn remove(&self, name: &str) -> Result<Removal, String>;
 }
 
@@ -252,7 +254,7 @@ impl ConfigStore {
 
     /// Reads every Configuration again from the backend, as another instance saved, pinned,
     /// collected or deleted one
-    /// (ADR-0041
+    /// (ADR-0048
     /// clause 12): what is held is dropped and what is stored taken in its place. It reads under
     /// the lock, so no write of this instance's own lands between the read and the swap.
     ///
@@ -328,7 +330,7 @@ impl ConfigStore {
         })
     }
 
-    /// Pins the saved revision of each of `names` for a rollout (ADR-0026 clause 6, ADR-0044
+    /// Pins the saved revision of each of `names` for a rollout (ADR-0026 clause 6, ADR-0050
     /// clause 2): hands `write` each one's hash and every revision it pins, under the store's
     /// lock, and makes them the store's — `write` persists them together with the assignments
     /// that pin them. Each pinned revision is handed on, held already or not: another instance
@@ -374,7 +376,7 @@ impl ConfigStore {
     /// Drops every retained revision of `name` that `referenced` does not name and no stored
     /// assignment pins — the collection half of ADR-0026's "the store retains every revision an
     /// assignment still references" — and holds what the store kept. The caller asks the Agent
-    /// store which revisions its assignments reference (ADR-0044 clause 2); a database store
+    /// store which revisions its assignments reference (ADR-0050 clause 2); a database store
     /// reckons the rest in its own transaction from the assignments it stores, so a revision
     /// another instance pinned is kept. A revision left behind by a failed write is harmless and
     /// collected on the next act, or when the Server next starts.

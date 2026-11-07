@@ -1,10 +1,10 @@
-//! The bootstrap certificates the Server issued, in PostgreSQL (ADR-0044 clause 11): the
+//! The bootstrap certificates the Server issued, in PostgreSQL (ADR-0050 clause 11): the
 //! PostgreSQL adapter behind [`BootstrapStore`](crate::bootstrap::BootstrapStore) — one row per
 //! certificate, its PKCS#12 file in the same row, an issuance written in one transaction.
 
 use std::sync::Arc;
 
-use tokio_postgres::GenericClient;
+use super::Cached as GenericClient;
 
 use super::{client, signed, sql, unsigned, Database};
 use crate::bootstrap::{BootstrapStore, Entry};
@@ -57,7 +57,7 @@ impl BootstrapStore for PgBootstrapStore {
     fn load(&self) -> Result<Vec<Entry>, String> {
         self.database.run(|pool| async move {
             let client = client(&pool).await?;
-            Ok(read_all(&**client)
+            Ok(read_all(&client)
                 .await?
                 .into_iter()
                 .map(|(entry, _)| entry)
@@ -70,7 +70,7 @@ impl BootstrapStore for PgBootstrapStore {
         self.database.run(move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
-            write(&*transaction, &entry, None).await?;
+            write(&transaction, &entry, None).await?;
             transaction.commit().await.map_err(sql)
         })
     }
@@ -81,7 +81,7 @@ impl BootstrapStore for PgBootstrapStore {
         self.database.run(move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
-            write(&*transaction, &entry, Some(&file)).await?;
+            write(&transaction, &entry, Some(&file)).await?;
             transaction.commit().await.map_err(sql)
         })
     }
@@ -114,7 +114,7 @@ impl BootstrapStore for PgBootstrapStore {
             if usize::try_from(valid).unwrap_or(usize::MAX) >= max {
                 return Ok(false);
             }
-            write(&*transaction, &entry, Some(&file)).await?;
+            write(&transaction, &entry, Some(&file)).await?;
             transaction.commit().await.map_err(sql)?;
             Ok(true)
         })
@@ -288,14 +288,14 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0044
+    /// Verifies: ADR-0050
     #[test]
     fn an_issuance_within_the_bound_holds_on_the_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
         within(&FsBootstrapStore::open(dir.path()).expect("open"));
     }
 
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0048
     #[test]
     fn an_issuance_within_the_bound_holds_on_postgres() {
         let Some(test) = TestDatabase::named() else {
@@ -306,7 +306,7 @@ mod tests {
 
     /// Two instances issue a bootstrap certificate each with one place left on record, behind a
     /// barrier, and exactly one is kept.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0048
     #[test]
     fn two_issuers_at_the_bound_keep_one_certificate_between_them() {
         let Some(test) = TestDatabase::named() else {
@@ -396,14 +396,14 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0044
+    /// Verifies: ADR-0050
     #[test]
     fn the_bootstrap_port_contract_holds_on_the_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
         contract(&|| Box::new(FsBootstrapStore::open(dir.path()).expect("open")));
     }
 
-    /// Verifies: ADR-0044
+    /// Verifies: ADR-0050
     #[test]
     fn the_bootstrap_port_contract_holds_on_postgres() {
         let Some(test) = TestDatabase::named() else {
@@ -414,8 +414,8 @@ mod tests {
     }
 
     /// With PostgreSQL the record and the file are one row, written in one transaction: an
-    /// issuance that cannot be written leaves neither (ADR-0044 clause 11).
-    /// Verifies: ADR-0044
+    /// issuance that cannot be written leaves neither (ADR-0050 clause 11).
+    /// Verifies: ADR-0050
     #[test]
     fn an_issuance_is_one_row_or_none() {
         let Some(test) = TestDatabase::named() else {

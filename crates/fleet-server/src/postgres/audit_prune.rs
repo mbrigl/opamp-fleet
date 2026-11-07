@@ -1,5 +1,5 @@
 //! How long the audit record on PostgreSQL goes back
-//! (ADR-0044 clause 12): once a day each instance removes from
+//! (ADR-0050 clause 12): once a day each instance removes from
 //! its own chain, and the one that holds the prune lock from every closed chain, the longest run of
 //! entries from the chain's start that are all older than `[audit] retain_days`, by the database's
 //! time when each was stored.
@@ -14,8 +14,8 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
+use super::Cached as GenericClient;
 use serde_json::Value;
-use tokio_postgres::GenericClient;
 
 use super::{client, sql, Database};
 use crate::audit::{Audit as _, Entry};
@@ -302,7 +302,7 @@ async fn round_under(
     // another chain pruned here, so a prune that stopped between two deletes would leave a
     // chain linked by nothing.
     let transaction = lock.transaction().await.map_err(sql)?;
-    delete(&*transaction, &plan.chains).await?;
+    delete(&transaction, &plan.chains).await?;
     transaction.commit().await.map_err(sql)?;
     pruned.chains = plan.chains;
     pruned.carried = plan.carried;
@@ -523,6 +523,7 @@ mod tests {
             Limits::default(),
             Arc::new(crate::clock::SystemClock),
             watched,
+            None,
         )
         .expect("start");
         Writing {
@@ -614,7 +615,7 @@ mod tests {
     /// Entries stored more than `retain_days` ago go, the longest run of them from the chain's
     /// start and no younger one; `audit.pruned` records the last removed entry's `seq` and hash
     /// before they go, and `audit-verify` links what is left to it.
-    /// Verifies: ADR-0044, ADR-0042
+    /// Verifies: ADR-0050, ADR-0047
     #[test]
     fn entries_older_than_retain_days_are_removed_and_what_is_left_still_verifies() {
         let Some(test) = TestDatabase::named() else {
@@ -657,7 +658,7 @@ mod tests {
     /// instance at a time, the one holding the prune lock: while it is held elsewhere an instance
     /// prunes its own chain alone; two that prune at once record each chain once, in
     /// `audit.pruned` entries naming both; a closed chain with no entries left keeps its record.
-    /// Verifies: ADR-0044, ADR-0042
+    /// Verifies: ADR-0050, ADR-0047
     #[test]
     fn closed_chains_are_pruned_by_one_instance_at_a_time() {
         let Some(test) = TestDatabase::named() else {
@@ -749,7 +750,7 @@ mod tests {
     /// A pruned chain whose first retained entry does not follow the entry its `audit.pruned`
     /// recorded, and a closed chain with no entries left whose closing hash is not the one its
     /// `audit.pruned` recorded, fail `audit-verify`, naming the chain.
-    /// Verifies: ADR-0042
+    /// Verifies: ADR-0047
     #[test]
     fn a_pruned_chain_that_does_not_link_to_its_audit_pruned_fails_naming_it() {
         let Some(test) = TestDatabase::named() else {
@@ -798,7 +799,7 @@ mod tests {
 
     /// A predecessor carried on by an `audit.pruned` in a chain that fails names nothing: the
     /// archive the database records is then named by no chain, and `audit-verify` fails.
-    /// Verifies: ADR-0042
+    /// Verifies: ADR-0047
     #[test]
     fn a_predecessor_carried_by_a_chain_that_fails_names_nothing() {
         let Some(test) = TestDatabase::named() else {
@@ -839,7 +840,7 @@ mod tests {
 
     /// A chain linked by an `audit.pruned` in a chain opened before it holds once that chain is
     /// found holding, whichever order the chains are walked in.
-    /// Verifies: ADR-0042
+    /// Verifies: ADR-0047
     #[test]
     fn a_chain_linked_from_an_older_chain_holds() {
         let Some(test) = TestDatabase::named() else {
@@ -856,7 +857,7 @@ mod tests {
 
     /// An `audit.pruned` in a chain that fails vouches for nothing: the chain it linked fails
     /// too, naming its first retained entry.
-    /// Verifies: ADR-0042
+    /// Verifies: ADR-0047
     #[test]
     fn an_audit_pruned_in_a_chain_that_fails_links_no_other_chain() {
         let Some(test) = TestDatabase::named() else {
@@ -900,7 +901,7 @@ mod tests {
     /// pruned, the links still needed — of a closed chain with no entries left, and of one that
     /// still begins after the entry recorded — and the archive's predecessor are recorded again,
     /// and `audit-verify` still holds.
-    /// Verifies: ADR-0044, ADR-0042
+    /// Verifies: ADR-0050, ADR-0047
     #[test]
     fn the_links_a_pruned_audit_pruned_recorded_are_carried_on() {
         let Some(test) = TestDatabase::named() else {
@@ -959,7 +960,7 @@ mod tests {
     /// prunes further sits in its own chain, which it prunes first, so a delete of its own chain
     /// that stood alone would leave the other chain linked by nothing, and an honest record would
     /// fail `audit-verify`.
-    /// Verifies: ADR-0044
+    /// Verifies: ADR-0050
     #[test]
     fn a_prune_that_stops_between_two_chains_deletes_nothing() {
         let Some(test) = TestDatabase::named() else {
@@ -1000,7 +1001,7 @@ mod tests {
     /// deleted in batches inside the one transaction: the prune ends, and the chain still verifies.
     /// The database slows each deleted row of the long chain by half a millisecond, so one
     /// statement over all of them would outlast the ten-second timeout and roll the prune back.
-    /// Verifies: ADR-0044
+    /// Verifies: ADR-0050
     #[test]
     fn a_run_too_long_for_one_statement_is_deleted_in_batches() {
         let Some(test) = TestDatabase::named() else {
@@ -1047,7 +1048,7 @@ mod tests {
     /// A backlog larger than one round drains across rounds within one prune: each round removes
     /// at most its share of entries and leaves a record that verifies, and the next follows right
     /// away until nothing old is left. Rounds of 1000 here stand for [`ROUND_ENTRIES`].
-    /// Verifies: ADR-0044
+    /// Verifies: ADR-0050
     #[test]
     fn a_backlog_larger_than_one_round_drains_in_rounds() {
         let Some(test) = TestDatabase::named() else {
@@ -1116,7 +1117,7 @@ mod tests {
     /// find the lock still held, leave the closed chains as if another instance pruned them, and
     /// end the prune with their old entries left. The round's connection is kept open here past
     /// the round, as a session that has not ended yet.
-    /// Verifies: ADR-0044
+    /// Verifies: ADR-0050
     #[test]
     fn a_round_lets_go_of_the_prune_lock_before_it_answers() {
         let Some(test) = TestDatabase::named() else {
@@ -1158,7 +1159,7 @@ mod tests {
 
     /// A chain with an entry missing where a round's budget cuts it is left as it is, and the run
     /// of rounds ends rather than repeating a round that prunes nothing.
-    /// Verifies: ADR-0044
+    /// Verifies: ADR-0050
     #[test]
     fn a_round_that_prunes_no_chain_ends_the_prune() {
         let Some(test) = TestDatabase::named() else {
@@ -1222,7 +1223,7 @@ mod tests {
     }
 
     /// When its `audit.pruned` entries cannot be written, the prune deletes nothing.
-    /// Verifies: ADR-0044
+    /// Verifies: ADR-0050
     #[test]
     fn nothing_is_pruned_before_its_audit_pruned_is_written() {
         let Some(test) = TestDatabase::named() else {
@@ -1241,7 +1242,7 @@ mod tests {
 
     /// Entries stored before the migration that adds `recorded_at` take the time their line
     /// carries, so a record of a release before is pruned by its own age.
-    /// Verifies: ADR-0044
+    /// Verifies: ADR-0050
     #[test]
     fn entries_stored_before_the_migration_take_their_lines_time() {
         let Some(test) = TestDatabase::named() else {

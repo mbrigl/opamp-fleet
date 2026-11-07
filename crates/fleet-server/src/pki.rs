@@ -213,12 +213,19 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct Recorded(std::sync::Mutex<Vec<crate::audit::Entry>>);
+    struct Recorded(std::sync::Arc<std::sync::Mutex<Vec<crate::audit::Entry>>>);
 
     impl crate::audit::Audit for Recorded {
         fn record(&self, entry: crate::audit::Entry) -> Result<(), crate::audit::Unavailable> {
             self.0.lock().expect("lock").push(entry);
             Ok(())
+        }
+
+        fn reserve(&self) -> Result<crate::audit::Permit, crate::audit::Unavailable> {
+            let entries = self.0.clone();
+            Ok(crate::audit::Permit::new(move |entry| {
+                entries.lock().expect("lock").push(entry);
+            }))
         }
     }
 

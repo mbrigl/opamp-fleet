@@ -65,8 +65,8 @@
   // apart from this container (observability/compose.yaml); this puts its Collector on the
   // container's loopback, 127.0.0.1:4317 and :4318, because the Client sends own telemetry in
   // plaintext to a loopback IP literal alone (ADR-0016), the stack's rustfs on :9100, the S3
-  // store a development Server may use (ADR-0044), and its PostgreSQL on :5432, the database it may
-  // keep its records in (ADR-0044). See observability/README.md.
+  // store a development Server may use (ADR-0050), and its PostgreSQL on :5432, the database it may
+  // keep its records in (ADR-0050). See observability/README.md.
   "postStartCommand": {
     "hooks": "git config core.hooksPath .githooks",
     "merge": "git config merge.ff false && git config pull.ff only",

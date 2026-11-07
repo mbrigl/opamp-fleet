@@ -1,6 +1,6 @@
 //! What a client certificate is known by, on the Server and on a Gateway alike: the host it names,
 //! its issuer and serial as the Server's register and revocation list name it, and the bound on
-//! its serial (ADR-0015, ADR-0038, ADR-0022 clause 11).
+//! its serial (ADR-0015, ADR-0038, ADR-0052 clause 11).
 //!
 //! This module is the rule. [`read`] reads it from a certificate with `x509-parser`, and [`issue`]
 //! holds what every certificate this project makes gets: its serial and how far its life starts
@@ -11,7 +11,7 @@ pub mod read;
 
 use sha2::{Digest as _, Sha256};
 
-/// The SAN URI prefix naming the host a certificate was issued to (ADR-0022 clause 11).
+/// The SAN URI prefix naming the host a certificate was issued to (ADR-0052 clause 11).
 pub const HOST_URI_PREFIX: &str = "urn:opamp-fleet:host:";
 
 /// The most octets a serial has: RFC 5280 4.1.2.2's 20, the length the register and every

@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use axum::body::Body;
-use axum::extract::{DefaultBodyLimit, Path, Query, Request, State};
+use axum::extract::{DefaultBodyLimit, Path, Query, RawQuery, Request, State};
 use axum::http::{header, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Response};
@@ -30,6 +30,10 @@ use crate::deployments::{Deployment, DeploymentError, DeploymentStore};
 use crate::fleet::{self, AppState, DeleteError, ForgetError, RestartError, RolloutError};
 use crate::labels::LabelError;
 use crate::packages::{PackageId, PackageSummary, Platform, SignatureState};
+
+mod paging;
+
+use paging::Asked;
 
 #[derive(OpenApi)]
 #[openapi(
@@ -75,7 +79,7 @@ impl OperatorAuth {
         Ok(OperatorAuth(Arc::new(auth.credentials()?), None, None))
     }
 
-    /// Records refused sign-ins in `audit` (ADR-0039 clause 1).
+    /// Records refused sign-ins in `audit` (ADR-0046 clause 1).
     #[must_use]
     pub fn with_audit(mut self, audit: Option<Arc<dyn crate::audit::Audit>>) -> Self {
         self.2 = audit;
@@ -91,7 +95,7 @@ impl OperatorAuth {
 }
 
 /// Records every mutating act on the Operator plane, before it runs and once it has run; an act
-/// that cannot be recorded is not run (ADR-0039 clauses 1 and 5).
+/// that cannot be recorded is not run (ADR-0046 clauses 1 and 5).
 async fn record_act(
     State(audit): State<Arc<dyn crate::audit::Audit>>,
     request: Request,
@@ -199,6 +203,7 @@ async fn authenticate(
 pub fn router(state: Arc<AppState>, auth: Option<OperatorAuth>) -> Router {
     let (api, document) = OpenApiRouter::with_openapi(ApiDoc::openapi())
         .routes(routes!(agents))
+        .routes(routes!(reported_attributes))
         .routes(routes!(restart_agent))
         .routes(routes!(forget_agent))
         .routes(routes!(set_agent_labels))
@@ -276,7 +281,7 @@ pub fn router(state: Arc<AppState>, auth: Option<OperatorAuth>) -> Router {
         .route("/shiki.js", get(shiki_js))
         .with_state(state.clone());
     // Inside the guard, so an act is recorded only once it is authenticated, and named by the
-    // operator who made it (ADR-0039 clause 1).
+    // operator who made it (ADR-0046 clause 1).
     let router = match state.audit().cloned() {
         Some(audit) => router.layer(middleware::from_fn_with_state(audit, record_act)),
         None => router,
@@ -671,6 +676,11 @@ struct AgentResponse {
     /// The Host this Agent last arrived over (ADR-0043 clause 16), or empty. Behind a Gateway, the
     /// Gateway's.
     host: String,
+    /// On PostgreSQL, the instance id of the Server instance that holds this Agent under a live
+    /// lease; empty without one, and always on the filesystem store.
+    holder: String,
+    /// The host name that instance's lease records; empty when `holder` is.
+    holder_host: String,
     /// The `fleet.host.*` values Selectors match on this Agent, from the certificate of the Host it
     /// arrived over directly (ADR-0043 clause 18); empty behind a Gateway.
     host_attributes: BTreeMap<String, String>,
@@ -727,6 +737,8 @@ impl From<fleet::AgentView> for AgentResponse {
             client_agent: view.client_agent,
             ambiguous: view.ambiguous,
             host: view.host,
+            holder: view.holder,
+            holder_host: view.holder_host,
             host_attributes: view.host_attributes,
             ignored_attributes: view.ignored_attributes,
         }
@@ -816,25 +828,188 @@ impl From<fleet::PackageStatusView> for PackageStatusResponse {
     }
 }
 
-/// The fleet: every Agent the Server knows, its reported attributes, and the Configurations
+/// The parameters a list that pages takes, besides its filters
+/// (ADR-0049
+/// clauses 3 and 4).
+const LIMIT_DOC: &str = "How many entries a page holds, 1 to 1000; a larger value is answered as \
+                         1000. Without limit and cursor the whole list is answered while it holds \
+                         at most 10000 entries after its filters, and a longer one is a 400 \
+                         naming limit.";
+
+/// The fleet, a page at a time where `limit` asks for one: every Agent the Server knows that
+/// matches the filters, in the order of `sort`, its reported attributes, and the Configurations
 /// currently matching it.
 #[utoipa::path(
     get,
     path = "/api/v1/agents",
     tag = "fleet",
+    params(
+        ("limit" = Option<u32>, Query, description = LIMIT_DOC),
+        ("cursor" = Option<String>, Query, description = "The position the page starts after, from the Link of the page before; opaque, passed back unchanged with the same sort and filters"),
+        ("q" = Option<String>, Query, description = "A case-insensitive substring of what the UI's filter searches: the names, the status, the OS, the platform, the versions, the attributes and labels, the capabilities and the package statuses"),
+        ("selector" = Option<String>, Query, description = "key=value pairs separated by commas, matched as a Deployment's Selector matches an Agent: the Host's values, what it reported, its labels and its Client Agent's"),
+        ("connected" = Option<bool>, Query, description = "Only the Agents a connection carries, or only those it does not"),
+        ("stale" = Option<bool>, Query, description = "Only the stale Agents, or only those that are not"),
+        ("service_name" = Option<String>, Query, description = "Only the Agents of this type"),
+        ("holder" = Option<String>, Query, description = "On PostgreSQL: only the Agents the instance of this id holds, or with none those no instance with a live lease holds; on the filesystem store a 400"),
+        ("sort" = Option<String>, Query, description = "name (the default), connected, health, config, version, os, seq or seen; ties are broken by Instance UID"),
+        ("order" = Option<String>, Query, description = "asc (the default) or desc")
+    ),
     responses(
-        (status = 200, description = "Every known Agent", body = [AgentResponse]),
+        (status = 200, description = "The Agents that match, a page of them where limit asks for one", body = [AgentResponse],
+            headers(
+                ("X-Total-Count" = u64, description = "How many Agents match the filters"),
+                ("Link" = String, description = "The next page, rel=\"next\"; absent on the last")
+            )),
+        (status = 400, description = "A parameter this route does not take, one that is not valid, a cursor that does not parse or was made for another sort or filters, holder on the filesystem store, or more than 10000 Agents without limit", body = ErrorBody),
         (status = 500, description = "The fleet cannot be read from the store", body = ErrorBody)
     )
 )]
-async fn agents(State(state): State<Arc<AppState>>) -> Response {
-    match state.fleet_view() {
-        Ok(views) => Json(
-            views
+async fn agents(State(state): State<Arc<AppState>>, RawQuery(raw): RawQuery) -> Response {
+    let asked = match Asked::parse(
+        raw.as_deref(),
+        &[
+            "q",
+            "selector",
+            "connected",
+            "stale",
+            "service_name",
+            "holder",
+            "sort",
+            "order",
+        ],
+    ) {
+        Ok(asked) => asked,
+        Err((status, message)) => return error(status, message),
+    };
+    let query = match agent_query(&state, &asked) {
+        Ok(query) => query,
+        Err((status, message)) => return error(status, message),
+    };
+    // A whole answer is counted first, so a list past the bound is refused without being read.
+    if asked.limit.is_none() {
+        match state.list_agents(&fleet::AgentQuery {
+            limit: 0,
+            ..query.clone()
+        }) {
+            Ok(counted) if counted.total > crate::listing::WHOLE_BOUND => {
+                return asked.answer(
+                    "/api/v1/agents",
+                    Vec::<AgentResponse>::new(),
+                    counted.total,
+                    None,
+                )
+            }
+            Ok(_) => {}
+            Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, e),
+        }
+    }
+    match state.list_agents(&query) {
+        Ok(listing) => asked.answer(
+            "/api/v1/agents",
+            listing
+                .agents
                 .into_iter()
                 .map(AgentResponse::from)
-                .collect::<Vec<_>>(),
-        )
+                .collect(),
+            listing.total,
+            listing.next,
+        ),
+        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+/// What a request of the list of Agents asks, or the `400` that says what is wrong with it.
+fn agent_query(state: &AppState, asked: &Asked) -> Result<fleet::AgentQuery, Refusal> {
+    use crate::listing::{AgentFilter, AgentSort, HolderFilter};
+    let sort = match asked.params.get("sort") {
+        None => AgentSort::Name,
+        Some(name) => AgentSort::parse(name).ok_or_else(|| {
+            paging::refused(format!(
+                "sort: {name:?} is none of name, connected, health, config, version, os, seq, seen"
+            ))
+        })?,
+    };
+    let descending = match asked.params.get("order").map(String::as_str) {
+        None | Some("asc") => false,
+        Some("desc") => true,
+        Some(other) => {
+            return Err(paging::refused(format!(
+                "order: {other:?} is neither asc nor desc"
+            )))
+        }
+    };
+    let selector = match asked.params.get("selector") {
+        None => BTreeMap::new(),
+        Some(text) => crate::listing::parse_selector(text).ok_or_else(|| {
+            paging::refused(format!(
+                "selector: {text:?} is not key=value pairs separated by commas"
+            ))
+        })?,
+    };
+    let holder = match asked.params.get("holder") {
+        None => None,
+        Some(_) if !state.keeps_holders() => {
+            return Err(paging::refused(
+                "holder: on the filesystem store there is one Server and no holder",
+            ))
+        }
+        Some(id) if id == "none" => Some(HolderFilter::None),
+        Some(id) if id.is_empty() => {
+            return Err(paging::refused("holder: an instance id, or none"))
+        }
+        Some(id) => Some(HolderFilter::Instance(id.clone())),
+    };
+    let after = asked.after_keyed(matches!(
+        sort,
+        AgentSort::Name | AgentSort::Config | AgentSort::Version | AgentSort::Os
+    ))?;
+    Ok(fleet::AgentQuery {
+        filter: AgentFilter {
+            q: asked.q(),
+            selector,
+            connected: asked.flag("connected")?,
+            stale: asked.flag("stale")?,
+            service_name: asked.params.get("service_name").cloned(),
+            holder,
+            arrived_over: None,
+        },
+        sort,
+        descending,
+        after,
+        limit: asked.reading(),
+    })
+}
+
+/// What the fleet reports, for suggestions
+/// (ADR-0049
+/// clause 7).
+#[derive(Serialize, ToSchema)]
+struct ReportedValuesResponse {
+    /// The distinct `key=value` pairs the Agents report that a Selector can match, sorted, at most
+    /// 1000.
+    attributes: Vec<String>,
+    /// The distinct `service_name` values the Agents report, sorted, at most 1000.
+    service_names: Vec<String>,
+}
+
+/// The distinct `key=value` pairs and Agent types the fleet reports: what the Deployment form
+/// suggests for a Selector and the Configuration form for a type.
+#[utoipa::path(
+    get,
+    path = "/api/v1/agents/attributes",
+    tag = "fleet",
+    responses(
+        (status = 200, description = "The distinct pairs and types, each sorted, at most 1000 of each", body = ReportedValuesResponse),
+        (status = 500, description = "The fleet cannot be read from the store", body = ErrorBody)
+    )
+)]
+async fn reported_attributes(State(state): State<Arc<AppState>>) -> Response {
+    match state.reported_values() {
+        Ok(values) => Json(ReportedValuesResponse {
+            attributes: values.pairs,
+            service_names: values.service_names,
+        })
         .into_response(),
         Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
@@ -1548,7 +1723,7 @@ async fn delete_package_set(
         Err(e) => return error(StatusCode::BAD_REQUEST, e),
     };
     // Off the async threads: the deletion's sweep may wait up to a minute for the blob store's lock
-    // (ADR-0044 clause 14).
+    // (ADR-0050 clause 14).
     let deleted = tokio::task::spawn_blocking({
         let id = id.clone();
         move || state.delete_package_set(&id)
@@ -1697,7 +1872,7 @@ async fn delete_package_entry(
         Err((status, why)) => return error(status, why),
     };
     // Off the async threads: the deletion's sweep may wait up to a minute for the blob store's lock
-    // (ADR-0044 clause 14).
+    // (ADR-0050 clause 14).
     let deleted = tokio::task::spawn_blocking({
         let (id, platform) = (id.clone(), platform.clone());
         move || state.delete_package_entry(&id, &platform)
@@ -1915,18 +2090,25 @@ async fn put_package_floor(
             );
         }
     };
+    // A floor is set only with its entry's place held, so a restore finds every floor raised;
+    // only one known to have failed gives the place back unwritten.
+    let Ok(place) = hold_place(&state) else {
+        return crate::transport::busy();
+    };
+    let floor_entry = |outcome: &str| {
+        crate::audit::Entry::new("package_floor.set", outcome)
+            .with("agent_type", agent_type.clone())
+            .with("version", spec.version.clone())
+    };
     match floors.put(&agent_type, &spec.version, signature.clone()) {
         Ok(signature_state) => {
             info!(
                 agent_type = %agent_type, version = %spec.version,
                 state = signature_state.as_str(), "package floor set"
             );
-            note(
-                &state,
-                crate::audit::Entry::new("package_floor.set", "set")
-                    .with("agent_type", agent_type.clone())
-                    .with("version", spec.version.clone())
-                    .with("signature_state", signature_state.as_str()),
+            fill_place(
+                place,
+                floor_entry("set").with("signature_state", signature_state.as_str()),
             );
             let floor = crate::floors::Floor {
                 version: spec.version,
@@ -1943,10 +2125,15 @@ async fn put_package_floor(
                 spec.version
             ),
         ),
-        Err(FloorError::Store(e)) => error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("the floor could not be persisted: {e}"),
-        ),
+        Err(FloorError::Store(e)) => {
+            // The store may hold it all the same, so the record names it, toward setting it
+            // again at a restore.
+            fill_place(place, floor_entry("unknown"));
+            error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("the floor could not be persisted: {e}"),
+            )
+        }
     }
 }
 
@@ -2099,7 +2286,7 @@ enum Chunk {
     End,
 }
 
-/// The upload as the blob store reads it (ADR-0044 clause 13): the request's chunks, handed over a
+/// The upload as the blob store reads it (ADR-0050 clause 13): the request's chunks, handed over a
 /// channel to the thread the store reads on. A channel that closes before [`Chunk::End`] is a
 /// failed stream — a refused, cut-off or cancelled upload — so the store keeps nothing of it.
 struct ChunkReader {
@@ -2663,7 +2850,7 @@ fn deployment_response(state: &AppState, deployment: Deployment) -> Response {
     Json(DeploymentView::of(deployment, reach)).into_response()
 }
 
-/// The enrolment window as the API answers with it (ADR-0044 clause 8).
+/// The enrolment window as the API answers with it (ADR-0050 clause 8).
 #[derive(Serialize, ToSchema)]
 struct EnrolmentWindow {
     /// Whether a host with a bootstrap certificate may enrol now.
@@ -2680,7 +2867,7 @@ struct OpenWindow {
     open_for_secs: u64,
 }
 
-/// One enrolment request waiting for an operator (ADR-0022 clause 10).
+/// One enrolment request waiting for an operator (ADR-0052 clause 10).
 #[derive(Serialize, ToSchema)]
 struct PendingEnrolment {
     /// What `approve` and `reject` name: the SHA-256 fingerprint of the requested public key.
@@ -2697,12 +2884,12 @@ struct PendingEnrolment {
     /// so an operator can match a request to a host.
     key_fingerprint: String,
     /// The six subject values of the bootstrap certificate the request proves: what an
-    /// approval carries into the host certificate (ADR-0022 clause 10). The request's own subject
+    /// approval carries into the host certificate (ADR-0052 clause 10). The request's own subject
     /// is not listed, because it is neither trusted nor carried. Absent when that certificate's
     /// subject cannot be carried — `subject_refusal` then says why.
     #[serde(skip_serializing_if = "Option::is_none")]
     bootstrap_subject: Option<HostSubject>,
-    /// Why the bootstrap certificate's subject breaks the rules of ADR-0022 clause 1, naming the
+    /// Why the bootstrap certificate's subject breaks the rules of ADR-0052 clause 1, naming the
     /// attribute: an approval is refused `409` with this reason, and nothing is signed. Absent
     /// when the values can be carried.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2714,7 +2901,7 @@ struct PendingEnrolment {
     bootstrap_serial: String,
 }
 
-/// What an operator asks a bootstrap certificate for (ADR-0022 clauses 1 and 3 and
+/// What an operator asks a bootstrap certificate for (ADR-0052 clauses 1 and 3 and
 /// ADR-0032 clause 14).
 #[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
@@ -2726,7 +2913,7 @@ struct IssueBootstrapRequest {
     /// 1 to 90; 10 when absent. Cut to the bootstrap CA's end.
     #[serde(default)]
     validity_days: Option<u32>,
-    /// 8 to 128 characters without a control character (ADR-0022). Required: the Server keeps a PKCS#12
+    /// 8 to 128 characters without a control character (ADR-0052). Required: the Server keeps a PKCS#12
     /// file of the certificate and its key under this password, to be downloaded until the
     /// certificate ends or is revoked; the key is never answered in PEM. The password is kept
     /// nowhere. Read as absent when it is missing, so the refusal names it.
@@ -2739,7 +2926,7 @@ struct IssueBootstrapRequest {
 /// The subject of a bootstrap certificate: these attributes only, `organization` and
 /// `organizational_unit` required and the others optional; the Server sets the common name. Every
 /// host certificate issued from it carries them, and they describe and select the Host through
-/// `fleet.host.*`; they authorize nothing (ADR-0022 clause 1).
+/// `fleet.host.*`; they authorize nothing (ADR-0052 clause 1).
 #[derive(Default, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 struct BootstrapSubject {
@@ -2760,7 +2947,7 @@ struct BootstrapSubject {
 }
 
 /// An issued bootstrap certificate, never with its private key: the key is in the PKCS#12 file of
-/// `GET /api/v1/bootstrap-certificates/{serial}/p12` (ADR-0022 clause 3).
+/// `GET /api/v1/bootstrap-certificates/{serial}/p12` (ADR-0052 clause 3).
 #[derive(Serialize, ToSchema)]
 struct IssuedBootstrap {
     /// What a revocation names, with the authority `bootstrap`.
@@ -2771,7 +2958,7 @@ struct IssuedBootstrap {
     certificate_pem: String,
 }
 
-/// A bootstrap certificate on record (ADR-0044 clause 11).
+/// A bootstrap certificate on record (ADR-0050 clause 11).
 #[derive(Serialize, ToSchema)]
 struct BootstrapView {
     serial: String,
@@ -2781,7 +2968,7 @@ struct BootstrapView {
     issued_ms: u64,
     not_after_ms: u64,
     revoked: bool,
-    /// Whether its PKCS#12 file can be downloaded (ADR-0044 clause 11).
+    /// Whether its PKCS#12 file can be downloaded (ADR-0050 clause 11).
     p12: bool,
 }
 
@@ -2823,8 +3010,8 @@ async fn list_bootstrap_certificates(State(state): State<Arc<AppState>>) -> Resp
 /// Issues a bootstrap certificate with the subject an operator names, which holds at least an
 /// organization and an organizational unit, under the password the request names. The key is in no
 /// answer: the Server keeps it, encrypted under that password in a PKCS#12 file, for download
-/// (ADR-0022 clause 3). A host with it may only ask to enrol, inside an open window, and
-/// an operator approves (ADR-0022 clauses 9 and 10).
+/// (ADR-0052 clause 3). A host with it may only ask to enrol, inside an open window, and
+/// an operator approves (ADR-0052 clauses 9 and 10).
 #[utoipa::path(
     post,
     path = "/api/v1/bootstrap-certificates",
@@ -2867,7 +3054,7 @@ async fn issue_bootstrap_certificate(
         Err(e) => return error(StatusCode::BAD_REQUEST, e.to_string()),
     };
     // Off the async workers: sealing a PKCS#12 file takes the better part of a second, as
-    // password hashing does (ADR-0022).
+    // password hashing does (ADR-0052).
     let issuer = bootstrap.clone();
     let issued = match tokio::task::spawn_blocking(move || issuer.issue(&request)).await {
         Ok(issued) => issued,
@@ -2875,7 +3062,7 @@ async fn issue_bootstrap_certificate(
     };
     match issued {
         Ok(pair) => {
-            // The key leaves only once the issuance is on the record (ADR-0039): a refused record
+            // The key leaves only once the issuance is on the record (ADR-0046): a refused record
             // leaves a listed, revocable entry and no key in anyone's hands.
             if let Some(audit) = state.audit() {
                 let recorded = audit.record(
@@ -2930,7 +3117,7 @@ async fn issue_bootstrap_certificate(
 }
 
 /// The PKCS#12 file of a bootstrap certificate, as often as it is asked,
-/// until the certificate ends or is revoked (ADR-0044 clause 11). Each download is on the record.
+/// until the certificate ends or is revoked (ADR-0050 clause 11). Each download is on the record.
 #[utoipa::path(
     get,
     path = "/api/v1/bootstrap-certificates/{serial}/p12",
@@ -2998,7 +3185,7 @@ async fn download_bootstrap_p12(
 }
 
 /// Deletes a revoked bootstrap certificate's entry, and any PKCS#12 file of it, from the record.
-/// Its revocation stays on the list, so it stays refused for as long as it is valid (ADR-0022 clause 7).
+/// Its revocation stays on the list, so it stays refused for as long as it is valid (ADR-0052 clause 7).
 #[utoipa::path(
     delete,
     path = "/api/v1/bootstrap-certificates/{serial}",
@@ -3091,7 +3278,7 @@ async fn get_enrolment_window(State(state): State<Arc<AppState>>) -> Response {
 }
 
 /// Opens the enrolment window for a bounded time, or moves its end. It is closed by default, and
-/// persisted before this answers, so a Server restart keeps it open until its end (ADR-0044).
+/// persisted before this answers, so a Server restart keeps it open until its end (ADR-0050).
 #[utoipa::path(
     post,
     path = "/api/v1/enrolment/window",
@@ -3144,11 +3331,16 @@ async fn close_enrolment_window(State(state): State<Arc<AppState>>) -> Response 
     let Some(enrolment) = state.enrolment() else {
         return enrolment_off();
     };
+    // The window is closed only with its entry's place held. It is closed here whatever the store
+    // answers, so the entry says `closed` either way.
+    let Ok(place) = hold_place(&state) else {
+        return crate::transport::busy();
+    };
     let expired = enrolment.pending().len();
     let saved = enrolment.close();
     info!("enrolment window closed");
-    note(
-        &state,
+    fill_place(
+        place,
         crate::audit::Entry::new("enrolment.window", "closed").with("expired_requests", expired),
     );
     match saved {
@@ -3217,7 +3409,7 @@ fn through_gateway(state: &AppState, id: &str) -> Option<String> {
         (status = 204, description = "Approved and signed"),
         (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
         (status = 404, description = "No such pending request, or enrolment is not configured", body = ErrorBody),
-        (status = 409, description = "The CA could not sign the request, its bootstrap certificate is revoked, that certificate's subject breaks the rules of ADR-0022 clause 1 — the message names the attribute —, or another Server instance is deciding the request at this moment; nothing is signed", body = ErrorBody),
+        (status = 409, description = "The CA could not sign the request, its bootstrap certificate is revoked, that certificate's subject breaks the rules of ADR-0052 clause 1 — the message names the attribute —, or another Server instance is deciding the request at this moment; nothing is signed", body = ErrorBody),
         (status = 500, description = "The approval could not be persisted; the request still waits", body = ErrorBody)
     )
 )]
@@ -3226,16 +3418,9 @@ async fn approve_enrolment(
     _csrf: SameOrigin,
     Path(id): Path<String>,
 ) -> Response {
-    let gateway = through_gateway(&state, &id);
     match state.approve_enrolment(&id) {
-        Ok(()) => {
-            info!(request = %id, "enrolment request approved");
-            note(
-                &state,
-                crate::audit::Entry::new("enrolment.approved", "approved")
-                    .with("id", id.clone())
-                    .with("gateway", gateway),
-            );
+        Ok(serial) => {
+            info!(request = %id, serial = %serial, "enrolment request approved");
             StatusCode::NO_CONTENT.into_response()
         }
         Err(crate::enrolment::DecisionError::NotFound) => error(
@@ -3271,16 +3456,19 @@ fn deciding(id: &str) -> Response {
     )
 }
 
-/// Rejects one enrolment request; its connection is closed.
+/// Rejects the key of one enrolment request, beyond its window: a request waiting for it is
+/// decided and its connection closed, and a request for it is refused whenever it arrives. An id
+/// the queue does not hold is rejected before its request arrives, with the window open or closed.
 #[utoipa::path(
     post,
     path = "/api/v1/enrolments/{id}/reject",
     tag = "enrolment",
-    params(("id" = String, Path, description = "the request's id")),
+    params(("id" = String, Path, description = "the request's id, the SHA-256 fingerprint of its key: 64 lowercase hexadecimal digits")),
     responses(
-        (status = 204, description = "Rejected"),
+        (status = 204, description = "Rejected, whether the queue held the request or not; a request for the key is refused from now on"),
+        (status = 400, description = "The id is not 64 lowercase hexadecimal digits", body = ErrorBody),
         (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
-        (status = 404, description = "No such pending request, or enrolment is not configured", body = ErrorBody),
+        (status = 404, description = "The queue holds the request decided already, or enrolment is not configured", body = ErrorBody),
         (status = 409, description = "Another Server instance is deciding the request at this moment; nothing is decided", body = ErrorBody),
         (status = 500, description = "The rejection could not be persisted; the request still waits", body = ErrorBody)
     )
@@ -3293,31 +3481,51 @@ async fn reject_enrolment(
     let Some(enrolment) = state.enrolment() else {
         return enrolment_off();
     };
+    if !crate::enrolment::is_key_id(&id) {
+        return error(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "{id:?} is not an enrolment request's id: the SHA-256 fingerprint of its key, 64 \
+                 lowercase hexadecimal digits"
+            ),
+        );
+    }
     let gateway = through_gateway(&state, &id);
+    // A request is rejected only with its entry's place held, so a restore rejects it again; only
+    // a rejection known to have failed gives the place back unwritten.
+    let Ok(place) = hold_place(&state) else {
+        return crate::transport::busy();
+    };
+    let rejection = |outcome: &str| {
+        crate::audit::Entry::new("enrolment.rejected", outcome)
+            .with("id", id.clone())
+            .with("gateway", gateway.clone())
+    };
     match enrolment.reject(&id) {
-        Ok(()) => {
-            info!(request = %id, "enrolment request rejected");
-            note(
-                &state,
-                crate::audit::Entry::new("enrolment.rejected", "rejected")
-                    .with("id", id.clone())
-                    .with("gateway", gateway),
-            );
+        Ok(rejected) => {
+            let queued = rejected == crate::enrolment::Rejection::Queued;
+            info!(request = %id, queued, "enrolment request rejected");
+            fill_place(place, rejection("rejected").with("queued", queued));
             StatusCode::NO_CONTENT.into_response()
         }
         Err(crate::enrolment::DecisionError::Deciding) => deciding(&id),
-        Err(crate::enrolment::DecisionError::Store(e)) => error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("the rejection could not be persisted, and the request still waits: {e}"),
-        ),
+        Err(crate::enrolment::DecisionError::Store(e)) => {
+            // The store may hold it all the same, so the record names it, toward rejecting it
+            // again at a restore.
+            fill_place(place, rejection("unknown"));
+            error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("the rejection could not be persisted, and the request still waits: {e}"),
+            )
+        }
         Err(_) => error(
             StatusCode::NOT_FOUND,
-            format!("no pending enrolment request {id:?}"),
+            format!("enrolment request {id:?} is decided already"),
         ),
     }
 }
 
-/// One certificate the client CA signed (ADR-0044 clause 9).
+/// One certificate the client CA signed (ADR-0050 clause 9).
 #[derive(Serialize, ToSchema)]
 struct CertificateView {
     /// `client` — the CA that signed it, as a revocation names it.
@@ -3336,12 +3544,12 @@ struct CertificateView {
     /// On a renewal, the certificate it renewed.
     #[serde(skip_serializing_if = "Option::is_none")]
     predecessor: Option<CertificateRef>,
-    /// The host it was issued to (ADR-0022 clause 11); absent on one an operator provisioned.
+    /// The host it was issued to (ADR-0052 clause 11); absent on one an operator provisioned.
     #[serde(skip_serializing_if = "Option::is_none")]
     host: Option<String>,
 }
 
-/// A Host: what a client certificate's host id names (ADR-0022 clause 11, ADR-0043).
+/// A Host: what a client certificate's host id names (ADR-0052 clause 11, ADR-0043).
 #[derive(Serialize, ToSchema)]
 struct HostView {
     host: String,
@@ -3469,11 +3677,28 @@ impl RevocationView {
     }
 }
 
-/// Records what an operator act did, beside the act itself (ADR-0039 clause 1). The act was
-/// already recorded before it ran, so a detail that cannot be recorded changes nothing.
+/// Records what an operator act did, beside the act itself (ADR-0046 clause 1), and drops it where
+/// the record cannot take it by then: the act was recorded before it ran. What it still records
+/// grants trust, so a restore that misses it errs toward withdrawing. The acts a restore repeats,
+/// which withdraw trust, hold their entry's place before they run instead ([`hold_place`]).
 fn note(state: &AppState, entry: crate::audit::Entry) {
     if let Some(audit) = state.audit() {
         audit.refusal(entry);
+    }
+}
+
+/// Holds a place in the record for the entry of an act about to run, which says what the act did
+/// once it has (ADR-0046
+/// clause 5): without one the act does not run, and is answered `503`. `None` where the Server
+/// keeps no record.
+fn hold_place(state: &AppState) -> Result<Option<crate::audit::Permit>, crate::audit::Unavailable> {
+    state.audit().map(|audit| audit.reserve()).transpose()
+}
+
+/// Writes what an act did into the place [`hold_place`] held for it.
+fn fill_place(place: Option<crate::audit::Permit>, entry: crate::audit::Entry) {
+    if let Some(place) = place {
+        place.write(entry);
     }
 }
 
@@ -3496,68 +3721,151 @@ fn revocation_off() -> Response {
     error(StatusCode::NOT_FOUND, "revocation is not configured")
 }
 
-/// Every certificate the client CA signed that has not yet expired, oldest first.
+/// Every certificate the client CA signed that has not yet expired, oldest first, a page at a
+/// time where `limit` asks for one.
 #[utoipa::path(
     get,
     path = "/api/v1/certificates",
     tag = "revocation",
+    params(
+        ("limit" = Option<u32>, Query, description = LIMIT_DOC),
+        ("cursor" = Option<String>, Query, description = "The position the page starts after, from the Link of the page before"),
+        ("q" = Option<String>, Query, description = "A case-insensitive substring of the subject, the serial or the host")
+    ),
     responses(
-        (status = 200, description = "Every unexpired certificate the client CA signed, oldest first", body = Vec<CertificateView>),
+        (status = 200, description = "Every unexpired certificate the client CA signed that matches, by the time it was issued, then by issuer and serial", body = Vec<CertificateView>,
+            headers(
+                ("X-Total-Count" = u64, description = "How many certificates match the filters"),
+                ("Link" = String, description = "The next page, rel=\"next\"; absent on the last")
+            )),
+        (status = 400, description = "A parameter this route does not take, one that is not valid, a cursor that names no position of this list, or more than 10000 without limit", body = ErrorBody),
         (status = 404, description = "Revocation is not configured", body = ErrorBody)
     )
 )]
-async fn list_certificates(State(state): State<Arc<AppState>>) -> Response {
+async fn list_certificates(
+    State(state): State<Arc<AppState>>,
+    RawQuery(raw): RawQuery,
+) -> Response {
     let Some(revocations) = state.revocations() else {
         return revocation_off();
     };
+    let asked = match Asked::parse(raw.as_deref(), &["q"]) {
+        Ok(asked) => asked,
+        Err((status, message)) => return error(status, message),
+    };
+    let after = match asked.after_keyed(false) {
+        Ok(after) => after,
+        Err((status, message)) => return error(status, message),
+    };
+    let q = asked.q();
     let authority = |id: &crate::revocation::CertId| {
         revocations
             .authority_of(&id.issuer)
             .map_or_else(|| "unknown".to_string(), |a| a.role.clone())
     };
-    let issued: Vec<CertificateView> = revocations
+    let issued: Vec<(crate::listing::Position, CertificateView)> = revocations
         .issued()
         .into_iter()
-        .map(|issued| CertificateView {
-            authority: authority(&issued.facts.id),
-            issuer: issued.facts.issuer_name,
-            serial: issued.facts.id.serial,
-            subject: issued.facts.subject,
-            key_fingerprint: issued.facts.key_fingerprint,
-            not_after_ms: issued.facts.not_after_ms,
-            instance_uid: issued.instance_uid,
-            issued_ms: issued.issued_ms,
-            predecessor: issued.predecessor.map(|id| CertificateRef {
-                authority: authority(&id),
-                serial: id.serial,
-            }),
-            host: issued.facts.host,
+        .filter(|issued| {
+            q.as_ref().is_none_or(|q| {
+                [
+                    issued.facts.subject.as_str(),
+                    issued.facts.id.serial.as_str(),
+                    issued.facts.host.as_deref().unwrap_or_default(),
+                ]
+                .iter()
+                .any(|field| field.to_lowercase().contains(q.as_str()))
+            })
+        })
+        .map(|issued| {
+            let position = crate::listing::Position {
+                key: crate::listing::Key::Int(issued.issued_ms as i64),
+                tiebreak: format!("{}\n{}", issued.facts.id.issuer, issued.facts.id.serial),
+            };
+            let view = CertificateView {
+                authority: authority(&issued.facts.id),
+                issuer: issued.facts.issuer_name,
+                serial: issued.facts.id.serial,
+                subject: issued.facts.subject,
+                key_fingerprint: issued.facts.key_fingerprint,
+                not_after_ms: issued.facts.not_after_ms,
+                instance_uid: issued.instance_uid,
+                issued_ms: issued.issued_ms,
+                predecessor: issued.predecessor.map(|id| CertificateRef {
+                    authority: authority(&id),
+                    serial: id.serial,
+                }),
+                host: issued.facts.host,
+            };
+            (position, view)
         })
         .collect();
-    Json(issued).into_response()
+    let page = paging::cut(&asked, after.as_ref(), issued);
+    asked.answer("/api/v1/certificates", page.entries, page.total, page.next)
 }
 
-/// Every Host, by host id, with its subject values and the Agents that arrived over it.
+/// Every Host, by host id, with its subject values and the Agents that arrived over it, a page at
+/// a time where `limit` asks for one.
 #[utoipa::path(
     get,
     path = "/api/v1/hosts",
     tag = "revocation",
+    params(
+        ("limit" = Option<u32>, Query, description = LIMIT_DOC),
+        ("cursor" = Option<String>, Query, description = "The position the page starts after, from the Link of the page before"),
+        ("q" = Option<String>, Query, description = "A case-insensitive substring of the host id or one of its subject values"),
+        ("gateway" = Option<bool>, Query, description = "Only the Gateways, or only the Hosts that are none")
+    ),
     responses(
-        (status = 200, description = "Every Host, by host id, with its subject values and the Agents that arrived over it (ADR-0043)", body = Vec<HostView>),
+        (status = 200, description = "Every Host that matches, by host id, with its subject values and the Agents that arrived over it (ADR-0043)", body = Vec<HostView>,
+            headers(
+                ("X-Total-Count" = u64, description = "How many Hosts match the filters"),
+                ("Link" = String, description = "The next page, rel=\"next\"; absent on the last")
+            )),
+        (status = 400, description = "A parameter this route does not take, one that is not valid, a cursor that names no position of this list, or more than 10000 without limit", body = ErrorBody),
         (status = 404, description = "Revocation is not configured", body = ErrorBody),
         (status = 500, description = "The fleet cannot be read from the store", body = ErrorBody)
     )
 )]
-async fn list_hosts(State(state): State<Arc<AppState>>) -> Response {
+async fn list_hosts(State(state): State<Arc<AppState>>, RawQuery(raw): RawQuery) -> Response {
     let Some(revocations) = state.revocations() else {
         return revocation_off();
     };
+    let asked = match Asked::parse(raw.as_deref(), &["q", "gateway"]) {
+        Ok(asked) => asked,
+        Err((status, message)) => return error(status, message),
+    };
+    let (after, gateway) = match (asked.after_keyed(true), asked.flag("gateway")) {
+        (Ok(after), Ok(gateway)) => (after, gateway),
+        (Err((status, message)), _) | (_, Err((status, message))) => return error(status, message),
+    };
+    let q = asked.q();
+    let matching: Vec<_> = revocations
+        .hosts()
+        .into_iter()
+        .filter(|(host, entry, _)| {
+            gateway.is_none_or(|gateway| gateway == entry.gateway)
+                && q.as_ref().is_none_or(|q| {
+                    std::iter::once(host.as_str())
+                        .chain(entry.subject.attributes().map(|(_, value)| value))
+                        .any(|field| field.to_lowercase().contains(q.as_str()))
+                })
+        })
+        .map(|(host, entry, certificates)| {
+            let position = crate::listing::Position {
+                key: crate::listing::Key::Text(host.clone()),
+                tiebreak: host.clone(),
+            };
+            (position, (host, entry, certificates))
+        })
+        .collect();
+    let page = paging::cut(&asked, after.as_ref(), matching);
     let mut carried = match state.host_agents() {
         Ok(carried) => carried,
         Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, e),
     };
-    let hosts: Vec<HostView> = revocations
-        .hosts()
+    let hosts: Vec<HostView> = page
+        .entries
         .into_iter()
         .map(|(host, entry, certificates)| {
             let agents = carried.remove(&host).unwrap_or_default();
@@ -3587,7 +3895,7 @@ async fn list_hosts(State(state): State<Arc<AppState>>) -> Response {
             }
         })
         .collect();
-    Json(hosts).into_response()
+    asked.answer("/api/v1/hosts", hosts, page.total, page.next)
 }
 
 /// Marks a host as a Gateway, which speaks for the Agents behind it, or takes the mark away.
@@ -3612,44 +3920,115 @@ async fn set_gateway(
     if state.revocations().is_none() {
         return revocation_off();
     }
-    match state.set_gateway(&host, request.gateway) {
+    // A mark is set or cleared only with its entry's place held, so a restore finds every mark
+    // cleared; only a change known to have failed gives the place back unwritten.
+    let Ok(place) = hold_place(&state) else {
+        return crate::transport::busy();
+    };
+    let mark = |outcome: &str| {
+        crate::audit::Entry::new("host.gateway", outcome)
+            .with("host", host.clone())
+            .with("gateway", request.gateway)
+    };
+    // Off the async workers: a mark of a Host this instance held no copy of reads the ledger
+    // again before it answers.
+    let marked = tokio::task::spawn_blocking({
+        let (state, host, gateway) = (state.clone(), host.clone(), request.gateway);
+        move || state.set_gateway(&host, gateway)
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("the mark ended: {e}")));
+    match marked {
         Ok(true) => {
             info!(%host, gateway = request.gateway, "gateway mark set");
-            note(
-                &state,
-                crate::audit::Entry::new(
-                    "host.gateway",
-                    if request.gateway { "set" } else { "cleared" },
-                )
-                .with("host", host),
-            );
+            fill_place(place, mark(if request.gateway { "set" } else { "cleared" }));
             StatusCode::NO_CONTENT.into_response()
         }
         Ok(false) => error(StatusCode::NOT_FOUND, format!("no host {host:?}")),
-        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e),
+        Err(e) => {
+            // The store may hold it all the same, so the record names what was asked; a restore
+            // clears the mark, whichever it was (toward withdrawing trust).
+            fill_place(place, mark("unknown"));
+            error(StatusCode::INTERNAL_SERVER_ERROR, e)
+        }
     }
 }
 
-/// The revocation list, oldest first.
+/// The revocation list, oldest first, a page at a time where `limit` asks for one.
 #[utoipa::path(
     get,
     path = "/api/v1/revocations",
     tag = "revocation",
+    params(
+        ("limit" = Option<u32>, Query, description = LIMIT_DOC),
+        ("cursor" = Option<String>, Query, description = "The position the page starts after, from the Link of the page before"),
+        ("q" = Option<String>, Query, description = "A case-insensitive substring of the serial, or of the subject or the host of the certificate revoked while the register holds it")
+    ),
     responses(
-        (status = 200, description = "The revocation list, oldest first", body = Vec<RevocationView>),
+        (status = 200, description = "The revocations that match, by the time they were made, then by id", body = Vec<RevocationView>,
+            headers(
+                ("X-Total-Count" = u64, description = "How many revocations match the filters"),
+                ("Link" = String, description = "The next page, rel=\"next\"; absent on the last")
+            )),
+        (status = 400, description = "A parameter this route does not take, one that is not valid, a cursor that names no position of this list, or more than 10000 without limit", body = ErrorBody),
         (status = 404, description = "Revocation is not configured", body = ErrorBody)
     )
 )]
-async fn list_revocations(State(state): State<Arc<AppState>>) -> Response {
+async fn list_revocations(State(state): State<Arc<AppState>>, RawQuery(raw): RawQuery) -> Response {
     let Some(revocations) = state.revocations() else {
         return revocation_off();
     };
-    let list: Vec<RevocationView> = revocations
+    let asked = match Asked::parse(raw.as_deref(), &["q"]) {
+        Ok(asked) => asked,
+        Err((status, message)) => return error(status, message),
+    };
+    let after = match asked.after_keyed(false) {
+        Ok(after) => after,
+        Err((status, message)) => return error(status, message),
+    };
+    let q = asked.q();
+    // What the register says of a revoked certificate, while it holds it.
+    let issued: BTreeMap<(String, String), (String, String)> = match &q {
+        None => BTreeMap::new(),
+        Some(_) => revocations
+            .issued()
+            .into_iter()
+            .map(|issued| {
+                (
+                    (issued.facts.id.issuer, issued.facts.id.serial),
+                    (issued.facts.subject, issued.facts.host.unwrap_or_default()),
+                )
+            })
+            .collect(),
+    };
+    let matching: Vec<(crate::listing::Position, RevocationView)> = revocations
         .list()
         .into_iter()
-        .map(RevocationView::of)
+        .filter(|entry| {
+            let Some(q) = &q else { return true };
+            let crate::revocation::Revoked::Certificate {
+                issuers, serial, ..
+            } = &entry.revoked;
+            serial.to_lowercase().contains(q.as_str())
+                || issuers.iter().any(|issuer| {
+                    issued
+                        .get(&(issuer.clone(), serial.clone()))
+                        .is_some_and(|(subject, host)| {
+                            subject.to_lowercase().contains(q.as_str())
+                                || host.to_lowercase().contains(q.as_str())
+                        })
+                })
+        })
+        .map(|entry| {
+            let position = crate::listing::Position {
+                key: crate::listing::Key::Int(entry.revoked_ms as i64),
+                tiebreak: entry.id.clone(),
+            };
+            (position, RevocationView::of(entry))
+        })
         .collect();
-    Json(list).into_response()
+    let page = paging::cut(&asked, after.as_ref(), matching);
+    asked.answer("/api/v1/revocations", page.entries, page.total, page.next)
 }
 
 /// Revokes a certificate, and every renewal of it. Every session it admitted ends at once, and no
@@ -3690,12 +4069,17 @@ async fn revoke(
         Ok(request) => request,
         Err(e) => return error(StatusCode::BAD_REQUEST, e.to_string()),
     };
+    // A revocation is made only with its entry's place held, so the record names every certificate
+    // revoked; only one known to have failed gives the place back unwritten.
+    let Ok(place) = hold_place(&state) else {
+        return crate::transport::busy();
+    };
     let outcome =
         revocations.revoke_certificate(&request.certificate.authority, &request.certificate.serial);
     match outcome {
         Ok(entry) => {
             info!(revocation = %entry.id, "revoked");
-            // A revoked bootstrap certificate's PKCS#12 file goes before the answer (ADR-0044
+            // A revoked bootstrap certificate's PKCS#12 file goes before the answer (ADR-0050
             // clause 11); the download refuses it either way.
             let crate::revocation::Revoked::Certificate {
                 authority,
@@ -3709,6 +4093,14 @@ async fn revoke(
                 withdrawn = state
                     .enrolment()
                     .map_or(0, |enrolment| enrolment.withdraw_revoked(issuers, serial));
+            }
+            // Written before anything after the revocation can fail: the revocation is made.
+            fill_place(
+                place,
+                revocation_entry("revocation.revoked", "revoked", &entry)
+                    .with("withdrawn_requests", withdrawn),
+            );
+            if authority == "bootstrap" {
                 if let Some(Err(e)) = state.bootstrap().map(|b| b.forget_p12(serial)) {
                     // Said, not swallowed: lifting this revocation would make the file
                     // downloadable again.
@@ -3722,11 +4114,6 @@ async fn revoke(
                     );
                 }
             }
-            note(
-                &state,
-                revocation_entry("revocation.revoked", "revoked", &entry)
-                    .with("withdrawn_requests", withdrawn),
-            );
             (StatusCode::CREATED, Json(RevocationView::of(entry))).into_response()
         }
         Err(RevokeError::Invalid(e)) => error(StatusCode::BAD_REQUEST, e),
@@ -3737,7 +4124,18 @@ async fn revoke(
                 crate::revocation::MAX_REVOCATIONS
             ),
         ),
-        Err(RevokeError::Store(e)) => error(StatusCode::INTERNAL_SERVER_ERROR, e),
+        Err(RevokeError::Store {
+            error: e,
+            attempted,
+        }) => {
+            // The store may hold it all the same, so the record names it, toward revoking it
+            // again at a restore.
+            fill_place(
+                place,
+                revocation_entry("revocation.revoked", "unknown", &attempted),
+            );
+            error(StatusCode::INTERNAL_SERVER_ERROR, e)
+        }
     }
 }
 
@@ -3778,6 +4176,335 @@ async fn lift_revocation(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A register whose revocation is written and whose answer is then lost, as a commit whose
+    /// answer never arrived: the store holds what it was answered `Err` for.
+    #[derive(Default)]
+    struct LostAnswer(std::sync::Mutex<Vec<crate::revocation::Revocation>>);
+
+    impl crate::revocation::LedgerStore for LostAnswer {
+        fn load(&self) -> Result<crate::revocation::Ledger, String> {
+            Ok(crate::revocation::Ledger::default())
+        }
+        fn put_issued(&self, _: &crate::revocation::Issued) -> Result<(), String> {
+            Ok(())
+        }
+        fn remove_issued(&self, _: &crate::revocation::CertId, _: u64) -> Result<bool, String> {
+            Ok(false)
+        }
+        fn add_revocation(
+            &self,
+            entry: &crate::revocation::Revocation,
+            _: usize,
+        ) -> Result<crate::revocation::Added, String> {
+            self.0.lock().expect("lock").push(entry.clone());
+            Err("the connection closed before the commit was answered".into())
+        }
+        fn remove_revocation(&self, _: &str) -> Result<bool, String> {
+            Ok(false)
+        }
+        fn save_hosts(&self, _: &BTreeMap<String, crate::revocation::Host>) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    /// The entries recorded, places written into included.
+    #[derive(Default)]
+    struct Recorded(Arc<std::sync::Mutex<Vec<crate::audit::Entry>>>);
+
+    impl crate::audit::Audit for Recorded {
+        fn record(&self, entry: crate::audit::Entry) -> Result<(), crate::audit::Unavailable> {
+            self.0.lock().expect("lock").push(entry);
+            Ok(())
+        }
+
+        fn reserve(&self) -> Result<crate::audit::Permit, crate::audit::Unavailable> {
+            let entries = self.0.clone();
+            Ok(crate::audit::Permit::new(move |entry| {
+                entries.lock().expect("lock").push(entry);
+            }))
+        }
+    }
+
+    /// A revocation whose store answers an error may have been made all the same, so its place is
+    /// written with the outcome `unknown`, naming the certificate as a revocation that was made
+    /// would, and a restore sets it again.
+    /// Verifies: ADR-0046
+    #[tokio::test]
+    async fn a_revocation_whose_store_answer_was_lost_is_recorded_as_unknown() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let revocations = crate::revocation::Revocations::open(
+            Box::new(LostAnswer::default()),
+            Arc::new(crate::clock::SystemClock),
+            vec![crate::revocation::Authority {
+                role: "client".to_string(),
+                subject: "0".repeat(64),
+                name: "client CA".to_string(),
+            }],
+        )
+        .expect("revocations");
+        let audit = Recorded::default();
+        let entries = audit.0.clone();
+        let state = AppState::new(dir.path().to_path_buf())
+            .expect("state")
+            .with_revocations(Some(Arc::new(revocations)))
+            .with_audit(Some(Arc::new(audit) as Arc<dyn crate::audit::Audit>));
+        let response = revoke(
+            State(Arc::new(state)),
+            SameOrigin,
+            Json(serde_json::json!({
+                "certificate": { "authority": "client", "serial": "0ABC123" }
+            })),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let entries = entries.lock().expect("lock");
+        let revoked: Vec<&crate::audit::Entry> = entries
+            .iter()
+            .filter(|entry| entry.event == "revocation.revoked")
+            .collect();
+        assert_eq!(revoked.len(), 1, "{entries:#?}");
+        assert_eq!(revoked[0].outcome, "unknown");
+        let field = |key: &str| revoked[0].fields.get(key).cloned();
+        let text = |value: &str| Some(crate::audit::Field::Text(value.to_string()));
+        assert_eq!(field("authority"), text("client"));
+        assert_eq!(field("serial"), text("abc123"));
+        assert!(field("id").is_some(), "{:?}", revoked[0]);
+    }
+
+    /// A register that knows the Gateway `h-gw`, and whose write of the hosts is answered `Err`
+    /// after it may have landed.
+    struct LostHosts;
+
+    impl crate::revocation::LedgerStore for LostHosts {
+        fn load(&self) -> Result<crate::revocation::Ledger, String> {
+            let mut ledger = crate::revocation::Ledger::default();
+            ledger.hosts.insert(
+                "h-gw".to_string(),
+                crate::revocation::Host {
+                    gateway: true,
+                    ..crate::revocation::Host::default()
+                },
+            );
+            Ok(ledger)
+        }
+        fn put_issued(&self, _: &crate::revocation::Issued) -> Result<(), String> {
+            Ok(())
+        }
+        fn remove_issued(&self, _: &crate::revocation::CertId, _: u64) -> Result<bool, String> {
+            Ok(false)
+        }
+        fn add_revocation(
+            &self,
+            _: &crate::revocation::Revocation,
+            _: usize,
+        ) -> Result<crate::revocation::Added, String> {
+            Err("not in this test".into())
+        }
+        fn remove_revocation(&self, _: &str) -> Result<bool, String> {
+            Ok(false)
+        }
+        fn save_hosts(&self, _: &BTreeMap<String, crate::revocation::Host>) -> Result<(), String> {
+            Err("the connection closed before the commit was answered".into())
+        }
+    }
+
+    /// Floors whose write is answered `Err` after it may have landed.
+    struct LostFloor;
+
+    impl crate::floors::FloorStore for LostFloor {
+        fn load(&self) -> Result<BTreeMap<String, crate::floors::Floor>, String> {
+            Ok(BTreeMap::new())
+        }
+        fn put(&self, _: &str, _: &crate::floors::Floor) -> Result<crate::floors::Put, String> {
+            Err("the connection closed before the commit was answered".into())
+        }
+        fn remove(&self, _: &str) -> Result<bool, String> {
+            Ok(false)
+        }
+    }
+
+    /// An enrolment store in memory whose writes, once `failing` is set, are answered `Err`.
+    #[derive(Clone, Default)]
+    struct Failing(
+        Arc<std::sync::Mutex<Option<crate::enrolment::Persisted>>>,
+        Arc<std::sync::atomic::AtomicBool>,
+    );
+
+    impl crate::enrolment::EnrolmentStore for Failing {
+        fn load(&self) -> Result<Option<crate::enrolment::Persisted>, String> {
+            Ok(self.0.lock().expect("lock").clone())
+        }
+        fn save(&self, persisted: &crate::enrolment::Persisted) -> Result<(), String> {
+            if self.1.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err("the connection closed before the commit was answered".into());
+            }
+            *self.0.lock().expect("lock") = Some(persisted.clone());
+            Ok(())
+        }
+    }
+
+    /// An act that withdraws trust whose store answers an error may have been made all the same,
+    /// so its place is written with the outcome `unknown` and what it was asked to do, and a
+    /// restore repeats it; a window closed here is closed whatever its store answers, so its entry
+    /// says `closed`.
+    /// Verifies: ADR-0046
+    #[tokio::test]
+    async fn an_act_withdrawing_trust_whose_store_answered_an_error_is_recorded_all_the_same() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let revocations = crate::revocation::Revocations::open(
+            Box::new(LostHosts),
+            Arc::new(crate::clock::SystemClock),
+            Vec::new(),
+        )
+        .expect("revocations");
+        let floors = crate::floors::PackageFloors::open(Box::new(LostFloor)).expect("floors");
+        let store = Failing::default();
+        let enrolment = crate::enrolment::Enrolment::open_on(
+            Arc::new(crate::clock::SystemClock),
+            Box::new(store.clone()),
+        )
+        .expect("enrolment");
+        enrolment.open(600).expect("open the window");
+        // A request's id is its key's fingerprint, which the rejection checks.
+        enrolment.submit(
+            crate::enrolment::tests::request(&crate::enrolment::tests::key(1)),
+            crate::enrolment::tests::requester(),
+        );
+        let id = enrolment.pending()[0].id.clone();
+        store.1.store(true, std::sync::atomic::Ordering::SeqCst);
+        let audit = Recorded::default();
+        let entries = audit.0.clone();
+        let state = Arc::new(
+            AppState::new(dir.path().to_path_buf())
+                .expect("state")
+                .with_revocations(Some(Arc::new(revocations)))
+                .with_floors(Some(Arc::new(floors)))
+                .with_enrolment(Some(Arc::new(enrolment)))
+                .with_audit(Some(Arc::new(audit) as Arc<dyn crate::audit::Audit>)),
+        );
+
+        let cleared = set_gateway(
+            State(state.clone()),
+            SameOrigin,
+            Path("h-gw".to_string()),
+            Json(GatewayRequest { gateway: false }),
+        )
+        .await;
+        let floor = put_package_floor(
+            State(state.clone()),
+            Path("otelcol".to_string()),
+            Json(FloorSpec {
+                version: "2.0.0".to_string(),
+                signature: hex::encode([7u8; 64]),
+            }),
+        )
+        .await;
+        let rejected = reject_enrolment(State(state.clone()), SameOrigin, Path(id.clone())).await;
+        let closed = close_enrolment_window(State(state.clone())).await;
+        for response in [&cleared, &floor, &rejected, &closed] {
+            assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        }
+
+        let entries = entries.lock().expect("lock");
+        let only = |event: &str| -> crate::audit::Entry {
+            let named: Vec<&crate::audit::Entry> = entries
+                .iter()
+                .filter(|entry| entry.event == event)
+                .collect();
+            assert_eq!(named.len(), 1, "{event}: {entries:#?}");
+            named[0].clone()
+        };
+        let text = |value: &str| Some(crate::audit::Field::Text(value.to_string()));
+        let gateway = only("host.gateway");
+        assert_eq!(gateway.outcome, "unknown");
+        assert_eq!(gateway.fields.get("host").cloned(), text("h-gw"));
+        assert_eq!(
+            gateway.fields.get("gateway").cloned(),
+            Some(crate::audit::Field::Flag(false))
+        );
+        let floor = only("package_floor.set");
+        assert_eq!(floor.outcome, "unknown");
+        assert_eq!(floor.fields.get("agent_type").cloned(), text("otelcol"));
+        assert_eq!(floor.fields.get("version").cloned(), text("2.0.0"));
+        let rejected = only("enrolment.rejected");
+        assert_eq!(rejected.outcome, "unknown");
+        assert_eq!(rejected.fields.get("id").cloned(), text(&id));
+        assert_eq!(only("enrolment.window").outcome, "closed");
+    }
+
+    /// A rejection of an id the queue does not hold, with the window closed, is answered `204`,
+    /// recorded as `enrolment.rejected` with `queued` false, and refuses that request when it
+    /// arrives in a window; one queued is recorded with `queued` true. An id that is not 64
+    /// lowercase hexadecimal digits is answered `400` and recorded nowhere.
+    /// Verifies: ADR-0052
+    #[tokio::test]
+    async fn an_id_not_queued_is_rejected_and_a_malformed_one_is_refused() {
+        use crate::enrolment::tests::{key, request, requester};
+        use crate::enrolment::Submitted;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let enrolment = Arc::new(crate::enrolment::Enrolment::new(Arc::new(
+            crate::clock::SystemClock,
+        )));
+        let audit = Recorded::default();
+        let entries = audit.0.clone();
+        let state = Arc::new(
+            AppState::new(dir.path().to_path_buf())
+                .expect("state")
+                .with_enrolment(Some(enrolment.clone()))
+                .with_audit(Some(Arc::new(audit) as Arc<dyn crate::audit::Audit>)),
+        );
+        let reject = |id: String| reject_enrolment(State(state.clone()), SameOrigin, Path(id));
+
+        for malformed in [
+            "no-such-request".to_string(),
+            key(0xab).to_uppercase(),
+            key(1)[1..].to_string(),
+            format!("{}0", key(1)),
+        ] {
+            let response = reject(malformed.clone()).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{malformed}");
+        }
+        assert!(entries.lock().expect("lock").is_empty(), "nothing recorded");
+
+        assert!(!enrolment.is_open());
+        let response = reject(key(1)).await;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        enrolment.open(600).expect("open the window");
+        assert_eq!(
+            enrolment.submit(request(&key(1)), requester()),
+            Submitted::Rejected
+        );
+        assert!(enrolment.pending().is_empty());
+        assert_eq!(
+            enrolment.submit(request(&key(2)), requester()),
+            Submitted::Waiting
+        );
+        let response = reject(key(2)).await;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        let entries = entries.lock().expect("lock");
+        let rejected: Vec<_> = entries
+            .iter()
+            .filter(|entry| entry.event == "enrolment.rejected")
+            .map(|entry| {
+                (
+                    entry.outcome.clone(),
+                    entry.fields.get("id").cloned(),
+                    entry.fields.get("queued").cloned(),
+                )
+            })
+            .collect();
+        let text = |value: String| Some(crate::audit::Field::Text(value));
+        let flag = |value: bool| Some(crate::audit::Field::Flag(value));
+        assert_eq!(
+            rejected,
+            [
+                ("rejected".to_string(), text(key(1)), flag(false)),
+                ("rejected".to_string(), text(key(2)), flag(true)),
+            ]
+        );
+    }
 
     /// A store refusal of the Package routes is answered with the status the REST contract names
     /// for it — among them the signature write onto an entry another instance replaced, a

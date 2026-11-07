@@ -43,7 +43,9 @@ puts things, and every configuration key.
   `***` (`[packages]`'s `archive_key`, and `bearer_token` and `password` should a leftover `[auth]`
   still hold them), since the Server persists what it receives.
 - **Supervises processes**: starts them, watches them, restarts them on a configuration
-  change or a Server-issued restart command, stops them gracefully on shutdown.
+  change or a Server-issued restart command, stops them gracefully on shutdown. Each restart
+  command received restarts the process once; the Server sends one again when it saw its send
+  fail, so a process may be restarted twice for one request.
 - **Applies received Configurations**: writes each entry to disk under its Configuration's name,
   points the process at it, and reports the configuration applied or failed with the hash it
   applied.
@@ -893,10 +895,11 @@ What the questionnaire asks about is only what has no useful default on a fresh 
   where they lie, logs the request's key fingerprint and waits until an operator approves it, then
   stores the issued certificate in the state directory. Ctrl-C stops the wait; the file stays
   written, nothing is registered, and running the questionnaire again asks again and resumes the
-  same request, printing its fingerprint. A request an operator rejected stays rejected: the
-  Server's refusal is logged and the wait goes on, so stop it, delete `client-key.pending.pem` and
-  `client-csr.pending.pem` from the state directory, and run the questionnaire again for a fresh
-  request. A path that names no readable file, here or for the CA, is asked for again;
+  same request, printing its fingerprint. A request an operator rejected stays rejected for its
+  key, in every later window too: the Server's refusal is logged and the wait goes on, so stop it,
+  delete `client-key.pending.pem` and `client-csr.pending.pem` from the state directory, and run
+  the questionnaire again for a fresh request with a new key. A path that names no readable file,
+  here or for the CA, is asked for again;
 - **the package verification key** ([`[packages]`](#packages)). It also decides whether the Server
   may update this Client: a new file is written with `self_update = true`, which takes effect once
   a key is set. An empty answer is accepted, and the questionnaire then says that this Client
@@ -1355,7 +1358,7 @@ notice.
 | `endpoint` | `"wss://127.0.0.1:4320/v1/opamp"` | The Server's OpAMP endpoint. The scheme selects the transport: `wss://` for WebSocket, `https://` for polling, both TLS 1.3. `ws://` and `http://` are accepted only when the host is the IP literal `127.0.0.1` or `::1`; to any other host, the name `localhost` included, the Client refuses to start. |
 | `name` | `"Supervisor Agent"` | The Agent's `service.instance.name` — your name for *this* Client, shown in the fleet view and matchable by a Selector. Its `service.name` is the constant type `supervisor`, the same on every host. |
 | `poll_interval_secs` | `30` | How often the plain-HTTP transport polls. Ignored on WebSocket. |
-| `heartbeat_interval_secs` | `30` | Heartbeat interval on WebSocket. `0` disables heartbeats and undeclares the capability; on plain HTTP every poll already is the periodic report. |
+| `heartbeat_interval_secs` | `30` | Heartbeat interval on WebSocket. `0` disables heartbeats and undeclares the capability; on plain HTTP every poll already is the periodic report. It also bounds the silence of a WebSocket, a Gateway's upstream connections included: one on which nothing arrives for half an interval is pinged, one on which nothing arrives for a whole interval (30 seconds with heartbeats disabled) is ended and reconnected as after a lost connection. Opening a connection, the TLS handshake and the upgrade included, gets one interval too: at `1`, a link whose round trip is above about 300 ms cannot connect at all. |
 | `max_message_size_bytes` | `67108864` (64 MiB) | The largest OpAMP message sent or accepted, in either direction — including on the Supervisor Endpoint. A message past it is never sent, and an oversized one from the Server is refused. |
 | `state_dir` | `"client-state"` | Where the Client persists its own Agent's identity, its remote configuration, and any Server-offered connection settings. A self-update artifact is streamed here first, so it needs room for one agent binary. |
 | `supervisor_dir` | `<state_dir>/supervisors` | Where the per-Supervisor directories live. Set it when the programs must not live where the state does — `/var/lib` is often mounted `noexec`, and sized for state rather than for a few hundred megabytes of Collector. Where it is the state directory itself, a Supervisor named after what the Client keeps there — `instance-uid`, `config`, `packages`, `logs`, `gateway-packages`, `supervisors` — is refused at startup and in a set the Server offers, and no Supervisor's directory may be the state directory or hold it. Outside the data root, the layout root and the state directory, `service install` creates and hands over nothing for it: create it yourself, writable by the service's account only. |
@@ -1474,13 +1477,15 @@ starts. Enrolment runs the same either way:
    stores it, and uses it from then on.
 
 Until the request is answered, the Client keeps its pending key and re-sends the same request. A
-closed window is answered `503`, which the Client retries with its usual backoff and which does not
-count toward the Server's admission throttle. The issued
-certificate is renewed the same way once it is two thirds through its validity, with no operator
-involved. The private key is written `0600`; on Windows the state directory's ACL is what protects
-it. Over an `https://` endpoint the enrolling Client sends its request alone, before the Server's
-first answer, and re-sends it at every poll. A host behind a Gateway enrols through it over
-`https://` (see [Enrolment through a Gateway](#enrolment-through-a-gateway)).
+rejected request stays rejected for its key, beyond the window; a fresh request with a new key
+starts once `client-key.pending.pem` and `client-csr.pending.pem` are deleted from the state
+directory. A closed window is answered `503`, which the Client retries with its usual backoff and
+which does not count toward the Server's admission throttle. The issued certificate is renewed the
+same way once it is two thirds through its validity, with no operator involved. The private key is
+written `0600`; on Windows the state directory's ACL is what protects it. Over an `https://`
+endpoint the enrolling Client sends its request alone, before the Server's first answer, and
+re-sends it at every poll. A host behind a Gateway enrols through it over `https://` (see [Enrolment
+through a Gateway](#enrolment-through-a-gateway)).
 
 ### A leftover `[auth]`
 

@@ -28,11 +28,11 @@ fn usage() -> ! {
     std::process::exit(2);
 }
 
-/// `server audit-verify <dir>` (ADR-0039 clause 3): walks the audit record's files in order and
+/// `server audit-verify <dir>` (ADR-0046 clause 3): walks the audit record's files in order and
 /// names the first entry whose `prev` does not match the entry before it. `server audit-verify
 /// --config <server.toml> [--archive <dir>]` walks every chain of the record in the database
 /// instead, lists the open ones, and checks the archive a move from files left
-/// (ADR-0042 clauses 5 and 6).
+/// (ADR-0047 clauses 5 and 6).
 fn audit_verify(mut args: impl Iterator<Item = String>) -> ! {
     let Some(first) = args.next() else { usage() };
     if first != "--config" && first != "--archive" {
@@ -161,7 +161,7 @@ fn pki(mut args: impl Iterator<Item = String>) -> ! {
     std::process::exit(pki::exit_code(&endings, now));
 }
 
-/// `server migrate --config-dir <old> --packages-dir <old> --data-dir <new>` (ADR-0044 clause 26):
+/// `server migrate --config-dir <old> --packages-dir <old> --data-dir <new>` (ADR-0050 clause 26):
 /// moves the state an older Server kept under `config_dir` and `packages_dir` into a new, empty
 /// `data_dir`, copying, so the old directories stay as the backup. It is run while the Server is
 /// stopped — a Server still writing the old directories would be copied half-way — and that is the
@@ -214,7 +214,7 @@ fn migrate(mut args: impl Iterator<Item = String>) -> ! {
 }
 
 /// `server migrate-to-postgres --from <data_dir> [--data-dir <new>] [--config <server.toml>]`
-/// (ADR-0044 clause 27): copies the records of `data_dir` into
+/// (ADR-0050 clause 27): copies the records of `data_dir` into
 /// the database the configuration names, leaving the old directory as the backup and its audit
 /// record as the archive the first chain links to. With the filesystem blob store the blobs go into
 /// a new, empty `data_dir`; with S3 there is none, `--data-dir` is refused, and the blobs the
@@ -294,7 +294,7 @@ fn migrate_to_postgres(mut args: impl Iterator<Item = String>) -> ! {
 }
 
 /// `server blobs-to-s3 --data-dir <data_dir> [--config <server.toml>]`
-/// (ADR-0044 clause 19): uploads the artifacts of a Server
+/// (ADR-0050 clause 19): uploads the artifacts of a Server
 /// already on PostgreSQL with the filesystem blob store into the bucket the configuration names,
 /// once, while no instance runs. The configuration is the one the Server will start with: the
 /// database, the bucket, and no `data_dir`. Prints what it uploaded, and exits non-zero when an
@@ -488,11 +488,53 @@ fn bind(address: SocketAddr, plane: &str) -> std::net::TcpListener {
     }
 }
 
-#[tokio::main]
-async fn main() {
+/// The most malloc arenas the Server's process uses on glibc, unless `MALLOC_ARENA_MAX` names
+/// another count.
+///
+/// glibc gives a thread that finds every arena in use an arena of its own, up to eight for each
+/// CPU, and an arena keeps most of what is freed in it for its own later use. The Server's work
+/// moves from thread to thread, the runtime's workers and the blocking pool that calls the store,
+/// and a read of the whole fleet, as a rollout makes, allocates and frees on whichever thread runs
+/// it. With an arena for each thread, an instance's resident memory grows with each such read on a
+/// thread whose arena has not held one yet, long after the memory in use has levelled off: in the
+/// G-20 load test, an instance with 205 MiB in use held 1.3 GiB after 15 minutes, and still grew.
+/// With two arenas it no longer grows with each such read. What still grows under a steady fleet
+/// is memory in use, to a bound: the database connections' buffers, at the size of the largest
+/// presence batch each has written, which follows the most Agents the instance has held at once.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+const MALLOC_ARENAS: libc::c_int = 2;
+
+/// Caps glibc's malloc arenas at [`MALLOC_ARENAS`], unless the environment names a count in
+/// `MALLOC_ARENA_MAX`, which glibc reads itself. Called first in `main`, before any other thread
+/// starts, so that no thread holds an arena past the cap.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn cap_malloc_arenas() {
+    if std::env::var_os("MALLOC_ARENA_MAX").is_some() {
+        return;
+    }
+    // SAFETY: mallopt only sets a parameter of glibc's allocator; it is called before this
+    // process starts a thread of its own.
+    if unsafe { libc::mallopt(libc::M_ARENA_MAX, MALLOC_ARENAS) } != 1 {
+        eprintln!("cannot cap the malloc arenas at {MALLOC_ARENAS}");
+    }
+}
+
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+fn cap_malloc_arenas() {}
+
+fn main() {
+    cap_malloc_arenas();
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("the Server's runtime")
+        .block_on(serve());
+}
+
+async fn serve() {
     // The log goes to stderr, so that stdout carries only what a command prints as its result.
     // On PostgreSQL each line names the instance id of the lease the instance holds (clause 1 of
-    // ADR-0041).
+    // ADR-0048).
     let logged = fleet_server::instance::LoggedId::default();
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
@@ -508,6 +550,11 @@ async fn main() {
 
     // One TLS provider for the whole process (ADR-0045): ring, never a system library.
     opamp::tls::install_ring_provider();
+
+    // The clock a lease and a sweep measure on counts a suspend of the host
+    // (ADR-0048
+    // clause 3), handed to the package store and the lease.
+    let elapsed = since_boot().unwrap_or_else(fleet_server::clock::Elapsed::monotonic);
 
     let Layered { config, origin, .. } = load_config(parse_args());
 
@@ -533,7 +580,7 @@ async fn main() {
     };
     // On PostgreSQL the instance id is made as soon as the store is known, so that every line
     // from here on names it, and the first lease is taken under it (clause 1 of
-    // ADR-0041).
+    // ADR-0048).
     let instance_id = if config.database.postgres().is_some() {
         match fleet_server::postgres::lease::new_instance_id() {
             Ok(id) => {
@@ -548,8 +595,8 @@ async fn main() {
     } else {
         None
     };
-    // Where the records live (ADR-0044): the data directory, its layout created owner-only and
-    // checked before any store opens (ADR-0044), and with PostgreSQL the database, its lock taken
+    // Where the records live (ADR-0050): the data directory, its layout created owner-only and
+    // checked before any store opens (ADR-0050), and with PostgreSQL the database, its lock taken
     // and its schema applied.
     let records = match fleet_server::Records::open(&config) {
         Ok(records) => records,
@@ -563,7 +610,7 @@ async fn main() {
     }
     let clock: Arc<dyn fleet_server::fleet::Clock> = Arc::new(fleet_server::clock::SystemClock);
     // ADR-0038: closed until an operator opens it; the window and its queue survive a restart
-    // (ADR-0044 clause 8).
+    // (ADR-0050 clause 8).
     let enrolment = match config.enrolment.as_ref().map(|section| {
         info!("hosts with a bootstrap certificate may enrol while an operator opens the window");
         fleet_server::enrolment::Enrolment::open_on(clock.clone(), records.enrolment()).map(
@@ -608,7 +655,7 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    // The bootstrap CA's key, when the Server issues bootstrap certificates (ADR-0022).
+    // The bootstrap CA's key, when the Server issues bootstrap certificates (ADR-0052).
     let bootstrap = match config.enrolment.as_ref().map(|enrolment| {
         fleet_server::ca::BootstrapCa::from_config(enrolment, config.client_ca.as_ref()).and_then(
             |signer| {
@@ -675,10 +722,15 @@ async fn main() {
             std::process::exit(1);
         }
     };
+    // Its startup sweep marks what it deletes under the lease the instance takes next, which
+    // another instance's sweep leaves (ADR-0050 clause 14).
+    if let (fleet_server::Records::Postgres(database), Some(id)) = (&records, &instance_id) {
+        database.sweep_under(id);
+    }
     // The package store before the lease, so that a bucket that fails startup leaves no lease
     // and no audit chain behind. Its startup cleanup needs no lease of this instance: it lists the
     // staging keys before it asks which leases are live
-    // (ADR-0044 clause 16).
+    // (ADR-0050 clause 16).
     let packages = config
         .packages
         .verification_key()
@@ -691,6 +743,7 @@ async fn main() {
                 &records,
                 config.data_dir(),
                 &config.blobs,
+                elapsed.clone(),
             )
             .map(|(store, staging)| {
                 (
@@ -719,13 +772,13 @@ async fn main() {
     };
     // With PostgreSQL, a lease before anything is decided and before either listener opens
     // (clauses 1 to 3 of
-    // ADR-0041):
+    // ADR-0048):
     // the audit chain is the lease's.
     let lease = match &records {
         fleet_server::Records::Postgres(database) => {
             // The audit files a Server on PostgreSQL kept before its record moved into the
             // database stay as the archive, which the first chain names (clause 6 of
-            // ADR-0042).
+            // ADR-0047).
             // Only while the database holds no chain: a later start never reads them.
             // With S3 too there is no data directory, and no archive to offer.
             if let Some(data_dir) = config.data_dir() {
@@ -746,6 +799,7 @@ async fn main() {
                     config.database.lease(),
                     &host_name(),
                     id,
+                    elapsed.clone(),
                 )
             }) {
                 Ok(lease) => {
@@ -762,14 +816,14 @@ async fn main() {
     };
     // On the bucket, this instance's uploads are staged under its lease, and whenever it takes over
     // a lapsed lease, the uploads that lease left go
-    // (ADR-0044 clause 16).
+    // (ADR-0050 clause 16).
     if let (Some(staging), Some(lease)) = (staging, &lease) {
         staging.stage_under(lease.held());
         clean_staging_on_takeover(staging, lease.takeovers());
     }
-    // The audit record (ADR-0039), opened before anything is decided: one chain in files, or on
+    // The audit record (ADR-0046), opened before anything is decided: one chain in files, or on
     // PostgreSQL the chain of each lease
-    // (ADR-0042).
+    // (ADR-0047).
     let started = match (&records, &lease) {
         (fleet_server::Records::Postgres(database), Some(lease)) => {
             fleet_server::audit_log::AuditLog::start_under(
@@ -780,6 +834,7 @@ async fn main() {
                 config.audit.limits(),
                 clock.clone(),
                 lease.held(),
+                Some(lease.proof()),
             )
         }
         _ => config
@@ -803,7 +858,7 @@ async fn main() {
     };
     let audit: Arc<dyn fleet_server::audit::Audit> = audit_log.clone();
     // On PostgreSQL the record goes back `[audit] retain_days`: pruned at startup and once a day
-    // after (ADR-0044 clause 12).
+    // after (ADR-0050 clause 12).
     if let (fleet_server::Records::Postgres(database), Some(lease)) = (&records, &lease) {
         let (database, audit, held) = (database.clone(), audit_log.clone(), lease.held());
         let retain_days = config.audit.retain_days();
@@ -893,6 +948,23 @@ async fn main() {
             std::process::exit(1);
         }
     };
+    // On files an approval writes its decision before its register entry: one a write between
+    // the two left decided without its entry waits again (ADR-0050 clause 9).
+    let read_certificate = |pem: &str| {
+        let der = opamp::tls::certificates(pem.as_bytes())?;
+        fleet_server::ca::facts(der.first().ok_or("no certificate in the PEM")?.as_ref())
+    };
+    match state.take_back_unregistered_approvals(&read_certificate) {
+        Ok(0) => {}
+        Ok(taken) => warn!(
+            requests = taken,
+            "approved enrolment requests whose certificate the register does not hold wait again"
+        ),
+        Err(e) => {
+            eprintln!("cannot take back an approval whose certificate is not registered: {e}");
+            std::process::exit(1);
+        }
+    }
     // The certificate is the whole of admission (ADR-0038): the configuration was refused at load
     // without the client CA.
     info!("the OpAMP endpoint admits by client certificate");
@@ -935,20 +1007,28 @@ async fn main() {
     let operators = fleet_server::operator_app(state.clone(), operator_auth);
 
     // The revocations, and every other change, of the other instances followed (clauses 9 to 11
-    // of ADR-0041),
+    // of ADR-0048),
     // and the presence of the Agents this instance carries written in batches under its lease
     // (ADR-0043 clause 4).
     let presence = match (&lease, &records) {
         (Some(lease), fleet_server::Records::Postgres(database)) => {
             state.serve_under(lease.held());
+            let proof = lease.proof();
+            state.answer_while(move || proof.holds());
             let presence = config.database.presence_interval().map(|interval| {
                 fleet_server::instance::write_presence(state.clone(), lease.held(), interval)
             });
             fleet_server::instance::follow(database, state.clone(), Some(lease.list_versions()));
+            fleet_server::instance::retry_unmarks(state.clone(), config.database.lease().renew);
             presence
         }
         _ => None,
     };
+    // A restart whose command was not sent and whose put-back failed is tried again until it
+    // holds, on every store
+    // (ADR-0048
+    // clause 8).
+    fleet_server::instance::retry_restarts(state.clone());
     // The handlers are installed before either plane is bound and logged as served, so a stop
     // sent as soon as the log says so drains the planes rather than ending the process.
     let shutdown = shutdown_signal();
@@ -971,17 +1051,27 @@ async fn main() {
         },
         (agent_listener, operator_listener),
         lease.as_ref().map(fleet_server::instance::Lease::held),
+        lease.as_ref().map(fleet_server::instance::Lease::proof),
         shutdown,
     )
     .await;
     if let Err(e) = &served {
         error!("{e}");
     }
+    // A new lease that found a schema a newer Server migrated stops the instance as a failed
+    // start does, naming both versions
+    // (ADR-0048
+    // clause 16).
+    if let fleet_server::Records::Postgres(database) = &records {
+        if let Some(refusal) = database.outdated() {
+            eprintln!("{refusal}");
+        }
+    }
     // The graceful-shutdown flush (ADR-0043): every record's current timestamp and sequence
     // number, so the ordinary restart restores a fleet without gaps or false silence.
     state.flush_agents();
     // And the presence of every Agent, its sessions ended by the drain, before the lease goes
-    // (ADR-0041
+    // (ADR-0048
     // clause 3): once the periodic batches stopped, so none commits after it.
     if let Some(presence) = presence {
         presence.stop().await;
@@ -995,10 +1085,10 @@ async fn main() {
         }
     }
     // What is still queued for the audit record is written before the process, and the writer
-    // thread with it, ends (ADR-0039); on PostgreSQL the chain is closed then, and the lease
+    // thread with it, ends (ADR-0046); on PostgreSQL the chain is closed then, and the lease
     // released only once it is, so that a chain left open is closed by the instance that takes
     // over the lapsed lease (clause 3 of
-    // ADR-0042).
+    // ADR-0047).
     let closed = audit_log.close(std::time::Duration::from_secs(5));
     if let Some(lease) = lease {
         if closed {
@@ -1013,6 +1103,13 @@ async fn main() {
         error!(
             "the audit record could not be written out before shutdown; its last entries are lost"
         );
+    }
+    // Nothing is recorded after the close: a decision taken since is refused, and counted here
+    // (ADR-0046
+    // clause 5).
+    let unrecorded = audit_log.unrecorded_count();
+    if unrecorded > 0 {
+        error!(unrecorded, "decisions went unrecorded at shutdown");
     }
     // A plane that could not be served is a failure a service manager restarts on.
     if served.is_err() {
@@ -1037,6 +1134,37 @@ fn clean_staging_on_takeover(
             }
         }
     });
+}
+
+/// `CLOCK_BOOTTIME`, which counts the time the host was suspended, as the clock a lease and a sweep
+/// measure on: on Linux, where the Server ships, once a first reading succeeds. A later reading
+/// that fails reads as the end of time, so a lease measured on it lapses rather than holds.
+#[cfg(target_os = "linux")]
+fn since_boot() -> Option<fleet_server::clock::Elapsed> {
+    fn read() -> Option<std::time::Duration> {
+        let mut now = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: clock_gettime writes only the timespec this function owns.
+        let read = unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut now) };
+        (read == 0).then(|| {
+            std::time::Duration::new(
+                u64::try_from(now.tv_sec).unwrap_or(0),
+                u32::try_from(now.tv_nsec).unwrap_or(0),
+            )
+        })
+    }
+    read()?;
+    Some(fleet_server::clock::Elapsed::new(|| {
+        read().unwrap_or(std::time::Duration::MAX)
+    }))
+}
+
+/// Elsewhere the clock of `std::time::Instant`.
+#[cfg(not(target_os = "linux"))]
+fn since_boot() -> Option<fleet_server::clock::Elapsed> {
+    None
 }
 
 /// The name of the host the Server runs on, which its lease records: the kernel's on Linux, where
@@ -1091,6 +1219,111 @@ fn uploaded_artifacts_notice(signs_csrs: bool) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// On glibc the Server's process allocates from at most [`MALLOC_ARENAS`] arenas, however many
+    /// of its threads allocate at once. Run in a process of its own, which caps its arenas as
+    /// `main` does, since the test harness's threads have arenas of their own by then.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[test]
+    fn the_process_allocates_from_a_capped_number_of_arenas() {
+        const CHILD: &str = "FLEET_TEST_MALLOC_ARENAS_CHILD";
+        const NAME: &str = "tests::the_process_allocates_from_a_capped_number_of_arenas";
+        if std::env::var_os(CHILD).is_some() {
+            cap_malloc_arenas();
+            let start = Arc::new(std::sync::Barrier::new(16));
+            let threads: Vec<_> = (0..16)
+                .map(|_| {
+                    let start = start.clone();
+                    std::thread::spawn(move || {
+                        start.wait();
+                        for _ in 0..2_000 {
+                            let held: Vec<Vec<u8>> =
+                                (0..64).map(|i| vec![0; 64 + i * 64]).collect();
+                            std::hint::black_box(held);
+                        }
+                    })
+                })
+                .collect();
+            for thread in threads {
+                thread.join().expect("an allocating thread");
+            }
+            println!("malloc arenas: {}", malloc_arenas());
+            return;
+        }
+        let child = std::process::Command::new(std::env::current_exe().expect("the test binary"))
+            .args(["--exact", NAME, "--nocapture", "--test-threads=1"])
+            .env(CHILD, "1")
+            .env_remove("MALLOC_ARENA_MAX")
+            .output()
+            .expect("run the test in a process of its own");
+        let out = String::from_utf8_lossy(&child.stdout);
+        assert!(child.status.success(), "{out}");
+        let arenas: libc::c_int = out
+            .lines()
+            .find_map(|line| line.split("malloc arenas: ").nth(1))
+            .unwrap_or_else(|| panic!("the arenas counted: {out}"))
+            .trim()
+            .parse()
+            .expect("a count");
+        assert!(
+            (1..=MALLOC_ARENAS).contains(&arenas),
+            "{arenas} arenas, at most {MALLOC_ARENAS}"
+        );
+    }
+
+    /// How many arenas glibc's malloc has, as `malloc_info` lists them.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    fn malloc_arenas() -> libc::c_int {
+        let dir = tempfile::tempdir().expect("a directory");
+        let path = dir.path().join("malloc-info.xml");
+        let name = std::ffi::CString::new(path.to_str().expect("a path")).expect("a C path");
+        // SAFETY: a file this function opens, writes through malloc_info and closes.
+        unsafe {
+            let file = libc::fopen(name.as_ptr(), c"w".as_ptr());
+            assert!(!file.is_null(), "open {}", path.display());
+            assert_eq!(libc::malloc_info(0, file), 0, "malloc_info");
+            libc::fclose(file);
+        }
+        let info = std::fs::read_to_string(&path).expect("read malloc_info");
+        libc::c_int::try_from(info.matches("<heap nr=").count()).expect("a count")
+    }
+
+    /// On Linux the lease's clock is `CLOCK_BOOTTIME`: it reads, it moves on as time passes, and it
+    /// counts at least as much as the monotonic clock, which a suspend would leave behind.
+    /// Verifies: ADR-0048
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_leases_clock_is_the_one_that_counts_a_suspend() {
+        let clock = since_boot().expect("CLOCK_BOOTTIME reads");
+        let (first, started) = (clock.now(), std::time::Instant::now());
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let (passed, monotonic) = (clock.now() - first, started.elapsed());
+        assert!(passed >= std::time::Duration::from_millis(20), "{passed:?}");
+        assert!(
+            passed + std::time::Duration::from_millis(5) >= monotonic,
+            "{passed:?}"
+        );
+        let boottime = || {
+            let mut now = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
+            // SAFETY: clock_gettime writes only the timespec this closure owns.
+            assert_eq!(
+                unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut now) },
+                0
+            );
+            std::time::Duration::new(
+                u64::try_from(now.tv_sec).expect("seconds"),
+                u32::try_from(now.tv_nsec).expect("nanoseconds"),
+            )
+        };
+        let (before, read, after) = (boottime(), clock.now(), boottime());
+        assert!(
+            before <= read && read <= after,
+            "the clock reads CLOCK_BOOTTIME: {read:?}, not between {before:?} and {after:?}"
+        );
+    }
 
     /// `hash-credential` makes an operator's Basic entry and nothing else: the Agent plane has no
     /// credential to hash.

@@ -1,7 +1,7 @@
 # ADR-0042: The audit record is one hash chain per lease of a Server instance
 
-- **Status:** 🟢 accepted
-- **Date:** 2026-11-02
+- **Status:** ⚪ superseded by [ADR-0047](0047-the-audit-record-is-one-hash-chain-per-lease-and-names-the-lease-each-decision-was-taken-under.md)
+- **Date:** 2026-11-07
 - **Deciders:** Markus Brigl
 - **Applies to:** the audit port in `crates/fleet-server/src/audit.rs`, the writer and `verify` in `crates/fleet-server/src/audit_log.rs`, its filesystem adapter in `crates/fleet-server/src/fs/audit.rs` and every database adapter beside it, `server audit-verify` in `crates/fleet-server/src/main.rs`, the `[audit]` section of `server.toml` and its parsing in `crates/fleet-server/src/config.rs`, `config/server.toml`, and every document that tells an operator how to check the record
 

@@ -313,7 +313,7 @@
       </section>
       </div>
 
-      <!-- Enrolments (ADR-0022 clause 10): the hosts that asked for a certificate with the fleet's
+      <!-- Enrolments (ADR-0052 clause 10): the hosts that asked for a certificate with the fleet's
            bootstrap certificate, waiting for an operator. The key fingerprint is shown whole so it
            can be matched against the `key_fingerprint` the Client logs on the host it came from;
            approving and rejecting are per-row presses, never part of a form. -->
@@ -352,11 +352,11 @@
         <div id="enrolments-empty" class="empty">No host is waiting.</div>
       </div>
 
-      <!-- Bootstrap certificates (ADR-0022): issued by this Server with the subject values
+      <!-- Bootstrap certificates (ADR-0052): issued by this Server with the subject values
            an operator names, which every host certificate issued from one carries. The Server keeps
            a PKCS#12 file of the pair under the password the operator types, which any page offers
            for download; the page never holds a private key, and the typed password is sent once
-           and kept nowhere (ADR-0022 clause 8). -->
+           and kept nowhere (ADR-0052 clause 8). -->
       <section id="boot-section" class="card config" style="display: none">
         <h2>Bootstrap certificates — one per customer, site or batch; each opens nothing without an open window and an approval</h2>
         <div class="config-fields">
@@ -463,6 +463,7 @@
         <span class="dropdown">Filters ▾</span>
         <input id="filter" type="text" placeholder="Filter by name, status, OS or label" autocomplete="off" />
         <span id="fleet-error" class="err"></span>
+        <span id="list-error" class="err"></span>
       </div>
 
       <div id="selection-bar" class="card filters" style="display: none; align-items: center; gap: 12px">
@@ -492,6 +493,11 @@
           <tbody id="agents"></tbody>
         </table>
         <div id="empty" class="empty">No agents connected yet. Start a Client.</div>
+        <div id="agents-pager" class="filters" style="align-items: center; gap: 12px">
+          <button id="page-prev" class="btn btn-ghost" title="The page before this one">‹ Previous</button>
+          <span id="page-range" class="sub"></span>
+          <button id="page-next" class="btn btn-ghost" title="The next page, as the Server links it">Next ›</button>
+        </div>
       </div>
       </div>
     </div>
@@ -580,10 +586,18 @@
       window.addEventListener("hashchange", () => showTab(location.hash.slice(1)));
       showTab(location.hash.slice(1));
 
+      // One page of the fleet at a time, as ADR-0049 clause 7 says:
+      // the Server filters by the field, sorts by the column, counts what matches and links the
+      // next page. `pageCursors` holds the cursor each page on the way here began at, the first
+      // page's none, so Previous goes back without a link the Server does not give.
+      const PAGE_SIZE = 100;
       let agents = [];
+      let agentsTotal = 0;
       let filterText = "";
       let sortKey = "name";
       let sortDir = 1;
+      let pageCursors = [null];
+      let nextCursor = null;
       let configDirty = false;
       // Agents whose declared-capabilities / available-components detail rows are open, keyed by
       // instance_uid so the state survives the periodic re-render.
@@ -651,19 +665,6 @@
         displayName(a) === a.instance_uid
           ? ""
           : `<div class="sub uid" title="the instance UID this Agent reports — what the Server keys it by">${esc(a.instance_uid)}</div>`;
-
-      const sortVal = {
-        name: displayName,
-        connected: (a) => (a.connected ? 1 : 0),
-        // Unhealthy first, then never-reported, then healthy: the sort exists to bring trouble
-        // to the top, and an Agent that reports nothing sits between finding and all-clear.
-        health: (a) => (a.healthy ? 2 : a.health_status || a.health_error ? 0 : 1),
-        config: (a) => a.remote_config_status,
-        version: (a) => a.service_version,
-        os: (a) => a.os,
-        seq: (a) => a.sequence_num,
-        seen: (a) => a.last_seen_ms,
-      };
 
       function statusPill(a) {
         // Two facts, not one (ADR-0043): the pill says whether a connection is open — behind a
@@ -759,6 +760,8 @@
       function details(a) {
         const chips = [];
         if (a.transport) chips.push(`<span class="chip">transport: ${esc(a.transport)}</span>`);
+        // On PostgreSQL the Server instance whose lease holds this Agent's connection.
+        if (a.holder) chips.push(`<span class="chip" title="the Server instance that carries this Agent: the instance id of its lease, ${esc(a.holder)}">held by ${esc(a.holder_host || a.holder)}</span>`);
         if (a.health_status) chips.push(`<span class="chip">status: ${esc(a.health_status)}</span>`);
         // Every reported attribute, with nothing held back: this list is what a selector is
         // written from, so leaving a key out of it hides a key you can target. os.type and
@@ -886,30 +889,13 @@
         return `<div class="chips">${chips.join("")}</div>`;
       }
 
-      function matches(a) {
-        if (!filterText) return true;
-        // Labels are searched beside the reported attributes, in the same `key=value` spelling:
-        // the filter promises "or label", and a rollout channel is exactly what an operator narrows
-        // the fleet by (ADR-0043).
-        const attrs = Object.entries(a.non_identifying_attributes || {}).concat(Object.entries(a.identifying_attributes || {}))
-          .concat(Object.entries(a.labels || {}))
-          .concat(Object.entries(a.inherited_labels || {}))
-          .concat(Object.entries(a.host_attributes || {}))
-          .map(([k, v]) => `${k}=${v}`);
-        const pkgs = (a.packages || []).flatMap((p) => [p.name, p.version, p.status]);
-        const hay = [a.service_name, a.service_instance_name, a.instance_uid, a.os, platformOf(a), a.service_version, a.service_build, a.remote_config_status, a.connected ? "connected" : "disconnected", a.stale ? "stale" : "", a.health_status, a.health_error, a.healthy ? "healthy" : "", a.transport]
-          .concat(a.matched_configurations || []).concat(attrs).concat(a.capabilities || []).concat(pkgs)
-          .join(" ").toLowerCase();
-        return hay.includes(filterText);
-      }
-
       function render() {
-        const rows = agents.filter(matches).sort((x, y) => {
-          const f = sortVal[sortKey] || sortVal.name;
-          const a = f(x), b = f(y);
-          return (a < b ? -1 : a > b ? 1 : 0) * sortDir;
-        });
-        $("count").textContent = agents.length;
+        const rows = agents;
+        $("count").textContent = agentsTotal;
+        const first = (pageCursors.length - 1) * PAGE_SIZE;
+        $("page-range").textContent = rows.length ? `${first + 1}–${first + rows.length} of ${agentsTotal}` : `0 of ${agentsTotal}`;
+        $("page-prev").disabled = pageCursors.length < 2;
+        $("page-next").disabled = !nextCursor;
         $("empty").style.display = rows.length ? "none" : "block";
         $("agents").innerHTML = rows.map((a) => {
           const current = a.instance_uid === currentAgent;
@@ -987,10 +973,25 @@
           const key = th.dataset.key;
           if (sortKey === key) sortDir *= -1;
           else { sortKey = key; sortDir = 1; }
-          render();
+          firstPage();
         });
       });
-      $("filter").addEventListener("input", (e) => { filterText = e.target.value.trim().toLowerCase(); render(); });
+      $("filter").addEventListener("input", (e) => { filterText = e.target.value.trim(); firstPage(); });
+      // Another filter or column is another list: it starts on its first page.
+      function firstPage() {
+        pageCursors = [null];
+        refreshAgents();
+      }
+      $("page-next").addEventListener("click", () => {
+        if (!nextCursor) return;
+        pageCursors.push(nextCursor);
+        refreshAgents();
+      });
+      $("page-prev").addEventListener("click", () => {
+        if (pageCursors.length < 2) return;
+        pageCursors.pop();
+        refreshAgents();
+      });
       $("agents").addEventListener("click", (e) => {
         const rolloutBtn = e.target.closest(".agent-rollout-btn");
         if (rolloutBtn) {
@@ -1152,7 +1153,7 @@
         refreshAgents();
       });
 
-      // Select-all applies to what is on screen — which, with a filter active, is the point.
+      // Select-all applies to the page on screen — which, with a filter active, is the point.
       $("select-all").addEventListener("change", (e) => {
         document.querySelectorAll("#agents .row-select").forEach((box) => {
           box.checked = e.target.checked;
@@ -1300,21 +1301,23 @@
       // deployment's selector — what a Selector can actually match on, in the hue of its
       // namespace as on the Agents tab. A list value is left out: a Selector matches string values
       // only, and its ", " would split the pair in the selector's text.
-      function renderSelectorOptions() {
-        const pairs = new Map();
-        for (const a of agents) {
-          for (const list of [a.identifying_attributes, a.non_identifying_attributes]) {
-            for (const [k, v] of Object.entries(list || {})) {
-              if (!String(v).includes(", ")) pairs.set(`${k}=${v}`, k);
-            }
-          }
-        }
-        $("selector-options").innerHTML = [...pairs].sort(([x], [y]) => x.localeCompare(y)).map(([p, k]) =>
-          `<span class="${attrChipClass(k)} clickable" data-pair="${esc(p)}">${esc(p)}</span>`
+      // What the fleet reports, as the Server answers it: the whole fleet, not the page on screen.
+      async function refreshSuggestions() {
+        let values;
+        try {
+          const res = await fetch("/api/v1/agents/attributes");
+          if (!res.ok) return;
+          values = await res.json();
+        } catch { return; }
+        renderSelectorOptions(values);
+      }
+      function renderSelectorOptions(values) {
+        $("selector-options").innerHTML = (values.attributes || []).map((p) =>
+          `<span class="${attrChipClass(p.split("=")[0])} clickable" data-pair="${esc(p)}">${esc(p)}</span>`
         ).join("") || `<span class="chip">no agents reporting yet</span>`;
         // The types the fleet currently reports, as suggestions for a configuration's type
         // (ADR-0026) — so stating the type is a pick, not a remembered spelling.
-        const types = [...new Set(agents.map((a) => a.service_name).filter(Boolean))].sort();
+        const types = values.service_names || [];
         $("config-type-options").innerHTML = types.map((t) => `<option value="${esc(t)}"></option>`).join("");
         document.querySelectorAll("#selector-options .clickable").forEach((chip) => {
           chip.addEventListener("click", () => {
@@ -2125,10 +2128,37 @@
         }
       }
 
+      // The cursor a Link header names for the next page, or null on the last.
+      function nextCursorOf(res) {
+        const link = res.headers.get("Link") || "";
+        const target = /<([^>]*)>\s*;\s*rel="next"/.exec(link);
+        return target ? new URL(target[1], location.href).searchParams.get("cursor") : null;
+      }
+      // The query of the page on screen: its size, the column, the filter field and its cursor.
+      function agentsQuery() {
+        const params = new URLSearchParams({ limit: PAGE_SIZE, sort: sortKey, order: sortDir === 1 ? "asc" : "desc" });
+        if (filterText) params.set("q", filterText);
+        const cursor = pageCursors[pageCursors.length - 1];
+        if (cursor) params.set("cursor", cursor);
+        return params.toString();
+      }
       async function refreshAgents() {
-        try { agents = await (await fetch("/api/v1/agents")).json(); } catch { return; }
+        const asked = agentsQuery();
+        let res;
+        try { res = await fetch(`/api/v1/agents?${asked}`); } catch { return; }
+        // An answer to a filter or a page since left behind is dropped.
+        if (agentsQuery() !== asked) return;
+        // The list's own refusal, apart from what an act on an Agent answered in #fleet-error,
+        // which a poll must not wipe before it is read.
+        if (!res.ok) {
+          $("list-error").textContent = (await res.json().catch(() => ({}))).error || `HTTP ${res.status}`;
+          return;
+        }
+        $("list-error").textContent = "";
+        agents = await res.json();
+        agentsTotal = Number(res.headers.get("X-Total-Count") || agents.length);
+        nextCursor = nextCursorOf(res);
         render();
-        renderSelectorOptions();
       }
       async function refreshConfigs() {
         try { configurations = await (await fetch("/api/v1/configurations")).json(); } catch { return; }
@@ -2143,12 +2173,12 @@
         if (currentDep || creatingDep) renderDepConfigs(currentDepView());
       }
 
-      // Enrolments (ADR-0022 clause 10; the UI as a client of the API, ADR-0025). A Server without
+      // Enrolments (ADR-0052 clause 10; the UI as a client of the API, ADR-0025). A Server without
       // [enrolment] answers 404 on both routes, and the tab says so instead of showing an empty
       // queue that could never fill.
       let enrolments = [];
       let enrolmentsShown = null;
-      // The bootstrap certificates on record (ADR-0044 clause 11). A request names the one it carries
+      // The bootstrap certificates on record (ADR-0050 clause 11). A request names the one it carries
       // by serial, since the record keeps the key's fingerprint and the request the certificate's.
       let boots = [];
       let bootsShown = null;
@@ -2166,7 +2196,7 @@
         const b = boots.find((b) => b.serial === e.bootstrap_serial);
         const tip = (lines) => esc(lines.join("\n"));
         // The values the approval carries into the host certificate, or why it will be refused
-        // (ADR-0022 clause 10) — shown before the operator presses Approve.
+        // (ADR-0052 clause 10) — shown before the operator presses Approve.
         const values = e.subject_refusal
           ? `<span class="pill red" title="Approving this request is refused, and nothing is signed: ${esc(e.subject_refusal)}. Reject it, and give the host a bootstrap certificate whose subject follows the rules.">subject cannot be carried: ${esc(e.subject_refusal)}</span>`
           : SUBJECT_FIELDS.filter(([field]) => e.bootstrap_subject && e.bootstrap_subject[field])
@@ -2312,7 +2342,7 @@
         const btn = e.target.closest(".enrolment-act");
         if (!btn) return;
         e.preventDefault();
-        // The id is the requested key's fingerprint (ADR-0022 clause 10).
+        // The id is the requested key's fingerprint (ADR-0052 clause 10).
         const fingerprint = btn.dataset.id;
         const approve = btn.dataset.act === "approve";
         const question = approve
@@ -2328,7 +2358,7 @@
         await refreshEnrolments();
       });
 
-      // The ISO 3166-1 alpha-2 codes a bootstrap certificate's country is chosen from (ADR-0022
+      // The ISO 3166-1 alpha-2 codes a bootstrap certificate's country is chosen from (ADR-0052
       // clause 8), each named in the browser's language where it knows the name.
       const COUNTRIES = ("AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ BA BB BD BE BF BG BH BI BJ BL BM BN BO BQ BR BS "
         + "BT BV BW BY BZ CA CC CD CF CG CH CI CK CL CM CN CO CR CU CV CW CX CY CZ DE DJ DK DM DO DZ EC EE EG EH ER ES ET "
@@ -2378,7 +2408,7 @@
           $("boot-error").textContent = body.error || (res ? `HTTP ${res.status}` : "the Server could not be reached");
           return;
         }
-        // The page keeps no password once it is sent (ADR-0022 clause 8).
+        // The page keeps no password once it is sent (ADR-0052 clause 8).
         $("boot-pass").value = "";
         $("boot-pass2").value = "";
         $("boot-result").textContent = `Issued ${body.subject}, serial ${body.serial}: save bootstrap.p12 from its row, now or later.`;
@@ -2589,7 +2619,9 @@
       refreshDeployments();
       refreshEnrolments();
       refreshAgents();
+      refreshSuggestions();
       setInterval(refreshAgents, 2000);
+      setInterval(refreshSuggestions, 5000);
       setInterval(refreshConfigs, 5000);
       setInterval(refreshPackages, 5000);
       setInterval(refreshDeployments, 5000);

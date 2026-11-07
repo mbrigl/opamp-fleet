@@ -48,6 +48,11 @@ pub enum LabelError {
 /// clause 20).
 pub fn check_pairs(set: &BTreeMap<String, String>) -> Result<(), String> {
     for (key, value) in set {
+        if key.contains('\0') || value.contains('\0') {
+            return Err(format!(
+                "label {key:?} holds a NUL character, which no Selector can be written with"
+            ));
+        }
         if key.trim().is_empty() {
             return Err("a label key cannot be empty".to_string());
         }

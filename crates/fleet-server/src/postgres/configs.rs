@@ -1,13 +1,13 @@
-//! Configurations in PostgreSQL (ADR-0044 clause 5): the PostgreSQL adapter behind
+//! Configurations in PostgreSQL (ADR-0050 clause 5): the PostgreSQL adapter behind
 //! [`ConfigBackend`](crate::configs::ConfigBackend) — one row per Configuration, its retained
 //! revisions in rows of their own, each call one transaction on the rows it names
-//! (ADR-0041
+//! (ADR-0048
 //! clause 19).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use tokio_postgres::GenericClient;
+use super::Cached as GenericClient;
 
 use super::notify::{notify, CONFIGURATION};
 use super::{client, sql, Database};
@@ -32,7 +32,7 @@ impl ConfigBackend for PgConfigBackend {
     fn load(&self) -> Result<Vec<Configuration>, String> {
         self.database.run(|pool| async move {
             let client = client(&pool).await?;
-            read_all(&**client).await
+            read_all(&client).await
         })
     }
 
@@ -43,8 +43,8 @@ impl ConfigBackend for PgConfigBackend {
         self.database.run(move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
-            save(&*transaction, &name, &saved).await?;
-            notify(&*transaction, CONFIGURATION, &name).await?;
+            save(&transaction, &name, &saved).await?;
+            notify(&transaction, CONFIGURATION, &name).await?;
             transaction.commit().await.map_err(sql)
         })
     }
@@ -85,7 +85,7 @@ impl ConfigBackend for PgConfigBackend {
                 .await
                 .map_err(sql)?;
             if collected > 0 {
-                notify(&*transaction, CONFIGURATION, &name).await?;
+                notify(&transaction, CONFIGURATION, &name).await?;
             }
             let mut kept = BTreeMap::new();
             for row in transaction
@@ -114,7 +114,8 @@ impl ConfigBackend for PgConfigBackend {
     /// One transaction: the Configuration's row is held `FOR UPDATE`, which waits for every
     /// rollout that holds it to pin one of its revisions and keeps every other out until this one
     /// commits; then the stored assignments that name it are counted, and only when none does
-    /// are the Configuration and its revisions deleted, the revisions by cascade.
+    /// are the Configuration and its revisions deleted, the revisions by cascade, and it is taken
+    /// out of every Deployment that holds it.
     fn remove(&self, name: &str) -> Result<Removal, String> {
         let name = name.to_string();
         self.database.run(move |pool| async move {
@@ -149,7 +150,12 @@ impl ConfigBackend for PgConfigBackend {
                 .execute("DELETE FROM configurations WHERE name = $1", &[&name])
                 .await
                 .map_err(sql)?;
-            notify(&*transaction, CONFIGURATION, &name).await?;
+            super::deployments::drop_member_rows(
+                &transaction,
+                &crate::deployments::Member::Configuration(name.clone()),
+            )
+            .await?;
+            notify(&transaction, CONFIGURATION, &name).await?;
             transaction.commit().await.map_err(sql)?;
             Ok(Removal::Removed)
         })
@@ -230,7 +236,7 @@ async fn save(client: &impl GenericClient, name: &str, saved: &Revision) -> Resu
 }
 
 /// Adds each pinned revision to its Configuration by its hash, inside a rollout's transaction
-/// (ADR-0044 clause 21), and deletes none; a revision already retained is left as it is, as its
+/// (ADR-0050 clause 21), and deletes none; a revision already retained is left as it is, as its
 /// hash names its content.
 /// Each Configuration's row is held `FOR KEY SHARE`, in name order, until the transaction ends:
 /// a collection's `FOR UPDATE` waits for it, so no instance collects a revision this transaction
@@ -407,7 +413,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0044
+    /// Verifies: ADR-0050
     #[test]
     fn the_configuration_port_contract_holds_on_the_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -419,7 +425,7 @@ mod tests {
         });
     }
 
-    /// Verifies: ADR-0044, ADR-0041
+    /// Verifies: ADR-0050, ADR-0048
     #[test]
     fn the_configuration_port_contract_holds_on_postgres() {
         let Some(test) = TestDatabase::named() else {
@@ -455,7 +461,7 @@ mod tests {
         assert_eq!(store.load().expect("load"), [before]);
     }
 
-    /// Verifies: ADR-0044
+    /// Verifies: ADR-0050
     #[test]
     fn a_write_that_fails_leaves_nothing_of_itself_on_the_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -470,7 +476,7 @@ mod tests {
 
     /// Run from inside a runtime's own thread, as the Server's handlers call the port: the bridge
     /// never needs the thread that waits for it.
-    /// Verifies: ADR-0044
+    /// Verifies: ADR-0050
     #[tokio::test(flavor = "current_thread")]
     async fn a_write_that_fails_leaves_nothing_of_itself_on_postgres() {
         let Some(test) = TestDatabase::named() else {
@@ -495,7 +501,7 @@ mod tests {
     /// A collection on PostgreSQL keeps every revision a stored assignment pins, whatever the
     /// caller names: the assignments are reckoned in its own transaction, so a revision another
     /// instance pinned is not collected by one that never heard of it.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0048
     #[test]
     fn a_collection_on_postgres_keeps_what_a_stored_assignment_pins() {
         let Some(test) = TestDatabase::named() else {
@@ -530,7 +536,7 @@ mod tests {
     /// committed. The rollout is held at a gate in the database between its revision and its
     /// record, so the collection runs exactly then; the gate opens once the collection waits, or
     /// once it has finished, which only a collection that took no hold does.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0048
     #[test]
     fn a_collection_keeps_a_stored_revision_a_rollout_pins_meanwhile() {
         use opamp::uid::InstanceUid;
@@ -624,7 +630,7 @@ mod tests {
     }
 
     /// A row that does not decode fails the load naming it, rather than being skipped.
-    /// Verifies: ADR-0044
+    /// Verifies: ADR-0050
     #[test]
     fn a_configuration_row_that_does_not_decode_fails_the_load_naming_it() {
         let Some(test) = TestDatabase::named() else {
@@ -639,7 +645,7 @@ mod tests {
     /// A deletion of a Configuration through B while a rollout through A that pins one of its
     /// revisions has not yet committed waits for the rollout, and then refuses it from the
     /// assignment the rollout stored: the rollout holds the Configuration's row until it commits.
-    /// Verifies: ADR-0041, ADR-0026
+    /// Verifies: ADR-0048, ADR-0026
     #[test]
     fn a_deletion_waits_for_a_rollout_that_pins_the_configuration_and_is_refused() {
         use crate::agent_store::tests::record;

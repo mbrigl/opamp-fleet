@@ -17,6 +17,12 @@ Sleeps that stand for an event:
   `a_take_does_not_land_in_a_window_closed_meanwhile`: 300 ms for the taker to block on the row
   lock. It does not fail, but on a slow host it no longer tests its race; `postgres/deployments.rs`
   waits on `pg_stat_activity` instead.
+- `crates/fleet-server/src/postgres/enrolment.rs`, the two race tests of two approvers: a 20 ms
+  sleep inside `sign` only widens the window and decides no outcome; hold the signer on an event
+  instead
+- `crates/fleet-server/src/postgres/packages.rs`
+  `a_sweep_waits_its_whole_wait_for_the_lock_and_an_upload_five_seconds`: the refused upload's own
+  sweep waits the whole `SWEEP_WAIT`, about 66 s; wait for the sweeps with `wait_for_sweeps`
 
 Budgets:
 

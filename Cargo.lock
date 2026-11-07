@@ -2092,6 +2092,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "tracing",
+ "tracing-subscriber",
  "uuid",
  "webpki-roots 1.0.11",
 ]

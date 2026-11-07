@@ -64,6 +64,27 @@ the `RUST_LOG` environment variable (default `info`); everything else is in the 
 and the `FLEET_SERVER__…` variables over it. `server pki status` reads the same configuration, from
 the same places.
 
+On Linux the Server allocates from two malloc arenas, so that its memory does not grow with every
+read of the whole fleet, as a rollout makes; the environment variable `MALLOC_ARENA_MAX` sets
+another count.
+
+Under a steady fleet an instance's memory levels off at what its Agents and its database pool hold.
+Each of the pool's connections keeps its buffers at the size of the largest presence batch it has
+written, so over the first hours they grow to up to about 4.5 KiB for each Agent of the most the
+instance has held at once, at the default `pool_size` of 16 and in proportion to `pool_size`: about
+70 MiB at 16 700 Agents an instance and 150 MiB at 33 000. They follow that most, not the Agents
+held now, and not time: an instance that carried a larger share of the fleet while another was
+down keeps buffers of that size after the fleet spreads out again, until it restarts. The
+operator's acts keep little beyond their answer:
+
+| Act | What an instance keeps |
+|---|---|
+| A label set on an Agent | about 0.5 KiB the first time the Agent is labelled; a later set replaces it |
+| A revocation | 100 to 200 bytes, for as long as the revocation is kept |
+| A saved Configuration | nothing once the act is answered; revisions no Agent is assigned are collected |
+| A rollout | on the instance that serves it, about 0.6 KiB for each Agent it releases, at the size of the largest rollout and not added up across rollouts: about 3 MiB at 5 000 Agents |
+| An Agent reconnecting | nothing |
+
 Stopping the Server is `SIGTERM`/`Ctrl-C`. Both listeners close at once, and the WebSocket sessions
 are closed spread over `drain_secs` (default 20 seconds), so their Agents do not all reconnect in
 the same instant; what is still open 2 seconds later is cut, and then the fleet's records are
@@ -377,13 +398,31 @@ On PostgreSQL every sweep and cleanup of the artifacts takes an advisory lock, s
 deletes at a time. It decides from the entries the database stores, so it keeps an artifact that an
 entry written through another instance names. An upload takes the same lock shared in the
 transaction that writes its entry, and checks there that its artifact is stored, so no sweep runs
-between the check and the commit; an upload whose artifact a sweep deleted first is refused:
-upload it again. An upload waits for the lock up to 5 seconds, a sweep up to 60. Each sweep in
-progress holds the lock on a database session of its own, beside the pool's eight, which the
-database's `max_connections` must allow for. The lock is taken on PostgreSQL with the filesystem
-blob store too, where the instance is alone and it decides nothing. A start whose sweep cannot have
-the lock fails, naming the lock; a sweep after an act logs it, and what it would have deleted stays
-until the next start.
+between the check and the commit; an upload whose artifact a sweep deleted first is refused: upload
+it again. A sweep marks in the database, on the session that holds its lock, each artifact it is
+about to delete, and renews each mark there right before its deletion; an upload of a marked
+artifact is refused too, until the sweep is done and has taken its marks away. When a sweep's
+session ends, as at a database failover, its lock is gone with it: the sweep deletes nothing more
+and logs it, and what it would have deleted stays until a later sweep. Marks a sweep could not take
+away, as while the database did not answer, its instance tries again every `lease_renew_secs`. The
+marks of an instance whose lease is no longer live, or of a start that took none yet, go with the
+next sweep on any instance once they were last renewed more than 130 seconds before: the 15 seconds
+a renewal may take to answer, the 100 seconds the one call to the bucket after it may take, and 15
+seconds to spare. Three cases are not covered, and in each the next start fails naming an entry
+whose artifact a sweep deleted, which is then uploaded again. A sweep deletes nothing more once more
+than 15 seconds have passed since it renewed the mark of the artifact it deletes next, a suspend of
+its host included; but an instance suspended for longer than 130 seconds while a call to the bucket
+is in flight may still delete an artifact whose mark another instance took away meanwhile, since
+that call goes on once the host runs. A failover to a replica the marks had not reached, with
+asynchronous replication, leaves the new primary without them: across a failover the marks hold only
+with synchronous replication. And an instance of 0.8.0 beside this release neither marks nor reads a
+mark, so while both releases run a sweep through it can still delete an artifact an upload just
+stored. An upload waits for the lock up to 5 seconds, a sweep up to 60. Each sweep in progress holds
+the lock on a database session of its own, beside the pool's `pool_size`, which the database's
+`max_connections` must allow for. The lock is taken on PostgreSQL with the filesystem blob store
+too, where the instance is alone and it decides nothing. A start whose sweep cannot have the lock
+fails, naming the lock; a sweep after an act logs it, and what it would have deleted stays until the
+next start.
 
 An instance that stops while an upload streams leaves the parts of an unfinished multipart upload,
 which are not objects: the Server neither lists nor deletes them. Expire them with a lifecycle rule
@@ -448,8 +487,12 @@ Optional. Where the Server keeps its records: one file per record under `data_di
 one PostgreSQL database. Both are supported in production. On files the Server loads every record
 at startup and answers from memory. On PostgreSQL it loads no Agent at startup: it keeps in memory
 the Agents connected to it, each read at its first report, and reads the fleet the API lists from
-the database. Either way the store is the durable copy, written before an act is answered. Several
-instances may share one database: see [Several instances](#several-instances).
+the database. Either way the store is the durable copy, written before an act is answered. On
+PostgreSQL one write does not wait for the database's disk: the record of an Agent first heard of.
+A crash of the database may lose the records created last, and each such Agent's next report
+creates its record again; nothing the Server wrote after one, its take, its binding or an audit
+entry, outlives it, since each of those waits for the disk. Several instances may share one
+database: see [Several instances](#several-instances).
 
 ```toml
 [database]
@@ -468,7 +511,8 @@ password_file = "/run/secrets/fleet-db-password"
 | `store` | `"fs"` | `"fs"` or `"postgres"`. Any other value fails startup naming the key; so do `"postgres"` without a `[database.postgres]` section and a `[database.postgres]` section beside `"fs"`. |
 | `lease_renew_secs` | `10` | With `"postgres"` alone: how often an instance renews its lease, from 1 to 3600. Set with `"fs"`, it fails startup naming it. |
 | `lease_secs` | `30` | With `"postgres"` alone: how long after its last renewal a lease lapses, at least three renewals and at most 3600. Set with `"fs"`, it fails startup naming it. |
-| `presence_interval_secs` | `30` | With `"postgres"` alone: how often an instance writes, in one batch, where each Agent it carries is connected and when it was last heard from, from 10 to 60. The report that connects an Agent to an instance writes it at once, so no other instance forgets an Agent that has just connected. A heartbeat reaches the database at most once per interval and Agent, so the staleness budget grows by this interval. Set with `"fs"`, it fails startup naming it. |
+| `presence_interval_secs` | `30` | With `"postgres"` alone: how often an instance writes, in one batch, where each Agent it carries is connected and when it was last heard from, from 10 to 60. The report that connects an Agent to an instance writes it at once, so no other instance forgets an Agent that has just connected. A heartbeat reaches the database at most once per interval and Agent, so the staleness budget grows by this interval. A batch written later than this interval after it was due is logged as a warning with `late_ms`: the database is not keeping up with the fleet's presence. Set with `"fs"`, it fails startup naming it. |
+| `pool_size` | `16` | With `"postgres"` alone: the connections an instance's pool holds at most, from 2 to 256. At most half of them create the records of new Agents at once, so the other half serves every other call while creations wait for one another. The database's `max_connections` must allow `pool_size` for each instance, plus one session for each sweep in progress, one for a prune of the audit record in progress, and one that listens for notifications. Set with `"fs"`, it fails startup naming it. |
 | `postgres.host` | — | Required with `"postgres"`. The database's host name or IP address — what its certificate must name. |
 | `postgres.port` | `5432` | Its port. |
 | `postgres.dbname` | — | Required with `"postgres"`. The database. The Server does not create it. |
@@ -482,26 +526,36 @@ verified and its host name checked — what libpq calls `verify-full`. Every set
 configuration alone: `PGHOST`, `PGSSLMODE` and the other `PG*` variables in the Server's environment
 change nothing. A database that cannot be reached at startup stops the start, naming the host and
 the database; one lost while the Server runs fails the acts that need it, as a failed write does.
-Every call is bounded: it fails when no pooled connection is free within 5 seconds, when the
+Every call is bounded: it fails when no pooled connection is free within 5 seconds (a new Agent's
+record waits up to 15 seconds for one, so a connecting fleet does not send it away), when the
 database does not answer it within 15 seconds (a rollout gets 20 ms more per record it writes), and
 the database itself ends a statement after 10 seconds, a wait for a lock after 5 and a transaction
 left open by a client that went away after 60. TCP keepalives notice a database host that is gone
 within about half a minute.
 
-The role needs the right to create tables in its default schema: at every start the Server applies
-the migrations of its schema the database has not yet seen, in one transaction, and records them in
-the table `fleet_schema`. A migration only adds, and each names the oldest Server that understands
-the schema it leaves. A database whose schema needs a newer Server stops the start, naming both
-versions, and is left unchanged. A Server of 0.7.1 is refused that way once this release has started
-on its database: back the database up before the upgrade, since going back to 0.7.1 afterwards
-means restoring it. The Server creates tables and indexes, and nothing else: the database, the role,
-its rights and extensions, replication and backups are the operator's.
+The role needs the right to create tables and functions in its default schema: at every start the
+Server applies the migrations of its schema the database has not yet seen, in one transaction, and
+records them in the table `fleet_schema`. A migration only adds, and each names the oldest Server
+that understands the schema it leaves. A database whose schema needs a newer Server stops the start,
+naming both versions, and is left unchanged. A Server of 0.7.1 is refused that way once this release
+has started on its database: back the database up before the upgrade, since going back to 0.7.1
+afterwards means restoring it. The Server creates tables and indexes, and the trigger, with its
+function, that keeps the count of the Agents' records `max_agents` is decided by, and nothing else:
+the database, the role, its rights and extensions, replication and backups are the operator's.
 
 Every Server on PostgreSQL is an instance: before it opens either listener it takes a lease in the
 database under an instance id of its own, renews it every `lease_renew_secs`, and keeps its
 listeners open only while it can prove it. One that cannot renew before its lease lapses ends every
 session, closes both listeners, and takes a new lease under a new instance id once the database
 answers again.
+
+An instance measures its lease on a clock that counts the time its host was suspended
+(`CLOCK_BOOTTIME`). Once it runs again after a suspend longer than its lease, it serves nothing:
+it answers `503` to a request on either plane and to a message of an Agent, within 100
+milliseconds it ends every session and closes both listeners, and it opens them again under a new
+lease and a new instance id, as after losing the database. A virtual machine that its hypervisor
+pauses without the guest's clocks counting the pause is not covered: such an instance serves on
+until its next renewal, at most `lease_renew_secs` later, finds its lease lapsed.
 
 Each line an instance logs begins with `instance_id=<id>`, so the logs of several instances say
 which one acted. The instance makes its id as soon as its configuration names PostgreSQL, before
@@ -661,7 +715,7 @@ an archived `audit/`, left under `data_dir`. With the filesystem store the layou
 | `certificates/<issuer>-<serial>.json` | certificate | The register of what the client CA signed |
 | `revocations.json` | — | The revocation list |
 | `bootstrap/<issuer>-<serial>.json`, `.p12` | bootstrap certificate | Its record, and its PKCS#12 file when one was made |
-| `enrolment.json` | — | The enrolment window and its pending requests |
+| `enrolment.json` | — | The enrolment window, its pending requests and the rejected keys |
 | `package-floors.json` | — | The floor the operator signed for each Agent type, with its signature |
 | `audit/audit-<first seq>.jsonl` | audit file | The audit record |
 
@@ -756,6 +810,28 @@ probes each instance with a TCP connection to the port `listen` names, `4320` by
 instance without a lease has closed its listeners and is sent no Agent. The Operator plane of any
 instance shows the whole fleet and acts on it.
 
+Give the balancer **source-address affinity** on the Agent plane, so that it sends one peer
+address to one instance for as long as that instance is up:
+
+- **The throttle and the rate limits count per instance.** The admission throttle and
+  [`[agent_rate_limit]`](#how-often-a-member-may-be-heard) keep their counts in each instance's
+  memory, so a host whose connections are spread over three instances is allowed three times as
+  much, and one that reaches another instance starts there with a full allowance.
+- **A plain-HTTP Client's poll on a new connection may reach another instance.** A poll that
+  reaches another instance than the poll before takes the Agent there, a write to the database and a
+  notification to every instance, and moves its holder. An Agent whose holder changes more than
+  ten times in a minute is logged as `likely a duplicate instance_uid on two connections`, which
+  is how a Client polling more often than every six seconds reads without affinity.
+- **A Gateway's connections share its address,** so under affinity they all reach one instance.
+
+When an instance is lost, the balancer sends its addresses to the others.
+
+Each Agent's view names the instance that carries it: `holder`, the instance id of its lease, and
+`holder_host`, the host name that lease records. Both are empty while no instance with a live
+lease holds the Agent, as after its instance stopped and before it reconnected. The Agents tab
+shows the holder in an Agent's details, and `GET /api/v1/agents?holder=<instance id>` lists what
+one instance carries, `holder=none` what none does: what a lost instance took with it.
+
 ### What a failover does
 
 - **An instance stops in order** (`SIGTERM`). It closes both listeners at once and ends its
@@ -777,6 +853,155 @@ instance shows the whole fleet and acts on it.
 
 A request in flight on an instance that ends without stopping is not answered: read through
 another instance whether it took effect before making it again.
+
+### Stopping an instance
+
+An instance stops on `SIGTERM`. It closes both listeners at once, answers the requests already in
+flight, and ends each WebSocket session at an instant drawn over `drain_secs`, 20 seconds by
+default; what is still open 2 seconds after that is cut. Each of its Agents then waits a delay
+drawn over 30 seconds before it reconnects, so the Agents of a stopped instance reach the others
+spread over `drain_secs` and 30 seconds more. Each instance takes at most
+`max_new_connections_per_sec` new connections a second and answers the rest `503` with a
+`Retry-After`, after which they come back.
+
+Once its sessions are ended, the instance writes where its Agents are, closes its audit chain,
+waiting up to 5 seconds for the record to be written out, and releases its lease. A stop
+therefore takes `drain_secs` and a few seconds more, and whatever stops the instance must wait
+longer before it sends `SIGKILL`: Docker's default of 10 seconds is too short, which
+`--stop-timeout 30` mends ([In a container](#in-a-container)); an orchestrator's grace period,
+30 seconds by default in Kubernetes, fits the default `drain_secs`. Raise the two together. An
+instance killed before it is done ends as one that ends without stopping: its Agents read as
+connected through it until its lease lapses, and the instance that takes the lease over closes its
+chain.
+
+### The database and the bucket
+
+Every instance stands on the one database and the one bucket, so the fleet is served on after the
+loss of an instance only while those two are served on. Making them redundant, backing them up and
+restoring them is yours: the Server creates neither and copies neither.
+
+**Replicate the database synchronously.** A failover of the database must lose no audit entry and
+no revocation, so the standby it fails over to must hold every commit the primary answered. Name
+the standbys in the primary's `synchronous_standby_names`, and keep `synchronous_commit` at `on`,
+its default, or `remote_apply` for the database and the role the Server signs in as. With
+asynchronous replication a failover loses what the standby had not received: a revocation the
+Operator plane answered as made, the audit entries of the last decisions, and the marks of a sweep
+in progress ([`[blobs]`](#blobs)). One write never waits, whatever the replication: the record of
+an Agent first heard of is committed without waiting for the disk or a standby, so a failover may
+lose the records created last, and each such Agent's next report creates its record again.
+
+A primary waits for a synchronous standby at every commit, so while none answers, nothing the
+Server writes commits but the records of new Agents, and to the instances that is an outage of
+the database. Run two standbys and name them as `ANY 1 (…)`, so that the loss of one stops
+nothing.
+
+**Point `[database.postgres] host` at the primary through an address the failover moves,** such
+as a virtual IP or a DNS name, and give every server that may become the primary a certificate for
+that name. While the database fails over, the acts that need it fail, answered `500`, and a new
+Agent's first report is answered `Unavailable` and sent again. Each instance connects again and
+reads again everything it holds, since it cannot know what it missed meanwhile. A failover that
+takes longer than `lease_secs` after an instance's last renewal is an
+[instance that loses the database](#what-a-failover-does): it ends its sessions and closes its
+listeners until it holds a new lease. An instance that must be alone loses its lock with its
+session and exits ([`[database]`](#database)); its service manager starts it again.
+
+**Back up the database and the bucket together, and restore them together.** The database holds
+every record and the audit record, the bucket the artifacts the Package entries name. An entry
+whose artifact the bucket lacks stops every start, naming the entry, and a Package deleted after
+the database's backup has its artifacts deleted by the next sweep, so a bucket restored as it is
+now may lack what the restored database names. Turn versioning on for the bucket and keep its
+noncurrent versions, by a lifecycle rule, at least as long as the oldest database backup you
+keep, or back the bucket up with a tool that restores it to a moment; then restore it to the
+moment of the database's backup. The Server reads only the current objects, so the old versions
+change nothing for it. An artifact the restored bucket holds and no entry names goes with the
+next sweep.
+
+To restore, stop every instance, restore the database and the bucket, and start one instance
+taken out of the balancer's pool, so that no Agent reaches it until the steps below are done: its
+probe connects as soon as it holds its lease. The leases the backup holds have lapsed, and that
+instance takes them over and closes their chains, as after a failover. What happened since the
+backup is gone from the database, the audit record included. What still holds it is the audit
+record's copy in the instances' logs, under the target `audit`, so ship those logs off the
+instances' hosts from the first instance on.
+
+**A database restored from before a revocation admits the revoked certificate again,** and so it
+does for the other trust withdrawn since the backup. Merge the log copies of every instance by
+their `time`, and take the lines from a minute before the backup on: each instance stamps them by
+its own clock, so keep the instances' clocks within that minute of one another. Then, through the
+instance's Operator plane:
+
+1. **Decide each revocation by its last line.** A revocation's `id` stands for its certificate, so
+   revoking a certificate again after a lift gives the same `id`. For each `id` that a
+   `revocation.revoked` or a `revocation.lifted` names, take the later of them: where it is
+   `revocation.revoked`, revoke again by its `authority` and `serial`, which changes nothing
+   where `GET /api/v1/revocations` lists it already; where it is `revocation.lifted`, lift it
+   where that list holds it. A `revocation.revoked` with the outcome `unknown` counts as
+   `revocation.revoked`: its store answered an error, and may have made it all the same. Where a
+   lift and a revocation of one `id` lie within a minute of each other, their order is not
+   certain: keep it revoked.
+2. **Revoke the renewals signed since the backup.** With [`[client_ca]`](#client_ca) the register
+   resolves a revocation to the renewals of its certificate, but a renewal signed since the backup
+   is not in the restored register, and a certificate the register does not hold is admitted
+   unless it is revoked itself. Each `issuance.signed` names the certificate it signed by
+   `authority` and `serial`, and the certificate it renews by `predecessor_serial`. For each one
+   since the backup, follow `predecessor_serial` through the lines since the backup to the first
+   certificate not signed since it. The register keeps each ancestor of a certificate still
+   valid, so the restored register holds that one and every certificate it descends from, except
+   a certificate an operator provisioned: the register holds only what the Server signed, and a
+   provisioned first certificate is named only as its renewal's predecessor. The database's
+   `certificates` table names them all, the provisioned one among them:
+
+   ```sql
+   WITH RECURSIVE chain AS (
+       SELECT issuer, serial, predecessor_issuer, predecessor_serial
+         FROM certificates WHERE serial = '<serial>'
+       UNION
+       SELECT c.issuer, c.serial, c.predecessor_issuer, c.predecessor_serial
+         FROM certificates AS c JOIN chain
+           ON c.issuer = chain.predecessor_issuer AND c.serial = chain.predecessor_serial
+   )
+   SELECT serial FROM chain
+   UNION
+   SELECT predecessor_serial FROM chain WHERE predecessor_serial IS NOT NULL;
+   ```
+
+   Where that first certificate is a provisioned one the query finds no row for, it alone is the
+   chain's rest. Where the serials of the lines since the backup or the query's answer name a
+   certificate step 1 revoked, revoke the renewal by its own serial.
+3. **Withdraw again the other trust withdrawn since the backup**, each by its last line. A line
+   with the outcome `unknown` is an act whose store answered an error, and which may have been
+   made all the same:
+   - a Gateway mark a `host.gateway` names: clear it again where the outcome is `cleared` or
+     `unknown`, whichever its `gateway` asked for, and set it again where it is `set`, with
+     `PUT /api/v1/hosts/{host}/gateway`. A host enrolled since the backup is answered `404` until
+     it has reported again; set its mark then;
+   - a floor a `package_floor.set` names, `set` or `unknown`, unless a later
+     `package_floor.removed` names its Agent type: set it again where the restored floor is lower
+     or absent. The line names the version but not the signature; `opamp-fleetctl package floor`
+     signs the same version with the same key into the same signature again
+     ([the tools](tools.md#keeping-old-builds-off-the-fleet));
+   - the requests decided since the backup, each whose `id` an `enrolment.rejected` names,
+     `rejected` or `unknown`, or an `issuance.signed` names as its `request`. A request's `id`
+     stands for its key, so one approved since the backup comes back pending when its host sends
+     it again, and approved again it would sign a certificate for that key that no revocation
+     names. Close the enrolment window first with `DELETE /api/v1/enrolment/window`, whatever the
+     restored database holds, and reject each `id` with `POST /api/v1/enrolments/{id}/reject`. A
+     rejection is answered `204` whether the queue holds the request or not, and it lasts: the
+     request is refused whenever its host sends it again, in every later window and on every
+     instance, and no approval signs its key;
+   - the enrolment window, once those requests are rejected and not before: where the last
+     `enrolment.window` from before the restore is `opened` and its `until_ms` is still ahead,
+     open it again for the time left to that end; otherwise leave it closed.
+
+The undecided requests are gone: the close drops those the restored database held, and it never
+held those queued since the backup. Their hosts send them again and enrol in the next window.
+Then put the instance into the balancer's pool and start the others.
+
+**An act of steps 1 and 3 is made only with its line queued**
+([The audit record](#the-audit-record)), so the record misses one only where its line was lost
+after that: on the filesystem store, in a write that failed, which the next line counts as
+`unrecorded_before`; and among the last lines before the database was lost, which are in neither
+copy, since a line reaches the log only once the database holds it.
 
 ### A CA key in a file means a standby
 
@@ -811,33 +1036,86 @@ The fleet view, the reach counts and what a rollout releases are read from the d
 there every Agent inherits the labels of its Client Agent as on one Server. In the memory of the
 instance that carries an Agent, two cases do not inherit yet:
 
-- **An Agent behind a Gateway** whose Client Agent another instance carries does not inherit that
-  Client Agent's labels.
 - **A Client Agent bound to its Host** on one instance just before another instance first places a
   fellow Agent of that Host is inherited there only once that group is placed again: when the
   Client Agent's labels change, an Agent of the group is forgotten, the Agent's report changes, or
   the instance has missed a notification and reads again.
+- **A Client Agent that arrives behind a Gateway** on one instance after another instance placed a
+  fellow Agent behind the same Gateway is inherited there only once that group is placed again:
+  when an Agent of the group joins, leaves or changes its report on that instance, or the instance
+  has missed a notification and reads again. Once the group is placed under it, a change of the
+  Client Agent's labels on any instance reaches it.
+
+### A new binding on several instances
+
+A host's first report on one instance binds its Agent to the Host and writes the Host, and the
+instance announces both right after the commit rather than in it, so a fleet that connects at once
+is not let in one commit at a time across the database. Another instance holds the binding and the
+Host once the announcement arrives, a moment later, and, where it never arrives because the instance
+that wrote them ended in between, at its next lease renewal (`lease_renew_secs`). Admission does not
+wait for it: every instance asks the database at each binding, so no host is let speak for an Agent
+another host holds. A Host's valid until moved forward by an issuance or a prune is announced after
+the commit too. A revocation, a release, a re-key, a Gateway's mark, a Host forgotten and a
+certificate registered or removed are announced in their commit. A Gateway's mark through any
+instance finds a Host the database holds, or a host a certificate in the register names, though
+that instance has not heard of it yet; a host the database does not know is answered `404`. Every
+lease renewal reads the certificate register, the revocation list and the Hosts again, which takes
+about a fifth of a second for 10 000 Hosts with a certificate each. A first report whose call loses
+its answer has its instance read the Hosts again at once; a binding that lands after that read is
+taken up at the Agent's next report or the next renewal.
 
 ### An approval whose commit fails
 
-An approval signs the host's certificate and records it in the register and the audit record
-before its decision commits. When that commit fails, on a lost connection to the database, a
-timeout, or a commit elsewhere on the database server that holds the notification lock for more
-than five seconds, the approval answers `500` and the request still waits. Approving it again
-signs a second certificate for the same key. The first is never handed to the host, so no one
-holds it, but it stays in the register as valid, beside a Host with no binding. When the audit
-record shows two `issuance.signed` entries with one `key_fingerprint`, revoke the first by its
-serial.
+An approval writes the certificate it signed into the register, with the Host it mints, in the
+transaction that decides the request. When that commit fails, on a lost connection to the
+database, a timeout, or a commit elsewhere on the database server that holds the notification lock
+for more than five seconds, the approval answers `500`, nothing is registered, and the request
+still waits. Approving it again signs it once more, so one certificate for its key is valid. An
+instance that cannot tell whether its commit landed reads the request back under a lock on its
+row: decided with its certificate, the approval stands. A refusal the database answers with an
+`ERROR` at the commit needs no read back; a `FATAL` there is read back, as the commit may have
+landed.
 
-### From one Server on files to two instances
+The audit record says what came of each signature. `enrolment.approved` names a certificate that
+was issued by its `serial`. `issuance.undecided` names one that was not with the outcome
+`rolled_back`, with its `serial` and its `request`. For a signature neither names, or one named
+with the outcome `unknown`, `GET /api/v1/certificates` answers while the certificate is valid:
+it was issued if it is listed.
+
+### An act whose answer is lost
+
+An act on PostgreSQL whose call loses its answer, on a dropped connection to the database or the
+bound of a call, is answered `500`, though its commit may have landed. The instance that made it
+reads again what the act names, at once and again when the act's own notification arrives, so
+its memory holds what was committed once it lands: a label, a floor, a revocation and every other
+act. An act answered `500` is read back, or made again: setting a label or a floor and adding a
+revocation again changes nothing more.
+
+A re-key is the Agent's, not an operator's. Its report is answered without a new identity when
+the instance cannot tell whether the move landed; the instance reads the Agent's row back first,
+under a lock that waits for the move, and assigns the new identity where it landed. Where that
+read back fails too, the instance reads it back again when the move's own notification arrives
+or at the Agent's next report on it, and assigns the new identity at that next report. Until it
+knows, a report under the old identity that it holds no record of is answered `Unavailable`, and
+the Agent retries. The Agent's session stays open: the instance keeps the Agent under its old
+identity until a read back holds, trying again while the database does not answer, and a session
+that ends meanwhile has its disconnect written to the row under the new identity once it holds.
+An Agent that reconnects to another instance before it was assigned the new identity is taken up
+there under its old one; its row under the new identity reads as disconnected once its session
+here ended and the read back held, or, if the instance stops first, once its lease has lapsed,
+and is forgotten by the silence bound.
+
+### From one Server on files to three instances
 
 1. **Run this release** on the one Server, on files.
 2. **Make the stores.** A PostgreSQL database and a role that may create tables in its default
-   schema, and a bucket with the lifecycle rule of [`[blobs]`](#blobs), both reachable from each
-   instance's host. Their replication and backups are yours.
-3. **Choose the CA's place.** With a CA key in a file, the second instance is a
-   [standby](#a-ca-key-in-a-file-means-a-standby); for two that serve at once, issue the hosts'
-   certificates outside the Server first.
+   schema, replicated as [The database and the bucket](#the-database-and-the-bucket) says, and a
+   versioned bucket with the lifecycle rule of [`[blobs]`](#blobs), both reachable from each
+   instance's host. Ship each instance's log off its host from its start on: its audit lines are
+   what a restore of the database needs.
+3. **Choose the CA's place.** With a CA key in a file, every instance after the first is a
+   [standby](#a-ca-key-in-a-file-means-a-standby); for instances that serve at once, issue the
+   hosts' certificates outside the Server first.
 4. **Write the `server.toml` the instances start with**: `[database] store = "postgres"` with its
    `[database.postgres]` section, `[blobs] store = "s3"` with its `[blobs.s3]` section, no
    `data_dir`, and no `[audit] max_file_bytes` or `keep_files`, which are the filesystem store's.
@@ -850,21 +1128,92 @@ serial.
    with `server blobs-to-s3` instead ([`[blobs]`](#blobs)).
 6. **Start the first instance**, and check the record with `server audit-verify --config
    <server.toml> --archive <data_dir>/audit`.
-7. **Put the balancer in front** under the address the Clients connect to. To give them a new one,
-   offer it with `[connection_offer] endpoint`
+7. **Put the balancer in front** under the address the Clients connect to, with source-address
+   affinity ([Several instances](#several-instances)). To give the Clients a new address, offer it
+   with `[connection_offer] endpoint`
    ([Moving the fleet](#moving-the-fleet-connection-settings)).
 8. **Start the second instance** on another host, with the same `server.toml`.
+9. **Start the third instance** on a third host, with the same `server.toml`
+   ([A third instance](#a-third-instance)).
 
-### Upgrading the instances
+### A third instance
 
-Every instance on one database runs one release. To upgrade, stop every instance, then start each
-again on the new release; the first to start migrates the schema, and instances that start together
-wait for it. Stopping the old ones first is yours: an orchestrator's rolling update, which starts a
-new instance before it stops an old one, does not fit. Where the Server can tell, it refuses the
-wrong order: an instance that shares the database starts, and migrates, only once no Server holds
-the database alone, as a Server of 0.7.1 does while it runs. Two releases side by side, for an
-upgrade without a stop, are not built yet. Nor has any load been proven on several instances: how
-many Agents they carry and how long a failover of a large fleet takes are not yet measured.
+A third instance starts as the second did: on a host of its own, with the same `server.toml`,
+behind the same balancer, which sends it Agents once its probe connects. Nothing moves the Agents
+the others carry. A WebSocket stays on the instance it reached, so the third instance fills with
+the Agents that connect anew: new hosts, and the Agents of an instance that stops or is lost.
+
+With three instances, the loss of one gives each of the other two half of its Agents, where with
+two the one left takes them all. Size them so that one instance fewer still carries the fleet:
+
+- **Connections.** Each instance holds at most `max_connections` Agent-plane connections, 10 000 by
+  default, and closes one past it on accept. A fleet that two of three instances must carry holds
+  at most twice that, a Gateway counting once for each connection of its pool.
+- **New connections.** Each instance takes at most `max_new_connections_per_sec` new connections a
+  second, 200 by default, which bounds how fast the Agents of a lost instance come back.
+- **The database's connections.** It must allow `pool_size` connections for each instance, one
+  more that listens for notifications, one for each sweep in progress, and one for a prune of the
+  audit record in progress: 57 for three instances at the defaults, counting one sweep and one
+  prune each, of PostgreSQL's default `max_connections` of 100, three of which it keeps for
+  superusers. A rolling update that starts a new instance before it stops an old one needs one
+  instance's share more.
+- **Peers that share an address.** Affinity sends every host behind one address translation, and
+  every connection of a Gateway, to one instance, so such a group weighs on one instance alone.
+
+No load has been proven on several instances yet: how many Agents they carry and how long a
+failover of a large fleet takes are not yet measured.
+
+### A rolling update
+
+Two consecutive releases serve one database side by side, so the instances are replaced one at a
+time while the others serve the fleet:
+
+1. **Read the release's notes** for what each change needs done, and back the database up.
+2. **Stop one instance** with `SIGTERM` and let it finish
+   ([Stopping an instance](#stopping-an-instance)). Its Agents reconnect to the others.
+3. **Start the new release in its place**, with the same `server.toml`. The first instance of the
+   new release migrates the schema, and an instance that starts meanwhile waits for it. Wait until
+   it serves: it logs `serving the OpAMP endpoint and package downloads over TLS`, and the
+   balancer's probe connects.
+4. **Do the same with each other instance**, one at a time.
+
+An orchestrator's rolling update does this when it replaces one instance at a time and gives each
+the grace period of [Stopping an instance](#stopping-an-instance).
+
+The migrations of a release name the release before it as the oldest Server that understands the
+schema they leave, so the instances of that release that still run serve on it; what a release
+stops using goes with a later one. Each lease records the release of its instance; a lease of
+0.8.0, which records none, counts as 0.8.0. An instance stops at its start, naming both releases
+and changing nothing, while a live lease is of a release older than the oldest Server its
+migrations leave: stop the instances of that release first. A lease that lapsed counts as none, and
+so does the lease of an instance that had to be alone and whose process is gone. An instance whose
+lease lapsed while a newer release migrated checks the schema as it takes its new lease, and on one
+that needs a newer Server it stops, naming both versions, and exits with a failure, as at a failed
+start.
+
+- **Skipping a release** stops every instance of the older release first, since a newer release
+  does not start beside them; a Server alone may skip releases. To skip a release from 0.8.0,
+  scale the instances of 0.8.0 to zero before the newer release starts, so that none of them is
+  restarted meanwhile: an instance of 0.8.0 checks the schema only at its own start and could take
+  its lease just after the newer release checked the leases. Releases after 0.8.0 close that gap
+  themselves.
+- **From 0.7.1** every Server stops first. An instance that shares the database starts, and
+  migrates, only once no Server holds the database alone, as a Server of 0.7.1 does while it runs.
+- **Beside 0.8.0** four things differ from a fleet of one release. `max_agents` may be passed by
+  the records the two releases create at the same moment, since 0.8.0 counts under a lock the newer
+  release does not take. When both create the record of the same new Agent at the same moment, the
+  database ends one of the two as a deadlock after its `deadlock_timeout` (one second by default);
+  that report is answered `Unavailable`, and the Agent reports again. And a Gateway's mark through
+  an instance of 0.8.0 may be refused for a Host it has not heard of yet, or written for a host the
+  database has forgotten; make marks through an instance of this release. And an instance of 0.8.0
+  reads no rejected key: through it a rejected key waits again, is listed and may be approved, so
+  approve through an instance of this release, which refuses it. All four end
+  with the last instance of 0.8.0.
+
+The first start of this release on a database migrates it to the schema of the paged lists: it
+adds columns to the Agents' table and builds three indexes over it, one of them over a digest of
+every row, in the transaction that migrates. Every write of an Agent's record waits for it, for
+a time that grows with the fleet and is not yet measured; start it at a quiet moment.
 
 ## Upgrading to one data directory
 
@@ -1220,8 +1569,10 @@ approved one with its certificate included — are written to `data_dir/enrolmen
 act that changes them is answered, so a Server restart keeps an open window open until its end and
 keeps its requests: a host whose approval it had not collected yet is handed its certificate after
 the restart. A window whose end passed while the Server was down is closed when it starts. When it
-closes, every enrolling connection is closed and every pending request expires, an approved one
-whose certificate its host has not collected included; that host enrols again in the next window.
+closes, every enrolling connection is closed and every request expires, an approved one whose
+certificate its host has not collected included; in the next window the same request waits again.
+A rejected key does not expire: it is kept in `enrolment.json`, or in the database on PostgreSQL,
+and its request is refused in every later window.
 
 **While it is open, an enrolling host may send a certificate request and nothing else.** The
 Server creates no Agent record for it and offers it nothing but the issued certificate. The request
@@ -1272,8 +1623,16 @@ the attribute, nothing is signed, and the request waits. Issue the host a bootst
 that fits, and reject the request. The host stores it as `client-cert.pem` in its state directory
 and reconnects with it
 as a member; from then on it renews by itself. Rejecting answers the request `BadRequest` and
-closes the connection. An unknown or expired id is answered `404`, and every enrolment route
-answers `404` while `[enrolment]` is not configured. A bootstrap certificate that arrives while
+closes the connection, and so is the same request answered whenever it is sent again, beyond the
+window and on every instance: the rejection is of the key, it is kept, and no approval signs that
+key. Nothing lifts it; a host rejected by mistake enrols with a new key, once its pending key and
+request are deleted from its state directory
+([the Client](client.md#enrolment-the-first-certificate)).
+An `id` the queue does not hold is rejected all the same, answered `204`, with the window open or
+closed, and its request is refused when it arrives; an `id` that is not 64 lowercase hexadecimal
+digits is answered `400`. Approving an unknown or expired id, or deciding a request already
+decided, is answered `404`, and every enrolment route answers `404` while `[enrolment]` is not
+configured. A bootstrap certificate that arrives while
 the window is closed is answered `503`, and does not count toward the throttle.
 
 A request whose subject or SANs name an `instance_uid` other than the host's own is answered
@@ -1418,9 +1777,24 @@ before it are not bound by those after it, so check them against a copy taken ea
 intruder on the Server host the chain only helps with a copy taken before, so ship the directory off
 the host. The record also goes to the Server's log under the target `audit`.
 
-The Server never takes a decision it cannot record: when the record cannot be written — a full
-disk, a failed device — it admits no Agent and runs no operator act, answering `503`, until it
-can. A certificate request in that time is answered `Unavailable` with a time to retry, and the
+The Server takes no decision whose entry it cannot queue: when the record cannot be written — a
+full disk, a failed device — or its queue of 10 000 entries is full, it admits no Agent and runs
+no operator act, answering `503`, until it can. An operator act is recorded before it runs, as
+`operator.act` with its method and path. The acts a restore repeats also hold a place in the
+queue before they run, and are not made, answering `503`, where none is free: a revocation, a
+Gateway mark set or cleared, a floor set, a request rejected, and the enrolment window closed.
+Once made, the act writes its entry into that place: `revocation.revoked` names the certificate
+by `authority` and `serial`, `host.gateway` the host and, as `gateway`, whether it is marked,
+`package_floor.set` the Agent type and version. Where the store answered an error and may have
+made it all the same, the entry has the outcome `unknown`; a window closed is closed on the
+instance whatever its store answers, and its entry says `closed`. An orderly shutdown gives no
+place once it begins to close the record, and waits up to its five seconds for those held. The
+entry that says what another act did follows the act, and is dropped where the queue is full or
+the record cannot be written by then; each of them grants trust, so a restore that misses it
+errs toward withdrawing. On the filesystem store an entry in the queue is still lost when the
+write it goes into fails, a held place's as well. The next entry that is written counts
+what was dropped or lost as `unrecorded_before`. A certificate
+request in that time is answered `Unavailable` with a time to retry, and the
 Agent asks again. Refusals past ten a second from one address are counted into one line, not
 dropped.
 `[audit] max_file_bytes` (64 MiB) and `keep_files` (16) bound the space it takes on the filesystem
@@ -1434,12 +1808,18 @@ On PostgreSQL the record is one chain per lease: each instance opens a chain of 
 lease it takes, named by the lease's instance id, and every entry names its chain. Its first entry
 is `audit.chain_opened` with the host. An orderly shutdown closes the chain with
 `audit.chain_closed`, `reason` `shutdown`, before the lease is released; when it cannot, the lease
-is left to lapse. An instance that takes over a lapsed lease — at its own start, or at any
-renewal — closes that lease's chain with `reason` `lease_lapsed` and `closed_by` its own chain, and
-from then on the database refuses the dead chain an entry. Decisions an instance queued under a
-lease that lapsed before they were written go into the chain of its next lease, each with
-`taken_under` naming the old chain; none is lost. Several chains are therefore no gap: there is at
-least one per start.
+is left to lapse. A closing write whose answer was lost is read back, and the lease is released
+when the chain holds its closing entry. After the close the instance records nothing more: a
+decision taken then is refused, and the shutdown logs at `error` how many went unrecorded. An
+instance that takes over a lapsed lease — at its own start, or at any renewal — closes that lease's
+chain with `reason` `lease_lapsed` and `closed_by` its own chain, and from then on the database
+refuses the dead chain an entry. The live lease of an instance that had to be alone and whose
+process is gone is taken over the same way before it lapses, with `reason` `holder_gone`.
+Decisions an instance queued under a lease that lapsed before they were written go into the chain
+of its next lease, each with `taken_under` naming the old chain; none is lost. A decision taken
+while the instance held no lease, its lease lapsed by its clock and no new one taken yet, carries
+`taken_under` `none` in whichever chain it is written into. Several chains are therefore no gap:
+there is at least one per start.
 
 ```console
 $ server audit-verify --config /etc/opamp-fleet/server.toml \
@@ -1482,11 +1862,10 @@ round deletes from all its chains in one transaction, in batches of a few thousa
 writes its own `audit.pruned` entries first, so a round that stops part-way deletes nothing and the
 record verifies after every round. A round that does not end within five minutes is rolled back, the
 prune stops with `cannot prune the audit record` in the log, and the next start or day goes on from
-there. A day is 24 hours, whatever the database's time zone. Upgrade all instances together: a
-Server of a release before this one does not know `audit.pruned`, and its `audit-verify --config`
-reports every pruned chain as broken.
+there. A day is 24 hours, whatever the database's time zone. A Server before 0.8.0 does not know
+`audit.pruned`, and its `audit-verify --config` reports every pruned chain as broken.
 
-A Server that was on PostgreSQL before this release kept its audit record in files under
+A Server that was on PostgreSQL before 0.8.0 kept its audit record in files under
 `data_dir/audit/`. At its first start, before the database holds any chain or archive, it records
 the last entry of those files as the archive, as `server migrate-to-postgres` does, and the first
 chain names it as its `predecessor`: check the link with `--archive <data_dir>/audit`. An empty or
@@ -1974,8 +2353,9 @@ when [`[rest.auth]`](#the-operator-plane-restauth) is configured, needs Basic cr
 
 | Method & path | What it does |
 |---|---|
-| `GET /api/v1/agents` | The whole fleet: every Agent, its attributes, capabilities, the Deployment that claims it, what is rolled out to it and what waits, package installations, health, and sync state. |
-| `POST /api/v1/agents/{instance_uid}/restart` | Queue a restart of that Agent's Managed Process. Delivered on the next exchange — pushed over WebSocket, on the next poll over plain HTTP. Only Supervisor-backed Agents accept it; a Client's own Agent has no process to restart. |
+| `GET /api/v1/agents` | The fleet: every Agent, its attributes, capabilities, the Deployment that claims it, what is rolled out to it and what waits, package installations, health, sync state and, on PostgreSQL, its holder. Pages and filters — see [Lists that page](#lists-that-page). |
+| `GET /api/v1/agents/attributes` | The distinct `key=value` pairs the fleet reports that a Selector can match, and the distinct `service_name` values, each sorted, at most 1000 of each: what the Deployment and Configuration forms suggest. |
+| `POST /api/v1/agents/{instance_uid}/restart` | Queue a restart of that Agent's Managed Process. Delivered on the next exchange — pushed over WebSocket, on the next poll over plain HTTP. Over WebSocket, a command whose send the Server sees fail stays queued and goes out on the Agent's next exchange, so a process may be restarted twice when the command reached it anyway. Where the store cannot take it back at once, the Server logs it and tries again, at intervals that grow to a minute, until it holds; a Server that stops before then loses it. While it tries, the Agent reads as having no restart queued, and the warning in the log is the sign; a restart requested or delivered meanwhile, or the Agent's forget, ends the tries, and a re-key of the Agent through this instance takes them to its new `instance_uid`. Two cases restart the process once more: a restart requested and delivered through another instance before this one heard of the request, and an Agent forgotten through another instance that no longer carried it here, which comes back under the same identity before the next try. A re-key of the Agent through another instance while this one tries is not seen: the restart is not tried again, the log warns `the restart is no longer tried, the Agent's row is gone` with the Agent's `instance_uid`, as it does for a forgotten Agent, and the Operator requests the restart again. A frame lost after the connection took it, and on plain HTTP any lost answer to a poll, is not seen: the Operator requests the restart again. Only Supervisor-backed Agents accept it; a Client's own Agent has no process to restart. |
 | `PUT /api/v1/agents/{instance_uid}/labels` | Set this Agent's labels — see [Labels: rollout channels without touching the host](#labels-rollout-channels-without-touching-the-host). Body: `{"labels": {…}}`; an empty map clears them. |
 | `DELETE /api/v1/agents/{instance_uid}` | Forget this Agent — see [Forgetting an Agent](#forgetting-an-agent) below. Reaches no host. `409` while it is still reporting. |
 | `POST /api/v1/agents/{instance_uid}/rollout` | The per-Agent rollout act: releases the Deployment that claims this Agent to it, replacing its assignment. Empty body, or `{"deployment": "…"}` naming that Deployment. `409` when the Agent is in no Deployment, in a conflict, or in another one than named, when the Deployment holds nothing or a Package with an unsigned entry, and when the press would change nothing because the Package it holds is no upgrade (the reason names the version). |
@@ -2004,7 +2384,7 @@ when [`[rest.auth]`](#the-operator-plane-restauth) is configured, needs Basic cr
 | `GET` / `POST` / `DELETE /api/v1/enrolment/window` | Read, open or close the enrolment window — see [Enrolment](#enrolment-a-new-host-approved-by-an-operator). `POST` body: `{"open_for_secs": n}`, 1 to 86400. `404` while `[enrolment]` is not configured. |
 | `GET /api/v1/enrolments` | The pending enrolment requests, oldest first, each with its `id` — the fingerprint the enrolling Client logs. |
 | `POST /api/v1/enrolments/{id}/approve` | Sign that request and hand the host its certificate. `404` for an unknown or expired id. `409` while another instance is deciding that request; asked again once it is decided, `404`. |
-| `POST /api/v1/enrolments/{id}/reject` | Refuse that request and close its connection. `404` for an unknown or expired id. `409` while another instance is deciding that request; asked again once it is decided, `404`. |
+| `POST /api/v1/enrolments/{id}/reject` | Refuse that request's key for good and close its connection. An `id` the queue does not hold is rejected before its request arrives, `204` as well. `400` for an `id` that is not 64 lowercase hexadecimal digits, `404` for a request already decided. `409` while another instance is deciding that request; asked again once it is decided, `404`. |
 | `GET` / `POST /api/v1/bootstrap-certificates` | List the valid bootstrap certificates the Server issued, or issue one — see [Bootstrap certificates](#bootstrap-certificates-issued-by-the-server). `POST` body: `{"subject": {…}, "validity_days": n, "password": "…"}`, `subject.organization`, `subject.organizational_unit` and `password` required (`400` naming the one missing); the answer carries the certificate and never its key, which is in the PKCS#12 file. `409` without `[enrolment] bootstrap_ca_key_file`. |
 
 The package routes answer `404` while package delivery is not configured on this Server.
@@ -2249,6 +2629,42 @@ that interval; the Server logs a warning at startup naming both keys when that i
 buckets live in memory: the subjects and aggregates up to the certificate register's 100 000, the
 Agents behind Gateways up to `max_agents`, and a full table forgets the bucket used least
 recently. `0` for any key is refused at startup; no value switches the limit off.
+
+### Lists that page
+
+`GET /api/v1/agents`, `GET /api/v1/hosts`, `GET /api/v1/certificates` and
+`GET /api/v1/revocations` grow with the fleet. Without `limit` each answers its whole JSON array,
+as before, while at most 10 000 entries match its filters; a longer one is answered `400`, naming
+`limit`, and never cut short. With `limit` (1 to 1000, a larger value read as 1000) each answers
+one page, the same array of the same entries:
+
+- `X-Total-Count` names how many entries match, on every answer.
+- `Link: <…>; rel="next"` names the next page: the same route and parameters with a `cursor`.
+  The last page has none. A cursor is opaque; pass it back unchanged, to any instance. One that
+  does not parse, or comes with another `sort` or other filters, is answered `400`. A `cursor`
+  without `limit` answers a page of 1000.
+- An entry whose sort value changes while you page may show twice or not at all; one that does not
+  change shows once.
+- A parameter the route does not take is answered `400`, naming it.
+
+The Agents sort by `sort` — `name` (the default), `connected`, `health` (unhealthy first, then not
+reported, then healthy), `config`, `version`, `os`, `seq` or `seen` — with `order` `asc` or `desc`,
+ties by Instance UID. They take `q`, a case-insensitive substring of what the Agents tab's filter
+searches (the names, the Instance UID, the OS and platform, the versions, the configuration and
+health status, the attributes, labels, inherited labels and Host values, the capabilities, the
+package statuses, and `connected`, `disconnected` or `stale`; not the Configurations a rollout
+would release); `selector`, `key=value` pairs separated by commas, matched as a Deployment's
+Selector matches; `connected` and `stale`, `true` or `false`; `service_name`; and, on PostgreSQL,
+`holder`, an instance id or `none`. On the filesystem store `holder` is answered `400`.
+
+```console
+$ curl -s --cacert ca.pem -D - \
+       'https://127.0.0.1:4321/api/v1/agents?limit=100&selector=ring%3Dcanary&sort=seen&order=desc'
+```
+
+The Hosts sort by host id and take `q` over the host id and its subject values, and `gateway`.
+The certificates sort by when they were issued, the revocations by when they were made; both take
+`q` over the serial, the subject and the host.
 
 ### The Operator plane: `[rest.auth]`
 

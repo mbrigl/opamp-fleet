@@ -1,6 +1,6 @@
 //! Configurations on the filesystem (ADR-0026): the default adapter behind
 //! [`ConfigBackend`](crate::configs::ConfigBackend) — one JSON file per Configuration under
-//! `<data_dir>/configurations/`, owner-only, written in one step (ADR-0044).
+//! `<data_dir>/configurations/`, owner-only, written in one step (ADR-0050).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -38,7 +38,7 @@ fn read(dir: &Path, name: &str) -> Result<Option<Configuration>, String> {
 }
 
 /// Adds one retained revision to the Configuration's file in `dir`, in one step — the write this
-/// store and a rollout's revisions (ADR-0044 clause 2) share. The file is this Server's alone, so
+/// store and a rollout's revisions (ADR-0050 clause 2) share. The file is this Server's alone, so
 /// what it reads is what it wrote.
 pub(crate) fn retain(dir: &Path, pinned: &Pinned) -> Result<(), String> {
     let mut config = read(dir, &pinned.configuration)?
@@ -66,7 +66,7 @@ fn parse(stem: &str, path: &Path, text: &str) -> Result<Configuration, String> {
             "{} carries a selector, and a Configuration has none any more (ADR-0026): put \
              it into a Deployment, whose Selector aims it, and remove the selector from \
              the file; a data directory an older Server wrote is moved by `server migrate` \
-             (ADR-0044)",
+             (ADR-0050)",
             path.display()
         ));
     }

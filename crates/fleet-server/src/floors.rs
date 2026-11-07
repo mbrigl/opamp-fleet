@@ -20,7 +20,7 @@ pub struct Floor {
     pub signature: Vec<u8>,
 }
 
-/// The floors' store (ADR-0044): the filesystem adapter keeps them in
+/// The floors' store (ADR-0050): the filesystem adapter keeps them in
 /// `<data_dir>/package-floors.json` ([`FsFloorStore`](crate::fs::FsFloorStore)), the PostgreSQL
 /// adapter in `package_floors`. Each write is persisted before the act that made it is answered.
 pub trait FloorStore: Send + Sync {
@@ -32,7 +32,7 @@ pub trait FloorStore: Send + Sync {
 
     /// Stores `floor` for `agent_type` unless its version orders below the one stored, deciding
     /// from what the store holds, as another instance may have raised it since this one read it
-    /// (ADR-0041
+    /// (ADR-0048
     /// clause 19).
     ///
     /// # Errors
@@ -148,7 +148,7 @@ impl PackageFloors {
     }
 
     /// Reads the floors again from the store, as another instance set or removed one
-    /// (ADR-0041
+    /// (ADR-0048
     /// clauses 9 and 12), so what this instance serves is what is stored. It reads under the lock,
     /// so no write of this instance's own lands between the read and the swap.
     ///

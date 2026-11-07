@@ -270,7 +270,7 @@ pub enum ServiceAction {
     /// Register this instance as a system (or `--user`) service and lay out the versioned
     /// install.
     Install(InstallArgs),
-    // ADR-0019 clauses 23 and 24 and ADR-0022 clause 16.
+    // ADR-0019 clauses 23 and 24 and ADR-0052 clause 16.
     /// Ask the questionnaire of `install --interactive` again, offering what the configuration
     /// holds as the defaults, and enrol with the Server if this Client holds no certificate yet.
     ///
@@ -320,7 +320,7 @@ pub struct InstallArgs {
     /// come.
     #[arg(long)]
     pub interactive: bool,
-    // ADR-0022.
+    // ADR-0052.
     /// Write the configuration file with this Server endpoint instead of asking for it.
     ///
     /// The non-interactive half of `--interactive`, for an install driven by a packaged installer:
@@ -346,7 +346,7 @@ pub struct InstallArgs {
     /// untouched, as it is for every other answer here.
     #[arg(long, conflicts_with = "interactive")]
     pub no_self_update: bool,
-    // ADR-0022.
+    // ADR-0052.
     /// Look for the fleet's files in this directory instead of beside the program:
     /// `server-ca.pem`, `package-signing-key.pub`, and the bootstrap identity — `bootstrap.pem` with
     /// `bootstrap-key.pem`, or `bootstrap.p12`.
@@ -355,7 +355,7 @@ pub struct InstallArgs {
     /// these files. The install never looks in both places.
     #[arg(long, value_name = "DIR")]
     pub fleet_files: Option<PathBuf>,
-    // ADR-0022.
+    // ADR-0052.
     /// Read the password of a `bootstrap.p12` from the first line of this file, instead of asking
     /// for it.
     ///
@@ -957,9 +957,9 @@ mod tests {
         }
     }
 
-    /// ADR-0022 clause 17: a packaged install passes the answer it collected. The endpoint is not
+    /// ADR-0052 clause 17: a packaged install passes the answer it collected. The endpoint is not
     /// validated here — the loader's own rule does that, once, in `config_init`.
-    /// Verifies: ADR-0019, ADR-0022
+    /// Verifies: ADR-0019, ADR-0052
     #[test]
     fn install_takes_an_endpoint_without_a_terminal() {
         let told = parse(&[
@@ -984,7 +984,7 @@ mod tests {
 
     /// The two ways of writing the first configuration cannot both be asked for: one blocks on a
     /// terminal and the other exists precisely because there is none.
-    /// Verifies: ADR-0019, ADR-0022
+    /// Verifies: ADR-0019, ADR-0052
     #[test]
     fn an_endpoint_and_interactive_are_refused_together() {
         let err = Cli::try_parse_from([

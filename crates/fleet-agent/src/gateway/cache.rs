@@ -4,7 +4,7 @@
 //!
 //! What is kept here:
 //! - the **bindings**: each `instance_uid` to the host of the first report for it, as the Server
-//!   binds on first report (ADR-0022 clause 11), kept across restarts in the store beside the held
+//!   binds on first report (ADR-0052 clause 11), kept across restarts in the store beside the held
 //!   artifacts ([`store`](crate::gateway::store), ADR-0015 clause 16) and relied on only once the
 //!   store holds them;
 //! - the **offers**: per `instance_uid`, the Server-hosted artifacts its last recorded

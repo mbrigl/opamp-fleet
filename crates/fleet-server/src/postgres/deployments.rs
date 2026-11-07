@@ -1,18 +1,19 @@
-//! Deployments in PostgreSQL (ADR-0044 clause 6): the PostgreSQL adapter behind
+//! Deployments in PostgreSQL (ADR-0050 clause 6): the PostgreSQL adapter behind
 //! [`DeploymentBackend`](crate::deployments::DeploymentBackend) — one row per Deployment and one
 //! per member, each call one transaction on the rows it names
-//! (ADR-0041
+//! (ADR-0048
 //! clause 19).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use tokio_postgres::GenericClient;
+use super::Cached as GenericClient;
 
 use super::{client, sql, Database};
 use crate::configs::validate_name;
 use crate::deployments::{
-    check_selector, not_held, Change, Deployment, DeploymentBackend, DeploymentError, Member,
+    check_selector, no_configuration, no_package, not_held, Change, Deployment, DeploymentBackend,
+    DeploymentError, Member,
 };
 use crate::packages::PackageId;
 
@@ -33,7 +34,7 @@ impl DeploymentBackend for PgDeploymentBackend {
     fn load(&self) -> Result<Vec<Deployment>, String> {
         self.database.run(|pool| async move {
             let client = client(&pool).await?;
-            read(&**client, None).await
+            read(&client, None).await
         })
     }
 
@@ -44,6 +45,10 @@ impl DeploymentBackend for PgDeploymentBackend {
         self.database.run(move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
+            // `packages` and `configurations` mirrored the member rows; no release reads them,
+            // so a new row's are empty and nothing writes them after
+            // (ADR-0050
+            // clause 22).
             transaction
                 .execute(
                     "INSERT INTO deployments (name, selector, packages, configurations) \
@@ -53,30 +58,25 @@ impl DeploymentBackend for PgDeploymentBackend {
                 )
                 .await
                 .map_err(sql)?;
-            let deployment = one(&*transaction, &name).await?;
-            super::notify::notify(&*transaction, super::notify::DEPLOYMENT, &name).await?;
+            let deployment = one(&transaction, &name).await?;
+            super::notify::notify(&transaction, super::notify::DEPLOYMENT, &name).await?;
             transaction.commit().await.map_err(sql)?;
             Ok(deployment)
         })
     }
 
     /// One transaction: the Deployment's row is held `FOR UPDATE`, the change decided from the
-    /// member rows it reads then, the rows it names written, and the columns the release before
-    /// migration 5 read written from the rows, kept for the removal rule of
-    /// ADR-0044 clause 22.
+    /// member rows it reads then, and the rows it names written.
     fn amend(&self, name: &str, change: &Change) -> Result<Deployment, DeploymentError> {
         let (name, change) = (name.to_string(), change.clone());
         let decided = self.database.run(move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
-            let decided = change_rows(&*transaction, &name, &change).await?;
-            if decided.is_ok() {
-                mirror(&*transaction, &name).await?;
-            }
+            let decided = change_rows(&transaction, &name, &change).await?;
             let decided = match decided {
                 Ok(()) => {
-                    super::notify::notify(&*transaction, super::notify::DEPLOYMENT, &name).await?;
-                    Ok(one(&*transaction, &name).await?)
+                    super::notify::notify(&transaction, super::notify::DEPLOYMENT, &name).await?;
+                    Ok(one(&transaction, &name).await?)
                 }
                 Err(refused) => Err(refused),
             };
@@ -87,7 +87,9 @@ impl DeploymentBackend for PgDeploymentBackend {
     }
 
     /// One transaction: every Deployment that holds the member is held `FOR UPDATE`, in name
-    /// order, and loses it.
+    /// order, and loses it. The deletion of the member took it out of every Deployment already,
+    /// in its own transaction ([`drop_member_rows`]), so this finds one only where a Server of
+    /// 0.8.0 beside this one added it after.
     fn drop_member(&self, member: &Member) -> Result<Vec<Deployment>, String> {
         let member = member.clone();
         self.database.run(move |pool| async move {
@@ -127,10 +129,9 @@ impl DeploymentBackend for PgDeploymentBackend {
                     }
                     Member::Package(id) => Change::RemovePackage(id.clone()),
                 };
-                if change_rows(&*transaction, name, &removed).await?.is_ok() {
-                    mirror(&*transaction, name).await?;
-                    super::notify::notify(&*transaction, super::notify::DEPLOYMENT, name).await?;
-                    changed.push(one(&*transaction, name).await?);
+                if change_rows(&transaction, name, &removed).await?.is_ok() {
+                    super::notify::notify(&transaction, super::notify::DEPLOYMENT, name).await?;
+                    changed.push(one(&transaction, name).await?);
                 }
             }
             transaction.commit().await.map_err(sql)?;
@@ -177,7 +178,7 @@ impl DeploymentBackend for PgDeploymentBackend {
                 .execute("DELETE FROM deployments WHERE name = $1", &[&name])
                 .await
                 .map_err(sql)?;
-            super::notify::notify(&*transaction, super::notify::DEPLOYMENT, &name).await?;
+            super::notify::notify(&transaction, super::notify::DEPLOYMENT, &name).await?;
             transaction.commit().await.map_err(sql)?;
             Ok(Ok(()))
         });
@@ -185,9 +186,49 @@ impl DeploymentBackend for PgDeploymentBackend {
     }
 }
 
+/// Takes `member` out of every Deployment that holds it inside the transaction that deletes it,
+/// which holds the member's row `FOR UPDATE`: an add that holds that row `FOR KEY SHARE` has
+/// committed before this reads the member rows, and every later one finds the member gone
+/// (ADR-0048
+/// clause 19). The Deployments' rows are not held, so this takes no lock in the order of an add,
+/// which holds the Deployment's row before the member's.
+pub(super) async fn drop_member_rows(
+    client: &impl GenericClient,
+    member: &Member,
+) -> Result<(), String> {
+    let rows = match member {
+        Member::Configuration(configuration) => {
+            client
+                .query(
+                    "DELETE FROM deployment_configurations WHERE configuration = $1 \
+                     RETURNING deployment",
+                    &[configuration],
+                )
+                .await
+        }
+        Member::Package(id) => {
+            client
+                .query(
+                    "DELETE FROM deployment_packages WHERE agent_type = $1 AND version = $2 \
+                     RETURNING deployment",
+                    &[&id.agent_type, &id.version],
+                )
+                .await
+        }
+    }
+    .map_err(sql)?;
+    let left: BTreeSet<String> = rows.iter().map(|row| row.get(0)).collect();
+    for name in &left {
+        super::notify::notify(client, super::notify::DEPLOYMENT, name).await?;
+    }
+    Ok(())
+}
+
 /// Makes `change` to the member rows of the Deployment `name` inside the caller's transaction,
-/// holding its row `FOR UPDATE` first and deciding from the rows it then reads. A refusal is the
-/// inner error, and nothing is written.
+/// holding its row `FOR UPDATE` first and deciding from the rows it then reads. A member it adds
+/// is held `FOR KEY SHARE` until the commit, and one that is not stored is refused: its deletion
+/// waits for the add, and then takes it out again ([`drop_member_rows`]). A refusal is the inner
+/// error, and nothing is written.
 async fn change_rows(
     client: &impl GenericClient,
     name: &str,
@@ -206,6 +247,17 @@ async fn change_rows(
     }
     match change {
         Change::PutPackage { id, replace } => {
+            if client
+                .query_opt(
+                    "SELECT 1 FROM packages WHERE agent_type = $1 AND version = $2 FOR KEY SHARE",
+                    &[&id.agent_type, &id.version],
+                )
+                .await
+                .map_err(sql)?
+                .is_none()
+            {
+                return Ok(Err(no_package(id)));
+            }
             let held = client
                 .query_opt(
                     "SELECT version FROM deployment_packages WHERE deployment = $1 \
@@ -247,6 +299,17 @@ async fn change_rows(
             }
         }
         Change::PutConfiguration(configuration) => {
+            if client
+                .query_opt(
+                    "SELECT 1 FROM configurations WHERE name = $1 FOR KEY SHARE",
+                    &[configuration],
+                )
+                .await
+                .map_err(sql)?
+                .is_none()
+            {
+                return Ok(Err(no_configuration(configuration)));
+            }
             client
                 .execute(
                     "INSERT INTO deployment_configurations (deployment, configuration) \
@@ -271,27 +334,6 @@ async fn change_rows(
         }
     }
     Ok(Ok(()))
-}
-
-/// Writes the `packages` and `configurations` columns of the Deployment `name` from its member
-/// rows, inside the caller's transaction, which holds its row. The release before migration 5 read
-/// its members there; no such release runs on this schema, whose oldest Server is 0.8.0, and the
-/// columns are kept for the removal rule of ADR-0044 clause 22.
-async fn mirror(client: &impl GenericClient, name: &str) -> Result<(), String> {
-    client
-        .execute(
-            "UPDATE deployments SET \
-             packages = (SELECT coalesce(json_agg(json_build_object('agent_type', agent_type, \
-             'version', version) ORDER BY agent_type), '[]'::json) FROM deployment_packages \
-             WHERE deployment = $1), \
-             configurations = ARRAY(SELECT configuration FROM deployment_configurations \
-             WHERE deployment = $1 ORDER BY configuration) \
-             WHERE name = $1",
-            &[&name],
-        )
-        .await
-        .map_err(sql)?;
-    Ok(())
 }
 
 /// The Deployment `name` as stored, inside the caller's transaction.
@@ -420,7 +462,7 @@ pub(crate) async fn write(
             .await
             .map_err(sql)?;
     }
-    mirror(client, &deployment.name).await
+    Ok(())
 }
 
 #[cfg(test)]
@@ -446,6 +488,19 @@ mod tests {
                 .unwrap_or_default(),
             configurations: configurations.iter().map(ToString::to_string).collect(),
         }
+    }
+
+    /// Stores every Configuration and Package these tests put into a Deployment: an add refuses a
+    /// member that is not stored.
+    fn store_members(test: &TestDatabase) {
+        test.sql(
+            "INSERT INTO configurations (name, body, role, service_name) VALUES \
+             ('base', '', '', 'otelcol'), ('extra', '', '', 'otelcol'), \
+             ('other', '', '', 'otelcol'); \
+             INSERT INTO packages (agent_type, version) VALUES ('otelcol', '1.0.0'), \
+             ('otelcol', '1.2.3'), ('otelcol', '1.2.4'), ('otelcol', '1.3.0'), \
+             ('otelcol', '2.0.0')",
+        );
     }
 
     /// Writes `deployment` through the port, one member at a time.
@@ -572,20 +627,21 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0044
+    /// Verifies: ADR-0050
     #[test]
     fn the_deployment_port_contract_holds_on_the_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
         contract(&|| Box::new(FsDeploymentBackend::open(dir.path()).expect("open")));
     }
 
-    /// Verifies: ADR-0044, ADR-0041
+    /// Verifies: ADR-0050, ADR-0048
     #[test]
     fn the_deployment_port_contract_holds_on_postgres() {
         let Some(test) = TestDatabase::named() else {
             return;
         };
         let database = test.open();
+        store_members(&test);
         contract(&|| Box::new(PgDeploymentBackend::new(database.clone())));
     }
 
@@ -614,7 +670,7 @@ mod tests {
         assert_eq!(store.load().expect("load"), [before]);
     }
 
-    /// Verifies: ADR-0044
+    /// Verifies: ADR-0050
     #[test]
     fn a_write_that_fails_leaves_the_deployment_as_it_was_on_the_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -626,56 +682,85 @@ mod tests {
         );
     }
 
-    /// The columns the release before migration 5 read are written last, from the rows: refusing
-    /// that write refuses the whole change.
-    /// Verifies: ADR-0044
+    /// Each write of `canary`'s row and of its member rows is refused: a replacing Package
+    /// removes the old row before its insert is refused, and the whole change is refused with it.
+    /// Verifies: ADR-0050
     #[test]
     fn a_write_that_fails_leaves_the_deployment_as_it_was_on_postgres() {
         let Some(test) = TestDatabase::named() else {
             return;
         };
+        let tables = [
+            ("deployments", "NEW.name = 'canary'"),
+            ("deployment_packages", "NEW.deployment = 'canary'"),
+            ("deployment_configurations", "NEW.deployment = 'canary'"),
+        ];
+        let database = test.open();
+        store_members(&test);
         fails_part_way(
-            &PgDeploymentBackend::new(test.open()),
-            &|| test.refuse("deployments", "NEW.name = 'canary'"),
-            &|| test.mend("deployments"),
+            &PgDeploymentBackend::new(database),
+            &|| {
+                for (table, condition) in tables {
+                    test.refuse(table, condition);
+                }
+            },
+            &|| {
+                for (table, _) in tables {
+                    test.mend(table);
+                }
+            },
         );
     }
 
-    /// The release before migration 5 read a Deployment's members from its own row; while those
-    /// columns are kept, every change writes them from the member rows in the same transaction.
-    /// Verifies: ADR-0041
+    /// No release reads the Deployments' `packages` and `configurations` columns, which mirror
+    /// the member rows, so this release writes them no more: a new Deployment's are empty, and
+    /// what a Server of 0.8.0 wrote into them stays as it was through every change of the
+    /// members, until the release after this one removes them
+    /// (ADR-0050
+    /// clause 22).
+    /// Verifies: ADR-0050
     #[test]
-    fn the_columns_the_release_before_reads_follow_the_member_rows() {
+    fn the_mirror_columns_are_written_no_more() {
         let Some(test) = TestDatabase::named() else {
             return;
         };
         let store = PgDeploymentBackend::new(test.open());
+        store_members(&test);
+        let mirrors = || test.rows("SELECT packages::text, configurations::text FROM deployments");
         put(
             &store,
             &deployment("canary", Some("1.2.3"), &["extra", "base"]),
         );
         assert_eq!(
-            test.rows("SELECT packages::text, configurations::text FROM deployments"),
-            [[
-                Some(r#"[{"agent_type" : "otelcol", "version" : "1.2.3"}]"#.to_string()),
-                Some("{base,extra}".to_string())
-            ]]
+            mirrors(),
+            [[Some("[]".to_string()), Some("{}".to_string())]],
+            "a new Deployment's are empty"
         );
+        // As a Server of 0.8.0 beside this one leaves them.
+        test.sql(
+            "UPDATE deployments SET packages = \
+             '[{\"agent_type\":\"otelcol\",\"version\":\"1.2.3\"}]', \
+             configurations = '{base,extra}'",
+        );
+        let written = mirrors();
         store
             .drop_member(&Member::Configuration("base".to_string()))
             .expect("drop");
         store
             .amend("canary", &Change::RemovePackage(id("1.2.3")))
             .expect("remove");
+        put(&store, &deployment("canary", Some("1.2.4"), &["other"]));
+        assert_eq!(mirrors(), written, "no change of the members writes them");
         assert_eq!(
-            test.rows("SELECT packages::text, configurations::text FROM deployments"),
-            [[Some("[]".to_string()), Some("{extra}".to_string())]]
+            store.load().expect("load"),
+            [deployment("canary", Some("1.2.4"), &["extra", "other"])],
+            "the members are the rows'"
         );
     }
 
     /// Migration 5 moves the members out of the Deployments' columns into rows of their own, and
     /// the Deployments load as the release before left them.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0048
     #[test]
     fn the_members_move_out_of_the_deployments_columns() {
         use crate::postgres::schema::{MIGRATIONS, SCHEMA_TABLE};
@@ -713,13 +798,14 @@ mod tests {
     /// write, so the second runs exactly then; the gate opens once the second waits for the
     /// Deployment's row, or has reached the gate itself, which only an amendment that took no hold
     /// does.
-    /// Verifies: ADR-0041, ADR-0027
+    /// Verifies: ADR-0048, ADR-0027
     #[test]
     fn two_packages_of_one_type_added_at_once_add_one() {
         let Some(test) = TestDatabase::named() else {
             return;
         };
         let database = test.open();
+        store_members(&test);
         PgDeploymentBackend::new(database.clone())
             .save("stable", &selector("stable"))
             .expect("save");
@@ -781,8 +867,44 @@ mod tests {
         );
     }
 
-    /// A row that does not decode fails the load naming it (ADR-0044 clause 6).
-    /// Verifies: ADR-0044
+    /// The deletion of a Configuration or a Package takes it out of every Deployment that holds it
+    /// in the transaction that deletes it: nothing the fleet does after, which a crash would cut
+    /// off, is needed for no Deployment to name it.
+    /// Verifies: ADR-0048, ADR-0026
+    #[test]
+    fn a_deleted_member_leaves_every_deployment_in_the_transaction_that_deletes_it() {
+        use crate::configs::{ConfigBackend as _, Removal};
+        use crate::packages::PackageBackend as _;
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        store_members(&test);
+        let store = PgDeploymentBackend::new(database.clone());
+        put(
+            &store,
+            &deployment("canary", Some("1.2.3"), &["base", "extra"]),
+        );
+        put(&store, &deployment("stable", Some("1.2.3"), &["base"]));
+
+        assert_eq!(
+            crate::postgres::configs::PgConfigBackend::new(database.clone()).remove("base"),
+            Ok(Removal::Removed)
+        );
+        crate::postgres::packages::PgPackageBackend::new(database)
+            .remove(&id("1.2.3"))
+            .expect("the Package is deleted");
+        assert_eq!(
+            store.load().expect("load"),
+            [
+                deployment("canary", None, &["extra"]),
+                deployment("stable", None, &[])
+            ]
+        );
+    }
+
+    /// A row that does not decode fails the load naming it (ADR-0050 clause 6).
+    /// Verifies: ADR-0050
     #[test]
     fn a_deployment_row_that_does_not_decode_fails_the_load_naming_it() {
         let Some(test) = TestDatabase::named() else {
@@ -804,7 +926,7 @@ mod tests {
     /// A deletion of a Deployment through B while a rollout through A that releases through it
     /// has not yet committed waits for the rollout, and then refuses it from the assignment the
     /// rollout stored: the rollout holds the Deployment's row until it commits.
-    /// Verifies: ADR-0041, ADR-0026
+    /// Verifies: ADR-0048, ADR-0026
     #[test]
     fn a_deletion_waits_for_a_rollout_through_the_deployment_and_is_refused() {
         use crate::agent_store::{tests::record, AgentStore as _};

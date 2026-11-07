@@ -23,7 +23,7 @@
 #       made one.
 #   scripts/seed_test_configs.sh --offline [data-dir]
 #       Writes each Configuration as <data-dir>/configurations/<name>.json, owner-only — the
-#       Server's own persistence format (ADR-0044), loaded at its next start; no running Server
+#       Server's own persistence format (ADR-0050), loaded at its next start; no running Server
 #       needed. Default data-dir is fleet-data/ in the repository root (the server.toml default).
 #       This is what scripts/install_tools.sh runs after installing the processes. A staged Configuration is
 #       stored, not assigned, and held by no Deployment: once the Agents have enrolled, put each
@@ -32,9 +32,9 @@
 #       POST /api/v1/deployments/<name>/rollout, or the Deployments tab).
 #   scripts/seed_test_configs.sh --enrol [server-url]
 #       For the development set of scripts/dev-pki.sh, whose Client enrols like any other host
-#       (ADR-0022): asks the Server for a fresh bootstrap certificate for the customer and site
+#       (ADR-0052): asks the Server for a fresh bootstrap certificate for the customer and site
 #       "Development" under a throwaway password, downloads its bootstrap.p12 — the Server hands
-#       the key out in no other form (ADR-0022) — and extracts the pair with
+#       the key out in no other form (ADR-0052) — and extracts the pair with
 #       `opamp-fleetctl pki p12-extract` where the development supervisor.toml names it
 #       ($SEED_BOOTSTRAP_DIR, default .dev-pki/offline/), replacing a pair already there,
 #       opens the enrolment window for ten minutes, waits up to two minutes for
@@ -68,7 +68,7 @@ if [ "${1:-}" = "--offline" ]; then
     mode=stage
     data_dir="${2:-$examples/../../fleet-data}"
     configurations="$data_dir/configurations"
-    # Owner-only, as the Server keeps everything under data_dir (ADR-0044).
+    # Owner-only, as the Server keeps everything under data_dir (ADR-0050).
     umask 077
     mkdir -p "$configurations"
 elif [ "${1:-}" = "--enrol" ]; then
@@ -89,7 +89,7 @@ if [ "$mode" = enrol ]; then
     bootstrap_dir="$(cd "${SEED_BOOTSTRAP_DIR:-$root/.dev-pki/offline}" && pwd)"
     # A fresh certificate every time, so one that has ended since the last run is never reused.
     # The Server keeps its key only in a PKCS#12 file under the password the request names
-    # (ADR-0022): a throwaway one opens the file once, and nothing keeps it.
+    # (ADR-0052): a throwaway one opens the file once, and nothing keeps it.
     work="$(mktemp -d)"
     trap 'rm -rf "$work"' EXIT
     (

@@ -15,10 +15,10 @@ use crate::configs::Pinned;
 use crate::fleet::{Assignment, Transport};
 use crate::packages::PackageId;
 
-/// The default adapter (ADR-0043, ADR-0044): one JSON file per Agent under `<data_dir>/agents/`,
+/// The default adapter (ADR-0043, ADR-0050): one JSON file per Agent under `<data_dir>/agents/`,
 /// owner-only — temp file plus atomic rename, loud failure on a file that does not parse or a name
 /// that is not an Instance UID. A rollout's revisions go to `<data_dir>/configurations/` first
-/// (ADR-0044 clause 2), and the integrity queries are answered from the assignments this adapter
+/// (ADR-0050 clause 2), and the integrity queries are answered from the assignments this adapter
 /// last read or wrote.
 pub struct FsAgentStore {
     dir: PathBuf,
@@ -133,7 +133,7 @@ impl Envelope {
                  no other record format: an Agent record carries its labels and the Host it \
                  arrived over (ADR-0043), and an assignment is one release per Agent, its \
                  Package and Configurations together (ADR-0026). A data directory an older \
-                 Server wrote is moved by `server migrate` (ADR-0044)",
+                 Server wrote is moved by `server migrate` (ADR-0050)",
                 self.version
             ));
         }
@@ -178,7 +178,7 @@ impl Envelope {
 impl FsAgentStore {
     /// Opens the store in the data directory `root`, creating `agents/` owner-only — reported
     /// effective configurations may hold credentials (ADR-0043), the same reasoning that guards
-    /// every other store (ADR-0044 clause 1).
+    /// every other store (ADR-0050 clause 1).
     pub fn open(root: &std::path::Path) -> Result<Self, String> {
         let dir = root.join(super::AGENTS);
         let configurations = root.join(super::CONFIGURATIONS);
@@ -312,7 +312,7 @@ impl AgentStore for FsAgentStore {
     }
 
     /// The revisions first, then each record: a crash in between leaves revisions nothing
-    /// references, which the next load collects (ADR-0044 clause 2). A record that cannot be
+    /// references, which the next load collects (ADR-0050 clause 2). A record that cannot be
     /// written puts every record this call already wrote back as it was, so a failure leaves the
     /// records as they were; one that cannot be put back stays as written, and so does what the
     /// store answers about it.
@@ -494,7 +494,7 @@ mod tests {
 
     /// A release that fails part-way puts back what it wrote, a record that had no file before
     /// among them: that file is removed again, and what the store answers about pins with it.
-    /// Verifies: ADR-0044
+    /// Verifies: ADR-0050
     #[test]
     fn a_failed_release_removes_a_record_it_created() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -523,9 +523,9 @@ mod tests {
         assert!(restored.contains_key(&new) && !restored.contains_key(&old));
     }
 
-    /// The integrity questions are the store's (ADR-0044 clause 2): what the stored assignments
+    /// The integrity questions are the store's (ADR-0050 clause 2): what the stored assignments
     /// pin and which revisions they reference, kept as records are written, removed and loaded.
-    /// Verifies: ADR-0044
+    /// Verifies: ADR-0050
     #[test]
     fn the_store_answers_what_its_assignments_pin() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -589,7 +589,7 @@ mod tests {
     /// A rollout writes its revisions before the assignments that pin them, so one cut short in
     /// between leaves a revision nothing references and every record as it was. The next load
     /// accepts that state and collects the orphaned revision, from memory and from disk.
-    /// Verifies: ADR-0044
+    /// Verifies: ADR-0050
     #[test]
     fn a_rollout_cut_short_after_its_revisions_leaves_a_state_the_next_load_accepts() {
         use crate::configs::{revision_hash, ConfigBackend as _, Configuration, Revision};
