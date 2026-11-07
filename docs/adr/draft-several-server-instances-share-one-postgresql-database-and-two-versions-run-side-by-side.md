@@ -442,7 +442,10 @@ every change that concerns a live session by one `NOTIFY`.
       another Host's fails, and the instance reads the binding that holds and decides by it.
     - The bounds of the register, the revocation list, the bootstrap entries and the enrolment
       queue are counted in the transaction that would pass them, so each holds for the fleet and
-      not for one instance.
+      not for one instance. An instance of 0.8.0 reads no rejected key
+      ([ADR-draft-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window](draft-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)
+      clause 16), so through it a key rejected in an earlier window waits again and may be
+      approved, until the last instance of 0.8.0 is replaced.
     - The ceiling on the Agents' records, `max_agents`, is counted from one row in the statement
       that creates a record
       ([ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision](draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
