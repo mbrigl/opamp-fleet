@@ -63,10 +63,12 @@ pub trait BlobStore: Send + Sync {
 /// (ADR-0044 clause 14), released when it is dropped. A store
 /// that is its one Server's alone holds nothing.
 pub struct BlobHold {
-    #[allow(dead_code)]
-    held: Option<Box<dyn Send>>,
+    held: Option<Box<dyn std::any::Any + Send>>,
     /// Set once the lock is gone while the hold lives, as when its session ended.
     lost: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// What the marks of the sweep that holds it are known by, where it marks
+    /// ([`PackageBackend::mark`](crate::packages::PackageBackend::mark)).
+    sweep: Option<String>,
     /// The `statement_timeout` and `lock_timeout` of the hold's session, where it has one.
     #[cfg(test)]
     pub(crate) settings: Option<(String, String)>,
@@ -79,17 +81,24 @@ impl BlobHold {
         BlobHold {
             held: None,
             lost: None,
+            sweep: None,
             #[cfg(test)]
             settings: None,
         }
     }
 
-    /// A hold that `held` keeps until it is dropped, `lost` set once the lock is gone before.
+    /// A hold that `held` keeps until it is dropped, `lost` set once the lock is gone before, its
+    /// sweep's marks known by `sweep`.
     #[must_use]
-    pub fn of(held: Box<dyn Send>, lost: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Self {
+    pub fn of(
+        held: Box<dyn std::any::Any + Send>,
+        lost: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        sweep: Option<String>,
+    ) -> Self {
         BlobHold {
             held: Some(held),
             lost: Some(lost),
+            sweep,
             #[cfg(test)]
             settings: None,
         }
@@ -101,6 +110,19 @@ impl BlobHold {
     pub(crate) fn with_settings(mut self, settings: (String, String)) -> Self {
         self.settings = Some(settings);
         self
+    }
+
+    /// What keeps the hold, when it is a `T`: what the adapter that made it reads its session
+    /// from.
+    #[must_use]
+    pub fn held<T: 'static>(&self) -> Option<&T> {
+        self.held.as_ref()?.downcast_ref()
+    }
+
+    /// What the marks of the sweep that holds it are known by, if it marks.
+    #[must_use]
+    pub fn sweep(&self) -> Option<&str> {
+        self.sweep.as_deref()
     }
 
     /// Whether the lock is gone while the hold lives.

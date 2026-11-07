@@ -29,7 +29,7 @@ pub const SCHEMA_TABLE: &str = "fleet_schema";
 
 /// Every table the migrations create, so that a database holding any of them is recognised as one
 /// the Server already wrote ([`super::Database::server_tables`]).
-pub const TABLES: [&str; 23] = [
+pub const TABLES: [&str; 24] = [
     "configurations",
     "configuration_revisions",
     "deployments",
@@ -52,6 +52,7 @@ pub const TABLES: [&str; 23] = [
     "audit_chains",
     "audit_entries",
     "audit_archive",
+    "blob_deletions",
     // Not tables of the records, but the Server's all the same.
     SCHEMA_TABLE,
 ];
@@ -144,7 +145,29 @@ pub const MIGRATIONS: &[Migration] = &[
         oldest_server: "0.8.0",
         sql: LEASE_RELEASE,
     },
+    // A table only added. A Server of 0.8.0 reads and writes none of it, so its sweeps and uploads
+    // are as before, beside the instances that mark
+    // (ADR-0044 clause 14).
+    Migration {
+        version: 13,
+        oldest_server: "0.8.0",
+        sql: BLOB_DELETIONS,
+    },
 ];
+
+/// The blobs a sweep marked before it deletes them (ADR-0044 clause 14): written on the session
+/// that holds the blob store's lock, read by every upload in the transaction that checks its blob,
+/// and taken away by the sweep that wrote them, `sweep`, or by any sweep once their `lease` is
+/// not live.
+const BLOB_DELETIONS: &str = "
+CREATE TABLE blob_deletions (
+    sha256 text PRIMARY KEY,
+    lease text,
+    sweep text NOT NULL,
+    marked_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX blob_deletions_sweep ON blob_deletions (sweep);
+";
 
 /// The release of the instance that holds each lease
 /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
@@ -758,8 +781,8 @@ mod tests {
         }
         assert_eq!(
             MIGRATIONS.len(),
-            12,
-            "migrations 11 and 12 are this release's"
+            13,
+            "migrations 11 to 13 are this release's"
         );
         assert!(
             LEASE_RELEASE.contains(&format!("DEFAULT '{RELEASE_BEFORE_THE_RECORD}'")),

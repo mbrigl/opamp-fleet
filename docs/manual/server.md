@@ -377,13 +377,28 @@ On PostgreSQL every sweep and cleanup of the artifacts takes an advisory lock, s
 deletes at a time. It decides from the entries the database stores, so it keeps an artifact that an
 entry written through another instance names. An upload takes the same lock shared in the
 transaction that writes its entry, and checks there that its artifact is stored, so no sweep runs
-between the check and the commit; an upload whose artifact a sweep deleted first is refused:
-upload it again. An upload waits for the lock up to 5 seconds, a sweep up to 60. Each sweep in
-progress holds the lock on a database session of its own, beside the pool's eight, which the
-database's `max_connections` must allow for. The lock is taken on PostgreSQL with the filesystem
-blob store too, where the instance is alone and it decides nothing. A start whose sweep cannot have
-the lock fails, naming the lock; a sweep after an act logs it, and what it would have deleted stays
-until the next start.
+between the check and the commit; an upload whose artifact a sweep deleted first is refused: upload
+it again. A sweep marks in the database, on the session that holds its lock, each artifact it is
+about to delete, and renews each mark there right before its deletion; an upload of a marked
+artifact is refused too, until the sweep is done and has taken its marks away. When a sweep's
+session ends, as at a database failover, its lock is gone with it: the sweep deletes nothing more
+and logs it, and what it would have deleted stays until a later sweep. Marks a sweep could not take
+away, as while the database did not answer, its instance tries again every `lease_renew_secs`. The
+marks of an instance whose lease is no longer live, or of a start that took none yet, go with the
+next sweep on any instance once they were last renewed more than 130 seconds before: the 15 seconds
+a renewal may take to answer, the 100 seconds the one call to the bucket after it may take, and 15
+seconds to spare. Three cases are not covered, and in each the next start fails naming an entry
+whose artifact a sweep deleted, which is then uploaded again. An instance suspended for longer than
+130 seconds in the middle of a sweep may delete an artifact whose mark another instance took away
+meanwhile. A failover to a replica the marks had not reached, with asynchronous replication, leaves
+the new primary without them: across a failover the marks hold only with synchronous replication.
+And an instance of 0.8.0 beside this release neither marks nor reads a mark, so while both releases
+run a sweep through it can still delete an artifact an upload just stored. An upload waits for the
+lock up to 5 seconds, a sweep up to 60. Each sweep in progress holds the lock on a database session
+of its own, beside the pool's eight, which the database's `max_connections` must allow for. The lock
+is taken on PostgreSQL with the filesystem blob store too, where the instance is alone and it
+decides nothing. A start whose sweep cannot have the lock fails, naming the lock; a sweep after an
+act logs it, and what it would have deleted stays until the next start.
 
 An instance that stops while an upload streams leaves the parts of an unfinished multipart upload,
 which are not objects: the Server neither lists nor deletes them. Expire them with a lifecycle rule

@@ -78,6 +78,18 @@ const KEEPALIVES_IDLE: Duration = Duration::from_secs(15);
 const KEEPALIVES_INTERVAL: Duration = Duration::from_secs(5);
 const KEEPALIVES_RETRIES: u32 = 3;
 
+/// How long after its last renewal a sweep's mark of a lease that is not live, or of none, is
+/// kept (ADR-0044 clause 14). A renewal that answered was stamped by the database at most one
+/// call's bound, [`CALL_TIMEOUT`], before its answer; one call to the blob store follows, at most
+/// [`LONGEST_CALL`](crate::s3::LONGEST_CALL); [`MARKS_MARGIN`] covers the waits between that
+/// call's retries and the clocks of two primaries after a failover.
+pub(crate) const MARKS_OUTLIVE: Duration = Duration::from_secs(
+    CALL_TIMEOUT.as_secs() + crate::s3::LONGEST_CALL.as_secs() + MARKS_MARGIN.as_secs(),
+);
+
+/// What [`MARKS_OUTLIVE`] adds to the time a sweep that renewed a mark may still be deleting.
+const MARKS_MARGIN: Duration = Duration::from_secs(15);
+
 /// The connections the pool holds at most. The Server writes one record at a time per act, and
 /// the in-memory state answers every read (ADR-0044 clause 3), so a few suffice.
 const POOL_SIZE: usize = 8;
@@ -142,6 +154,10 @@ pub struct Database {
     /// sessions ended at all.
     holds_lost: Arc<std::sync::atomic::AtomicUsize>,
     holds_ended: Arc<std::sync::atomic::AtomicUsize>,
+    /// The instance id under which this instance's sweeps mark the blobs they delete (ADR-0044
+    /// clause 14): the lease it holds, or the one it is about to take; `None` for a Server that
+    /// takes no lease, such as a command.
+    sweeps_under: std::sync::Mutex<Option<String>>,
     /// The release this instance is, `MAJOR.MINOR.PATCH`: what its lease records and what the
     /// schema is checked against ([`schema::server_version`], or what a test names).
     release: &'static str,
@@ -352,6 +368,7 @@ impl Database {
             bound,
             holds_lost: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             holds_ended: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            sweeps_under: std::sync::Mutex::new(None),
             sweep_wait: std::sync::atomic::AtomicU64::new(
                 u64::try_from(SWEEP_WAIT.as_millis()).unwrap_or(u64::MAX),
             ),
@@ -562,6 +579,24 @@ impl Database {
         self.hold_blobs_within(wait)
     }
 
+    /// Has the sweeps of this instance mark the blobs they delete under `instance_id`: the lease it
+    /// takes next, set before its first sweep and again with each lease it takes.
+    pub fn sweep_under(&self, instance_id: &str) {
+        *self
+            .sweeps_under
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(instance_id.to_string());
+    }
+
+    /// The instance id the sweeps of this instance mark under, if any
+    /// ([`sweep_under`](Self::sweep_under)).
+    pub(crate) fn sweeps_under(&self) -> Option<String> {
+        self.sweeps_under
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
     /// How many holds on the blob store's lock lost it with their session, and how many sessions
     /// of a hold ended at all: what a test waits for.
     #[cfg(test)]
@@ -622,14 +657,15 @@ impl Database {
             };
             Ok(LockHold {
                 holding,
-                client,
+                client: Arc::new(client),
                 #[cfg(test)]
                 settings,
             })
         })?;
         #[cfg(test)]
         let settings = held.settings.clone();
-        let hold = crate::blobs::BlobHold::of(Box::new(held), lost);
+        let hold =
+            crate::blobs::BlobHold::of(Box::new(held), lost, Some(lease::new_instance_id()?));
         #[cfg(test)]
         let hold = hold.with_settings(settings);
         Ok(hold)
@@ -646,10 +682,11 @@ pub(crate) fn blob_lock_refused(error: tokio_postgres::Error) -> String {
 }
 
 /// A hold on the blob store's lock: its session, and whether it still holds the lock.
-struct LockHold {
+pub(crate) struct LockHold {
     holding: Arc<AtomicBool>,
-    #[allow(dead_code)]
-    client: tokio_postgres::Client,
+    /// The session that holds the lock: what a sweep marks the blobs it deletes on, so that a mark
+    /// is written only while the lock holds (ADR-0044 clause 14).
+    pub(crate) client: Arc<tokio_postgres::Client>,
     /// The session's `statement_timeout` and `lock_timeout` once it had the lock.
     #[cfg(test)]
     settings: (String, String),

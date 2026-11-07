@@ -62,7 +62,8 @@ impl PackageBackend for PgPackageBackend {
     /// ([`hold_unassigned`]). The transaction takes the blob store's lock shared first, and asks
     /// `stored` under it before it locks the Package's row: a sweep holds the lock alone, so none
     /// runs between the answer and the commit, and none deletes the blob the entry names
-    /// (ADR-0044 clause 14). The lock goes with the
+    /// (ADR-0044 clause 14). A blob a sweep marked is refused before the store is asked: that
+    /// sweep may still delete it once its lock is gone. The lock goes with the
     /// transaction, its session's end included, which writes no entry.
     fn put_entry(&self, id: &PackageId, entry: &Entry, stored: Stored) -> Result<(), String> {
         let (id, entry) = (id.clone(), entry.clone());
@@ -76,6 +77,17 @@ impl PackageBackend for PgPackageBackend {
                 )
                 .await
                 .map_err(|e| format!("{} — upload the artifact again", blob_lock_refused(e)))?;
+            if transaction
+                .query_opt(
+                    "SELECT 1 FROM blob_deletions WHERE sha256 = $1",
+                    &[&hex::encode(&entry.content_hash)],
+                )
+                .await
+                .map_err(sql)?
+                .is_some()
+            {
+                return Err(REMOVED_WHILE_UPLOADED.to_string());
+            }
             // The blob store is asked off the database's runtime, as its calls block, and before
             // the Package's row is locked, so no act on the row waits for the bucket: the shared
             // lock already keeps every sweep out until the commit.
@@ -220,15 +232,37 @@ impl PackageBackend for PgPackageBackend {
         self.hold()
     }
 
-    /// From the stored entries, read under the caller's hold.
-    fn named(&self, hashes: &[String]) -> Result<std::collections::HashSet<String>, String> {
-        let hashes = hashes.to_vec();
-        self.database.run(move |pool| async move {
-            let client = client(&pool).await?;
-            Ok(client
+    /// On the session that holds the lock (ADR-0044 clause 14): the marks of every lease that is
+    /// not live, or of none, are taken away first once they were last renewed more than
+    /// [`MARKS_OUTLIVE`](super::MARKS_OUTLIVE) before, which a sweep that stopped short left; then
+    /// each hash no stored entry names is marked in one statement, under the lease this instance
+    /// sweeps under and the hold's sweep. A hash another sweep marked is left to it. With the
+    /// session ended, the statement fails, and nothing is to be deleted.
+    fn mark(
+        &self,
+        hold: &crate::blobs::BlobHold,
+        hashes: &[String],
+    ) -> Result<Vec<String>, String> {
+        let (session, sweep) = session_of(hold)?;
+        let (hashes, lease) = (hashes.to_vec(), self.database.sweeps_under());
+        let outlive = super::MARKS_OUTLIVE.as_secs_f64();
+        self.database.run(move |_pool| async move {
+            session
+                .execute(
+                    "DELETE FROM blob_deletions WHERE (lease IS NULL OR lease NOT IN \
+                     (SELECT instance_id::text FROM leases WHERE expires_at > now())) \
+                     AND marked_at < now() - make_interval(secs => $1)",
+                    &[&outlive],
+                )
+                .await
+                .map_err(sql)?;
+            Ok(session
                 .query(
-                    "SELECT DISTINCT sha256 FROM package_entries WHERE sha256 = ANY($1)",
-                    &[&hashes],
+                    "INSERT INTO blob_deletions (sha256, lease, sweep) \
+                     SELECT h, $2, $3 FROM unnest($1::text[]) AS h \
+                     WHERE NOT EXISTS (SELECT 1 FROM package_entries WHERE sha256 = h) \
+                     ON CONFLICT (sha256) DO NOTHING RETURNING sha256",
+                    &[&hashes, &lease, &sweep],
                 )
                 .await
                 .map_err(sql)?
@@ -236,6 +270,48 @@ impl PackageBackend for PgPackageBackend {
                 .map(|row| row.get(0))
                 .collect())
         })
+    }
+
+    /// One statement on the hold's session: the sweep's mark of `sha256` renewed, if it is still
+    /// there. The marks of the blobs after it are left as they are: another sweep may take one
+    /// away meanwhile, and that blob's own confirmation then finds it gone.
+    fn confirm(&self, hold: &crate::blobs::BlobHold, sha256: &str) -> Result<bool, String> {
+        let (session, sweep) = session_of(hold)?;
+        let sha256 = sha256.to_string();
+        self.database.run(move |_pool| async move {
+            Ok(session
+                .query_opt(
+                    "UPDATE blob_deletions SET marked_at = now() WHERE sweep = $1 \
+                     AND sha256 = $2 RETURNING 1",
+                    &[&sweep, &sha256],
+                )
+                .await
+                .map_err(sql)?
+                .is_some())
+        })
+    }
+
+    /// Through the pool, as the hold's session may be gone.
+    fn unmark(&self, sweep: &str) -> Result<(), String> {
+        let sweep = sweep.to_string();
+        self.database.run(move |pool| async move {
+            client(&pool)
+                .await?
+                .execute("DELETE FROM blob_deletions WHERE sweep = $1", &[&sweep])
+                .await
+                .map(drop)
+                .map_err(sql)
+        })
+    }
+}
+
+/// The session of a sweep's hold on the blob store's lock, and what its marks are known by.
+fn session_of(
+    hold: &crate::blobs::BlobHold,
+) -> Result<(Arc<tokio_postgres::Client>, String), String> {
+    match (hold.held::<super::LockHold>(), hold.sweep()) {
+        (Some(held), Some(sweep)) => Ok((held.client.clone(), sweep.to_string())),
+        _ => Err("a sweep on PostgreSQL holds the blob store's lock".to_string()),
     }
 }
 
@@ -701,6 +777,8 @@ mod tests {
         at: &'static str,
         reached: std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>>,
         go: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+        /// How many times the staging objects were cleaned up.
+        cleaned: Arc<std::sync::atomic::AtomicUsize>,
     }
 
     impl Pausing {
@@ -721,6 +799,7 @@ mod tests {
                     at,
                     reached: std::sync::Mutex::new(Some(reached)),
                     go: std::sync::Mutex::new(goes),
+                    cleaned: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                 },
                 reaches,
                 go,
@@ -752,10 +831,471 @@ mod tests {
             self.inner.exists(sha256)
         }
         fn delete(&self, sha256: &str) -> Result<(), String> {
+            self.pause("delete");
             self.inner.delete(sha256)
         }
         fn list(&self) -> Result<Vec<(String, u64)>, String> {
             self.inner.list()
+        }
+        fn clean_staging(&self) -> Result<usize, String> {
+            self.cleaned
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.clean_staging()
+        }
+    }
+
+    /// An instance's database on the test's schema, shared with the others, holding a live lease
+    /// under which its sweeps mark: what each instance of these tests is.
+    fn shared(test: &TestDatabase) -> Arc<Database> {
+        let database = Database::open_in(
+            &test.config(),
+            crate::postgres::Exclusive::Shared,
+            Some(&test.schema),
+        )
+        .expect("open");
+        let id = crate::postgres::lease::new_instance_id().expect("an instance id");
+        let lapse = std::time::Duration::from_secs(600);
+        database
+            .take_lease_within(id, "a host", lapse, lapse)
+            .expect("a lease");
+        database
+    }
+
+    /// Ends the session that holds the blob store's lock alone, and waits until `database`, whose
+    /// hold it is, has marked the hold lost.
+    fn end_the_sweeps_session(test: &TestDatabase, database: &Database) {
+        let key = format!("(SELECT {} AS key)", crate::postgres::BLOB_LOCK);
+        test.rows(&format!(
+            "SELECT pg_terminate_backend(pid) FROM pg_locks, {key} k \
+             WHERE locktype = 'advisory' AND granted AND mode = 'ExclusiveLock' \
+             AND classid = ((k.key >> 32) & 4294967295)::oid \
+             AND objid = (k.key & 4294967295)::oid"
+        ));
+        until("the sweep's hold is marked lost", &|| {
+            database.holds_lost().0 >= 1
+        });
+    }
+
+    /// A's sweep marked the blob and is about to delete it when its session ends, its lock with
+    /// it. An upload of the same bytes through B is refused, to be uploaded again, while the mark
+    /// stands; once A's sweep is done and its mark gone, the upload again commits, and the blob
+    /// its entry names is stored.
+    /// Verifies: ADR-0044
+    #[test]
+    fn an_upload_beside_a_sweep_whose_session_ended_keeps_its_artifact() {
+        let _beside = LOSING_SWEEPS
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let (database_a, database_b) = (shared(&test), shared(&test));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let linux = Platform::new("linux", "amd64").expect("platform");
+        let (first, second) = (
+            PackageId::new("otelcol", "1.0.0").expect("id"),
+            PackageId::new("otelcol", "2.0.0").expect("id"),
+        );
+        let (pausing, reaches, go) = Pausing::at(dir.path(), "delete");
+        let a = Arc::new(
+            crate::packages::PackageStore::with_backend(
+                Box::new(PgPackageBackend::new(database_a.clone())),
+                Box::new(pausing),
+            )
+            .expect("open A"),
+        );
+        let b = instance(&database_b, dir.path());
+        a.create(&first).expect("create");
+        a.put_entry(&first, &linux, b"the same bytes".to_vec())
+            .expect("an entry");
+        let (sha256, _) = a.artifact(&first, &linux).expect("A holds it");
+        let blob = dir.path().join("blobs").join(hex::encode(&sha256));
+        b.create(&second).expect("create");
+        let deleting = std::thread::spawn({
+            let (a, first, linux) = (a.clone(), first.clone(), linux.clone());
+            move || a.delete_entry(&first, &linux)
+        });
+        reaches
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("A's sweep deletes the blob it marked");
+        end_the_sweeps_session(&test, &database_a);
+        let upload = b.put_entry(&second, &linux, b"the same bytes".to_vec());
+        go.send(()).expect("go on");
+        assert_eq!(deleting.join().expect("A"), Ok(true));
+        match upload {
+            Ok(()) => {}
+            Err(refused) => {
+                assert!(refused.contains("upload it again"), "{refused}");
+                b.put_entry(&second, &linux, b"the same bytes".to_vec())
+                    .expect("uploaded again once the sweep is done");
+            }
+        }
+        assert_eq!(
+            test.rows("SELECT sha256 FROM package_entries"),
+            [[Some(hex::encode(&sha256))]],
+            "B's entry is stored"
+        );
+        assert!(blob.exists(), "and so is the blob it names");
+        assert!(
+            test.rows("SELECT 1 FROM blob_deletions").is_empty(),
+            "no mark is left"
+        );
+    }
+
+    /// A sweep whose hold is lost by the time it reaches a deletion deletes nothing more and says
+    /// so in the log: the one blob it was deleting goes, the other stays, and no mark is left.
+    /// Verifies: ADR-0044
+    #[test]
+    fn a_sweep_whose_hold_is_lost_deletes_nothing_more_and_says_so() {
+        let _alone = LOSING_SWEEPS
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = shared(&test);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let id = PackageId::new("otelcol", "1.0.0").expect("id");
+        let (linux, windows) = (
+            Platform::new("linux", "amd64").expect("platform"),
+            Platform::new("windows", "amd64").expect("platform"),
+        );
+        let (pausing, reaches, go) = Pausing::at(dir.path(), "delete");
+        let a = Arc::new(
+            crate::packages::PackageStore::with_backend(
+                Box::new(PgPackageBackend::new(database.clone())),
+                Box::new(pausing),
+            )
+            .expect("open"),
+        );
+        a.create(&id).expect("create");
+        a.put_entry(&id, &linux, b"one artifact".to_vec())
+            .expect("an entry");
+        a.put_entry(&id, &windows, b"another artifact".to_vec())
+            .expect("an entry");
+        let blobs: Vec<std::path::PathBuf> = [&linux, &windows]
+            .iter()
+            .map(|platform| {
+                let (sha256, _) = a.artifact(&id, platform).expect("held");
+                dir.path().join("blobs").join(hex::encode(sha256))
+            })
+            .collect();
+        let collected = Collected::default();
+        let deleting = std::thread::spawn({
+            let (a, id, writer) = (a.clone(), id.clone(), collected.clone());
+            move || {
+                let subscriber = tracing_subscriber::fmt()
+                    .with_ansi(false)
+                    .without_time()
+                    .with_writer(move || writer.clone())
+                    .finish();
+                tracing::subscriber::with_default(subscriber, || a.delete_set(&id))
+            }
+        });
+        reaches
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("the sweep deletes its first blob");
+        end_the_sweeps_session(&test, &database);
+        go.send(()).expect("go on");
+        assert_eq!(deleting.join().expect("the sweep"), Ok(true));
+        assert_eq!(
+            blobs.iter().filter(|blob| blob.exists()).count(),
+            1,
+            "the blob it was deleting goes, the other stays"
+        );
+        let log = String::from_utf8(collected.0.lock().expect("log").clone()).expect("utf-8");
+        assert!(log.contains("deletes nothing more"), "{log}");
+        assert!(
+            test.rows("SELECT 1 FROM blob_deletions").is_empty(),
+            "no mark is left"
+        );
+    }
+
+    /// A sweep whose session has ended marks nothing, and so deletes nothing: its marks are
+    /// written on the session that holds the lock, never through the pool, where they would land
+    /// with the lock gone and an upload between its check and its commit.
+    /// Verifies: ADR-0044
+    #[test]
+    fn a_sweep_marks_nothing_once_its_session_has_ended() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = shared(&test);
+        let backend = PgPackageBackend::new(database.clone());
+        let hold = backend.hold_blobs().expect("held");
+        end_the_sweeps_session(&test, &database);
+        let unnamed = "ab".repeat(32);
+        assert!(
+            backend.mark(&hold, &[unnamed]).is_err(),
+            "nothing is marked on a session that has ended"
+        );
+        assert!(
+            test.rows("SELECT 1 FROM blob_deletions").is_empty(),
+            "no mark is written"
+        );
+    }
+
+    /// Every sweep takes away the marks of a lease that is not live, or of none, once they were
+    /// last renewed longer ago than a sweep that lost its lock may still be deleting; it keeps
+    /// younger ones, which such a sweep may still be deleting by, and those of a live lease. It
+    /// marks under its own lease, and takes its own marks away once it is done.
+    /// Verifies: ADR-0044
+    #[test]
+    fn a_sweep_takes_away_old_marks_of_a_lease_that_is_not_live_and_keeps_the_others() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let (other, database) = (shared(&test), shared(&test));
+        let live = other.sweeps_under().expect("a lease");
+        let gone_lease = "00000000-0000-4000-8000-000000000000";
+        let old = "now() - interval '131 seconds'";
+        let young = "now() - interval '129 seconds'";
+        let [kept, gone, of_none, young_gone, young_none] =
+            ["aa", "bb", "cc", "ee", "ff"].map(|byte| byte.repeat(32));
+        test.sql(&format!(
+            "INSERT INTO blob_deletions (sha256, lease, sweep, marked_at) VALUES \
+             ('{kept}', '{live}', 'another sweep', {old}), \
+             ('{gone}', '{gone_lease}', 'a sweep that stopped short', {old}), \
+             ('{of_none}', NULL, 'a sweep of a command', {old}), \
+             ('{young_gone}', '{gone_lease}', 'a sweep that may still delete', {young}), \
+             ('{young_none}', NULL, 'a startup sweep that may still delete', {young})"
+        ));
+        let backend = PgPackageBackend::new(database.clone());
+        let hold = backend.hold_blobs().expect("held");
+        let marked = backend
+            .mark(&hold, &[kept.clone(), "dd".repeat(32)])
+            .expect("marked");
+        assert_eq!(
+            marked,
+            ["dd".repeat(32)],
+            "a hash another sweep marked is its"
+        );
+        assert_eq!(
+            test.rows("SELECT sha256, lease FROM blob_deletions ORDER BY sha256"),
+            [
+                [Some(kept.clone()), Some(live)],
+                [Some("dd".repeat(32)), database.sweeps_under()],
+                [Some(young_gone.clone()), Some(gone_lease.to_string())],
+                [Some(young_none.clone()), None],
+            ],
+            "the old marks of a lease that is not live, or of none, are gone"
+        );
+        backend
+            .unmark(hold.sweep().expect("a sweep"))
+            .expect("unmarked");
+        assert_eq!(
+            test.rows("SELECT sha256 FROM blob_deletions ORDER BY sha256"),
+            [[Some(kept)], [Some(young_gone)], [Some(young_none)]],
+            "its own marks go once it is done, another sweep's stay"
+        );
+    }
+
+    /// Before each deletion a sweep renews, on its own session, the mark of the blob it is about
+    /// to delete, and finds whether it is still there; the marks of the blobs after it are left
+    /// as they are, so a sweep of many blobs writes each mark once.
+    /// Verifies: ADR-0044
+    #[test]
+    fn a_sweep_renews_a_marks_time_and_finds_a_blob_another_sweep_unmarked() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = shared(&test);
+        let backend = PgPackageBackend::new(database.clone());
+        let hold = backend.hold_blobs().expect("held");
+        let [first, second, third] = ["aa", "bb", "cc"].map(|byte| byte.repeat(32));
+        backend
+            .mark(&hold, &[first.clone(), second.clone(), third.clone()])
+            .expect("marked");
+        test.sql("UPDATE blob_deletions SET marked_at = now() - interval '1 hour'");
+        test.sql(&format!(
+            "DELETE FROM blob_deletions WHERE sha256 = '{second}'"
+        ));
+        assert_eq!(backend.confirm(&hold, &first), Ok(true));
+        assert_eq!(
+            backend.confirm(&hold, &second),
+            Ok(false),
+            "its mark is gone"
+        );
+        assert_eq!(
+            test.rows(
+                "SELECT sha256 FROM blob_deletions WHERE marked_at > now() - interval '1 minute'"
+            ),
+            [[Some(first.clone())]],
+            "only the mark of the blob about to be deleted is renewed"
+        );
+        assert_eq!(
+            test.rows("SELECT sha256 FROM blob_deletions ORDER BY sha256"),
+            [[Some(first)], [Some(third)]],
+            "the marks after it are left as they are"
+        );
+    }
+
+    /// A mark of a lease that is not live outlives the renewal that answered, which the database
+    /// may have stamped up to one call's bound before, and the one call to the blob store that
+    /// follows it, with a margin.
+    /// Verifies: ADR-0044
+    #[test]
+    fn the_marks_outlive_a_renewal_its_call_and_the_longest_blob_call() {
+        assert!(
+            crate::postgres::MARKS_OUTLIVE
+                >= crate::postgres::CALL_TIMEOUT + crate::s3::LONGEST_CALL,
+            "a mark outlives what a sweep that renewed it may still be doing"
+        );
+        assert_eq!(
+            crate::postgres::MARKS_OUTLIVE,
+            std::time::Duration::from_secs(130),
+            "the bound the ADR names"
+        );
+    }
+
+    /// A's startup sweep, on `a`, marks a blob no entry names, is held inside its deletion, and
+    /// its session ends; B, live, sweeps, and then uploads the same bytes. B's sweep keeps A's
+    /// young mark, so B's upload is refused while A may still delete, and once A is done and its
+    /// mark gone, the upload again commits and the blob its entry names is stored.
+    fn a_mark_outlives_its_lost_session(test: &TestDatabase, a: &Arc<Database>) {
+        let b = shared(test);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let linux = Platform::new("linux", "amd64").expect("platform");
+        let b_store = instance(&b, dir.path());
+        let blob = {
+            let blobs = crate::fs::FsBlobStore::open(dir.path()).expect("blobs");
+            let (sha256, _) = crate::blobs::BlobStore::put(&blobs, &mut &b"the same bytes"[..])
+                .expect("an unnamed blob");
+            dir.path().join("blobs").join(sha256)
+        };
+        let (pausing, reaches, go) = Pausing::at(dir.path(), "delete");
+        let starting = std::thread::spawn({
+            let a = a.clone();
+            move || {
+                crate::packages::PackageStore::with_backend(
+                    Box::new(PgPackageBackend::new(a)),
+                    Box::new(pausing),
+                )
+                .map(drop)
+            }
+        });
+        reaches
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("A's startup sweep deletes the blob it marked");
+        end_the_sweeps_session(test, a);
+        let other = PackageId::new("other", "1.0.0").expect("id");
+        b_store.create(&other).expect("create");
+        assert_eq!(b_store.delete_set(&other), Ok(true), "B sweeps");
+        let id = PackageId::new("otelcol", "1.0.0").expect("id");
+        b_store.create(&id).expect("create");
+        let upload = b_store.put_entry(&id, &linux, b"the same bytes".to_vec());
+        go.send(()).expect("go on");
+        starting.join().expect("A").expect("A starts");
+        if let Err(refused) = upload {
+            assert!(refused.contains("upload it again"), "{refused}");
+            b_store
+                .put_entry(&id, &linux, b"the same bytes".to_vec())
+                .expect("uploaded again once A's sweep is done");
+        }
+        assert!(blob.exists(), "the blob B's entry names is stored");
+    }
+
+    /// A startup sweep marks under the lease its instance is about to take, which is not live yet:
+    /// another instance's sweep keeps that mark while the sweep may still be deleting.
+    /// Verifies: ADR-0044
+    #[test]
+    fn a_startup_sweeps_marks_outlive_its_lost_session_and_keep_an_uploads_artifact() {
+        let _beside = LOSING_SWEEPS
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let a = Database::open_in(
+            &test.config(),
+            crate::postgres::Exclusive::Shared,
+            Some(&test.schema),
+        )
+        .expect("open");
+        a.sweep_under(&crate::postgres::lease::new_instance_id().expect("an instance id"));
+        a_mark_outlives_its_lost_session(&test, &a);
+    }
+
+    /// A sweep whose lease lapsed meanwhile: another instance's sweep keeps its young mark.
+    /// Verifies: ADR-0044
+    #[test]
+    fn a_lapsed_leases_marks_outlive_its_lost_session_and_keep_an_uploads_artifact() {
+        let _beside = LOSING_SWEEPS
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let a = shared(&test);
+        let lease = a.sweeps_under().expect("a lease");
+        test.sql(&format!(
+            "UPDATE leases SET expires_at = now() - interval '1 second' \
+             WHERE instance_id::text = '{lease}'"
+        ));
+        a_mark_outlives_its_lost_session(&test, &a);
+    }
+
+    /// A sweep whose hold is lost by the time its deletions are done cleans up no staging object:
+    /// the cleanup runs under the lock too.
+    /// Verifies: ADR-0044
+    #[test]
+    fn a_sweep_whose_hold_is_lost_cleans_up_no_staging_object() {
+        let _beside = LOSING_SWEEPS
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = shared(&test);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let id = PackageId::new("otelcol", "1.0.0").expect("id");
+        let linux = Platform::new("linux", "amd64").expect("platform");
+        let (pausing, reaches, go) = Pausing::at(dir.path(), "delete");
+        let cleaned = pausing.cleaned.clone();
+        let a = Arc::new(
+            crate::packages::PackageStore::with_backend(
+                Box::new(PgPackageBackend::new(database.clone())),
+                Box::new(pausing),
+            )
+            .expect("open"),
+        );
+        let opened = cleaned.load(std::sync::atomic::Ordering::SeqCst);
+        a.create(&id).expect("create");
+        a.put_entry(&id, &linux, b"an artifact".to_vec())
+            .expect("an entry");
+        let deleting = std::thread::spawn({
+            let (a, id) = (a.clone(), id.clone());
+            move || a.delete_entry(&id, &linux)
+        });
+        reaches
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("the sweep deletes its one blob");
+        end_the_sweeps_session(&test, &database);
+        go.send(()).expect("go on");
+        assert_eq!(deleting.join().expect("the sweep"), Ok(true));
+        assert_eq!(
+            cleaned.load(std::sync::atomic::Ordering::SeqCst),
+            opened,
+            "no staging object is cleaned up once the lock is lost"
+        );
+    }
+
+    /// Held for writing by a test that reads what a sweep that lost its lock logs, and for reading
+    /// by every other test whose sweep logs it: a warning first met on a thread with no
+    /// subscriber of its own is cached as of no interest, and the reading test would miss it.
+    static LOSING_SWEEPS: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
+    /// What a log writes, collected.
+    #[derive(Clone, Default)]
+    struct Collected(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Collected {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("log").extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
         }
     }
 

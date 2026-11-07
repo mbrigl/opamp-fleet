@@ -82,6 +82,12 @@ const LIMITS: Limits = Limits {
     retry_for: Duration::from_secs(60),
 };
 
+/// The longest a call to the store may take under [`LIMITS`]: a retry started at the end of
+/// `retry_for`, its connection, and its silence.
+pub(crate) const LONGEST_CALL: Duration = Duration::from_secs(
+    LIMITS.retry_for.as_secs() + LIMITS.connect.as_secs() + LIMITS.silence.as_secs(),
+);
+
 /// Whose uploads a store's staging keys are
 /// (ADR-0044 clause 16): `<prefix>staging/<lease>/<random>`.
 #[derive(Clone)]

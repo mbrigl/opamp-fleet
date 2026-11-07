@@ -416,7 +416,8 @@ pub trait PackageBackend: Send + Sync {
     /// backend that other Servers write too asks `stored` inside the entry's transaction, holding
     /// the blob store's lock shared, so no sweep runs between the answer and the commit
     /// (ADR-0044 clause 14). A Package the store does not hold
-    /// is an error, and so is a blob `stored` does not find: removed while it was uploaded.
+    /// is an error, and so is a blob `stored` does not find, or one a sweep marked
+    /// ([`mark`](Self::mark)): removed while it was uploaded.
     fn put_entry(&self, id: &PackageId, entry: &Entry, stored: Stored) -> Result<(), String>;
 
     /// Writes or, with `None`, clears the signature of the entry for `platform` — only while the
@@ -450,16 +451,44 @@ pub trait PackageBackend: Send + Sync {
         Ok(BlobHold::none())
     }
 
-    /// Which of `hashes` a stored entry names, read under the hold of a sweep: what a backend
-    /// that other Servers write too answers from what it stores, so a blob an entry written
-    /// through another Server names is kept. One whose one Server is its only writer answers
-    /// none, which the default does: that Server decided from what it holds.
+    /// Marks, under the hold of a sweep, each of `hashes` that no stored entry names, and answers
+    /// those it marked: the only blobs the sweep deletes (ADR-0044 clauses 13 and 14). A backend
+    /// that other Servers write too decides from what it stores, so a blob an entry written
+    /// through another Server names is kept, and marks on the hold's own session, so that nothing
+    /// is marked once the lock is gone; an upload refuses a marked blob. Its marks are known by
+    /// the hold's [`sweep`](BlobHold::sweep). One whose one Server is its only writer marks
+    /// nothing and answers every hash, which the default does: that Server decided from what it
+    /// holds.
     ///
     /// # Errors
-    /// Returns an error when the entries cannot be read.
-    fn named(&self, hashes: &[String]) -> Result<HashSet<String>, String> {
-        let _ = hashes;
-        Ok(HashSet::new())
+    /// Returns an error when the entries cannot be read or the marks not written, the hold's
+    /// session ended included: then nothing is to be deleted, though the marks may have landed.
+    fn mark(&self, hold: &BlobHold, hashes: &[String]) -> Result<Vec<String>, String> {
+        let _ = hold;
+        Ok(hashes.to_vec())
+    }
+
+    /// Asks, on the hold's own session, right before the sweep deletes `sha256`, that the blob is
+    /// still marked, and renews the time of that mark, which no other sweep takes away while it
+    /// is younger than the time a sweep may still be deleting. The default marks nothing and
+    /// answers yes.
+    ///
+    /// # Errors
+    /// Returns an error when the session does not answer, as when it ended: the lock may be gone.
+    fn confirm(&self, hold: &BlobHold, sha256: &str) -> Result<bool, String> {
+        let _ = (hold, sha256);
+        Ok(true)
+    }
+
+    /// Takes away the marks of the sweep `sweep` once its deletions are done, whether its lock
+    /// still holds or not. The default marks nothing and takes nothing away.
+    ///
+    /// # Errors
+    /// Returns an error when the marks cannot be taken away; they refuse uploads of their blobs
+    /// until they are.
+    fn unmark(&self, sweep: &str) -> Result<(), String> {
+        let _ = sweep;
+        Ok(())
     }
 }
 
@@ -521,6 +550,9 @@ pub struct PackageStore {
     /// The blobs an upload or a deletion is working on while no lock on `sets` is held, so that
     /// no round trip to the blob store runs under it and the two never cross ([`Life`]).
     life: Mutex<Life>,
+    /// The sweeps whose marks could not be taken away when they were done, tried again by the
+    /// next sweep ([`PackageBackend::unmark`]).
+    unmarked: Mutex<Vec<String>>,
     /// The check against the operator's public key, `[packages] verification_key` (ADR-0027).
     /// Each entry's signature is reported by it; `None` reports every signature `unchecked`.
     key: Option<Box<dyn SignatureVerifier>>,
@@ -532,11 +564,12 @@ impl PackageStore {
     /// entry naming a blob that is not stored, or of another size, fails the open, and a blob no
     /// entry names is deleted, as are the staging objects of every lease that is not live. The
     /// blobs are listed, the Packages read and the sweep made under the blob store's lock, held
-    /// alone (ADR-0044 clause 14).
+    /// alone, and the sweep deletes only what it marked, while the lock holds (ADR-0044 clause 14).
     ///
     /// # Errors
     /// Returns an error when the lock is not had in time, naming it, when a Package cannot be
-    /// loaded, the blobs cannot be listed, or an entry names a blob that is not stored as recorded.
+    /// loaded, the blobs cannot be listed or marked, or an entry names a blob that is not stored as
+    /// recorded.
     pub fn with_backend(
         backend: Box<dyn PackageBackend>,
         blobs: Box<dyn BlobStore>,
@@ -584,16 +617,17 @@ impl PackageStore {
             sets: RwLock::new(BTreeMap::new()),
             writes: Mutex::new(()),
             life: Mutex::new(Life::default()),
+            unmarked: Mutex::new(Vec::new()),
             key: None,
         };
         // A blob no entry names is deleted at startup (ADR-0044 clause 13): an upload whose entry
         // was never written, or an entry whose deletion stopped short of its blob.
-        for sha256 in stored.keys() {
-            if !referenced(&sets, sha256) {
-                store.blobs.delete(sha256)?;
-            }
-        }
-        store.blobs.clean_staging()?;
+        let unnamed: Vec<String> = stored
+            .keys()
+            .filter(|sha256| !referenced(&sets, sha256))
+            .cloned()
+            .collect();
+        store.delete_under(&hold, &unnamed, Deletion::FailsTheSweep)?;
         drop(hold);
         *store.sets.write().expect("sets lock") = sets;
         Ok(store)
@@ -1031,24 +1065,16 @@ impl PackageStore {
     /// The sweep after an act (ADR-0044 clause 13): deletes the blobs [`doom`](Self::doom) chose
     /// that no stored entry names either, and the staging objects of every lease that is not
     /// live, under the blob store's lock held alone and with no lock on the Packages held
-    /// (ADR-0044 clauses 14 and 16). What the backend stores is
-    /// read under the hold, so a blob that an entry written through another Server names is kept.
+    /// (ADR-0044 clauses 14 and 16). The backend marks under the hold what no stored entry names,
+    /// so a blob that an entry written through another Server names is kept, and only what it
+    /// marked is deleted, while the lock holds ([`delete_under`](Self::delete_under)).
     /// A failure is logged and left to the next startup, which deletes every blob no entry names.
     fn sweep(&self, doomed: impl IntoIterator<Item = String>) {
         let doomed: Vec<String> = doomed.into_iter().collect();
-        let swept = self.backend.hold_blobs().and_then(|_hold| {
-            let named = if doomed.is_empty() {
-                HashSet::new()
-            } else {
-                self.backend.named(&doomed)?
-            };
-            for sha256 in doomed.iter().filter(|sha256| !named.contains(*sha256)) {
-                if let Err(e) = self.blobs.delete(sha256) {
-                    tracing::warn!(blob = %sha256, error = %e, "cannot delete an artifact no entry names");
-                }
-            }
-            self.blobs.clean_staging().map(drop)
-        });
+        let swept = self
+            .backend
+            .hold_blobs()
+            .and_then(|hold| self.delete_under(&hold, &doomed, Deletion::IsLogged));
         if let Err(e) = swept {
             tracing::warn!(
                 error = %e,
@@ -1058,6 +1084,91 @@ impl PackageStore {
         let mut life = self.life.lock().expect("blob life lock");
         for sha256 in &doomed {
             life.deleting.remove(sha256);
+        }
+    }
+
+    /// Deletes, under `hold`, each of `unnamed` that the backend marks as named by no stored entry,
+    /// and then the staging objects of every lease that is not live, and takes the marks away
+    /// once it is done, or once its marking failed (ADR-0044 clauses 13, 14 and 16). Before each
+    /// deletion it asks whether the lock still holds, and the backend whether the blob is still
+    /// marked, renewing the marks: once the lock is lost or the backend cannot answer, the sweep
+    /// deletes nothing more and says so, and what it would have deleted stays for a later sweep.
+    /// A blob whose mark is gone is not deleted, nor one that `deletion` says is only logged when
+    /// it cannot be deleted.
+    ///
+    /// # Errors
+    /// Returns an error when the blobs cannot be marked, which deletes nothing, when the staging
+    /// objects cannot be cleaned up, or, as `deletion` says, when a blob cannot be deleted.
+    fn delete_under(
+        &self,
+        hold: &BlobHold,
+        unnamed: &[String],
+        deletion: Deletion,
+    ) -> Result<(), String> {
+        self.retry_unmarks();
+        let deleted = self.backend.mark(hold, unnamed).and_then(|doomed| {
+            for sha256 in &doomed {
+                if hold.lost() {
+                    lost_while_sweeping(None);
+                    return Ok(());
+                }
+                match self.backend.confirm(hold, sha256) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        tracing::warn!(
+                            blob = %sha256,
+                            "the sweep's mark of an artifact is gone, so it is not deleted"
+                        );
+                        continue;
+                    }
+                    Err(e) => {
+                        lost_while_sweeping(Some(&e));
+                        return Ok(());
+                    }
+                }
+                if let Err(e) = self.blobs.delete(sha256) {
+                    match deletion {
+                        Deletion::FailsTheSweep => return Err(e),
+                        Deletion::IsLogged => tracing::warn!(
+                            blob = %sha256,
+                            error = %e,
+                            "cannot delete an artifact no entry names"
+                        ),
+                    }
+                }
+            }
+            if hold.lost() {
+                lost_while_sweeping(None);
+                return Ok(());
+            }
+            self.blobs.clean_staging().map(drop)
+        });
+        // Also when the marking failed: its statement may have landed without its answer.
+        if let Some(sweep) = hold.sweep() {
+            self.unmark(sweep.to_string());
+        }
+        deleted
+    }
+
+    /// Takes the marks of the sweep `sweep` away, or keeps it for the next sweep to try again.
+    fn unmark(&self, sweep: String) {
+        if let Err(e) = self.backend.unmark(&sweep) {
+            tracing::warn!(
+                error = %e,
+                "cannot take away the marks of a sweep that is done; an upload of what it deleted \
+                 is refused until the next sweep takes them away"
+            );
+            self.unmarked.lock().expect("unmarked lock").push(sweep);
+        }
+    }
+
+    /// Tries again to take away the marks of every sweep of this store that is done and could not
+    /// take them away: what each sweep does first, and the instance every lease renewal interval
+    /// (ADR-0044 clause 14).
+    pub fn retry_unmarks(&self) {
+        let left = std::mem::take(&mut *self.unmarked.lock().expect("unmarked lock"));
+        for sweep in left {
+            self.unmark(sweep);
         }
     }
 
@@ -1277,6 +1388,25 @@ fn fits(description: Option<&AgentDescription>, id: &PackageId, platform: &Platf
 /// The refusal of an upload whose blob a deletion took, or is taking.
 pub(crate) const REMOVED_WHILE_UPLOADED: &str =
     "the artifact was removed while it was uploaded; upload it again";
+
+/// What a sweep does when a blob cannot be deleted.
+#[derive(Clone, Copy)]
+enum Deletion {
+    /// The sweep fails: the startup's, which fails the start.
+    FailsTheSweep,
+    /// It is logged, and the sweep goes on: one after an act.
+    IsLogged,
+}
+
+/// Says that a sweep lost the blob store's lock, or could not ask whether it still holds it,
+/// before its deletions were done (ADR-0044 clause 14).
+fn lost_while_sweeping(error: Option<&str>) {
+    tracing::warn!(
+        error,
+        "the blob store's lock is lost: the sweep deletes nothing more, and what it would have \
+         deleted stays until a later sweep"
+    );
+}
 
 /// Whether any entry of `sets` names the blob `sha256`.
 fn referenced(sets: &BTreeMap<PackageId, Package>, sha256: &str) -> bool {
@@ -2877,6 +3007,182 @@ mod tests {
         assert!(!store.offers(Some(&set), Some(&linux_agent), &set, &linux()));
         let windows_agent = agent("windows", "amd64", &[]);
         assert!(store.offers(Some(&set), Some(&windows_agent), &set, &windows()));
+    }
+
+    /// A package backend over files whose sweeps hold a lock and mark, as a database's do: its
+    /// marking fails while `refuse_marks` says so, and its unmarking fails `failing_unmarks` times;
+    /// every sweep it was asked to unmark is noted.
+    /// It notes every blob it was asked to confirm, and answers no for `unconfirmed`.
+    #[derive(Clone, Default)]
+    struct Marking {
+        refuse_marks: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        failing_unmarks: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        unmarked: std::sync::Arc<Mutex<Vec<String>>>,
+        confirmed: std::sync::Arc<Mutex<Vec<String>>>,
+        unconfirmed: std::sync::Arc<Mutex<Option<String>>>,
+    }
+
+    /// A [`Marking`] backend over files.
+    struct MarkingBackend {
+        inner: crate::fs::FsPackageBackend,
+        marking: Marking,
+    }
+
+    impl PackageBackend for MarkingBackend {
+        fn load(&self) -> Result<Vec<Package>, String> {
+            self.inner.load()
+        }
+        fn create(&self, id: &PackageId) -> Result<(), String> {
+            self.inner.create(id)
+        }
+        fn put_entry(&self, id: &PackageId, entry: &Entry, stored: Stored) -> Result<(), String> {
+            self.inner.put_entry(id, entry, stored)
+        }
+        fn sign(
+            &self,
+            id: &PackageId,
+            platform: &Platform,
+            content_hash: &[u8],
+            signature: Option<&[u8]>,
+        ) -> Result<Signed, String> {
+            self.inner.sign(id, platform, content_hash, signature)
+        }
+        fn remove_entry(&self, id: &PackageId, platform: &Platform) -> Result<(), String> {
+            self.inner.remove_entry(id, platform)
+        }
+        fn remove(&self, id: &PackageId) -> Result<(), String> {
+            self.inner.remove(id)
+        }
+        fn hold_blobs(&self) -> Result<BlobHold, String> {
+            Ok(BlobHold::of(
+                Box::new(()),
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                Some("the sweep".to_string()),
+            ))
+        }
+        fn mark(&self, _hold: &BlobHold, hashes: &[String]) -> Result<Vec<String>, String> {
+            if self
+                .marking
+                .refuse_marks
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err("the marks' answer was lost".to_string());
+            }
+            Ok(hashes.to_vec())
+        }
+        fn confirm(&self, _hold: &BlobHold, sha256: &str) -> Result<bool, String> {
+            self.marking
+                .confirmed
+                .lock()
+                .expect("confirmed")
+                .push(sha256.to_string());
+            Ok(self
+                .marking
+                .unconfirmed
+                .lock()
+                .expect("unconfirmed")
+                .as_deref()
+                != Some(sha256))
+        }
+        fn unmark(&self, sweep: &str) -> Result<(), String> {
+            self.marking
+                .unmarked
+                .lock()
+                .expect("unmarked")
+                .push(sweep.to_string());
+            let failing = &self.marking.failing_unmarks;
+            if failing.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+                failing.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                return Err("the database does not answer".to_string());
+            }
+            Ok(())
+        }
+    }
+
+    /// A store on a [`Marking`] backend, its blobs in `dir`, with the handles that steer it.
+    fn marking(dir: &std::path::Path) -> (PackageStore, Marking) {
+        let marking = Marking::default();
+        let store = PackageStore::with_backend(
+            Box::new(MarkingBackend {
+                inner: crate::fs::FsPackageBackend::open(dir).expect("backend"),
+                marking: marking.clone(),
+            }),
+            Box::new(crate::fs::FsBlobStore::open(dir).expect("blobs")),
+        )
+        .expect("open");
+        marking.unmarked.lock().expect("unmarked").clear();
+        (store, marking)
+    }
+
+    /// Before each deletion a sweep asks the backend whether the blob is still marked, which
+    /// renews its mark, and passes over a blob whose mark another sweep took away.
+    /// Verifies: ADR-0044
+    #[test]
+    fn a_sweep_asks_before_each_deletion_and_passes_over_a_blob_no_longer_marked() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (store, marking) = marking(dir.path());
+        let set = stored_set(&store, "otelcol", "1.0.0", b"one artifact");
+        store
+            .put_entry(&set, &windows(), b"another artifact".to_vec())
+            .expect("entry");
+        let [kept, gone] = [linux(), windows()].map(|platform| {
+            let (sha256, _) = store.artifact(&set, &platform).expect("stored");
+            hex::encode(sha256)
+        });
+        *marking.unconfirmed.lock().expect("unconfirmed") = Some(kept.clone());
+        assert_eq!(store.delete_set(&set), Ok(true));
+        let mut confirmed = marking.confirmed.lock().expect("confirmed").clone();
+        confirmed.sort();
+        let mut both = vec![kept.clone(), gone.clone()];
+        both.sort();
+        assert_eq!(confirmed, both, "asked once before each deletion");
+        let blobs = dir.path().join("blobs");
+        assert!(
+            blobs.join(&kept).exists(),
+            "the blob no longer marked stays"
+        );
+        assert!(!blobs.join(&gone).exists(), "the other goes");
+    }
+
+    /// A sweep whose marking fails deletes nothing, and takes its marks away all the same: the
+    /// statement may have landed though its answer was lost, and its marks would refuse uploads.
+    /// Verifies: ADR-0044
+    #[test]
+    fn a_sweep_whose_marking_fails_takes_its_marks_away() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (store, marking) = marking(dir.path());
+        let (refuse_marks, unmarked) = (marking.refuse_marks, marking.unmarked);
+        let set = stored_set(&store, "otelcol", "1.0.0", b"an artifact");
+        let (sha256, _) = store.artifact(&set, &linux()).expect("stored");
+        refuse_marks.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(store.delete_entry(&set, &linux()), Ok(true));
+        assert!(
+            dir.path().join("blobs").join(hex::encode(sha256)).exists(),
+            "nothing is deleted"
+        );
+        assert_eq!(*unmarked.lock().expect("unmarked"), ["the sweep"]);
+    }
+
+    /// Marks a sweep could not take away are taken away by the next try, and only until they are
+    /// gone: what the instance runs every lease renewal interval.
+    /// Verifies: ADR-0044
+    #[test]
+    fn marks_that_could_not_be_taken_away_are_taken_away_by_the_next_try() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (store, marking) = marking(dir.path());
+        let (failing_unmarks, unmarked) = (marking.failing_unmarks, marking.unmarked);
+        let set = stored_set(&store, "otelcol", "1.0.0", b"an artifact");
+        failing_unmarks.store(1, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(store.delete_entry(&set, &linux()), Ok(true));
+        assert_eq!(unmarked.lock().expect("unmarked").len(), 1, "tried once");
+        store.retry_unmarks();
+        assert_eq!(unmarked.lock().expect("unmarked").len(), 2, "and again");
+        store.retry_unmarks();
+        assert_eq!(
+            unmarked.lock().expect("unmarked").len(),
+            2,
+            "and no more once they are gone"
+        );
     }
 
     /// A blob store over files that can hold one request — `exists` or `delete` — until the test
