@@ -155,7 +155,9 @@ that decides its request, and move an old layout by an offline command.
      ([ADR-0041](0041-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md)
      clauses 8 and 13), through the port's `get` and `query`
      ([ADR-0043](0043-the-fleet-record-of-agents-and-hosts.md)
-     clause 2). An instance, too, writes through the port before an act is answered.
+     clause 2) and its `query_page` and `reported_values`
+     ([ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server](draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server.md)
+     clause 9). An instance, too, writes through the port before an act is answered.
 
 4. **The filesystem adapter keeps one JSON file per Agent, `data_dir/agents/<instance_uid>.json`;
    the PostgreSQL adapter keeps one row per Agent.**
@@ -362,14 +364,17 @@ that decides its request, and move an old layout by an offline command.
       of 24 hours, whatever the database's time zone.
     - A prune runs in rounds. A round removes at most 100 000 entries across the chains it
       prunes, taking each chain's run from its start, and records its own `audit.pruned` entries
-      before it deletes; the next round follows right away, until no entry is that old, so a
-      backlog drains over as many rounds as it needs. A round deletes from every chain in one
-      transaction, so one that stops part-way deletes nothing and every round leaves a record that
-      verifies, and within it in batches of a bounded number of entries, so no statement outgrows
-      the statement timeout every connection of the Server holds. A round that does not end
-      within five minutes is rolled back whole; the prune then stops, and the next start or day
-      goes on from where the last round that ended left the record. A round that prunes no chain
-      ends the prune too, with a warning: there is nothing a next round would do differently.
+      before it deletes. While a round removes as many entries as a round may, the next round
+      follows right away, so a backlog drains over as many rounds as it needs; the first round
+      that removes fewer ends the prune. A round deletes from every chain in one transaction, so
+      one that stops part-way deletes nothing and every round leaves a record that verifies, and
+      within it in batches of a bounded number of entries, so no statement outgrows the statement
+      timeout every connection of the Server holds. A round that does not end within five
+      minutes, its wait for its `audit.pruned` entries included, is cut off: its transaction
+      deletes all it was to delete or nothing, and the `audit.pruned` entries it wrote before
+      that transaction stay either way. The prune then stops, and the next start or day goes on
+      from where the record was left. A round that prunes no chain ends the prune too: there is
+      nothing a next round would do differently.
     - An `audit.pruned` is an entry like any other and is pruned in its turn. Where an entry an
       instance removes is an `audit.pruned` whose link is still needed, the instance records that
       link again in a new `audit.pruned`. A link is still needed when the chain it names begins
@@ -1062,27 +1067,13 @@ Tests that carry `Verifies: ADR-0044`:
 - The S3 and PostgreSQL tests run in CI jobs with a rustfs and a PostgreSQL service, and are
   reported skipped where no store is named. `cargo tree` of the Server contains neither
   `aws-lc-rs` nor `openssl`; `cargo-deny` fails on a licence or source outside the allow list.
-- Tests that will carry `Verifies: ADR-0044`, for clauses 2, 10,
-  21 and 22: [`postgres/schema.rs`](../../crates/fleet-server/src/postgres/schema.rs)
-  `two_servers_of_a_new_version_started_together_apply_each_migration_once`;
+- Tests that carry `Verifies: ADR-0044`, for clauses 2, 10, 21 and 22:
   [`postgres/ledger.rs`](../../crates/fleet-server/src/postgres/ledger.rs)
-  `a_revocation_beside_another_writers_keeps_both`,
-  `a_host_written_beside_another_writers_keeps_both`,
   `the_list_version_moves_with_each_revocation_and_lift_and_names_only_the_list_held`,
   `a_register_change_moves_the_list_version`,
   `the_prune_keeps_an_entry_a_valid_renewal_in_the_database_descends_from`;
   [`tests/instances.rs`](../../crates/fleet-server/tests/instances.rs)
   `a_renewal_whose_notification_is_missed_is_refused_once_its_predecessor_is_revoked`;
-  [`postgres/enrolment.rs`](../../crates/fleet-server/src/postgres/enrolment.rs)
-  `two_writers_queue_two_requests_and_the_bound_counts_both`;
-  [`postgres/configs.rs`](../../crates/fleet-server/src/postgres/configs.rs)
-  `two_writers_saving_one_configuration_keep_both_revisions`;
-  [`postgres/packages.rs`](../../crates/fleet-server/src/postgres/packages.rs)
-  `two_writers_adding_two_entries_keep_both`;
-  [`postgres/deployments.rs`](../../crates/fleet-server/src/postgres/deployments.rs)
-  `two_writers_adding_two_members_keep_both`;
-  [`postgres/floors.rs`](../../crates/fleet-server/src/postgres/floors.rs)
-  `a_floor_below_the_stored_one_is_refused_in_the_transaction`;
   [`s3.rs`](../../crates/fleet-server/src/s3.rs)
   `the_cleanup_leaves_the_staging_objects_of_a_live_lease_and_deletes_a_lapsed_ones`,
   `the_cleanup_lists_the_staging_keys_before_it_asks_which_leases_are_live`,
@@ -1107,21 +1098,40 @@ Tests that carry `Verifies: ADR-0044`:
   [`fleet.rs`](../../crates/fleet-server/src/fleet.rs)
   `a_package_deletion_sweeps_once_it_lets_the_fleet_lock_go`;
   [`postgres/import.rs`](../../crates/fleet-server/src/postgres/import.rs)
-  `migrate_to_postgres_leaves_the_audit_as_an_archive_and_records_its_last_entry`,
   `migrate_to_postgres_with_s3_uploads_the_referenced_blobs_and_takes_no_data_dir`,
   `blobs_to_s3_uploads_the_referenced_blobs_and_checks_every_entry`,
   `blobs_to_s3_holds_the_blob_lock_alone_and_fails_naming_it_when_held`.
-- Tests that will carry `Verifies: ADR-0044`, for clause 23:
+- That two writers on the database keep both of what they write, and that the migrations are
+  applied once while instances start together, is decided by tests that carry the marker of
+  [ADR-0041](0041-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md)
+  or of
+  [ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side](draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md):
+  [`tests/instances.rs`](../../crates/fleet-server/tests/instances.rs)
+  `two_revocations_committed_at_once_on_two_instances_are_both_kept`,
+  `an_instance_with_an_older_floor_in_memory_cannot_lower_the_stored_one`,
+  `two_revisions_rolled_out_at_once_on_two_instances_are_both_kept`,
+  `two_entries_added_at_once_on_two_instances_are_both_kept`,
+  `two_members_added_at_once_on_two_instances_are_both_kept`,
+  `this_release_starts_beside_a_live_lease_of_0_8_0_and_migrates_once`,
+  `two_versions_serve_side_by_side_and_the_newer_migrates_once`;
+  [`postgres/ledger.rs`](../../crates/fleet-server/src/postgres/ledger.rs)
+  `two_binders_of_one_host_bind_both_without_a_deadlock`,
+  `a_gateway_mark_finds_a_host_another_instance_wrote`;
+  [`postgres/enrolment.rs`](../../crates/fleet-server/src/postgres/enrolment.rs)
+  `two_takers_at_the_queues_bound_take_one_request_between_them`.
+- Tests that carry `Verifies: ADR-0044`, for clause 23:
   [`postgres/mod.rs`](../../crates/fleet-server/src/postgres/mod.rs)
-  `a_server_holds_a_lease_before_it_opens_a_listener`,
-  `an_instance_that_cannot_renew_its_lease_closes_its_listeners_until_it_holds_a_new_one`,
-  `a_second_instance_beside_one_that_must_be_alone_fails_startup_naming_the_key`,
-  `an_instance_that_must_be_alone_fails_startup_beside_a_live_lease`,
-  `an_instance_that_loses_its_exclusive_lock_logs_it_and_refuses_every_call`. They take the
-  place of `a_second_server_against_the_same_database_fails_startup_naming_it` and
-  `a_server_that_loses_its_lock_logs_it_and_writes_nothing_more`, which verify ADR-0044
-  clause 23.
-- A test that will carry `Verifies: ADR-0044`, for clause 22:
+  `a_second_instance_that_must_be_alone_fails_startup_naming_it`,
+  `a_server_that_loses_its_lock_logs_it_and_writes_nothing_more`. Beside them, with the marker of
+  [ADR-0041](0041-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md):
+  [`postgres/lease.rs`](../../crates/fleet-server/src/postgres/lease.rs)
+  `instances_that_share_the_database_each_hold_a_lease`,
+  `an_instance_that_must_be_alone_is_alone`;
+  [`tests/instances.rs`](../../crates/fleet-server/tests/instances.rs)
+  `an_instance_without_a_lease_closes_its_listeners_until_it_holds_a_new_one`, which opens the
+  listeners again only once the instance holds a new lease. No test of its own decides that an
+  instance takes its lease before it first opens a listener.
+- Tests that carry `Verifies: ADR-0044`, for clause 22:
   [`postgres/mod.rs`](../../crates/fleet-server/src/postgres/mod.rs)
   `a_server_of_0_7_1_refuses_the_schema_once_a_migration_of_0_8_0_is_applied`: the schema of
   migrations 1 and 2 is taken by 0.7.1, and after each of migrations 3 to 10 it is refused, naming
@@ -1130,14 +1140,20 @@ Tests that carry `Verifies: ADR-0044`:
   lock held on the schema of migrations 1 and 2, as a running Server of 0.7.1 holds it, an
   instance that shares the database fails startup and the schema is left as it was, and once the
   lock is free the instance migrates and starts.
-- A test that will carry `Verifies: ADR-0044`:
+- Tests that carry `Verifies: ADR-0044`, for clauses 1, 16 and 27:
   [`fs/mod.rs`](../../crates/fleet-server/src/fs/mod.rs)
   `a_data_dir_beside_the_database_holds_the_blobs_alone`, that the Server makes `blobs/` in a
-  `data_dir` beside the database with the filesystem blob store and no `audit/` there, and that
-  with S3 it creates no `data_dir` and refuses one the configuration names (clause 1). It takes
-  the place of `a_data_dir_beside_the_database_holds_the_audit_and_the_blobs_alone`, which
-  verifies ADR-0044 clause 1.
-- Tests that will carry `Verifies:
+  `data_dir` beside the database with the filesystem blob store and keeps `audit/` there only as
+  the archive an older Server left; [`config.rs`](../../crates/fleet-server/src/config.rs)
+  `with_postgresql_and_s3_a_named_data_dir_fails_startup_naming_it`, that with S3 the Server has
+  no `data_dir` and refuses one the configuration names;
+  [`fs/mod.rs`](../../crates/fleet-server/src/fs/mod.rs)
+  `a_data_directory_read_in_place_is_not_written`;
+  [`s3.rs`](../../crates/fleet-server/src/s3.rs)
+  `a_store_opened_before_its_lease_takes_no_upload_until_the_lease_is_named`;
+  [`tests/stateless_instance.rs`](../../crates/fleet-server/tests/stateless_instance.rs)
+  `a_bucket_that_fails_startup_leaves_no_lease_behind`.
+- Tests that carry `Verifies:
   ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision`,
   for clauses 2, 9 and 21:
   [`postgres/enrolment.rs`](../../crates/fleet-server/src/postgres/enrolment.rs)
