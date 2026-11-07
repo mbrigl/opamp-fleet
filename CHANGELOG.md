@@ -91,6 +91,23 @@ once its tag exists.
   instance of 0.8.0 left while both releases ran, stays until it is taken out of the Deployment,
   by `DELETE /api/v1/deployments/{name}/configurations/{configuration}` or
   `DELETE /api/v1/deployments/{name}/packages/{agent_type}/{version}`.
+- **A sweep stops once its lock is lost**
+  ([ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision](docs/adr/draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
+  clause 14). On PostgreSQL a sweep whose database session ended after it had read which artifacts
+  the entries name could still delete one that an upload through another instance had just
+  stored, and the new entry named a missing artifact. A sweep now marks, on the session that holds
+  its lock, the artifacts it deletes, renews each mark before its deletion, and deletes nothing
+  more once the lock is lost, saying so in the log. An upload of a marked artifact is refused until
+  the sweep has taken its marks away; marks it could not take away its instance tries again every
+  `lease_renew_secs`, and those of an instance whose lease is no longer live go with any sweep
+  once 130 seconds old. The schema gains migration 13, which a Server of 0.8.0 serves on; such a
+  Server neither marks nor reads a mark.
+  **What to do:** nothing. An upload refused with *the artifact was removed while it was uploaded;
+  upload it again* is uploaded again. A start that fails naming an entry whose artifact *is not
+  stored* is mended by uploading that artifact again, or by restoring it from a backup: a sweep
+  through an instance of 0.8.0 while both releases ran, an instance suspended for more than 130
+  seconds in a sweep, or a failover to an asynchronous replica the marks had not reached can leave
+  one.
 
 ## [0.8.0]
 

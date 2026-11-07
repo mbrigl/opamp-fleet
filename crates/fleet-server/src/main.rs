@@ -675,6 +675,11 @@ async fn main() {
             std::process::exit(1);
         }
     };
+    // Its startup sweep marks what it deletes under the lease the instance takes next, which
+    // another instance's sweep leaves (ADR-0044 clause 14).
+    if let (fleet_server::Records::Postgres(database), Some(id)) = (&records, &instance_id) {
+        database.sweep_under(id);
+    }
     // The package store before the lease, so that a bucket that fails startup leaves no lease
     // and no audit chain behind. Its startup cleanup needs no lease of this instance: it lists the
     // staging keys before it asks which leases are live
@@ -962,6 +967,7 @@ async fn main() {
                 fleet_server::instance::write_presence(state.clone(), lease.held(), interval)
             });
             fleet_server::instance::follow(database, state.clone(), Some(lease.list_versions()));
+            fleet_server::instance::retry_unmarks(state.clone(), config.database.lease().renew);
             presence
         }
         _ => None,

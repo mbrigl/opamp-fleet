@@ -220,6 +220,9 @@ impl Database {
             self.set_outdated(&refusal);
             refusal
         })?;
+        // From now on this instance's sweeps mark under the lease, so that a sweep of another
+        // instance leaves their marks while it lives (ADR-0044 clause 14).
+        self.sweep_under(&id);
         Ok(Taken {
             instance_id: id,
             sent,

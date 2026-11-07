@@ -514,6 +514,30 @@ pub fn write_presence(state: Arc<AppState>, held: Held, interval: Duration) -> P
     PresenceBatches { stop, task }
 }
 
+/// Every `interval`, the lease renewal interval, tries again to take away the marks of the sweeps
+/// of this instance that could not take them away when they were done: they refuse uploads of
+/// their blobs on every instance until they are gone (ADR-0044 clause 14). Runs until the runtime
+/// ends.
+pub fn retry_unmarks(state: Arc<AppState>, interval: Duration) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(interval);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            let state = state.clone();
+            let retried = tokio::task::spawn_blocking(move || {
+                if let Some(store) = state.packages() {
+                    store.retry_unmarks();
+                }
+            })
+            .await;
+            if let Err(e) = retried {
+                warn!(error = %e, "could not try again to take away the marks of a sweep");
+            }
+        }
+    });
+}
+
 /// The presence batches [`write_presence`] runs.
 pub struct PresenceBatches {
     stop: tokio::sync::oneshot::Sender<()>,
