@@ -32,7 +32,7 @@ Either may need a migration, which takes the next free number and names its olde
 
 ## Read first
 
-- ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+- ADR-0048
   clause 8 (the restart's put-back and the cases not seen) and clause 9 (announcements).
 - `fleet.rs`: `put_back`, `retry_restarts`, `rekey_held`, `read_unsure_rekey`;
   `postgres/agents.rs` `set_restart_pending` and `rekey`.

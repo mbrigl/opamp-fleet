@@ -1,5 +1,5 @@
 //! The parameters and the headers of the four lists that grow with the fleet
-//! (ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server
+//! (ADR-0049
 //! clauses 3, 4 and 6): `limit` and `cursor`, a `400` for a parameter a route does not name, and
 //! the `Link` and `X-Total-Count` headers of the answer.
 
@@ -285,7 +285,7 @@ mod tests {
 
     /// A cursor comes back as the position it was made of, and only for the sort and filters it
     /// was made for; one that does not parse names nothing.
-    /// Verifies: ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server
+    /// Verifies: ADR-0049
     #[test]
     fn a_cursor_names_its_position_for_its_own_sort_and_filters_alone() {
         let made_for = listing::digest(&[("sort", "name"), ("q", "edge")]);

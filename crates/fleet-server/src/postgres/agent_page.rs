@@ -1,5 +1,5 @@
 //! The list of Agents on PostgreSQL
-//! (ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server
+//! (ADR-0049
 //! clauses 5, 6, 8 and 9): the columns the core derives from each record and writes with it, the
 //! rows written without them derived again, and the one query that filters, sorts and cuts a page.
 //!

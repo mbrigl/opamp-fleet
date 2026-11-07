@@ -192,7 +192,7 @@ async fn a_plain_http_exchange_is_answered_by_the_handler() {
 
 /// A reply past the limit is answered `500` and never put on the wire, and the handler is told it
 /// was not sent, so what it carried can wait for the next exchange.
-// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+// Verifies: ADR-0048
 #[tokio::test]
 async fn a_plain_http_reply_past_the_limit_is_reported_unsent() {
     let (addr, handler) = serve(Settings::new(LIMIT)).await;

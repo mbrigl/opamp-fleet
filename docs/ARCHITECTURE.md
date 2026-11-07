@@ -74,7 +74,7 @@ Five crates in one workspace ([ADR-0008](adr/0008-five-crates-on-tokio-and-axum.
   HTTP client from a `Connection` the application fills in. The WebSocket driver ends a
   connection on which nothing arrived for one heartbeat interval (`client::ws::Silence`), and
   draws its reconnects and its waits after an `Unavailable` from `client::backoff`
-  ([ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended](adr/draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended.md)).
+  ([ADR-0051](adr/0051-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended.md)).
   Behind `server`, the endpoint around a `Handler`, which answers a WebSocket's pings while it
   handles a message, `server::listen`, the listener with its TLS and its bounds on connection
   setup, and `server::pace`, the floor every body and WebSocket message it serves is held to. The
@@ -119,7 +119,7 @@ no module.
   revisions and assignments as one operation, answers what an assignment pins, and answers a page
   of the list of Agents (`query_page`) and the values the fleet reports (`reported_values`), with
   the filter, the order and what is derived from each record defined in the core module `listing`
-  ([ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server](adr/draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server.md));
+  ([ADR-0049](adr/0049-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server.md));
   `ConfigBackend` under the `ConfigStore` in `configs`; `DeploymentBackend` under the
   `DeploymentStore` in `deployments`; `PackageBackend` and `BlobStore` (`blobs`, artifact bytes by
   SHA-256) under the `PackageStore` in `packages`, the bytes in `data_dir` or, with
@@ -157,7 +157,7 @@ no module.
   [ADR-0044](adr/0044-the-servers-state-and-its-stores.md)).
 - **Server instances** — on PostgreSQL every Server is an instance, and several share one
   database and one bucket
-  ([ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side](adr/draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)).
+  ([ADR-0048](adr/0048-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)).
   `instance` takes a lease, a row of `postgres::lease`, before either listener opens, renews it,
   proves it before every answer, and closes both planes while it cannot. Each lease it takes checks
   the schema under the migrations' lock and records the instance's release, and a migration refuses
@@ -208,8 +208,8 @@ no module.
   ([ADR-0042](adr/0042-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance.md)).
   Each entry names the lease its decision was taken under (`taken_under`), and on PostgreSQL the
   writer keeps a batch whose write failed and tries it again first
-  ([ADR-draft-the-audit-record-is-one-hash-chain-per-lease-and-names-the-lease-each-decision-was-taken-under](adr/draft-the-audit-record-is-one-hash-chain-per-lease-and-names-the-lease-each-decision-was-taken-under.md),
-  [ADR-draft-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again](adr/draft-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again.md)).
+  ([ADR-0047](adr/0047-the-audit-record-is-one-hash-chain-per-lease-and-names-the-lease-each-decision-was-taken-under.md),
+  [ADR-0046](adr/0046-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again.md)).
   `postgres::audit_prune` bounds it by `[audit] retain_days`: a task `main` starts prunes at
   startup and once a day, the instance's own chain always and the closed chains while it holds the
   prune's advisory lock, recording each `audit.pruned` through the instance's writer and waiting
@@ -223,7 +223,7 @@ no module.
   as a lease and a sweep measure it: `PackageStore::with_backend` takes it, and `instance`'s
   `Lease::take_as`. `clock::Elapsed::monotonic` is the adapter on `std::time::Instant`, and
   `main.rs` hands both of them `CLOCK_BOOTTIME`, which counts a suspend of the host, on Linux
-  ([ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side](adr/draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+  ([ADR-0048](adr/0048-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
   clause 3). The `[connection_offer]` and `[telemetry_offer]` sections become the fleet's offers in
   `config`.
 - **Server configuration** — `config` builds one TOML document from the defaults, `server.toml`
@@ -415,7 +415,7 @@ WebSockets after one heartbeat interval of silence. Each Agent reconnects after 
 Agent's record at its first report and takes it as its holder. Once the lost instance's lease has
 lapsed, the instance that removes it closes its audit chain. The others serve from what the lost
 instance committed to the database
-([ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side](adr/draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)).
+([ADR-0048](adr/0048-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)).
 
 **A Supervisor starts its program.** Without a process account the runner starts the Managed
 Process, its version probe and a package's preflight as the Client. Where `service install

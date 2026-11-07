@@ -4041,7 +4041,7 @@ mod tests {
 
     /// A revocation check, a handshake's Gateway test and another report's check do not wait for a
     /// report's binding or its Host to be written.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn a_check_does_not_wait_for_a_binding_or_a_host_to_be_written() {
         let (revocations, _store, hooked) = hooked_register();

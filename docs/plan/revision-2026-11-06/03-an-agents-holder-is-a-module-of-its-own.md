@@ -30,7 +30,7 @@ notice it acts on as one type, and update the overview in the same change.
 ## Read first
 
 - ADR-0009;
-  ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+  ADR-0048
   clauses 8 to 10.
 - `docs/plan/revision-2026-10-31/13-the-servers-report-processing-has-a-module.md` on
   `feat/revision-2026-10-31`: whichever of the two lands second takes the other's module up.

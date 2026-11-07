@@ -189,17 +189,17 @@ The plan lands on `main` in three stages, each a release of its own.
    count is the sensor for such a row. The lists page and name the holder, two versions run side
    by side, the manual runs three instances, and the load test decides G-20, which lands with it.
    Its drafts are
-   ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side,
+   ADR-0048,
    which supersedes ADR-0041,
-   ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server,
-   ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended,
-   ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision,
+   ADR-0049,
+   ADR-0051,
+   ADR-0050,
    which supersedes ADR-0044,
-   ADR-draft-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again,
+   ADR-0046,
    which supersedes ADR-0039,
-   ADR-draft-the-audit-record-is-one-hash-chain-per-lease-and-names-the-lease-each-decision-was-taken-under,
+   ADR-0047,
    which supersedes ADR-0042, and
-   ADR-draft-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window,
+   ADR-0052,
    which supersedes ADR-0022.
 3. **The keys on a token.** Tickets 12, 16 and 17. The CA keys live on a PKCS#11 token, so
    instances holding a CA run side by side, the heads of the audit chains are signed, and the

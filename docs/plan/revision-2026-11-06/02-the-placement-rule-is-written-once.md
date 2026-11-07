@@ -21,7 +21,7 @@ One function decides the placement of a group from its members, and both callers
 ## Read first
 
 - ADR-0043 clause 19;
-  ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server
+  ADR-0049
   clause 8 (the core owns the derivation).
 - `fleet.rs` `inherit`, `inherit_held`; `listing.rs` `place_on_host`; `postgres/agent_page.rs`.
 

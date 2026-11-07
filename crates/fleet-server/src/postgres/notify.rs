@@ -674,7 +674,7 @@ mod tests {
     /// once: a commit that landed before the call failed and one that lands after it are both read.
     /// The same notification of an earlier call of its own, or of another instance's call that
     /// bears the same mark, is not taken for it.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn the_notifications_of_a_call_whose_answer_was_lost_are_handed_on_and_heard_once_more() {
         let unsure = Unsure::default();
@@ -722,7 +722,7 @@ mod tests {
     /// The notices that were to follow the commit of a call whose answer was lost are handed on at
     /// once, each once, and not awaited: this instance's own notice of the same kind and
     /// identifier, should one come, is passed over (clause 10).
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn the_notices_to_follow_a_commit_whose_answer_was_lost_are_read_again_and_not_awaited() {
         let unsure = Unsure::default();
@@ -747,7 +747,7 @@ mod tests {
 
     /// A call that fails after it committed a change whose notice was to follow the commit has its
     /// instance read what the notice names at once, as on hearing it (clause 10).
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn a_call_that_fails_after_its_commit_has_the_notice_to_follow_it_read_at_once() {
         let Some(test) = TestDatabase::named() else {
@@ -789,7 +789,7 @@ mod tests {
 
     /// A notification that names the call that sent it is read by a Server of 0.8.0 as one without:
     /// its payload, as 0.8.0 declares it, reads past a field it does not know (clause 16).
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn a_notification_that_names_its_call_is_read_by_the_release_before() {
         /// The payload as version/0.8.0 declares it in `postgres/notify.rs`.

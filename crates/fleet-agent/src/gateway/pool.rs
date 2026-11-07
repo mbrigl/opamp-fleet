@@ -154,7 +154,7 @@ impl Pool {
         upstream.max_message_size = self.limit;
         // An upstream that sends nothing for a heartbeat interval, not even the pong to a ping
         // sent half-way, is taken for lost; opening is bounded by `connect_websocket`
-        // (ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended).
+        // (ADR-0051).
         let silence = opamp::client::ws::Silence::of(upstream.heartbeat);
         let socket = upstream.connect_websocket().await?;
 

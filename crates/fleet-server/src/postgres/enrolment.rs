@@ -1145,7 +1145,7 @@ mod tests {
     /// A withdrawal of a request whose bootstrap certificate the list names announces itself in the
     /// call that commits it: where that call loses its answer, the instance is handed the
     /// notification, so it reads its queue again.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn a_withdrawal_whose_commit_lost_its_answer_is_handed_on() {
         let Some(test) = TestDatabase::named() else {
@@ -1583,7 +1583,7 @@ mod tests {
     /// approval's update needs that lock, so a wait would deadlock the two, and the database would
     /// end one of them. The approval is let go once the rejection answered or waits for the row,
     /// and it stands.
-    /// Verifies: ADR-draft-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window
+    /// Verifies: ADR-0052
     #[test]
     fn a_rejection_of_a_request_held_by_an_approval_does_not_wait_for_it() {
         let Some(test) = TestDatabase::named() else {
@@ -1727,14 +1727,14 @@ mod tests {
         assert!(!signed.get(), "a rejected key is signed by no approval");
     }
 
-    /// Verifies: ADR-draft-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window
+    /// Verifies: ADR-0052
     #[test]
     fn the_rejected_keys_hold_at_the_store_on_the_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
         rejections(&|| Box::new(FsEnrolmentStore::open(dir.path())));
     }
 
-    /// Verifies: ADR-draft-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window
+    /// Verifies: ADR-0052
     #[test]
     fn the_rejected_keys_hold_at_the_store_on_postgres() {
         let Some(test) = TestDatabase::named() else {
@@ -1747,7 +1747,7 @@ mod tests {
     /// An approval of a key another instance rejected, whose request still waits in the database
     /// as an instance of 0.8.0 queued it, signs nothing, records nothing, and is answered as not
     /// found; an instance that reads the queue lists the request as pending no longer.
-    /// Verifies: ADR-draft-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window
+    /// Verifies: ADR-0052
     #[test]
     fn an_approval_signs_no_rejected_key_on_postgres() {
         use crate::enrolment::tests::{
@@ -1785,7 +1785,7 @@ mod tests {
 
     /// A rejected key stays refused beyond its window on PostgreSQL, on every instance on the
     /// database.
-    /// Verifies: ADR-draft-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window
+    /// Verifies: ADR-0052
     #[test]
     fn a_rejected_key_stays_refused_on_postgres() {
         let Some(test) = TestDatabase::named() else {
@@ -1845,7 +1845,7 @@ mod tests {
     /// recorded as rolled back; approved again, the request is signed once more, and one
     /// certificate for its key is in the register beside one Host, the list's version moved by
     /// its entry alone and held by the approving instance (ADR-0044 clauses 9 and 10).
-    /// Verifies: ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision
+    /// Verifies: ADR-0050
     #[test]
     fn an_approval_whose_commit_fails_records_nothing_and_a_second_records_one_certificate() {
         use crate::enrolment::tests::{request as submitted, requester, Counting, Registering};
@@ -1919,7 +1919,7 @@ mod tests {
     /// Two instances approve one request, and the first one's commit fails: the second, which
     /// waited for the request's row, signs it once when the first rolls back, and the request ends
     /// decided once, with one certificate in the register (ADR-0044 clause 9, ADR-0041 clause 19).
-    /// Verifies: ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision
+    /// Verifies: ADR-0050
     #[test]
     fn two_instances_approving_one_request_whose_first_commit_fails_sign_it_once_more() {
         use crate::enrolment::tests::{request as submitted, requester, Counting, Registering};
@@ -2036,7 +2036,7 @@ mod tests {
     /// rolls the decision back with it: nothing is registered or decided, the request is
     /// withdrawn, and the signature is recorded as rolled back (ADR-0044 clause 9, ADR-0038
     /// clause 28).
-    /// Verifies: ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision
+    /// Verifies: ADR-0050
     #[test]
     fn an_approval_whose_register_entry_is_refused_rolls_its_decision_back() {
         use crate::enrolment::tests::{request as submitted, requester, Counting, Registering};
@@ -2116,7 +2116,7 @@ mod tests {
 
     /// A commit the database server itself refuses is answered as a refusal, not as an outcome
     /// the instance would have to read back (ADR-0044 clause 9).
-    /// Verifies: ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision
+    /// Verifies: ADR-0050
     #[test]
     fn a_commit_the_database_refuses_is_answered_as_a_refusal() {
         let Some(test) = TestDatabase::named() else {
@@ -2146,7 +2146,7 @@ mod tests {
     /// The read back of an approval whose outcome is not known waits for the transaction that
     /// holds the request to end, and answers what it committed, not what was committed before
     /// (ADR-0044 clause 9).
-    /// Verifies: ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision
+    /// Verifies: ADR-0050
     #[test]
     fn a_read_back_waits_for_the_transaction_that_holds_the_request() {
         let Some(test) = TestDatabase::named() else {
@@ -2218,7 +2218,7 @@ mod tests {
     /// answer of the server is certain (ADR-0044 clause 9). A real `FATAL` after a commit durable
     /// on its own, as a terminate during the wait for a synchronous standby gives, needs a
     /// replica, so the classification is decided here from the severity alone.
-    /// Verifies: ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision
+    /// Verifies: ADR-0050
     #[test]
     fn only_an_error_at_the_commit_is_a_certain_rollback() {
         assert!(rolled_back_for_certain(

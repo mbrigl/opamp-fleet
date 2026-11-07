@@ -47,7 +47,7 @@ impl DeploymentBackend for PgDeploymentBackend {
             let transaction = client.transaction().await.map_err(sql)?;
             // `packages` and `configurations` mirrored the member rows; no release reads them,
             // so a new row's are empty and nothing writes them after
-            // (ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision
+            // (ADR-0050
             // clause 22).
             transaction
                 .execute(
@@ -189,7 +189,7 @@ impl DeploymentBackend for PgDeploymentBackend {
 /// Takes `member` out of every Deployment that holds it inside the transaction that deletes it,
 /// which holds the member's row `FOR UPDATE`: an add that holds that row `FOR KEY SHARE` has
 /// committed before this reads the member rows, and every later one finds the member gone
-/// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+/// (ADR-0048
 /// clause 19). The Deployments' rows are not held, so this takes no lock in the order of an add,
 /// which holds the Deployment's row before the member's.
 pub(super) async fn drop_member_rows(
@@ -716,9 +716,9 @@ mod tests {
     /// the member rows, so this release writes them no more: a new Deployment's are empty, and
     /// what a Server of 0.8.0 wrote into them stays as it was through every change of the
     /// members, until the release after this one removes them
-    /// (ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision
+    /// (ADR-0050
     /// clause 22).
-    /// Verifies: ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision
+    /// Verifies: ADR-0050
     #[test]
     fn the_mirror_columns_are_written_no_more() {
         let Some(test) = TestDatabase::named() else {
@@ -870,7 +870,7 @@ mod tests {
     /// The deletion of a Configuration or a Package takes it out of every Deployment that holds it
     /// in the transaction that deletes it: nothing the fleet does after, which a crash would cut
     /// off, is needed for no Deployment to name it.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side, ADR-0026
+    /// Verifies: ADR-0048, ADR-0026
     #[test]
     fn a_deleted_member_leaves_every_deployment_in_the_transaction_that_deletes_it() {
         use crate::configs::{ConfigBackend as _, Removal};

@@ -238,7 +238,7 @@ impl Connection {
     /// that drives the socket itself. The name's resolution gets one silence bound, and each
     /// address it resolves to, in turn, one for the TCP connection, the TLS handshake and the
     /// upgrade together, so an endpoint that accepts and never answers fails the call
-    /// (ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended
+    /// (ADR-0051
     /// clause 3).
     ///
     /// # Errors
@@ -370,9 +370,9 @@ mod tests {
     /// Verifies: ADR-0008, ADR-0045
     /// The probe of an offered endpoint that accepts the TCP connection and never answers fails
     /// once the bound has passed, rather than holding the session that asked for it
-    /// (ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended
+    /// (ADR-0051
     /// clause 3).
-    /// Verifies: ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended
+    /// Verifies: ADR-0051
     #[tokio::test]
     async fn a_probe_of_an_endpoint_that_never_answers_fails_within_the_bound() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")

@@ -49,7 +49,7 @@ pub type Held = watch::Receiver<Option<String>>;
 
 /// Whether the lease is still held by the clock it is measured on, read at the moment of asking:
 /// what each request on either plane and each message of an Agent checks before it is answered
-/// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+/// (ADR-0048
 /// clause 3). The lease thread reads the clock only every [`CHECKED_EVERY`], and after a suspend
 /// this answers at once.
 #[derive(Clone)]
@@ -471,7 +471,7 @@ async fn renew(lease: &Renewing, taken: Taken) {
                 }
                 // A schema migrated by a newer Server while this one held no lease: it stops, as
                 // at a failed start
-                // (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+                // (ADR-0048
                 // clause 16).
                 Err(e) if database.outdated().is_some() => {
                     error!(
@@ -554,7 +554,7 @@ fn lock_lost(lease: &Renewing, instance_id: &str) {
 /// notification that was missed without the connection ending, and a notice that was to follow a
 /// commit but was never sent, as when its instance ended between the two, are caught within one
 /// renewal
-/// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+/// (ADR-0048
 /// clauses 9 and 10). The revocation list's version the renewal read is compared with the one
 /// held, and a version that moved is logged.
 pub fn follow(
@@ -643,7 +643,7 @@ pub fn follow(
 /// (ADR-0043 clause 4). A batch that fails is logged, and what
 /// it held is written with the next one. A batch written later than its interval after it was
 /// due is logged as a warning naming how late it was
-/// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+/// (ADR-0048
 /// clause 5). The batches run until they are stopped.
 pub fn write_presence(state: Arc<AppState>, held: Held, interval: Duration) -> PresenceBatches {
     let (stop, mut stopped) = tokio::sync::oneshot::channel();
@@ -1209,7 +1209,7 @@ mod tests {
 
     /// A request is served while the lease is held by its clock, and answered `503` once the clock
     /// has jumped past its lapse, as after a suspend, though nothing else has noticed yet.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[tokio::test]
     async fn a_request_is_answered_503_once_the_leases_clock_has_passed_its_lapse() {
         use std::sync::atomic::{AtomicU64, Ordering};
@@ -1419,7 +1419,7 @@ mod tests {
 
     /// A presence batch written later than its interval after it was due is logged as a warning
     /// naming how late it was.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[tokio::test]
     async fn a_presence_batch_written_late_is_logged_with_how_late() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1455,7 +1455,7 @@ mod tests {
     }
 
     /// A presence batch written within its interval logs no lateness.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[tokio::test]
     async fn a_presence_batch_written_in_time_logs_no_lateness() {
         let dir = tempfile::tempdir().expect("tempdir");
