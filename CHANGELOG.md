@@ -331,11 +331,14 @@ once its tag exists.
   the size limit, is now queued again and sent at the Agent's next exchange, on a lease that
   lapsed meanwhile too. Where the store cannot take it back, the Server tries again at intervals
   that grow to a minute until it holds; a Server that stops first loses it, and a restart
-  requested or delivered meanwhile, or the Agent's forget, ends the tries. A command that reached
+  requested or delivered meanwhile, or the Agent's forget, ends the tries. A re-key of the Agent
+  through this instance takes the tries to its new `instance_uid`; one through another instance
+  ends them, and the Server warns `the restart is no longer tried, the Agent's row is gone`
+  naming the Agent, as it does where the Agent was forgotten. A command that reached
   the Agent although its send failed restarts the Managed Process twice, and so may a restart
   requested and delivered through another instance before this one heard of the request. A frame
   lost after the connection took it, and on plain HTTP a lost answer to a poll, is still not seen.
-  **What to do:** nothing. Request a restart that did not happen again.
+  **What to do:** nothing. Request a restart that did not happen again, and one the warning names.
 - **The audit record names the lease of each decision**
   ([ADR-draft-the-audit-record-is-one-hash-chain-per-lease-and-names-the-lease-each-decision-was-taken-under](docs/adr/draft-the-audit-record-is-one-hash-chain-per-lease-and-names-the-lease-each-decision-was-taken-under.md)
   clause 3,
