@@ -578,10 +578,11 @@ pub trait AgentStore: Send + Sync {
     /// `instance_uid` whatever order they are given in, so two batches over the same Agents never
     /// deadlock (ADR-0043 clause 4). Each Agent comes with
     /// the count of takes `holder` was last answered for it, `None` where it was answered none. A
-    /// connected Agent names `holder` as the instance that holds its connection only where the
-    /// stored presence names `holder`, or none, or an instance without a live lease: a batch read
-    /// before another instance took the Agent never undoes that take, and writes nothing of it.
-    /// Naming `holder` anew counts as a take. A disconnect is written only of an Agent whose stored
+    /// connected Agent names `holder` as the instance that holds its connection where the stored
+    /// presence names `holder`, and anew only where it names none or an instance without a live
+    /// lease, and, where the Agent comes with a count, only while the stored count is still that
+    /// one: a batch read before another instance took the Agent never undoes that take, and writes
+    /// nothing of it. Naming `holder` anew counts as a take. A disconnect is written only of an Agent whose stored
     /// presence names `holder` and still holds the count it comes with, so it never undoes another
     /// instance's take, nor a take of `holder` made since, however the instances' clocks differ;
     /// `last_seen_ms` never moves back. A record no longer stored is written nothing. Answers the
@@ -634,6 +635,23 @@ pub trait AgentStore: Send + Sync {
         &self,
         uids: &[InstanceUid],
     ) -> Result<HashMap<InstanceUid, Option<String>>, String> {
+        let _ = uids;
+        Err("this store keeps no presence; its Server decides from what it holds".to_string())
+    }
+
+    /// The holder each stored presence of `uids` names, as [`holders`](Self::holders) answers it,
+    /// and the record's count of takes; a record not stored is left out. What an instance that does
+    /// not know whether its take was written, since its answer was lost, reads before it writes the
+    /// Agent's disconnect under the count it read
+    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// clause 8).
+    ///
+    /// # Errors
+    /// Returns an error when the records cannot be read, and on a store that keeps no presence.
+    fn takes(
+        &self,
+        uids: &[InstanceUid],
+    ) -> Result<HashMap<InstanceUid, (Option<String>, u64)>, String> {
         let _ = uids;
         Err("this store keeps no presence; its Server decides from what it holds".to_string())
     }

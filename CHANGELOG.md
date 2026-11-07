@@ -69,6 +69,16 @@ once its tag exists.
   names its serial, and not where `issuance.undecided` names it `rolled_back`; for a signature
   neither names, or one named `unknown`, `GET /api/v1/certificates` answers while the
   certificate is valid.
+- **A presence row ends with its connection**
+  ([ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side](docs/adr/draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+  clause 8). On PostgreSQL an Agent's row could keep naming an instance as connected after the
+  connection ended, until the silence bound, so the fleet list and the holder named an instance
+  that no longer carried the Agent. That happened when a connect's take was written but its
+  answer was lost, after a re-key, when a batch named its instance again over a take another
+  instance counted since, or when a batch's late answers replaced a newer take's count. Such an
+  Agent's goodbye is now written with the next batch. An Agent that disconnected under a lease the
+  instance later lost is flushed at shutdown again.
+  **What to do:** nothing.
 
 ## [0.8.0]
 
