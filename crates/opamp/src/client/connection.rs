@@ -225,19 +225,34 @@ impl Connection {
     }
 
     /// Opens one WebSocket to the endpoint with this connection's credential and TLS, for a caller
-    /// that drives the socket itself.
+    /// that drives the socket itself. The TCP connection, the TLS handshake and the upgrade get one
+    /// silence bound together, so an endpoint that accepts and never answers fails the call
+    /// (ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended
+    /// clause 3).
     ///
     /// # Errors
-    /// Returns an error when the material cannot be used or the server cannot be reached.
+    /// Returns an error when the material cannot be used, the server cannot be reached, or nothing
+    /// arrived within the bound.
     pub async fn connect_websocket(&self) -> Result<ws::Socket, String> {
         self.scheme()?;
-        ws::connect(
-            &self.endpoint,
-            &self.headers()?,
-            self.connector()?,
-            self.max_message_size,
+        let bound = ws::Silence::of(self.heartbeat).end_after;
+        tokio::time::timeout(
+            bound,
+            ws::connect(
+                &self.endpoint,
+                &self.headers()?,
+                self.connector()?,
+                self.max_message_size,
+            ),
         )
         .await
+        .map_err(|_| {
+            format!(
+                "cannot reach {}: nothing arrived within {} ms of opening the connection",
+                self.endpoint,
+                bound.as_millis()
+            )
+        })?
         .map_err(|e| format!("cannot reach {}: {e}", self.endpoint))
     }
 }
@@ -367,6 +382,42 @@ mod tests {
     }
 
     /// Verifies: ADR-0008, ADR-0045
+    /// The probe of an offered endpoint that accepts the TCP connection and never answers fails
+    /// once the bound has passed, rather than holding the session that asked for it
+    /// (ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended
+    /// clause 3).
+    /// Verifies: ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended
+    #[tokio::test]
+    async fn a_probe_of_an_endpoint_that_never_answers_fails_within_the_bound() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                held.push(stream);
+            }
+        });
+        let heartbeat = Duration::from_millis(500);
+        let mut offered = connection(&format!("ws://{addr}/v1/opamp"), None);
+        offered.heartbeat = Some(heartbeat);
+        let started = tokio::time::Instant::now();
+        let probed = tokio::time::timeout(Duration::from_secs(10), probe(&offered, || None))
+            .await
+            .expect("the probe ends within the test's bound");
+        let failed = started.elapsed();
+        assert!(
+            probed.is_err(),
+            "an endpoint that never answers fails the probe"
+        );
+        assert!(failed >= heartbeat, "not before the bound: {failed:?}");
+        assert!(
+            failed < heartbeat + Duration::from_millis(2_500),
+            "once the bound passes: {failed:?}"
+        );
+    }
+
     #[tokio::test]
     async fn plaintext_off_the_loopback_is_refused_before_connecting() {
         let refused = connection("ws://192.0.2.1:9/v1/opamp", None);

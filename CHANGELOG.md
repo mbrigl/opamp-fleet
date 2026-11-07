@@ -65,6 +65,27 @@ once its tag exists.
 
 ### Fixed
 
+- **An Agent leaves a Server that stopped answering within one heartbeat interval**
+  ([ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended](docs/adr/draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended.md)).
+  A Server that was frozen, lost its power or was cut off closed nothing, and its Agents stayed on
+  it until TCP gave up, about fifteen minutes. The Client, a Gateway's upstream connections and the
+  `opamp` crate's WebSocket driver now send a WebSocket ping once nothing has arrived for half a
+  heartbeat interval, end the connection once nothing has arrived for a whole one, and reconnect
+  after the delay drawn over `[0, 30 s)`; a pong gets the rest of the interval from when its ping
+  went out, so an Agent busy with an install does not drop a live Server. Opening a connection,
+  the TLS handshake and the upgrade included, is bounded by one interval too, the probe of an
+  offered endpoint among them. With heartbeats disabled the bound is 30 seconds. The
+  line *nothing arrived from the server within the bound; ending the connection* carries
+  `bound_ms`. `opamp::client::ws::Silence` names the bounds; the crate's other functions and
+  settings are unchanged, but `Connection::connect_websocket` now fails once an interval has
+  passed.
+  **What to do:** nothing. A Client whose `heartbeat_interval_secs` is very short now also ends a
+  connection that is silent that long. A Server instance that handles no message for a whole
+  interval, overloaded rather than lost, now loses its Agents to the other instances, which
+  reconnect spread by the drawn delay; a message that takes longer than an interval to arrive
+  whole ends the connection and is sent again; and when a Gateway's upstream freezes, the Agents
+  behind that Gateway may reconnect to it as well.
+
 - **An approval records its certificate only with its decision**
   ([ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision](docs/adr/draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)).
   This removes the 0.8.0 bound *An approval whose commit fails leaves its certificate recorded*.

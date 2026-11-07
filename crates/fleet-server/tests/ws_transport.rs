@@ -73,6 +73,38 @@ async fn a_framed_report_is_answered() {
     assert!(agents[0].connected);
 }
 
+/// The Server answers a WebSocket ping with a pong carrying its payload, on a session that has
+/// sent nothing yet and after a report: the sign of life an Agent waits for
+/// (ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended clause 1).
+/// Verifies: ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended
+#[tokio::test]
+async fn the_server_answers_a_ping_with_a_pong() {
+    async fn pong(socket: &mut Socket, payload: &'static [u8]) {
+        socket
+            .send(Message::Ping(payload.into()))
+            .await
+            .expect("send a ping");
+        loop {
+            let message = tokio::time::timeout(Duration::from_secs(5), socket.next())
+                .await
+                .expect("a pong within five seconds")
+                .expect("an open connection")
+                .expect("a frame");
+            if let Message::Pong(data) = message {
+                assert_eq!(&data[..], payload, "the pong carries the ping's payload");
+                return;
+            }
+        }
+    }
+    let server = spawn().await;
+    let mut socket = connect(server.addr).await;
+    pong(&mut socket, b"before").await;
+    let uid = InstanceUid::default();
+    send(&mut socket, &full_report(&uid, "pinged", 1)).await;
+    let _ = recv(&mut socket).await;
+    pong(&mut socket, b"after").await;
+}
+
 #[tokio::test]
 async fn a_config_change_is_pushed_without_the_agent_asking() {
     let server = spawn().await;
