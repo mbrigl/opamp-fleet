@@ -616,6 +616,11 @@ pub fn follow(
             Agents::Named(uids) => state.release_taken(Some(uids))?,
             Agents::All => state.release_taken(None)?,
         }
+        match &due.restarts {
+            Agents::Named(uids) if uids.is_empty() => {}
+            Agents::Named(uids) => state.take_up_restarts(Some(uids))?,
+            Agents::All => state.take_up_restarts(None)?,
+        }
         // Counted once the whole read is done, so a read counted has taken up everything it was
         // due.
         if due.ledger {
@@ -683,6 +688,27 @@ pub fn retry_unmarks(state: Arc<AppState>, interval: Duration) {
         }
     });
 }
+
+/// Every second, tries again the put-backs of restarts whose command was not sent and which the
+/// store did not take, each at its own growing interval
+/// ([`AppState::retry_restarts`](crate::fleet::AppState::retry_restarts)). On every store, since
+/// a file can refuse a write too. Runs until the runtime ends.
+pub fn retry_restarts(state: Arc<AppState>) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(RESTARTS_RETRIED_EVERY);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            let state = state.clone();
+            if let Err(e) = tokio::task::spawn_blocking(move || state.retry_restarts()).await {
+                warn!(error = %e, "could not try again to queue a restart");
+            }
+        }
+    });
+}
+
+/// How often [`retry_restarts`] runs.
+pub const RESTARTS_RETRIED_EVERY: Duration = Duration::from_secs(1);
 
 /// The presence batches [`write_presence`] runs.
 pub struct PresenceBatches {
@@ -769,6 +795,9 @@ struct Due {
     agents: Agents,
     /// The Agents whose holder is read again, as another instance took them.
     holders: Agents,
+    /// The Agents another instance requested a restart of: a put-back kept here is that restart
+    /// now.
+    restarts: Agents,
 }
 
 impl Due {
@@ -782,6 +811,7 @@ impl Due {
         packages: true,
         agents: Agents::All,
         holders: Agents::All,
+        restarts: Agents::All,
     };
 
     /// What `what` calls for.
@@ -814,7 +844,12 @@ impl Due {
                 packages: true,
                 ..Due::default()
             },
-            ASSIGNMENT | LABELS | RESTART | FORGOTTEN => Due {
+            RESTART => Due {
+                agents: Agents::of(&notice.id),
+                restarts: Agents::of(&notice.id),
+                ..Due::default()
+            },
+            ASSIGNMENT | LABELS | FORGOTTEN => Due {
                 agents: Agents::of(&notice.id),
                 ..Due::default()
             },
@@ -836,6 +871,7 @@ impl Due {
             packages: self.packages || other.packages,
             agents: self.agents.and(other.agents),
             holders: self.holders.and(other.holders),
+            restarts: self.restarts.and(other.restarts),
         }
     }
 }
@@ -1543,6 +1579,19 @@ mod tests {
                 ..Due::default()
             }],
             "a take has the holder of the Agent it names read again, and nothing else"
+        );
+        assert_eq!(
+            reads_for(vec![
+                Heard::Notified(Notice::new("restart", &one.to_string())),
+                Heard::Notified(Notice::new("labels", &two.to_string())),
+            ])
+            .await,
+            vec![Due {
+                agents: Agents::Named(HashSet::from([one, two])),
+                restarts: Agents::Named(HashSet::from([one])),
+                ..Due::default()
+            }],
+            "a restart has the record read again, and a put-back kept of it dropped"
         );
         assert_eq!(
             reads_for(vec![notified("floor"), notified("revocation")]).await,

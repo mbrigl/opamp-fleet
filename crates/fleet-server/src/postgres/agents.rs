@@ -1608,6 +1608,15 @@ mod tests {
         assert_eq!(store.set_restart_pending(&three, false), Ok(Some(true)));
         assert_eq!(store.set_restart_pending(&three, false), Ok(Some(false)));
         assert_eq!(store.set_restart_pending(&three, true), Ok(Some(false)));
+        // A restart taken for a send that failed is put back, and the next take finds it queued
+        // (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+        // clause 8).
+        assert_eq!(store.set_restart_pending(&three, false), Ok(Some(true)));
+        assert_eq!(store.set_restart_pending(&three, true), Ok(Some(false)));
+        assert_eq!(
+            open().0.get(&three).map(|r| r.map(|r| r.restart_pending)),
+            Ok(Some(true))
+        );
         let got = open().0.get(&three).expect("get").expect("stored");
         assert_eq!(got.labels, labels);
         assert!(got.restart_pending);

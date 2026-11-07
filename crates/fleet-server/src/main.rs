@@ -981,6 +981,11 @@ async fn main() {
         }
         _ => None,
     };
+    // A restart whose command was not sent and whose put-back failed is tried again until it
+    // holds, on every store
+    // (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    // clause 8).
+    fleet_server::instance::retry_restarts(state.clone());
     // The handlers are installed before either plane is bound and logged as served, so a stop
     // sent as soon as the log says so drains the planes rather than ending the process.
     let shutdown = shutdown_signal();

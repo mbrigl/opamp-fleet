@@ -198,6 +198,15 @@ pub trait Handler: Send + Sync + 'static {
     /// The connection is gone: after its one exchange on plain HTTP, when the socket closes on a
     /// WebSocket.
     fn on_closed(&self, _connection: Self::Connection) {}
+
+    /// A message the endpoint did not put on the wire, so that what it carried can wait for the
+    /// next occasion. On a WebSocket: a reply or a push whose send failed, the pushes of the same
+    /// occasion after it, and one discarded past the size limit. On plain HTTP: a reply past the
+    /// limit, answered `500`. A message the transport took and lost afterwards is not seen; on
+    /// plain HTTP that is every lost answer, since the body goes out with the response's head. On
+    /// a WebSocket this comes before [`on_closed`](Self::on_closed); on plain HTTP after it. By
+    /// default nothing is done.
+    fn on_unsent(&self, _message: &ServerToAgent) {}
 }
 
 /// Why the endpoint closes a WebSocket: a close code of RFC 6455 and a reason for the peer.
@@ -430,7 +439,11 @@ async fn serve_socket<H: Handler, S>(
                     }
                 };
                 if let Reply::Send(reply) = reply {
-                    if !send_framed(&mut socket, &reply, limit).await {
+                    let sent = send_framed(&mut socket, &reply, limit).await;
+                    if sent != Sending::Sent {
+                        handler.on_unsent(&reply);
+                    }
+                    if sent == Sending::Gone {
                         break;
                     }
                 }
@@ -446,10 +459,16 @@ async fn serve_socket<H: Handler, S>(
                 };
                 let mut gone = false;
                 for message in handler.on_outbound(&mut connection, item) {
-                    if !send_framed(&mut socket, &message, limit).await {
-                        gone = true;
-                        break;
+                    // What follows a failed send is not tried on a connection that is gone.
+                    let sent = if gone {
+                        Sending::Gone
+                    } else {
+                        send_framed(&mut socket, &message, limit).await
+                    };
+                    if sent != Sending::Sent {
+                        handler.on_unsent(&message);
                     }
+                    gone |= sent == Sending::Gone;
                 }
                 if gone {
                     break;
@@ -503,23 +522,35 @@ async fn next_outbound<O: Outbound>(outbound: &mut Option<O>) -> Option<O::Item>
     }
 }
 
+/// What became of one message given to [`send_framed`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Sending {
+    Sent,
+    /// Past the size limit, and not sent; the connection is fine.
+    Discarded,
+    /// The send failed: the connection is gone.
+    Gone,
+}
+
 /// Sends one framed message under the size limit. A message that would exceed it is **not** sent —
 /// the specification's MUST for the outbound direction — but discarded with a log line, since the
-/// fault is on this end and the connection is fine. Returns `false` only when the connection is
-/// gone.
+/// fault is on this end and the connection is fine.
 async fn send_framed<S>(
     socket: &mut WebSocketStream<S>,
     message: &ServerToAgent,
     limit: usize,
-) -> bool
+) -> Sending
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     match frame::encode_within(message, limit) {
-        Ok(framed) => socket.send(Message::Binary(framed.into())).await.is_ok(),
+        Ok(framed) => match socket.send(Message::Binary(framed.into())).await {
+            Ok(()) => Sending::Sent,
+            Err(_) => Sending::Gone,
+        },
         Err(e) => {
             warn!(error = %e, "discarding a message that exceeds the size limit");
-            true
+            Sending::Discarded
         }
     }
 }
@@ -592,9 +623,9 @@ async fn exchange<H: Handler>(
     };
     handler.on_closed(connection);
 
-    let reply = match reply {
-        Reply::Send(reply) => reply,
-        Reply::Nothing => ServerToAgent::default(),
+    let (reply, sent) = match reply {
+        Reply::Send(reply) => (reply, true),
+        Reply::Nothing => (ServerToAgent::default(), false),
         Reply::Refuse(status, why) => return (status, why).into_response(),
     };
     // The send side of the same limit: an oversized response is never put on the wire, so a reply
@@ -606,6 +637,9 @@ async fn exchange<H: Handler>(
             size = encoded.len(),
             limit, "discarding a response that exceeds the message size limit"
         );
+        if sent {
+            handler.on_unsent(&reply);
+        }
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             "the response exceeds the message size limit",
@@ -620,4 +654,232 @@ fn header_str<'a>(headers: &'a HeaderMap, name: &header::HeaderName) -> &'a str 
         .get(name)
         .and_then(|value| value.to_str().ok())
         .unwrap_or("")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io;
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Mutex;
+    use std::task::{Context, Poll};
+    use std::time::Duration;
+    use tokio::io::{AsyncRead, AsyncWrite, DuplexStream, ReadBuf};
+    use tokio::sync::mpsc;
+
+    struct Pushes(mpsc::Receiver<()>);
+
+    impl Outbound for Pushes {
+        type Item = ();
+
+        async fn next(&mut self) -> Option<()> {
+            self.0.recv().await
+        }
+    }
+
+    /// Answers each message with its `instance_uid`, pushes two messages per occasion, and records
+    /// what the endpoint reports unsent.
+    #[derive(Default)]
+    struct Recording {
+        unsent: Mutex<Vec<ServerToAgent>>,
+    }
+
+    fn named(uid: &[u8]) -> ServerToAgent {
+        ServerToAgent {
+            instance_uid: uid.to_vec(),
+            ..Default::default()
+        }
+    }
+
+    impl Handler for Recording {
+        type Connection = ();
+        type Outbound = Pushes;
+
+        fn on_connecting(&self, _: &RequestInfo<'_>) -> Result<((), Option<Pushes>), Rejection> {
+            unreachable!("the tests serve the socket directly")
+        }
+
+        async fn on_message(&self, _: &mut (), message: AgentToServer) -> Reply {
+            let mut reply = named(&message.instance_uid);
+            if message.instance_uid == b"big" {
+                reply.error_response = Some(crate::proto::ServerErrorResponse {
+                    error_message: "x".repeat(LIMIT),
+                    ..Default::default()
+                });
+            }
+            Reply::Send(reply)
+        }
+
+        fn on_outbound(&self, _: &mut (), (): ()) -> Vec<ServerToAgent> {
+            vec![named(b"first"), named(b"second")]
+        }
+
+        fn on_unsent(&self, message: &ServerToAgent) {
+            self.unsent.lock().expect("unsent").push(message.clone());
+        }
+    }
+
+    /// The server's half of a socket, whose writes fail once it is broken.
+    struct Breaking {
+        inner: DuplexStream,
+        broken: Arc<AtomicBool>,
+    }
+
+    impl AsyncRead for Breaking {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.inner).poll_read(cx, buf)
+        }
+    }
+
+    impl AsyncWrite for Breaking {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            if self.broken.load(Ordering::SeqCst) {
+                return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
+            }
+            Pin::new(&mut self.inner).poll_write(cx, buf)
+        }
+
+        fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            if self.broken.load(Ordering::SeqCst) {
+                return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
+            }
+            Pin::new(&mut self.inner).poll_flush(cx)
+        }
+
+        fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.inner).poll_shutdown(cx)
+        }
+    }
+
+    const LIMIT: usize = 4096;
+
+    /// A session served over a socket that breaks when told to: the handler, the switch, the
+    /// client's end, the push sender, and the session itself.
+    async fn session() -> (
+        Arc<Recording>,
+        Arc<AtomicBool>,
+        WebSocketStream<DuplexStream>,
+        mpsc::Sender<()>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let handler = Arc::new(Recording::default());
+        let endpoint = Arc::new(Endpoint {
+            handler: handler.clone(),
+            limit: LIMIT,
+        });
+        let (ours, theirs) = tokio::io::duplex(64 * 1024);
+        let broken = Arc::new(AtomicBool::new(false));
+        let stream = pace::FrameMeter::new(Breaking {
+            inner: ours,
+            broken: broken.clone(),
+        });
+        let socket = WebSocketStream::from_raw_socket(stream, Role::Server, None).await;
+        let client = WebSocketStream::from_raw_socket(theirs, Role::Client, None).await;
+        let (pushes, outbound) = mpsc::channel(4);
+        let served = tokio::spawn(serve_socket(
+            socket,
+            endpoint,
+            (),
+            Some(Pushes(outbound)),
+            None,
+            None,
+        ));
+        (handler, broken, client, pushes, served)
+    }
+
+    async fn ended(served: tokio::task::JoinHandle<()>) {
+        tokio::time::timeout(Duration::from_secs(5), served)
+            .await
+            .expect("the session ends in time")
+            .expect("the session");
+    }
+
+    /// A reply whose send fails is reported unsent, and the session ends.
+    #[tokio::test]
+    async fn a_websocket_reply_whose_send_fails_is_reported_unsent() {
+        let (handler, broken, mut client, _pushes, served) = session().await;
+        broken.store(true, Ordering::SeqCst);
+        let report = AgentToServer {
+            instance_uid: b"agent".to_vec(),
+            ..Default::default()
+        };
+        let framed = frame::encode_within(&report, LIMIT).expect("framed");
+        client
+            .send(Message::Binary(framed.into()))
+            .await
+            .expect("sent to the server");
+        ended(served).await;
+        assert_eq!(*handler.unsent.lock().expect("unsent"), [named(b"agent")]);
+    }
+
+    /// A reply past the limit is discarded and reported unsent, and the session reads on.
+    #[tokio::test]
+    async fn a_websocket_reply_past_the_limit_is_reported_unsent() {
+        let (handler, _broken, mut client, _pushes, _served) = session().await;
+        for uid in [b"big".as_slice(), b"agent"] {
+            let report = AgentToServer {
+                instance_uid: uid.to_vec(),
+                ..Default::default()
+            };
+            let framed = frame::encode_within(&report, LIMIT).expect("framed");
+            client
+                .send(Message::Binary(framed.into()))
+                .await
+                .expect("sent to the server");
+        }
+        let message = tokio::time::timeout(Duration::from_secs(5), client.next())
+            .await
+            .expect("a reply in time")
+            .expect("an open socket")
+            .expect("a message");
+        let Message::Binary(data) = message else {
+            panic!("expected a binary frame, got {message:?}");
+        };
+        let reply: ServerToAgent = frame::decode(&data, LIMIT).expect("framed");
+        assert_eq!(reply.instance_uid, b"agent", "the session reads on");
+        let unsent = handler.unsent.lock().expect("unsent").clone();
+        assert_eq!(unsent.len(), 1);
+        assert_eq!(unsent[0].instance_uid, b"big");
+    }
+
+    /// Pushes that go out are not reported; when one fails, it and the ones after it are, and the
+    /// session ends.
+    #[tokio::test]
+    async fn pushes_after_a_failed_send_are_reported_unsent() {
+        let (handler, broken, mut client, pushes, served) = session().await;
+        pushes.send(()).await.expect("push");
+        for expected in [b"first".as_slice(), b"second"] {
+            let message = tokio::time::timeout(Duration::from_secs(5), client.next())
+                .await
+                .expect("a push in time")
+                .expect("an open socket")
+                .expect("a message");
+            let Message::Binary(data) = message else {
+                panic!("expected a binary frame, got {message:?}");
+            };
+            let pushed: ServerToAgent = frame::decode(&data, LIMIT).expect("framed");
+            assert_eq!(pushed.instance_uid, expected);
+        }
+        assert!(
+            handler.unsent.lock().expect("unsent").is_empty(),
+            "both were sent"
+        );
+
+        broken.store(true, Ordering::SeqCst);
+        pushes.send(()).await.expect("push");
+        ended(served).await;
+        assert_eq!(
+            *handler.unsent.lock().expect("unsent"),
+            [named(b"first"), named(b"second")]
+        );
+    }
 }

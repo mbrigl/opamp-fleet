@@ -43,7 +43,9 @@ puts things, and every configuration key.
   `***` (`[packages]`'s `archive_key`, and `bearer_token` and `password` should a leftover `[auth]`
   still hold them), since the Server persists what it receives.
 - **Supervises processes**: starts them, watches them, restarts them on a configuration
-  change or a Server-issued restart command, stops them gracefully on shutdown.
+  change or a Server-issued restart command, stops them gracefully on shutdown. Each restart
+  command received restarts the process once; the Server sends one again when it saw its send
+  fail, so a process may be restarted twice for one request.
 - **Applies received Configurations**: writes each entry to disk under its Configuration's name,
   points the process at it, and reports the configuration applied or failed with the hash it
   applied.
