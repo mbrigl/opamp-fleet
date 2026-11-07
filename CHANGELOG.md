@@ -246,7 +246,21 @@ once its tag exists.
   answer was lost, after a re-key, when a batch named its instance again over a take another
   instance counted since, or when a batch's late answers replaced a newer take's count. Such an
   Agent's goodbye is now written with the next batch. An Agent that disconnected under a lease the
-  instance later lost is flushed at shutdown again.
+  instance later lost is flushed at shutdown again, and so is one whose connect's take was not
+  written, where the instance was answered a count of takes for it before or created its record,
+  and no instance took it since.
+  **What to do:** nothing.
+- **A shutdown flush keeps what a newer carrier wrote**
+  ([ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side](docs/adr/draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+  clause 8). On PostgreSQL an instance stopping could write its older record of an Agent over the
+  report of the instance that carried the Agent next, when that instance's take was not written:
+  the Operator plane then showed the older sequence number, description and health. A shutdown
+  flush now writes no record whose stored sequence number is higher than its own, also where the
+  stopping instance still holds the Agent. An instance whose take was not written writes the
+  record at every report of the Agent until a count of takes is answered for it, at its next
+  presence batch at the latest once no other live instance holds the Agent, so a record an older
+  flush wrote over an Agent that started again with lower sequence numbers is written again at the
+  Agent's next report.
   **What to do:** nothing.
 - **A Deployment keeps no deleted member**
   ([ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side](docs/adr/draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)

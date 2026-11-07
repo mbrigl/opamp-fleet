@@ -407,7 +407,8 @@ impl AgentStore for PgAgentStore {
     }
 
     /// [`write_report`](AgentStore::write_report), of a row whose holder is `holder`, or none and
-    /// whose count of takes is still `take`.
+    /// whose count of takes is still `take`, and whose sequence number is not higher than the
+    /// record's.
     fn write_report_unless_held_elsewhere(
         &self,
         uid: &InstanceUid,
@@ -1283,8 +1284,8 @@ struct Held<'a> {
 
 /// Writes the columns a report decides of one Agent record, inside the caller's transaction,
 /// `last_seen_ms` only forward. Where `unless_held_elsewhere` is given, only of a row whose holder
-/// is the one it names, or of one no instance holds whose count of takes is the one it names.
-/// Answers whether it wrote a record.
+/// is the one it names, or of one no instance holds whose count of takes is the one it names, and
+/// whose sequence number is not higher than the record's. Answers whether it wrote a record.
 async fn write_reported(
     client: &impl GenericClient,
     uid: &InstanceUid,
@@ -1304,10 +1305,15 @@ async fn write_reported(
         .join(", ");
     // A row no instance holds is written only where no instance took the Agent since this one
     // was last answered its count of takes: another instance that carried the Agent since clears
-    // the holder at its disconnect, and what it wrote stays. No clock is compared.
+    // the holder at its disconnect, and what it wrote stays. A row whose sequence number is higher
+    // holds a newer report another instance wrote while this one still held the row, and stays
+    // too; an Agent that started again and counts from the start misses this one flush, and the
+    // instance that carries it, with no count answered, writes its record again at its next
+    // report. No clock is compared.
     let held = match unless_held_elsewhere {
         Some(_) => format!(
-            " AND (holder = ${}::text::uuid OR (holder IS NULL AND takes = ${}))",
+            " AND (holder = ${}::text::uuid OR (holder IS NULL AND takes = ${})) \
+             AND sequence_num <= $2",
             REPORTED.len() + 2,
             REPORTED.len() + 3
         ),

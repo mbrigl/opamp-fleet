@@ -512,7 +512,11 @@ pub trait AgentStore: Send + Sync {
     /// the stored holder is `holder`, or is none and the stored count of takes is still `take`,
     /// the count this Server was last answered for the Agent, so an Agent that moved to another
     /// Server keeps what that Server wrote of it, also once it disconnected there, however the
-    /// Servers' clocks differ (ADR-0043 clause 2). `holder`
+    /// Servers' clocks differ (ADR-0043 clause 2), and only where the stored sequence number is not
+    /// higher than the record's, so a Server that still holds the row as it stops leaves a newer
+    /// report another Server wrote meanwhile
+    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// clause 8). `holder`
     /// is the instance id of this Server's lease, `None` without one, and `take` is `None` where
     /// this Server was answered none. Answers whether it wrote the record. A store whose one
     /// Server is its only writer writes as `write_report` does.
