@@ -9,9 +9,13 @@
 //! Every connection of an instance carries the instance's origin as the session setting
 //! [`ORIGIN_SETTING`], so a notification names its sender whichever store sends it, and the
 //! listener hands on none that its own instance sent: that instance holds what it committed
-//! already.
+//! already. A call whose answer is lost is the exception: the instance cannot tell whether it
+//! committed, so it is handed the call's notifications at once, and hears its own notification of
+//! each once more ([`Unsure`]).
 
-use std::sync::atomic::Ordering;
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use futures_util::StreamExt as _;
@@ -86,6 +90,10 @@ struct Payload {
     id: String,
     #[serde(default)]
     from: Option<String>,
+    /// The call of its sender that sent it, by which that sender tells a call whose answer was
+    /// lost from its others ([`Unsure`]); a version that does not know it reads past it.
+    #[serde(default)]
+    call: Option<String>,
 }
 
 /// A change another instance committed: its kind and the identifier it concerns, empty where the
@@ -118,9 +126,127 @@ pub enum Heard {
     Listening,
 }
 
+tokio::task_local! {
+    /// The call being run ([`sending`]).
+    static CALL: Arc<Call>;
+}
+
+/// The calls of this process so far, which mark each call apart.
+static CALLS: AtomicU64 = AtomicU64::new(0);
+
+/// One call to the database: the mark its notifications carry, and those it has sent so far.
+pub(crate) struct Call {
+    mark: String,
+    sent: Mutex<Vec<Notice>>,
+}
+
+impl Call {
+    /// A call with a mark of its own.
+    pub(crate) fn new() -> Arc<Call> {
+        Arc::new(Call {
+            mark: CALLS.fetch_add(1, Ordering::Relaxed).to_string(),
+            sent: Mutex::new(Vec::new()),
+        })
+    }
+
+    /// The notifications it has sent, taken.
+    pub(crate) fn take(&self) -> Vec<Notice> {
+        std::mem::take(&mut *self.sent.lock().unwrap_or_else(PoisonError::into_inner))
+    }
+
+    /// The mark its notifications carry.
+    pub(crate) fn mark(&self) -> &str {
+        &self.mark
+    }
+}
+
+/// `work` as `call`: its every [`notify`] carries the call's mark and is counted into it, even
+/// where `work` is dropped unfinished, which is what a call whose answer is lost may have
+/// committed.
+pub(crate) fn sending<F: std::future::Future>(
+    call: Arc<Call>,
+    work: F,
+) -> impl std::future::Future<Output = F::Output> {
+    CALL.scope(call, work)
+}
+
+/// How many of its own notifications an instance waits to hear at most; the oldest goes first. An
+/// entry stays where its call was rolled back, refused, or committed before its answer was lost
+/// and was heard before it was awaited; none of these is heard again, and no other call's
+/// notification matches it, so dropping the oldest loses nothing a commit still to land needs
+/// unless this many calls lost their answers since.
+const AWAITED_AT_MOST: usize = 1024;
+
+/// The notifications of this instance's calls whose answer was lost: it does not know whether they
+/// committed. Each is handed to the listener's `on` at once, as if heard, and its own notification
+/// of the same kind and identifier is handed on once more when it is heard: a commit that landed
+/// before the call failed is read by the first, one that lands after it by the second.
+#[derive(Default)]
+pub(crate) struct Unsure {
+    state: Mutex<UnsureState>,
+}
+
+#[derive(Default)]
+struct UnsureState {
+    /// What [`Database::listen`] hands on to; none while nothing listens.
+    on: Option<Arc<dyn Fn(Heard) + Send + Sync>>,
+    /// The notifications of this instance's own that are handed on when heard, each once, with the
+    /// mark of the call that sent them.
+    awaited: VecDeque<(Notice, String)>,
+}
+
+impl Unsure {
+    /// The notifications of the call marked `call`, whose answer was lost: awaited, then handed on
+    /// at once.
+    pub(crate) fn lost(&self, sent: Vec<Notice>, call: &str) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut lost: Vec<Notice> = Vec::new();
+        for notice in sent {
+            if !lost.contains(&notice) {
+                lost.push(notice);
+            }
+        }
+        for notice in &lost {
+            if state.awaited.len() == AWAITED_AT_MOST {
+                state.awaited.pop_front();
+            }
+            state.awaited.push_back((notice.clone(), call.to_string()));
+        }
+        let on = state.on.clone();
+        drop(state);
+        if let Some(on) = on {
+            for notice in lost {
+                on(Heard::Notified(notice));
+            }
+        }
+    }
+
+    /// Whether this instance's own `notice`, sent by the call marked `call`, is handed on: once,
+    /// where that call lost its answer.
+    fn awaits(&self, notice: &Notice, call: &str) -> bool {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        match state
+            .awaited
+            .iter()
+            .position(|(awaited, by)| awaited == notice && by == call)
+        {
+            Some(at) => {
+                state.awaited.remove(at);
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn listen(&self, on: Arc<dyn Fn(Heard) + Send + Sync>) {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner).on = Some(on);
+    }
+}
+
 /// Announces a change of `kind` concerning `id` to every other instance, in the transaction
 /// `client` is in, so it is heard once the change is committed and never when it is not. It names
-/// the origin the connection carries.
+/// the origin the connection carries and the mark of the call it runs in, which counts it as sent
+/// before it is sent ([`sending`]).
 ///
 /// # Errors
 /// Returns the database's error.
@@ -129,28 +255,48 @@ pub(crate) async fn notify(
     kind: &str,
     id: &str,
 ) -> Result<(), String> {
+    let call = CALL
+        .try_with(|call| {
+            call.sent
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(Notice::new(kind, id));
+            call.mark.clone()
+        })
+        .ok();
     client
         .execute(
             &format!(
                 "SELECT pg_notify({CHANNEL}, json_build_object('kind', $1::text, 'id', $2::text, \
-                 'from', current_setting('{ORIGIN_SETTING}', true))::text)"
+                 'from', current_setting('{ORIGIN_SETTING}', true), 'call', $3::text)::text)"
             ),
-            &[&kind, &id],
+            &[&kind, &id, &call],
         )
         .await
         .map_err(sql)?;
     Ok(())
 }
 
-/// What `payload` says, unless `origin` sent it: a payload that does not read is a notice of a
-/// kind nobody knows, which counts as every notification.
-fn heard(payload: &str, origin: &str) -> Option<Notice> {
+/// What `payload` says, unless `origin` sent it and `unsure` awaits it no more: a payload that does
+/// not read is a notice of a kind nobody knows, which counts as every notification.
+fn heard(payload: &str, origin: &str, unsure: &Unsure) -> Option<Notice> {
     match serde_json::from_str::<Payload>(payload) {
-        Ok(payload) if payload.from.as_deref() == Some(origin) => None,
-        Ok(payload) => Some(Notice {
-            kind: payload.kind,
-            id: payload.id,
-        }),
+        Ok(payload) => {
+            let notice = Notice {
+                kind: payload.kind,
+                id: payload.id,
+            };
+            // Only this instance's own notification is matched: another's call marks count apart.
+            if payload.from.as_deref() == Some(origin)
+                && !payload
+                    .call
+                    .as_deref()
+                    .is_some_and(|call| unsure.awaits(&notice, call))
+            {
+                return None;
+            }
+            Some(notice)
+        }
         Err(_) => Some(Notice::new("", "")),
     }
 }
@@ -158,19 +304,23 @@ fn heard(payload: &str, origin: &str) -> Option<Notice> {
 impl Database {
     /// Listens on a connection of its own for as long as the database is open, and hands `on`
     /// every change another instance announced, and [`Heard::Listening`] each time the connection
-    /// is made. What this instance announced itself is not handed on. A connection that ends is
-    /// made again after a second.
+    /// is made. What this instance announced itself is not handed on, but where a call of its own
+    /// lost its answer: then the call's notifications are handed on at once, and each once more
+    /// when it is heard ([`Unsure`]). A connection that ends is made again after a second.
     pub fn listen(&self, on: impl Fn(Heard) + Send + Sync + 'static) {
+        let on: Arc<dyn Fn(Heard) + Send + Sync> = Arc::new(on);
+        self.unsure.listen(on.clone());
         let (pg, tls, name) = (self.pg.clone(), self.tls.clone(), self.name.clone());
         let (closing, origin) = (self.closing.clone(), self.origin.clone());
+        let unsure = self.unsure.clone();
         self.bridge.spawn(async move {
             loop {
                 if closing.load(Ordering::SeqCst) {
                     return;
                 }
                 let ended = match &tls {
-                    Tls::Rustls(tls) => listen_once(&pg, tls.clone(), &origin, &on).await,
-                    Tls::Plain => listen_once(&pg, NoTls, &origin, &on).await,
+                    Tls::Rustls(tls) => listen_once(&pg, tls.clone(), &origin, &unsure, &*on).await,
+                    Tls::Plain => listen_once(&pg, NoTls, &origin, &unsure, &*on).await,
                 };
                 if closing.load(Ordering::SeqCst) {
                     return;
@@ -192,7 +342,8 @@ async fn listen_once<T>(
     pg: &tokio_postgres::Config,
     tls: T,
     origin: &str,
-    on: &impl Fn(Heard),
+    unsure: &Unsure,
+    on: &(dyn Fn(Heard) + Send + Sync),
 ) -> String
 where
     T: MakeTlsConnect<Socket>,
@@ -230,7 +381,7 @@ where
     }
     on(Heard::Listening);
     while let Some(payload) = hearing.recv().await {
-        if let Some(notice) = heard(&payload, origin) {
+        if let Some(notice) = heard(&payload, origin, unsure) {
             on(Heard::Notified(notice));
         }
     }
@@ -306,12 +457,89 @@ mod tests {
     #[test]
     fn a_notice_from_this_instance_is_passed_over_and_an_unreadable_one_is_unknown() {
         let sent = r#"{"kind":"floor","id":"otelcol","from":"a"}"#;
-        assert_eq!(heard(sent, "a"), None);
-        assert_eq!(heard(sent, "b"), Some(Notice::new("floor", "otelcol")));
+        let none = Unsure::default();
+        assert_eq!(heard(sent, "a", &none), None);
         assert_eq!(
-            heard(r#"{"kind":"floor","id":"otelcol","from":null}"#, "a"),
+            heard(sent, "b", &none),
             Some(Notice::new("floor", "otelcol"))
         );
-        assert_eq!(heard("floor", "a"), Some(Notice::new("", "")));
+        assert_eq!(
+            heard(r#"{"kind":"floor","id":"otelcol","from":null}"#, "a", &none),
+            Some(Notice::new("floor", "otelcol"))
+        );
+        assert_eq!(heard("floor", "a", &none), Some(Notice::new("", "")));
+    }
+
+    /// The notifications of a call whose answer was lost are handed on at once, each once, and this
+    /// instance's own notification of that call is handed on once more when it is heard, and only
+    /// once: a commit that landed before the call failed and one that lands after it are both read.
+    /// The same notification of an earlier call of its own, or of another instance's call that
+    /// bears the same mark, is not taken for it.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    #[test]
+    fn the_notifications_of_a_call_whose_answer_was_lost_are_handed_on_and_heard_once_more() {
+        let unsure = Unsure::default();
+        let handed = Arc::new(Mutex::new(Vec::new()));
+        unsure.listen({
+            let handed = handed.clone();
+            Arc::new(move |what| handed.lock().expect("handed").push(what))
+        });
+        let own = r#"{"kind":"labels","id":"x","from":"a","call":"2"}"#;
+        assert_eq!(heard(own, "a", &unsure), None, "a call that answered");
+        unsure.lost(
+            vec![Notice::new("labels", "x"), Notice::new("labels", "x")],
+            "2",
+        );
+        assert_eq!(
+            *handed.lock().expect("handed"),
+            [Heard::Notified(Notice::new("labels", "x"))],
+            "handed on at once, once"
+        );
+        let other = r#"{"kind":"floor","id":"x","from":"a","call":"2"}"#;
+        assert_eq!(heard(other, "a", &unsure), None, "only what the call sent");
+        let earlier = r#"{"kind":"labels","id":"x","from":"a","call":"1"}"#;
+        assert_eq!(heard(earlier, "a", &unsure), None, "not an earlier call's");
+        let unmarked = r#"{"kind":"labels","id":"x","from":"a"}"#;
+        assert_eq!(heard(unmarked, "a", &unsure), None, "nor one no call marks");
+        let elsewhere = r#"{"kind":"labels","id":"x","from":"b","call":"2"}"#;
+        assert_eq!(
+            heard(elsewhere, "a", &unsure),
+            Some(Notice::new("labels", "x")),
+            "another instance's is heard as ever"
+        );
+        assert_eq!(
+            heard(own, "a", &unsure),
+            Some(Notice::new("labels", "x")),
+            "and does not use up this one's: heard once more"
+        );
+        assert_eq!(heard(own, "a", &unsure), None, "and once only");
+        for _ in 0..=AWAITED_AT_MOST {
+            unsure.lost(vec![Notice::new("floor", "y")], "3");
+        }
+        let awaited = unsure.state.lock().expect("state").awaited.len();
+        assert_eq!(awaited, AWAITED_AT_MOST, "bounded");
+    }
+
+    /// A notification that names the call that sent it is read by a Server of 0.8.0 as one without:
+    /// its payload, as 0.8.0 declares it, reads past a field it does not know (clause 16).
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    #[test]
+    fn a_notification_that_names_its_call_is_read_by_the_release_before() {
+        /// The payload as version/0.8.0 declares it in `postgres/notify.rs`.
+        #[derive(Deserialize)]
+        struct Payload080 {
+            kind: String,
+            #[serde(default)]
+            id: String,
+            #[serde(default)]
+            from: Option<String>,
+        }
+        let read: Payload080 =
+            serde_json::from_str(r#"{"kind":"labels","id":"x","from":"a","call":"7"}"#)
+                .expect("read by 0.8.0");
+        assert_eq!(
+            (read.kind.as_str(), read.id.as_str(), read.from.as_deref()),
+            ("labels", "x", Some("a"))
+        );
     }
 }

@@ -871,6 +871,29 @@ was issued by its `serial`. `issuance.undecided` names one that was not with the
 with the outcome `unknown`, `GET /api/v1/certificates` answers while the certificate is valid:
 it was issued if it is listed.
 
+### An act whose answer is lost
+
+An act on PostgreSQL whose call loses its answer, on a dropped connection to the database or the
+bound of a call, is answered `500`, though its commit may have landed. The instance that made it
+reads again what the act names, at once and again when the act's own notification arrives, so
+its memory holds what was committed once it lands: a label, a floor, a revocation and every other
+act. An act answered `500` is read back, or made again: setting a label or a floor and adding a
+revocation again changes nothing more.
+
+A re-key is the Agent's, not an operator's. Its report is answered without a new identity when
+the instance cannot tell whether the move landed; the instance reads the Agent's row back first,
+under a lock that waits for the move, and assigns the new identity where it landed. Where that
+read back fails too, the instance reads it back again when the move's own notification arrives
+or at the Agent's next report on it, and assigns the new identity at that next report. Until it
+knows, a report under the old identity that it holds no record of is answered `Unavailable`, and
+the Agent retries. The Agent's session stays open: the instance keeps the Agent under its old
+identity until a read back holds, trying again while the database does not answer, and a session
+that ends meanwhile has its disconnect written to the row under the new identity once it holds.
+An Agent that reconnects to another instance before it was assigned the new identity is taken up
+there under its old one; its row under the new identity reads as disconnected once its session
+here ended and the read back held, or, if the instance stops first, once its lease has lapsed,
+and is forgotten by the silence bound.
+
 ### From one Server on files to two instances
 
 1. **Run this release** on the one Server, on files.

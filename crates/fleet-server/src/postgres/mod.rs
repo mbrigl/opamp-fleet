@@ -146,8 +146,9 @@ pub struct Database {
     /// into the database, which the first chain names as its predecessor
     /// ([`offer_archive`](Self::offer_archive)).
     archive: std::sync::Mutex<Option<(u64, String)>>,
-    /// What one call may take ([`CALL_TIMEOUT`]).
-    bound: Duration,
+    /// What one call may take ([`CALL_TIMEOUT`]), in milliseconds; a test may shorten it for the
+    /// one call whose answer it means to lose.
+    bound: std::sync::atomic::AtomicU64,
     /// How long a sweep waits for the blob store's lock, in milliseconds ([`SWEEP_WAIT`]).
     sweep_wait: std::sync::atomic::AtomicU64,
     /// How many holds on the blob store's lock lost it with their session, and how many of their
@@ -166,6 +167,9 @@ pub struct Database {
     /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
     /// clause 16).
     outdated: std::sync::Mutex<Option<String>>,
+    /// The notifications of the calls whose answer was lost, which the listener hands on
+    /// ([`notify::Unsure`]).
+    unsure: Arc<notify::Unsure>,
     /// Dropped last: the connections' tasks run on it.
     bridge: Bridge,
 }
@@ -365,7 +369,9 @@ impl Database {
             name,
             origin,
             archive: std::sync::Mutex::new(None),
-            bound,
+            bound: std::sync::atomic::AtomicU64::new(
+                u64::try_from(bound.as_millis()).unwrap_or(u64::MAX),
+            ),
             holds_lost: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             holds_ended: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             sweeps_under: std::sync::Mutex::new(None),
@@ -374,6 +380,7 @@ impl Database {
             ),
             release: schema::server_version(),
             outdated: std::sync::Mutex::new(None),
+            unsure: Arc::default(),
             bridge,
         })
     }
@@ -507,6 +514,21 @@ impl Database {
         self.archive.lock().expect("archive lock").clone()
     }
 
+    /// What one call may take.
+    fn bound(&self) -> Duration {
+        Duration::from_millis(self.bound.load(Ordering::SeqCst))
+    }
+
+    /// Bounds every call from now on by `bound`: what a test that means to lose one call's answer
+    /// sets for that call alone, and sets back after it.
+    #[cfg(test)]
+    pub(crate) fn bound_calls_by(&self, bound: Duration) {
+        self.bound.store(
+            u64::try_from(bound.as_millis()).unwrap_or(u64::MAX),
+            Ordering::SeqCst,
+        );
+    }
+
     /// Runs `work` on the database's runtime with the pool, and waits for it at most
     /// [`CALL_TIMEOUT`]. Every error names the database.
     ///
@@ -517,7 +539,7 @@ impl Database {
         F: Future<Output = Result<T, String>> + Send + 'static,
         T: Send + 'static,
     {
-        self.run_within(self.bound, work)
+        self.run_within(self.bound(), work)
     }
 
     /// [`run`](Self::run) for a call that writes `records` records in one transaction: its bound
@@ -536,7 +558,7 @@ impl Database {
     {
         let records = u32::try_from(records).unwrap_or(u32::MAX);
         self.run_within(
-            self.bound
+            self.bound()
                 .saturating_add(PER_RECORD.saturating_mul(records)),
             work,
         )
@@ -558,9 +580,21 @@ impl Database {
         if self.lost.load(Ordering::SeqCst) {
             return Err(lost_lock(&self.name));
         }
-        self.bridge
-            .run(bounded(bound, work(self.pool.clone())))
-            .map_err(|e| format!("{}: {e}", self.name))
+        // What the call announced is counted as it is sent: where its answer is lost, it may have
+        // committed, and the instance reads again what it names (the several-instances draft,
+        // clause 10).
+        let call = notify::Call::new();
+        let answer = self.bridge.run(notify::sending(
+            call.clone(),
+            bounded(bound, work(self.pool.clone())),
+        ));
+        if answer.is_err() {
+            let sent = call.take();
+            if !sent.is_empty() {
+                self.unsure.lost(sent, call.mark());
+            }
+        }
+        answer.map_err(|e| format!("{}: {e}", self.name))
     }
 }
 
@@ -630,7 +664,7 @@ impl Database {
             ended: self.holds_ended.clone(),
         };
         let (holding, lost) = (watch.holding.clone(), watch.lost.clone());
-        let held = self.run_within(self.bound.saturating_add(wait), move |_pool| async move {
+        let held = self.run_within(self.bound().saturating_add(wait), move |_pool| async move {
             let client = lock_session(&pg, &tls, wait, watch).await?;
             client
                 .execute(&format!("SELECT pg_advisory_lock({BLOB_LOCK})"), &[])
@@ -1270,6 +1304,49 @@ pub(crate) mod testing {
             self.wait_until_none_holds_it_alone();
             Database::open_in(&self.config, Exclusive::Shared, Some(&self.schema))
                 .expect("open the test database shared")
+        }
+
+        /// [`shared`](Self::shared), its every call bounded by `bound`: an instance whose call
+        /// can lose its answer while the commit it sent is held.
+        /// The schema is applied first on a handle of the usual bound, so a database slowed by the
+        /// tests beside this one does not fail the migration on the short bound.
+        pub(crate) fn shared_within(&self, bound: std::time::Duration) -> Arc<Database> {
+            drop(self.shared());
+            Arc::new(
+                Database::connect_as(&self.config, Some(&self.schema), bound, Exclusive::Shared)
+                    .expect("open the test database shared"),
+            )
+        }
+
+        /// Holds the commit of every transaction that writes a row of `table` at a gate the test
+        /// opens: a deferred trigger takes the advisory lock `key` once every statement is done, so
+        /// the call that commits loses its answer to its bound and the commit lands once the gate
+        /// opens. The wait sets the session's `lock_timeout` aside, so the session's
+        /// `statement_timeout` alone bounds how long it is held.
+        pub(crate) fn hold_commits(&self, table: &str, key: i64) -> Gate {
+            self.sql(&format!(
+                "CREATE FUNCTION fleet_test_hold_commit_{table}() RETURNS trigger \
+                     LANGUAGE plpgsql AS $$ BEGIN \
+                     PERFORM set_config('lock_timeout', '0', true); \
+                     PERFORM pg_advisory_lock_shared({key}); \
+                     PERFORM pg_advisory_unlock_shared({key}); RETURN NULL; END $$; \
+                 CREATE CONSTRAINT TRIGGER fleet_test_hold_commit AFTER INSERT OR UPDATE OR DELETE \
+                     ON {table} DEFERRABLE INITIALLY DEFERRED FOR EACH ROW \
+                     EXECUTE FUNCTION fleet_test_hold_commit_{table}();"
+            ));
+            self.gate(key)
+        }
+
+        /// Whether a session waits for the advisory lock `key`, as one held by
+        /// [`hold_commits`](Self::hold_commits) does.
+        pub(crate) fn waits_for(&self, key: i64) -> bool {
+            !self
+                .rows(&format!(
+                    "SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND NOT granted \
+                     AND classid = (({key}::bigint >> 32) & 4294967295)::oid \
+                     AND objid = ({key}::bigint & 4294967295)::oid"
+                ))
+                .is_empty()
         }
 
         /// How many sessions other than the asking one meet `condition`, a condition on

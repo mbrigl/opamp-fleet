@@ -742,9 +742,12 @@ impl AgentStore for PgAgentStore {
         let rows = self.database.run(move |pool| async move {
             let client = client(&pool).await?;
             client
+                // Under a share lock, taken in the order the batches lock, so a take still in
+                // flight is waited for and its count read.
                 .query(
                     "SELECT instance_uid, holder::text, takes FROM agents \
-                     WHERE instance_uid = ANY($1)",
+                     WHERE instance_uid = ANY($1) \
+                     ORDER BY instance_uid COLLATE \"C\" FOR SHARE",
                     &[&keys],
                 )
                 .await
@@ -800,6 +803,29 @@ impl AgentStore for PgAgentStore {
             self.stored([(uid, None)]);
         }
         Ok(forgotten)
+    }
+
+    /// The old row under a share lock first, which waits for a move still in flight and then
+    /// finds it gone, and the new row read after it, by a statement that sees that move's commit.
+    fn moved(&self, old: &InstanceUid, new: &InstanceUid) -> Result<bool, String> {
+        let (old, new) = (old.to_string(), new.to_string());
+        self.database.run(move |pool| async move {
+            let client = client(&pool).await?;
+            let old_stored = client
+                .query_opt(
+                    "SELECT 1 FROM agents WHERE instance_uid = $1 FOR SHARE",
+                    &[&old],
+                )
+                .await
+                .map_err(sql)?
+                .is_some();
+            let new_stored = client
+                .query_opt("SELECT 1 FROM agents WHERE instance_uid = $1", &[&new])
+                .await
+                .map_err(sql)?
+                .is_some();
+            Ok(new_stored && !old_stored)
+        })
     }
 
     /// One transaction: the row as it is stored moved to its new key, its assignment's

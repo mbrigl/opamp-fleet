@@ -642,7 +642,8 @@ pub trait AgentStore: Send + Sync {
     /// The holder each stored presence of `uids` names, as [`holders`](Self::holders) answers it,
     /// and the record's count of takes; a record not stored is left out. What an instance that does
     /// not know whether its take was written, since its answer was lost, reads before it writes the
-    /// Agent's disconnect under the count it read
+    /// Agent's disconnect under the count it read. A database adapter reads them under a share
+    /// lock, which waits for a take still in flight
     /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
     /// clause 8).
     ///
@@ -690,6 +691,19 @@ pub trait AgentStore: Send + Sync {
     ) -> Result<(), String> {
         self.put(new, record)?;
         self.remove(old)
+    }
+
+    /// Whether a [`rekey`](Self::rekey) of `old` to `new` that answered an error was made all the
+    /// same: the record is stored under `new` and no longer under `old`. What an instance whose
+    /// re-key lost its answer reads back before it answers the Agent; a database adapter waits for
+    /// a move of the record still in flight
+    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// clause 10).
+    ///
+    /// # Errors
+    /// Returns an error when the records cannot be read; the outcome is then not known.
+    fn moved(&self, old: &InstanceUid, new: &InstanceUid) -> Result<bool, String> {
+        Ok(self.get(new)?.is_some() && self.get(old)?.is_none())
     }
 
     /// A rollout (ADR-0044 clause 2): the revisions it pins, each added to its Configuration's
