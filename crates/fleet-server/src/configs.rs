@@ -210,8 +210,10 @@ pub trait ConfigBackend: Send + Sync {
     /// Deletes one Configuration, its retained revisions with it, unless a stored assignment pins
     /// it (ADR-0026 clause 12). A database adapter counts the assignments in the transaction that
     /// deletes, holding the Configuration's row against every rollout that pins one of its
-    /// revisions, so a pin written through another instance refuses it; the filesystem adapter,
-    /// whose one Server asked its Agent store first, deletes.
+    /// revisions, so a pin written through another instance refuses it, and takes the
+    /// Configuration out of every Deployment that holds it in the same transaction; the
+    /// filesystem adapter, whose one Server asked its Agent store first, deletes, and the fleet
+    /// takes it out of the Deployments after.
     fn remove(&self, name: &str) -> Result<Removal, String>;
 }
 

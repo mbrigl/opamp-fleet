@@ -227,6 +227,20 @@ impl Change {
     }
 }
 
+/// The refusal to put in a Configuration that is not stored.
+pub(crate) fn no_configuration(configuration: &str) -> DeploymentError {
+    DeploymentError::Missing(format!(
+        "no configuration {configuration:?} — save it before a deployment can hold it"
+    ))
+}
+
+/// The refusal to put in a Package that is not stored.
+pub(crate) fn no_package(id: &PackageId) -> DeploymentError {
+    DeploymentError::Missing(format!(
+        "no package {id} — upload it before a deployment can offer it"
+    ))
+}
+
 /// The refusal to take out a Configuration the Deployment `name` does not hold.
 pub(crate) fn not_held(name: &str, configuration: &str) -> DeploymentError {
     DeploymentError::Missing(format!(
@@ -425,7 +439,8 @@ impl DeploymentStore {
     }
 
     /// Puts a Configuration into a Deployment; holding it already is the request arriving twice.
-    /// Whether the Configuration exists is the caller's question — the fleet asks it.
+    /// Whether the Configuration exists is the caller's question — the fleet asks it — and a
+    /// database adapter asks it again of what is stored.
     pub fn put_configuration(
         &self,
         name: &str,
@@ -459,21 +474,27 @@ impl DeploymentStore {
     }
 
     /// Takes `member` out of every Deployment the store holds it in, and holds what the store
-    /// answers.
+    /// answers. A database adapter took it out of the stored ones already, in the transaction
+    /// that deleted it, so it is taken out of every one held here too.
     fn drop_everywhere(&self, member: &Member) -> Result<Vec<String>, DeploymentError> {
         let mut deployments = self.deployments.write().expect("deployments lock");
         let changed = self
             .backend
             .drop_member(member)
             .map_err(DeploymentError::Storage)?;
-        Ok(changed
-            .into_iter()
-            .map(|deployment| {
-                let name = deployment.name.clone();
-                deployments.insert(name.clone(), deployment);
-                name
+        let mut left: BTreeSet<String> = deployments
+            .values_mut()
+            .filter_map(|deployment| {
+                member
+                    .drop_from(deployment)
+                    .then(|| deployment.name.clone())
             })
-            .collect())
+            .collect();
+        for deployment in changed {
+            left.insert(deployment.name.clone());
+            deployments.insert(deployment.name.clone(), deployment);
+        }
+        Ok(left.into_iter().collect())
     }
 
     /// Deletes a Deployment. Whether anything still names it is the fleet's business, not the

@@ -12,7 +12,8 @@ use tokio_postgres::GenericClient;
 use super::{client, sql, Database};
 use crate::configs::validate_name;
 use crate::deployments::{
-    check_selector, not_held, Change, Deployment, DeploymentBackend, DeploymentError, Member,
+    check_selector, no_configuration, no_package, not_held, Change, Deployment, DeploymentBackend,
+    DeploymentError, Member,
 };
 use crate::packages::PackageId;
 
@@ -86,7 +87,9 @@ impl DeploymentBackend for PgDeploymentBackend {
     }
 
     /// One transaction: every Deployment that holds the member is held `FOR UPDATE`, in name
-    /// order, and loses it.
+    /// order, and loses it. The deletion of the member took it out of every Deployment already,
+    /// in its own transaction ([`drop_member_rows`]), so this finds one only where a Server of
+    /// 0.8.0 beside this one added it after.
     fn drop_member(&self, member: &Member) -> Result<Vec<Deployment>, String> {
         let member = member.clone();
         self.database.run(move |pool| async move {
@@ -183,9 +186,49 @@ impl DeploymentBackend for PgDeploymentBackend {
     }
 }
 
+/// Takes `member` out of every Deployment that holds it inside the transaction that deletes it,
+/// which holds the member's row `FOR UPDATE`: an add that holds that row `FOR KEY SHARE` has
+/// committed before this reads the member rows, and every later one finds the member gone
+/// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+/// clause 19). The Deployments' rows are not held, so this takes no lock in the order of an add,
+/// which holds the Deployment's row before the member's.
+pub(super) async fn drop_member_rows(
+    client: &impl GenericClient,
+    member: &Member,
+) -> Result<(), String> {
+    let rows = match member {
+        Member::Configuration(configuration) => {
+            client
+                .query(
+                    "DELETE FROM deployment_configurations WHERE configuration = $1 \
+                     RETURNING deployment",
+                    &[configuration],
+                )
+                .await
+        }
+        Member::Package(id) => {
+            client
+                .query(
+                    "DELETE FROM deployment_packages WHERE agent_type = $1 AND version = $2 \
+                     RETURNING deployment",
+                    &[&id.agent_type, &id.version],
+                )
+                .await
+        }
+    }
+    .map_err(sql)?;
+    let left: BTreeSet<String> = rows.iter().map(|row| row.get(0)).collect();
+    for name in &left {
+        super::notify::notify(client, super::notify::DEPLOYMENT, name).await?;
+    }
+    Ok(())
+}
+
 /// Makes `change` to the member rows of the Deployment `name` inside the caller's transaction,
-/// holding its row `FOR UPDATE` first and deciding from the rows it then reads. A refusal is the
-/// inner error, and nothing is written.
+/// holding its row `FOR UPDATE` first and deciding from the rows it then reads. A member it adds
+/// is held `FOR KEY SHARE` until the commit, and one that is not stored is refused: its deletion
+/// waits for the add, and then takes it out again ([`drop_member_rows`]). A refusal is the inner
+/// error, and nothing is written.
 async fn change_rows(
     client: &impl GenericClient,
     name: &str,
@@ -204,6 +247,17 @@ async fn change_rows(
     }
     match change {
         Change::PutPackage { id, replace } => {
+            if client
+                .query_opt(
+                    "SELECT 1 FROM packages WHERE agent_type = $1 AND version = $2 FOR KEY SHARE",
+                    &[&id.agent_type, &id.version],
+                )
+                .await
+                .map_err(sql)?
+                .is_none()
+            {
+                return Ok(Err(no_package(id)));
+            }
             let held = client
                 .query_opt(
                     "SELECT version FROM deployment_packages WHERE deployment = $1 \
@@ -245,6 +299,17 @@ async fn change_rows(
             }
         }
         Change::PutConfiguration(configuration) => {
+            if client
+                .query_opt(
+                    "SELECT 1 FROM configurations WHERE name = $1 FOR KEY SHARE",
+                    &[configuration],
+                )
+                .await
+                .map_err(sql)?
+                .is_none()
+            {
+                return Ok(Err(no_configuration(configuration)));
+            }
             client
                 .execute(
                     "INSERT INTO deployment_configurations (deployment, configuration) \
@@ -425,6 +490,19 @@ mod tests {
         }
     }
 
+    /// Stores every Configuration and Package these tests put into a Deployment: an add refuses a
+    /// member that is not stored.
+    fn store_members(test: &TestDatabase) {
+        test.sql(
+            "INSERT INTO configurations (name, body, role, service_name) VALUES \
+             ('base', '', '', 'otelcol'), ('extra', '', '', 'otelcol'), \
+             ('other', '', '', 'otelcol'); \
+             INSERT INTO packages (agent_type, version) VALUES ('otelcol', '1.0.0'), \
+             ('otelcol', '1.2.3'), ('otelcol', '1.2.4'), ('otelcol', '1.3.0'), \
+             ('otelcol', '2.0.0')",
+        );
+    }
+
     /// Writes `deployment` through the port, one member at a time.
     fn put(store: &dyn DeploymentBackend, deployment: &Deployment) {
         store
@@ -563,6 +641,7 @@ mod tests {
             return;
         };
         let database = test.open();
+        store_members(&test);
         contract(&|| Box::new(PgDeploymentBackend::new(database.clone())));
     }
 
@@ -616,8 +695,10 @@ mod tests {
             ("deployment_packages", "NEW.deployment = 'canary'"),
             ("deployment_configurations", "NEW.deployment = 'canary'"),
         ];
+        let database = test.open();
+        store_members(&test);
         fails_part_way(
-            &PgDeploymentBackend::new(test.open()),
+            &PgDeploymentBackend::new(database),
             &|| {
                 for (table, condition) in tables {
                     test.refuse(table, condition);
@@ -644,6 +725,7 @@ mod tests {
             return;
         };
         let store = PgDeploymentBackend::new(test.open());
+        store_members(&test);
         let mirrors = || test.rows("SELECT packages::text, configurations::text FROM deployments");
         put(
             &store,
@@ -723,6 +805,7 @@ mod tests {
             return;
         };
         let database = test.open();
+        store_members(&test);
         PgDeploymentBackend::new(database.clone())
             .save("stable", &selector("stable"))
             .expect("save");
@@ -781,6 +864,42 @@ mod tests {
         assert_eq!(
             test.rows("SELECT version FROM deployment_packages"),
             [[Some("1.0.0".to_string())]]
+        );
+    }
+
+    /// The deletion of a Configuration or a Package takes it out of every Deployment that holds it
+    /// in the transaction that deletes it: nothing the fleet does after, which a crash would cut
+    /// off, is needed for no Deployment to name it.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side, ADR-0026
+    #[test]
+    fn a_deleted_member_leaves_every_deployment_in_the_transaction_that_deletes_it() {
+        use crate::configs::{ConfigBackend as _, Removal};
+        use crate::packages::PackageBackend as _;
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        store_members(&test);
+        let store = PgDeploymentBackend::new(database.clone());
+        put(
+            &store,
+            &deployment("canary", Some("1.2.3"), &["base", "extra"]),
+        );
+        put(&store, &deployment("stable", Some("1.2.3"), &["base"]));
+
+        assert_eq!(
+            crate::postgres::configs::PgConfigBackend::new(database.clone()).remove("base"),
+            Ok(Removal::Removed)
+        );
+        crate::postgres::packages::PgPackageBackend::new(database)
+            .remove(&id("1.2.3"))
+            .expect("the Package is deleted");
+        assert_eq!(
+            store.load().expect("load"),
+            [
+                deployment("canary", None, &["extra"]),
+                deployment("stable", None, &[])
+            ]
         );
     }
 

@@ -2468,7 +2468,8 @@ impl AppState {
     /// The fleet lock is held across the check and the delete, so a rollout of this Server cannot
     /// pin it in between. A store that other Servers write too counts the stored assignments again
     /// in the act that deletes (ADR-0044 clause 2), so a pin
-    /// written through another instance refuses it as well.
+    /// written through another instance refuses it as well, and takes it out of every Deployment
+    /// in that act too.
     pub fn delete_configuration(&self, name: &str) -> Result<bool, DeleteError> {
         let fleet = self.fleet.lock().expect("fleet lock");
         let pinned = |pinning: usize| {
@@ -2504,7 +2505,9 @@ impl AppState {
 
     /// Puts a Configuration into a Deployment (ADR-0026 clause 5); a Configuration the Server
     /// does not hold is `Missing`. Distributes nothing. Under the fleet lock, so a Configuration
-    /// cannot be deleted between the check and the write.
+    /// cannot be deleted between the check and the write. A store that other Servers write too
+    /// reads the Configuration again in the act that adds it, so one deleted through another
+    /// instance is `Missing` as well.
     pub fn put_deployment_configuration(
         &self,
         name: &str,
@@ -2513,9 +2516,7 @@ impl AppState {
         let store = self.deployment_store().ok_or(DeploymentError::NotFound)?;
         let _fleet = self.fleet.lock().expect("fleet lock");
         if self.configs.get(configuration).is_none() {
-            return Err(DeploymentError::Missing(format!(
-                "no configuration {configuration:?} — save it before a deployment can hold it"
-            )));
+            return Err(deployments::no_configuration(configuration));
         }
         store.put_configuration(name, configuration)
     }
@@ -3750,7 +3751,8 @@ impl AppState {
     /// Puts a Package into a channel (ADR-0027 clause 25). Not gated: adding one for an Agent type
     /// the channel does not hold surfaces as waiting on the Agents of that type, and replacing the
     /// one it holds is how a rollout proceeds — an Agent already rolled out to keeps the Package
-    /// its assignment pins until the next act.
+    /// its assignment pins until the next act. A store that other Servers write too reads the
+    /// Package in the act that adds it, so one deleted through another instance is `Missing`.
     pub fn put_deployment_package(
         &self,
         name: &str,
@@ -3896,7 +3898,7 @@ impl AppState {
     ///
     /// The fleet lock is held across the check and the delete, so a rollout of this Server cannot
     /// pin it in between; a store that other Servers write too counts the stored assignments again
-    /// in the act that deletes.
+    /// in the act that deletes, and takes it out of every Deployment in that act too.
     pub fn delete_package_set(&self, id: &PackageId) -> Result<bool, String> {
         let fleet = self.fleet.lock().expect("fleet lock");
         let pinning = self.agent_store.pinning(Pin::Package(id));
@@ -8423,6 +8425,190 @@ mod tests {
         state
             .put_deployment_configuration("early", "collector")
             .expect("hold it");
+    }
+
+    /// Two instances on `database`, A opened first: a Configuration `base` and a Package A saved,
+    /// an empty Deployment `stable`, and a Deployment `canary` that holds both, which B reads
+    /// when it opens. What B deletes after, A holds in memory until it takes it up.
+    fn holding_base_on_two_instances(
+        database: &Arc<crate::postgres::Database>,
+        dir: &std::path::Path,
+    ) -> (AppState, AppState, PackageId) {
+        let on = || {
+            delivering_on(
+                database,
+                Box::new(
+                    crate::postgres::agents::PgAgentStore::open(database.clone()).expect("open"),
+                ),
+                dir,
+            )
+        };
+        let a = on();
+        let id = PackageId::new("otelcol", "1.0.0").expect("id");
+        a.save_configuration("base", body("receivers: {}\n"))
+            .expect("save");
+        a.create_package_set(&id).expect("package");
+        let deployments = a.deployment_store().expect("deployments");
+        for name in ["canary", "stable"] {
+            deployments
+                .put(
+                    name,
+                    BTreeMap::from([("ring".to_string(), name.to_string())]),
+                )
+                .expect("deployment");
+        }
+        a.put_deployment_configuration("canary", "base")
+            .expect("base in canary");
+        a.put_deployment_package("canary", &id, false)
+            .expect("the package in canary");
+        (a, on(), id)
+    }
+
+    /// The member rows the database stores, as `deployment member` lines.
+    fn stored_members(test: &crate::postgres::testing::TestDatabase) -> Vec<Vec<Option<String>>> {
+        test.rows(
+            "SELECT deployment || ' ' || configuration FROM deployment_configurations UNION ALL \
+             SELECT deployment || ' ' || agent_type || '@' || version FROM deployment_packages",
+        )
+    }
+
+    /// A Configuration and a Package deleted through B leave every Deployment that held them, in
+    /// B's memory too, and A, which has not taken up the deletions and still holds both in
+    /// memory, is refused when it adds either to a Deployment: the add reads the member it adds
+    /// in its own transaction and finds it gone, so no Deployment names it.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side, ADR-0026
+    #[test]
+    fn a_member_deleted_through_one_instance_is_refused_by_another_that_has_not_taken_it_up() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let dir = tempfile::tempdir().expect("blobs");
+        let (a, b, id) = holding_base_on_two_instances(&database, dir.path());
+
+        assert!(b.delete_configuration("base").expect("deleted"));
+        assert_eq!(b.delete_package_set(&id), Ok(true));
+        let canary = b
+            .deployment_store()
+            .expect("deployments")
+            .get("canary")
+            .expect("canary");
+        assert!(
+            canary.configurations.is_empty() && canary.packages.is_empty(),
+            "both left B's canary: {canary:?}"
+        );
+        assert!(stored_members(&test).is_empty(), "and the stored one");
+
+        assert!(
+            a.configurations().get("base").is_some(),
+            "A holds the Configuration in memory still"
+        );
+        assert!(matches!(
+            a.put_deployment_configuration("stable", "base"),
+            Err(DeploymentError::Missing(why)) if why.contains("\"base\"")
+        ));
+        assert!(matches!(
+            a.put_deployment_package("stable", &id, false),
+            Err(DeploymentError::Missing(why)) if why.contains("otelcol")
+        ));
+        assert!(
+            stored_members(&test).is_empty(),
+            "no Deployment names either"
+        );
+        let stable = a
+            .deployment_store()
+            .expect("deployments")
+            .get("stable")
+            .expect("stable");
+        assert!(
+            stable.configurations.is_empty() && stable.packages.is_empty(),
+            "nor does A's stable: {stable:?}"
+        );
+    }
+
+    /// An add through A that holds the Deployment's row, held at a gate in the database just
+    /// before it writes the member's row, while B deletes that member: the add holds the member's
+    /// row too, so the deletion waits for its commit, and then takes the member out of every
+    /// Deployment in the transaction that deletes it. Whichever commits first, no Deployment names
+    /// the deleted member once both have — for a Configuration and for a Package.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side, ADR-0026
+    #[test]
+    fn an_add_held_while_another_instance_deletes_the_member_leaves_no_deployment_naming_it() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let dir = tempfile::tempdir().expect("blobs");
+        let (a, b, id) = holding_base_on_two_instances(&database, dir.path());
+        let race = |table: &str,
+                    key: i64,
+                    add: &(dyn Fn() -> Result<Deployment, DeploymentError> + Sync),
+                    delete: &(dyn Fn() -> bool + Sync)| {
+            test.sql(&format!(
+                "CREATE FUNCTION fleet_test_hold_{table}() RETURNS trigger LANGUAGE plpgsql AS $$ \
+                 BEGIN PERFORM pg_advisory_lock_shared({key}); \
+                 PERFORM pg_advisory_unlock_shared({key}); RETURN NEW; END $$; \
+                 CREATE TRIGGER fleet_test_hold BEFORE INSERT ON {table} \
+                 FOR EACH ROW EXECUTE FUNCTION fleet_test_hold_{table}();"
+            ));
+            let gate = test.gate(key);
+            std::thread::scope(|scope| {
+                let added = scope.spawn(add);
+                // A holds the Deployment's row and waits at the gate with its transaction open.
+                let a_pid = test.once(&format!(
+                    "SELECT pid::text FROM pg_locks WHERE locktype = 'advisory' AND NOT granted \
+                     AND objid::text = '{key}'"
+                ));
+                let deleted = scope.spawn(delete);
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                while !deleted.is_finished()
+                    && test
+                        .rows(&format!(
+                            "SELECT 1 FROM pg_stat_activity \
+                             WHERE {a_pid} = ANY(pg_blocking_pids(pid))"
+                        ))
+                        .is_empty()
+                {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "B's deletion neither waits for A nor ends"
+                    );
+                }
+                gate.open();
+                assert!(added.join().expect("A").is_ok(), "A's add commits first");
+                assert!(deleted.join().expect("B"), "B deletes it");
+            });
+        };
+
+        race(
+            "deployment_configurations",
+            0x25_0001,
+            &|| a.put_deployment_configuration("stable", "base"),
+            &|| b.delete_configuration("base").expect("deleted"),
+        );
+        race(
+            "deployment_packages",
+            0x25_0002,
+            &|| a.put_deployment_package("stable", &id, false),
+            &|| b.delete_package_set(&id).expect("deleted"),
+        );
+        assert!(
+            stored_members(&test).is_empty(),
+            "no Deployment names either: {:?}",
+            stored_members(&test)
+        );
+        b.deployment_store()
+            .expect("deployments")
+            .reload()
+            .expect("B reads the Deployments again");
+        assert!(b
+            .deployment_store()
+            .expect("deployments")
+            .list()
+            .iter()
+            .all(
+                |deployment| deployment.configurations.is_empty() && deployment.packages.is_empty()
+            ));
     }
 
     /// The Deployment the stored assignment of `uid` was released through.

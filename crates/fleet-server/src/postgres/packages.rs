@@ -187,13 +187,17 @@ impl PackageBackend for PgPackageBackend {
     }
 
     /// The Package and its entries go in one statement, the entries by cascade, while no stored
-    /// assignment pins it ([`hold_unassigned`]).
+    /// assignment pins it ([`hold_unassigned`]), and it leaves every Deployment that holds it in
+    /// the same transaction. A Package that is not stored is left as a Configuration that is not
+    /// is: nothing is written and nothing announced.
     fn remove(&self, id: &PackageId) -> Result<(), String> {
         let id = id.clone();
         self.database.run(move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
-            hold_unassigned(&*transaction, &id, pinned).await?;
+            if !hold_unassigned(&*transaction, &id, pinned).await? {
+                return transaction.commit().await.map_err(sql);
+            }
             transaction
                 .execute(
                     "DELETE FROM packages WHERE agent_type = $1 AND version = $2",
@@ -201,6 +205,11 @@ impl PackageBackend for PgPackageBackend {
                 )
                 .await
                 .map_err(sql)?;
+            super::deployments::drop_member_rows(
+                &*transaction,
+                &crate::deployments::Member::Package(id.clone()),
+            )
+            .await?;
             notify(&*transaction, PACKAGE, &id.to_string()).await?;
             transaction.commit().await.map_err(sql)
         })

@@ -114,7 +114,8 @@ impl ConfigBackend for PgConfigBackend {
     /// One transaction: the Configuration's row is held `FOR UPDATE`, which waits for every
     /// rollout that holds it to pin one of its revisions and keeps every other out until this one
     /// commits; then the stored assignments that name it are counted, and only when none does
-    /// are the Configuration and its revisions deleted, the revisions by cascade.
+    /// are the Configuration and its revisions deleted, the revisions by cascade, and it is taken
+    /// out of every Deployment that holds it.
     fn remove(&self, name: &str) -> Result<Removal, String> {
         let name = name.to_string();
         self.database.run(move |pool| async move {
@@ -149,6 +150,11 @@ impl ConfigBackend for PgConfigBackend {
                 .execute("DELETE FROM configurations WHERE name = $1", &[&name])
                 .await
                 .map_err(sql)?;
+            super::deployments::drop_member_rows(
+                &*transaction,
+                &crate::deployments::Member::Configuration(name.clone()),
+            )
+            .await?;
             notify(&*transaction, CONFIGURATION, &name).await?;
             transaction.commit().await.map_err(sql)?;
             Ok(Removal::Removed)
