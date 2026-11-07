@@ -8,6 +8,8 @@
 #                            (selector service.name = otelcol-contrib; opampextension, self-reporting)
 #   otelcol-conf          →  type otelcol, deployment otelcol
 #                            (selector service.name = otelcol; core otelcol, observed externally)
+#   icinga2-conf,         →  type icinga2, deployment icinga2
+#   icinga2-zones            (selector service.name = icinga2; the root file and what it includes)
 #
 # A Configuration's name is the file name its entry gets in the Supervisor's config directory,
 # so a block that reads one must read exactly that path. Names carry no extension: they follow the
@@ -154,6 +156,11 @@ seed() {
 seed otelcol-contrib-conf "$examples/otelcol-contrib-conf.yaml" otelcol-contrib otelcol-contrib \
     '{"service.name": "otelcol-contrib"}'
 seed otelcol-conf "$examples/otelcol-conf.yaml" otelcol otelcol '{"service.name": "otelcol"}'
+# Icinga 2 reads one root file and includes the rest by name (ADR-draft-icinga-2), so both entries
+# are seeded. Its ticket is per host and a secret, so it is deliberately not seeded here — see
+# docs/manual/icinga2.md.
+seed icinga2-conf "$examples/icinga2-conf.conf" icinga2 icinga2 '{"service.name": "icinga2"}'
+seed icinga2-zones "$examples/icinga2-zones.conf" icinga2 icinga2 '{"service.name": "icinga2"}'
 
 if [ "$mode" = stage ]; then
     echo "Done — the Server holds these Configurations from its next start; put each into a Deployment and roll that out to assign them."
