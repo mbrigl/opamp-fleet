@@ -621,7 +621,7 @@ the database cluster, which the operator runs.
 
 ## Enforcement
 
-Tests that will carry `Verifies:
+Tests that carry `Verifies:
 ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side`,
 run against the PostgreSQL that `FLEET_TEST_POSTGRES_URL` names, with two instances in one test
 process, or three where a bullet says so. The tests that carry `Verifies:

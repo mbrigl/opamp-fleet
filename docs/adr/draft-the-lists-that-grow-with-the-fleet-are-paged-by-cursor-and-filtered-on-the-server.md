@@ -224,7 +224,7 @@ an export of the whole fleet; the audit record, which the REST API does not serv
 
 ## Enforcement
 
-Tests that will carry `Verifies:
+Tests that carry `Verifies:
 ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server`:
 
 - Three Agents read with `limit=2` arrive as two pages that together hold each exactly once, the

@@ -220,7 +220,7 @@ shell access on a Server host.
 
 ## Enforcement
 
-Tests that will carry `Verifies:
+Tests that carry `Verifies:
 ADR-0042`:
 
 - On the filesystem store, the existing tests of the chain, the rotation and `audit-verify` stay
