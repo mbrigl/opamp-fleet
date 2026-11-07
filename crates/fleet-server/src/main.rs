@@ -893,6 +893,23 @@ async fn main() {
             std::process::exit(1);
         }
     };
+    // On files an approval writes its decision before its register entry: one a write between
+    // the two left decided without its entry waits again (ADR-0044 clause 9).
+    let read_certificate = |pem: &str| {
+        let der = opamp::tls::certificates(pem.as_bytes())?;
+        fleet_server::ca::facts(der.first().ok_or("no certificate in the PEM")?.as_ref())
+    };
+    match state.take_back_unregistered_approvals(&read_certificate) {
+        Ok(0) => {}
+        Ok(taken) => warn!(
+            requests = taken,
+            "approved enrolment requests whose certificate the register does not hold wait again"
+        ),
+        Err(e) => {
+            eprintln!("cannot take back an approval whose certificate is not registered: {e}");
+            std::process::exit(1);
+        }
+    }
     // The certificate is the whole of admission (ADR-0038): the configuration was refused at load
     // without the client CA.
     info!("the OpAMP endpoint admits by client certificate");

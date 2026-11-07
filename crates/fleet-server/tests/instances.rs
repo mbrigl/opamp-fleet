@@ -1477,18 +1477,59 @@ fn approve(instance: &Instance, pki: &Pki, key: &str) {
         ca_pem: pki.ca_pem.clone(),
         ca_key_pem: pki.ca_key_pem.clone(),
     };
-    let revocations = instance.revocations.clone();
-    let record = move |signed: &fleet_server::revocation::Signed,
-                       instance_uid: &[u8],
-                       bootstrap: &CertId| {
-        revocations
-            .record_approved(signed.facts.clone(), instance_uid, bootstrap)
-            .map_err(fleet_server::enrolment::DecisionError::Store)
-    };
     instance
         .enrolment
-        .approve(key, &signer, &format!("host-{key}"), &record, &|_| false)
+        .approve(
+            key,
+            &signer,
+            &format!("host-{key}"),
+            &Registering(&instance.revocations),
+            &|_| false,
+        )
         .expect("approve");
+}
+
+/// Prepares an approval's register entry and Host on the instance's register, which the store
+/// writes with the decision, and takes them up once it is written, as the Server does.
+struct Registering<'a>(&'a Revocations);
+
+impl fleet_server::enrolment::Registrar for Registering<'_> {
+    fn register(
+        &self,
+        approved: &fleet_server::revocation::Approved,
+    ) -> Result<(), fleet_server::enrolment::DecisionError> {
+        self.0
+            .register_approved(approved)
+            .map_err(fleet_server::enrolment::DecisionError::Store)
+    }
+
+    fn committed(&self, approved: &fleet_server::revocation::Approved) {
+        self.0.took_up_approved(approved);
+    }
+}
+
+impl fleet_server::enrolment::Recorder for Registering<'_> {
+    fn signed(
+        &self,
+        signed: &fleet_server::revocation::Signed,
+        _: &str,
+        instance_uid: &[u8],
+        bootstrap: &CertId,
+    ) -> Result<Option<fleet_server::revocation::Approved>, fleet_server::enrolment::DecisionError>
+    {
+        self.0
+            .prepare_approved(signed.facts.clone(), instance_uid, bootstrap)
+            .map(Some)
+            .map_err(fleet_server::enrolment::DecisionError::Store)
+    }
+
+    fn undecided(
+        &self,
+        _: &fleet_server::revocation::Signed,
+        _: &str,
+        _: fleet_server::enrolment::Undecided,
+    ) {
+    }
 }
 
 /// An enrolment request waiting on B, approved on A, is answered with its certificate on B, which

@@ -1067,6 +1067,25 @@ pub(crate) mod testing {
             self.sql(&format!("DROP TRIGGER fleet_test_refuse ON {table}"));
         }
 
+        /// Makes the commit of the next `times` transactions that insert or update a row of
+        /// `table` fail, after every statement of theirs succeeded: a deferred constraint trigger
+        /// that raises at the commit, as a commit the database refuses at its end. The count is a
+        /// sequence, which a rollback does not take back.
+        pub(crate) fn fail_commits(&self, table: &str, times: u32) {
+            let schema = &self.schema;
+            self.sql(&format!(
+                "CREATE SEQUENCE fleet_test_commits; \
+                 CREATE OR REPLACE FUNCTION fleet_test_fail_commit() RETURNS trigger \
+                 LANGUAGE plpgsql AS $$ BEGIN \
+                 IF nextval('{schema}.fleet_test_commits') <= {times} THEN \
+                 RAISE EXCEPTION 'the commit is refused by the test'; END IF; \
+                 RETURN NULL; END $$; \
+                 CREATE CONSTRAINT TRIGGER fleet_test_fail_commit AFTER INSERT OR UPDATE ON {table} \
+                 DEFERRABLE INITIALLY DEFERRED FOR EACH ROW \
+                 EXECUTE FUNCTION fleet_test_fail_commit();"
+            ));
+        }
+
         /// The rows `query` answers in this schema, each column as text.
         pub(crate) fn rows(&self, query: &str) -> Vec<Vec<Option<String>>> {
             let (pg, tls) = self.admin_connection();

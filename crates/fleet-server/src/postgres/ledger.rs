@@ -153,46 +153,18 @@ impl LedgerStore for PgLedgerStore {
         self.database.run(move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
-            transaction
-                .batch_execute(
-                    "LOCK TABLE certificates IN SHARE ROW EXCLUSIVE MODE; \
-                     LOCK TABLE revocations IN SHARE MODE",
-                )
-                .await
-                .map_err(sql)?;
-            let id = &issued.facts.id;
-            let held: i64 = transaction
-                .query_one(
-                    "SELECT count(*) FROM certificates WHERE NOT (issuer = $1 AND serial = $2)",
-                    &[&id.issuer, &id.serial],
-                )
-                .await
-                .map_err(sql)?
-                .get(0);
-            let held = usize::try_from(held).unwrap_or(usize::MAX);
-            if held >= bounds.size {
-                return Ok(Registered::Full(register_full(held)));
+            let registered = register_in(
+                &*transaction,
+                &issued,
+                &bounds,
+                mint.as_ref().map(|(host, entry)| (host.as_str(), entry)),
+                bootstrap.as_ref(),
+            )
+            .await?;
+            if registered == Registered::Registered {
+                transaction.commit().await.map_err(sql)?;
             }
-            if let Some(bootstrap) = &bootstrap {
-                if names(&*transaction, bootstrap).await? {
-                    return Ok(Registered::BootstrapRevoked);
-                }
-            }
-            if let Some(predecessor) = &issued.predecessor {
-                let decided = decide_renewal(&*transaction, id, predecessor, &bounds).await?;
-                if decided != Registered::Registered {
-                    return Ok(decided);
-                }
-            }
-            write_issued(&*transaction, &issued).await?;
-            notify(&*transaction, CERTIFICATE, &issued.facts.id.serial).await?;
-            if let Some((host, entry)) = &mint {
-                if write_seen(&*transaction, host, entry).await? {
-                    notify(&*transaction, HOST, host).await?;
-                }
-            }
-            transaction.commit().await.map_err(sql)?;
-            Ok(Registered::Registered)
+            Ok(registered)
         })
     }
 
@@ -896,6 +868,64 @@ async fn decide_renewal(
     let below = usize::try_from(row.get::<_, i64>(1)).unwrap_or(usize::MAX);
     if below >= bounds.per_root {
         return Ok(Registered::Full(CHAIN_FULL.to_string()));
+    }
+    Ok(Registered::Registered)
+}
+
+/// Registers `issued`, deciding from what is stored, with the Host an approval mints, `mint`,
+/// written when the store has no row of it and else its valid until moved forward, inside the
+/// caller's transaction, which commits it or not: the register's own transaction, or the one that
+/// decides an approval's request (ADR-0044 clause 9). The table is held against every other
+/// adder while the bounds are counted, and an approval's bootstrap certificate, `bootstrap`, is
+/// looked up in the list the transaction holds, so a revocation another instance committed first
+/// refuses it. Anything but [`Registered::Registered`] leaves the transaction to be rolled back.
+///
+/// # Errors
+/// Returns an error when a statement fails.
+pub(crate) async fn register_in(
+    transaction: &impl GenericClient,
+    issued: &Issued,
+    bounds: &RegisterBounds,
+    mint: Option<(&str, &Host)>,
+    bootstrap: Option<&CertId>,
+) -> Result<Registered, String> {
+    transaction
+        .batch_execute(
+            "LOCK TABLE certificates IN SHARE ROW EXCLUSIVE MODE; \
+             LOCK TABLE revocations IN SHARE MODE",
+        )
+        .await
+        .map_err(sql)?;
+    let id = &issued.facts.id;
+    let held: i64 = transaction
+        .query_one(
+            "SELECT count(*) FROM certificates WHERE NOT (issuer = $1 AND serial = $2)",
+            &[&id.issuer, &id.serial],
+        )
+        .await
+        .map_err(sql)?
+        .get(0);
+    let held = usize::try_from(held).unwrap_or(usize::MAX);
+    if held >= bounds.size {
+        return Ok(Registered::Full(register_full(held)));
+    }
+    if let Some(bootstrap) = bootstrap {
+        if names(transaction, bootstrap).await? {
+            return Ok(Registered::BootstrapRevoked);
+        }
+    }
+    if let Some(predecessor) = &issued.predecessor {
+        let decided = decide_renewal(transaction, id, predecessor, bounds).await?;
+        if decided != Registered::Registered {
+            return Ok(decided);
+        }
+    }
+    write_issued(transaction, issued).await?;
+    notify(transaction, CERTIFICATE, &issued.facts.id.serial).await?;
+    if let Some((host, entry)) = mint {
+        if write_seen(transaction, host, entry).await? {
+            notify(transaction, HOST, host).await?;
+        }
     }
     Ok(Registered::Registered)
 }

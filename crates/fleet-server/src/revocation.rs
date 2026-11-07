@@ -213,6 +213,42 @@ pub struct Signed {
     pub facts: Facts,
 }
 
+/// The register entry of a certificate an approval signed and the Host it mints, prepared and not
+/// yet written: written with the decision on its request, and taken up in memory once that decision
+/// is written (ADR-0044 clause 9).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Approved {
+    pub(crate) issued: Issued,
+    pub(crate) bounds: RegisterBounds,
+    pub(crate) mint: Option<(String, Host)>,
+    pub(crate) bootstrap: CertId,
+}
+
+impl Approved {
+    /// The entry it registers.
+    #[must_use]
+    pub fn issued(&self) -> &Issued {
+        &self.issued
+    }
+
+    /// The Host it mints, as its row is written when the store has none.
+    pub(crate) fn mint(&self) -> Option<(&str, &Host)> {
+        self.mint
+            .as_ref()
+            .map(|(host, entry)| (host.as_str(), entry))
+    }
+}
+
+/// What a register write that is not [`Registered::Registered`] is refused with.
+pub(crate) fn refusal(registered: Registered) -> Result<(), String> {
+    match registered {
+        Registered::Registered => Ok(()),
+        Registered::Full(why) => Err(why),
+        Registered::Revoked => Err(RENEWS_REVOKED.to_string()),
+        Registered::BootstrapRevoked => Err(BOOTSTRAP_REVOKED.to_string()),
+    }
+}
+
 /// One certificate the Server signed (ADR-0044 clause 9).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Issued {
@@ -974,23 +1010,113 @@ impl Revocations {
         instance_uid: &[u8],
         predecessor: Option<CertId>,
     ) -> Result<(), String> {
-        self.record_with(facts, instance_uid, predecessor, None)
+        self.record_with(facts, instance_uid, predecessor)
     }
 
-    /// [`record`](Self::record) for an approved enrolment request, whose bootstrap certificate,
-    /// `bootstrap`, is checked against the list in the same write: a revoked one is refused with
-    /// [`BOOTSTRAP_REVOKED`], here and by a store other instances share, which reads the list in
-    /// the write (ADR-0038 clause 28).
+    /// Prepares the register entry of a certificate an approval signed, and the Host it mints,
+    /// without writing either: they are written with the decision on its request
+    /// ([`register_approved`](Self::register_approved), or the enrolment store's own transaction
+    /// and then [`took_up_approved`](Self::took_up_approved)), so a decision that is not written
+    /// leaves neither (ADR-0044 clause 9). The bounds are checked against what this instance
+    /// holds; the write counts them again. The bootstrap certificate the request came with,
+    /// `bootstrap`, is checked against the list: a revoked one is refused with
+    /// [`BOOTSTRAP_REVOKED`], here and in the write (ADR-0038 clause 28).
     ///
     /// # Errors
-    /// As [`record`](Self::record), and [`BOOTSTRAP_REVOKED`] for a revoked bootstrap certificate.
-    pub fn record_approved(
+    /// Returns an error when the register is full, when the host holds as many valid
+    /// certificates as it may, or for a revoked bootstrap certificate.
+    pub fn prepare_approved(
         &self,
         facts: Facts,
         instance_uid: &[u8],
         bootstrap: &CertId,
-    ) -> Result<(), String> {
-        self.record_with(facts, instance_uid, None, Some(bootstrap))
+    ) -> Result<Approved, String> {
+        let mut state = self.state.lock().expect("revocation lock");
+        // The prune is an act on the trust state.
+        state.acted();
+        if state.revoked().contains(bootstrap) {
+            return Err(BOOTSTRAP_REVOKED.to_string());
+        }
+        let forgotten = self.prune(&mut state)?;
+        let bounds = self.bounds_for(&state, &facts, None);
+        let approved = bounds.map(|bounds| Approved {
+            mint: facts.host.clone().map(|host| {
+                (
+                    host,
+                    Host {
+                        subject: facts.subject_values.clone(),
+                        approved_ms: Some(self.clock.now_ms()),
+                        valid_until_ms: Some(facts.not_after_ms),
+                        ..Host::default()
+                    },
+                )
+            }),
+            issued: Issued {
+                facts,
+                instance_uid: hex::encode(instance_uid),
+                predecessor: None,
+                issued_ms: self.clock.now_ms(),
+            },
+            bounds,
+            bootstrap: bootstrap.clone(),
+        });
+        drop(state);
+        self.write_forgotten(forgotten);
+        approved
+    }
+
+    /// Writes what [`prepare_approved`](Self::prepare_approved) prepared through this register's
+    /// own store, and takes it up: what an approval does once its decision is written to a store
+    /// that does not write the register in the decision's own transaction (ADR-0044 clause 9).
+    ///
+    /// # Errors
+    /// Returns an error when the write refuses it, as [`record`](Self::record) does and with
+    /// [`BOOTSTRAP_REVOKED`], or cannot be made; nothing is then taken up.
+    pub fn register_approved(&self, approved: &Approved) -> Result<(), String> {
+        let mut state = self.state.lock().expect("revocation lock");
+        state.acted();
+        if state.revoked().contains(&approved.bootstrap) {
+            return Err(BOOTSTRAP_REVOKED.to_string());
+        }
+        refusal(self.store.register_minting(
+            &approved.issued,
+            &approved.bounds,
+            approved.mint(),
+            Some(&approved.bootstrap),
+        )?)?;
+        self.take_up_approved(state, approved);
+        Ok(())
+    }
+
+    /// Takes up what an enrolment store wrote of `approved` in the transaction that decided its
+    /// request, once that transaction committed (ADR-0044 clause 9): the register entry and the
+    /// Host, which the store wrote by act, in memory alone.
+    pub fn took_up_approved(&self, approved: &Approved) {
+        let mut state = self.state.lock().expect("revocation lock");
+        state.acted();
+        self.take_up_approved(state, approved);
+    }
+
+    fn take_up_approved(&self, mut state: std::sync::MutexGuard<'_, State>, approved: &Approved) {
+        state.insert(approved.issued.clone());
+        let not_after = approved.issued.facts.not_after_ms;
+        let changed = match &approved.mint {
+            Some((host, entry)) => match state.hosts.get_mut(host) {
+                Some(held) => held.extend(not_after),
+                None => {
+                    state.hosts.insert(host.clone(), entry.clone());
+                    true
+                }
+            },
+            None => false,
+        };
+        // A store that writes the Hosts by act wrote the Host with the entry.
+        if !changed || self.store.writes_hosts_by_act() {
+            return;
+        }
+        let hosts = Self::hosts_changed(&mut state);
+        drop(state);
+        self.write_forgotten(Some(hosts));
     }
 
     fn record_with(
@@ -998,14 +1124,10 @@ impl Revocations {
         facts: Facts,
         instance_uid: &[u8],
         predecessor: Option<CertId>,
-        bootstrap: Option<&CertId>,
     ) -> Result<(), String> {
         let mut state = self.state.lock().expect("revocation lock");
         // The prune and the register's write below are acts on the trust state.
         state.acted();
-        if bootstrap.is_some_and(|bootstrap| state.revoked().contains(bootstrap)) {
-            return Err(BOOTSTRAP_REVOKED.to_string());
-        }
         let forgotten = self.prune(&mut state)?;
         // The approval that mints a host id writes the Host (ADR-0043 clause 15): an issuance that
         // renews nothing and names a host the register does not know yet. A store that writes the
@@ -1028,7 +1150,7 @@ impl Revocations {
             instance_uid,
             predecessor,
             mint.as_ref().map(|(host, entry)| (host.as_str(), entry)),
-            bootstrap,
+            None,
         );
         // Every issuance moves its Host's valid until forward (ADR-0043 clause 15).
         let act = match (&recorded, mint, &facts.host) {
@@ -1074,6 +1196,29 @@ impl Revocations {
         mint: Option<(&str, &Host)>,
         bootstrap: Option<&CertId>,
     ) -> Result<(), String> {
+        let bounds = self.bounds_for(state, &facts, predecessor.as_ref())?;
+        let issued = Issued {
+            facts,
+            instance_uid: hex::encode(instance_uid),
+            predecessor,
+            issued_ms: self.clock.now_ms(),
+        };
+        refusal(
+            self.store
+                .register_minting(&issued, &bounds, mint, bootstrap)?,
+        )?;
+        state.insert(issued);
+        Ok(())
+    }
+
+    /// The bounds a register write of `facts` counts, once what this instance holds passes them:
+    /// the register's size, the chain's below its root, and the host's valid certificates.
+    fn bounds_for(
+        &self,
+        state: &State,
+        facts: &Facts,
+        predecessor: Option<&CertId>,
+    ) -> Result<RegisterBounds, String> {
         let limit = if predecessor.is_some() {
             MAX_ISSUED - ENROLMENT_RESERVE
         } else {
@@ -1082,7 +1227,7 @@ impl Revocations {
         if state.issued.len() >= limit {
             return Err(register_full(state.issued.len()));
         }
-        let root = state.root_below(predecessor.as_ref(), &facts.id);
+        let root = state.root_below(predecessor, &facts.id);
         if state.descendants.get(&root).copied().unwrap_or(0) >= MAX_DESCENDANTS_PER_ROOT {
             return Err(CHAIN_FULL.to_string());
         }
@@ -1102,27 +1247,10 @@ impl Revocations {
                 ));
             }
         }
-        let issued = Issued {
-            facts,
-            instance_uid: hex::encode(instance_uid),
-            predecessor,
-            issued_ms: self.clock.now_ms(),
-        };
-        let bounds = RegisterBounds {
+        Ok(RegisterBounds {
             size: limit,
             per_root: MAX_DESCENDANTS_PER_ROOT,
-        };
-        match self
-            .store
-            .register_minting(&issued, &bounds, mint, bootstrap)?
-        {
-            Registered::Registered => {}
-            Registered::Full(why) => return Err(why),
-            Registered::Revoked => return Err(RENEWS_REVOKED.to_string()),
-            Registered::BootstrapRevoked => return Err(BOOTSTRAP_REVOKED.to_string()),
-        }
-        state.insert(issued);
-        Ok(())
+        })
     }
 
     /// Whether a connection presenting a certificate of `host` may report for `instance_uid`
@@ -2696,17 +2824,35 @@ mod tests {
             .revoke_certificate("client", "00:A1")
             .expect("revoke");
         assert_eq!(
-            revocations.record_approved(on_host("e5", "h5"), &[5; 16], &id("a1")),
+            revocations.prepare_approved(on_host("e5", "h5"), &[5; 16], &id("a1")),
             Err(BOOTSTRAP_REVOKED.to_string())
         );
+        let prepared = revocations
+            .prepare_approved(on_host("e7", "h7"), &[7; 16], &id("d4"))
+            .expect("prepared before the revocation");
+        revocations
+            .revoke_certificate("client", "00:D4")
+            .expect("revoke");
+        assert_eq!(
+            revocations.register_approved(&prepared),
+            Err(BOOTSTRAP_REVOKED.to_string()),
+            "a revocation between the preparation and the write wins"
+        );
         assert!(
-            revocations.issued_entry(&id("e5")).is_none(),
+            revocations.issued_entry(&id("e5")).is_none()
+                && revocations.issued_entry(&id("e7")).is_none(),
             "nothing registered"
         );
-        revocations
-            .record_approved(on_host("e6", "h6"), &[6; 16], &id("d4"))
+        let approved = revocations
+            .prepare_approved(on_host("e6", "h6"), &[6; 16], &id("f8"))
             .expect("a bootstrap certificate the list does not name");
+        assert!(
+            revocations.issued_entry(&id("e6")).is_none(),
+            "prepared, not registered"
+        );
+        revocations.register_approved(&approved).expect("register");
         assert!(revocations.issued_entry(&id("e6")).is_some());
+        assert!(revocations.hosts().iter().any(|(host, _, _)| host == "h6"));
     }
 
     /// What ADR-0038 clause 28 answers for `id`, worked out from the list and the register as they

@@ -3226,16 +3226,9 @@ async fn approve_enrolment(
     _csrf: SameOrigin,
     Path(id): Path<String>,
 ) -> Response {
-    let gateway = through_gateway(&state, &id);
     match state.approve_enrolment(&id) {
-        Ok(()) => {
-            info!(request = %id, "enrolment request approved");
-            note(
-                &state,
-                crate::audit::Entry::new("enrolment.approved", "approved")
-                    .with("id", id.clone())
-                    .with("gateway", gateway),
-            );
+        Ok(serial) => {
+            info!(request = %id, serial = %serial, "enrolment request approved");
             StatusCode::NO_CONTENT.into_response()
         }
         Err(crate::enrolment::DecisionError::NotFound) => error(
