@@ -7,14 +7,14 @@ name: G-20
 # clause 20 and the Enforcement). `crates/fleet-server/tests/g20.rs` holds both; the balancer and
 # the simulated fleet are the test's own, so the stack needs no image beyond the stores' ones.
 #
-# Deliberately not on `push` or `pull_request`: it runs for about twenty minutes on the whole
-# runner, and a slow neighbour must not read as a broken change. Weekly and on demand.
+# Deliberately not on `push` or `pull_request`: it runs for about half an hour on the whole
+# runner, and a slow neighbour must not read as a broken change. On demand only: a hosted runner
+# has less memory than the check needs (scripts/check-g20.sh), so a schedule would fail every week.
+# The weekly schedule comes back once docs/plan/fleet-at-scale-costs/05 settles the instances'
+# memory, or a runner large enough exists.
 
 on:
   workflow_dispatch:
-  schedule:
-    # Weekly on Sunday, well outside working hours in CET, apart from the service smoke test.
-    - cron: "0 3 * * 0"
 
 permissions:
   contents: read
@@ -22,7 +22,7 @@ permissions:
 jobs:
   g20:
     runs-on: ubuntu-latest
-    # Generous: the two tests take about twenty minutes with the release build; a hang fails as a
+    # Generous: the tests take about half an hour with the release build; a hang fails as a
     # timeout rather than burning the runner's six hours.
     timeout-minutes: 90
     services:

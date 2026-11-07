@@ -44,8 +44,8 @@ use object_store::{ObjectStore as _, ObjectStoreExt as _};
 use opamp::client::ws::{run_from, Connector, Settings};
 use opamp::client::{AfterReply, Ended, ReportSink, Session, StopSignal};
 use opamp::proto::{
-    AgentCapabilities, AgentDescription, AgentToServer, AnyValue, KeyValue, ServerToAgent,
-    ServerToAgentFlags,
+    server_error_response, AgentCapabilities, AgentDescription, AgentToServer, AnyValue, KeyValue,
+    ServerErrorResponseType, ServerToAgent, ServerToAgentFlags,
 };
 use opamp::uid::InstanceUid;
 use rcgen::{CertificateParams, IsCa, Issuer, KeyPair, SanType, SerialNumber};
@@ -58,17 +58,23 @@ const LOAD_AGENTS: usize = 100_000;
 /// G-20's load run: ten minutes.
 const LOAD_SECS: u64 = 600;
 /// The Agents each simulated host carries in the load test unless `FLEET_G20_AGENTS_PER_HOST`
-/// says otherwise.
-const LOAD_AGENTS_PER_HOST: usize = 1;
+/// says otherwise: ten, so that one machine holds the simulated fleet. One on each connection would
+/// take 100 000 connections, about 200 KiB each in an instance and as much again in the simulator
+/// and its balancer, measured at 10 000 and 20 000.
+const LOAD_AGENTS_PER_HOST: usize = 10;
 /// G-20's bound on the failover: `lease_secs` plus two heartbeat intervals at the defaults.
 const CARRIED_WITHIN: Duration = Duration::from_secs(30 + 2 * 30);
 /// G-20's bound on a revocation: one `lease_renew_secs` at the default.
 const REVOKED_WITHIN: Duration = Duration::from_secs(10);
 /// The default heartbeat, which every simulated Agent keeps.
 const HEARTBEAT: Duration = Duration::from_secs(30);
+/// The instances' `presence_interval_secs` at the default.
+const PRESENCE_INTERVAL: Duration = Duration::from_secs(30);
 /// The new connections a second the simulated fleet opens while it connects: below the three
 /// instances' bound of 200 each, so no connection is refused for it.
 const RAMP_PER_SEC: u64 = 450;
+/// The least rate at which the instances hold the new Agents of a fleet that connects.
+const NEW_AGENTS_PER_SEC: u64 = 150;
 /// The Gateway's pool: ten connections from one address, each carrying ten Agents.
 const GATEWAY_CONNECTIONS: usize = 10;
 const GATEWAY_AGENTS_PER_CONNECTION: usize = 10;
@@ -660,6 +666,7 @@ impl Drop for Instance {
         self.kill();
         // A run that traces keeps what each instance logged, under the directory it names.
         if let Some(dir) = variable("FLEET_G20_TRACE") {
+            let _ = std::fs::create_dir_all(&dir);
             let file = Path::new(&dir).join(format!("instance-{}.log", self.operator));
             let _ = std::fs::write(file, self.log.lock().expect("log").join("\n"));
         }
@@ -1036,14 +1043,43 @@ impl Session for Sim {
     }
 
     fn on_reply(&mut self, reply: &ServerToAgent) -> Option<Duration> {
-        if reply.flags & ServerToAgentFlags::ReportFullState as u64 != 0 {
-            if let Some(agent) = self
-                .agents
-                .iter_mut()
-                .find(|agent| agent.uid.as_bytes().as_slice() == reply.instance_uid.as_slice())
-            {
-                agent.owes_full = true;
+        // As the `opamp` client settles a reply (`client::protocol`): a command carries nothing
+        // else, and an error ends the reply there; `Unavailable` keeps the host away for the time
+        // it names, half a minute without a hint, and counts as a refusal.
+        if reply.command.is_some() {
+            return None;
+        }
+        if let Some(response) = &reply.error_response {
+            if response.r#type != ServerErrorResponseType::Unavailable as i32 {
+                return None;
             }
+            let nanos = match &response.details {
+                Some(server_error_response::Details::RetryInfo(info)) => {
+                    info.retry_after_nanoseconds
+                }
+                _ => 30_000_000_000,
+            };
+            tracing::warn!(
+                "the server answered unavailable ({}); throttling",
+                response.error_message
+            );
+            return Some(Duration::from_nanos(nanos));
+        }
+        let agent = self
+            .agents
+            .iter_mut()
+            .find(|agent| agent.uid.as_bytes().as_slice() == reply.instance_uid.as_slice())?;
+        if reply.flags & ServerToAgentFlags::ReportFullState as u64 != 0 {
+            agent.owes_full = true;
+        }
+        // An identity the Server assigns is the Agent's from here on, as the `opamp` client
+        // adopts it.
+        if let Some(new) = reply
+            .agent_identification
+            .as_ref()
+            .and_then(|identification| InstanceUid::from_wire(&identification.new_instance_uid))
+        {
+            agent.uid = new;
         }
         None
     }
@@ -1210,18 +1246,19 @@ fn diagnosis(fleet: &Fleet, instances: &[Instance]) -> String {
     text
 }
 
-/// Starts `count` hosts of `per_host` Agents each, at most [`RAMP_PER_SEC`] connections a second,
-/// every `rollout_every`-th Agent in the rollout's group.
+/// Starts `count` hosts of `per_host` Agents each, `per_sec` connections a second, every
+/// `rollout_every`-th Agent in the rollout's group.
 async fn ramp(
     fleet: &mut Fleet,
     endpoint: &str,
     tls: &[HostTls],
     per_host: usize,
     rollout_every: usize,
+    per_sec: u64,
 ) {
     let started = Instant::now();
     for (i, host) in tls.iter().enumerate() {
-        let due = started + Duration::from_millis(i as u64 * 1000 / RAMP_PER_SEC);
+        let due = started + Duration::from_millis(i as u64 * 1000 / per_sec);
         tokio::time::sleep_until(due.into()).await;
         let agents = (0..per_host)
             .map(|a| SimAgent::new((i * per_host + a).is_multiple_of(rollout_every)))
@@ -1276,6 +1313,91 @@ async fn revoke(client: &reqwest::Client, instance: &Instance, host: &SimHost) {
         "the revocation is taken: {status} {}",
         answer.text().await.unwrap_or_default()
     );
+}
+
+/// The sentinels each live instance is sent, how far apart they go, and how soon each has to end
+/// its session.
+const SENTINELS: usize = 4;
+const SENTINEL_EVERY: Duration = Duration::from_millis(2_500);
+const SENTINEL_WITHIN: Duration = Duration::from_secs(2);
+
+/// Whether each live instance reads its notifications and handles them in order: for each instance
+/// in `live`, [`SENTINELS`] hosts it carries are revoked through another live instance,
+/// [`SENTINEL_EVERY`] apart, and each host's session has to end within [`SENTINEL_WITHIN`]. Over
+/// the listener that takes some 0.1 to 0.3 s.
+///
+/// A revocation has a second way to an instance: each lease renewal reads the revocation list's
+/// version and reads the ledger again when it moved, at most one renewal every `lease_renew_secs`
+/// (10 s at the default) while renewals succeed. The sentinels are spaced so that one renewal ends
+/// at most one of them in time: four, 2.5 s apart, span 7.5 s, and with the 2 s each may take,
+/// less than one renewal interval. So an instance whose listener reads nothing, or whose handling
+/// is stuck or lags, fails at least three of its four. What it proves for the other kinds of
+/// notification is that the listener reads and the handling keeps up, as they share both; it
+/// does not apply a label or an assignment itself.
+///
+/// A host counts as carried when its last connection came up after its last loss, it was never
+/// refused, and no reconnect is pending for it. Answers the hosts revoked and how long each took.
+async fn heard_by_every(
+    client: &reqwest::Client,
+    instances: &[Instance],
+    live: &[usize],
+    placed: &HashMap<IpAddr, usize>,
+    fleet: &Fleet,
+    record: &Record,
+    skip: &HashSet<usize>,
+) -> Vec<(usize, Duration)> {
+    let mut used = skip.clone();
+    let mut heard = Vec::new();
+    for round in 0..SENTINELS {
+        let started = Instant::now();
+        let mut sent = Vec::new();
+        for &carrier in live {
+            let through = *live
+                .iter()
+                .find(|&&other| other != carrier)
+                .expect("another live instance");
+            let host = (0..fleet.hosts.len())
+                .find(|&host| {
+                    let log = record.host(host);
+                    !used.contains(&host)
+                        && placed.get(&fleet.hosts[host].address) == Some(&carrier)
+                        && !fleet.hosts[host].churn.load(Ordering::SeqCst)
+                        && log.refusals.is_empty()
+                        && log
+                            .connects
+                            .last()
+                            .is_some_and(|&up| log.losses.last().is_none_or(|&(lost, _)| up > lost))
+                })
+                .unwrap_or_else(|| panic!("a connected host instance {carrier} carries"));
+            used.insert(host);
+            let at = Instant::now();
+            revoke(client, &instances[through], &fleet.hosts[host]).await;
+            sent.push((carrier, through, host, at));
+        }
+        for (carrier, through, host, at) in sent {
+            let deadline = at + SENTINEL_WITHIN + Duration::from_secs(1);
+            let took = loop {
+                let took = record
+                    .host(host)
+                    .losses
+                    .iter()
+                    .find(|&&(lost, _)| lost >= at)
+                    .map(|&(lost, _)| lost - at);
+                if took.is_some() || Instant::now() >= deadline {
+                    break took;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            };
+            assert!(
+                took.is_some_and(|took| took <= SENTINEL_WITHIN),
+                "instance {carrier} heard and handled sentinel {round} committed through instance \
+                 {through} within {SENTINEL_WITHIN:?}: host {host}'s session ended after {took:?}"
+            );
+            heard.push((host, took.expect("ended")));
+        }
+        tokio::time::sleep_until((started + SENTINEL_EVERY).into()).await;
+    }
+    heard
 }
 
 /// The instances' and this process's resident memory, for the report.
@@ -1375,7 +1497,7 @@ fn failover(loss: Loss) {
     runtime.block_on(async {
         let mut fleet = Fleet::new(record.clone());
         let started = Instant::now();
-        ramp(&mut fleet, &endpoint, &tls, 1, usize::MAX).await;
+        ramp(&mut fleet, &endpoint, &tls, 1, usize::MAX, RAMP_PER_SEC).await;
         let gateway: Vec<usize> = (0..GATEWAY_CONNECTIONS)
             .map(|_| {
                 let agents = (0..GATEWAY_AGENTS_PER_CONNECTION)
@@ -1428,7 +1550,10 @@ fn failover(loss: Loss) {
             role.round_trip(),
             memory(&instances)
         );
-        assert!(rate >= 150.0, "at least 150 new Agents a second: {rate:.0}");
+        assert!(
+            rate >= NEW_AGENTS_PER_SEC as f64,
+            "at least {NEW_AGENTS_PER_SEC} new Agents a second: {rate:.0}"
+        );
         assert_eq!(rekeyed, 0, "no connection was ended for silence");
         let answer = client
             .put(operator_url(&instances[0], "hosts/sim-gateway/gateway"))
@@ -1593,7 +1718,27 @@ fn failover(loss: Loss) {
             );
         }
 
-        // No notification is left unread once they are carried.
+        // No notification is left unread once they are carried: each instance left hears and
+        // handles the sentinels committed through the other in time, and the database's queue is
+        // read.
+        // Not a host the killed instance carried, whose holder writes are counted below.
+        let mut skip: HashSet<usize> = revoked.iter().copied().collect();
+        skip.extend(gateway.iter().copied());
+        skip.extend(killed_hosts.iter().copied());
+        let heard = heard_by_every(
+            &client,
+            &instances,
+            &[0, 1],
+            &balancer.placed(),
+            &fleet,
+            &record,
+            &skip,
+        )
+        .await;
+        let revoked: HashSet<usize> = revoked
+            .into_iter()
+            .chain(heard.iter().map(|&(host, _)| host))
+            .collect();
         assert!(
             eventually(Duration::from_secs(10), || role.unread_notifications() == 0).await,
             "no notification is left unread: {} millionths of the queue",
@@ -1621,18 +1766,31 @@ fn failover(loss: Loss) {
                 log.refusals
             );
         }
-        let throttled: usize = (0..fleet.hosts.len())
+        let throttled: Vec<String> = (0..fleet.hosts.len())
             .filter(|host| !revoked.contains(host))
-            .map(|host| record.host(host).refusals.len())
-            .sum();
-        assert_eq!(throttled, 0, "no host was refused or throttled");
+            .flat_map(|host| {
+                record
+                    .host(host)
+                    .refusals
+                    .iter()
+                    .map(|(_, why)| format!("host {host}: {why}"))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert!(
+            throttled.is_empty(),
+            "no host was refused or throttled: {} {:?}",
+            throttled.len(),
+            &throttled[..throttled.len().min(10)]
+        );
 
         eprintln!(
             "G-20 failover: {agents} Agents, 1 per connection, a Gateway of {GATEWAY_CONNECTIONS} \
              connections, 3 instances, instance {KILLED} lost ({loss:?}) carrying {killed_agents}; carried \
              by the others after {carried_after:?} (bound {CARRIED_WITHIN:?}); revocations ended \
-             their sessions after {revoked_within:?} (bound {REVOKED_WITHIN:?}); ramp \
-             {ramp_took:?}; {}",
+             their sessions after {revoked_within:?} (bound {REVOKED_WITHIN:?}); each instance \
+             left ended its sentinels' sessions after {:?}; ramp {ramp_took:?}; {}",
+            heard.iter().map(|&(_, took)| took).collect::<Vec<_>>(),
             memory(&instances)
         );
         fleet.stop().await;
@@ -1640,11 +1798,11 @@ fn failover(loss: Loss) {
 }
 
 /// G-20's load: the presence batches and notifications of 100 000 simulated Agents at the default
-/// heartbeat, about 3 300 reports a second, across three instances, for ten minutes, while one
-/// Agent in a hundred reconnects each minute, labels are set on 100 Agents every five seconds, a
-/// Configuration is rolled out to 10 000 Agents and a certificate revoked once a minute, and a page
-/// of the Agents is read every ten seconds: no presence batch is written later than its interval
-/// after it was due, and no notification is left unread.
+/// heartbeat, ten on each connection, about 3 300 reports a second, across three instances, for ten
+/// minutes, while one Agent in a hundred reconnects each minute, labels are set on 100 Agents every
+/// five seconds, a Configuration is rolled out to 10 000 Agents and a certificate revoked once a
+/// minute, and a page of the Agents is read every ten seconds: no presence batch is written later
+/// than its interval after it was due, and no notification is left unread.
 /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
 #[test]
 fn g20_three_instances_carry_the_presence_and_notifications_of_100_000_agents() {
@@ -1663,15 +1821,25 @@ fn g20_three_instances_carry_the_presence_and_notifications_of_100_000_agents() 
     ))
     .expect("k");
     let secs = size("FLEET_G20_LOAD_SECS", LOAD_SECS);
-    let the_target = agents == LOAD_AGENTS && secs == LOAD_SECS;
+    // The fleet connects no faster than the instances hold new Agents, so that no connection
+    // waits behind the others' first reports, unless `FLEET_G20_RAMP_PER_SEC` names the
+    // connections a second.
+    let paced = (NEW_AGENTS_PER_SEC / per_host as u64).clamp(1, RAMP_PER_SEC);
+    let per_sec = size("FLEET_G20_RAMP_PER_SEC", paced).max(1);
+    let the_target = agents == LOAD_AGENTS
+        && secs == LOAD_SECS
+        && per_host == LOAD_AGENTS_PER_HOST
+        && variable("FLEET_G20_RAMP_PER_SEC").is_none();
     assert!(
         the_target || variable("CI").as_deref() != Some("true"),
-        "a CI run measures G-20's target: no FLEET_G20_LOAD_AGENTS or FLEET_G20_LOAD_SECS"
+        "a CI run measures G-20's target: no FLEET_G20_LOAD_AGENTS, FLEET_G20_AGENTS_PER_HOST, \
+         FLEET_G20_LOAD_SECS or FLEET_G20_RAMP_PER_SEC"
     );
     if !the_target {
         eprintln!(
-            "NOTE: {agents} Agents for {secs} s is not G-20's target of {LOAD_AGENTS} for \
-             {LOAD_SECS} s; this run does not decide G-20"
+            "NOTE: {agents} Agents, {per_host} on each connection, {per_sec} connections a second, \
+             for {secs} s is not G-20's target of {LOAD_AGENTS}, {LOAD_AGENTS_PER_HOST} on each, \
+             {paced} a second, for {LOAD_SECS} s; this run does not decide G-20"
         );
     }
     opamp::tls::install_ring_provider();
@@ -1709,9 +1877,9 @@ fn g20_three_instances_carry_the_presence_and_notifications_of_100_000_agents() 
             })
         });
         let _ = tracing_db;
-        ramp(&mut fleet, &endpoint, &tls, per_host, 10).await;
+        ramp(&mut fleet, &endpoint, &tls, per_host, 10, per_sec).await;
         let agents = fleet.agents();
-        let ramp_bound = Duration::from_secs(hosts as u64 / RAMP_PER_SEC + 300);
+        let ramp_bound = Duration::from_secs(hosts as u64 / per_sec + 300);
         assert!(
             eventually(ramp_bound, || fleet.connected_hosts() == hosts).await,
             "the fleet connected: {} of {hosts} hosts\n{}",
@@ -1722,15 +1890,33 @@ fn g20_three_instances_carry_the_presence_and_notifications_of_100_000_agents() 
             role.number("SELECT count(*) FROM agents WHERE connected AND holder IS NOT NULL")
                 as usize
         };
+        // The fleet is held at the failover's least rate of new Agents, and two minutes to spare.
+        let held_bound = (Duration::from_secs(agents as u64 / NEW_AGENTS_PER_SEC + 120))
+            .saturating_sub(started.elapsed());
         assert!(
-            eventually(ramp_bound, || connected(&role) == agents).await,
-            "every Agent is held: {} of {agents}",
-            connected(&role)
+            eventually(held_bound, || connected(&role) == agents).await,
+            "every Agent is held: {} of {agents} after {:?}",
+            connected(&role),
+            started.elapsed()
         );
         let ramp_took = started.elapsed();
+        let rekeyed = |from: &[usize]| -> usize {
+            instances
+                .iter()
+                .zip(from)
+                .map(|(instance, &from)| {
+                    instance
+                        .logged(from, "duplicate instance_uid; rekeying")
+                        .len()
+                })
+                .sum()
+        };
         eprintln!(
             "{agents} Agents on {hosts} connections ({per_host} each) across 3 instances, held \
-             after {ramp_took:?}, which the run does not count; {}",
+             after {ramp_took:?}, {:.0} new Agents a second, {} re-keyed as duplicates, which the \
+             run does not count; {}",
+            agents as f64 / ramp_took.as_secs_f64(),
+            rekeyed(&[0, 0, 0]),
             memory(&instances)
         );
 
@@ -1773,8 +1959,10 @@ fn g20_three_instances_carry_the_presence_and_notifications_of_100_000_agents() 
             tokio::time::sleep(Duration::from_secs(1)).await;
             ticks += 1;
             let through = &instances[usize::try_from(ticks % 3).expect("instance")];
-            // One host in a hundred reconnects each minute.
-            for _ in 0..(hosts / 6000).max(usize::from(ticks.is_multiple_of(60))) {
+            // One Agent in a hundred reconnects each minute, a host of `per_host` at a time,
+            // counted from the start so that no remainder is lost.
+            let churned = |ticks: u64| ticks * agents as u64 / (6000 * per_host as u64);
+            for _ in churned(ticks - 1)..churned(ticks) {
                 fleet.hosts[draw.below(hosts)]
                     .churn
                     .store(true, Ordering::SeqCst);
@@ -1859,12 +2047,31 @@ fn g20_three_instances_carry_the_presence_and_notifications_of_100_000_agents() 
         }
         let measured_for = measured.elapsed();
 
-        // Nothing is left unread once the acts end.
+        // Nothing is left unread once the acts end: each instance hears and handles the sentinels
+        // committed through another in time, and the database's queue is read.
+        let heard = heard_by_every(
+            &client,
+            &instances,
+            &[0, 1, 2],
+            &balancer.placed(),
+            &fleet,
+            &record,
+            &revoked,
+        )
+        .await;
+        revoked.extend(heard.iter().map(|&(host, _)| host));
         assert!(
             eventually(Duration::from_secs(15), || role.unread_notifications() == 0).await,
             "no notification is left unread: {} millionths of the queue",
             role.unread_notifications()
         );
+        // No presence batch hangs unseen: every Agent a connection carries was written seen within
+        // a heartbeat and two presence intervals.
+        let unseen = role.number(&format!(
+            "SELECT count(*) FROM agents WHERE connected AND holder IS NOT NULL \
+             AND last_seen_ms < (extract(epoch FROM clock_timestamp()) * 1000)::bigint - {}",
+            (HEARTBEAT + 2 * PRESENCE_INTERVAL).as_millis()
+        ));
         let late: Vec<String> = instances
             .iter()
             .zip(&logged_from)
@@ -1877,17 +2084,39 @@ fn g20_three_instances_carry_the_presence_and_notifications_of_100_000_agents() 
             .zip(&logged_from)
             .flat_map(|(instance, &from)| instance.logged(from, "could not write the presence"))
             .collect();
+        // Every Agent not revoked is held, by one row each, once the hosts that reconnected are
+        // back: no identity is re-keyed and no row stays held without its connection.
+        let expected = agents - revoked.len() * per_host;
+        let all_held = eventually(Duration::from_secs(60), || connected(&role) == expected).await;
         let still_held = connected(&role);
+        let rekeyed_measured = rekeyed(&logged_from);
+        let refused: Vec<String> = (0..hosts)
+            .filter(|host| !revoked.contains(host))
+            .flat_map(|host| {
+                record
+                    .host(host)
+                    .refusals
+                    .iter()
+                    .filter(|&&(at, _)| at >= measured)
+                    .map(|(_, why)| format!("host {host}: {why}"))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
         eprintln!(
             "G-20 load: {agents} Agents, {per_host} per connection, 3 instances, measured for \
              {measured_for:?} after a ramp of {ramp_took:?}; late presence batches {}, failed \
-             batches {}; the most of the notification queue unread at a sample {most_unread} \
-             millionths; slowest operator act {} ms; {} acts failed; {still_held} of {agents} \
-             Agents held at the end, {} hosts revoked; {}",
+             batches {}, Agents held unseen for {:?} {unseen}; the most of the notification queue \
+             unread at a sample {most_unread} millionths, the sentinels' sessions ended \
+             after {:?}; slowest operator act {} ms; {} acts failed; {} hosts refused or \
+             throttled; {still_held} of {expected} Agents held at the end, {} hosts revoked, \
+             {rekeyed_measured} Agents re-keyed as duplicates; {}",
             late.len(),
             failed_batches.len(),
+            HEARTBEAT + 2 * PRESENCE_INTERVAL,
+            heard.iter().map(|&(_, took)| took).collect::<Vec<_>>(),
             slowest.load(Ordering::SeqCst),
             failures.lock().expect("failures").len(),
+            refused.len(),
             revoked.len(),
             memory(&instances)
         );
@@ -1898,6 +2127,20 @@ fn g20_three_instances_carry_the_presence_and_notifications_of_100_000_agents() 
         assert!(
             failed_batches.is_empty(),
             "no presence batch fails: {failed_batches:#?}"
+        );
+        assert_eq!(
+            unseen, 0,
+            "no connected Agent's presence is older than its bound"
+        );
+        assert_eq!(rekeyed_measured, 0, "no Agent was re-keyed as a duplicate");
+        assert!(
+            all_held,
+            "every Agent not revoked is held by one row: {still_held} of {expected}"
+        );
+        assert!(
+            refused.is_empty(),
+            "no host was refused or throttled: {:?}",
+            &refused[..refused.len().min(10)]
         );
         let failures = failures.lock().expect("failures").clone();
         assert!(
