@@ -990,11 +990,12 @@ instance's Operator plane:
      request is refused whenever its host sends it again, in every later window and on every
      instance, and no approval signs its key;
    - the enrolment window, once those requests are rejected and not before: where the last
-     `enrolment.window` is `opened` and its `until_ms` is still ahead, open it again for the time
-     left to that end; otherwise leave it closed.
+     `enrolment.window` from before the restore is `opened` and its `until_ms` is still ahead,
+     open it again for the time left to that end; otherwise leave it closed.
 
-The enrolment requests queued and not yet decided since the backup are gone, so such a host
-enrols again. Then put the instance into the balancer's pool and start the others.
+The undecided requests are gone: the close drops those the restored database held, and it never
+held those queued since the backup. Their hosts send them again and enrol in the next window.
+Then put the instance into the balancer's pool and start the others.
 
 **An act of steps 1 and 3 is made only with its line queued**
 ([The audit record](#the-audit-record)), so the record misses one only where its line was lost
@@ -1205,8 +1206,8 @@ start.
   that report is answered `Unavailable`, and the Agent reports again. And a Gateway's mark through
   an instance of 0.8.0 may be refused for a Host it has not heard of yet, or written for a host the
   database has forgotten; make marks through an instance of this release. And an instance of 0.8.0
-  reads no rejected key: through it a key rejected in an earlier window waits again, is listed and
-  may be approved, so approve through an instance of this release, which refuses it. All four end
+  reads no rejected key: through it a rejected key waits again, is listed and may be approved, so
+  approve through an instance of this release, which refuses it. All four end
   with the last instance of 0.8.0.
 
 The first start of this release on a database migrates it to the schema of the paged lists: it
