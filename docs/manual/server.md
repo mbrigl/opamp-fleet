@@ -388,17 +388,20 @@ marks of an instance whose lease is no longer live, or of a start that took none
 next sweep on any instance once they were last renewed more than 130 seconds before: the 15 seconds
 a renewal may take to answer, the 100 seconds the one call to the bucket after it may take, and 15
 seconds to spare. Three cases are not covered, and in each the next start fails naming an entry
-whose artifact a sweep deleted, which is then uploaded again. An instance suspended for longer than
-130 seconds in the middle of a sweep may delete an artifact whose mark another instance took away
-meanwhile. A failover to a replica the marks had not reached, with asynchronous replication, leaves
-the new primary without them: across a failover the marks hold only with synchronous replication.
-And an instance of 0.8.0 beside this release neither marks nor reads a mark, so while both releases
-run a sweep through it can still delete an artifact an upload just stored. An upload waits for the
-lock up to 5 seconds, a sweep up to 60. Each sweep in progress holds the lock on a database session
-of its own, beside the pool's eight, which the database's `max_connections` must allow for. The lock
-is taken on PostgreSQL with the filesystem blob store too, where the instance is alone and it
-decides nothing. A start whose sweep cannot have the lock fails, naming the lock; a sweep after an
-act logs it, and what it would have deleted stays until the next start.
+whose artifact a sweep deleted, which is then uploaded again. A sweep deletes nothing more once more
+than 15 seconds have passed since it renewed the mark of the artifact it deletes next, a suspend of
+its host included; but an instance suspended for longer than 130 seconds while a call to the bucket
+is in flight may still delete an artifact whose mark another instance took away meanwhile, since
+that call goes on once the host runs. A failover to a replica the marks had not reached, with
+asynchronous replication, leaves the new primary without them: across a failover the marks hold only
+with synchronous replication. And an instance of 0.8.0 beside this release neither marks nor reads a
+mark, so while both releases run a sweep through it can still delete an artifact an upload just
+stored. An upload waits for the lock up to 5 seconds, a sweep up to 60. Each sweep in progress holds
+the lock on a database session of its own, beside the pool's eight, which the database's
+`max_connections` must allow for. The lock is taken on PostgreSQL with the filesystem blob store
+too, where the instance is alone and it decides nothing. A start whose sweep cannot have the lock
+fails, naming the lock; a sweep after an act logs it, and what it would have deleted stays until the
+next start.
 
 An instance that stops while an upload streams leaves the parts of an unfinished multipart upload,
 which are not objects: the Server neither lists nor deletes them. Expire them with a lifecycle rule
@@ -517,6 +520,14 @@ database under an instance id of its own, renews it every `lease_renew_secs`, an
 listeners open only while it can prove it. One that cannot renew before its lease lapses ends every
 session, closes both listeners, and takes a new lease under a new instance id once the database
 answers again.
+
+An instance measures its lease on a clock that counts the time its host was suspended
+(`CLOCK_BOOTTIME`). Once it runs again after a suspend longer than its lease, it serves nothing:
+it answers `503` to a request on either plane and to a message of an Agent, within 100
+milliseconds it ends every session and closes both listeners, and it opens them again under a new
+lease and a new instance id, as after losing the database. A virtual machine that its hypervisor
+pauses without the guest's clocks counting the pause is not covered: such an instance serves on
+until its next renewal, at most `lease_renew_secs` later, finds its lease lapsed.
 
 Each line an instance logs begins with `instance_id=<id>`, so the logs of several instances say
 which one acted. The instance makes its id as soon as its configuration names PostgreSQL, before

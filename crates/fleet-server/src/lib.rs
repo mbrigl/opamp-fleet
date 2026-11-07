@@ -250,6 +250,7 @@ impl packages::PackageStore {
         Self::with_backend(
             Box::new(FsPackageBackend::open(&data_dir)?),
             Box::new(FsBlobStore::open(&data_dir)?),
+            clock::Elapsed::monotonic(),
         )
     }
 
@@ -265,8 +266,13 @@ impl packages::PackageStore {
         data_dir: std::path::PathBuf,
         blobs: &config::BlobsConfig,
     ) -> Result<Self, String> {
-        Self::open_on(&Records::Files(data_dir.clone()), Some(&data_dir), blobs)
-            .map(|(store, _)| store)
+        Self::open_on(
+            &Records::Files(data_dir.clone()),
+            Some(&data_dir),
+            blobs,
+            clock::Elapsed::monotonic(),
+        )
+        .map(|(store, _)| store)
     }
 
     /// [`open_with`](Self::open_with), the Package records in `records` (ADR-0044) and the bytes
@@ -279,7 +285,9 @@ impl packages::PackageStore {
     /// filesystem record store an upload is staged under `fs`, and everything staged is deleted
     /// at startup alone. On PostgreSQL the store is opened before the instance takes its lease, so
     /// that a bucket that fails leaves no lease behind, and it takes no upload until
-    /// [`StagingCleanup::stage_under`](s3::StagingCleanup::stage_under) names that lease.
+    /// [`StagingCleanup::stage_under`](s3::StagingCleanup::stage_under) names that lease. A sweep
+    /// measures the time between the renewal of a mark and its deletion on `elapsed`
+    /// (ADR-0044 clause 14).
     ///
     /// # Errors
     /// As [`open_with`](Self::open_with), and when the filesystem blob store has no `data_dir`.
@@ -287,12 +295,13 @@ impl packages::PackageStore {
         records: &Records,
         data_dir: Option<&std::path::Path>,
         blobs: &config::BlobsConfig,
+        elapsed: clock::Elapsed,
     ) -> Result<(Self, Option<s3::StagingCleanup>), String> {
         let backend = records.packages()?;
         let Some(bucket) = blobs.s3() else {
             let data_dir =
                 data_dir.ok_or_else(|| "the filesystem blob store needs data_dir".to_string())?;
-            return Self::with_backend(backend, Box::new(FsBlobStore::open(data_dir)?))
+            return Self::with_backend(backend, Box::new(FsBlobStore::open(data_dir)?), elapsed)
                 .map(|store| (store, None));
         };
         let (store, live, hold): (_, s3::LiveLeases, s3::HoldBlobs) = match records {
@@ -334,7 +343,7 @@ impl packages::PackageStore {
                 &store,
             )?;
         }
-        Self::with_backend(backend, Box::new(store)).map(|store| (store, Some(cleanup)))
+        Self::with_backend(backend, Box::new(store), elapsed).map(|store| (store, Some(cleanup)))
     }
 }
 

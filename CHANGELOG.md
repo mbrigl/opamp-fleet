@@ -106,8 +106,24 @@ once its tag exists.
   upload it again* is uploaded again. A start that fails naming an entry whose artifact *is not
   stored* is mended by uploading that artifact again, or by restoring it from a backup: a sweep
   through an instance of 0.8.0 while both releases ran, an instance suspended for more than 130
-  seconds in a sweep, or a failover to an asynchronous replica the marks had not reached can leave
-  one.
+  seconds while a sweep's call to the bucket was in flight, or a failover to an asynchronous
+  replica the marks had not reached can leave one.
+- **A suspended instance serves nothing on a lease that lapsed meanwhile**
+  ([ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side](docs/adr/draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+  clause 3,
+  [ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision](docs/adr/draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
+  clause 14). On PostgreSQL an instance measured its lease on a clock that does not count the time
+  its host was suspended. After a suspend it served on until its next renewal, up to
+  `lease_renew_secs`, while its lease had lapsed for every other instance: it could admit an Agent
+  against a revocation list it no longer followed. It now measures on `CLOCK_BOOTTIME`, which
+  counts a suspend, and reads that clock before each answer: a request on either plane and a
+  message of an Agent are answered `503` while the lease is lapsed by it, and within 100
+  milliseconds it ends its sessions and closes both listeners until it holds a new lease. A sweep
+  likewise deletes nothing more once more than 15 seconds have passed, a suspend included, since it
+  renewed the mark of the artifact it deletes next.
+  **What to do:** nothing. A virtual machine paused by its hypervisor, whose clocks do not count
+  the pause, is not covered: such an instance serves on until its next renewal finds its lease
+  lapsed, as before.
 
 ## [0.8.0]
 

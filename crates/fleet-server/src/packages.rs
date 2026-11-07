@@ -553,6 +553,9 @@ pub struct PackageStore {
     /// The sweeps whose marks could not be taken away when they were done, tried again by the
     /// next sweep ([`PackageBackend::unmark`]).
     unmarked: Mutex<Vec<String>>,
+    /// The clock a sweep reads between the renewal of a blob's mark and that blob's deletion: one
+    /// that counts a suspend, as the binary hands it.
+    clock: crate::fleet::Elapsed,
     /// The check against the operator's public key, `[packages] verification_key` (ADR-0027).
     /// Each entry's signature is reported by it; `None` reports every signature `unchecked`.
     key: Option<Box<dyn SignatureVerifier>>,
@@ -565,6 +568,8 @@ impl PackageStore {
     /// entry names is deleted, as are the staging objects of every lease that is not live. The
     /// blobs are listed, the Packages read and the sweep made under the blob store's lock, held
     /// alone, and the sweep deletes only what it marked, while the lock holds (ADR-0044 clause 14).
+    /// Every sweep measures the time between the renewal of a mark and its deletion on `clock`, the
+    /// one that counts a suspend.
     ///
     /// # Errors
     /// Returns an error when the lock is not had in time, naming it, when a Package cannot be
@@ -573,6 +578,7 @@ impl PackageStore {
     pub fn with_backend(
         backend: Box<dyn PackageBackend>,
         blobs: Box<dyn BlobStore>,
+        clock: crate::fleet::Elapsed,
     ) -> Result<Self, String> {
         let hold = backend.hold_blobs()?;
         let stored: BTreeMap<String, u64> = blobs.list()?.into_iter().collect();
@@ -618,6 +624,7 @@ impl PackageStore {
             writes: Mutex::new(()),
             life: Mutex::new(Life::default()),
             unmarked: Mutex::new(Vec::new()),
+            clock,
             key: None,
         };
         // A blob no entry names is deleted at startup (ADR-0044 clause 13): an upload whose entry
@@ -1112,6 +1119,7 @@ impl PackageStore {
                     lost_while_sweeping(None);
                     return Ok(());
                 }
+                let asked = self.clock.now();
                 match self.backend.confirm(hold, sha256) {
                     Ok(true) => {}
                     Ok(false) => {
@@ -1125,6 +1133,17 @@ impl PackageStore {
                         lost_while_sweeping(Some(&e));
                         return Ok(());
                     }
+                }
+                // Past the bound of the renewal's call, a suspend perhaps, the time a mark outlives
+                // its renewal no longer covers the deletion (ADR-0044 clause 14).
+                if self.clock.now().saturating_sub(asked) > DELETED_WITHIN {
+                    tracing::warn!(
+                        blob = %sha256,
+                        "the sweep was held up after it renewed its mark, by a suspend perhaps: it \
+                         deletes nothing more, and what it would have deleted stays until a later \
+                         sweep"
+                    );
+                    return Ok(());
                 }
                 if let Err(e) = self.blobs.delete(sha256) {
                     match deletion {
@@ -1397,6 +1416,12 @@ enum Deletion {
     /// It is logged, and the sweep goes on: one after an act.
     IsLogged,
 }
+
+/// How long after it sent the renewal of a blob's mark a sweep may still call the blob store to
+/// delete that blob, on the clock that counts a suspend: the bound of the renewal's own call, which
+/// the time a mark outlives its renewal allows for (ADR-0044 clause 14). The PostgreSQL adapter's
+/// bound of a call, which its tests hold equal to this.
+pub(crate) const DELETED_WITHIN: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// Says that a sweep lost the blob store's lock, or could not ask whether it still holds it,
 /// before its deletions were done (ADR-0044 clause 14).
@@ -3020,6 +3045,24 @@ mod tests {
         unmarked: std::sync::Arc<Mutex<Vec<String>>>,
         confirmed: std::sync::Arc<Mutex<Vec<String>>>,
         unconfirmed: std::sync::Arc<Mutex<Option<String>>>,
+        /// Set, the first confirm suspends the host for this long, as the store's clock counts.
+        suspend_at_confirm: std::sync::Arc<Mutex<Option<std::time::Duration>>>,
+        /// What the store's clock counts beyond what passed, in nanoseconds.
+        suspended: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    }
+
+    impl Marking {
+        /// A clock that counts what passed, and the suspends this backend makes.
+        fn clock(&self) -> crate::clock::Elapsed {
+            let monotonic = crate::clock::Elapsed::monotonic();
+            let suspended = self.suspended.clone();
+            crate::clock::Elapsed::new(move || {
+                monotonic.now()
+                    + std::time::Duration::from_nanos(
+                        suspended.load(std::sync::atomic::Ordering::SeqCst),
+                    )
+            })
+        }
     }
 
     /// A [`Marking`] backend over files.
@@ -3076,6 +3119,18 @@ mod tests {
                 .lock()
                 .expect("confirmed")
                 .push(sha256.to_string());
+            if let Some(pause) = self
+                .marking
+                .suspend_at_confirm
+                .lock()
+                .expect("suspend")
+                .take()
+            {
+                self.marking.suspended.fetch_add(
+                    u64::try_from(pause.as_nanos()).expect("nanoseconds"),
+                    std::sync::atomic::Ordering::SeqCst,
+                );
+            }
             Ok(self
                 .marking
                 .unconfirmed
@@ -3108,10 +3163,58 @@ mod tests {
                 marking: marking.clone(),
             }),
             Box::new(crate::fs::FsBlobStore::open(dir).expect("blobs")),
+            marking.clock(),
         )
         .expect("open");
         marking.unmarked.lock().expect("unmarked").clear();
         (store, marking)
+    }
+
+    /// A sweep whose host is suspended after it renewed a blob's mark, for longer than the bound
+    /// of that renewal's call, deletes nothing more, that blob included: the time a mark outlives
+    /// its renewal no longer covers the deletion. It takes its marks away all the same.
+    /// Verifies: ADR-0044
+    #[test]
+    fn a_sweep_suspended_after_it_renewed_a_mark_deletes_nothing_more() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (store, marking) = marking(dir.path());
+        let set = stored_set(&store, "otelcol", "1.0.0", b"one artifact");
+        store
+            .put_entry(&set, &windows(), b"another artifact".to_vec())
+            .expect("entry");
+        let blobs: Vec<String> = [linux(), windows()]
+            .iter()
+            .map(|platform| hex::encode(store.artifact(&set, platform).expect("stored").0))
+            .collect();
+        *marking.suspend_at_confirm.lock().expect("suspend") =
+            Some(DELETED_WITHIN + std::time::Duration::from_secs(1));
+        assert_eq!(store.delete_set(&set), Ok(true));
+        assert_eq!(
+            marking.confirmed.lock().expect("confirmed").len(),
+            1,
+            "it asks for no other blob"
+        );
+        for sha256 in &blobs {
+            assert!(
+                dir.path().join("blobs").join(sha256).exists(),
+                "a blob was deleted after the suspend"
+            );
+        }
+        assert_eq!(*marking.unmarked.lock().expect("unmarked"), ["the sweep"]);
+    }
+
+    /// A pause no longer than the bound of the renewal's call deletes as before.
+    /// Verifies: ADR-0044
+    #[test]
+    fn a_sweep_paused_within_the_bound_of_its_renewal_deletes_as_before() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (store, marking) = marking(dir.path());
+        let set = stored_set(&store, "otelcol", "1.0.0", b"an artifact");
+        let sha256 = hex::encode(store.artifact(&set, &linux()).expect("stored").0);
+        *marking.suspend_at_confirm.lock().expect("suspend") =
+            Some(DELETED_WITHIN - std::time::Duration::from_secs(1));
+        assert_eq!(store.delete_set(&set), Ok(true));
+        assert!(!dir.path().join("blobs").join(sha256).exists());
     }
 
     /// Before each deletion a sweep asks the backend whether the blob is still marked, which
@@ -3255,6 +3358,7 @@ mod tests {
         let store = PackageStore::with_backend(
             Box::new(crate::fs::FsPackageBackend::open(dir).expect("backend")),
             Box::new(blobs),
+            crate::clock::Elapsed::monotonic(),
         )
         .expect("open");
         GatedStore {

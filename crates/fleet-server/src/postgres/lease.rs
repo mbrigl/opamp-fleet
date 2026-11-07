@@ -9,7 +9,7 @@
 //! the other's.
 
 use std::collections::HashSet;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use super::{client, schema, sql, Database, Exclusive, EXCLUSIVE_LOCK, MIGRATION_LOCK};
 
@@ -22,9 +22,6 @@ const LEASES_LOCK: &str = "hashtextextended('opamp-fleet-server-leases:' || \
 pub struct Taken {
     /// The instance id the lease is held under: a random UUID, not persisted.
     pub instance_id: String,
-    /// When the request that took it was sent: the instance measures its lease from here, which is
-    /// no later than the database's own time of it.
-    pub sent: Instant,
     /// The leases of instances that were gone, which this one took over: every lease that had
     /// lapsed, and the live lease of an instance that had to be alone and whose lock is free.
     pub taken_over: Vec<String>,
@@ -33,8 +30,6 @@ pub struct Taken {
 /// A lease this instance renewed.
 #[derive(Clone, Copy, Debug)]
 pub struct Renewal {
-    /// When the request that renewed it was sent.
-    pub sent: Instant,
     /// The revocation list's version as the database held it at the renewal
     /// (ADR-0041
     /// clause 10).
@@ -101,7 +96,6 @@ impl Database {
         let files = self.archive_offered();
         let host = host.to_string();
         let release = self.release();
-        let sent = Instant::now();
         let taking = self.run_within(bound, move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
@@ -225,14 +219,14 @@ impl Database {
         self.sweep_under(&id);
         Ok(Taken {
             instance_id: id,
-            sent,
             taken_over,
         })
     }
 
     /// Renews the lease of `instance_id` to lapse `lapse` after now, waiting at most `bound` for
-    /// the answer. Answers when the request was sent and the revocation list's version, read in the
-    /// same statement, or `None` when the lease is no longer live, lapsed or taken over.
+    /// the answer. Answers the revocation list's version, read in the same statement, or `None`
+    /// when the lease is no longer live, lapsed or taken over. The instance measures its lease from
+    /// before it asked.
     ///
     /// # Errors
     /// Returns an error naming the database when it does not answer within `bound`.
@@ -243,7 +237,6 @@ impl Database {
         bound: Duration,
     ) -> Result<Option<Renewal>, String> {
         let id = instance_id.to_string();
-        let sent = Instant::now();
         let (renewed, version) = self.run_within(bound, move |pool| async move {
             let client = client(&pool).await?;
             let row = client
@@ -260,7 +253,6 @@ impl Database {
             Ok((row.get::<_, i64>(0), row.get::<_, i64>(1)))
         })?;
         Ok((renewed == 1).then_some(Renewal {
-            sent,
             list_version: super::unsigned(version),
         }))
     }
@@ -506,7 +498,7 @@ mod tests {
     }
 
     /// The lines `take` logs.
-    fn logged(take: impl FnOnce() -> Taken) -> (Taken, Vec<String>) {
+    fn logged<T>(take: impl FnOnce() -> T) -> (T, Vec<String>) {
         let collected = Collected::default();
         let writer = collected.clone();
         let subscriber = tracing_subscriber::fmt()
@@ -547,8 +539,15 @@ mod tests {
         let gone = a.take_lease("host-a", LAPSE).expect("a's lease");
         lapse(&gone.instance_id);
         let (taken, lines) = logged(|| {
-            crate::instance::take_in_time(&b, times, "host-b", new_instance_id().expect("id"), None)
-                .expect("b's lease")
+            crate::instance::take_in_time(
+                &b,
+                &crate::clock::Elapsed::monotonic(),
+                times,
+                "host-b",
+                new_instance_id().expect("id"),
+                None,
+            )
+            .expect("b's lease")
         });
         let takeover = lines
             .iter()
@@ -568,6 +567,7 @@ mod tests {
         let (again, lines) = logged(|| {
             crate::instance::take_in_time(
                 &b,
+                &crate::clock::Elapsed::monotonic(),
                 times,
                 "host-b",
                 new_instance_id().expect("id"),
