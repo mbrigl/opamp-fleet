@@ -19,7 +19,7 @@ lease, or the lease's times give the cut room.
 
 - [`AGENTS.md` §5](../../../AGENTS.md#5-quality-bar--definition-of-done), which counts a flaky
   test as a defect
-- ADR-0041 clauses 3 and 10
+- ADR-0048 clauses 3 and 10
 - Seam: the test's cut of the listening connection
 
 ## Blocked by

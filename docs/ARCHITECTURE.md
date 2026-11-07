@@ -94,7 +94,7 @@ Five crates in one workspace ([ADR-0008](adr/0008-five-crates-on-tokio-and-axum.
   `x509-parser` by the adapter `x509::read`, with the random serial and the clock skew every issued
   certificate gets in the adapter `x509::issue` — and the
   bootstrap certificate's PKCS#12 file, whose rule is core and whose reading and writing with
-  `p12-keystore` is the adapter `pkcs12::file` (ADR-0022).
+  `p12-keystore` is the adapter `pkcs12::file` (ADR-0052).
 - **`fleet-server`** — the Server: the fleet and its Hosts, its Configurations, labels, packages
   and Deployments, the Agent plane and the Operator plane.
 - **`fleet-agent`** — the Client in all its modes, the program `supervisor`.
@@ -114,7 +114,7 @@ no module.
 
 - **Server stores** — one port per domain in the core module it serves, shaped so a database or
   an object store could implement it, and speaking in domain types, never paths
-  ([ADR-0044](adr/0044-the-servers-state-and-its-stores.md)):
+  ([ADR-0050](adr/0050-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)):
   `AgentStore` in `agent_store`, which holds each Agent's labels in its record, writes a rollout's
   revisions and assignments as one operation, answers what an assignment pins, and answers a page
   of the list of Agents (`query_page`) and the values the fleet reports (`reported_values`), with
@@ -125,7 +125,8 @@ no module.
   SHA-256) under the `PackageStore` in `packages`, the bytes in `data_dir` or, with
   `[blobs] store = "s3"`, in one bucket of an S3-compatible store through the adapter in `s3`, which
   bridges the synchronous port onto a runtime of its own (`bridge`)
-  ([ADR-0044](adr/0044-the-servers-state-and-its-stores.md)); `BootstrapStore` under the
+  ([ADR-0050](adr/0050-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md));
+  `BootstrapStore` under the
   `BootstrapCertificates` in `bootstrap`; `EnrolmentStore` under the `Enrolment` in `enrolment`;
   `FloorStore` under the `PackageFloors` in `floors`, the floor the operator signed per Agent type
   ([ADR-0028](adr/0028-package-versions-high-water-mark-and-floor.md));
@@ -141,8 +142,8 @@ no module.
   notifications of `postgres::notify` — and applies the schema embedded in `postgres::schema` as
   numbered migrations; `postgres::import` is `server migrate-to-postgres`, which copies a
   `data_dir` into the database offline
-  ([ADR-0044](adr/0044-the-servers-state-and-its-stores.md)). The core's
-  constructors take the ports — `AppState::with_stores`, `PackageStore::with_backend`,
+  ([ADR-0050](adr/0050-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)).
+  The core's constructors take the ports — `AppState::with_stores`, `PackageStore::with_backend`,
   `PackageOffering::with_deployments`, `BootstrapCertificates::open`, `Enrolment::open_on` — and
   `lib.rs` chooses the adapters by `[database]` in `Records`, which `AppState::on`,
   `PackageStore::open_on`, `PackageOffering::on` and `BootstrapCertificates::on` take, and wires
@@ -154,7 +155,7 @@ no module.
   filesystem adapter in `fs::floors`, its PostgreSQL adapter in `postgres::floors`, and the one
   `contract` test there that runs on both stores. A new store copies its shape and its test
   ([ADR-0009](adr/0009-ports-and-adapters.md),
-  [ADR-0044](adr/0044-the-servers-state-and-its-stores.md)).
+  [ADR-0050](adr/0050-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)).
 - **Server instances** — on PostgreSQL every Server is an instance, and several share one
   database and one bucket
   ([ADR-0048](adr/0048-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)).
@@ -197,15 +198,16 @@ no module.
   message before the handler does anything else and for each download in the guard
   ([ADR-0045](adr/0045-tls-1-3-two-planes-and-bounded-input.md)).
 - **Audit record** — `audit` is the port every security decision is recorded through;
-  `audit_log` chains the entries by hash and `fs::FsAuditStore` keeps them under
-  `data_dir/audit/` ([ADR-0039](adr/0039-an-append-only-audit-record.md)). An act a restore
+  `audit_log` chains the entries by hash and `fs::FsAuditStore` keeps them under `data_dir/audit/`
+  ([ADR-0046](adr/0046-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again.md)).
+  An act a restore
   repeats by its entry — a revocation, a Gateway mark, a floor set, a rejection, the window
   closed — holds a place in the writer's channel first, an `audit::Permit`, and writes the entry
   into it once it has run. On PostgreSQL
   `postgres::audit::PgAuditStore` keeps one chain per lease; the lease's take opens it and closes
   the chains of the lapsed leases it removes, as each renewal does, and an orderly shutdown closes
   the instance's own
-  ([ADR-0042](adr/0042-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance.md)).
+  ([ADR-0047](adr/0047-the-audit-record-is-one-hash-chain-per-lease-and-names-the-lease-each-decision-was-taken-under.md)).
   Each entry names the lease its decision was taken under (`taken_under`), and on PostgreSQL the
   writer keeps a batch whose write failed and tries it again first
   ([ADR-0047](adr/0047-the-audit-record-is-one-hash-chain-per-lease-and-names-the-lease-each-decision-was-taken-under.md),
@@ -215,7 +217,7 @@ no module.
   prune's advisory lock, recording each `audit.pruned` through the instance's writer and waiting
   for it before it deletes, in rounds of a bounded number of entries, every chain of one round in
   one transaction
-  ([ADR-0044](adr/0044-the-servers-state-and-its-stores.md)
+  ([ADR-0050](adr/0050-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
   clause 12).
 - **Server ports beyond storage** — `fleet` owns `CertificateSigner`, which the local CA in `ca`
   implements for the CSR flow and the renewal proof (ADR-0038), and
@@ -392,7 +394,7 @@ probation that commits or rolls back.
 `bootstrap` checks the subject and the life, records what was issued, and asks its
 `BootstrapSigner` port — the bootstrap CA with its key in `ca` — to make the key, sign, and
 seal both into the PKCS#12 file it keeps, the key's only way out
-([ADR-0022](adr/0022-bootstrap-certificates-and-enrolment.md)).
+([ADR-0052](adr/0052-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)).
 A fresh host presents a bootstrap certificate while an operator has
 the enrolment window open — to the Server, or to a Gateway that relays its request — and proves it
 in its CSR ([ADR-0015](adr/0015-client-modes-and-the-gateway.md));
@@ -400,12 +402,12 @@ the request is filed under the certificate it proves and waits until an operator
 the certificate it
 gets names a new host and carries the subject values `tls` read from the bootstrap certificate
 and `ca` checked again, never the CSR's; every renewal carries the predecessor's
-([ADR-0022](adr/0022-bootstrap-certificates-and-enrolment.md)). The questionnaire of `service
-install --interactive` and `service config`
+([ADR-0052](adr/0052-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)).
+The questionnaire of `service install --interactive` and `service config`
 does this before the service is registered: `service::enrol` runs the Client's own Agent over the
-ordinary `transport` with the bootstrap pair until the issued certificate is in the state
-directory ([ADR-0022](adr/0022-bootstrap-certificates-and-enrolment.md)). From then on the Client
-renews at two thirds of the certificate's life,
+ordinary `transport` with the bootstrap pair until the issued certificate is in the state directory
+([ADR-0052](adr/0052-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)).
+From then on the Client renews at two thirds of the certificate's life,
 proving with the old key which certificate it renews. A revocation closes the sessions it
 concerns at once, on every instance by its notification, and follows every renewal.
 
@@ -442,11 +444,11 @@ artifacts, named by SHA-256, unless a bucket keeps them), `agents/` (each Agent'
 inside), `hosts/`,
 `certificates/` (the register), `revocations.json`, `bootstrap/`, `enrolment.json` (the window and
 its queue), `package-floors.json` (the floor of each Agent type) and `audit/`
-([ADR-0044](adr/0044-the-servers-state-and-its-stores.md)).
+([ADR-0050](adr/0050-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)).
 With `[database] store = "postgres"` the records are rows of one PostgreSQL database instead, and
 `data_dir` keeps, with the filesystem blob store, `blobs/` and an archived `audit/`; with the blobs
 in S3 too there is no `data_dir`, and an instance keeps nothing on its disk
-([ADR-0044](adr/0044-the-servers-state-and-its-stores.md)).
+([ADR-0050](adr/0050-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)).
 On files the Server loads every record at startup and answers from memory; on PostgreSQL an
 instance holds only the Agents connected to it, each read at its first report, and the Operator
 plane reads the fleet from the database.

@@ -1,11 +1,11 @@
-//! Enrolment: how a host gets its first client certificate (ADR-0038 clause 17, ADR-0044 clause 8
-//! and ADR-0022 clauses 9 and 10).
+//! Enrolment: how a host gets its first client certificate (ADR-0038 clause 17, ADR-0050 clause 8
+//! and ADR-0052 clauses 9 and 10).
 //!
 //! A host enrols with a bootstrap certificate from a CA of its own. Such a connection is admitted
 //! only while an operator holds an **enrolment window** open, and the certificate signing request
 //! it sends waits in a **pending queue** until an operator approves or rejects it. The window's end
 //! and the queue — an approved request with its certificate included — are persisted through the
-//! [`EnrolmentStore`] port before the act that changes them is answered (ADR-0044 clause 8), so a
+//! [`EnrolmentStore`] port before the act that changes them is answered (ADR-0050 clause 8), so a
 //! restart keeps an open window open until its end and keeps its requests; a window whose end has
 //! passed is closed when it is loaded. When the window closes, every pending request expires.
 //!
@@ -34,7 +34,7 @@ pub const MAX_WINDOW_SECS: u64 = 86_400;
 pub const MAX_PENDING: usize = 1024;
 
 /// The most requests of one bootstrap certificate the queue holds at once, unless
-/// `[enrolment] max_pending_per_bootstrap` says otherwise (ADR-0022): a quarter of the queue.
+/// `[enrolment] max_pending_per_bootstrap` says otherwise (ADR-0052): a quarter of the queue.
 pub const DEFAULT_MAX_PENDING_PER_BOOTSTRAP: usize = MAX_PENDING / 4;
 
 /// What a request says about itself, read from the CSR by the adapter that parses it.
@@ -43,12 +43,12 @@ pub struct Request {
     /// The PEM the Agent sent, signed as it is on approval.
     pub csr_pem: String,
     /// The CSR's subject, for the audit record only: the host chose it, so it is neither listed
-    /// nor carried (ADR-0022 clause 10).
+    /// nor carried (ADR-0052 clause 10).
     pub subject: String,
     /// The SHA-256 fingerprint of the requested public key, hex — the key of the queue, and what the
     /// Client logs so an operator can match a request to a host.
     pub key_fingerprint: String,
-    /// The `instance_uid` of the message that carried it, for the register (ADR-0044 clause 9).
+    /// The `instance_uid` of the message that carried it, for the register (ADR-0050 clause 9).
     pub instance_uid: Vec<u8>,
 }
 
@@ -61,8 +61,8 @@ pub struct Requester {
     /// The bootstrap certificate's subject as text, for the audit record.
     pub bootstrap_subject: String,
     /// The values an approval carries into the host certificate, or why the subject breaks the
-    /// rules of ADR-0022 clause 1 — read from the certificate verified in the handshake. The queue
-    /// lists this as it stands (ADR-0022 clause 10), so an operator sees a refusal before pressing
+    /// rules of ADR-0052 clause 1 — read from the certificate verified in the handshake. The queue
+    /// lists this as it stands (ADR-0052 clause 10), so an operator sees a refusal before pressing
     /// Approve.
     pub carried: Result<SubjectValues, String>,
     pub bootstrap_fingerprint: String,
@@ -85,7 +85,7 @@ pub struct Pending {
 }
 
 /// Writes the register entry and the Host an approval prepared, and takes them up, for the
-/// enrolment store that writes them with the decision on its request (ADR-0044 clause 9).
+/// enrolment store that writes them with the decision on its request (ADR-0050 clause 9).
 pub trait Registrar {
     /// Writes `approved` through the register's own store and takes it up: what a store calls
     /// once it has written the decision, when it cannot write the register in the same write. A
@@ -97,11 +97,11 @@ pub trait Registrar {
 
     /// Takes up `approved` once the store wrote it in the transaction that decided its request,
     /// and that transaction committed, with the revocation list's version the transaction left,
-    /// `written`: `None` where it is not known, as for a commit read back (ADR-0044 clause 10).
+    /// `written`: `None` where it is not known, as for a commit read back (ADR-0050 clause 10).
     fn committed(&self, approved: &Approved, written: Option<u64>);
 }
 
-/// What an approval keeps of what it signed (ADR-0044 clause 9): it records the signature in the
+/// What an approval keeps of what it signed (ADR-0050 clause 9): it records the signature in the
 /// audit record and prepares the register entry, before the decision is written, and records a
 /// signature whose decision was not written.
 pub trait Recorder: Registrar {
@@ -196,7 +196,7 @@ pub enum Submitted {
     Rejected,
     /// The queue is full; the Client is told to come back later.
     Full,
-    /// Its bootstrap certificate holds its share of the queue already (ADR-0022); the Client is
+    /// Its bootstrap certificate holds its share of the queue already (ADR-0052); the Client is
     /// told to come back later. `first` is set for the first such refusal of that certificate in
     /// the window, the one that is audited.
     OverShare { first: bool },
@@ -233,7 +233,7 @@ pub enum DecisionError {
     Subject(String),
     /// The CA could not sign the request.
     Sign(String),
-    /// The decision could not be persisted (ADR-0044 clause 8); the request still waits.
+    /// The decision could not be persisted (ADR-0050 clause 8); the request still waits.
     Store(String),
     /// Another instance is deciding the request at this moment — a `409`. Nothing was decided
     /// here; asked again, the request is found decided, or still waiting.
@@ -245,7 +245,7 @@ pub enum DecisionError {
 pub enum WindowError {
     /// The duration is outside 1 to [`MAX_WINDOW_SECS`] seconds — a `400`.
     Invalid(String),
-    /// The window could not be persisted (ADR-0044 clause 8); it is as it was.
+    /// The window could not be persisted (ADR-0050 clause 8); it is as it was.
     Store(String),
 }
 
@@ -258,7 +258,7 @@ pub enum Decision {
     Rejected,
 }
 
-/// The window and its requests as they persist (ADR-0044 clause 8): what an [`EnrolmentStore`]
+/// The window and its requests as they persist (ADR-0050 clause 8): what an [`EnrolmentStore`]
 /// keeps, and all it keeps.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -308,7 +308,7 @@ pub enum Took {
     Held(Box<PersistedRequest>),
     /// The queue holds as many requests as it may.
     Full,
-    /// The request's bootstrap certificate holds its share of the queue (ADR-0022).
+    /// The request's bootstrap certificate holds its share of the queue (ADR-0052).
     OverShare,
     /// No window is open.
     Closed,
@@ -316,11 +316,11 @@ pub enum Took {
     Rejected,
 }
 
-/// The enrolment's port (ADR-0009, ADR-0044): where the window and its queue persist. The
+/// The enrolment's port (ADR-0009, ADR-0050): where the window and its queue persist. The
 /// filesystem adapter ([`FsEnrolmentStore`](crate::fs::FsEnrolmentStore)) keeps them in
 /// `enrolment.json`. Each act is one write that decides from what is stored, so the queue's bounds
 /// hold for every instance on one database
-/// (ADR-0041
+/// (ADR-0048
 /// clause 19). The acts' bodies here read and write the whole, for a store that is its only
 /// writer; a store that is shared answers each in one transaction of its own.
 pub trait EnrolmentStore: Send + Sync {
@@ -429,10 +429,10 @@ pub trait EnrolmentStore: Send + Sync {
 
     /// Approves the waiting request `id`: `sign` signs it while the request is held, and its
     /// answer is written as the request's decision, with the register entry and the Host it
-    /// prepared (ADR-0044 clause 9). A request the store holds no longer waiting, or whose key it
+    /// prepared (ADR-0050 clause 9). A request the store holds no longer waiting, or whose key it
     /// holds rejected, is answered [`Approval::NotWaiting`] before anything is signed, so of two
     /// instances approving one request one signs and records it and the other nothing
-    /// (ADR-0041
+    /// (ADR-0048
     /// clause 19). A store other instances share also refuses a request whose bootstrap
     /// certificate, `bootstrap`, the list names, and withdraws it; a store that is its only writer
     /// leaves that to the list in memory. Such a store answers [`Approval::Deciding`] for a
@@ -515,7 +515,7 @@ pub trait EnrolmentStore: Send + Sync {
 
     /// Takes the decision on the request `id` back, so it waits again: what an approval whose
     /// certificate could not be registered does, and what a start does for a decided request
-    /// whose certificate the register does not hold (ADR-0044 clause 9). A request the store does
+    /// whose certificate the register does not hold (ADR-0050 clause 9). A request the store does
     /// not hold is left.
     ///
     /// # Errors
@@ -622,7 +622,7 @@ struct State {
     /// Keyed by the id, which is the key fingerprint.
     entries: BTreeMap<String, Entry>,
     /// The bootstrap certificates refused for their share in this window, each audited once
-    /// (ADR-0022). Not persisted: a restart may audit a certificate once more.
+    /// (ADR-0052). Not persisted: a restart may audit a certificate once more.
     over_share: std::collections::BTreeSet<CertId>,
     /// The rejected keys, as the store keeps them: beyond the window.
     rejected: BTreeMap<String, u64>,
@@ -667,7 +667,7 @@ impl State {
             return Took::Full;
         }
         // A re-sent request has its entry and was answered before; only a new one is counted
-        // against its bootstrap certificate's share (ADR-0022).
+        // against its bootstrap certificate's share (ADR-0052).
         let share = self
             .entries
             .values()
@@ -714,12 +714,12 @@ fn answer(decision: Option<&Decision>) -> Submitted {
 pub struct Enrolment {
     clock: Arc<dyn Clock>,
     state: Mutex<State>,
-    /// The most requests of one bootstrap certificate the queue holds (ADR-0022).
+    /// The most requests of one bootstrap certificate the queue holds (ADR-0052).
     max_per_bootstrap: usize,
     /// Where the window and its queue persist; `None` keeps them in memory, as a test does.
     store: Option<Box<dyn EnrolmentStore>>,
     changes: watch::Sender<u64>,
-    /// Where a window that runs out records the requests that expired with it (ADR-0039).
+    /// Where a window that runs out records the requests that expired with it (ADR-0046).
     audit: std::sync::OnceLock<Arc<dyn crate::audit::Audit>>,
 }
 
@@ -737,7 +737,7 @@ impl Enrolment {
         }
     }
 
-    /// Restores the window and its queue from `store` (ADR-0044 clause 8), and persists through it
+    /// Restores the window and its queue from `store` (ADR-0050 clause 8), and persists through it
     /// from here on. A window whose end has passed while the Server was down is closed, and its
     /// requests expire with it.
     ///
@@ -770,7 +770,7 @@ impl Enrolment {
         })
     }
 
-    /// Holds at most `max` requests of one bootstrap certificate in the queue (ADR-0022), clamped
+    /// Holds at most `max` requests of one bootstrap certificate in the queue (ADR-0052), clamped
     /// to 1 to [`MAX_PENDING`]; the configuration refuses anything else at startup.
     #[must_use]
     pub fn with_max_pending_per_bootstrap(mut self, max: usize) -> Self {
@@ -950,7 +950,7 @@ impl Enrolment {
     /// not be written; the request then still waits.
     ///
     /// `recorder` records the signature and prepares its register entry and Host, which are
-    /// written with the decision (ADR-0044 clause 9): a decision that is not written leaves
+    /// written with the decision (ADR-0050 clause 9): a decision that is not written leaves
     /// neither, and `recorder` records the signature as undecided. When a store that writes the
     /// register with its decision cannot tell whether its commit landed, the request is read
     /// back: decided with the certificate signed here, the approval stands.
@@ -978,7 +978,7 @@ impl Enrolment {
             return Err(self.withdrawn(state, id));
         }
         // The bootstrap certificate's values, under the rules they were issued by, and never the
-        // request's (ADR-0022 clause 11 and ADR-0015 clause 23).
+        // request's (ADR-0052 clause 11 and ADR-0015 clause 23).
         let subject = entry.pending.requester.carried.clone().map_err(|e| {
             DecisionError::Subject(format!(
                 "the bootstrap certificate's subject cannot be carried into a host \
@@ -1000,7 +1000,7 @@ impl Enrolment {
             Ok((decision, approved))
         };
         // Persisted before it is answered, the certificate included, so a restart before the host
-        // collects it hands it over all the same (ADR-0044 clause 8). The store signs only a
+        // collects it hands it over all the same (ADR-0050 clause 8). The store signs only a
         // request that still waits there, and holds it meanwhile: one another instance decided or
         // withdrew is gone, and nothing is signed for it.
         let approval = match &self.store {
@@ -1108,7 +1108,7 @@ impl Enrolment {
     }
 
     /// Whether the store writes an approval's register entry with its decision, in one
-    /// transaction; a start then has nothing to take back (ADR-0044 clause 9).
+    /// transaction; a start then has nothing to take back (ADR-0050 clause 9).
     pub fn registers_with_its_decision(&self) -> bool {
         self.store
             .as_ref()
@@ -1129,7 +1129,7 @@ impl Enrolment {
     }
 
     /// Takes the decision on the request `id` back, so it waits again: what a start does for an
-    /// approved request whose certificate the register does not hold (ADR-0044 clause 9).
+    /// approved request whose certificate the register does not hold (ADR-0050 clause 9).
     ///
     /// # Errors
     /// Returns an error when the store cannot be written; the request is then left decided.
@@ -1271,7 +1271,7 @@ impl Enrolment {
     }
 
     /// Reads the window and its queue again from the store, as another instance changed them
-    /// (ADR-0041
+    /// (ADR-0048
     /// clauses 9 and 10), and wakes every connection waiting on them, so a request another instance
     /// approved is handed to the connection that asked. It reads under the lock, so no act of this
     /// instance's own lands between the read and the swap; the queue is bounded, so the read is
@@ -1579,7 +1579,7 @@ pub(crate) mod tests {
     /// Two instances on one store answer a request as the store holds it: one the other approved
     /// is handed out with its certificate, and one the other decided or withdrew is not found,
     /// however the first held it, and signs nothing.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0048
     #[test]
     fn two_instances_on_one_store_answer_a_request_as_the_store_holds_it() {
         let clock = Arc::new(Manual(AtomicU64::new(1_000_000)));
@@ -1677,7 +1677,7 @@ pub(crate) mod tests {
 
     /// An approved enrolment survives a restart: the window stays open until its end, a waiting
     /// request still waits, and the approved one hands its host the certificate it was issued.
-    /// Verifies: ADR-0044
+    /// Verifies: ADR-0050
     #[test]
     fn an_approved_enrolment_survives_a_restart() {
         let clock = Arc::new(Manual(AtomicU64::new(1_000_000)));
@@ -1721,7 +1721,7 @@ pub(crate) mod tests {
 
     /// A window whose end passed while the Server was down is closed when it is loaded, and its
     /// requests — an approved one included — expire with it.
-    /// Verifies: ADR-0044
+    /// Verifies: ADR-0050
     #[test]
     fn a_window_whose_end_passed_while_down_is_closed_on_load() {
         let clock = Arc::new(Manual(AtomicU64::new(1_000_000)));
@@ -1754,7 +1754,7 @@ pub(crate) mod tests {
 
     /// An act whose result cannot be persisted is not taken: the window stays as it was, and a
     /// decision leaves the request waiting.
-    /// Verifies: ADR-0044
+    /// Verifies: ADR-0050
     #[test]
     fn an_act_that_cannot_be_persisted_changes_nothing() {
         // It holds what it wrote, as every store does: an act decides from what is stored.
@@ -1799,7 +1799,7 @@ pub(crate) mod tests {
 
     /// A decision on a request another instance is deciding at this moment is answered so, and
     /// decides nothing: the request still waits here, to be decided once asked again.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0048
     #[test]
     fn a_decision_on_a_request_another_instance_is_deciding_is_answered_so() {
         #[derive(Clone, Default)]
@@ -1923,7 +1923,7 @@ pub(crate) mod tests {
     fn the_queue_is_bounded() {
         let (enrolment, _) = enrolment();
         enrolment.open(600).expect("open");
-        // One bootstrap certificate per request, so only the queue's own bound applies (ADR-0022).
+        // One bootstrap certificate per request, so only the queue's own bound applies (ADR-0052).
         for n in 0..MAX_PENDING {
             let one_each = Requester {
                 bootstrap: CertId::new(b"bootstrap CA", &format!("{n:x}")),
@@ -1943,7 +1943,7 @@ pub(crate) mod tests {
     /// The requests of one bootstrap certificate hold at most their share of the queue; a re-sent
     /// one joins its entry all the same, another certificate's is still queued, and the first
     /// refusal of a certificate in a window is the one marked for the audit.
-    /// Verifies: ADR-0022
+    /// Verifies: ADR-0052
     #[test]
     fn one_bootstrap_certificate_holds_at_most_its_share() {
         let (enrolment, _) = enrolment();
@@ -1990,7 +1990,7 @@ pub(crate) mod tests {
     }
 
     /// The default share is a quarter of the queue.
-    /// Verifies: ADR-0022
+    /// Verifies: ADR-0052
     #[test]
     fn the_default_share_is_a_quarter_of_the_queue() {
         assert_eq!(DEFAULT_MAX_PENDING_PER_BOOTSTRAP, 256);
@@ -2051,7 +2051,7 @@ pub(crate) mod tests {
 
     /// An approval signs the values the bootstrap certificate carries, and one whose subject breaks
     /// the rules signs nothing, says why, and leaves the request for the operator to reject.
-    /// Verifies: ADR-0022
+    /// Verifies: ADR-0052
     #[test]
     fn an_approval_carries_the_bootstrap_values_or_signs_nothing() {
         let (enrolment, _clock) = enrolment();
@@ -2222,7 +2222,7 @@ pub(crate) mod tests {
 
     /// An approval whose commit landed but whose answer was lost is read back: decided with the
     /// certificate signed here, it stands, its register entry is taken up, and nothing is recorded
-    /// as undecided (ADR-0044 clause 9).
+    /// as undecided (ADR-0050 clause 9).
     /// Verifies: ADR-0050
     #[test]
     fn a_commit_that_landed_and_whose_answer_was_lost_is_read_back_as_approved() {
@@ -2246,7 +2246,7 @@ pub(crate) mod tests {
     /// A signature whose decision was not written is recorded as undecided: rolled back when the
     /// store refused the register's write or the request is read back waiting, unknown when it
     /// cannot be read back. The request still waits, and nothing is taken up. A signature the
-    /// audit record did not take is not recorded as undecided either (ADR-0044 clause 9).
+    /// audit record did not take is not recorded as undecided either (ADR-0050 clause 9).
     /// Verifies: ADR-0050
     #[test]
     fn a_signature_whose_decision_was_not_written_is_recorded_undecided() {
@@ -2300,7 +2300,7 @@ pub(crate) mod tests {
 
     /// An approval whose answer was lost while another instance decided the request with a
     /// certificate of its own is not taken for its own: the read back finds another certificate,
-    /// so the signature is rolled back and nothing is taken up (ADR-0044 clause 9).
+    /// so the signature is rolled back and nothing is taken up (ADR-0050 clause 9).
     /// Verifies: ADR-0050
     #[test]
     fn a_read_back_that_finds_another_certificate_rolls_the_signature_back() {
@@ -2323,7 +2323,7 @@ pub(crate) mod tests {
     }
 
     /// A commit the database server itself refused is rolled back as it stands: no read back is
-    /// asked, so one that would fail cannot leave it unknown (ADR-0044 clause 9).
+    /// asked, so one that would fail cannot leave it unknown (ADR-0050 clause 9).
     /// Verifies: ADR-0050
     #[test]
     fn a_refusal_the_database_answers_is_rolled_back_without_a_read_back() {

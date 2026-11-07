@@ -1,7 +1,7 @@
 # ADR-0051: A WebSocket on which nothing arrives for one heartbeat interval is ended by the end that opened it
 
-- **Status:** 🟡 proposed
-- **Date:** 2026-11-05
+- **Status:** 🟢 accepted
+- **Date:** 2026-11-07
 - **Deciders:** Markus Brigl
 - **Applies to:** how long a WebSocket the Agent's end opens may stay silent: the driver in `crates/opamp/src/client/ws.rs` (`run`, `run_from` and `serve`), the Gateway's upstream pool in `crates/fleet-agent/src/gateway/pool.rs`, every other WebSocket an Agent, a Client or a Gateway opens to a Server, and the reading of a WebSocket by the endpoint in `crates/opamp/src/server.rs` (`serve_socket`) the Server, the Supervisor Endpoint and the Gateway's endpoint share
 

@@ -26,7 +26,7 @@ pub const PENDING_KEY_FILE: &str = "client-key.pending.pem";
 /// swap cut short is completed at the next start rather than leaving a mismatched pair.
 pub const PENDING_CERT_FILE: &str = "client-cert.pending.pem";
 /// The request in flight, re-sent unchanged until it is answered — the enrolment queue knows a
-/// request by its public key (ADR-0022 clause 9).
+/// request by its public key (ADR-0052 clause 9).
 pub const PENDING_CSR_FILE: &str = "client-csr.pending.pem";
 
 /// The trust and the identity in force.
@@ -74,7 +74,7 @@ pub fn client_tls_for(
             })
         }
         // An identity opened from a `bootstrap.p12` stands in for the configured one until the
-        // Server's certificate is stored (ADR-0022 clause 15); the issued one outranks both.
+        // Server's certificate is stored (ADR-0052 clause 15); the issued one outranks both.
         None => match (&config.bootstrap_identity, config.is_enrolled()) {
             (Some(bootstrap), false) => Some(Identity {
                 cert_pem: bootstrap.cert_pem.clone(),
@@ -136,7 +136,7 @@ fn key_in(path: &Path, pem: Vec<u8>) -> Result<Zeroizing<Vec<u8>>, String> {
     Ok(pem)
 }
 
-/// The identity in the PKCS#12 file at `path`, under `password`, as PEM in memory (ADR-0022
+/// The identity in the PKCS#12 file at `path`, under `password`, as PEM in memory (ADR-0052
 /// clause 15). A file over [`fleet_core::pkcs12::MAX_FILE_BYTES`] is refused before it is read.
 ///
 /// # Errors
@@ -216,9 +216,9 @@ mod tests {
     use super::*;
 
     /// A `bootstrap.p12` opens to PEM in memory and stands in for the configured identity until
-    /// the Server's certificate is stored; a file over the bound is refused unread (ADR-0022
+    /// the Server's certificate is stored; a file over the bound is refused unread (ADR-0052
     /// clause 15).
-    /// Verifies: ADR-0022
+    /// Verifies: ADR-0052
     #[test]
     fn an_opened_bootstrap_p12_is_presented_until_the_client_is_enrolled() {
         use fleet_core::pkcs12::file::OpenError;

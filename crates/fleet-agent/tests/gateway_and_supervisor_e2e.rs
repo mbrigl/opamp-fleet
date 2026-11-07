@@ -347,7 +347,7 @@ async fn a_verified_offer_restarts_the_gateway_and_leaves_the_supervisors_runnin
     // connecting; the Server's record of the Agent holds that report. The Client dials its second
     // connection as soon as it closes the first, so its report may arrive while the Server still
     // holds the first connection open: with no host presented that is a duplicate, and the Server
-    // re-keys the Agent (ADR-0041 clause 8). Two records then carry the name, so the wait looks at
+    // re-keys the Agent (ADR-0048 clause 8). Two records then carry the name, so the wait looks at
     // each and follows the one that holds the report, by its `instance_uid`.
     let records = fleet_server::fs::FsAgentStore::open(&dir.path().join("fleet-configs"))
         .expect("the server's records");

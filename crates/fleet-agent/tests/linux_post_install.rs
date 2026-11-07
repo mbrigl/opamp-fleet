@@ -63,7 +63,7 @@ fn the_post_install_prints_no_endpoint_the_client_refuses_at_startup() {
 /// install finds the bootstrap identity it enrols with. The manual alternative names the identity,
 /// `[tls] cert_file` and `key_file`, and nothing the Client does not read; a password it names is
 /// a `bootstrap.p12`'s, never a credential (ADR-0037 clause 9).
-/// Verifies: ADR-0022, ADR-0037
+/// Verifies: ADR-0052, ADR-0037
 #[test]
 fn the_post_install_steps_ask_for_the_client_identity() {
     let script = post_install();

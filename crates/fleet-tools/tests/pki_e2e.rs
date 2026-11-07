@@ -86,7 +86,7 @@ async fn a_fleet_made_by_pki_init_admits_an_enrolled_host() {
     let signer = fleet_server::ca::ClientCa::from_config(&fragment.client_ca)
         .expect("the client CA pki init made loads");
     // The Server issues the host's bootstrap certificate from the bootstrap CA key pki init gave
-    // it, as a PKCS#12 file only (ADR-0022 clause 3), and the operator extracts its pair where
+    // it, as a PKCS#12 file only (ADR-0052 clause 3), and the operator extracts its pair where
     // supervisor.toml.fragment names it (ADR-0032).
     let bootstrap_ca =
         fleet_server::ca::BootstrapCa::from_config(&fragment.enrolment, Some(&fragment.client_ca))

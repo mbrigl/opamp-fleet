@@ -1880,7 +1880,7 @@ async fn the_forms_mark_every_field_required_or_optional() {
 }
 
 /// The bundled UI asks for a bootstrap password of 8 to 128 characters, as the Server takes.
-/// Verifies: ADR-0022
+/// Verifies: ADR-0052
 #[tokio::test]
 async fn the_ui_asks_for_a_bootstrap_password_of_8_to_128_characters() {
     let server = spawn().await;
@@ -2031,14 +2031,14 @@ async fn the_ui_shows_the_sha256_and_carries_the_signing_file_the_api_serves() {
 
 /// The bundled UI is a client of the REST API and nothing more (ADR-0026 clause 24), so its
 /// Enrolments tab depends on the names the enrolment routes share with it: the routes it calls and
-/// the fields it shows and sends, the requested key's fingerprint above all — what ADR-0022 clause 10 lists
+/// the fields it shows and sends, the requested key's fingerprint above all — what ADR-0052 clause 10 lists
 /// so an operator can match a request to the Client's log. The page asks for them, and the OpenAPI
 /// document describes them; a rename on one side breaks here rather than in an empty column. What
 /// the page does with them is not tested in the repository: it is one embedded page with no
 /// frontend toolchain to run it in. The queue lists the bootstrap certificate's subject values and
 /// not the request's own subject, the issue form sends all six attributes and the password, and
-/// the page never handles a private key: every certificate offers its PKCS#12 file (ADR-0022).
-/// Verifies: ADR-0025, ADR-0022
+/// the page never handles a private key: every certificate offers its PKCS#12 file (ADR-0052).
+/// Verifies: ADR-0025, ADR-0052
 #[tokio::test]
 async fn the_ui_and_the_enrolment_api_share_their_names() {
     let server = spawn().await;

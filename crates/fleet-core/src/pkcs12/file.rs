@@ -1,8 +1,8 @@
-//! The bootstrap PKCS#12 file written and read with `p12-keystore` (ADR-0022 clauses 4 and 15).
+//! The bootstrap PKCS#12 file written and read with `p12-keystore` (ADR-0052 clauses 4 and 15).
 //!
 //! Reading is bounded: a file over [`MAX_FILE_BYTES`] is refused before it is parsed, and
 //! `p12-keystore` itself refuses work factors above a million iterations. Before anything is
-//! decrypted, the file's structure is held to ADR-0022 clause 4's family: a MAC of HMAC with SHA-2,
+//! decrypted, the file's structure is held to ADR-0052 clause 4's family: a MAC of HMAC with SHA-2,
 //! and every encryption PBES2 with PBKDF2-HMAC-SHA-2 and AES-CBC — no PBES1, no scrypt, no AES-GCM,
 //! no key in the clear. `p12-keystore` would read several of those.
 
@@ -81,7 +81,7 @@ impl fmt::Display for OpenError {
     }
 }
 
-/// The certificate and key in `bytes`, under `password` (ADR-0022 clause 15).
+/// The certificate and key in `bytes`, under `password` (ADR-0052 clause 15).
 ///
 /// # Errors
 /// [`OpenError::WrongPassword`] when the MAC fails, and [`OpenError::Invalid`] for a file over
@@ -138,7 +138,7 @@ const PBES2: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.5
 const DATA: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.7.1");
 const ENCRYPTED_DATA: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.7.6");
 
-/// Whether the file is of ADR-0022 clause 4's family, read from its structure before anything is
+/// Whether the file is of ADR-0052 clause 4's family, read from its structure before anything is
 /// decrypted: a MAC — without one anyone could swap the certificate without the password — of
 /// HMAC with SHA-2, and every encrypted part PBES2 with PBKDF2-HMAC-SHA-2 and AES-CBC. A key in the
 /// clear, and any bag but an encrypted key and a certificate, is refused.
@@ -255,7 +255,7 @@ mod tests {
 
     const PASSWORD: &str = "correct horse battery";
 
-    /// Verifies: ADR-0022
+    /// Verifies: ADR-0052
     #[test]
     fn a_sealed_file_opens_under_its_password_to_exactly_the_certificate_and_its_key() {
         let (certificate, key) = pair("bootstrap");
@@ -290,9 +290,9 @@ mod tests {
         assert_eq!(*key_of(identity), [1, 2, 3]);
     }
 
-    /// The file is the scheme ADR-0022 clause 4 names: PBES2 with AES-256 and a SHA-256 MAC, at
+    /// The file is the scheme ADR-0052 clause 4 names: PBES2 with AES-256 and a SHA-256 MAC, at
     /// 600 000 iterations.
-    /// Verifies: ADR-0022
+    /// Verifies: ADR-0052
     #[test]
     fn a_sealed_file_is_pbes2_with_aes_256_and_a_sha_256_mac() {
         let (certificate, key) = pair("bootstrap");
@@ -313,7 +313,7 @@ mod tests {
         assert!(text.contains(aes256), "AES-256-CBC");
     }
 
-    /// Verifies: ADR-0022
+    /// Verifies: ADR-0052
     #[test]
     fn a_file_is_refused_when_large_without_a_mac_or_not_one_key_with_its_certificate() {
         assert!(matches!(

@@ -1,4 +1,4 @@
-//! `server migrate` as an operator runs it (ADR-0044 clause 26): three named directories, what it
+//! `server migrate` as an operator runs it (ADR-0050 clause 26): three named directories, what it
 //! did on standard output, and an exit code a script can act on.
 
 use std::process::Command;
@@ -19,7 +19,7 @@ fn migrate(config_dir: &std::path::Path, data_dir: &std::path::Path) -> std::pro
 /// An old layout migrates into a new data directory, which the command names for `server.toml`;
 /// the same data directory a second time is refused, non-zero, and a call missing a directory is
 /// a usage error.
-/// Verifies: ADR-0044
+/// Verifies: ADR-0050
 #[test]
 fn migrate_writes_a_new_data_directory_once_and_says_so() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -52,8 +52,8 @@ fn migrate_writes_a_new_data_directory_once_and_says_so() {
 /// `server migrate-to-postgres` takes no `--data-dir` when the configuration names S3, as a Server
 /// on PostgreSQL and S3 keeps nothing on its disk, and refuses one before it reaches the database
 /// or the bucket, naming the flag; with the filesystem blob store a call without it is a usage
-/// error (ADR-0044 clause 27).
-/// Verifies: ADR-0044
+/// error (ADR-0050 clause 27).
+/// Verifies: ADR-0050
 #[cfg(unix)]
 #[test]
 fn migrate_to_postgres_takes_a_data_dir_with_the_filesystem_blob_store_alone() {

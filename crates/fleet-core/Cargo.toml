@@ -15,7 +15,7 @@ git2.workspace = true
 
 [dependencies]
 # The bootstrap certificate as a password-protected PKCS#12 file, written by the Server and read by
-# the Client (ADR-0022): `pkcs12`, `pkcs5` and `der` read which schemes a file uses; `rcgen` and
+# the Client (ADR-0052): `pkcs12`, `pkcs5` and `der` read which schemes a file uses; `rcgen` and
 # `x509-parser` tell whether the key and the certificate belong together.
 p12-keystore.workspace = true
 pkcs12.workspace = true

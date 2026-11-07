@@ -428,7 +428,7 @@ pub trait Clock: Send + Sync {
 
 /// The port of the time that has passed, as a lease and a sweep measure it
 /// (ADR-0048
-/// clause 3, ADR-0044 clause 14): a clock that counts the time the host was suspended, which the
+/// clause 3, ADR-0050 clause 14): a clock that counts the time the host was suspended, which the
 /// binary hands the lease and the package store (on Linux `CLOCK_BOOTTIME`). A reading is the time since an origin of the
 /// clock's own: two readings of one clock compare, readings of two clocks do not. The adapters'
 /// constructors are in [`crate::clock`].
@@ -454,7 +454,7 @@ impl Elapsed {
 pub trait CertificateSigner: Send + Sync {
     /// The signed certificate, PEM, for a CSR in PEM, and what it says about itself. Its subject
     /// carries `subject` — the values copied from the bootstrap certificate or the predecessor
-    /// (ADR-0015 clause 23 and ADR-0022 clause 12) — and never the request's.
+    /// (ADR-0015 clause 23 and ADR-0052 clause 12) — and never the request's.
     ///
     /// # Errors
     /// Returns an error when the request does not parse or cannot be signed.
@@ -612,7 +612,7 @@ pub struct AppState {
     /// The enrolment window and its queue (ADR-0038); `None` while `[enrolment]` is not set, and no
     /// host enrols.
     enrolment: Option<Arc<Enrolment>>,
-    /// The bootstrap certificates the Server issued (ADR-0022); `None` while `[enrolment]` is not
+    /// The bootstrap certificates the Server issued (ADR-0052); `None` while `[enrolment]` is not
     /// set.
     bootstrap: Option<Arc<crate::bootstrap::BootstrapCertificates>>,
     /// What the client CA signed and what is revoked (ADR-0038); `None` only where a test serves
@@ -620,7 +620,7 @@ pub struct AppState {
     revocations: Option<Arc<Revocations>>,
     /// The floor of each Agent type (ADR-0028); `None` only where a test serves without it.
     floors: Option<Arc<crate::floors::PackageFloors>>,
-    /// The audit record every security decision goes to (ADR-0039); `None` only in tests.
+    /// The audit record every security decision goes to (ADR-0046); `None` only in tests.
     audit: Option<Arc<dyn Audit>>,
     /// How often an admitted peer may be heard (ADR-0045); `None` only in tests.
     agent_rate: Option<Arc<crate::agent_rate::AgentRate>>,
@@ -1093,7 +1093,7 @@ impl AppState {
         //
         // On a shared store an instance holds only the Agents it carries, each loaded at its first
         // report here, and loads none at startup
-        // (ADR-0041
+        // (ADR-0048
         // clause 8).
         let mut fleet = HashMap::new();
         let mut written = HashMap::new();
@@ -1109,7 +1109,7 @@ impl AppState {
         if !fleet.is_empty() {
             info!(agents = fleet.len(), "restored the fleet");
         }
-        // A rollout cut short leaves at most a revision no assignment references (ADR-0044
+        // A rollout cut short leaves at most a revision no assignment references (ADR-0050
         // clause 2); it is collected here, before anything is offered.
         for config in configs.list() {
             configs.retain_only(
@@ -1336,7 +1336,7 @@ impl AppState {
         self
     }
 
-    /// Arms the issuing of bootstrap certificates and their record (ADR-0022).
+    /// Arms the issuing of bootstrap certificates and their record (ADR-0052).
     #[must_use]
     pub fn with_bootstrap(
         mut self,
@@ -1360,7 +1360,7 @@ impl AppState {
         self
     }
 
-    /// Marks `host` as a Gateway, or not (ADR-0022 clause 11); answers whether this Server knows
+    /// Marks `host` as a Gateway, or not (ADR-0052 clause 11); answers whether this Server knows
     /// the host. The mark decides whether the Agents arriving over it carry its values and how
     /// they group (ADR-0043 clauses 18 and 19), so every Agent is placed again.
     ///
@@ -1438,7 +1438,7 @@ impl AppState {
     /// does. On a shared store the Client Agent of a Host may be carried by another instance, so
     /// the Agents the host register binds to the Host that this instance does not hold are read
     /// from the store, and a Client Agent among them counts as one of the group
-    /// (ADR-0041
+    /// (ADR-0048
     /// clause 8). Behind a Gateway, where the register binds no Agent, the Agents that arrived
     /// over the Gateway's Host are read instead ([`arrived_over`](Self::arrived_over)).
     ///
@@ -1606,7 +1606,7 @@ impl AppState {
     }
 
     /// The fleet as the Operator plane reads it
-    /// (ADR-0044 clause 3): on a shared store every record as
+    /// (ADR-0050 clause 3): on a shared store every record as
     /// stored, connected as its stored presence says, placed among the others, and nothing of what
     /// this instance holds in memory; on a store this Server alone writes, what it holds.
     ///
@@ -1752,7 +1752,7 @@ impl AppState {
         self.floors.as_ref()
     }
 
-    /// Arms the audit record (ADR-0039).
+    /// Arms the audit record (ADR-0046).
     #[must_use]
     pub fn with_audit(mut self, audit: Option<Arc<dyn Audit>>) -> Self {
         self.audit = audit;
@@ -1780,7 +1780,7 @@ impl AppState {
     }
 
     /// Records a decision this Server is about to act on; without a record it is not taken
-    /// (ADR-0039 clause 5).
+    /// (ADR-0046 clause 5).
     fn audited(&self, entry: Entry) -> Result<(), String> {
         match &self.audit {
             Some(audit) => audit
@@ -1797,8 +1797,8 @@ impl AppState {
         }
     }
 
-    /// Records a certificate the client CA signed on a renewal, before it is offered (ADR-0044
-    /// clause 9, ADR-0039 clause 1). An approval records through [`Approving`].
+    /// Records a certificate the client CA signed on a renewal, before it is offered (ADR-0050
+    /// clause 9, ADR-0046 clause 1). An approval records through [`Approving`].
     fn record_issued(
         &self,
         signed: &Signed,
@@ -1814,7 +1814,7 @@ impl AppState {
             .map_err(|e| format!("cannot record the issued certificate: {e}"))
     }
 
-    /// The audit entry of a signature, `issuance.signed` (ADR-0039 clause 1): `predecessor` for a
+    /// The audit entry of a signature, `issuance.signed` (ADR-0046 clause 1): `predecessor` for a
     /// renewal, and for an enrolment the request it approves.
     fn signature_entry(
         &self,
@@ -1853,7 +1853,7 @@ impl AppState {
     }
 
     /// What a CSR renews, the host the new certificate is for (ADR-0015 clause 18), and the
-    /// subject values it carries on (ADR-0022 clause 12). A renewal proof names the certificate
+    /// subject values it carries on (ADR-0052 clause 12). A renewal proof names the certificate
     /// whose key signed the new one — through a Gateway too — and the host and the values carry
     /// on from it; without one, the certificate the connection presented is renewed, unless its
     /// host is marked as a Gateway (ADR-0015 clause 18). A bootstrap proof makes the request an
@@ -1929,7 +1929,7 @@ impl AppState {
         self.enrolment.as_ref()
     }
 
-    /// Approves one pending enrolment request: the client CA signs it (ADR-0022 clause 10), with
+    /// Approves one pending enrolment request: the client CA signs it (ADR-0052 clause 10), with
     /// the subject values of the bootstrap certificate the request came with (ADR-0015 clause 23).
     ///
     /// # Errors
@@ -1941,7 +1941,7 @@ impl AppState {
         let signer = self.client_ca.as_deref().ok_or_else(|| {
             DecisionError::Sign("this Server issues no client certificates".into())
         })?;
-        // A new host: its identity is minted here and carried by every renewal (ADR-0022 clause 11).
+        // A new host: its identity is minted here and carried by every renewal (ADR-0052 clause 11).
         let host = InstanceUid::default().to_string();
         let revoked = |bootstrap: &CertId| {
             self.revocations
@@ -1955,7 +1955,7 @@ impl AppState {
             .find(|pending| pending.id == id)
             .and_then(|pending| pending.requester.gateway);
         let serial = enrolment.approve(id, signer, &host, &Approving(self), &revoked)?;
-        // Recorded before the approval is answered (ADR-0044 clause 9). The decision is written
+        // Recorded before the approval is answered (ADR-0050 clause 9). The decision is written
         // already, so a record that cannot take it refuses nothing: the register answers for it.
         if let Err(e) = self.audited(
             Entry::new("enrolment.approved", "approved")
@@ -1971,7 +1971,7 @@ impl AppState {
     /// Takes back every approved request whose certificate the register does not hold, so it
     /// waits again, and records each signature as undecided: what a start does with a store that
     /// writes the decision before the register entry, after a write between the two failed
-    /// (ADR-0044 clause 9). `read` reads what a certificate, PEM, says about itself. Answers how
+    /// (ADR-0050 clause 9). `read` reads what a certificate, PEM, says about itself. Answers how
     /// many it took back.
     ///
     /// # Errors
@@ -2009,7 +2009,7 @@ impl AppState {
         Ok(taken)
     }
 
-    /// What an enrolment connection is told (ADR-0022 clause 9): the capabilities that say it may
+    /// What an enrolment connection is told (ADR-0052 clause 9): the capabilities that say it may
     /// send a CSR, and — once its request is approved — the issued certificate, as an ordinary
     /// connection-settings offer with no private key in it.
     pub fn enrolment_answer(
@@ -2093,7 +2093,7 @@ impl AppState {
 
     /// Reads the Configurations and, where package delivery is armed, the Deployments and the
     /// Packages again from their stores, as another instance changed them
-    /// (ADR-0041
+    /// (ADR-0048
     /// clause 12). Each one whose flag is set is dropped and read again whole.
     ///
     /// # Errors
@@ -2119,7 +2119,7 @@ impl AppState {
     }
 
     /// Takes up what another instance wrote to the records of Agents this one holds
-    /// (ADR-0041
+    /// (ADR-0048
     /// clauses 8 and 9): the record of each Agent of `uids` this instance holds, or of every one
     /// it holds where `uids` is `None`, is read again from the store. Its assignment, its labels and
     /// its queued restart are taken into what is held, its group is placed again for its labels,
@@ -2363,7 +2363,7 @@ impl AppState {
         })
     }
 
-    /// Writes releases (ADR-0026 clause 6, ADR-0044 clause 2): each Configuration's saved revision
+    /// Writes releases (ADR-0026 clause 6, ADR-0050 clause 2): each Configuration's saved revision
     /// is pinned — copied into the store's retained revisions, its hash the one the assignment
     /// keeps — and the revisions and the records carrying the new assignments go to the store as
     /// one operation. Only once it succeeded are they the fleet's. A failure leaves the fleet's
@@ -2437,7 +2437,7 @@ impl AppState {
     }
 
     /// Collects every retained revision of `names` no stored assignment references any more — a
-    /// question the store answers (ADR-0044 clause 2).
+    /// question the store answers (ADR-0050 clause 2).
     fn collect_revisions(&self, names: impl IntoIterator<Item = String>) {
         for name in names.into_iter().collect::<BTreeSet<_>>() {
             let referenced = self.agent_store.referenced_revisions(&name);
@@ -2966,7 +2966,7 @@ impl AppState {
     /// Forgets everything this Server knows about one Agent (ADR-0043): the record is dropped and
     /// the row leaves the fleet view. Nothing reaches the host — no process is stopped and no
     /// certificate revoked, since a certificate here proves fleet membership and its host, never
-    /// which Agent is speaking (ADR-0022 clause 11). A Client still running therefore reappears on its next
+    /// which Agent is speaking (ADR-0052 clause 11). A Client still running therefore reappears on its next
     /// report, which this Server answers with `ReportFullState` as it does for any unknown Agent.
     /// The `instance_uid` is released from the Host it was bound to, so that report binds it to
     /// the host whose certificate carries it (ADR-0043 clause 10).
@@ -3299,7 +3299,7 @@ impl AppState {
     ///
     /// The fleet lock is held across the check and the delete, so a rollout of this Server cannot
     /// pin it in between. A store that other Servers write too counts the stored assignments again
-    /// in the act that deletes (ADR-0044 clause 2), so a pin
+    /// in the act that deletes (ADR-0050 clause 2), so a pin
     /// written through another instance refuses it as well, and takes it out of every Deployment
     /// in that act too.
     pub fn delete_configuration(&self, name: &str) -> Result<bool, DeleteError> {
@@ -3394,7 +3394,7 @@ impl AppState {
     /// so an older state never lands after a newer one, since the Agent's own lock, which every
     /// report of it holds from its start to its answer, is held across the write; and a report is
     /// answered only once its record is written (ADR-0043 clause 4). What a store's write may take
-    /// is bounded: a PostgreSQL call fails after `postgres::CALL_TIMEOUT` (ADR-0044 clause 24).
+    /// is bounded: a PostgreSQL call fails after `postgres::CALL_TIMEOUT` (ADR-0050 clause 24).
     ///
     /// On a shared store, an Agent this instance was answered no count of takes for, its take not
     /// written or its answer lost, has its record written at every report and no digest kept: a
@@ -3634,7 +3634,7 @@ impl AppState {
     /// holder, so that no other instance forgets it as not connected while the next batch is due
     /// (ADR-0043 clause 11), and so that an instance that
     /// carried it before stops carrying it
-    /// (ADR-0041
+    /// (ADR-0048
     /// clause 8): one write per connect, never per heartbeat. A take that makes the Agent's holder
     /// change more than ten times within a minute is logged as a likely duplicate. Without a lease
     /// nothing is written. One that fails is logged, and the next batch writes it, where no other
@@ -3702,7 +3702,7 @@ impl AppState {
 
     /// Stops carrying each Agent of `uids`, every one this instance carries where `None`, whose
     /// stored presence no longer names this instance as its holder: another instance took it
-    /// (ADR-0041
+    /// (ADR-0048
     /// clause 8). It is held as on a closed connection, and its disconnect is not written, since
     /// the row is the other instance's. An Agent the row still names is kept, so of two instances
     /// that take one Agent at once only the one the row does not name stops carrying it. The
@@ -3866,7 +3866,7 @@ impl AppState {
 
     /// [`process`](Self::process) for a connection that presented a certificate: the host it was
     /// issued to binds the Agents it reports for, and a CSR without a renewal proof renews it
-    /// unless its host is a Gateway's (ADR-0022 clause 11, ADR-0015).
+    /// unless its host is a Gateway's (ADR-0052 clause 11, ADR-0015).
     pub fn process_presented(
         &self,
         msg: AgentToServer,
@@ -3937,7 +3937,7 @@ impl AppState {
         let mut reply_flags = 0u64;
         let mut identification = None;
 
-        // An instance_uid belongs to the host whose certificate first reported it (ADR-0022
+        // An instance_uid belongs to the host whose certificate first reported it (ADR-0052
         // clause 11): a certificate of another host does not speak for it, nor re-keys it. Such a
         // reporter is re-keyed — it gets an identity of its own, never the one it claimed. The
         // binding is made only once the report is admitted below.
@@ -4254,7 +4254,7 @@ impl AppState {
                     });
                 }
             }
-            // A re-key an Agent asks for keeps its host (ADR-0022 clause 11).
+            // A re-key an Agent asks for keeps its host (ADR-0052 clause 11).
             if let Some((old, new)) = rekeyed {
                 if let Err(e) = revocations.rebind(old.as_bytes(), new.as_bytes()) {
                     warn!(error = %e, "cannot move the host binding to the new instance_uid");
@@ -4684,7 +4684,7 @@ impl AppState {
     /// connection it arrived over, is the whole of the approval, since admission already required
     /// every proof this endpoint asks of any message, which is what the Baseline's flow means by
     /// awaiting one. A request the Server refuses, or one whose record cannot be written, which
-    /// the Agent retries (ADR-0039 clause 5), is answered here, the report's record persisted.
+    /// the Agent retries (ADR-0046 clause 5), is answered here, the report's record persisted.
     fn issue(
         &self,
         csr: Vec<u8>,
@@ -4695,7 +4695,7 @@ impl AppState {
     ) -> Result<TlsCertificate, Box<Processed>> {
         let uid = ending.uid;
         // `Ok(Err(..))` is a request the Server refuses; `Err(..)` a record it cannot write,
-        // which the Agent retries (ADR-0039 clause 5).
+        // which the Agent retries (ADR-0046 clause 5).
         let outcome: Result<Result<Signed, String>, String> = match &self.client_ca {
             // The Baseline's MUST when the Server cannot act on the request. An Agent reaching
             // here ignored the undeclared capability, so it is a client error.
@@ -4880,7 +4880,7 @@ impl AppState {
     /// On a shared store, loads the record of `uid` from it when this Server does not hold one, as
     /// at an Agent's first report here: another instance may have written it, and its labels, its
     /// assignment and its queued restart are what this report goes on from
-    /// (ADR-0041
+    /// (ADR-0048
     /// clause 8). Read before the fleet lock is taken, so no other report waits for it. Answers
     /// whether it loaded one; one that cannot be read is logged, and the report goes on as an
     /// Agent's first.
@@ -5117,7 +5117,7 @@ impl AppState {
     }
 
     /// Whether any Agent's assignment references this Package — the gate that makes an assigned
-    /// Package's bytes immutable (ADR-0026 clause 13). The Agent store answers it (ADR-0044
+    /// Package's bytes immutable (ADR-0026 clause 13). The Agent store answers it (ADR-0050
     /// clause 2); the fleet lock keeps a rollout of this Server from pinning it meanwhile. A
     /// store that other Servers write too refuses the write again from the stored assignments, in
     /// the act that writes.
@@ -5198,7 +5198,7 @@ impl AppState {
         Ok(())
     }
 
-    /// Stores one streamed upload as an entry of a Package (ADR-0027, ADR-0044). Refused while the
+    /// Stores one streamed upload as an entry of a Package (ADR-0027, ADR-0050). Refused while the
     /// Package is assigned to an Agent (ADR-0026 clause 13); no push, because saving never
     /// distributes.
     pub fn put_package_entry(
@@ -5408,7 +5408,7 @@ impl AppState {
 
     /// The REST view of the fleet (`GET /api/v1/agents`), read as [`read_fleet`](Self::read_fleet)
     /// reads it: on a shared store from the database, each Agent connected as its stored presence
-    /// says (ADR-0041
+    /// says (ADR-0048
     /// clause 13).
     ///
     /// # Errors
@@ -6596,7 +6596,7 @@ fn refuse_unreleasable(
     )))
 }
 
-/// What an approval keeps of what it signed (ADR-0044 clause 9): the signature in the audit
+/// What an approval keeps of what it signed (ADR-0050 clause 9): the signature in the audit
 /// record before its decision is written, and its register entry and Host, prepared here, written
 /// with the decision and taken up once it is.
 struct Approving<'a>(&'a AppState);
@@ -6915,8 +6915,8 @@ mod tests {
 
     /// Every `Unavailable` — a full enrolment queue, the record ceiling, an audit record that cannot
     /// be written — tells the Agent when to ask again, so it retries instead of giving up or
-    /// hammering (ADR-0022 clause 9, ADR-0039 clause 5).
-    /// Verifies: ADR-0038, ADR-0039, ADR-0045
+    /// hammering (ADR-0052 clause 9, ADR-0046 clause 5).
+    /// Verifies: ADR-0038, ADR-0046, ADR-0045
     #[test]
     fn unavailable_tells_the_agent_when_to_retry() {
         let reply = unavailable(&[7; 16], "busy");
@@ -7184,7 +7184,7 @@ mod tests {
     /// first is put back as it was, the fleet keeps its assignments, the revision those still pin
     /// stays, and the one nothing pins is collected. The next press, once the store writes again,
     /// releases to both.
-    /// Verifies: ADR-0044
+    /// Verifies: ADR-0050
     #[test]
     fn a_rollout_that_fails_part_way_leaves_disk_and_memory_as_they_were() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -8997,7 +8997,7 @@ mod tests {
 
     /// The deletion of a Package sweeps its blobs once it has let the fleet lock go: while the
     /// sweep waits for the blob store's lock, every other act of the fleet goes on.
-    /// Verifies: ADR-0044
+    /// Verifies: ADR-0050
     #[test]
     fn a_package_deletion_sweeps_once_it_lets_the_fleet_lock_go() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -9055,7 +9055,7 @@ mod tests {
     /// An entry's deletion sweeps once it has let go of every lock of the Package store: while
     /// its sweep waits for the blob store's lock, the deletion of another Package, which takes
     /// the fleet lock and then the store's, goes on, and so does every act behind the fleet lock.
-    /// Verifies: ADR-0044
+    /// Verifies: ADR-0050
     #[test]
     fn an_entry_deletion_sweeps_once_it_lets_the_store_go() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -9211,7 +9211,7 @@ mod tests {
             .with_revocations(Some(revocations))
     }
 
-    // ---- An approval records its certificate with its decision (ADR-0044 clause 9) ----
+    // ---- An approval records its certificate with its decision (ADR-0050 clause 9) ----
 
     /// A fleet on files in `dir` that enrols: its register, its window and queue, its audit record
     /// in `dir/audit`, and a client CA kept in `dir` across a reopen.
@@ -9312,7 +9312,7 @@ mod tests {
     /// On files the decision is written before the register entry: a decision that cannot be
     /// written registers nothing, and an entry that cannot be written takes the decision back, so
     /// the request waits again with nothing registered, each signature is recorded as rolled back,
-    /// and approved again it is signed anew (ADR-0044 clause 9).
+    /// and approved again it is signed anew (ADR-0050 clause 9).
     /// Verifies: ADR-0050
     #[cfg(unix)]
     #[test]
@@ -9393,7 +9393,7 @@ mod tests {
 
     /// The audit record of an approval whose decision was not written still verifies, and names
     /// that signature as undecided by its serial and request, beside the signature of the approval
-    /// that was (ADR-0044 clause 9).
+    /// that was (ADR-0050 clause 9).
     /// Verifies: ADR-0050
     #[cfg(unix)]
     #[test]
@@ -9427,7 +9427,7 @@ mod tests {
     /// A decision found at startup whose certificate the register does not hold, as after a crash
     /// between the two writes, is taken back: the request waits again and its signature is
     /// recorded as undecided, while an approval whose certificate is registered stays decided
-    /// (ADR-0044 clause 9).
+    /// (ADR-0050 clause 9).
     /// Verifies: ADR-0050
     #[test]
     fn a_decision_found_at_startup_without_its_register_entry_waits_again() {
@@ -9663,7 +9663,7 @@ mod tests {
     /// What another Server wrote to a held record is taken up from the store: a Client Agent's
     /// labels place its Client's other Agent again, so it inherits them, a queued restart is held,
     /// and a record the store no longer holds is dropped.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0048
     #[test]
     fn what_another_server_wrote_is_taken_up_and_places_the_group_again() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -10425,7 +10425,7 @@ mod tests {
 
     /// An instance on PostgreSQL loads no Agent record when it starts, holds none until one
     /// reports to it, and reads again only the ones it holds when it reads everything again.
-    /// Verifies: ADR-0041, ADR-0044
+    /// Verifies: ADR-0048, ADR-0050
     #[test]
     fn an_instance_on_postgres_loads_no_fleet_and_reads_again_only_what_it_holds() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -10470,7 +10470,7 @@ mod tests {
     /// On PostgreSQL an Agent's view and a rollout to it read the Agent and the Agents bound to its
     /// Host, not the whole fleet, and the view inherits the labels of its Client Agent, which this
     /// instance does not hold either.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0048
     #[test]
     fn an_agents_view_and_a_rollout_to_it_read_its_host_and_not_the_fleet() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -10774,7 +10774,7 @@ mod tests {
     /// An Agent bound to a direct Host that reports over a Gateway since is placed by the Gateway
     /// it arrived over: the list, its view and a rollout to it all inherit the labels of the
     /// Client Agent behind that Gateway.
-    /// Verifies: ADR-0041, ADR-0043
+    /// Verifies: ADR-0048, ADR-0043
     #[test]
     fn an_agent_bound_to_a_direct_host_and_arriving_over_a_gateway_is_placed_by_the_gateway() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -10836,7 +10836,7 @@ mod tests {
     /// A record that does not decode, which every read that meets it fails, can still be
     /// forgotten through an instance that does not hold it, and is gone after, with what its
     /// assignment pinned: the Deployment it was released through may be deleted then.
-    /// Verifies: ADR-0044, ADR-0043
+    /// Verifies: ADR-0050, ADR-0043
     #[test]
     fn a_record_that_does_not_decode_can_be_forgotten() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -10876,7 +10876,7 @@ mod tests {
 
     /// Forgetting an Agent this instance on PostgreSQL does not hold collects the revision only its
     /// assignment pinned, as forgetting one it holds does.
-    /// Verifies: ADR-0026, ADR-0044
+    /// Verifies: ADR-0026, ADR-0050
     #[test]
     fn forgetting_an_agent_held_nowhere_collects_the_revision_only_it_pinned() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -11578,7 +11578,7 @@ mod tests {
     /// An instance that heard another took an Agent reads its holder under the Agent's own lock: a
     /// take of its own by the Agent's new connection here, made while the holder is read, waits
     /// for the read and keeps the Agent carried.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0048
     #[test]
     fn an_agent_taken_back_here_while_its_holder_is_read_stays_carried() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -11628,7 +11628,7 @@ mod tests {
     /// On PostgreSQL a first report here whose read of the stored record failed goes on from the
     /// record another instance created, as it is stored: its labels are held, and a report the
     /// binding then refuses leaves it stored and its Agent carried where it is.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0048
     #[test]
     fn a_record_another_instance_created_is_taken_as_stored_and_never_removed() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -11683,7 +11683,7 @@ mod tests {
     /// A label change made on A after A's take-up read the record, before it took the fleet lock,
     /// is not undone by what that read found: what differs is read again under the lock. A never
     /// hears its own announcement, so nothing else would correct it.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0048
     #[test]
     fn a_take_up_never_undoes_a_newer_act_of_its_own_instance() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -11751,7 +11751,7 @@ mod tests {
 
     /// What differs is read again under the fleet lock in one read, however many records differ:
     /// the lock is held for one round trip, not one per record.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0048
     #[test]
     fn a_take_up_reads_again_what_differs_in_one_read() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {

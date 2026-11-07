@@ -935,7 +935,7 @@ mod tests {
 
     /// A new certificate request is owed at once, so it never waits for a heartbeat; the same one
     /// re-sent while it waits for an operator rides the next report, so it never answers every
-    /// answer (ADR-0022 clause 9).
+    /// answer (ADR-0052 clause 9).
     /// Verifies: ADR-0038
     #[test]
     fn a_new_certificate_request_is_owed_at_once_and_a_repeated_one_is_not() {

@@ -104,7 +104,7 @@ mod tests {
 
     /// The host is the first SAN URI with the prefix; the id is the issuer's hash and the serial
     /// without leading zeros.
-    /// Verifies: ADR-0022
+    /// Verifies: ADR-0052
     #[test]
     fn a_certificate_is_known_by_its_host_issuer_and_serial() {
         let key = rcgen::KeyPair::generate().expect("key");

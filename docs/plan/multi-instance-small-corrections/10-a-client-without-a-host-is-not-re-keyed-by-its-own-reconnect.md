@@ -8,7 +8,7 @@ and dials connection 2 at once. It does not wait for the Server's close. When th
 connection 2 reaches the Server before the Server has run `on_closed` for connection 1, the
 Server still sees the Agent carried by a live connection. A connection that presented no host
 has no same-host peer, so `Carried::of` answers `ByAnotherPeer` and the Server re-keys every
-Agent the Client carries (ADR-0041 clause 8). The Server then holds two records of each, the old
+Agent the Client carries (ADR-0048 clause 8). The Server then holds two records of each, the old
 one disconnected. Through a plain `ws://` endpoint with `Admission::open()` this happened on CI
 in `a_verified_offer_restarts_the_gateway_and_leaves_the_supervisors_running`
 (`crates/fleet-agent/tests/gateway_and_supervisor_e2e.rs`). That test now follows the re-keyed
@@ -31,7 +31,7 @@ back.
 
 ## Read first
 
-- ADR-0041 clause 8, on duplicate detection and the connection that presented no host
+- ADR-0048 clause 8, on duplicate detection and the connection that presented no host
 - `crates/opamp/src/client/ws.rs` `AfterReply::Reconnect` and `Served::Reconnect`;
   `crates/fleet-server/src/fleet.rs` `Carried::of`; `crates/fleet-server/src/transport.rs`
   `on_closed`
@@ -45,6 +45,6 @@ back.
 ## Mode
 
 with the human: ADR-0007 clause 5 keeps every part of the system with the human and sets the cap on
-open unattended work at zero. This does not block G-20. ADR-0041 clause 8 intends the re-key of an
+open unattended work at zero. This does not block G-20. ADR-0048 clause 8 intends the re-key of an
 Agent whose connection presented no host. In production the Client presents a host certificate,
 and the same-host rule hands the Agent to the newer connection without a re-key.

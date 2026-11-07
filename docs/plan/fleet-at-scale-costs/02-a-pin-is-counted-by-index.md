@@ -18,7 +18,7 @@ counted. It blocks no stage: the G-20 load test met its target at 100 000 Agents
 
 ## Read first
 
-- ADR-0044 clauses 2 and 22 on the schema and its migrations; ADR-0041 clause 19
+- ADR-0050 clauses 2 and 22 on the schema and its migrations; ADR-0048 clause 19
 - `postgres/packages.rs` `hold_unassigned`; `postgres/schema.rs`
 
 ## Blocked by

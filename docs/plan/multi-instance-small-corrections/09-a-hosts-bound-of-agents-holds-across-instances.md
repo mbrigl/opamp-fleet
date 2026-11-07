@@ -15,7 +15,7 @@ lease renewal, so the window can be one renewal long.
 
 `bind_seen` already holds the Host's row `FOR NO KEY UPDATE`, so two binders of one Host wait for
 each other. It counts the Host's bindings there and refuses a binding past the bound, so the bound
-is counted in the transaction that would pass it, as the instances draft's clause 19 does for the
+is counted in the transaction that would pass it, as ADR-0048 clause 19 does for the
 other bounds.
 
 ## Acceptance criteria
