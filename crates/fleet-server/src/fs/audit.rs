@@ -428,7 +428,7 @@ mod tests {
     /// A crash that cuts a line inside a two-byte character leaves bytes that are not UTF-8. The
     /// record still verifies: the torn line is read the lossy way the store hashed it when it
     /// repaired the record, and the entries after the repair hold.
-    /// Verifies: ADR-0039, ADR-0039
+    /// Verifies: ADR-0039
     #[test]
     fn a_line_torn_inside_a_character_verifies_as_the_store_hashed_it() {
         use crate::audit::{Audit as _, Entry};

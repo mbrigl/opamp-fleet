@@ -2693,7 +2693,7 @@ async fn an_agent_forgotten_through_one_instance_has_its_session_ended_by_the_on
 /// An Agent forgotten through B stays forgotten when A, which holds it and has not heard of it
 /// yet, writes its next report or flushes at shutdown: A writes nothing of it again, neither the
 /// record nor the labels it held, and drops the Agent it reported for and ends its session.
-/// Verifies: ADR-0043, ADR-0043
+/// Verifies: ADR-0043
 #[test]
 fn an_agent_forgotten_through_one_instance_is_not_written_again_by_another() {
     use fleet_server::fleet::{AppState, Transport};
@@ -2798,7 +2798,7 @@ fn an_agent_rekeyed_at_its_request_keeps_its_stored_record() {
 /// An Agent rekeyed at its request through A is dropped under its old identity by B, which
 /// held it: the move announces the old identity forgotten, so B holds no record of it under a
 /// name no store keeps.
-/// Verifies: ADR-0043, ADR-0043
+/// Verifies: ADR-0043
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_agent_rekeyed_through_one_instance_is_dropped_under_its_old_identity_by_another() {
     use fleet_server::fleet::{AppState, Transport};

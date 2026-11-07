@@ -11716,7 +11716,7 @@ mod tests {
     /// A re-key whose move of the stored record fails leaves the Agent under the identity it has:
     /// the reply assigns no new one, the record stays stored and held under the old uid, and the
     /// session is not ended as one of an Agent forgotten.
-    /// Verifies: ADR-0043, ADR-0043
+    /// Verifies: ADR-0043
     #[test]
     fn a_rekey_whose_move_fails_keeps_the_agent_under_its_identity() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {

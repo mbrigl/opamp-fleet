@@ -3594,7 +3594,7 @@ mod tests {
     /// A row that does not decode fails the read that meets it, naming its `instance_uid`: the
     /// load, the query, the query of it and the read of it. Opening the adapter, which reads the
     /// assignments alone, does not meet it (ADR-0044 clause 4).
-    /// Verifies: ADR-0044, ADR-0044
+    /// Verifies: ADR-0044
     #[test]
     fn an_agent_row_that_does_not_decode_fails_the_read_that_meets_it_naming_it() {
         let Some(test) = TestDatabase::named() else {

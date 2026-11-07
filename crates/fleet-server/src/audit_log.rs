@@ -1846,7 +1846,7 @@ mod tests {
     /// on its hash and naming the entry before it as `last_whole`), and refuses a torn line nothing
     /// records as broken, in the middle or at the end, and a repair whose `last_whole` is not the
     /// entry before the torn line.
-    /// Verifies: ADR-0039, ADR-0039
+    /// Verifies: ADR-0039
     #[test]
     fn a_torn_line_holds_only_when_the_next_entry_records_it_as_broken() {
         let first = format!("{{\"seq\":1,\"prev\":\"{GENESIS}\",\"event\":\"a\"}}");
