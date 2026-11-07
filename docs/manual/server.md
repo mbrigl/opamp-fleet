@@ -934,6 +934,13 @@ oldest Server that understands the schema they leave, so the instances of that r
 run serve on it; what a release stops using goes with a later one. The first instance of the new
 release to start migrates the schema, and instances that start together wait for it.
 
+While instances of 0.8.0 serve beside those of a newer release, two things about new Agents differ
+from a fleet of one release. `max_agents` may be passed by the records the two releases create at
+the same moment, since 0.8.0 counts under a lock the newer release does not take. And when both
+create the record of the same new Agent at the same moment, the database ends one of the two as a
+deadlock after its `deadlock_timeout` (one second by default); that report is answered
+`Unavailable`, and the Agent reports again. Both end with the last instance of 0.8.0.
+
 Each lease records the release of its instance; a lease of 0.8.0, which records none, counts as
 0.8.0. An instance stops at its start, naming both releases and changing nothing, while a live lease
 is of a release older than the oldest Server its migrations leave: stop the instances of that

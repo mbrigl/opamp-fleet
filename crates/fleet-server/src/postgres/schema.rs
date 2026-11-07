@@ -168,7 +168,10 @@ pub const MIGRATIONS: &[Migration] = &[
 /// triggers on `agents` in the statement that adds or removes rows, so the Agent-record ceiling is
 /// decided from it and not from a count of every row. The triggers exist before the row is
 /// filled, and creating them locks `agents` against every addition and removal until the
-/// migration commits, so none is missed between the count and the triggers.
+/// migration commits, so none is missed between the count and the triggers. Their functions are
+/// pinned to the schema the migration runs in, by name rather than by the search path it runs
+/// under, which may start with `"$user"`: a session of any role, whatever it names first, counts
+/// in this schema.
 const AGENT_COUNT: &str = "
 CREATE TABLE agent_count (
     one boolean PRIMARY KEY DEFAULT true CHECK (one),
@@ -192,6 +195,12 @@ BEGIN
         UPDATE agent_count SET agents = agents - n;
     END IF;
     RETURN NULL;
+END
+$$;
+DO $$
+BEGIN
+    EXECUTE format('ALTER FUNCTION agent_count_added() SET search_path = %I', current_schema());
+    EXECUTE format('ALTER FUNCTION agent_count_removed() SET search_path = %I', current_schema());
 END
 $$;
 CREATE TRIGGER agents_added AFTER INSERT ON agents

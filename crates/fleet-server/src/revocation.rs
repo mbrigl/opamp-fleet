@@ -4039,11 +4039,12 @@ mod tests {
     }
 
     /// A Host's bound counts the bindings this instance is writing: a report of another Agent
-    /// of a Host one short of its bound, made while the last binding is written, is refused.
+    /// of a Host one short of its bound, made while the last binding is written, is refused, and
+    /// so it is after a reload swapped in meanwhile, which carries the count over.
     /// Verifies: ADR-0038
     #[test]
     fn a_binding_being_written_counts_against_the_hosts_bound() {
-        let (revocations, _store, hooked) = hooked_register();
+        let (revocations, store, hooked) = hooked_register();
         for n in 0..MAX_UIDS_PER_HOST - 1 {
             let uid = (n as u32).to_be_bytes();
             let mut instance_uid = [0u8; 16];
@@ -4056,6 +4057,10 @@ mod tests {
         {
             let revocations = revocations.clone();
             *hooked.before_bind.lock().expect("hook lock") = Some(Box::new(move || {
+                // A reload is read and swapped in while the binding is written.
+                let (go, reloader) = reload_held(&store, &revocations);
+                go.send(()).expect("go");
+                joined(reloader).expect("reloaded");
                 let (reported, report) = std::sync::mpsc::channel();
                 std::thread::spawn(move || {
                     let _ = reported.send(revocations.check_report(
