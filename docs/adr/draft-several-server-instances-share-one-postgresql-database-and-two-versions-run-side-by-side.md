@@ -191,7 +191,9 @@ every change that concerns a live session by one `NOTIFY`.
    carrier's record again at the Agent's next report. The carrier writes so while it has no count:
    its next presence batch answers one where no other instance with a live lease holds the row,
    and otherwise the first batch after that lease is gone, or the take at the Agent's next connect
-   does; from then on a report that changes nothing durable writes nothing again. A flush refused
+   does; from then on a report that changes nothing durable writes nothing again. Where none of
+   these comes, as with a duplicate of the Agent live on two live instances, the other of which
+   holds the row, every report of it keeps writing. A flush refused
    for a higher stored sequence number leaves its own Agent's newer sequence number unwritten, and
    the next report to the instance that carries it, or the full report a gap asks for, writes it.
    The port of
