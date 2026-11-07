@@ -567,9 +567,9 @@ impl AgentStore for PgAgentStore {
     }
 
     /// One transaction: the rows locked in the order of their `instance_uid`, byte by byte as the
-    /// release orders them, then the batch written in one statement. A connected Agent whose row
-    /// names another instance with a live lease is not written: that instance took it after this
-    /// one read the batch. A disconnect whose row holds another count of takes than it comes with
+    /// release orders them, then the batch written in one statement. A connected Agent is named
+    /// anew only where the row names no instance with a live lease, and where it comes with a count
+    /// only while the row still holds it: another instance took it after this one read the batch. A disconnect whose row holds another count of takes than it comes with
     /// is not written: the Agent was taken since, by this instance or another, and the take wrote
     /// its presence.
     fn write_presence(
@@ -627,10 +627,12 @@ impl AgentStore for PgAgentStore {
                      FROM unnest($1::text[], $2::boolean[], $3::bigint[], $5::bigint[]) \
                          AS p(instance_uid, connected, last_seen_ms, take) \
                      WHERE a.instance_uid = p.instance_uid \
-                         AND (NOT p.connected OR a.holder IS NULL \
-                             OR a.holder = $4::text::uuid \
-                             OR NOT EXISTS (SELECT 1 FROM leases AS l \
-                                 WHERE l.instance_id = a.holder AND l.expires_at > now())) \
+                         AND (NOT p.connected OR a.holder = $4::text::uuid \
+                             OR ((p.take IS NULL OR a.takes = p.take) \
+                                 AND (a.holder IS NULL \
+                                     OR NOT EXISTS (SELECT 1 FROM leases AS l \
+                                         WHERE l.instance_id = a.holder \
+                                             AND l.expires_at > now())))) \
                      RETURNING a.instance_uid, p.connected, a.takes",
                     &[&uids, &connected, &last_seen, &holder, &takes],
                 )
@@ -728,6 +730,32 @@ impl AgentStore for PgAgentStore {
                 let uid = InstanceUid::parse(&key)
                     .ok_or_else(|| format!("agents: {key} is not an instance_uid"))?;
                 Ok((uid, row.get(1)))
+            })
+            .collect()
+    }
+
+    fn takes(
+        &self,
+        uids: &[InstanceUid],
+    ) -> Result<HashMap<InstanceUid, (Option<String>, u64)>, String> {
+        let keys: Vec<String> = uids.iter().map(ToString::to_string).collect();
+        let rows = self.database.run(move |pool| async move {
+            let client = client(&pool).await?;
+            client
+                .query(
+                    "SELECT instance_uid, holder::text, takes FROM agents \
+                     WHERE instance_uid = ANY($1)",
+                    &[&keys],
+                )
+                .await
+                .map_err(sql)
+        })?;
+        rows.into_iter()
+            .map(|row| {
+                let key: String = row.get(0);
+                let uid = InstanceUid::parse(&key)
+                    .ok_or_else(|| format!("agents: {key} is not an instance_uid"))?;
+                Ok((uid, (row.get(1), unsigned(row.get(2)))))
             })
             .collect()
     }
@@ -2521,8 +2549,11 @@ mod tests {
 
     /// The newest connection takes an Agent: a take names its instance as the holder and answers
     /// the one it replaced. A presence batch of the instance it was taken from, read before the
-    /// take and written after it, leaves the row as the take wrote it; once the taker's lease has
-    /// lapsed, the batch names its own instance again, as it does over a row that names none.
+    /// take and written after it, leaves the row as the take wrote it, also once the taker's lease
+    /// has lapsed, since a take was counted after its own; a batch that was answered no count
+    /// names its own instance over a row that names none, or an instance without a live lease, and
+    /// one answered a count over such a row only while it still holds that count, never over a
+    /// live holder.
     /// Verifies: ADR-0041
     #[test]
     fn a_batch_read_before_another_instance_took_the_agent_does_not_undo_the_take() {
@@ -2585,8 +2616,68 @@ mod tests {
         store.write_presence(&a, &due).expect("A's batch again");
         assert_eq!(
             presence(one),
+            [[Some(format!("{b} true 2000"))]],
+            "a take was counted since A's"
+        );
+        store
+            .write_presence(&a, &[(one, connected(3_000), None)])
+            .expect("A's batch answered no count");
+        assert_eq!(
+            presence(one),
             [[Some(format!("{a} true 3000"))]],
             "a holder without a live lease holds no connection"
+        );
+        assert_eq!(
+            store.takes(&[one, two, InstanceUid([9; 16])]),
+            Ok(HashMap::from([
+                (one, (Some(a.clone()), 3)),
+                (two, (Some(a.clone()), 1)),
+            ])),
+            "the holders and counts, none of a record not stored"
+        );
+        test.sql(&format!(
+            "UPDATE agents SET holder = NULL, connected = false WHERE instance_uid = '{two}'"
+        ));
+        store
+            .write_presence(&a, &[(two, connected(4_000), Some(1))])
+            .expect("A's batch under the count it holds");
+        assert_eq!(
+            presence(two),
+            [[Some(format!("{a} true 4000"))]],
+            "a row that still holds the count is taken back"
+        );
+        store
+            .write_presence(&b, &[(two, connected(5_000), Some(1))])
+            .expect("B's batch under a count taken since");
+        assert_eq!(
+            presence(two),
+            [[Some(format!("{a} true 4000"))]],
+            "not under a count a take raised since"
+        );
+        test.sql(&format!(
+            "INSERT INTO leases (instance_id, host, must_be_alone, taken_at, renewed_at, \
+             expires_at) VALUES ('{b}', 'b', false, now(), now(), now() + interval '1 hour'); \
+             UPDATE agents SET holder = '{b}'::uuid WHERE instance_uid = '{two}'"
+        ));
+        store
+            .write_presence(&a, &[(two, connected(6_000), Some(2))])
+            .expect("A's batch under its count, over a live holder");
+        assert_eq!(
+            presence(two),
+            [[Some(format!("{b} true 4000"))]],
+            "a live holder is never undone, whatever the count"
+        );
+        let gone = "00000000-0000-7000-8000-0000000000ff";
+        test.sql(&format!(
+            "UPDATE agents SET holder = '{gone}'::uuid WHERE instance_uid = '{two}'"
+        ));
+        store
+            .write_presence(&a, &[(two, connected(7_000), Some(2))])
+            .expect("A's batch under its count, over a holder without a live lease");
+        assert_eq!(
+            presence(two),
+            [[Some(format!("{a} true 7000"))]],
+            "a holder without a live lease is taken back under the count"
         );
     }
 
