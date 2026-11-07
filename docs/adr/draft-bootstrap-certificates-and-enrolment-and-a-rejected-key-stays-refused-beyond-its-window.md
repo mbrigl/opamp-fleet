@@ -678,7 +678,8 @@ Tests that will carry `Verifies: ADR-0022`:
   or ran out is answered as rejected and not listed, on the filesystem store, on PostgreSQL, on a
   second instance on the database and after a restart; a rejection of an id the queue does not
   hold answers `204` with the window closed, and its request is then refused; a malformed id
-  answers `400`; an approval of a rejected key signs nothing, where its request still waits —
+  answers `400`; an approval of a rejected key signs nothing, where its request still waits; a
+  rejection of a request an approval holds answers at once that it is being decided —
   [`enrolment.rs`](../../crates/fleet-server/src/enrolment.rs)
   `a_rejected_key_stays_refused_on_one_store_in_memory`,
   `a_rejected_key_stays_refused_on_the_filesystem`,
@@ -688,7 +689,8 @@ Tests that will carry `Verifies: ADR-0022`:
   `a_rejected_key_stays_refused_on_postgres`,
   `the_rejected_keys_hold_at_the_store_on_the_filesystem`,
   `the_rejected_keys_hold_at_the_store_on_postgres`,
-  `an_approval_signs_no_rejected_key_on_postgres`;
+  `an_approval_signs_no_rejected_key_on_postgres`,
+  `a_rejection_of_a_request_held_by_an_approval_does_not_wait_for_it`;
   [`api.rs`](../../crates/fleet-server/src/api.rs)
   `an_id_not_queued_is_rejected_and_a_malformed_one_is_refused`;
   [`tests/mutual_tls.rs`](../../crates/fleet-server/tests/mutual_tls.rs)
