@@ -29,7 +29,7 @@ pub const SCHEMA_TABLE: &str = "fleet_schema";
 
 /// Every table the migrations create, so that a database holding any of them is recognised as one
 /// the Server already wrote ([`super::Database::server_tables`]).
-pub const TABLES: [&str; 24] = [
+pub const TABLES: [&str; 25] = [
     "configurations",
     "configuration_revisions",
     "deployments",
@@ -53,6 +53,7 @@ pub const TABLES: [&str; 24] = [
     "audit_entries",
     "audit_archive",
     "blob_deletions",
+    "agent_count",
     // Not tables of the records, but the Server's all the same.
     SCHEMA_TABLE,
 ];
@@ -153,7 +154,52 @@ pub const MIGRATIONS: &[Migration] = &[
         oldest_server: "0.8.0",
         sql: BLOB_DELETIONS,
     },
+    // A table, its row and the triggers that keep it only added. A Server of 0.8.0 reads none of
+    // it, and what it adds and removes is counted all the same
+    // (ADR-0044 clause 22).
+    Migration {
+        version: 14,
+        oldest_server: "0.8.0",
+        sql: AGENT_COUNT,
+    },
 ];
+
+/// The count of the Agents' records (ADR-0044 clause 22): one row, raised and lowered by the
+/// triggers on `agents` in the statement that adds or removes rows, so the Agent-record ceiling is
+/// decided from it and not from a count of every row. The triggers exist before the row is
+/// filled, and creating them locks `agents` against every addition and removal until the
+/// migration commits, so none is missed between the count and the triggers.
+const AGENT_COUNT: &str = "
+CREATE TABLE agent_count (
+    one boolean PRIMARY KEY DEFAULT true CHECK (one),
+    agents bigint NOT NULL
+);
+CREATE FUNCTION agent_count_added() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE n bigint;
+BEGIN
+    SELECT count(*) INTO n FROM added;
+    IF n > 0 THEN
+        UPDATE agent_count SET agents = agents + n;
+    END IF;
+    RETURN NULL;
+END
+$$;
+CREATE FUNCTION agent_count_removed() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE n bigint;
+BEGIN
+    SELECT count(*) INTO n FROM removed;
+    IF n > 0 THEN
+        UPDATE agent_count SET agents = agents - n;
+    END IF;
+    RETURN NULL;
+END
+$$;
+CREATE TRIGGER agents_added AFTER INSERT ON agents
+    REFERENCING NEW TABLE AS added FOR EACH STATEMENT EXECUTE FUNCTION agent_count_added();
+CREATE TRIGGER agents_removed AFTER DELETE ON agents
+    REFERENCING OLD TABLE AS removed FOR EACH STATEMENT EXECUTE FUNCTION agent_count_removed();
+INSERT INTO agent_count (agents) SELECT count(*) FROM agents;
+";
 
 /// The blobs a sweep marked before it deletes them (ADR-0044 clause 14): written on the session
 /// that holds the blob store's lock, read by every upload in the transaction that checks its blob,
@@ -781,8 +827,8 @@ mod tests {
         }
         assert_eq!(
             MIGRATIONS.len(),
-            13,
-            "migrations 11 to 13 are this release's"
+            14,
+            "migrations 11 to 14 are this release's"
         );
         assert!(
             LEASE_RELEASE.contains(&format!("DEFAULT '{RELEASE_BEFORE_THE_RECORD}'")),

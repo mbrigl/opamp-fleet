@@ -8,9 +8,9 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 
+use super::Cached as GenericClient;
 use opamp::uid::InstanceUid;
 use prost::Message;
-use tokio_postgres::GenericClient;
 
 use super::notify::{notify, ASSIGNMENT, CONFIGURATION, FORGOTTEN, LABELS, RESTART, TAKEN};
 use super::{client, signed, sql, unsigned, Database};
@@ -30,6 +30,11 @@ pub struct PgAgentStore {
     database: Arc<Database>,
     /// Every stored record's assignment, as committed.
     assignments: Mutex<Pins>,
+    /// The creations of this instance under way, at most half the pool: the creations of every
+    /// instance wait for the count's row, which a Server of 0.8.0 holds across its whole creation,
+    /// and those past the bound wait here, each on its own thread, rather than on a connection of
+    /// the pool, which every other call needs.
+    creating: Creating,
     /// Run between a read's rows and its taking them into [`Pins`], in tests.
     #[cfg(test)]
     after_read: Mutex<Option<Box<dyn FnOnce() + Send>>>,
@@ -106,6 +111,7 @@ impl PgAgentStore {
     #[must_use]
     pub fn new(database: Arc<Database>) -> Self {
         PgAgentStore {
+            creating: Creating::of(database.pool_size()),
             database,
             assignments: Mutex::new(Pins::default()),
             #[cfg(test)]
@@ -124,7 +130,7 @@ impl PgAgentStore {
         let store = Self::new(database);
         let assignments = store.database.run(|pool| async move {
             let client = client(&pool).await?;
-            read_assignments(&**client).await
+            read_assignments(&client).await
         })?;
         store
             .assignments
@@ -219,7 +225,7 @@ impl AgentStore for PgAgentStore {
         let began = self.began();
         let records = self.database.run(|pool| async move {
             let client = client(&pool).await?;
-            read_all(&**client).await
+            read_all(&client).await
         })?;
         self.refresh(
             began,
@@ -247,7 +253,7 @@ impl AgentStore for PgAgentStore {
         let keys: Vec<String> = uids.iter().map(ToString::to_string).collect();
         let found = self.database.run(move |pool| async move {
             let client = client(&pool).await?;
-            read(&**client, Some(&keys)).await
+            read(&client, Some(&keys)).await
         })?;
         self.refresh(
             began,
@@ -269,7 +275,7 @@ impl AgentStore for PgAgentStore {
         let (records, mut presence) = self.database.run(move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = snapshot(&mut client).await?;
-            let records = read(&*transaction, keys.as_deref()).await?;
+            let records = read(&transaction, keys.as_deref()).await?;
             let (filter, params): (&str, Vec<&(dyn tokio_postgres::types::ToSql + Sync)>) =
                 match &keys {
                     Some(keys) => (" AND a.instance_uid = ANY($1)", vec![keys]),
@@ -375,10 +381,10 @@ impl AgentStore for PgAgentStore {
             // One another instance created in between the two is written to again, the columns a
             // report decides alone.
             let created = loop {
-                if write_reported(&*transaction, &uid, &record, None).await? {
+                if write_reported(&transaction, &uid, &record, None).await? {
                     break false;
                 }
-                if insert(&*transaction, &uid, &record, "DO NOTHING").await? {
+                if insert(&transaction, &uid, &record, "DO NOTHING").await? {
                     break true;
                 }
             };
@@ -396,7 +402,7 @@ impl AgentStore for PgAgentStore {
         let (uid, record) = (*uid, record.clone());
         self.database.run(move |pool| async move {
             let client = client(&pool).await?;
-            write_reported(&**client, &uid, &record, None).await
+            write_reported(&client, &uid, &record, None).await
         })
     }
 
@@ -414,7 +420,7 @@ impl AgentStore for PgAgentStore {
         self.database.run(move |pool| async move {
             let client = client(&pool).await?;
             write_reported(
-                &**client,
+                &client,
                 &uid,
                 &record,
                 Some(Held {
@@ -426,8 +432,12 @@ impl AgentStore for PgAgentStore {
         })
     }
 
-    /// One transaction under a lock only creations take, so two instances creating at once count
-    /// each other's rows; a report's write of a record that exists waits for none of it.
+    /// One statement that locks the row the triggers on `agents` keep the count in and inserts
+    /// only while the count is below `max_records`, so creations on every instance count each
+    /// other's rows one after another, the ceiling is decided without reading every row, and no
+    /// creation waits for a client round trip of another (ADR-0044 clause 22). Its transaction
+    /// commits without waiting for the flush, so neither does any for a flush of another
+    /// (ADR-0044 clause 21). A report's write of a record that exists waits for none of it.
     fn create_within(
         &self,
         uid: &InstanceUid,
@@ -437,36 +447,36 @@ impl AgentStore for PgAgentStore {
         let (uid, record) = (*uid, record.clone());
         let assignment = record.assignment.clone();
         let max = i64::try_from(max_records).unwrap_or(i64::MAX);
+        let creating = self.creating.enter();
         let creation = self.database.run(move |pool| async move {
             let mut client = client(&pool).await?;
+            let key = uid.to_string();
+            // One transaction that commits without waiting for its flush, so the count's row is
+            // let go at once (ADR-0044 clause 21); the record's Configurations, where it names
+            // any, are written in it.
             let transaction = client.transaction().await.map_err(sql)?;
             transaction
-                .execute(&format!("SELECT pg_advisory_xact_lock({CREATE_LOCK})"), &[])
+                .batch_execute(ASYNCHRONOUS_COMMIT)
                 .await
                 .map_err(sql)?;
-            let key = uid.to_string();
-            let stored = transaction
-                .query_one(
-                    "SELECT count(*), count(*) FILTER (WHERE instance_uid = $1) FROM agents",
-                    &[&key],
-                )
-                .await
-                .map_err(sql)?;
-            let (count, there): (i64, i64) = (stored.get(0), stored.get(1));
-            if there > 0 {
-                let found = read(&*transaction, Some(std::slice::from_ref(&key)))
+            let created = insert_as(&transaction, &uid, &record, "DO NOTHING", Some(max)).await?;
+            transaction.commit().await.map_err(sql)?;
+            if created {
+                return Ok(Creation::Created);
+            }
+            // Stored already, or the count is at the ceiling.
+            Ok(
+                match read(&client, Some(std::slice::from_ref(&key)))
                     .await?
                     .remove(&uid)
-                    .ok_or_else(|| format!("agent {key} was counted, and is not there"))?;
-                return Ok(Creation::Found(Box::new(found)));
-            }
-            if count >= max {
-                return Ok(Creation::Full);
-            }
-            insert(&*transaction, &uid, &record, "DO NOTHING").await?;
-            transaction.commit().await.map_err(sql)?;
-            Ok(Creation::Created)
-        })?;
+                {
+                    Some(found) => Creation::Found(Box::new(found)),
+                    None => Creation::Full,
+                },
+            )
+        });
+        drop(creating);
+        let creation = creation?;
         match &creation {
             Creation::Created => self.stored([(&uid, assignment.as_ref())]),
             Creation::Found(found) => self.stored([(&uid, found.assignment.as_ref())]),
@@ -494,7 +504,7 @@ impl AgentStore for PgAgentStore {
                 .map_err(sql)?
                 > 0;
             if set {
-                notify(&*transaction, LABELS, &key).await?;
+                notify(&transaction, LABELS, &key).await?;
             }
             transaction.commit().await.map_err(sql)?;
             Ok(set)
@@ -533,7 +543,7 @@ impl AgentStore for PgAgentStore {
                     .map_err(sql)?;
             }
             if pending {
-                notify(&*transaction, RESTART, &key).await?;
+                notify(&transaction, RESTART, &key).await?;
             }
             transaction.commit().await.map_err(sql)?;
             Ok(Some(was))
@@ -552,7 +562,7 @@ impl AgentStore for PgAgentStore {
                 .await
                 .map_err(sql)?;
             if removed > 0 {
-                notify(&*transaction, FORGOTTEN, &uid.to_string()).await?;
+                notify(&transaction, FORGOTTEN, &uid.to_string()).await?;
             }
             transaction.commit().await.map_err(sql)
         })?;
@@ -692,7 +702,7 @@ impl AgentStore for PgAgentStore {
                 .map_err(sql)?
                 .get(0);
             if changed {
-                notify(&*transaction, TAKEN, &key).await?;
+                notify(&transaction, TAKEN, &key).await?;
             }
             transaction.commit().await.map_err(sql)?;
             Ok(Some(Taken {
@@ -789,7 +799,7 @@ impl AgentStore for PgAgentStore {
                 .execute("DELETE FROM agents WHERE instance_uid = $1", &[&key])
                 .await
                 .map_err(sql)?;
-            notify(&*transaction, FORGOTTEN, &key).await?;
+            notify(&transaction, FORGOTTEN, &key).await?;
             transaction.commit().await.map_err(sql)?;
             Ok(Some(true))
         })?;
@@ -875,7 +885,7 @@ impl AgentStore for PgAgentStore {
                     .execute("DELETE FROM agents WHERE instance_uid = $1", &[&old])
                     .await
                     .map_err(sql)?;
-                notify(&*transaction, FORGOTTEN, &old).await?;
+                notify(&transaction, FORGOTTEN, &old).await?;
             }
             transaction.commit().await.map_err(sql)?;
             Ok(moved)
@@ -915,32 +925,32 @@ impl AgentStore for PgAgentStore {
             self.database.run_writing(written, move |pool| async move {
                 let mut client = client(&pool).await?;
                 let transaction = client.transaction().await.map_err(sql)?;
-                super::configs::retain(&*transaction, &revisions).await?;
+                super::configs::retain(&transaction, &revisions).await?;
                 let packages: BTreeSet<&PackageId> = records
                     .iter()
                     .filter_map(|(_, assignment)| assignment.as_ref()?.package.as_ref())
                     .collect();
                 for id in packages {
-                    hold_pinned_package(&*transaction, id).await?;
+                    hold_pinned_package(&transaction, id).await?;
                 }
                 let deployments: BTreeSet<&str> = records
                     .iter()
                     .filter_map(|(_, assignment)| Some(assignment.as_ref()?.deployment.as_str()))
                     .collect();
                 for name in deployments {
-                    hold_released_through(&*transaction, name).await?;
+                    hold_released_through(&transaction, name).await?;
                 }
                 let pinned: BTreeSet<&str> = revisions
                     .iter()
                     .map(|pinned| pinned.configuration.as_str())
                     .collect();
                 for configuration in pinned {
-                    notify(&*transaction, CONFIGURATION, configuration).await?;
+                    notify(&transaction, CONFIGURATION, configuration).await?;
                 }
                 let mut wrote = BTreeSet::new();
                 for (key, assignment) in records {
-                    if write_assignment(&*transaction, &key, assignment.as_ref()).await? {
-                        notify(&*transaction, ASSIGNMENT, &key).await?;
+                    if write_assignment(&transaction, &key, assignment.as_ref()).await? {
+                        notify(&transaction, ASSIGNMENT, &key).await?;
                         wrote.insert(key);
                     }
                 }
@@ -1011,9 +1021,59 @@ async fn hold_released_through(client: &impl GenericClient, name: &str) -> Resul
         .ok_or_else(|| format!("no deployment {name:?}"))
 }
 
-/// The lock the creation of a record is counted under, by the key its schema gives it.
-const CREATE_LOCK: &str =
-    "hashtextextended('opamp-fleet-server-agents:' || coalesce(current_schema(), ''), 0)";
+/// What a creation's transaction runs first: its commit does not wait for the database to flush
+/// it, and no other transaction on the connection is affected (ADR-0044 clause 21).
+const ASYNCHRONOUS_COMMIT: &str = "SET LOCAL synchronous_commit = off";
+
+/// A count of the creations under way, bounded by half the pool, so the other half serves every
+/// other call while creations wait for the count's row (ADR-0044 clause 24).
+struct Creating {
+    at_most: usize,
+    under_way: Mutex<usize>,
+    freed: std::sync::Condvar,
+}
+
+impl Creating {
+    /// Half of a pool of `pool_size` connections, at least one.
+    fn of(pool_size: usize) -> Self {
+        Creating {
+            at_most: (pool_size / 2).max(1),
+            under_way: Mutex::new(0),
+            freed: std::sync::Condvar::new(),
+        }
+    }
+
+    /// Waits until fewer than its bound are under way, and counts this one until the answer is
+    /// dropped.
+    fn enter(&self) -> Entered<'_> {
+        let mut under_way = self
+            .under_way
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while *under_way >= self.at_most {
+            under_way = self
+                .freed
+                .wait(under_way)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        *under_way += 1;
+        Entered(self)
+    }
+}
+
+/// One creation under way.
+struct Entered<'a>(&'a Creating);
+
+impl Drop for Entered<'_> {
+    fn drop(&mut self) {
+        *self
+            .0
+            .under_way
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) -= 1;
+        self.0.freed.notify_one();
+    }
+}
 
 /// The columns of a row, in the order [`read_all`] selects and [`write`] inserts them.
 const COLUMNS: &str = "instance_uid, sequence_num, capabilities, transport, last_seen_ms, \
@@ -1437,6 +1497,28 @@ async fn insert(
     record: &PersistedAgent,
     on_conflict: &str,
 ) -> Result<bool, String> {
+    insert_as(client, uid, record, on_conflict, None).await
+}
+
+/// The types of the columns [`insert`] writes, in the order of its parameters: what a row
+/// selected rather than given as values names, so each parameter takes its column's type.
+const INSERTED_TYPES: [&str; 28] = [
+    "text", "bigint", "bigint", "text", "bigint", "boolean", "bytea", "bytea", "bytea", "bytea",
+    "bytea", "bytea", "bytea", "json", "text", "text", "text", "text", "text", "bigint", "text",
+    "text", "text", "text", "json", "text", "boolean", "text",
+];
+
+/// [`insert`], or with `within` the creation of a record only while the count of the records,
+/// kept by the triggers of migration 14, is below `within`: one statement that locks the count's
+/// row, so creations of every instance are counted one after another and none waits for a round
+/// trip of another (ADR-0044 clause 22).
+async fn insert_as(
+    client: &impl GenericClient,
+    uid: &InstanceUid,
+    record: &PersistedAgent,
+    on_conflict: &str,
+    within: Option<i64>,
+) -> Result<bool, String> {
     let key = uid.to_string();
     let labels = serde_json::to_value(&record.labels).expect("labels serialize");
     let assignment = record.assignment.as_ref();
@@ -1488,6 +1570,25 @@ async fn insert(
         Box::new(package.map(|id| id.version.clone())),
     ];
     values.extend(derived);
+    let rows = match within {
+        None => format!(
+            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, \
+             $18, {derived_values}, {stamp})"
+        ),
+        Some(within) => {
+            let typed: Vec<String> = INSERTED_TYPES
+                .iter()
+                .enumerate()
+                .map(|(i, kind)| format!("${}::{kind}", i + 1))
+                .collect();
+            let bound = typed.len() + 1;
+            values.push(Box::new(within));
+            format!(
+                "SELECT {}, {stamp} FROM agent_count WHERE agents < ${bound} FOR UPDATE",
+                typed.join(", ")
+            )
+        }
+    };
     let params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = values
         .iter()
         .map(|p| p.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync))
@@ -1495,16 +1596,18 @@ async fn insert(
     let written = client
         .execute(
             &format!(
-                "INSERT INTO agents ({COLUMNS}, {derived_names}, derived_from) VALUES ($1, $2, $3, \
-                 $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, \
-                 {derived_values}, {stamp}) ON CONFLICT (instance_uid) {on_conflict}"
+                "INSERT INTO agents ({COLUMNS}, {derived_names}, derived_from) {rows} \
+                 ON CONFLICT (instance_uid) {on_conflict}"
             ),
             &params,
         )
         .await
         .map_err(sql)?
         > 0;
-    if written {
+    // A record created anew has no Configurations to replace: none is written for one whose
+    // assignment names none.
+    let configurations = assignment.is_some_and(|assignment| !assignment.configurations.is_empty());
+    if written && (within.is_none() || configurations) {
         write_configurations(client, &key, assignment).await?;
     }
     Ok(written)
@@ -1933,6 +2036,173 @@ mod tests {
                     .collect()
             },
         );
+    }
+
+    /// The count of the Agents' records follows every row added and removed, whichever call adds
+    /// or removes it, and the ceiling is decided from it and not from the rows: a count that says
+    /// full refuses a new Agent though fewer rows are stored.
+    /// Verifies: ADR-0044, ADR-0043
+    #[test]
+    fn the_count_of_agents_follows_every_addition_and_removal_and_decides_the_ceiling() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let store = PgAgentStore::open(database.clone()).expect("open");
+        let counted = || {
+            let rows = test.rows("SELECT (SELECT agents FROM agent_count), count(*) FROM agents");
+            let (kept, stored) = (rows[0][0].clone(), rows[0][1].clone());
+            assert_eq!(kept, stored, "the count is the rows'");
+            kept.expect("a count").parse::<usize>().expect("a number")
+        };
+        assert_eq!(counted(), 0);
+        let uids = [1u8, 2, 3].map(|byte| InstanceUid([byte; 16]));
+        for uid in &uids[..2] {
+            assert!(matches!(
+                store.create_within(uid, &record(), 10).expect("create"),
+                Creation::Created
+            ));
+        }
+        assert!(matches!(
+            store
+                .create_within(&uids[0], &record(), 10)
+                .expect("create"),
+            Creation::Found(_)
+        ));
+        assert_eq!(counted(), 2, "a record created, not one found");
+        store.put(&uids[2], &record()).expect("put");
+        assert_eq!(counted(), 3, "a record put");
+        let moved = InstanceUid([4; 16]);
+        store.rekey(&uids[2], &moved, &record()).expect("rekey");
+        assert_eq!(counted(), 3, "a record moved");
+        store.remove(&moved).expect("remove");
+        assert_eq!(counted(), 2, "a record removed");
+
+        test.sql("UPDATE agent_count SET agents = 10");
+        assert!(
+            matches!(
+                store.create_within(&moved, &record(), 10).expect("create"),
+                Creation::Full
+            ),
+            "decided by the count"
+        );
+        test.sql("UPDATE agent_count SET agents = 2");
+        assert!(matches!(
+            store.create_within(&moved, &record(), 3).expect("create"),
+            Creation::Created
+        ));
+        assert_eq!(counted(), 3);
+    }
+
+    /// A creation commits without waiting for its flush, and the calls made after it on the same
+    /// connections commit synchronously again: a take, a report's write and a binding after it
+    /// wait for the flush, of the creation's too.
+    /// Verifies: ADR-0044
+    #[test]
+    fn a_creation_commits_without_its_flush_and_no_other_call_does() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        test.sql(
+            "CREATE TABLE commits_seen (statement text, setting text);
+             CREATE FUNCTION commit_seen() RETURNS trigger LANGUAGE plpgsql AS $$
+             BEGIN
+                 INSERT INTO commits_seen VALUES (TG_OP, current_setting('synchronous_commit'));
+                 RETURN NULL;
+             END $$;
+             CREATE TRIGGER commit_seen AFTER INSERT OR UPDATE ON agents
+                 FOR EACH ROW EXECUTE FUNCTION commit_seen();",
+        );
+        let store = PgAgentStore::open(database.clone()).expect("open");
+        let mut bare = record();
+        bare.assignment = None;
+        let uids: Vec<InstanceUid> = (0..20u8).map(|n| InstanceUid([0x50 + n; 16])).collect();
+        for uid in &uids {
+            store.create_within(uid, &bare, 1_000).expect("create");
+        }
+        for uid in &uids {
+            store
+                .take(uid, "00000000-0000-7000-8000-00000000000a", 5)
+                .expect("take");
+            let mut reported = bare.clone();
+            reported.sequence_num = 9;
+            store.write_report(uid, &reported).expect("write");
+        }
+        let seen = |statement: &str| -> Vec<String> {
+            let mut settings: Vec<String> = test
+                .rows(&format!(
+                    "SELECT DISTINCT setting FROM commits_seen WHERE statement = '{statement}'"
+                ))
+                .into_iter()
+                .flatten()
+                .flatten()
+                .collect();
+            settings.sort();
+            settings
+        };
+        assert_eq!(seen("INSERT"), ["off"], "a creation waits for no flush");
+        assert_eq!(seen("UPDATE"), ["on"], "a take and a write wait for theirs");
+    }
+
+    /// The pool holds the connections `[database] pool_size` names, and the store creates half of
+    /// them at once.
+    /// Verifies: ADR-0044
+    #[test]
+    fn the_pool_holds_what_pool_size_names_and_half_of_it_creates() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        for (size, creating) in [(2, 1), (6, 3), (40, 20)] {
+            let mut config = test.config();
+            config.pool_size = size;
+            let database = Database::open_in(
+                &config,
+                super::super::Exclusive::Alone("the test".to_string()),
+                Some(&test.schema),
+            )
+            .expect("open");
+            assert_eq!(database.pool_size(), size, "the pool");
+            let store = PgAgentStore::new(database.clone());
+            assert_eq!(store.creating.at_most, creating, "the creations at once");
+            drop(store);
+            drop(database);
+        }
+    }
+
+    /// Creations that wait for the count's row, which a creation elsewhere holds, hold no
+    /// connection of the pool meanwhile, so the other calls of the instance are answered.
+    /// Verifies: ADR-0044
+    #[test]
+    fn creations_waiting_for_their_lock_leave_the_pool_to_the_other_calls() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let store = Arc::new(PgAgentStore::open(database.clone()).expect("open"));
+        let gate = test.hold("SELECT agents FROM agent_count FOR UPDATE;");
+        // More than the whole pool.
+        let waiting: Vec<_> = (0..24u8)
+            .map(|n| {
+                let store = store.clone();
+                std::thread::spawn(move || {
+                    store.create_within(&InstanceUid([0x40 + n; 16]), &record(), 100)
+                })
+            })
+            .collect();
+        // However many creations wait, a read is answered within the pool's wait.
+        for _ in 0..3 {
+            store
+                .get(&InstanceUid([0x3f; 16]))
+                .expect("a read while creations wait");
+        }
+        gate.open();
+        for creation in waiting {
+            assert!(matches!(
+                creation.join().expect("a creation").expect("created"),
+                Creation::Created
+            ));
+        }
     }
 
     /// A read that began before this instance committed a release never takes the older
@@ -2373,7 +2643,7 @@ mod tests {
             database
                 .run(move |pool| async move {
                     let client = client(&pool).await?;
-                    write(&**client, &uid, &record).await
+                    write(&client, &uid, &record).await
                 })
                 .expect("import");
         };

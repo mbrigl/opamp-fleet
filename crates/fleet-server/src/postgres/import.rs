@@ -111,7 +111,7 @@ impl Records {
     }
 
     /// Writes every record inside the caller's transaction.
-    async fn write(self, client: &impl tokio_postgres::GenericClient) -> Result<(), String> {
+    async fn write(self, client: &impl super::Cached) -> Result<(), String> {
         for configuration in &self.configurations {
             super::configs::write(client, configuration).await?;
         }
@@ -314,7 +314,7 @@ fn copy(from: &Path, target: Target<'_>, database: &Database) -> Result<Report, 
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
             schema::apply(&*transaction, schema::MIGRATIONS, ours).await?;
-            records.write(&*transaction).await?;
+            records.write(&transaction).await?;
             if let Some((seq, hash)) = archive_end {
                 transaction
                     .execute(
@@ -1192,6 +1192,7 @@ mod tests {
             password_file: password,
             ca_file: None,
             tls: false,
+            pool_size: crate::config::DEFAULT_POOL_SIZE,
         };
         let err = run(&old, Blobs::Files(&new), &config).expect_err("nothing listens");
         assert!(err.contains(&format!("127.0.0.1:{port}")), "{err}");

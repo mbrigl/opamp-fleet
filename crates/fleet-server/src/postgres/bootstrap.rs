@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use tokio_postgres::GenericClient;
+use super::Cached as GenericClient;
 
 use super::{client, signed, sql, unsigned, Database};
 use crate::bootstrap::{BootstrapStore, Entry};
@@ -57,7 +57,7 @@ impl BootstrapStore for PgBootstrapStore {
     fn load(&self) -> Result<Vec<Entry>, String> {
         self.database.run(|pool| async move {
             let client = client(&pool).await?;
-            Ok(read_all(&**client)
+            Ok(read_all(&client)
                 .await?
                 .into_iter()
                 .map(|(entry, _)| entry)
@@ -70,7 +70,7 @@ impl BootstrapStore for PgBootstrapStore {
         self.database.run(move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
-            write(&*transaction, &entry, None).await?;
+            write(&transaction, &entry, None).await?;
             transaction.commit().await.map_err(sql)
         })
     }
@@ -81,7 +81,7 @@ impl BootstrapStore for PgBootstrapStore {
         self.database.run(move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
-            write(&*transaction, &entry, Some(&file)).await?;
+            write(&transaction, &entry, Some(&file)).await?;
             transaction.commit().await.map_err(sql)
         })
     }
@@ -114,7 +114,7 @@ impl BootstrapStore for PgBootstrapStore {
             if usize::try_from(valid).unwrap_or(usize::MAX) >= max {
                 return Ok(false);
             }
-            write(&*transaction, &entry, Some(&file)).await?;
+            write(&transaction, &entry, Some(&file)).await?;
             transaction.commit().await.map_err(sql)?;
             Ok(true)
         })

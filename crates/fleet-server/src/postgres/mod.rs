@@ -90,10 +90,6 @@ pub(crate) const MARKS_OUTLIVE: Duration = Duration::from_secs(
 /// What [`MARKS_OUTLIVE`] adds to the time a sweep that renewed a mark may still be deleting.
 const MARKS_MARGIN: Duration = Duration::from_secs(15);
 
-/// The connections the pool holds at most. The Server writes one record at a time per act, and
-/// the in-memory state answers every read (ADR-0044 clause 3), so a few suffice.
-const POOL_SIZE: usize = 8;
-
 /// The name the Server's connections carry in `pg_stat_activity`.
 const APPLICATION_NAME: &str = "opamp-fleet-server";
 
@@ -350,7 +346,7 @@ impl Database {
             ),
         };
         let pool = Pool::builder(manager)
-            .max_size(POOL_SIZE)
+            .max_size(config.pool_size)
             .runtime(Runtime::Tokio1)
             .wait_timeout(Some(WAIT_TIMEOUT))
             .create_timeout(Some(CONNECT_TIMEOUT))
@@ -527,6 +523,13 @@ impl Database {
             u64::try_from(bound.as_millis()).unwrap_or(u64::MAX),
             Ordering::SeqCst,
         );
+    }
+
+    /// The connections the pool holds at most, as `[database] pool_size` set them
+    /// (ADR-0044 clause 24).
+    #[must_use]
+    pub fn pool_size(&self) -> usize {
+        self.pool.status().max_size
     }
 
     /// Runs `work` on the database's runtime with the pool, and waits for it at most
@@ -857,6 +860,134 @@ async fn bounded<T>(
     })
 }
 
+/// A pooled connection or a transaction on one, whose statements are prepared once per
+/// connection and kept: a statement run again is bound and executed in one round trip, not
+/// prepared again first.
+pub(crate) trait Cached: Sync {
+    /// Like `execute`, its statement prepared once per connection.
+    fn execute(
+        &self,
+        sql: &str,
+        params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
+    ) -> impl Future<Output = Result<u64, tokio_postgres::Error>> + Send;
+
+    /// Like `query`, its statement prepared once per connection.
+    fn query(
+        &self,
+        sql: &str,
+        params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
+    ) -> impl Future<Output = Result<Vec<tokio_postgres::Row>, tokio_postgres::Error>> + Send;
+
+    /// Like `query_one`, its statement prepared once per connection.
+    fn query_one(
+        &self,
+        sql: &str,
+        params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
+    ) -> impl Future<Output = Result<tokio_postgres::Row, tokio_postgres::Error>> + Send;
+
+    /// Like `query_opt`, its statement prepared once per connection.
+    fn query_opt(
+        &self,
+        sql: &str,
+        params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
+    ) -> impl Future<Output = Result<Option<tokio_postgres::Row>, tokio_postgres::Error>> + Send;
+
+    /// Like `batch_execute`: the simple protocol, one round trip, nothing prepared.
+    fn batch_execute(
+        &self,
+        sql: &str,
+    ) -> impl Future<Output = Result<(), tokio_postgres::Error>> + Send;
+}
+
+/// Implements [`Cached`] for a type of `deadpool_postgres` that has `prepare_cached`.
+macro_rules! cached {
+    ($type:ty) => {
+        impl Cached for $type {
+            async fn execute(
+                &self,
+                sql: &str,
+                params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
+            ) -> Result<u64, tokio_postgres::Error> {
+                let statement = self.prepare_cached(sql).await?;
+                deadpool_postgres::GenericClient::execute(self, &statement, params).await
+            }
+            async fn query(
+                &self,
+                sql: &str,
+                params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
+            ) -> Result<Vec<tokio_postgres::Row>, tokio_postgres::Error> {
+                let statement = self.prepare_cached(sql).await?;
+                deadpool_postgres::GenericClient::query(self, &statement, params).await
+            }
+            async fn query_one(
+                &self,
+                sql: &str,
+                params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
+            ) -> Result<tokio_postgres::Row, tokio_postgres::Error> {
+                let statement = self.prepare_cached(sql).await?;
+                deadpool_postgres::GenericClient::query_one(self, &statement, params).await
+            }
+            async fn query_opt(
+                &self,
+                sql: &str,
+                params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
+            ) -> Result<Option<tokio_postgres::Row>, tokio_postgres::Error> {
+                let statement = self.prepare_cached(sql).await?;
+                deadpool_postgres::GenericClient::query_opt(self, &statement, params).await
+            }
+            async fn batch_execute(&self, sql: &str) -> Result<(), tokio_postgres::Error> {
+                deadpool_postgres::GenericClient::batch_execute(self, sql).await
+            }
+        }
+    };
+}
+
+cached!(deadpool_postgres::Object);
+cached!(deadpool_postgres::Transaction<'_>);
+
+/// Implements [`Cached`] for a connection of `tokio_postgres` outside the pool — one a lock or a
+/// migration holds alone — whose statements are prepared each time they run.
+macro_rules! uncached {
+    ($type:ty) => {
+        impl Cached for $type {
+            async fn execute(
+                &self,
+                sql: &str,
+                params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
+            ) -> Result<u64, tokio_postgres::Error> {
+                tokio_postgres::GenericClient::execute(self, sql, params).await
+            }
+            async fn query(
+                &self,
+                sql: &str,
+                params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
+            ) -> Result<Vec<tokio_postgres::Row>, tokio_postgres::Error> {
+                tokio_postgres::GenericClient::query(self, sql, params).await
+            }
+            async fn query_one(
+                &self,
+                sql: &str,
+                params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
+            ) -> Result<tokio_postgres::Row, tokio_postgres::Error> {
+                tokio_postgres::GenericClient::query_one(self, sql, params).await
+            }
+            async fn query_opt(
+                &self,
+                sql: &str,
+                params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
+            ) -> Result<Option<tokio_postgres::Row>, tokio_postgres::Error> {
+                tokio_postgres::GenericClient::query_opt(self, sql, params).await
+            }
+            async fn batch_execute(&self, sql: &str) -> Result<(), tokio_postgres::Error> {
+                tokio_postgres::GenericClient::batch_execute(self, sql).await
+            }
+        }
+    };
+}
+
+uncached!(tokio_postgres::Client);
+uncached!(tokio_postgres::Transaction<'_>);
+
 /// A pooled connection, or why there is none: a database lost while the Server runs fails the
 /// calls that need it (ADR-0044 clause 24).
 ///
@@ -1141,6 +1272,7 @@ pub(crate) mod testing {
                 user,
                 password_file: password_file.into(),
                 tls: ca_file.is_some(),
+                pool_size: crate::config::DEFAULT_POOL_SIZE,
                 ca_file,
             };
             let mut random = [0u8; 8];
@@ -1165,6 +1297,7 @@ pub(crate) mod testing {
                 password_file: self.config.password_file.clone(),
                 ca_file: self.config.ca_file.clone(),
                 tls: self.config.tls,
+                pool_size: self.config.pool_size,
             }
         }
 
@@ -1181,6 +1314,23 @@ pub(crate) mod testing {
         /// Runs `statements` in this schema, past every adapter.
         pub(crate) fn sql(&self, statements: &str) {
             self.admin(&format!("SET search_path = {};\n{statements}", self.schema));
+        }
+
+        /// What [`sql`](Self::sql) runs, as a function another thread or a store's hook may own.
+        pub(crate) fn sql_runner(&self) -> impl Fn(&str) + Send + Sync + 'static {
+            let (pg, tls) = self.admin_connection();
+            let schema = self.schema.clone();
+            move |statements: &str| {
+                let (pg, tls) = (pg.clone(), tls.clone());
+                let statements = format!("SET search_path = {schema};\n{statements}");
+                Bridge::new("records-test")
+                    .expect("runtime")
+                    .run(async move {
+                        let client = connect(&pg, &tls).await?;
+                        client.batch_execute(&statements).await.map_err(sql)
+                    })
+                    .expect("run on the test database");
+            }
         }
 
         /// Makes every insert or update of `table` whose new row meets `condition` fail, as a
@@ -1385,6 +1535,35 @@ pub(crate) mod testing {
             )
         }
 
+        /// Runs `statements` in a transaction on a session of its own, in the test's schema, and
+        /// holds the transaction open, with the locks it took, until the [`Gate`] is opened or
+        /// dropped, then rolls it back.
+        pub(crate) fn hold(&self, statements: &str) -> Gate {
+            let (pg, tls) = self.admin_connection();
+            let statements = format!("SET search_path = {};\nBEGIN;\n{statements}", self.schema);
+            let (open, opened) = std::sync::mpsc::channel::<()>();
+            let (held, holds) = std::sync::mpsc::channel::<()>();
+            let thread = std::thread::spawn(move || {
+                Bridge::new("records-test-hold")
+                    .expect("runtime")
+                    .run(async move {
+                        let client = connect(&pg, &tls).await?;
+                        client.batch_execute(&statements).await.map_err(sql)?;
+                        let _ = held.send(());
+                        let _ = tokio::task::spawn_blocking(move || opened.recv()).await;
+                        client.batch_execute("ROLLBACK").await.map_err(sql)?;
+                        drop(client);
+                        Ok::<_, String>(())
+                    })
+                    .expect("the hold");
+            });
+            holds.recv().expect("the hold is held");
+            Gate {
+                open,
+                thread: Some(thread),
+            }
+        }
+
         /// Holds the advisory lock `key` on a session of its own until the [`Gate`] is opened or
         /// dropped: a trigger that takes it holds another connection's write open, mid-transaction,
         /// for as long as the test needs, with no timing.
@@ -1516,6 +1695,7 @@ mod tests {
             password_file: "/nonexistent".into(),
             ca_file: None,
             tls,
+            pool_size: crate::config::DEFAULT_POOL_SIZE,
         }
     }
 

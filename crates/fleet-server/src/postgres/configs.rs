@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use tokio_postgres::GenericClient;
+use super::Cached as GenericClient;
 
 use super::notify::{notify, CONFIGURATION};
 use super::{client, sql, Database};
@@ -32,7 +32,7 @@ impl ConfigBackend for PgConfigBackend {
     fn load(&self) -> Result<Vec<Configuration>, String> {
         self.database.run(|pool| async move {
             let client = client(&pool).await?;
-            read_all(&**client).await
+            read_all(&client).await
         })
     }
 
@@ -43,8 +43,8 @@ impl ConfigBackend for PgConfigBackend {
         self.database.run(move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
-            save(&*transaction, &name, &saved).await?;
-            notify(&*transaction, CONFIGURATION, &name).await?;
+            save(&transaction, &name, &saved).await?;
+            notify(&transaction, CONFIGURATION, &name).await?;
             transaction.commit().await.map_err(sql)
         })
     }
@@ -85,7 +85,7 @@ impl ConfigBackend for PgConfigBackend {
                 .await
                 .map_err(sql)?;
             if collected > 0 {
-                notify(&*transaction, CONFIGURATION, &name).await?;
+                notify(&transaction, CONFIGURATION, &name).await?;
             }
             let mut kept = BTreeMap::new();
             for row in transaction
@@ -151,11 +151,11 @@ impl ConfigBackend for PgConfigBackend {
                 .await
                 .map_err(sql)?;
             super::deployments::drop_member_rows(
-                &*transaction,
+                &transaction,
                 &crate::deployments::Member::Configuration(name.clone()),
             )
             .await?;
-            notify(&*transaction, CONFIGURATION, &name).await?;
+            notify(&transaction, CONFIGURATION, &name).await?;
             transaction.commit().await.map_err(sql)?;
             Ok(Removal::Removed)
         })

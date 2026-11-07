@@ -14,7 +14,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use tokio_postgres::GenericClient;
+use super::Cached as GenericClient;
 
 use super::{client, sql, Database, Exclusive, CALL_TIMEOUT};
 use crate::audit::Entry;
@@ -501,7 +501,7 @@ pub fn verify(database: &Database, archive: Option<&Path>) -> Result<Verified, S
                     })
                     .map(|(_, link)| (link.last_seq, link.last_hash.clone()))
                     .collect();
-                let walked = walk(&*transaction, chain, pruned)
+                let walked = walk(&transaction, chain, pruned)
                     .await?
                     .and_then(|walk| walk.finish(closed_hash.as_deref()));
                 if walked.is_ok() {
@@ -1626,7 +1626,7 @@ mod tests {
                 closer.run_within(Duration::from_secs(30), move |pool| async move {
                     let mut client = client(&pool).await?;
                     let transaction = client.transaction().await.map_err(sql)?;
-                    close_lapsed(&*transaction, &chain, "test-closer", Ended::Lapsed)
+                    close_lapsed(&transaction, &chain, "test-closer", Ended::Lapsed)
                         .await?
                         .expect("an open chain");
                     locked.send(()).expect("the test listens");

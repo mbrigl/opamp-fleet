@@ -186,7 +186,13 @@ struct Setup<'a> {
     max_pending_per_bootstrap: Option<usize>,
     /// The floor of each Agent type (ADR-0028), kept in the data directory.
     floors: bool,
+    /// The Agent records' store, opened on the data directory; the filesystem's when `None`.
+    agents: Option<OpenAgents>,
 }
+
+/// Opens an Agent records' store on a data directory.
+type OpenAgents =
+    Box<dyn FnOnce(&std::path::Path) -> Box<dyn fleet_server::agent_store::AgentStore>>;
 
 /// The CAs a revocation can name, as `main` takes them from `[tls]` and `[enrolment]`.
 fn authorities(pki: &Pki, bootstrap: Option<&Pki>) -> Vec<fleet_server::revocation::Authority> {
@@ -277,8 +283,20 @@ async fn serve(pki: &Pki, setup: Setup<'_>) -> Served {
             .expect("bootstrap record"),
         )
     });
+    let data_dir = dir.path().join("fleet-configs");
+    let state = match setup.agents {
+        None => AppState::new(data_dir),
+        Some(open) => {
+            std::fs::create_dir_all(&data_dir).expect("data directory");
+            AppState::with_stores(
+                open(&data_dir),
+                Box::new(fleet_server::fs::FsConfigBackend::open(&data_dir).expect("configs")),
+                Box::new(fleet_server::clock::SystemClock),
+            )
+        }
+    };
     let state = Arc::new(
-        AppState::new(dir.path().join("fleet-configs"))
+        state
             .expect("state")
             .with_bootstrap(bootstrap)
             .with_client_ca(setup.client_ca)
@@ -6106,4 +6124,166 @@ async fn the_hosts_the_certificates_and_the_revocations_page_in_their_fixed_orde
         let (status, _, _, body) = read(refused.to_string()).await;
         assert_eq!(status, 400, "{refused}: {body}");
     }
+}
+
+// ---- A report that waits for its store ----
+
+/// The filesystem's Agent store, whose write of one Agent's record waits until it is let go.
+struct HeldWrite {
+    inner: fleet_server::fs::FsAgentStore,
+    held: InstanceUid,
+    entered: std::sync::Mutex<std::sync::mpsc::Sender<()>>,
+    released: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl fleet_server::agent_store::AgentStore for HeldWrite {
+    fn load(
+        &self,
+    ) -> Result<
+        std::collections::HashMap<InstanceUid, fleet_server::agent_store::PersistedAgent>,
+        String,
+    > {
+        self.inner.load()
+    }
+    fn get(
+        &self,
+        uid: &InstanceUid,
+    ) -> Result<Option<fleet_server::agent_store::PersistedAgent>, String> {
+        self.inner.get(uid)
+    }
+    fn put(
+        &self,
+        uid: &InstanceUid,
+        record: &fleet_server::agent_store::PersistedAgent,
+    ) -> Result<(), String> {
+        self.inner.put(uid, record)
+    }
+    fn write_report(
+        &self,
+        uid: &InstanceUid,
+        record: &fleet_server::agent_store::PersistedAgent,
+    ) -> Result<bool, String> {
+        if *uid == self.held {
+            let _ = self.entered.lock().expect("hook lock").send(());
+            let _ = self
+                .released
+                .lock()
+                .expect("hook lock")
+                .recv_timeout(std::time::Duration::from_secs(30));
+        }
+        self.inner.write_report(uid, record)
+    }
+    fn set_labels(
+        &self,
+        uid: &InstanceUid,
+        labels: &std::collections::BTreeMap<String, String>,
+    ) -> Result<bool, String> {
+        self.inner.set_labels(uid, labels)
+    }
+    fn set_restart_pending(
+        &self,
+        uid: &InstanceUid,
+        pending: bool,
+    ) -> Result<Option<bool>, String> {
+        self.inner.set_restart_pending(uid, pending)
+    }
+    fn remove(&self, uid: &InstanceUid) -> Result<(), String> {
+        self.inner.remove(uid)
+    }
+    fn rekey(
+        &self,
+        old: &InstanceUid,
+        new: &InstanceUid,
+        record: &fleet_server::agent_store::PersistedAgent,
+    ) -> Result<(), String> {
+        self.inner.rekey(old, new, record)
+    }
+    fn release(
+        &self,
+        revisions: &[fleet_server::configs::Pinned],
+        agents: &[(InstanceUid, fleet_server::agent_store::PersistedAgent)],
+    ) -> Result<Vec<InstanceUid>, String> {
+        self.inner.release(revisions, agents)
+    }
+    fn pinning(&self, pin: fleet_server::agent_store::Pin<'_>) -> usize {
+        self.inner.pinning(pin)
+    }
+    fn referenced_revisions(&self, name: &str) -> std::collections::BTreeSet<String> {
+        self.inner.referenced_revisions(name)
+    }
+}
+
+/// While one Agent's report waits for its store, another host's TLS handshake on the Agent plane
+/// completes and its report is answered: the report runs off the runtime's workers, so the one
+/// worker of the Server's runtime here stays free, and the fleet lock is not held across the
+/// call.
+/// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+#[test]
+fn a_handshake_completes_and_a_report_is_answered_while_another_reports_store_call_waits() {
+    let pki = Pki::new();
+    let (held, other) = (InstanceUid([0x51; 16]), InstanceUid([0x52; 16]));
+    let (entered, entering) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let setup = Setup {
+        agents: Some(Box::new(move |data_dir: &std::path::Path| {
+            Box::new(HeldWrite {
+                inner: fleet_server::fs::FsAgentStore::open(data_dir).expect("agents"),
+                held,
+                entered: std::sync::Mutex::new(entered),
+                released: std::sync::Mutex::new(released),
+            }) as Box<dyn fleet_server::agent_store::AgentStore>
+        })),
+        ..Setup::default()
+    };
+    // The Server on a runtime of one worker, the test's clients on another runtime.
+    let server = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .expect("the Server's runtime");
+    let served = server.block_on(serve(&pki, setup));
+    let clients = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("the clients' runtime");
+    clients.block_on(async {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message as Ws;
+        let (cert, key) = pki.issue("edge-held");
+        let mut waiting = websocket(&served, &cert, &key, None)
+            .await
+            .expect("the first host's session");
+        let framed = opamp::frame::encode_within(&report(&held), usize::MAX).expect("frame");
+        waiting.send(Ws::Binary(framed.into())).await.expect("send");
+        tokio::task::spawn_blocking(move || {
+            entering
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("the first Agent's write is under way");
+        })
+        .await
+        .expect("waited");
+
+        let (cert, key) = pki.issue("edge-other");
+        let answered = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let mut socket = websocket(&served, &cert, &key, None)
+                .await
+                .expect("the handshake completes");
+            exchange(&mut socket, &other).await;
+        })
+        .await;
+        let _ = release.send(());
+        answered.expect("the other host is answered while the write waits");
+        loop {
+            match tokio::time::timeout(std::time::Duration::from_secs(10), waiting.next())
+                .await
+                .expect("the first Agent is answered once its write is let go")
+            {
+                Some(Ok(Ws::Binary(_))) => break,
+                Some(Ok(_)) => continue,
+                other => panic!("the session ended early: {other:?}"),
+            }
+        }
+    });
+    drop(served);
 }
