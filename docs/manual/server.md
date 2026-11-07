@@ -1519,12 +1519,18 @@ On PostgreSQL the record is one chain per lease: each instance opens a chain of 
 lease it takes, named by the lease's instance id, and every entry names its chain. Its first entry
 is `audit.chain_opened` with the host. An orderly shutdown closes the chain with
 `audit.chain_closed`, `reason` `shutdown`, before the lease is released; when it cannot, the lease
-is left to lapse. An instance that takes over a lapsed lease — at its own start, or at any
-renewal — closes that lease's chain with `reason` `lease_lapsed` and `closed_by` its own chain, and
-from then on the database refuses the dead chain an entry. Decisions an instance queued under a
-lease that lapsed before they were written go into the chain of its next lease, each with
-`taken_under` naming the old chain; none is lost. Several chains are therefore no gap: there is at
-least one per start.
+is left to lapse. A closing write whose answer was lost is read back, and the lease is released
+when the chain holds its closing entry. After the close the instance records nothing more: a
+decision taken then is refused, and the shutdown logs at `error` how many went unrecorded. An
+instance that takes over a lapsed lease — at its own start, or at any renewal — closes that lease's
+chain with `reason` `lease_lapsed` and `closed_by` its own chain, and from then on the database
+refuses the dead chain an entry. The live lease of an instance that had to be alone and whose
+process is gone is taken over the same way before it lapses, with `reason` `holder_gone`.
+Decisions an instance queued under a lease that lapsed before they were written go into the chain
+of its next lease, each with `taken_under` naming the old chain; none is lost. A decision taken
+while the instance held no lease, its lease lapsed by its clock and no new one taken yet, carries
+`taken_under` `none` in whichever chain it is written into. Several chains are therefore no gap:
+there is at least one per start.
 
 ```console
 $ server audit-verify --config /etc/opamp-fleet/server.toml \

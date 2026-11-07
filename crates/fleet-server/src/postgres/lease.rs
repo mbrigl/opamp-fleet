@@ -164,25 +164,34 @@ impl Database {
                     }
                 }
             }
-            let taken_over: Vec<String> = transaction
+            // A lease that has not lapsed is taken over only as that of a holder that had to be
+            // alone and whose process is gone.
+            let removed: Vec<(String, bool)> = transaction
                 .query(
                     "DELETE FROM leases WHERE expires_at <= now() OR instance_id::text = ANY($1) \
-                     RETURNING instance_id::text",
+                     RETURNING instance_id::text, expires_at <= now()",
                     &[&alone],
                 )
                 .await
                 .map_err(sql)?
                 .iter()
-                .map(|row| row.get(0))
+                .map(|row| (row.get(0), row.get(1)))
                 .collect();
             // Each removed lease's chain is closed for it, and this lease's chain opened, in the
             // same transaction (clause 3 of
             // ADR-0042).
             let mut written = Vec::new();
-            for lapsed in &taken_over {
-                written
-                    .extend(super::audit::close_lapsed(&*transaction, lapsed, &instance_id).await?);
+            for (lapsed, by_time) in &removed {
+                let ended = if *by_time {
+                    super::audit::Ended::Lapsed
+                } else {
+                    super::audit::Ended::HolderGone
+                };
+                written.extend(
+                    super::audit::close_lapsed(&*transaction, lapsed, &instance_id, ended).await?,
+                );
             }
+            let taken_over: Vec<String> = removed.into_iter().map(|(id, _)| id).collect();
             written.push(
                 super::audit::open_chain(&*transaction, &instance_id, &host, files.as_ref())
                     .await?,
@@ -288,7 +297,15 @@ impl Database {
                 .collect();
             let mut written = Vec::new();
             for chain in &lapsed {
-                written.extend(super::audit::close_lapsed(&*transaction, chain, &id).await?);
+                written.extend(
+                    super::audit::close_lapsed(
+                        &*transaction,
+                        chain,
+                        &id,
+                        super::audit::Ended::Lapsed,
+                    )
+                    .await?,
+                );
             }
             transaction.commit().await.map_err(sql)?;
             for line in &written {
@@ -461,6 +478,38 @@ mod tests {
             .take_lease("host-c", LAPSE)
             .expect("the lock went with its session");
         assert_eq!(taken.taken_over, [held.instance_id]);
+    }
+
+    /// The live lease of an instance that had to be alone and whose process is gone is taken over
+    /// before it lapses, and its chain closed with `reason` `holder_gone` and `closed_by` the
+    /// chain of the instance that took it over; the record verifies.
+    /// Verifies: ADR-draft-the-audit-record-is-one-hash-chain-per-lease-and-names-the-lease-each-decision-was-taken-under
+    #[test]
+    fn the_chain_of_a_gone_holders_live_lease_is_closed_as_holder_gone() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let lonely = alone(&test, "[blobs] store = \"fs\"").expect("the lock is free");
+        let held = lonely.take_lease("host-a", LAPSE).expect("alone");
+        drop(lonely);
+        let taker = test.shared();
+        let taken = taker
+            .take_lease("host-b", LAPSE)
+            .expect("the lock went with its session");
+        assert_eq!(taken.taken_over, std::slice::from_ref(&held.instance_id));
+        let closing = test.rows(&format!(
+            "SELECT line FROM audit_entries WHERE chain = '{}' ORDER BY seq DESC LIMIT 1",
+            held.instance_id
+        ));
+        let closing = closing[0][0].clone().expect("line");
+        assert!(
+            closing.contains("audit.chain_closed")
+                && closing.contains("\"reason\":\"holder_gone\"")
+                && closing.contains(&format!("\"closed_by\":\"{}\"", taken.instance_id)),
+            "{closing}"
+        );
+        let verified = super::super::audit::verify(&taker, None).expect("verify");
+        assert!(!verified.failed, "{:?}", verified.lines);
     }
 
     /// A lease that lapsed is taken over by the next instance that takes one, which names it; a

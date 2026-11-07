@@ -792,6 +792,7 @@ async fn main() {
                 config.audit.limits(),
                 clock.clone(),
                 lease.held(),
+                Some(lease.proof()),
             )
         }
         _ => config
@@ -1060,6 +1061,13 @@ async fn main() {
         error!(
             "the audit record could not be written out before shutdown; its last entries are lost"
         );
+    }
+    // Nothing is recorded after the close: a decision taken since is refused, and counted here
+    // (ADR-draft-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again
+    // clause 5).
+    let unrecorded = audit_log.unrecorded_count();
+    if unrecorded > 0 {
+        error!(unrecorded, "decisions went unrecorded at shutdown");
     }
     // A plane that could not be served is a failure a service manager restarts on.
     if served.is_err() {
