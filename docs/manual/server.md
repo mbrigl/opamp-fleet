@@ -984,12 +984,17 @@ instance's Operator plane:
      `GET /api/v1/enrolment/window` shows the window open, close it with
      `DELETE /api/v1/enrolment/window`; where it is `opened` and the window shows a later end
      than the line's `until_ms`, close it, or open it again for the time left to that end;
-   - the requests decided since the backup: while the window is open, reject with
-     `POST /api/v1/enrolments/{id}/reject` each request `GET /api/v1/enrolments` lists, now and
-     as hosts send them again, whose `id` an `enrolment.rejected` names, `rejected` or `unknown`,
-     or an `issuance.signed` names as its `request`. A request's `id` stands for its key, so one
-     approved since the backup comes back pending, and approved again it would sign a certificate
-     for that key that no revocation names.
+   - the requests decided since the backup, each whose `id` an `enrolment.rejected` names,
+     `rejected` or `unknown`, or an `issuance.signed` names as its `request`. A request's `id`
+     stands for its key, so one approved since the backup comes back pending when its host sends
+     it again, and approved again it would sign a certificate for that key that no revocation
+     names. Reject each with `POST /api/v1/enrolments/{id}/reject` in every window that is open
+     while its host can still send it: now where `GET /api/v1/enrolments` lists it, and in each
+     later window as it arrives. A rejection lasts only as long as its window: a window that is
+     closed or runs out drops every request it holds, the rejected ones included, and the same
+     request sent in the next window waits again. An `id` the queue does not hold is answered
+     `404`, so no request is rejected before it arrives. Keep these ids with the restore's notes
+     for the later windows.
 
 The enrolment requests queued and not yet decided since the backup are gone, so such a host
 enrols again. Then put the instance into the balancer's pool and start the others.
@@ -1564,8 +1569,9 @@ approved one with its certificate included — are written to `data_dir/enrolmen
 act that changes them is answered, so a Server restart keeps an open window open until its end and
 keeps its requests: a host whose approval it had not collected yet is handed its certificate after
 the restart. A window whose end passed while the Server was down is closed when it starts. When it
-closes, every enrolling connection is closed and every pending request expires, an approved one
-whose certificate its host has not collected included; that host enrols again in the next window.
+closes, every enrolling connection is closed and every request expires, an approved one whose
+certificate its host has not collected and a rejected one included; in the next window the same
+request waits again.
 
 **While it is open, an enrolling host may send a certificate request and nothing else.** The
 Server creates no Agent record for it and offers it nothing but the issued certificate. The request
@@ -1616,7 +1622,8 @@ the attribute, nothing is signed, and the request waits. Issue the host a bootst
 that fits, and reject the request. The host stores it as `client-cert.pem` in its state directory
 and reconnects with it
 as a member; from then on it renews by itself. Rejecting answers the request `BadRequest` and
-closes the connection. An unknown or expired id is answered `404`, and every enrolment route
+closes the connection, and so is the same request answered when it is sent again until the window
+closes. An unknown or expired id is answered `404`, and every enrolment route
 answers `404` while `[enrolment]` is not configured. A bootstrap certificate that arrives while
 the window is closed is answered `503`, and does not count toward the throttle.
 

@@ -895,10 +895,11 @@ What the questionnaire asks about is only what has no useful default on a fresh 
   where they lie, logs the request's key fingerprint and waits until an operator approves it, then
   stores the issued certificate in the state directory. Ctrl-C stops the wait; the file stays
   written, nothing is registered, and running the questionnaire again asks again and resumes the
-  same request, printing its fingerprint. A request an operator rejected stays rejected: the
-  Server's refusal is logged and the wait goes on, so stop it, delete `client-key.pending.pem` and
-  `client-csr.pending.pem` from the state directory, and run the questionnaire again for a fresh
-  request. A path that names no readable file, here or for the CA, is asked for again;
+  same request, printing its fingerprint. A request an operator rejected stays rejected until the
+  window closes: the Server's refusal is logged and the wait goes on, so stop it, delete
+  `client-key.pending.pem` and `client-csr.pending.pem` from the state directory, and run the
+  questionnaire again for a fresh request. A path that names no readable file, here or for the CA,
+  is asked for again;
 - **the package verification key** ([`[packages]`](#packages)). It also decides whether the Server
   may update this Client: a new file is written with `self_update = true`, which takes effect once
   a key is set. An empty answer is accepted, and the questionnaire then says that this Client
