@@ -488,8 +488,50 @@ fn bind(address: SocketAddr, plane: &str) -> std::net::TcpListener {
     }
 }
 
-#[tokio::main]
-async fn main() {
+/// The most malloc arenas the Server's process uses on glibc, unless `MALLOC_ARENA_MAX` names
+/// another count.
+///
+/// glibc gives a thread that finds every arena in use an arena of its own, up to eight for each
+/// CPU, and an arena keeps most of what is freed in it for its own later use. The Server's work
+/// moves from thread to thread, the runtime's workers and the blocking pool that calls the store,
+/// and a read of the whole fleet, as a rollout makes, allocates and frees on whichever thread runs
+/// it. With an arena for each thread, an instance's resident memory grows with each such read on a
+/// thread whose arena has not held one yet, long after the memory in use has levelled off: in the
+/// G-20 load test, an instance with 205 MiB in use held 1.3 GiB after 15 minutes, and still grew.
+/// With two arenas it no longer grows with each such read. What still grows under a steady fleet
+/// is memory in use, to a bound: the database connections' buffers, at the size of the largest
+/// presence batch each has written, which follows the most Agents the instance has held at once.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+const MALLOC_ARENAS: libc::c_int = 2;
+
+/// Caps glibc's malloc arenas at [`MALLOC_ARENAS`], unless the environment names a count in
+/// `MALLOC_ARENA_MAX`, which glibc reads itself. Called first in `main`, before any other thread
+/// starts, so that no thread holds an arena past the cap.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn cap_malloc_arenas() {
+    if std::env::var_os("MALLOC_ARENA_MAX").is_some() {
+        return;
+    }
+    // SAFETY: mallopt only sets a parameter of glibc's allocator; it is called before this
+    // process starts a thread of its own.
+    if unsafe { libc::mallopt(libc::M_ARENA_MAX, MALLOC_ARENAS) } != 1 {
+        eprintln!("cannot cap the malloc arenas at {MALLOC_ARENAS}");
+    }
+}
+
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+fn cap_malloc_arenas() {}
+
+fn main() {
+    cap_malloc_arenas();
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("the Server's runtime")
+        .block_on(serve());
+}
+
+async fn serve() {
     // The log goes to stderr, so that stdout carries only what a command prints as its result.
     // On PostgreSQL each line names the instance id of the lease the instance holds (clause 1 of
     // ADR-0041).
@@ -1177,6 +1219,74 @@ fn uploaded_artifacts_notice(signs_csrs: bool) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// On glibc the Server's process allocates from at most [`MALLOC_ARENAS`] arenas, however many
+    /// of its threads allocate at once. Run in a process of its own, which caps its arenas as
+    /// `main` does, since the test harness's threads have arenas of their own by then.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[test]
+    fn the_process_allocates_from_a_capped_number_of_arenas() {
+        const CHILD: &str = "FLEET_TEST_MALLOC_ARENAS_CHILD";
+        const NAME: &str = "tests::the_process_allocates_from_a_capped_number_of_arenas";
+        if std::env::var_os(CHILD).is_some() {
+            cap_malloc_arenas();
+            let start = Arc::new(std::sync::Barrier::new(16));
+            let threads: Vec<_> = (0..16)
+                .map(|_| {
+                    let start = start.clone();
+                    std::thread::spawn(move || {
+                        start.wait();
+                        for _ in 0..2_000 {
+                            let held: Vec<Vec<u8>> =
+                                (0..64).map(|i| vec![0; 64 + i * 64]).collect();
+                            std::hint::black_box(held);
+                        }
+                    })
+                })
+                .collect();
+            for thread in threads {
+                thread.join().expect("an allocating thread");
+            }
+            println!("malloc arenas: {}", malloc_arenas());
+            return;
+        }
+        let child = std::process::Command::new(std::env::current_exe().expect("the test binary"))
+            .args(["--exact", NAME, "--nocapture", "--test-threads=1"])
+            .env(CHILD, "1")
+            .env_remove("MALLOC_ARENA_MAX")
+            .output()
+            .expect("run the test in a process of its own");
+        let out = String::from_utf8_lossy(&child.stdout);
+        assert!(child.status.success(), "{out}");
+        let arenas: libc::c_int = out
+            .lines()
+            .find_map(|line| line.split("malloc arenas: ").nth(1))
+            .unwrap_or_else(|| panic!("the arenas counted: {out}"))
+            .trim()
+            .parse()
+            .expect("a count");
+        assert!(
+            (1..=MALLOC_ARENAS).contains(&arenas),
+            "{arenas} arenas, at most {MALLOC_ARENAS}"
+        );
+    }
+
+    /// How many arenas glibc's malloc has, as `malloc_info` lists them.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    fn malloc_arenas() -> libc::c_int {
+        let dir = tempfile::tempdir().expect("a directory");
+        let path = dir.path().join("malloc-info.xml");
+        let name = std::ffi::CString::new(path.to_str().expect("a path")).expect("a C path");
+        // SAFETY: a file this function opens, writes through malloc_info and closes.
+        unsafe {
+            let file = libc::fopen(name.as_ptr(), c"w".as_ptr());
+            assert!(!file.is_null(), "open {}", path.display());
+            assert_eq!(libc::malloc_info(0, file), 0, "malloc_info");
+            libc::fclose(file);
+        }
+        let info = std::fs::read_to_string(&path).expect("read malloc_info");
+        libc::c_int::try_from(info.matches("<heap nr=").count()).expect("a count")
+    }
 
     /// On Linux the lease's clock is `CLOCK_BOOTTIME`: it reads, it moves on as time passes, and it
     /// counts at least as much as the monotonic clock, which a suspend would leave behind.

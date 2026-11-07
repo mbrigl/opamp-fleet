@@ -19,6 +19,9 @@
 //! The load test's fleet, its Agents per connection and its length may be set by
 //! `FLEET_G20_LOAD_AGENTS`, `FLEET_G20_AGENTS_PER_HOST` and `FLEET_G20_LOAD_SECS` for a shorter run
 //! on a smaller machine; it then says it did not decide G-20, and a CI run refuses them.
+//! `FLEET_G20_STEADY=1` leaves out the operator acts that add data each minute (the Configuration
+//! saved, its rollout and the revocation), so that what an instance holds under a steady fleet can
+//! be measured; such a run does not decide G-20 either.
 //! `FLEET_G20_TRACE=<dir>` keeps each instance's log there and prints what the database sessions
 //! do every ten seconds while the load test's fleet connects; `FLEET_G20_SERVER_LOG` sets the
 //! instances' `RUST_LOG`.
@@ -1424,8 +1427,9 @@ fn in_list(uids: impl IntoIterator<Item = InstanceUid>) -> String {
 
 /// G-20's failover: of 10 000 simulated Agents, one on each connection, across three instances,
 /// one instance is killed. Every Agent is held within 60 seconds of the last connection opened, at
-/// least 150 new Agents a second, and none is re-keyed as a duplicate, which an Agent whose
-/// connection was ended for silence would be. Every Agent the killed instance carried is carried by the other two within `lease_secs`
+/// least 150 new Agents a second, the held rows counted apart as the Gateway's Agents and the
+/// single-Agent hosts', and none is re-keyed as a duplicate, which an Agent whose connection was
+/// ended for silence would be. Every Agent the killed instance carried is carried by the other two within `lease_secs`
 /// plus two heartbeat intervals, with one holder write each, none reconnecting before the delay it
 /// drew; a revocation committed meanwhile ends its session on either instance within
 /// `lease_renew_secs`; no notification is left unread; and a Gateway's ten pool connections from
@@ -1522,19 +1526,41 @@ fn failover(loss: Loss) {
             role.number("SELECT count(*) FROM agents WHERE connected AND holder IS NOT NULL")
                 as usize
         };
+        // The Gateway's Agents and those of the single-Agent hosts, counted apart, so that a row
+        // left held beside an Agent's own, a re-key's among them, tells which of the two it is.
+        let gateway_agents = GATEWAY_CONNECTIONS * GATEWAY_AGENTS_PER_CONNECTION;
+        let held_apart = |role: &Role| {
+            let of = |which: &str| {
+                role.number(&format!(
+                    "SELECT count(*) FROM agents WHERE connected AND holder IS NOT NULL \
+                     AND host {which} 'sim-gateway'"
+                )) as usize
+            };
+            (of("="), of("IS DISTINCT FROM"))
+        };
         // Every Agent is held within 60 seconds of the last connection opened.
         let bound = (opened + Duration::from_secs(60)).saturating_sub(started.elapsed());
         assert!(
             eventually(bound, || held(&role) == agents).await,
             "every Agent is held within 60 s of the last connection opened: {} of {agents} after \
-             {:?}, {:?} after it; a database round trip {:?}",
+             {:?}, {:?} after it, (Gateway, single-Agent hosts) {:?} of ({gateway_agents}, {}); \
+             a database round trip {:?}",
             held(&role),
             started.elapsed(),
             started.elapsed().saturating_sub(opened),
+            held_apart(&role),
+            agents - gateway_agents,
             role.round_trip()
         );
         let ramp_took = started.elapsed();
         let rate = agents as f64 / ramp_took.as_secs_f64();
+        // A row is held at its take and names its Host once its report is written, a moment after.
+        let apart = (gateway_agents, agents - gateway_agents);
+        assert!(
+            eventually(Duration::from_secs(10), || held_apart(&role) == apart).await,
+            "the held rows are the Gateway's and the single-Agent hosts' Agents: {:?} of {apart:?}",
+            held_apart(&role)
+        );
         // A connection ended for silence comes back while its old one is still marked connected,
         // and its Agent is re-keyed as a duplicate: none may be.
         let rekeyed: usize = instances
@@ -1544,9 +1570,11 @@ fn failover(loss: Loss) {
         eprintln!(
             "{agents} Agents on {} connections across 3 instances, held after {ramp_took:?}, {:?} \
              after the last connection opened, {rate:.0} new Agents a second, {rekeyed} re-keyed \
-             as duplicates; a database round trip {:?}; {}",
+             as duplicates, (Gateway, single-Agent hosts) held {:?}; a database round trip {:?}; \
+             {}",
             fleet.hosts.len(),
             ramp_took.saturating_sub(opened),
+            held_apart(&role),
             role.round_trip(),
             memory(&instances)
         );
@@ -1822,6 +1850,7 @@ fn g20_three_instances_carry_the_presence_and_notifications_of_100_000_agents() 
     ))
     .expect("k");
     let secs = size("FLEET_G20_LOAD_SECS", LOAD_SECS);
+    let steady = variable("FLEET_G20_STEADY").as_deref() == Some("1");
     // The fleet connects no faster than the instances hold new Agents, so that no connection
     // waits behind the others' first reports, unless `FLEET_G20_RAMP_PER_SEC` names the
     // connections a second.
@@ -1830,17 +1859,23 @@ fn g20_three_instances_carry_the_presence_and_notifications_of_100_000_agents() 
     let the_target = agents == LOAD_AGENTS
         && secs == LOAD_SECS
         && per_host == LOAD_AGENTS_PER_HOST
-        && variable("FLEET_G20_RAMP_PER_SEC").is_none();
+        && variable("FLEET_G20_RAMP_PER_SEC").is_none()
+        && !steady;
     assert!(
         the_target || variable("CI").as_deref() != Some("true"),
         "a CI run measures G-20's target: no FLEET_G20_LOAD_AGENTS, FLEET_G20_AGENTS_PER_HOST, \
-         FLEET_G20_LOAD_SECS or FLEET_G20_RAMP_PER_SEC"
+         FLEET_G20_LOAD_SECS, FLEET_G20_RAMP_PER_SEC or FLEET_G20_STEADY"
     );
     if !the_target {
         eprintln!(
             "NOTE: {agents} Agents, {per_host} on each connection, {per_sec} connections a second, \
-             for {secs} s is not G-20's target of {LOAD_AGENTS}, {LOAD_AGENTS_PER_HOST} on each, \
-             {paced} a second, for {LOAD_SECS} s; this run does not decide G-20"
+             for {secs} s{} is not G-20's target of {LOAD_AGENTS}, {LOAD_AGENTS_PER_HOST} on each, \
+             {paced} a second, for {LOAD_SECS} s; this run does not decide G-20",
+            if steady {
+                ", without the acts that add data each minute"
+            } else {
+                ""
+            }
         );
     }
     opamp::tls::install_ring_provider();
@@ -2008,7 +2043,7 @@ fn g20_three_instances_carry_the_presence_and_notifications_of_100_000_agents() 
                     ));
                 }
             }
-            if ticks % 60 == 30 {
+            if !steady && ticks % 60 == 30 {
                 acts.push(act(
                     client
                         .put(operator_url(through, "configurations/g20"))
@@ -2019,13 +2054,13 @@ fn g20_three_instances_carry_the_presence_and_notifications_of_100_000_agents() 
                     "a Configuration saved".to_string(),
                 ));
             }
-            if ticks % 60 == 35 {
+            if !steady && ticks % 60 == 35 {
                 acts.push(act(
                     client.post(operator_url(through, "deployments/g20/rollout")),
                     "a rollout".to_string(),
                 ));
             }
-            if ticks % 60 == 45 {
+            if !steady && ticks % 60 == 45 {
                 let host = draw.below(hosts);
                 revoked.insert(host);
                 acts.push(act(

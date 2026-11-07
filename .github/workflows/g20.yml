@@ -8,10 +8,10 @@ name: G-20
 # the simulated fleet are the test's own, so the stack needs no image beyond the stores' ones.
 #
 # Deliberately not on `push` or `pull_request`: it runs for about half an hour on the whole
-# runner, and a slow neighbour must not read as a broken change. On demand only: a hosted runner
-# has less memory than the check needs (scripts/check-g20.sh), so a schedule would fail every week.
-# The weekly schedule comes back once docs/plan/fleet-at-scale-costs/05 settles the instances'
-# memory, or a runner large enough exists.
+# runner, and a slow neighbour must not read as a broken change. On demand only: the whole stack
+# fits a hosted runner's memory, but `ubuntu-latest` has 4 CPUs, below the check's floor of 8
+# (scripts/check-g20.sh), and whether the rates hold on 4 is not measured. The weekly schedule
+# comes back once a measured run shows the rates hold on a 4-CPU runner, or on an 8-CPU runner.
 
 on:
   workflow_dispatch:

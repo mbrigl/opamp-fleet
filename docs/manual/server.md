@@ -64,6 +64,27 @@ the `RUST_LOG` environment variable (default `info`); everything else is in the 
 and the `FLEET_SERVER__…` variables over it. `server pki status` reads the same configuration, from
 the same places.
 
+On Linux the Server allocates from two malloc arenas, so that its memory does not grow with every
+read of the whole fleet, as a rollout makes; the environment variable `MALLOC_ARENA_MAX` sets
+another count.
+
+Under a steady fleet an instance's memory levels off at what its Agents and its database pool hold.
+Each of the pool's connections keeps its buffers at the size of the largest presence batch it has
+written, so over the first hours they grow to up to about 4.5 KiB for each Agent of the most the
+instance has held at once, at the default `pool_size` of 16 and in proportion to `pool_size`: about
+70 MiB at 16 700 Agents an instance and 150 MiB at 33 000. They follow that most, not the Agents
+held now, and not time: an instance that carried a larger share of the fleet while another was
+down keeps buffers of that size after the fleet spreads out again, until it restarts. The
+operator's acts keep little beyond their answer:
+
+| Act | What an instance keeps |
+|---|---|
+| A label set on an Agent | about 0.5 KiB the first time the Agent is labelled; a later set replaces it |
+| A revocation | 100 to 200 bytes, for as long as the revocation is kept |
+| A saved Configuration | nothing once the act is answered; revisions no Agent is assigned are collected |
+| A rollout | on the instance that serves it, about 0.6 KiB for each Agent it releases, at the size of the largest rollout and not added up across rollouts: about 3 MiB at 5 000 Agents |
+| An Agent reconnecting | nothing |
+
 Stopping the Server is `SIGTERM`/`Ctrl-C`. Both listeners close at once, and the WebSocket sessions
 are closed spread over `drain_secs` (default 20 seconds), so their Agents do not all reconnect in
 the same instant; what is still open 2 seconds later is cut, and then the fleet's records are
