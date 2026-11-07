@@ -9,7 +9,7 @@
 //! `ServiceSpecific(10)` on exit so the SCM reads a failure rather than a clean stop. Nothing has
 //! ever proved that this brings a Client back.
 //!
-//! It also installs as a script enrols a host after the package (ADR-0022 clause 19): from
+//! It also installs as a script enrols a host after the package (ADR-0052 clause 19): from
 //! `--fleet-files` with a `bootstrap.p12`, against a Server in the test that the service it
 //! registers then reaches on the certificate the enrolment was issued.
 //!
@@ -2234,7 +2234,7 @@ Set-Content -Path $out -Value $lines
 /// The password of the `bootstrap.p12` the enrolment smoke test installs with.
 const P12_PASSWORD: &str = "a password of the operator";
 
-/// The fleet's files a script puts in the directory `--fleet-files` names (ADR-0022 clause 19),
+/// The fleet's files a script puts in the directory `--fleet-files` names (ADR-0052 clause 19),
 /// made from what `served` issued: its bootstrap certificate and key as `bootstrap.p12` under
 /// [`P12_PASSWORD`], and the CA of its certificate as `server-ca.pem`. Answers the bootstrap key.
 fn fleet_files(served: &enrolling::Served, dir: &Path) -> rcgen::KeyPair {
@@ -2360,7 +2360,7 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
         .any(|window| window == needle)
 }
 
-/// The arguments of the install a script runs after the package (ADR-0022 clause 19).
+/// The arguments of the install a script runs after the package (ADR-0052 clause 19).
 fn install_args(root: &Path, port: u16, fleet_files: &Path, password_file: &Path) -> Vec<String> {
     vec![
         "service".into(),
@@ -2376,7 +2376,7 @@ fn install_args(root: &Path, port: u16, fleet_files: &Path, password_file: &Path
     ]
 }
 
-/// The install a script runs after the package (ADR-0022 clause 19): `service install --endpoint
+/// The install a script runs after the package (ADR-0052 clause 19): `service install --endpoint
 /// --fleet-files --bootstrap-password-file` opens the `bootstrap.p12` in that directory, waits for
 /// an operator's approval with nothing staged or registered, and only then stages and registers.
 /// The configuration it wrote names a copy of the CA and no bootstrap identity, the Client's
@@ -2384,7 +2384,7 @@ fn install_args(root: &Path, port: u16, fleet_files: &Path, password_file: &Path
 /// neither the `bootstrap.p12`, its password nor its key is in any file under the root. The
 /// service started then reaches the Server on the issued certificate: the Server takes it into the
 /// fleet as the Host that certificate names, and has issued no other.
-/// Verifies: ADR-0022, ADR-0019, ADR-0038
+/// Verifies: ADR-0052, ADR-0019, ADR-0038
 #[test]
 #[ignore = "installs a real system service; run with --ignored in the service-smoke job"]
 fn an_install_enrols_with_a_bootstrap_p12_and_the_service_runs_on_the_issued_certificate() {
@@ -2504,13 +2504,13 @@ fn an_install_enrols_with_a_bootstrap_p12_and_the_service_runs_on_the_issued_cer
         "the state directory holds another certificate than the one issued"
     );
 
-    // The fleet's files are read, never copied, changed or removed (ADR-0022 clauses 17 and 18).
+    // The fleet's files are read, never copied, changed or removed (ADR-0052 clauses 17 and 18).
     assert!(
         (read(&p12), read(&password_file)) == before,
         "the install changed bootstrap.p12 or the password file"
     );
     // The decrypted bootstrap key — as PKCS#8, in DER or in PEM however it is wrapped — the
-    // `bootstrap.p12` and its password are in no file under the root (ADR-0022 clause 15).
+    // `bootstrap.p12` and its password are in no file under the root (ADR-0052 clause 15).
     let key_der = key.serialize_der();
     let key_body: String = key
         .serialize_pem()
@@ -2587,8 +2587,8 @@ fn an_install_enrols_with_a_bootstrap_p12_and_the_service_runs_on_the_issued_cer
 
 /// A `bootstrap.p12` that does not open under the password `--bootstrap-password-file` names fails
 /// the install before anything is written, staged or registered, saying so of the file and naming
-/// the flag (ADR-0022 clause 18, ADR-0019 clause 26).
-/// Verifies: ADR-0022, ADR-0019
+/// the flag (ADR-0052 clause 18, ADR-0019 clause 26).
+/// Verifies: ADR-0052, ADR-0019
 #[test]
 #[ignore = "installs a real system service; run with --ignored in the service-smoke job"]
 fn a_wrong_bootstrap_password_fails_the_install_before_anything_is_written() {

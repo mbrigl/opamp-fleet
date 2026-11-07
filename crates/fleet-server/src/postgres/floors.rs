@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use tokio_postgres::GenericClient;
+use super::Cached as GenericClient;
 
 use super::{client, sql, Database};
 use crate::floors::{below, Floor, FloorStore, Put};
@@ -26,7 +26,7 @@ impl FloorStore for PgFloorStore {
     fn load(&self) -> Result<BTreeMap<String, Floor>, String> {
         self.database.run(|pool| async move {
             let client = client(&pool).await?;
-            read_all(&**client).await
+            read_all(&client).await
         })
     }
 
@@ -77,10 +77,10 @@ impl FloorStore for PgFloorStore {
                 if below(&floor.version, &stored.version) {
                     return Ok(Put::Lower(stored));
                 }
-                write(&*transaction, &agent_type, &floor).await?;
+                write(&transaction, &agent_type, &floor).await?;
                 break;
             }
-            super::notify::notify(&*transaction, super::notify::FLOOR, &agent_type).await?;
+            super::notify::notify(&transaction, super::notify::FLOOR, &agent_type).await?;
             transaction.commit().await.map_err(sql)?;
             Ok(Put::Stored)
         })
@@ -101,7 +101,7 @@ impl FloorStore for PgFloorStore {
             if removed == 0 {
                 return Ok(false);
             }
-            super::notify::notify(&*transaction, super::notify::FLOOR, &agent_type).await?;
+            super::notify::notify(&transaction, super::notify::FLOOR, &agent_type).await?;
             transaction.commit().await.map_err(sql)?;
             Ok(true)
         })

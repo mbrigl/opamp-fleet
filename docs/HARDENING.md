@@ -29,7 +29,7 @@ Out of scope, and deliberately so: **authorization and multi-tenancy**, which th
 names as non-goals, with one bound on the Agent plane: a host receives from the Server only the
 configurations and packages released to an Agent it speaks for (ADR-0027), on the Server and from
 a Gateway's package cache alike. The boundary is worth
-stating precisely because the host binding (ADR-0022 clause 11) runs close to it — *which Agent is
+stating precisely because the host binding (ADR-0052 clause 11) runs close to it — *which Agent is
 speaking*, and so *what its host may receive from the Server*, is authentication and belongs here;
 *what that Agent is allowed to do* beyond that is authorization and does not.
 
@@ -102,7 +102,7 @@ has:
 - **A CSR's claim to an `instance_uid` is checked** (ADR-0038): a CSR naming any
   `instance_uid` but its sender's is answered `BadRequest` before it is signed or queued — the
   Baseline's conditional MUST.
-- **A certificate names its host, and a host speaks only for its own Agents** (ADR-0022 clause 11,
+- **A certificate names its host, and a host speaks only for its own Agents** (ADR-0052 clause 11,
   ADR-0038 clause 12, and ADR-0015 clause 18): the Server puts a host of its own in every
   certificate it signs; an
   `instance_uid` first reported with one host's certificate is not spoken for by another's — such a
@@ -208,7 +208,7 @@ has:
 - **No credential in `server.toml` authenticates on its own** (ADR-0038 clause 21): an operator's
   Basic password is kept as an Argon2id hash of at least the OWASP minimum, and a value in clear is
   refused at startup without being echoed. The Server offers no credential (ADR-0013).
-- **An audit record of every security decision** (ADR-0039): admissions and refusals, enrolment,
+- **An audit record of every security decision** (ADR-0046): admissions and refusals, enrolment,
   issuance, revocation, operator acts and package outcomes, one hash-chained line each; no
   admission without its record, refusals aggregated per peer before they are queued and kept to
   half the queue so they cannot crowd out any other record, and no `Authorization` value in any
@@ -345,7 +345,9 @@ the certificates move — ML-DSA in TLS 1.3 as a standard, issuance through rcge
 the other OpAMP implementations, and a browser on the Operator plane. It would supersede
 ADR-0045 (the TLS provider), [ADR-0027](adr/0027-packages-signatures-and-delivery.md) (the package
 signature), [ADR-0028](adr/0028-package-versions-high-water-mark-and-floor.md) (the floor's
-signature) and [ADR-0044](adr/0044-the-servers-state-and-its-stores.md) (its stores' TLS without
+signature) and
+[ADR-0050](adr/0050-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
+(its stores' TLS without
 aws-lc-rs), and touch [ADR-0018](adr/0018-the-client-updates-itself-from-a-signed-package.md),
 whose self-update rests on the package signature.
 

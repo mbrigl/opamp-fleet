@@ -212,7 +212,8 @@ run "Build, test and lint" scripts/check-rust.sh
 # On instruction: scripts/vendor-shiki.sh
 # The gates the other workflows run: each says so and skips where this machine lacks what it
 # needs — Windows or macOS, a store named in the environment, cargo-deny, cargo-fuzz, Go, a
-# throwaway machine — and fails instead in a CI run, where a skip would read as a pass.
+# throwaway machine, the G-20 stack — and fails instead in a CI run, where a skip would read as a
+# pass.
 run "Client on its platform" scripts/check-client-platform.sh
 run "S3 store" scripts/check-store.sh s3
 run "PostgreSQL store" scripts/check-store.sh postgres
@@ -222,6 +223,7 @@ run "Supply chain" scripts/check-deny.sh
 run "Fuzzing" scripts/check-fuzz.sh
 run "Interop with opamp-go" scripts/check-interop.sh
 run "Service smoke test" scripts/check-service-smoke.sh
+run "G-20 failover and load" scripts/check-g20.sh
 # The release publishes; it is no gate, and check-build-hardening.sh holds its steps.
 # Not a gate: .github/workflows/release.yml
 

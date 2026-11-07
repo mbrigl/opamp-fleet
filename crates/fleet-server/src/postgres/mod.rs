@@ -1,7 +1,7 @@
-//! The Server's records in one PostgreSQL database (ADR-0044): the connection every PostgreSQL
+//! The Server's records in one PostgreSQL database (ADR-0050): the connection every PostgreSQL
 //! adapter shares, the exclusive lock of an instance that must be alone on it, the leases every
 //! instance holds, the notifications they share, and the schema the Server applies itself
-//! (ADR-0041).
+//! (ADR-0048).
 //!
 //! The connection is TLS 1.3 on the *ring*-only client of `opamp::tls`, the database's
 //! certificate verified against the public roots or the root `ca_file` names and its host name
@@ -14,6 +14,7 @@
 //! the S3 store does ([`Bridge`]): the pool lives on a runtime of its own, and every call waits on
 //! a channel for its work there.
 
+pub mod agent_page;
 pub mod agents;
 pub mod audit;
 pub mod audit_prune;
@@ -77,9 +78,17 @@ const KEEPALIVES_IDLE: Duration = Duration::from_secs(15);
 const KEEPALIVES_INTERVAL: Duration = Duration::from_secs(5);
 const KEEPALIVES_RETRIES: u32 = 3;
 
-/// The connections the pool holds at most. The Server writes one record at a time per act, and
-/// the in-memory state answers every read (ADR-0044 clause 3), so a few suffice.
-const POOL_SIZE: usize = 8;
+/// How long after its last renewal a sweep's mark of a lease that is not live, or of none, is
+/// kept (ADR-0050 clause 14). A renewal that answered was stamped by the database at most one
+/// call's bound, [`CALL_TIMEOUT`], before its answer; one call to the blob store follows, at most
+/// [`LONGEST_CALL`](crate::s3::LONGEST_CALL); [`MARKS_MARGIN`] covers the waits between that
+/// call's retries and the clocks of two primaries after a failover.
+pub(crate) const MARKS_OUTLIVE: Duration = Duration::from_secs(
+    CALL_TIMEOUT.as_secs() + crate::s3::LONGEST_CALL.as_secs() + MARKS_MARGIN.as_secs(),
+);
+
+/// What [`MARKS_OUTLIVE`] adds to the time a sweep that renewed a mark may still be deleting.
+const MARKS_MARGIN: Duration = Duration::from_secs(15);
 
 /// The name the Server's connections carry in `pg_stat_activity`.
 const APPLICATION_NAME: &str = "opamp-fleet-server";
@@ -87,7 +96,7 @@ const APPLICATION_NAME: &str = "opamp-fleet-server";
 /// Whether an instance must be the only one on its database, and why.
 ///
 /// An instance whose blobs or CA keys are files must be alone
-/// (ADR-0041
+/// (ADR-0048
 /// clause 2): what it keeps on its own disk no other instance can reach.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Exclusive {
@@ -133,14 +142,32 @@ pub struct Database {
     /// into the database, which the first chain names as its predecessor
     /// ([`offer_archive`](Self::offer_archive)).
     archive: std::sync::Mutex<Option<(u64, String)>>,
-    /// What one call may take ([`CALL_TIMEOUT`]).
-    bound: Duration,
+    /// What one call may take ([`CALL_TIMEOUT`]), in milliseconds; a test may shorten it for the
+    /// one call whose answer it means to lose.
+    bound: std::sync::atomic::AtomicU64,
     /// How long a sweep waits for the blob store's lock, in milliseconds ([`SWEEP_WAIT`]).
     sweep_wait: std::sync::atomic::AtomicU64,
     /// How many holds on the blob store's lock lost it with their session, and how many of their
     /// sessions ended at all.
     holds_lost: Arc<std::sync::atomic::AtomicUsize>,
     holds_ended: Arc<std::sync::atomic::AtomicUsize>,
+    /// The instance id under which this instance's sweeps mark the blobs they delete (ADR-0050
+    /// clause 14): the lease it holds, or the one it is about to take; `None` for a Server that
+    /// takes no lease, such as a command.
+    sweeps_under: std::sync::Mutex<Option<String>>,
+    /// The release this instance is, `MAJOR.MINOR.PATCH`: what its lease records and what the
+    /// schema is checked against ([`schema::server_version`], or what a test names).
+    release: &'static str,
+    /// Set once a lease taken after a lost one found a schema that needs a newer Server: the
+    /// refusal, naming both versions, and the instance stops
+    /// (ADR-0048
+    /// clause 16).
+    outdated: std::sync::Mutex<Option<String>>,
+    /// The notifications of the calls whose answer was lost, which the listener hands on
+    /// ([`notify::Unsure`]).
+    unsure: Arc<notify::Unsure>,
+    /// What the notices after a commit of its calls go through ([`notify::follow_commit`]).
+    afterwards: Arc<notify::Afterwards>,
     /// Dropped last: the connections' tasks run on it.
     bridge: Bridge,
 }
@@ -154,7 +181,7 @@ enum Tls {
 
 impl Database {
     /// Connects to the database `config` names, takes the exclusive lock when `exclusive` says
-    /// this instance must be alone, and brings its schema up to date (ADR-0044 clauses 22 to 24).
+    /// this instance must be alone, and brings its schema up to date (ADR-0050 clauses 22 to 24).
     ///
     /// # Errors
     /// Returns an error naming the key when the password or CA file cannot be read, naming the host
@@ -175,8 +202,31 @@ impl Database {
         exclusive: Exclusive,
         schema: Option<&str>,
     ) -> Result<Arc<Self>, String> {
-        let database = Self::connect_as(config, schema, CALL_TIMEOUT, exclusive)?;
-        let applied = database.apply_schema(schema::MIGRATIONS)?;
+        Self::open_as(
+            config,
+            exclusive,
+            schema,
+            schema::server_version(),
+            schema::MIGRATIONS,
+        )
+    }
+
+    /// [`open_in`](Self::open_in), as a Server of `release` whose schema is `migrations`: what the
+    /// tests of two versions side by side start each version as.
+    ///
+    /// # Errors
+    /// As [`open`](Self::open).
+    #[doc(hidden)]
+    pub fn open_as(
+        config: &PostgresConfig,
+        exclusive: Exclusive,
+        schema: Option<&str>,
+        release: &'static str,
+        migrations: &'static [schema::Migration],
+    ) -> Result<Arc<Self>, String> {
+        let mut database = Self::connect_as(config, schema, CALL_TIMEOUT, exclusive)?;
+        database.release = release;
+        let applied = database.apply_schema(migrations)?;
         if !applied.versions.is_empty() {
             tracing::info!(
                 database = %database.name,
@@ -298,7 +348,7 @@ impl Database {
             ),
         };
         let pool = Pool::builder(manager)
-            .max_size(POOL_SIZE)
+            .max_size(config.pool_size)
             .runtime(Runtime::Tokio1)
             .wait_timeout(Some(WAIT_TIMEOUT))
             .create_timeout(Some(CONNECT_TIMEOUT))
@@ -317,12 +367,19 @@ impl Database {
             name,
             origin,
             archive: std::sync::Mutex::new(None),
-            bound,
+            bound: std::sync::atomic::AtomicU64::new(
+                u64::try_from(bound.as_millis()).unwrap_or(u64::MAX),
+            ),
             holds_lost: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             holds_ended: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            sweeps_under: std::sync::Mutex::new(None),
             sweep_wait: std::sync::atomic::AtomicU64::new(
                 u64::try_from(SWEEP_WAIT.as_millis()).unwrap_or(u64::MAX),
             ),
+            release: schema::server_version(),
+            outdated: std::sync::Mutex::new(None),
+            unsure: Arc::default(),
+            afterwards: Arc::default(),
             bridge,
         })
     }
@@ -331,6 +388,30 @@ impl Database {
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// The release this instance is, as its lease records it.
+    #[must_use]
+    pub fn release(&self) -> &'static str {
+        self.release
+    }
+
+    /// The refusal of a schema that needs a newer Server, once a lease taken after a lost one
+    /// found it: the instance serves no more and stops.
+    #[must_use]
+    pub fn outdated(&self) -> Option<String> {
+        self.outdated
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Records that a lease found a schema that needs a newer Server.
+    pub(crate) fn set_outdated(&self, refusal: &str) {
+        *self
+            .outdated
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(refusal.to_string());
     }
 
     /// Whether this instance must be alone on the database, and why.
@@ -346,17 +427,21 @@ impl Database {
         self.lost.load(Ordering::SeqCst)
     }
 
-    /// Applies `migrations` in one transaction (ADR-0044 clause 22).
+    /// Applies `migrations` in one transaction (ADR-0050 clause 22), once the schema and the
+    /// releases of the live leases are checked under the migrations' lock
+    /// (ADR-0048
+    /// clause 16).
     ///
     /// # Errors
-    /// Returns an error naming the database when the schema needs a newer Server, when this
+    /// Returns an error naming the database when the schema needs a newer Server, when a live
+    /// lease is of a release older than the schema would need once migrated, when this
     /// instance shares the database and another Server holds it alone, or when a statement fails;
     /// the transaction is then rolled back and the database left as it was.
     pub(crate) fn apply_schema(
         &self,
         migrations: &'static [schema::Migration],
     ) -> Result<schema::Applied, String> {
-        let ours = schema::server_version();
+        let ours = self.release;
         let shared = matches!(self.exclusive, Exclusive::Shared);
         self.run(move |pool| async move {
             let mut client = client(&pool).await?;
@@ -418,7 +503,7 @@ impl Database {
     /// PostgreSQL wrote under `data_dir/audit/` before its record moved into the database, as the
     /// archive: the take that opens the first chain the database holds records it, unless an
     /// archive is recorded already, and the chain names it as its predecessor
-    /// (ADR-0042 clause 6).
+    /// (ADR-0047 clause 6).
     pub fn offer_archive(&self, end: Option<(u64, String)>) {
         *self.archive.lock().expect("archive lock") = end;
     }
@@ -426,6 +511,28 @@ impl Database {
     /// What [`offer_archive`](Self::offer_archive) offered.
     pub(crate) fn archive_offered(&self) -> Option<(u64, String)> {
         self.archive.lock().expect("archive lock").clone()
+    }
+
+    /// What one call may take.
+    fn bound(&self) -> Duration {
+        Duration::from_millis(self.bound.load(Ordering::SeqCst))
+    }
+
+    /// Bounds every call from now on by `bound`: what a test that means to lose one call's answer
+    /// sets for that call alone, and sets back after it.
+    #[cfg(test)]
+    pub(crate) fn bound_calls_by(&self, bound: Duration) {
+        self.bound.store(
+            u64::try_from(bound.as_millis()).unwrap_or(u64::MAX),
+            Ordering::SeqCst,
+        );
+    }
+
+    /// The connections the pool holds at most, as `[database] pool_size` set them
+    /// (ADR-0050 clause 24).
+    #[must_use]
+    pub fn pool_size(&self) -> usize {
+        self.pool.status().max_size
     }
 
     /// Runs `work` on the database's runtime with the pool, and waits for it at most
@@ -438,7 +545,7 @@ impl Database {
         F: Future<Output = Result<T, String>> + Send + 'static,
         T: Send + 'static,
     {
-        self.run_within(self.bound, work)
+        self.run_within(self.bound(), work)
     }
 
     /// [`run`](Self::run) for a call that writes `records` records in one transaction: its bound
@@ -457,7 +564,7 @@ impl Database {
     {
         let records = u32::try_from(records).unwrap_or(u32::MAX);
         self.run_within(
-            self.bound
+            self.bound()
                 .saturating_add(PER_RECORD.saturating_mul(records)),
             work,
         )
@@ -479,9 +586,27 @@ impl Database {
         if self.lost.load(Ordering::SeqCst) {
             return Err(lost_lock(&self.name));
         }
-        self.bridge
-            .run(bounded(bound, work(self.pool.clone())))
-            .map_err(|e| format!("{}: {e}", self.name))
+        // What the call announced is counted as it is sent: where its answer is lost, it may have
+        // committed, and the instance reads again what it names (ADR-0048
+        // clause 10).
+        let call = notify::Call::new(self.afterwards.clone());
+        let answer = self.bridge.run(notify::sending(
+            call.clone(),
+            bounded(bound, work(self.pool.clone())),
+        ));
+        if answer.is_err() {
+            let sent = call.take();
+            if !sent.is_empty() {
+                self.unsure.lost(sent, call.mark());
+            }
+            // What was to follow its commit is read again at once, and not awaited: no notice of
+            // it may come.
+            let following = call.take_following();
+            if !following.is_empty() {
+                self.unsure.reread(following);
+            }
+        }
+        answer.map_err(|e| format!("{}: {e}", self.name))
     }
 }
 
@@ -498,6 +623,30 @@ impl Database {
     pub fn hold_blobs(&self) -> Result<crate::blobs::BlobHold, String> {
         let wait = Duration::from_millis(self.sweep_wait.load(Ordering::SeqCst));
         self.hold_blobs_within(wait)
+    }
+
+    /// Has the sweeps of this instance mark the blobs they delete under `instance_id`: the lease it
+    /// takes next, set before its first sweep and again with each lease it takes.
+    pub fn sweep_under(&self, instance_id: &str) {
+        *self
+            .sweeps_under
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(instance_id.to_string());
+    }
+
+    /// The instance id the sweeps of this instance mark under, if any
+    /// ([`sweep_under`](Self::sweep_under)).
+    pub(crate) fn sweeps_under(&self) -> Option<String> {
+        self.sweeps_under
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// What the notices after a commit of its calls go through, which a test drops or fails.
+    #[cfg(test)]
+    pub(crate) fn afterwards(&self) -> &notify::Afterwards {
+        &self.afterwards
     }
 
     /// How many holds on the blob store's lock lost it with their session, and how many sessions
@@ -533,7 +682,7 @@ impl Database {
             ended: self.holds_ended.clone(),
         };
         let (holding, lost) = (watch.holding.clone(), watch.lost.clone());
-        let held = self.run_within(self.bound.saturating_add(wait), move |_pool| async move {
+        let held = self.run_within(self.bound().saturating_add(wait), move |_pool| async move {
             let client = lock_session(&pg, &tls, wait, watch).await?;
             client
                 .execute(&format!("SELECT pg_advisory_lock({BLOB_LOCK})"), &[])
@@ -560,14 +709,15 @@ impl Database {
             };
             Ok(LockHold {
                 holding,
-                client,
+                client: Arc::new(client),
                 #[cfg(test)]
                 settings,
             })
         })?;
         #[cfg(test)]
         let settings = held.settings.clone();
-        let hold = crate::blobs::BlobHold::of(Box::new(held), lost);
+        let hold =
+            crate::blobs::BlobHold::of(Box::new(held), lost, Some(lease::new_instance_id()?));
         #[cfg(test)]
         let hold = hold.with_settings(settings);
         Ok(hold)
@@ -584,10 +734,11 @@ pub(crate) fn blob_lock_refused(error: tokio_postgres::Error) -> String {
 }
 
 /// A hold on the blob store's lock: its session, and whether it still holds the lock.
-struct LockHold {
+pub(crate) struct LockHold {
     holding: Arc<AtomicBool>,
-    #[allow(dead_code)]
-    client: tokio_postgres::Client,
+    /// The session that holds the lock: what a sweep marks the blobs it deletes on, so that a mark
+    /// is written only while the lock holds (ADR-0050 clause 14).
+    pub(crate) client: Arc<tokio_postgres::Client>,
     /// The session's `statement_timeout` and `lock_timeout` once it had the lock.
     #[cfg(test)]
     settings: (String, String),
@@ -672,13 +823,13 @@ pub(crate) const EXCLUSIVE_LOCK: &str =
     "hashtextextended('opamp-fleet-server:' || coalesce(current_schema(), ''), 0)";
 
 /// Why an instance that shares the database neither migrates nor starts while another Server
-/// holds it alone (ADR-0044 clause 22).
+/// holds it alone (ADR-0050 clause 22).
 const HELD_ALONE_BEFORE_MIGRATING: &str = "another Server holds the database alone — a Server of \
      0.7.1 or earlier, or an instance that keeps its blobs as files ([blobs] store = \"fs\") or a \
      CA key in a file ([client_ca] key_file, [enrolment] bootstrap_ca_key_file); stop it before \
      this instance starts, which changed nothing in the database";
 
-/// The lock of the blob store (ADR-0044 clause 14), by the key
+/// The lock of the blob store (ADR-0050 clause 14), by the key
 /// its schema gives it: a sweep or a staging cleanup holds it alone, an upload shared in the
 /// transaction that checks its blob and writes its entry, and `server blobs-to-s3` alone for its
 /// run.
@@ -692,13 +843,13 @@ const BLOB_LOCK_NAME: &str = "the blob store's lock (opamp-fleet-server-blobs)";
 pub(crate) const SWEEP_WAIT: Duration = Duration::from_secs(60);
 
 /// The lock a migration of the schema holds for its transaction.
-const MIGRATION_LOCK: &str =
+pub(crate) const MIGRATION_LOCK: &str =
     "hashtextextended('opamp-fleet-server-schema:' || coalesce(current_schema(), ''), 0)";
 
 /// Why every call is refused once the lock's connection has ended.
 fn lost_lock(name: &str) -> String {
     format!(
-        "this Server lost its lock on the {name} — another instance may hold it now (ADR-0044 \
+        "this Server lost its lock on the {name} — another instance may hold it now (ADR-0050 \
          clause 23), so this one writes nothing more; restart it once the database answers"
     )
 }
@@ -724,13 +875,153 @@ async fn bounded<T>(
     })
 }
 
+/// A pooled connection or a transaction on one, whose statements are prepared once per
+/// connection and kept: a statement run again is bound and executed in one round trip, not
+/// prepared again first.
+pub(crate) trait Cached: Sync {
+    /// Like `execute`, its statement prepared once per connection.
+    fn execute(
+        &self,
+        sql: &str,
+        params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
+    ) -> impl Future<Output = Result<u64, tokio_postgres::Error>> + Send;
+
+    /// Like `query`, its statement prepared once per connection.
+    fn query(
+        &self,
+        sql: &str,
+        params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
+    ) -> impl Future<Output = Result<Vec<tokio_postgres::Row>, tokio_postgres::Error>> + Send;
+
+    /// Like `query_one`, its statement prepared once per connection.
+    fn query_one(
+        &self,
+        sql: &str,
+        params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
+    ) -> impl Future<Output = Result<tokio_postgres::Row, tokio_postgres::Error>> + Send;
+
+    /// Like `query_opt`, its statement prepared once per connection.
+    fn query_opt(
+        &self,
+        sql: &str,
+        params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
+    ) -> impl Future<Output = Result<Option<tokio_postgres::Row>, tokio_postgres::Error>> + Send;
+
+    /// Like `batch_execute`: the simple protocol, one round trip, nothing prepared.
+    fn batch_execute(
+        &self,
+        sql: &str,
+    ) -> impl Future<Output = Result<(), tokio_postgres::Error>> + Send;
+}
+
+/// Implements [`Cached`] for a type of `deadpool_postgres` that has `prepare_cached`.
+macro_rules! cached {
+    ($type:ty) => {
+        impl Cached for $type {
+            async fn execute(
+                &self,
+                sql: &str,
+                params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
+            ) -> Result<u64, tokio_postgres::Error> {
+                let statement = self.prepare_cached(sql).await?;
+                deadpool_postgres::GenericClient::execute(self, &statement, params).await
+            }
+            async fn query(
+                &self,
+                sql: &str,
+                params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
+            ) -> Result<Vec<tokio_postgres::Row>, tokio_postgres::Error> {
+                let statement = self.prepare_cached(sql).await?;
+                deadpool_postgres::GenericClient::query(self, &statement, params).await
+            }
+            async fn query_one(
+                &self,
+                sql: &str,
+                params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
+            ) -> Result<tokio_postgres::Row, tokio_postgres::Error> {
+                let statement = self.prepare_cached(sql).await?;
+                deadpool_postgres::GenericClient::query_one(self, &statement, params).await
+            }
+            async fn query_opt(
+                &self,
+                sql: &str,
+                params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
+            ) -> Result<Option<tokio_postgres::Row>, tokio_postgres::Error> {
+                let statement = self.prepare_cached(sql).await?;
+                deadpool_postgres::GenericClient::query_opt(self, &statement, params).await
+            }
+            async fn batch_execute(&self, sql: &str) -> Result<(), tokio_postgres::Error> {
+                deadpool_postgres::GenericClient::batch_execute(self, sql).await
+            }
+        }
+    };
+}
+
+cached!(deadpool_postgres::Object);
+cached!(deadpool_postgres::Transaction<'_>);
+
+/// Implements [`Cached`] for a connection of `tokio_postgres` outside the pool — one a lock or a
+/// migration holds alone — whose statements are prepared each time they run.
+macro_rules! uncached {
+    ($type:ty) => {
+        impl Cached for $type {
+            async fn execute(
+                &self,
+                sql: &str,
+                params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
+            ) -> Result<u64, tokio_postgres::Error> {
+                tokio_postgres::GenericClient::execute(self, sql, params).await
+            }
+            async fn query(
+                &self,
+                sql: &str,
+                params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
+            ) -> Result<Vec<tokio_postgres::Row>, tokio_postgres::Error> {
+                tokio_postgres::GenericClient::query(self, sql, params).await
+            }
+            async fn query_one(
+                &self,
+                sql: &str,
+                params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
+            ) -> Result<tokio_postgres::Row, tokio_postgres::Error> {
+                tokio_postgres::GenericClient::query_one(self, sql, params).await
+            }
+            async fn query_opt(
+                &self,
+                sql: &str,
+                params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
+            ) -> Result<Option<tokio_postgres::Row>, tokio_postgres::Error> {
+                tokio_postgres::GenericClient::query_opt(self, sql, params).await
+            }
+            async fn batch_execute(&self, sql: &str) -> Result<(), tokio_postgres::Error> {
+                tokio_postgres::GenericClient::batch_execute(self, sql).await
+            }
+        }
+    };
+}
+
+uncached!(tokio_postgres::Client);
+uncached!(tokio_postgres::Transaction<'_>);
+
 /// A pooled connection, or why there is none: a database lost while the Server runs fails the
-/// calls that need it (ADR-0044 clause 24).
+/// calls that need it (ADR-0050 clause 24).
 ///
 /// # Errors
 /// Returns an error when no connection can be had within the pool's timeouts.
 pub(crate) async fn client(pool: &Pool) -> Result<Object, String> {
     pool.get()
+        .await
+        .map_err(|e| format!("cannot reach the database: {e}"))
+}
+
+/// [`client`] for a creation of an Agent's record, which waits for a pooled connection up to the
+/// bound of its whole call, [`CALL_TIMEOUT`], rather than [`WAIT_TIMEOUT`]: a new Agent is not
+/// answered `Unavailable` while the calls of a connecting fleet hold every connection for a few
+/// seconds (ADR-0050 clause 24).
+pub(crate) async fn creating_client(pool: &Pool) -> Result<Object, String> {
+    let mut timeouts = pool.timeouts();
+    timeouts.wait = Some(CALL_TIMEOUT);
+    pool.timeout_get(&timeouts)
         .await
         .map_err(|e| format!("cannot reach the database: {e}"))
 }
@@ -763,7 +1054,7 @@ fn new_origin() -> Result<String, String> {
     Ok(hex::encode(bytes))
 }
 
-/// The connection's settings, every one from `[database.postgres]` (ADR-0044 clause 24) — nothing
+/// The connection's settings, every one from `[database.postgres]` (ADR-0050 clause 24) — nothing
 /// from the environment, and nothing from a connection string. `schema`, when named, is the only
 /// schema the connection sees.
 fn pg_config(
@@ -795,7 +1086,7 @@ fn pg_config(
     pg
 }
 
-/// The TLS client of ADR-0044 clause 24: TLS 1.3 on *ring* alone, the database's certificate
+/// The TLS client of ADR-0050 clause 24: TLS 1.3 on *ring* alone, the database's certificate
 /// verified against the public roots, or against the roots of `ca_file` alone when it names one,
 /// and its host name checked by rustls. `None` — plaintext — only where `tls = false`, which the
 /// configuration allows on a loopback IP literal alone.
@@ -909,7 +1200,7 @@ pub(crate) fn unsigned(value: i64) -> u64 {
 
 #[cfg(test)]
 pub(crate) mod testing {
-    //! The database the PostgreSQL tests run against (ADR-0044 clause 25): the one the
+    //! The database the PostgreSQL tests run against (ADR-0050 clause 25): the one the
     //! `FLEET_TEST_POSTGRES_*` variables name, never one the tests start. Each test works in a
     //! schema of its own and drops it afterwards.
 
@@ -1008,6 +1299,7 @@ pub(crate) mod testing {
                 user,
                 password_file: password_file.into(),
                 tls: ca_file.is_some(),
+                pool_size: crate::config::DEFAULT_POOL_SIZE,
                 ca_file,
             };
             let mut random = [0u8; 8];
@@ -1032,6 +1324,7 @@ pub(crate) mod testing {
                 password_file: self.config.password_file.clone(),
                 ca_file: self.config.ca_file.clone(),
                 tls: self.config.tls,
+                pool_size: self.config.pool_size,
             }
         }
 
@@ -1050,6 +1343,23 @@ pub(crate) mod testing {
             self.admin(&format!("SET search_path = {};\n{statements}", self.schema));
         }
 
+        /// What [`sql`](Self::sql) runs, as a function another thread or a store's hook may own.
+        pub(crate) fn sql_runner(&self) -> impl Fn(&str) + Send + Sync + 'static {
+            let (pg, tls) = self.admin_connection();
+            let schema = self.schema.clone();
+            move |statements: &str| {
+                let (pg, tls) = (pg.clone(), tls.clone());
+                let statements = format!("SET search_path = {schema};\n{statements}");
+                Bridge::new("records-test")
+                    .expect("runtime")
+                    .run(async move {
+                        let client = connect(&pg, &tls).await?;
+                        client.batch_execute(&statements).await.map_err(sql)
+                    })
+                    .expect("run on the test database");
+            }
+        }
+
         /// Makes every insert or update of `table` whose new row meets `condition` fail, as a
         /// write the database refuses part-way through a call: the failure the "fails part-way"
         /// tests inject. [`mend`](Self::mend) takes it away.
@@ -1065,6 +1375,25 @@ pub(crate) mod testing {
         /// Takes away what [`refuse`](Self::refuse) put on `table`.
         pub(crate) fn mend(&self, table: &str) {
             self.sql(&format!("DROP TRIGGER fleet_test_refuse ON {table}"));
+        }
+
+        /// Makes the commit of the next `times` transactions that insert or update a row of
+        /// `table` fail, after every statement of theirs succeeded: a deferred constraint trigger
+        /// that raises at the commit, as a commit the database refuses at its end. The count is a
+        /// sequence, which a rollback does not take back.
+        pub(crate) fn fail_commits(&self, table: &str, times: u32) {
+            let schema = &self.schema;
+            self.sql(&format!(
+                "CREATE SEQUENCE fleet_test_commits; \
+                 CREATE OR REPLACE FUNCTION fleet_test_fail_commit() RETURNS trigger \
+                 LANGUAGE plpgsql AS $$ BEGIN \
+                 IF nextval('{schema}.fleet_test_commits') <= {times} THEN \
+                 RAISE EXCEPTION 'the commit is refused by the test'; END IF; \
+                 RETURN NULL; END $$; \
+                 CREATE CONSTRAINT TRIGGER fleet_test_fail_commit AFTER INSERT OR UPDATE ON {table} \
+                 DEFERRABLE INITIALLY DEFERRED FOR EACH ROW \
+                 EXECUTE FUNCTION fleet_test_fail_commit();"
+            ));
         }
 
         /// The rows `query` answers in this schema, each column as text.
@@ -1154,6 +1483,49 @@ pub(crate) mod testing {
                 .expect("open the test database shared")
         }
 
+        /// [`shared`](Self::shared), its every call bounded by `bound`: an instance whose call
+        /// can lose its answer while the commit it sent is held.
+        /// The schema is applied first on a handle of the usual bound, so a database slowed by the
+        /// tests beside this one does not fail the migration on the short bound.
+        pub(crate) fn shared_within(&self, bound: std::time::Duration) -> Arc<Database> {
+            drop(self.shared());
+            Arc::new(
+                Database::connect_as(&self.config, Some(&self.schema), bound, Exclusive::Shared)
+                    .expect("open the test database shared"),
+            )
+        }
+
+        /// Holds the commit of every transaction that writes a row of `table` at a gate the test
+        /// opens: a deferred trigger takes the advisory lock `key` once every statement is done, so
+        /// the call that commits loses its answer to its bound and the commit lands once the gate
+        /// opens. The wait sets the session's `lock_timeout` aside, so the session's
+        /// `statement_timeout` alone bounds how long it is held.
+        pub(crate) fn hold_commits(&self, table: &str, key: i64) -> Gate {
+            self.sql(&format!(
+                "CREATE FUNCTION fleet_test_hold_commit_{table}() RETURNS trigger \
+                     LANGUAGE plpgsql AS $$ BEGIN \
+                     PERFORM set_config('lock_timeout', '0', true); \
+                     PERFORM pg_advisory_lock_shared({key}); \
+                     PERFORM pg_advisory_unlock_shared({key}); RETURN NULL; END $$; \
+                 CREATE CONSTRAINT TRIGGER fleet_test_hold_commit AFTER INSERT OR UPDATE OR DELETE \
+                     ON {table} DEFERRABLE INITIALLY DEFERRED FOR EACH ROW \
+                     EXECUTE FUNCTION fleet_test_hold_commit_{table}();"
+            ));
+            self.gate(key)
+        }
+
+        /// Whether a session waits for the advisory lock `key`, as one held by
+        /// [`hold_commits`](Self::hold_commits) does.
+        pub(crate) fn waits_for(&self, key: i64) -> bool {
+            !self
+                .rows(&format!(
+                    "SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND NOT granted \
+                     AND classid = (({key}::bigint >> 32) & 4294967295)::oid \
+                     AND objid = ({key}::bigint & 4294967295)::oid"
+                ))
+                .is_empty()
+        }
+
         /// How many sessions other than the asking one meet `condition`, a condition on
         /// `pg_stat_activity`, among those that hold or wait for a lock on a table of this schema.
         /// The tests share one database, so a session of another test's schema, such as one held
@@ -1190,6 +1562,35 @@ pub(crate) mod testing {
             )
         }
 
+        /// Runs `statements` in a transaction on a session of its own, in the test's schema, and
+        /// holds the transaction open, with the locks it took, until the [`Gate`] is opened or
+        /// dropped, then rolls it back.
+        pub(crate) fn hold(&self, statements: &str) -> Gate {
+            let (pg, tls) = self.admin_connection();
+            let statements = format!("SET search_path = {};\nBEGIN;\n{statements}", self.schema);
+            let (open, opened) = std::sync::mpsc::channel::<()>();
+            let (held, holds) = std::sync::mpsc::channel::<()>();
+            let thread = std::thread::spawn(move || {
+                Bridge::new("records-test-hold")
+                    .expect("runtime")
+                    .run(async move {
+                        let client = connect(&pg, &tls).await?;
+                        client.batch_execute(&statements).await.map_err(sql)?;
+                        let _ = held.send(());
+                        let _ = tokio::task::spawn_blocking(move || opened.recv()).await;
+                        client.batch_execute("ROLLBACK").await.map_err(sql)?;
+                        drop(client);
+                        Ok::<_, String>(())
+                    })
+                    .expect("the hold");
+            });
+            holds.recv().expect("the hold is held");
+            Gate {
+                open,
+                thread: Some(thread),
+            }
+        }
+
         /// Holds the advisory lock `key` on a session of its own until the [`Gate`] is opened or
         /// dropped: a trigger that takes it holds another connection's write open, mid-transaction,
         /// for as long as the test needs, with no timing.
@@ -1220,6 +1621,41 @@ pub(crate) mod testing {
                     .expect("the gate");
             });
             holds.recv().expect("the gate is held");
+            Gate {
+                open,
+                thread: Some(thread),
+            }
+        }
+
+        /// Locks `table` against every read, on a session of its own, in a transaction that runs
+        /// `writes` and commits once the [`Gate`] is opened or dropped: a read that reaches the
+        /// table waits until then, and finds what `writes` committed unless it reads in a snapshot
+        /// taken before.
+        pub(crate) fn hold_reads(&self, table: &str, writes: &str) -> Gate {
+            let (pg, tls) = self.admin_connection();
+            let lock = format!(
+                "SET search_path = {}; SET idle_in_transaction_session_timeout = '60s'; \
+                 BEGIN; LOCK TABLE {table} IN ACCESS EXCLUSIVE MODE",
+                self.schema
+            );
+            let commit = format!("{writes}; COMMIT");
+            let (open, opened) = std::sync::mpsc::channel::<()>();
+            let (held, holds) = std::sync::mpsc::channel::<()>();
+            let thread = std::thread::spawn(move || {
+                Bridge::new("records-test-hold-reads")
+                    .expect("runtime")
+                    .run(async move {
+                        let client = connect(&pg, &tls).await?;
+                        client.batch_execute(&lock).await.map_err(sql)?;
+                        let _ = held.send(());
+                        let _ = tokio::task::spawn_blocking(move || opened.recv()).await;
+                        client.batch_execute(&commit).await.map_err(sql)?;
+                        drop(client);
+                        Ok::<_, String>(())
+                    })
+                    .expect("the held reads");
+            });
+            holds.recv().expect("the reads are held");
             Gate {
                 open,
                 thread: Some(thread),
@@ -1286,6 +1722,7 @@ mod tests {
             password_file: "/nonexistent".into(),
             ca_file: None,
             tls,
+            pool_size: crate::config::DEFAULT_POOL_SIZE,
         }
     }
 
@@ -1294,9 +1731,9 @@ mod tests {
 
     /// `PGHOST`, `PGSSLMODE` and their kin, set in the Server's environment, change neither the
     /// database nor whether plaintext is allowed: the connection is built from
-    /// `[database.postgres]` alone (ADR-0044 clause 24). The environment is the real one of a child
+    /// `[database.postgres]` alone (ADR-0050 clause 24). The environment is the real one of a child
     /// process.
-    /// Verifies: ADR-0044
+    /// Verifies: ADR-0050
     #[test]
     fn pg_variables_change_neither_the_database_nor_plaintext() {
         let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
@@ -1350,7 +1787,7 @@ mod tests {
     }
 
     /// Without TLS only where `tls = false` says so; a CA file is read as roots and nothing else.
-    /// Verifies: ADR-0044
+    /// Verifies: ADR-0050
     #[test]
     fn the_connection_requires_tls_unless_the_configuration_waives_it() {
         let pg = pg_config(&config("127.0.0.1", false), "secret", Some("s"));
@@ -1374,7 +1811,7 @@ mod tests {
     /// The password comes from its file, which its owner and group alone may read; one that
     /// others may read or its group may write fails startup naming the key, before any
     /// connection is made.
-    /// Verifies: ADR-0044
+    /// Verifies: ADR-0050
     #[cfg(unix)]
     #[test]
     fn a_password_file_others_may_read_fails_startup_naming_it() {
@@ -1409,7 +1846,7 @@ mod tests {
     }
 
     /// A database that cannot be reached fails startup naming the host and the database.
-    /// Verifies: ADR-0044
+    /// Verifies: ADR-0050
     #[test]
     fn an_unreachable_database_fails_startup_naming_it() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1453,8 +1890,8 @@ mod tests {
     }
 
     /// A database that takes the connection and never answers fails startup within the bound of
-    /// one call, naming it, rather than holding the Server forever (ADR-0044 clause 24).
-    /// Verifies: ADR-0044
+    /// one call, naming it, rather than holding the Server forever (ADR-0050 clause 24).
+    /// Verifies: ADR-0050
     #[test]
     fn a_database_that_never_answers_fails_startup_within_the_bound() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1518,8 +1955,8 @@ mod tests {
 
     /// A database that stops answering while the Server runs fails the one call that needs it
     /// within that call's bound, and the call after it as fast; the Server is held no longer
-    /// (ADR-0044 clause 24). The database is reached through a proxy that is frozen mid-run.
-    /// Verifies: ADR-0044
+    /// (ADR-0050 clause 24). The database is reached through a proxy that is frozen mid-run.
+    /// Verifies: ADR-0050
     #[test]
     fn a_database_that_stops_answering_fails_the_call_within_the_bound() {
         let Some(test) = TestDatabase::named() else {
@@ -1633,9 +2070,9 @@ mod tests {
     /// The connection is what libpq calls `verify-full`: a database whose certificate a root of
     /// `ca_file` signed but that does not name `host`, or that names it but no root of
     /// `ca_file` signed, is refused before a password is sent; one that a root signed for `host`
-    /// is accepted (ADR-0044 clause 24). Run against a listener that speaks the start of the
+    /// is accepted (ADR-0050 clause 24). Run against a listener that speaks the start of the
     /// protocol, so it needs no database.
-    /// Verifies: ADR-0044
+    /// Verifies: ADR-0050
     #[test]
     fn the_database_certificate_is_verified_against_its_root_and_its_host_name() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1678,42 +2115,15 @@ mod tests {
         );
     }
 
-    /// What the tests of this module log, read back: the global subscriber of the test process,
-    /// since the database logs from threads of its own runtime.
-    fn logged() -> &'static std::sync::Mutex<Vec<u8>> {
-        static LOG: std::sync::OnceLock<Arc<std::sync::Mutex<Vec<u8>>>> =
-            std::sync::OnceLock::new();
-        LOG.get_or_init(|| {
-            let log = Arc::new(std::sync::Mutex::new(Vec::new()));
-            let writer = log.clone();
-            let subscriber = tracing_subscriber::fmt()
-                .with_writer(move || LogBuffer(writer.clone()))
-                .with_ansi(false)
-                .finish();
-            let _ = tracing::subscriber::set_global_default(subscriber);
-            log
-        })
-    }
-
-    /// A `tracing` writer into a shared buffer.
-    struct LogBuffer(Arc<std::sync::Mutex<Vec<u8>>>);
-
-    impl std::io::Write for LogBuffer {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().expect("log").extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
+    // What the tests of this module log is read back from the global subscriber of the test
+    // process, since the database logs from threads of its own runtime.
+    use crate::test_support::logged;
 
     /// A Server whose lock's connection ends while it runs notices: it logs why and refuses every
-    /// call from then on, rather than writing on while a second Server may start (ADR-0044
+    /// call from then on, rather than writing on while a second Server may start (ADR-0050
     /// clause 23). The session is ended from the database's side, as a restart or an operator
     /// would end it.
-    /// Verifies: ADR-0044
+    /// Verifies: ADR-0050
     #[test]
     fn a_server_that_loses_its_lock_logs_it_and_writes_nothing_more() {
         let Some(test) = TestDatabase::named() else {
@@ -1759,7 +2169,7 @@ mod tests {
     /// A second instance that must be alone, against a database one already holds alone, fails
     /// startup naming the database and the key that makes it alone; once the first is gone, the
     /// lock is free again.
-    /// Verifies: ADR-0044, ADR-0041
+    /// Verifies: ADR-0050, ADR-0048
     #[test]
     fn a_second_instance_that_must_be_alone_fails_startup_naming_it() {
         let Some(test) = TestDatabase::named() else {
@@ -1799,7 +2209,7 @@ mod tests {
     /// The schema is applied at startup and recorded; a database one migration behind is migrated
     /// at startup; a database whose schema names an oldest Server above this one fails startup
     /// naming both versions and is left unchanged.
-    /// Verifies: ADR-0044
+    /// Verifies: ADR-0050
     #[test]
     fn the_server_applies_its_schema_and_refuses_a_newer_one() {
         let Some(test) = TestDatabase::named() else {
@@ -1874,9 +2284,9 @@ mod tests {
     /// A Server of 0.7.1 takes the schema of migrations 1 and 2, which it knows, and refuses the
     /// schema once any migration of 0.8.0 is applied, naming 0.8.0 and changing nothing: it holds
     /// no lease, so it must not serve beside the instances of 0.8.0
-    /// (ADR-0044 clause 22). It is asked through the check of
+    /// (ADR-0050 clause 22). It is asked through the check of
     /// [`schema::apply`], which 0.7.1 runs as it stands here.
-    /// Verifies: ADR-0044
+    /// Verifies: ADR-0050
     #[test]
     fn a_server_of_0_7_1_refuses_the_schema_once_a_migration_of_0_8_0_is_applied() {
         let Some(test) = TestDatabase::named() else {
@@ -1920,9 +2330,9 @@ mod tests {
     /// An instance that shares the database neither migrates nor starts while another Server holds
     /// the database alone, as a running Server of 0.7.1 does for its whole run under the same key:
     /// that Server checked the schema only at its own start, and would serve on in a schema it
-    /// refuses (ADR-0044 clause 22). Once the lock is free, the
+    /// refuses (ADR-0050 clause 22). Once the lock is free, the
     /// instance migrates and starts.
-    /// Verifies: ADR-0044
+    /// Verifies: ADR-0050
     #[test]
     fn a_shared_instance_migrates_nothing_while_a_server_holds_the_database_alone() {
         let Some(test) = TestDatabase::named() else {
@@ -1959,8 +2369,235 @@ mod tests {
         );
     }
 
+    /// The schema of a Server two releases on: this release's migrations and one more, which
+    /// names 0.9.0 as the oldest Server that understands what it leaves. `sql` is that
+    /// migration's.
+    fn two_releases_on(sql: &'static str) -> &'static [schema::Migration] {
+        let mut migrations = schema::MIGRATIONS.to_vec();
+        migrations.push(schema::Migration {
+            version: i32::try_from(migrations.len() + 1).expect("few"),
+            oldest_server: "0.9.0",
+            sql,
+        });
+        Box::leak(migrations.into_boxed_slice())
+    }
+
+    /// A live lease as a Server of 0.8.0 takes one: no release written, so the column's default
+    /// names it.
+    fn lease_as_0_8_0_takes_it(test: &TestDatabase, must_be_alone: bool) {
+        test.sql(&format!(
+            "INSERT INTO leases \
+             (instance_id, host, must_be_alone, taken_at, renewed_at, expires_at) \
+             VALUES ('{}', 'host-old', {must_be_alone}, now(), now(), now() + interval '1 hour')",
+            lease::new_instance_id().expect("an id")
+        ));
+    }
+
+    /// An instance refuses its start, naming its own release and the older one and leaving the
+    /// schema as it was, while a live lease names a release older than the oldest Server the
+    /// schema names once its own migrations are applied, whether they are applied already or not.
+    /// A lease of 0.8.0 counts as 0.8.0 by the column's default; a lapsed lease, and the live one
+    /// of an instance that had to be alone and whose lock is free, count as none; with no such
+    /// lease the instance applies every migration it lacks
+    /// (ADR-0048
+    /// clause 16).
+    /// Verifies: ADR-0048
+    #[test]
+    fn an_instance_refuses_its_start_while_a_live_lease_is_older_than_the_schema_it_leaves() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let ahead = two_releases_on("CREATE TABLE fleet_test_ahead (n integer)");
+        let schema_rows =
+            || test.rows("SELECT version, oldest_server FROM fleet_schema ORDER BY version");
+        let open_ahead = || {
+            Database::open_as(
+                &test.config(),
+                Exclusive::Shared,
+                Some(&test.schema),
+                "0.10.0",
+                ahead,
+            )
+        };
+
+        // An instance of 0.8.4 holds a lease on this release's schema.
+        let older = Database::open_as(
+            &test.config(),
+            Exclusive::Shared,
+            Some(&test.schema),
+            "0.8.4",
+            schema::MIGRATIONS,
+        )
+        .expect("0.8.4 migrates");
+        let held = older
+            .take_lease("host-older", Duration::from_secs(3600))
+            .expect("a lease");
+        let before = schema_rows();
+        let err = open_ahead().map(|_| ()).expect_err("a live lease of 0.8.4");
+        for named in ["0.8.4", "0.9.0", "0.10.0", held.instance_id.as_str()] {
+            assert!(err.contains(named), "{named}: {err}");
+        }
+        assert!(
+            err.contains(&format!("database {}", test.config.dbname)),
+            "{err}"
+        );
+        assert_eq!(schema_rows(), before, "nothing migrated");
+
+        // Its lease released, the instance migrates.
+        older.release_lease(&held.instance_id).expect("released");
+        drop(open_ahead().expect("no live lease"));
+        assert_eq!(
+            schema_rows().len(),
+            ahead.len(),
+            "every migration it lacked"
+        );
+
+        // Applied already: a lease of 0.8.0, recorded by the default, still refuses it.
+        lease_as_0_8_0_takes_it(&test, false);
+        assert_eq!(
+            test.rows("SELECT release FROM leases"),
+            [[Some("0.8.0".to_string())]],
+            "a lease of 0.8.0 records 0.8.0"
+        );
+        let before = schema_rows();
+        let err = open_ahead().map(|_| ()).expect_err("a live lease of 0.8.0");
+        assert!(err.contains("of Server 0.8.0"), "{err}");
+        assert!(err.contains("needs Server 0.9.0"), "{err}");
+        assert_eq!(schema_rows(), before, "left as it was");
+
+        // A lapsed lease counts as none, and so does the live lease of an instance that had to
+        // be alone, its lock free: clause 2 takes it over.
+        test.sql("UPDATE leases SET expires_at = now() - interval '1 second'");
+        lease_as_0_8_0_takes_it(&test, true);
+        let opened = open_ahead().expect("only leases taken over");
+        let taken = opened
+            .take_lease("host-ahead", Duration::from_secs(3600))
+            .expect("a lease");
+        assert_eq!(taken.taken_over.len(), 2, "both taken over");
+        assert_eq!(
+            test.rows("SELECT release FROM leases"),
+            [[Some("0.10.0".to_string())]],
+            "a lease names the release of its instance"
+        );
+    }
+
+    /// An instance whose migrations name the oldest Server a live lease's release is, or older,
+    /// serves beside it: a newer patch release of 0.8 beside a lease of 0.8.0.
+    /// Verifies: ADR-0048
+    #[test]
+    fn a_patch_release_serves_beside_a_lease_of_the_release_its_migrations_name() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        drop(test.shared());
+        lease_as_0_8_0_takes_it(&test, false);
+        let patch = Database::open_as(
+            &test.config(),
+            Exclusive::Shared,
+            Some(&test.schema),
+            "0.8.1",
+            schema::MIGRATIONS,
+        )
+        .expect("a patch release beside 0.8.0");
+        patch
+            .take_lease("host-patch", Duration::from_secs(3600))
+            .expect("serves");
+        let mut releases = test.rows("SELECT release FROM leases ORDER BY release");
+        releases.dedup();
+        assert_eq!(
+            releases,
+            [[Some("0.8.0".to_string())], [Some("0.8.1".to_string())]]
+        );
+    }
+
+    /// Of a lease taken while a Server two releases on migrates, the later sees the earlier: the
+    /// lease waits for the migrations' lock, then finds the schema that needs a newer Server and
+    /// is refused, naming both versions, taking nothing and keeping the refusal
+    /// (ADR-0048
+    /// clause 16). The other order, the lease first, is
+    /// `an_instance_refuses_its_start_while_a_live_lease_is_older_than_the_schema_it_leaves`.
+    /// Verifies: ADR-0048
+    #[test]
+    fn a_lease_taken_while_a_newer_server_migrates_sees_its_schema_and_is_refused() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        const KEY: i64 = 4_711_000_161;
+        let ahead = two_releases_on(
+            "SELECT pg_advisory_lock_shared(4711000161); \
+             SELECT pg_advisory_unlock_shared(4711000161); \
+             CREATE TABLE fleet_test_ahead (n integer);",
+        );
+        let older = Database::open_as(
+            &test.config(),
+            Exclusive::Shared,
+            Some(&test.schema),
+            "0.8.0",
+            schema::MIGRATIONS,
+        )
+        .expect("0.8.0 migrates");
+        let waits_for_the_migrations = |waiting: usize| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
+            while test
+                .rows(&format!(
+                    "SELECT 1 FROM pg_locks, (SELECT {MIGRATION_LOCK} AS key) k \
+                     WHERE locktype = 'advisory' AND NOT granted \
+                     AND classid = ((k.key >> 32) & 4294967295)::oid \
+                     AND objid = (k.key & 4294967295)::oid"
+                ))
+                .len()
+                != waiting
+            {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "never {waiting} waiting for the migrations' lock"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        let gate = test.gate(KEY);
+        std::thread::scope(|scope| {
+            let migrating = scope.spawn(|| {
+                Database::open_as(
+                    &test.config(),
+                    Exclusive::Shared,
+                    Some(&test.schema),
+                    "0.10.0",
+                    ahead,
+                )
+                .map(|_| ())
+            });
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
+            while test.sessions("wait_event_type = 'Lock'") != 1 {
+                assert!(std::time::Instant::now() < deadline, "the migration waits");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let taking = scope.spawn(|| older.take_lease("host-older", Duration::from_secs(3600)));
+            waits_for_the_migrations(1);
+            gate.open();
+            migrating
+                .join()
+                .expect("migrating")
+                .expect("the newer Server migrates");
+            let err = taking
+                .join()
+                .expect("taking")
+                .map(|_| ())
+                .expect_err("refused");
+            for named in ["needs Server 0.9.0", "this Server is 0.8.0"] {
+                assert!(err.contains(named), "{named}: {err}");
+            }
+            assert_eq!(older.outdated(), Some(err), "the refusal is kept");
+        });
+        assert_eq!(
+            test.rows("SELECT count(*) FROM leases"),
+            [[Some("0".to_string())]],
+            "no lease taken"
+        );
+    }
+
     /// The whole schema applies on an empty database, and every table it names is there.
-    /// Verifies: ADR-0044
+    /// Verifies: ADR-0050
     #[test]
     fn the_embedded_schema_applies_on_an_empty_database() {
         let Some(test) = TestDatabase::named() else {

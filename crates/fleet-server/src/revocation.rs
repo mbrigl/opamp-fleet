@@ -16,10 +16,10 @@ use tokio::sync::watch;
 
 use crate::fleet::Clock;
 
-/// The revocations one list holds at most (ADR-0044 clause 10).
+/// The revocations one list holds at most (ADR-0050 clause 10).
 pub const MAX_REVOCATIONS: usize = 100_000;
 
-/// The certificates the register holds at most (ADR-0044 clause 9).
+/// The certificates the register holds at most (ADR-0050 clause 9).
 pub const MAX_ISSUED: usize = 100_000;
 
 /// The reads of a reload swapped in no more, as an act of this instance's own committed while
@@ -29,11 +29,11 @@ pub const RELOAD_SWAPS_REFUSED: usize = 3;
 
 /// The certificates the register holds at most in one chain — below one root, the first
 /// certificate a chain renews from: enough for a Gateway's downstream Agents, few enough that one
-/// member cannot fill the register (ADR-0044 clause 9).
+/// member cannot fill the register (ADR-0050 clause 9).
 pub const MAX_DESCENDANTS_PER_ROOT: usize = 10_000;
 
 /// The room the register keeps for enrolments: a renewal is refused once fewer are left, so
-/// renewals alone cannot shut out a new host (ADR-0044 clause 9).
+/// renewals alone cannot shut out a new host (ADR-0050 clause 9).
 pub const ENROLMENT_RESERVE: usize = 1_000;
 
 /// A certificate by its issuer and serial: the issuer as the SHA-256 of its DER-encoded name, hex,
@@ -79,7 +79,7 @@ pub struct Facts {
     pub key_fingerprint: String,
     /// Milliseconds since the Unix epoch.
     pub not_after_ms: u64,
-    /// The host the certificate was issued to (ADR-0022 clause 11) — the stable identity a host
+    /// The host the certificate was issued to (ADR-0052 clause 11) — the stable identity a host
     /// keeps across renewals and re-keys; `None` for a certificate an operator provisioned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,
@@ -150,7 +150,7 @@ pub struct Presented {
     pub not_after_ms: u64,
 }
 
-/// A Host: what a client certificate's host id names (ADR-0022 clause 11, ADR-0043 clause 15).
+/// A Host: what a client certificate's host id names (ADR-0052 clause 11, ADR-0043 clause 15).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Host {
     /// A Gateway carries other hosts' Agents, so its certificate binds none of them.
@@ -199,7 +199,7 @@ pub enum SpeaksFor {
 /// A version of the hosts, numbered so no older one is written over a newer.
 type HostsVersion = (u64, BTreeMap<String, Host>);
 
-/// The certificates one host may hold at once (ADR-0022 clause 11): the one in force, its renewal,
+/// The certificates one host may hold at once (ADR-0052 clause 11): the one in force, its renewal,
 /// and one more for a renewal whose answer was lost.
 pub const MAX_PER_HOST: usize = 3;
 
@@ -213,7 +213,43 @@ pub struct Signed {
     pub facts: Facts,
 }
 
-/// One certificate the Server signed (ADR-0044 clause 9).
+/// The register entry of a certificate an approval signed and the Host it mints, prepared and not
+/// yet written: written with the decision on its request, and taken up in memory once that decision
+/// is written (ADR-0050 clause 9).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Approved {
+    pub(crate) issued: Issued,
+    pub(crate) bounds: RegisterBounds,
+    pub(crate) mint: Option<(String, Host)>,
+    pub(crate) bootstrap: CertId,
+}
+
+impl Approved {
+    /// The entry it registers.
+    #[must_use]
+    pub fn issued(&self) -> &Issued {
+        &self.issued
+    }
+
+    /// The Host it mints, as its row is written when the store has none.
+    pub(crate) fn mint(&self) -> Option<(&str, &Host)> {
+        self.mint
+            .as_ref()
+            .map(|(host, entry)| (host.as_str(), entry))
+    }
+}
+
+/// What a register write that is not [`Registered::Registered`] is refused with.
+pub(crate) fn refusal(registered: Registered) -> Result<(), String> {
+    match registered {
+        Registered::Registered => Ok(()),
+        Registered::Full(why) => Err(why),
+        Registered::Revoked => Err(RENEWS_REVOKED.to_string()),
+        Registered::BootstrapRevoked => Err(BOOTSTRAP_REVOKED.to_string()),
+    }
+}
+
+/// One certificate the Server signed (ADR-0050 clause 9).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Issued {
     #[serde(flatten)]
@@ -254,7 +290,7 @@ pub struct Ledger {
     pub revocations: Vec<Revocation>,
     pub hosts: BTreeMap<String, Host>,
     /// The list's one version, as the store holds it, where the store keeps one: PostgreSQL does
-    /// (ADR-0044 clause 10), the filesystem does not.
+    /// (ADR-0050 clause 10), the filesystem does not.
     pub version: Option<u64>,
 }
 
@@ -273,17 +309,21 @@ pub trait LedgerStore: Send + Sync {
     /// Returns an error when it cannot be written.
     fn put_issued(&self, issued: &Issued) -> Result<(), String>;
 
-    /// Removes one register entry.
+    /// Removes one register entry the prune found expired, with no valid certificate renewed from
+    /// it, and answers whether it removed it. A store other instances share removes it only while
+    /// it holds no certificate renewed from it that is valid at `now_ms`, whatever the instance
+    /// that prunes holds, so a renewal it never took up keeps its chain
+    /// (ADR-0050 clause 10).
     ///
     /// # Errors
     /// Returns an error when it cannot be removed.
-    fn remove_issued(&self, id: &CertId) -> Result<(), String>;
+    fn remove_issued(&self, id: &CertId, now_ms: u64) -> Result<bool, String>;
 
     /// Writes one register entry, deciding from what is stored: the register's bounds are
     /// counted, and a renewal whose chain holds a revoked certificate is refused, in the write
     /// itself, so both hold for every instance on one store together and no instance with a stale
     /// view can pass them
-    /// (ADR-0041
+    /// (ADR-0048
     /// clause 19). A store that is its only writer decides as [`register_into`] does; the one
     /// that only puts what the Server decided in memory is answered `Registered`.
     ///
@@ -326,7 +366,7 @@ pub trait LedgerStore: Send + Sync {
     /// issuers widened by those `entry` names beside them ([`widened`]), and a list already
     /// holding `bound` entries takes no more. The bound is counted
     /// in the write itself, so it holds for every instance on one store together
-    /// (ADR-0041
+    /// (ADR-0048
     /// clause 19).
     ///
     /// # Errors
@@ -347,7 +387,7 @@ pub trait LedgerStore: Send + Sync {
 
     /// Binds `instance_uid` to `host`, unless another Host holds it: the binding is one row the
     /// store holds once for every instance
-    /// (ADR-0041
+    /// (ADR-0048
     /// clause 19). A store that is its only writer binds what the Server decided in memory.
     ///
     /// # Errors
@@ -411,15 +451,18 @@ pub trait LedgerStore: Send + Sync {
 
     /// Writes one act on the Hosts, deciding each field from what is stored: a valid until only
     /// moves forward, an approval and a subject are written only into a Host that has no row yet,
-    /// and a Host is forgotten only while what is stored says it has ended
-    /// (ADR-0041
-    /// clause 19). A store that writes the Hosts whole writes nothing here.
+    /// a Host is forgotten only while what is stored says it has ended, and a Gateway's mark is
+    /// written only for a host that a Host row or a register entry names
+    /// (ADR-0048
+    /// clause 19). Answers whether the store knows the host a Gateway's mark names: `false` when
+    /// it knows neither, and nothing is then written; every other act answers `true`. A store that
+    /// writes the Hosts whole writes nothing here and answers `true`.
     ///
     /// # Errors
     /// Returns an error when it cannot be written; the Hosts are then as they were.
-    fn write_host_act(&self, act: &HostAct) -> Result<(), String> {
+    fn write_host_act(&self, act: &HostAct) -> Result<bool, String> {
         let _ = act;
-        Ok(())
+        Ok(true)
     }
 
     /// Writes the Hosts as `hosts` holds them, each one that changed since the last write and each
@@ -455,7 +498,8 @@ pub enum HostAct {
     /// Valid untils moved forward, each never back.
     Extended(Vec<(String, u64)>),
     /// A Host marked as a Gateway, or no longer; marking it releases every `instance_uid` bound to
-    /// it in the same write.
+    /// it in the same write. Written only for a host the store knows by its row or a register
+    /// entry.
     Gateway { host: String, gateway: bool },
     /// Hosts whose valid until had passed at `now_ms`, forgotten with their bindings, each only
     /// while what is stored still says so.
@@ -468,7 +512,7 @@ pub fn bound_elsewhere(instance_uid: &str, host: &str) -> String {
     format!("the Agent {instance_uid} is bound to the host {host}")
 }
 
-/// The bounds a register write counts (ADR-0044 clause 9).
+/// The bounds a register write counts (ADR-0050 clause 9).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RegisterBounds {
     /// The entries the register may hold before this one: [`MAX_ISSUED`], and for a renewal
@@ -663,8 +707,13 @@ pub enum RevokeError {
     Invalid(String),
     /// The list is at [`MAX_REVOCATIONS`].
     Full,
-    /// The store could not write it.
-    Store(String),
+    /// The store answered an error. Whether it holds `attempted` is unknown: a write whose answer
+    /// was lost, or a file renamed into place before its directory failed to sync, may have
+    /// landed.
+    Store {
+        error: String,
+        attempted: Box<Revocation>,
+    },
 }
 
 /// The register and the list, in memory and in their store.
@@ -707,6 +756,9 @@ struct State {
     /// only while this has not moved since the read began
     /// ([`Revocations::reload_ledger`]).
     acts: u64,
+    /// The bindings to each Host this instance is writing with the lock let go, counted against
+    /// the Host's bound beside those it holds.
+    binding: BTreeMap<String, usize>,
     /// How often the revoked set was built.
     #[cfg(test)]
     rebuilds: usize,
@@ -740,6 +792,7 @@ impl State {
             list_version: ledger.version,
             revoked: None,
             acts: 0,
+            binding: BTreeMap::new(),
             #[cfg(test)]
             rebuilds: 0,
         };
@@ -962,7 +1015,7 @@ impl Revocations {
             .cloned()
     }
 
-    /// Records a certificate the client CA signed, before it is handed out (ADR-0044 clause 9).
+    /// Records a certificate the client CA signed, before it is handed out (ADR-0050 clause 9).
     ///
     /// # Errors
     /// Returns an error when the register is full — for a renewal, [`ENROLMENT_RESERVE`] short of
@@ -974,23 +1027,117 @@ impl Revocations {
         instance_uid: &[u8],
         predecessor: Option<CertId>,
     ) -> Result<(), String> {
-        self.record_with(facts, instance_uid, predecessor, None)
+        self.record_with(facts, instance_uid, predecessor)
     }
 
-    /// [`record`](Self::record) for an approved enrolment request, whose bootstrap certificate,
-    /// `bootstrap`, is checked against the list in the same write: a revoked one is refused with
-    /// [`BOOTSTRAP_REVOKED`], here and by a store other instances share, which reads the list in
-    /// the write (ADR-0038 clause 28).
+    /// Prepares the register entry of a certificate an approval signed, and the Host it mints,
+    /// without writing either: they are written with the decision on its request
+    /// ([`register_approved`](Self::register_approved), or the enrolment store's own transaction
+    /// and then [`took_up_approved`](Self::took_up_approved)), so a decision that is not written
+    /// leaves neither (ADR-0050 clause 9). The bounds are checked against what this instance
+    /// holds; the write counts them again. The bootstrap certificate the request came with,
+    /// `bootstrap`, is checked against the list: a revoked one is refused with
+    /// [`BOOTSTRAP_REVOKED`], here and in the write (ADR-0038 clause 28).
     ///
     /// # Errors
-    /// As [`record`](Self::record), and [`BOOTSTRAP_REVOKED`] for a revoked bootstrap certificate.
-    pub fn record_approved(
+    /// Returns an error when the register is full, when the host holds as many valid
+    /// certificates as it may, or for a revoked bootstrap certificate.
+    pub fn prepare_approved(
         &self,
         facts: Facts,
         instance_uid: &[u8],
         bootstrap: &CertId,
-    ) -> Result<(), String> {
-        self.record_with(facts, instance_uid, None, Some(bootstrap))
+    ) -> Result<Approved, String> {
+        let mut state = self.state.lock().expect("revocation lock");
+        // The prune is an act on the trust state.
+        state.acted();
+        if state.revoked().contains(bootstrap) {
+            return Err(BOOTSTRAP_REVOKED.to_string());
+        }
+        let forgotten = self.prune(&mut state)?;
+        let bounds = self.bounds_for(&state, &facts, None);
+        let approved = bounds.map(|bounds| Approved {
+            mint: facts.host.clone().map(|host| {
+                (
+                    host,
+                    Host {
+                        subject: facts.subject_values.clone(),
+                        approved_ms: Some(self.clock.now_ms()),
+                        valid_until_ms: Some(facts.not_after_ms),
+                        ..Host::default()
+                    },
+                )
+            }),
+            issued: Issued {
+                facts,
+                instance_uid: hex::encode(instance_uid),
+                predecessor: None,
+                issued_ms: self.clock.now_ms(),
+            },
+            bounds,
+            bootstrap: bootstrap.clone(),
+        });
+        drop(state);
+        self.write_forgotten(forgotten);
+        approved
+    }
+
+    /// Writes what [`prepare_approved`](Self::prepare_approved) prepared through this register's
+    /// own store, and takes it up: what an approval does once its decision is written to a store
+    /// that does not write the register in the decision's own transaction (ADR-0050 clause 9).
+    ///
+    /// # Errors
+    /// Returns an error when the write refuses it, as [`record`](Self::record) does and with
+    /// [`BOOTSTRAP_REVOKED`], or cannot be made; nothing is then taken up.
+    pub fn register_approved(&self, approved: &Approved) -> Result<(), String> {
+        let mut state = self.state.lock().expect("revocation lock");
+        state.acted();
+        if state.revoked().contains(&approved.bootstrap) {
+            return Err(BOOTSTRAP_REVOKED.to_string());
+        }
+        refusal(self.store.register_minting(
+            &approved.issued,
+            &approved.bounds,
+            approved.mint(),
+            Some(&approved.bootstrap),
+        )?)?;
+        state.took_up_own_write(self.store.list_version());
+        self.take_up_approved(state, approved);
+        Ok(())
+    }
+
+    /// Takes up what an enrolment store wrote of `approved` in the transaction that decided its
+    /// request, once that transaction committed (ADR-0050 clause 9): the register entry and the
+    /// Host, which the store wrote by act, in memory alone, and the list's version that
+    /// transaction left, `written`, where it is known (ADR-0050 clause 10). An approval whose
+    /// commit was read back names none, and the list is then read again before a version is held.
+    pub fn took_up_approved(&self, approved: &Approved, written: Option<u64>) {
+        let mut state = self.state.lock().expect("revocation lock");
+        state.acted();
+        state.took_up_own_write(written);
+        self.take_up_approved(state, approved);
+    }
+
+    fn take_up_approved(&self, mut state: std::sync::MutexGuard<'_, State>, approved: &Approved) {
+        state.insert(approved.issued.clone());
+        let not_after = approved.issued.facts.not_after_ms;
+        let changed = match &approved.mint {
+            Some((host, entry)) => match state.hosts.get_mut(host) {
+                Some(held) => held.extend(not_after),
+                None => {
+                    state.hosts.insert(host.clone(), entry.clone());
+                    true
+                }
+            },
+            None => false,
+        };
+        // A store that writes the Hosts by act wrote the Host with the entry.
+        if !changed || self.store.writes_hosts_by_act() {
+            return;
+        }
+        let hosts = Self::hosts_changed(&mut state);
+        drop(state);
+        self.write_forgotten(Some(hosts));
     }
 
     fn record_with(
@@ -998,14 +1145,10 @@ impl Revocations {
         facts: Facts,
         instance_uid: &[u8],
         predecessor: Option<CertId>,
-        bootstrap: Option<&CertId>,
     ) -> Result<(), String> {
         let mut state = self.state.lock().expect("revocation lock");
         // The prune and the register's write below are acts on the trust state.
         state.acted();
-        if bootstrap.is_some_and(|bootstrap| state.revoked().contains(bootstrap)) {
-            return Err(BOOTSTRAP_REVOKED.to_string());
-        }
         let forgotten = self.prune(&mut state)?;
         // The approval that mints a host id writes the Host (ADR-0043 clause 15): an issuance that
         // renews nothing and names a host the register does not know yet. A store that writes the
@@ -1028,7 +1171,7 @@ impl Revocations {
             instance_uid,
             predecessor,
             mint.as_ref().map(|(host, entry)| (host.as_str(), entry)),
-            bootstrap,
+            None,
         );
         // Every issuance moves its Host's valid until forward (ADR-0043 clause 15).
         let act = match (&recorded, mint, &facts.host) {
@@ -1074,6 +1217,30 @@ impl Revocations {
         mint: Option<(&str, &Host)>,
         bootstrap: Option<&CertId>,
     ) -> Result<(), String> {
+        let bounds = self.bounds_for(state, &facts, predecessor.as_ref())?;
+        let issued = Issued {
+            facts,
+            instance_uid: hex::encode(instance_uid),
+            predecessor,
+            issued_ms: self.clock.now_ms(),
+        };
+        refusal(
+            self.store
+                .register_minting(&issued, &bounds, mint, bootstrap)?,
+        )?;
+        state.took_up_own_write(self.store.list_version());
+        state.insert(issued);
+        Ok(())
+    }
+
+    /// The bounds a register write of `facts` counts, once what this instance holds passes them:
+    /// the register's size, the chain's below its root, and the host's valid certificates.
+    fn bounds_for(
+        &self,
+        state: &State,
+        facts: &Facts,
+        predecessor: Option<&CertId>,
+    ) -> Result<RegisterBounds, String> {
         let limit = if predecessor.is_some() {
             MAX_ISSUED - ENROLMENT_RESERVE
         } else {
@@ -1082,7 +1249,7 @@ impl Revocations {
         if state.issued.len() >= limit {
             return Err(register_full(state.issued.len()));
         }
-        let root = state.root_below(predecessor.as_ref(), &facts.id);
+        let root = state.root_below(predecessor, &facts.id);
         if state.descendants.get(&root).copied().unwrap_or(0) >= MAX_DESCENDANTS_PER_ROOT {
             return Err(CHAIN_FULL.to_string());
         }
@@ -1102,31 +1269,14 @@ impl Revocations {
                 ));
             }
         }
-        let issued = Issued {
-            facts,
-            instance_uid: hex::encode(instance_uid),
-            predecessor,
-            issued_ms: self.clock.now_ms(),
-        };
-        let bounds = RegisterBounds {
+        Ok(RegisterBounds {
             size: limit,
             per_root: MAX_DESCENDANTS_PER_ROOT,
-        };
-        match self
-            .store
-            .register_minting(&issued, &bounds, mint, bootstrap)?
-        {
-            Registered::Registered => {}
-            Registered::Full(why) => return Err(why),
-            Registered::Revoked => return Err(RENEWS_REVOKED.to_string()),
-            Registered::BootstrapRevoked => return Err(BOOTSTRAP_REVOKED.to_string()),
-        }
-        state.insert(issued);
-        Ok(())
+        })
     }
 
     /// Whether a connection presenting a certificate of `host` may report for `instance_uid`
-    /// (ADR-0022 clause 11), binding nothing: [`check_report`](Self::check_report) binds it once
+    /// (ADR-0052 clause 11), binding nothing: [`check_report`](Self::check_report) binds it once
     /// the report is admitted.
     ///
     /// # Errors
@@ -1137,7 +1287,7 @@ impl Revocations {
     }
 
     /// Whether a connection presenting a certificate of `host` may report for `instance_uid`
-    /// (ADR-0022 clause 11). An `instance_uid` first heard from a host is bound to it; one bound to
+    /// (ADR-0052 clause 11). An `instance_uid` first heard from a host is bound to it; one bound to
     /// another host is refused. A Gateway's certificate binds nothing — it carries other hosts'
     /// Agents. A certificate an operator provisioned with a host id makes its Host here, at its
     /// first report, with `subject` — the values of the certificate it presented (ADR-0043
@@ -1160,6 +1310,9 @@ impl Revocations {
             valid_until_ms: Some(not_after_ms),
             ..Host::default()
         };
+        if self.store.writes_hosts_by_act() {
+            return self.check_report_by_act(state, host, subject, not_after_ms, &uid, &row);
+        }
         let binds = Self::admits(&state, host, &uid)? && self.bind(&mut state, &uid, host, &row)?;
         if binds {
             state
@@ -1187,12 +1340,100 @@ impl Revocations {
             let Some(entry) = state.hosts.get(host).cloned() else {
                 return Ok(());
             };
-            return self.store.write_host_act(&HostAct::Seen {
-                host: host.to_string(),
-                entry,
-            });
+            return self
+                .store
+                .write_host_act(&HostAct::Seen {
+                    host: host.to_string(),
+                    entry,
+                })
+                .map(drop);
         }
         self.save_hosts(state)
+    }
+
+    /// [`check_report`](Self::check_report) on a store that writes each act on the Hosts as one
+    /// write on the rows it names, as the PostgreSQL store does: the store's writes are made with
+    /// the lock let go, so no check, no handshake and no other report waits for them.
+    ///
+    /// Under the lock it is decided whether the report binds, and the binding is counted against
+    /// the Host's bound until it is taken up. The binding is written, and taken up under the lock
+    /// as an act of this instance's own, which a reload whose read began before it does not
+    /// swap in over ([`reload_ledger`](Self::reload_ledger)). The Host's valid until is moved
+    /// forward in memory as it is taken up, then written, and moved forward again under the lock
+    /// as another act once it is written: a reload that read the store before that write
+    /// committed, and was swapped in meanwhile, does not leave it moved back. The store decides a
+    /// binding another Host holds, and a valid until only moves forward there.
+    fn check_report_by_act(
+        &self,
+        mut state: MutexGuard<'_, State>,
+        host: &str,
+        subject: &SubjectValues,
+        not_after_ms: u64,
+        uid: &str,
+        row: &Host,
+    ) -> Result<(), String> {
+        let binds = Self::admits(&state, host, uid)?;
+        if binds {
+            *state.binding.entry(host.to_string()).or_default() += 1;
+        }
+        drop(state);
+        let bound = if binds {
+            Some(self.store.bind_seen(uid, host, row))
+        } else {
+            None
+        };
+        let mut state = self.state.lock().expect("revocation lock");
+        if binds {
+            if let Some(binding) = state.binding.get_mut(host) {
+                *binding -= 1;
+                if *binding == 0 {
+                    state.binding.remove(host);
+                }
+            }
+        }
+        let binds = match bound {
+            None => false,
+            Some(bound) => {
+                state.acted();
+                Self::take_up(&mut state, uid, host, bound?)?
+            }
+        };
+        if binds {
+            state
+                .hosts
+                .entry(host.to_string())
+                .or_insert_with(|| Host {
+                    subject: subject.clone(),
+                    ..Host::default()
+                })
+                .instance_uids
+                .insert(uid.to_string());
+        }
+        let extended = state
+            .hosts
+            .get_mut(host)
+            .is_some_and(|entry| entry.extend(not_after_ms));
+        if extended {
+            state.earliest_expiry_ms = state.earliest_expiry_ms.min(not_after_ms);
+            state.acted();
+        }
+        if !(binds || extended) {
+            return Ok(());
+        }
+        let Some(entry) = state.hosts.get(host).cloned() else {
+            return Ok(());
+        };
+        drop(state);
+        self.store.write_host_act(&HostAct::Seen {
+            host: host.to_string(),
+            entry,
+        })?;
+        let mut state = self.state.lock().expect("revocation lock");
+        if let Some(entry) = state.hosts.get_mut(host) {
+            entry.extend(not_after_ms);
+        }
+        state.acted();
+        Ok(())
     }
 
     /// Releases `instance_uid` from the Host it is bound to, when an operator forgets its Agent
@@ -1269,10 +1510,13 @@ impl Revocations {
             }
             None => {}
         }
+        let binding = state.binding.get(host).copied().unwrap_or(0);
         if state
             .hosts
             .get(host)
-            .is_some_and(|entry| entry.instance_uids.len() >= MAX_UIDS_PER_HOST)
+            .map_or(0, |entry| entry.instance_uids.len())
+            .saturating_add(binding)
+            >= MAX_UIDS_PER_HOST
         {
             return Err(format!(
                 "this host already speaks for {MAX_UIDS_PER_HOST} Agents"
@@ -1306,7 +1550,7 @@ impl Revocations {
     }
 
     /// Moves a binding to the `instance_uid` the Server re-keyed an Agent to — a re-key never
-    /// orphans a host's certificate (ADR-0022 clause 11).
+    /// orphans a host's certificate (ADR-0052 clause 11).
     ///
     /// # Errors
     /// Returns an error when the binding cannot be written.
@@ -1347,27 +1591,38 @@ impl Revocations {
         self.save_hosts(state)
     }
 
-    /// Marks `host` as a Gateway, or not; answers whether this Server knows the host.
+    /// Marks `host` as a Gateway, or not; answers whether this Server knows the host. A store that
+    /// writes the Hosts by act decides that in the write, from what it holds, so a Host another
+    /// instance wrote is known before this one hears of it, and one it no longer holds is not
+    /// marked from this instance's copy; this instance then reads the ledger again where it held
+    /// no copy of the Host, so it holds the Host as stored. A store that is its only writer is
+    /// decided by what this instance holds.
     ///
     /// # Errors
     /// Returns an error when the change cannot be written.
     pub fn set_gateway(&self, host: &str, gateway: bool) -> Result<bool, String> {
+        let by_act = self.store.writes_hosts_by_act();
         let mut state = self.state.lock().expect("revocation lock");
-        let known = state.hosts.contains_key(host)
+        let held = state.hosts.contains_key(host);
+        let known = held
             || state
                 .issued
                 .values()
                 .any(|issued| issued.facts.host.as_deref() == Some(host));
-        if !known {
+        if !by_act && !known {
             return Ok(false);
         }
         state.acted();
-        if self.store.writes_hosts_by_act() {
-            // The mark and the release of every binding it ends are one write.
-            self.store.write_host_act(&HostAct::Gateway {
+        if by_act {
+            // The mark and the release of every binding it ends are one write, made only for a
+            // host the store knows (ADR-0048 clause 19).
+            let known = self.store.write_host_act(&HostAct::Gateway {
                 host: host.to_string(),
                 gateway,
             })?;
+            if !known {
+                return Ok(false);
+            }
         } else if gateway {
             self.store.unbind_host(host)?;
         }
@@ -1386,8 +1641,15 @@ impl Revocations {
         if !gateway {
             state.earliest_expiry_ms = state.earliest_expiry_ms.min(until);
         }
-        if !self.store.writes_hosts_by_act() {
+        if !by_act {
             self.save_hosts(state)?;
+        } else if !held {
+            drop(state);
+            // The copy holds the mark alone; the Host's other fields, its subject that places
+            // its Agents among them, are read now, or at the next lease renewal where this fails.
+            if let Err(e) = self.reload_ledger() {
+                tracing::warn!(error = %e, %host, "cannot read the Host a Gateway's mark wrote");
+            }
         }
         Ok(true)
     }
@@ -1524,11 +1786,16 @@ impl Revocations {
             revoked,
             revoked_ms: self.clock.now_ms(),
         };
-        let (entry, written) = match self
-            .store
-            .add_revocation(&entry, MAX_REVOCATIONS)
-            .map_err(RevokeError::Store)?
-        {
+        let added = match self.store.add_revocation(&entry, MAX_REVOCATIONS) {
+            Ok(added) => added,
+            Err(error) => {
+                return Err(RevokeError::Store {
+                    error,
+                    attempted: Box::new(entry),
+                })
+            }
+        };
+        let (entry, written) = match added {
             Added::Added => (entry, true),
             Added::Present(existing) => (existing, false),
             Added::Widened(wider) => (wider, true),
@@ -1672,7 +1939,7 @@ impl Revocations {
     /// Reads the register and the Hosts again from the store, as another instance may have changed
     /// them, so what this instance admits follows what is stored: an `instance_uid` another instance
     /// bound, released or moved, a Host it marked, and the entries it registered
-    /// (ADR-0041
+    /// (ADR-0048
     /// clause 19). The revocation list is read again too, and announced when it changed, so every
     /// open session checks itself against what is stored
     /// (ADR-0038 clause 32).
@@ -1725,6 +1992,7 @@ impl Revocations {
     fn swap(&self, mut state: MutexGuard<'_, State>, (mut fresh, list): (State, Vec<Revocation>)) {
         fresh.hosts_version = state.hosts_version;
         fresh.acts = state.acts;
+        fresh.binding = std::mem::take(&mut state.binding);
         fresh.list_version = fresh.list_version.max(state.list_version);
         #[cfg(test)]
         {
@@ -1747,7 +2015,7 @@ impl Revocations {
     }
 
     /// Drops the register entries that have expired and from which no valid certificate descends,
-    /// and the revocations of certificates those entries held (ADR-0044 clause 10). A revoked
+    /// and the revocations of certificates those entries held (ADR-0050 clause 10). A revoked
     /// ancestor of a valid renewal stays, so the renewal stays revoked.
     ///
     /// A Host not marked as a Gateway whose valid until has passed is forgotten, and every
@@ -1849,10 +2117,19 @@ impl Revocations {
         if gone.is_empty() {
             return Ok(forgotten);
         }
-        for id in &gone {
-            self.store.remove_issued(id)?;
-            state.remove(id);
+        let mut removed = Vec::with_capacity(gone.len());
+        for id in gone {
+            if self.store.remove_issued(&id, now)? {
+                state.took_up_own_write(self.store.list_version());
+                state.remove(&id);
+                removed.push(id);
+            } else {
+                // The store holds a valid renewal of it that this instance never took up: its
+                // register is not the stored one, so it holds no version until it reads it again.
+                state.list_version = None;
+            }
         }
+        let gone = removed;
         let dropped: Vec<String> = state
             .revocations
             .iter()
@@ -1911,13 +2188,13 @@ mod tests {
             ledger.issued.push(issued.clone());
             Ok(())
         }
-        fn remove_issued(&self, id: &CertId) -> Result<(), String> {
+        fn remove_issued(&self, id: &CertId, _now_ms: u64) -> Result<bool, String> {
             self.0
                 .lock()
                 .expect("lock")
                 .issued
                 .retain(|i| &i.facts.id != id);
-            Ok(())
+            Ok(true)
         }
         fn add_revocation(&self, entry: &Revocation, bound: usize) -> Result<Added, String> {
             Ok(add_to(
@@ -2392,8 +2669,8 @@ mod tests {
         fn put_issued(&self, issued: &Issued) -> Result<(), String> {
             self.0.put_issued(issued)
         }
-        fn remove_issued(&self, id: &CertId) -> Result<(), String> {
-            self.0.remove_issued(id)
+        fn remove_issued(&self, id: &CertId, now_ms: u64) -> Result<bool, String> {
+            self.0.remove_issued(id, now_ms)
         }
         fn add_revocation(&self, entry: &Revocation, bound: usize) -> Result<Added, String> {
             self.0.add_revocation(entry, bound)
@@ -2420,8 +2697,8 @@ mod tests {
         fn put_issued(&self, issued: &Issued) -> Result<(), String> {
             self.inner.put_issued(issued)
         }
-        fn remove_issued(&self, id: &CertId) -> Result<(), String> {
-            self.inner.remove_issued(id)
+        fn remove_issued(&self, id: &CertId, now_ms: u64) -> Result<bool, String> {
+            self.inner.remove_issued(id, now_ms)
         }
         fn add_revocation(&self, entry: &Revocation, bound: usize) -> Result<Added, String> {
             self.inner.add_revocation(entry, bound)
@@ -2545,8 +2822,8 @@ mod tests {
         fn put_issued(&self, issued: &Issued) -> Result<(), String> {
             self.inner.put_issued(issued)
         }
-        fn remove_issued(&self, id: &CertId) -> Result<(), String> {
-            self.inner.remove_issued(id)
+        fn remove_issued(&self, id: &CertId, now_ms: u64) -> Result<bool, String> {
+            self.inner.remove_issued(id, now_ms)
         }
         fn add_revocation(&self, entry: &Revocation, bound: usize) -> Result<Added, String> {
             self.inner.add_revocation(entry, bound)
@@ -2696,17 +2973,35 @@ mod tests {
             .revoke_certificate("client", "00:A1")
             .expect("revoke");
         assert_eq!(
-            revocations.record_approved(on_host("e5", "h5"), &[5; 16], &id("a1")),
+            revocations.prepare_approved(on_host("e5", "h5"), &[5; 16], &id("a1")),
             Err(BOOTSTRAP_REVOKED.to_string())
         );
+        let prepared = revocations
+            .prepare_approved(on_host("e7", "h7"), &[7; 16], &id("d4"))
+            .expect("prepared before the revocation");
+        revocations
+            .revoke_certificate("client", "00:D4")
+            .expect("revoke");
+        assert_eq!(
+            revocations.register_approved(&prepared),
+            Err(BOOTSTRAP_REVOKED.to_string()),
+            "a revocation between the preparation and the write wins"
+        );
         assert!(
-            revocations.issued_entry(&id("e5")).is_none(),
+            revocations.issued_entry(&id("e5")).is_none()
+                && revocations.issued_entry(&id("e7")).is_none(),
             "nothing registered"
         );
-        revocations
-            .record_approved(on_host("e6", "h6"), &[6; 16], &id("d4"))
+        let approved = revocations
+            .prepare_approved(on_host("e6", "h6"), &[6; 16], &id("f8"))
             .expect("a bootstrap certificate the list does not name");
+        assert!(
+            revocations.issued_entry(&id("e6")).is_none(),
+            "prepared, not registered"
+        );
+        revocations.register_approved(&approved).expect("register");
         assert!(revocations.issued_entry(&id("e6")).is_some());
+        assert!(revocations.hosts().iter().any(|(host, _, _)| host == "h6"));
     }
 
     /// What ADR-0038 clause 28 answers for `id`, worked out from the list and the register as they
@@ -3069,8 +3364,8 @@ mod tests {
         fn put_issued(&self, issued: &Issued) -> Result<(), String> {
             self.0.put_issued(issued)
         }
-        fn remove_issued(&self, id: &CertId) -> Result<(), String> {
-            self.0.remove_issued(id)
+        fn remove_issued(&self, id: &CertId, now_ms: u64) -> Result<bool, String> {
+            self.0.remove_issued(id, now_ms)
         }
         fn register_minting(
             &self,
@@ -3119,8 +3414,20 @@ mod tests {
         fn writes_hosts_by_act(&self) -> bool {
             true
         }
-        fn write_host_act(&self, act: &HostAct) -> Result<(), String> {
-            let hosts = &mut self.0 .0.lock().expect("lock").hosts;
+        fn write_host_act(&self, act: &HostAct) -> Result<bool, String> {
+            let ledger = &mut *self.0 .0.lock().expect("lock");
+            let named = |host: &str| {
+                ledger
+                    .issued
+                    .iter()
+                    .any(|issued| issued.facts.host.as_deref() == Some(host))
+            };
+            if let HostAct::Gateway { host, .. } = act {
+                if !ledger.hosts.contains_key(host) && !named(host) {
+                    return Ok(false);
+                }
+            }
+            let hosts = &mut ledger.hosts;
             match act {
                 HostAct::Seen { host, entry } => match hosts.get_mut(host) {
                     Some(held) => {
@@ -3153,7 +3460,7 @@ mod tests {
                         || held.valid_until_ms.is_none_or(|t| t > *now_ms)
                 }),
             }
-            Ok(())
+            Ok(true)
         }
         fn save_hosts(&self, hosts: &BTreeMap<String, Host>) -> Result<(), String> {
             self.0.save_hosts(hosts)
@@ -3220,8 +3527,8 @@ mod tests {
         fn put_issued(&self, issued: &Issued) -> Result<(), String> {
             self.inner.put_issued(issued)
         }
-        fn remove_issued(&self, id: &CertId) -> Result<(), String> {
-            self.inner.remove_issued(id)
+        fn remove_issued(&self, id: &CertId, now_ms: u64) -> Result<bool, String> {
+            self.inner.remove_issued(id, now_ms)
         }
         fn register_issued(
             &self,
@@ -3263,7 +3570,7 @@ mod tests {
         fn writes_hosts_by_act(&self) -> bool {
             self.inner.writes_hosts_by_act()
         }
-        fn write_host_act(&self, act: &HostAct) -> Result<(), String> {
+        fn write_host_act(&self, act: &HostAct) -> Result<bool, String> {
             self.inner.write_host_act(act)
         }
         fn save_hosts(&self, hosts: &BTreeMap<String, Host>) -> Result<(), String> {
@@ -3306,7 +3613,7 @@ mod tests {
     /// A revocation check, `speaks_for` and a report's check wait for a reload's swap only, not
     /// for its read of the store, and a reload no act of this instance's own crossed is swapped in
     /// after one read.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0048
     #[test]
     fn a_check_does_not_wait_for_a_reloads_read() {
         let store = ReadHeld::default();
@@ -3399,7 +3706,7 @@ mod tests {
         hex::encode([n; 16])
     }
 
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0048
     #[test]
     fn a_revocation_made_during_a_reload_holds() {
         an_own_act_outlives_a_reload(
@@ -3411,7 +3718,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0048
     #[test]
     fn a_lift_made_during_a_reload_holds() {
         an_own_act_outlives_a_reload(
@@ -3427,7 +3734,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0048
     #[test]
     fn a_binding_made_during_a_reload_holds() {
         an_own_act_outlives_a_reload(
@@ -3445,7 +3752,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0048
     #[test]
     fn a_valid_until_moved_during_a_reload_holds() {
         let until = |r: &Revocations| {
@@ -3467,7 +3774,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0048
     #[test]
     fn a_register_write_made_during_a_reload_holds() {
         an_own_act_outlives_a_reload(
@@ -3480,7 +3787,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0048
     #[test]
     fn a_release_made_during_a_reload_holds() {
         an_own_act_outlives_a_reload(
@@ -3493,7 +3800,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0048
     #[test]
     fn a_rekey_made_during_a_reload_holds() {
         an_own_act_outlives_a_reload(
@@ -3506,7 +3813,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0048
     #[test]
     fn a_gateway_mark_made_during_a_reload_holds() {
         an_own_act_outlives_a_reload(
@@ -3517,6 +3824,317 @@ mod tests {
             |r| assert!(r.set_gateway("h1", true).expect("mark")),
             |r| r.is_gateway("h1"),
         );
+    }
+
+    /// What [`ActHooked`] runs once at a point of a write.
+    type Hook = Arc<Mutex<Option<Box<dyn FnOnce() + Send>>>>;
+
+    /// A store that writes by act, as [`ByAct`] does, and runs a hook once before a binding is
+    /// written, before a Host is written, and after it is.
+    #[derive(Clone, Default)]
+    struct ActHooked {
+        inner: ByAct,
+        before_bind: Hook,
+        before_host: Hook,
+        after_host: Hook,
+        /// Host writes refused, as a database that does not answer.
+        failing_host: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    /// Waits for `reloader` within the test's patience, and answers what it answered.
+    fn joined(reloader: std::thread::JoinHandle<Result<(), String>>) -> Result<(), String> {
+        let deadline = std::time::Instant::now() + PATIENCE;
+        while !reloader.is_finished() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the reload never ended"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        reloader.join().expect("reloader")
+    }
+
+    fn run(hook: &Hook) {
+        let hook = hook.lock().expect("hook lock").take();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
+    impl LedgerStore for ActHooked {
+        fn load(&self) -> Result<Ledger, String> {
+            self.inner.load()
+        }
+        fn put_issued(&self, issued: &Issued) -> Result<(), String> {
+            self.inner.put_issued(issued)
+        }
+        fn remove_issued(&self, id: &CertId, now_ms: u64) -> Result<bool, String> {
+            self.inner.remove_issued(id, now_ms)
+        }
+        fn register_minting(
+            &self,
+            issued: &Issued,
+            bounds: &RegisterBounds,
+            mint: Option<(&str, &Host)>,
+            bootstrap: Option<&CertId>,
+        ) -> Result<Registered, String> {
+            self.inner.register_minting(issued, bounds, mint, bootstrap)
+        }
+        fn add_revocation(&self, entry: &Revocation, bound: usize) -> Result<Added, String> {
+            self.inner.add_revocation(entry, bound)
+        }
+        fn remove_revocation(&self, id: &str) -> Result<bool, String> {
+            self.inner.remove_revocation(id)
+        }
+        fn bind(&self, instance_uid: &str, host: &str) -> Result<Bound, String> {
+            self.inner.bind(instance_uid, host)
+        }
+        fn bind_seen(&self, instance_uid: &str, host: &str, row: &Host) -> Result<Bound, String> {
+            run(&self.before_bind);
+            self.inner.bind_seen(instance_uid, host, row)
+        }
+        fn unbind(&self, instance_uid: &str) -> Result<Option<String>, String> {
+            self.inner.unbind(instance_uid)
+        }
+        fn writes_hosts_by_act(&self) -> bool {
+            true
+        }
+        fn write_host_act(&self, act: &HostAct) -> Result<bool, String> {
+            run(&self.before_host);
+            if self.failing_host.load(Ordering::SeqCst) {
+                return Err("the Host is not written".to_string());
+            }
+            let known = self.inner.write_host_act(act)?;
+            run(&self.after_host);
+            Ok(known)
+        }
+        fn save_hosts(&self, hosts: &BTreeMap<String, Host>) -> Result<(), String> {
+            self.inner.save_hosts(hosts)
+        }
+    }
+
+    /// The register on a store whose reads a test may hold open, over a store whose writes it may
+    /// hook, and the two.
+    fn hooked_register() -> (Arc<Revocations>, ReadHeld, ActHooked) {
+        let hooked = ActHooked::default();
+        let store = ReadHeld::over(Arc::new(hooked.clone()));
+        (open_held(&store), store, hooked)
+    }
+
+    /// A reload whose read began after a report's binding was decided, and read the store before
+    /// the binding was written, is not swapped in once the binding is taken up: taking it up is an
+    /// act of this instance's own, and the store is read again.
+    /// Verifies: ADR-0048
+    #[test]
+    fn a_reload_that_read_before_a_binding_was_written_does_not_undo_it() {
+        let (revocations, store, hooked) = hooked_register();
+        // The Host is there with its valid until, so the report binds and moves nothing else.
+        revocations
+            .check_report("h1", &SubjectValues::default(), FAR, &[2; 16])
+            .expect("binds");
+        let held = Arc::new(Mutex::new(None));
+        {
+            let (revocations, store, held) = (revocations.clone(), store.clone(), held.clone());
+            *hooked.before_bind.lock().expect("hook lock") = Some(Box::new(move || {
+                *held.lock().expect("held") = Some(reload_held(&store, &revocations));
+            }));
+        }
+        revocations
+            .check_report("h1", &SubjectValues::default(), FAR, &[1; 16])
+            .expect("binds");
+        let (go, reloader) = held.lock().expect("held").take().expect("a reload began");
+        go.send(()).expect("go");
+        joined(reloader).expect("reloaded");
+        assert_eq!(
+            revocations.speaks_for("h1"),
+            SpeaksFor::Agents([uid(1), uid(2)].into()),
+            "the binding holds"
+        );
+        assert_eq!(store.loads.load(Ordering::SeqCst), 2, "read again");
+
+        // So does one whose Host is not written after it.
+        let (revocations, store, hooked) = hooked_register();
+        revocations
+            .check_report("h1", &SubjectValues::default(), FAR, &[2; 16])
+            .expect("binds");
+        hooked.failing_host.store(true, Ordering::SeqCst);
+        let held = Arc::new(Mutex::new(None));
+        {
+            let (revocations, store, held) = (revocations.clone(), store.clone(), held.clone());
+            *hooked.before_bind.lock().expect("hook lock") = Some(Box::new(move || {
+                *held.lock().expect("held") = Some(reload_held(&store, &revocations));
+            }));
+        }
+        assert!(
+            revocations
+                .check_report("h1", &SubjectValues::default(), FAR, &[1; 16])
+                .is_err(),
+            "the Host write fails"
+        );
+        let (go, reloader) = held.lock().expect("held").take().expect("a reload began");
+        go.send(()).expect("go");
+        joined(reloader).expect("reloaded");
+        assert_eq!(
+            revocations.speaks_for("h1"),
+            SpeaksFor::Agents([uid(1), uid(2)].into()),
+            "the binding written holds"
+        );
+    }
+
+    /// A reload that read the store before a Host's valid until was written does not leave it
+    /// moved back, whether it is swapped in before the write is taken up or would be after it.
+    /// Verifies: ADR-0048
+    #[test]
+    fn a_reload_that_read_before_a_valid_until_was_written_does_not_move_it_back() {
+        let until = |r: &Revocations| {
+            r.hosts()
+                .into_iter()
+                .find(|(n, ..)| n == "h1")
+                .and_then(|(_, host, _)| host.valid_until_ms)
+        };
+        // Swapped in after the write is taken up: refused, and read again.
+        let (revocations, store, hooked) = hooked_register();
+        revocations
+            .check_report("h1", &SubjectValues::default(), NOW + 1_000, &[1; 16])
+            .expect("binds");
+        let held = Arc::new(Mutex::new(None));
+        {
+            let (revocations, store, held) = (revocations.clone(), store.clone(), held.clone());
+            *hooked.before_host.lock().expect("hook lock") = Some(Box::new(move || {
+                *held.lock().expect("held") = Some(reload_held(&store, &revocations));
+            }));
+        }
+        revocations
+            .check_report("h1", &SubjectValues::default(), FAR, &[1; 16])
+            .expect("extends");
+        let (go, reloader) = held.lock().expect("held").take().expect("a reload began");
+        go.send(()).expect("go");
+        joined(reloader).expect("reloaded");
+        assert_eq!(until(&revocations), Some(FAR), "after the take-up");
+        assert_eq!(store.loads.load(Ordering::SeqCst), 2, "read again");
+
+        // Swapped in between the write and its taking up: moved forward again.
+        let (revocations, store, hooked) = hooked_register();
+        revocations
+            .check_report("h1", &SubjectValues::default(), NOW + 1_000, &[1; 16])
+            .expect("binds");
+        let held = Arc::new(Mutex::new(None));
+        {
+            let (revocations, store, held) = (revocations.clone(), store.clone(), held.clone());
+            *hooked.before_host.lock().expect("hook lock") = Some(Box::new(move || {
+                *held.lock().expect("held") = Some(reload_held(&store, &revocations));
+            }));
+        }
+        {
+            let held = held.clone();
+            *hooked.after_host.lock().expect("hook lock") = Some(Box::new(move || {
+                let (go, reloader) = held.lock().expect("held").take().expect("a reload began");
+                go.send(()).expect("go");
+                joined(reloader).expect("reloaded");
+            }));
+        }
+        revocations
+            .check_report("h1", &SubjectValues::default(), FAR, &[1; 16])
+            .expect("extends");
+        assert_eq!(until(&revocations), Some(FAR), "before the take-up");
+    }
+
+    /// A revocation check, a handshake's Gateway test and another report's check do not wait for a
+    /// report's binding or its Host to be written.
+    /// Verifies: ADR-0048
+    #[test]
+    fn a_check_does_not_wait_for_a_binding_or_a_host_to_be_written() {
+        let (revocations, _store, hooked) = hooked_register();
+        let checks = |revocations: &Arc<Revocations>| {
+            let (answered, answer) = std::sync::mpsc::channel();
+            let revocations = revocations.clone();
+            std::thread::spawn(move || {
+                let revoked = revocations.is_certificate_revoked(&id("a1"));
+                let gateway = revocations.is_gateway("h2");
+                let reports =
+                    revocations.check_report("h2", &SubjectValues::default(), FAR, &[2; 16]);
+                let _ = answered.send((revoked, gateway, reports));
+            });
+            answer
+        };
+        let (during_bind, during_host) = (Arc::new(Mutex::new(None)), Arc::new(Mutex::new(None)));
+        {
+            let (revocations, during) = (revocations.clone(), during_bind.clone());
+            *hooked.before_bind.lock().expect("hook lock") = Some(Box::new(move || {
+                *during.lock().expect("during") = Some(checks(&revocations).recv_timeout(PATIENCE));
+            }));
+        }
+        {
+            let (revocations, during) = (revocations.clone(), during_host.clone());
+            *hooked.before_host.lock().expect("hook lock") = Some(Box::new(move || {
+                *during.lock().expect("during") = Some(checks(&revocations).recv_timeout(PATIENCE));
+            }));
+        }
+        revocations
+            .check_report("h1", &SubjectValues::default(), FAR, &[1; 16])
+            .expect("binds");
+        for (what, during) in [("binding", during_bind), ("host", during_host)] {
+            let (revoked, gateway, reports) = during
+                .lock()
+                .expect("during")
+                .take()
+                .expect("checked")
+                .unwrap_or_else(|_| panic!("answered while the {what} is written"));
+            assert!(!revoked && !gateway);
+            reports.expect("the other report is admitted");
+        }
+    }
+
+    /// A Host's bound counts the bindings this instance is writing: a report of another Agent
+    /// of a Host one short of its bound, made while the last binding is written, is refused, and
+    /// so it is after a reload swapped in meanwhile, which carries the count over.
+    /// Verifies: ADR-0038
+    #[test]
+    fn a_binding_being_written_counts_against_the_hosts_bound() {
+        let (revocations, store, hooked) = hooked_register();
+        for n in 0..MAX_UIDS_PER_HOST - 1 {
+            let uid = (n as u32).to_be_bytes();
+            let mut instance_uid = [0u8; 16];
+            instance_uid[..4].copy_from_slice(&uid);
+            revocations
+                .check_report("h1", &SubjectValues::default(), FAR, &instance_uid)
+                .expect("binds");
+        }
+        let (answered, answer) = std::sync::mpsc::channel();
+        {
+            let revocations = revocations.clone();
+            *hooked.before_bind.lock().expect("hook lock") = Some(Box::new(move || {
+                // A reload is read and swapped in while the binding is written.
+                let (go, reloader) = reload_held(&store, &revocations);
+                go.send(()).expect("go");
+                joined(reloader).expect("reloaded");
+                let (reported, report) = std::sync::mpsc::channel();
+                std::thread::spawn(move || {
+                    let _ = reported.send(revocations.check_report(
+                        "h1",
+                        &SubjectValues::default(),
+                        FAR,
+                        &[0xee; 16],
+                    ));
+                });
+                let _ = answered.send(report.recv_timeout(PATIENCE));
+            }));
+        }
+        revocations
+            .check_report("h1", &SubjectValues::default(), FAR, &[0xff; 16])
+            .expect("the last one binds");
+        let other = answer
+            .recv_timeout(PATIENCE)
+            .expect("checked")
+            .expect("answered while the last binding is written");
+        assert!(
+            other.is_err_and(|e| e.contains("already speaks for")),
+            "refused at the bound"
+        );
+        match revocations.speaks_for("h1") {
+            SpeaksFor::Agents(bound) => assert_eq!(bound.len(), MAX_UIDS_PER_HOST),
+            SpeaksFor::Any => panic!("not a Gateway"),
+        }
     }
 
     /// A store each of whose reads, made while the state lock is free, sees an act of the
@@ -3551,8 +4169,8 @@ mod tests {
         fn put_issued(&self, issued: &Issued) -> Result<(), String> {
             self.inner.put_issued(issued)
         }
-        fn remove_issued(&self, id: &CertId) -> Result<(), String> {
-            self.inner.remove_issued(id)
+        fn remove_issued(&self, id: &CertId, now_ms: u64) -> Result<bool, String> {
+            self.inner.remove_issued(id, now_ms)
         }
         fn add_revocation(&self, entry: &Revocation, bound: usize) -> Result<Added, String> {
             self.inner.add_revocation(entry, bound)
@@ -3568,7 +4186,7 @@ mod tests {
     /// Own acts that keep crossing a reload's reads do not keep it from ending: after
     /// `RELOAD_SWAPS_REFUSED` refused swaps it reads once under the lock and swaps that in, with
     /// another instance's act and every own act held.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0048
     #[test]
     fn a_reload_crossed_by_own_acts_ends_after_its_bounded_reads() {
         let store = Acting::default();
@@ -3625,7 +4243,7 @@ mod tests {
 
     /// Two reloads at once never swap an older read over a newer one: the second reads once the
     /// first has swapped.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0048
     #[test]
     fn a_reload_never_swaps_an_older_read_over_a_newer_one() {
         let store = ReadHeld::default();
@@ -3689,8 +4307,8 @@ mod tests {
         fn put_issued(&self, issued: &Issued) -> Result<(), String> {
             self.inner.put_issued(issued)
         }
-        fn remove_issued(&self, id: &CertId) -> Result<(), String> {
-            self.inner.remove_issued(id)
+        fn remove_issued(&self, id: &CertId, now_ms: u64) -> Result<bool, String> {
+            self.inner.remove_issued(id, now_ms)
         }
         fn add_revocation(&self, entry: &Revocation, bound: usize) -> Result<Added, String> {
             self.inner.add_revocation(entry, bound)
@@ -3705,7 +4323,7 @@ mod tests {
 
     /// A reload whose read panicked does not end the reloads after it: the next one reads and
     /// swaps, and takes up what another instance committed.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0048
     #[test]
     fn a_reload_after_one_that_panicked_still_swaps() {
         let store = PanicsOnce::default();

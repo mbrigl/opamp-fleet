@@ -1,5 +1,5 @@
 //! A Server on PostgreSQL and S3 keeps nothing on its own disk
-//! (ADR-0044 clause 1): started from a directory it cannot write,
+//! (ADR-0050 clause 1): started from a directory it cannot write,
 //! with no data directory, it serves, and writes no file. In the bucket it keeps the staging
 //! objects of every live lease and deletes those of a lease that is no longer live, at startup and
 //! whenever it takes over a lapsed lease (clause 16), and an upload it takes is staged under its
@@ -325,7 +325,7 @@ fn instance_id() -> String {
     )
 }
 
-// Verifies: ADR-0044, ADR-0041
+// Verifies: ADR-0050, ADR-0048
 #[test]
 fn a_server_on_postgresql_and_s3_serves_from_a_directory_it_cannot_write() {
     opamp::tls::install_ring_provider();
@@ -491,10 +491,10 @@ fn a_server_on_postgresql_and_s3_serves_from_a_directory_it_cannot_write() {
 /// A bucket that fails at startup, unreachable or holding a key outside the store's layout, stops
 /// the Server before it takes its lease: no lease row and no audit chain is left for another
 /// instance to count as live or to close as lapsed
-/// (ADR-0044 clause 16,
-/// ADR-0041
+/// (ADR-0050 clause 16,
+/// ADR-0048
 /// clause 2).
-// Verifies: ADR-0044, ADR-0041
+// Verifies: ADR-0050, ADR-0048
 #[test]
 fn a_bucket_that_fails_startup_leaves_no_lease_behind() {
     opamp::tls::install_ring_provider();
@@ -563,4 +563,111 @@ fn a_bucket_that_fails_startup_leaves_no_lease_behind() {
             "{case}: no audit chain is left"
         );
     }
+}
+
+/// An instance whose lease lapsed while a newer Server migrated the schema stops at its new lease
+/// as at a failed start: it prints the refusal, naming the version the schema needs and its own,
+/// and exits with status 1
+/// (ADR-0048
+/// clause 16).
+// Verifies: ADR-0048
+#[test]
+fn an_instance_whose_lease_lapsed_on_a_newer_schema_exits_naming_both_versions() {
+    opamp::tls::install_ring_provider();
+    let Some(role) = Role::named() else { return };
+    let Some(bucket) = Bucket::named() else {
+        return;
+    };
+    let files = tempfile::tempdir().expect("tempdir");
+    let cert = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_string()])
+        .expect("a self-signed certificate");
+    std::fs::write(files.path().join("cert.pem"), cert.cert.pem()).expect("write cert");
+    std::fs::write(
+        files.path().join("key.pem"),
+        cert.signing_key.serialize_pem(),
+    )
+    .expect("write key");
+    let config = files.path().join("server.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "listen = \"127.0.0.1:{agent}\"\n\
+             [tls]\ncert_file = {cert:?}\nkey_file = {key:?}\nclient_ca_file = {cert:?}\n\
+             [rest]\nlisten = \"127.0.0.1:{operator}\"\n\
+             [database]\nstore = \"postgres\"\nlease_renew_secs = 1\nlease_secs = 3\n\
+             {database}{blobs}",
+            agent = ports::spare_port(),
+            operator = ports::spare_port(),
+            cert = files.path().join("cert.pem").display().to_string(),
+            key = files.path().join("key.pem").display().to_string(),
+            database = role.section(files.path()),
+            blobs = bucket.section(),
+        ),
+    )
+    .expect("write server.toml");
+    let mut server = ServerUnderTest(
+        Command::new(env!("CARGO_BIN_EXE_server"))
+            .arg("--config")
+            .arg(&config)
+            .current_dir(files.path())
+            .env("RUST_LOG", "info")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("start the server"),
+    );
+    let (lines, logged) = mpsc::channel();
+    let stderr = server.0.stderr.take().expect("stderr");
+    std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            if lines.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let mut seen = Vec::new();
+    let came_up = loop {
+        match logged.recv_timeout(Duration::from_secs(60)) {
+            Ok(line) if line.contains("serving the REST API") => break true,
+            Ok(line) => seen.push(line),
+            Err(_) => break false,
+        }
+    };
+    assert!(came_up, "the server never came up:\n{}", seen.join("\n"));
+
+    // A Server two releases on migrated while this one's lease lapsed.
+    role.sql(
+        "INSERT INTO fleet_schema (version, oldest_server) VALUES (999, '99.0.0'); \
+         UPDATE leases SET expires_at = now() - interval '1 second';",
+    );
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let status = loop {
+        if let Some(status) = server.0.try_wait().expect("the server's status") {
+            break status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the server did not stop:\n{}",
+            seen.join("\n")
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    seen.extend(logged.iter());
+    assert_eq!(status.code(), Some(1), "{}", seen.join("\n"));
+    // The refusal as a failed start prints it: the line itself, not a log record that carries it.
+    let ours = env!("CARGO_PKG_VERSION");
+    let printed = format!("database {} on ", role.dbname);
+    assert!(
+        seen.iter().any(|line| line.starts_with(&printed)
+            && line.contains("needs Server 99.0.0 or later")
+            && line.contains(&format!("this Server is {ours}"))),
+        "no line names both versions:\n{}",
+        seen.join("\n")
+    );
+    assert_eq!(
+        role.count("leases WHERE expires_at > now()"),
+        0,
+        "no new lease"
+    );
 }

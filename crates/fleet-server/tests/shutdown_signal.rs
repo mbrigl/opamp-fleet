@@ -20,7 +20,7 @@ impl Drop for ServerUnderTest {
     }
 }
 
-// Verifies: ADR-0045, ADR-0043, ADR-0044
+// Verifies: ADR-0045, ADR-0043, ADR-0050
 #[test]
 fn sigterm_shuts_the_server_down_gracefully() {
     let dir = tempfile::tempdir().expect("tempdir");

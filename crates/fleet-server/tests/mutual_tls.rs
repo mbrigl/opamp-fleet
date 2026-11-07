@@ -73,7 +73,7 @@ impl Pki {
     }
 
     /// A certificate and key signed by this CA naming `host` the way the Server's own signer does
-    /// (ADR-0022 clause 11): `urn:opamp-fleet:host:<host>`, and no other name.
+    /// (ADR-0052 clause 11): `urn:opamp-fleet:host:<host>`, and no other name.
     fn issue_to_host(&self, host: &str) -> (String, String) {
         let key = KeyPair::generate().expect("key");
         let mut params = CertificateParams::new(Vec::<String>::new()).expect("params");
@@ -168,7 +168,7 @@ struct Setup<'a> {
     operator_auth: Option<fleet_server::api::OperatorAuth>,
     /// The register and the revocation list (ADR-0038).
     revocations: bool,
-    /// The audit record (ADR-0039).
+    /// The audit record (ADR-0046).
     audit: Option<Arc<dyn fleet_server::audit::Audit>>,
     /// `[agent_rate_limit]` (ADR-0045).
     agent_rate: Option<fleet_server::agent_rate::Limits>,
@@ -178,15 +178,21 @@ struct Setup<'a> {
     clock: Option<Arc<dyn fleet_server::fleet::Clock>>,
     /// Package delivery over an empty store (ADR-0027).
     packages: bool,
-    /// The bootstrap CA's key on the Server, which then issues bootstrap certificates (ADR-0022).
+    /// The bootstrap CA's key on the Server, which then issues bootstrap certificates (ADR-0052).
     issue_bootstrap: bool,
     /// The CA of `[rest.tls]`: the Operator plane then serves a certificate it issued (ADR-0045).
     operator_pki: Option<&'a Pki>,
-    /// `[enrolment] max_pending_per_bootstrap` (ADR-0022); its default when `None`.
+    /// `[enrolment] max_pending_per_bootstrap` (ADR-0052); its default when `None`.
     max_pending_per_bootstrap: Option<usize>,
     /// The floor of each Agent type (ADR-0028), kept in the data directory.
     floors: bool,
+    /// The Agent records' store, opened on the data directory; the filesystem's when `None`.
+    agents: Option<OpenAgents>,
 }
+
+/// Opens an Agent records' store on a data directory.
+type OpenAgents =
+    Box<dyn FnOnce(&std::path::Path) -> Box<dyn fleet_server::agent_store::AgentStore>>;
 
 /// The CAs a revocation can name, as `main` takes them from `[tls]` and `[enrolment]`.
 fn authorities(pki: &Pki, bootstrap: Option<&Pki>) -> Vec<fleet_server::revocation::Authority> {
@@ -277,8 +283,20 @@ async fn serve(pki: &Pki, setup: Setup<'_>) -> Served {
             .expect("bootstrap record"),
         )
     });
+    let data_dir = dir.path().join("fleet-configs");
+    let state = match setup.agents {
+        None => AppState::new(data_dir),
+        Some(open) => {
+            std::fs::create_dir_all(&data_dir).expect("data directory");
+            AppState::with_stores(
+                open(&data_dir),
+                Box::new(fleet_server::fs::FsConfigBackend::open(&data_dir).expect("configs")),
+                Box::new(fleet_server::clock::SystemClock),
+            )
+        }
+    };
     let state = Arc::new(
-        AppState::new(dir.path().join("fleet-configs"))
+        state
             .expect("state")
             .with_bootstrap(bootstrap)
             .with_client_ca(setup.client_ca)
@@ -390,7 +408,7 @@ async fn serve(pki: &Pki, setup: Setup<'_>) -> Served {
 }
 
 /// The files of the bootstrap certificate `serial` in the Server's `bootstrap/`, named
-/// `<issuer>-<serial>.json` and `.p12` (ADR-0044).
+/// `<issuer>-<serial>.json` and `.p12` (ADR-0050).
 fn bootstrap_files(served: &Served, serial: &str) -> Vec<String> {
     std::fs::read_dir(served.config_dir.join("fleet-configs/bootstrap"))
         .expect("bootstrap/")
@@ -412,14 +430,14 @@ fn bootstrap_files(served: &Served, serial: &str) -> Vec<String> {
 /// The password the tests issue bootstrap certificates under.
 const BOOTSTRAP_PASSWORD: &str = "a password of the operator";
 
-/// The customer and the site every bootstrap certificate names (ADR-0022 clause 1).
+/// The customer and the site every bootstrap certificate names (ADR-0052 clause 1).
 fn customer_and_site() -> serde_json::Value {
     serde_json::json!({ "organization": "Kunde GmbH", "organizational_unit": "Werk Nord" })
 }
 
 /// The key of the bootstrap certificate `serial`, as PEM, out of the PKCS#12 file the Server keeps
 /// for it under [`BOOTSTRAP_PASSWORD`] — the only place the key leaves the Server
-/// (ADR-0022 clause 3).
+/// (ADR-0052 clause 3).
 async fn bootstrap_key(served: &Served, operator_client: &reqwest::Client, serial: &str) -> String {
     let file = operator_client
         .get(operator(
@@ -778,7 +796,7 @@ async fn decode(response: reqwest::Response) -> ServerToAgent {
 
 /// A bootstrap certificate opens nothing outside an enrolment window: the handshake passes, and
 /// the endpoint answers `503` — the handshake proved the certificate, so it is no failure
-/// (ADR-0044 clause 8, ADR-0022 clause 9, and ADR-0038 clause 19).
+/// (ADR-0050 clause 8, ADR-0052 clause 9, and ADR-0038 clause 19).
 /// Verifies: ADR-0038
 #[tokio::test]
 async fn a_bootstrap_certificate_is_refused_outside_an_enrolment_window() {
@@ -807,7 +825,7 @@ async fn a_bootstrap_certificate_is_refused_outside_an_enrolment_window() {
 /// The whole enrolment: an operator opens the window, the host's request waits in the queue without
 /// becoming an Agent, an operator approves it, and the host is handed its certificate. A bootstrap
 /// certificate never reaches the package download, and the standing offer the fleet's members get
-/// never reaches an enrolling host (ADR-0038 clauses 4 and 18, ADR-0044 clause 8 and ADR-0022
+/// never reaches an enrolling host (ADR-0038 clauses 4 and 18, ADR-0050 clause 8 and ADR-0052
 /// clauses 9 and 10).
 /// Verifies: ADR-0038
 #[tokio::test]
@@ -913,7 +931,7 @@ async fn an_enrolment_request_waits_for_an_operator_and_is_issued_on_approval() 
 }
 
 /// A rejected request is answered `BadRequest`, and closing the window shuts out every bootstrap
-/// certificate again (ADR-0044 clause 8 and ADR-0022 clause 9).
+/// certificate again (ADR-0050 clause 8 and ADR-0052 clause 9).
 /// Verifies: ADR-0038
 #[tokio::test]
 async fn a_rejected_request_is_refused_and_closing_the_window_shuts_enrolment() {
@@ -1049,11 +1067,12 @@ fn a_bootstrap_ca_sharing_its_subject_with_the_client_ca_is_refused() {
     );
 }
 
-/// An operator deciding a request that is not pending is told so: an unknown id is `404` for an
-/// approval and a rejection alike (ADR-0022 clause 10).
-/// Verifies: ADR-0038
+/// An operator approving a request that is not pending is told so with `404`; a rejection of an id
+/// the queue does not hold is `204`, so its key is refused when it arrives, and one of an id that
+/// is no key's fingerprint is `400` (clause 10).
+/// Verifies: ADR-0038, ADR-0052
 #[tokio::test]
-async fn an_unknown_enrolment_request_is_answered_404() {
+async fn an_unknown_request_is_not_approved_and_is_rejected_before_it_arrives() {
     let pki = Pki::new();
     let bootstrap = Pki::named("opamp-fleet-test-bootstrap-ca");
     let served = serve(
@@ -1066,20 +1085,26 @@ async fn an_unknown_enrolment_request_is_answered_404() {
     )
     .await;
     let operator_client = client(&served.ca_pem, None);
-    for decision in ["approve", "reject"] {
+    let unqueued = "ab".repeat(32);
+    for (id, decision, status) in [
+        ("no-such-request", "approve", reqwest::StatusCode::NOT_FOUND),
+        (unqueued.as_str(), "approve", reqwest::StatusCode::NOT_FOUND),
+        (
+            "no-such-request",
+            "reject",
+            reqwest::StatusCode::BAD_REQUEST,
+        ),
+        (unqueued.as_str(), "reject", reqwest::StatusCode::NO_CONTENT),
+    ] {
         let response = operator_client
             .post(operator(
                 &served,
-                &format!("/api/v1/enrolments/no-such-request/{decision}"),
+                &format!("/api/v1/enrolments/{id}/{decision}"),
             ))
             .send()
             .await
             .expect("send");
-        assert_eq!(
-            response.status(),
-            reqwest::StatusCode::NOT_FOUND,
-            "{decision}"
-        );
+        assert_eq!(response.status(), status, "{decision} {id}");
     }
 }
 
@@ -1624,7 +1649,7 @@ async fn a_kept_alive_connection_reaches_the_download_no_further_once_its_certif
 }
 
 /// A certificate renewed before its predecessor was revoked is revoked with it: the register
-/// records the presented certificate as the issued one's predecessor (ADR-0038 clauses 26 and 28 and ADR-0044 clause 9).
+/// records the presented certificate as the issued one's predecessor (ADR-0038 clauses 26 and 28 and ADR-0050 clause 9).
 /// Verifies: ADR-0038
 #[tokio::test]
 async fn a_revocation_reaches_a_certificate_renewed_before_it() {
@@ -1688,7 +1713,7 @@ async fn a_revocation_reaches_a_certificate_renewed_before_it() {
 }
 
 /// A renewal of a certificate an operator provisioned names a host of its own; the operator
-/// sees the host, what it speaks for, and can mark it as a Gateway (ADR-0022 clause 11).
+/// sees the host, what it speaks for, and can mark it as a Gateway (ADR-0052 clause 11).
 /// Verifies: ADR-0038
 #[tokio::test]
 async fn an_operator_sees_each_host_and_can_mark_a_gateway() {
@@ -1943,7 +1968,7 @@ async fn an_approval_writes_the_host_before_its_first_report() {
             .join("fleet-configs/hosts")
             .join(format!("{host}.json")),
     )
-    .expect("the Host is written, one file per Host (ADR-0044)");
+    .expect("the Host is written, one file per Host (ADR-0050)");
     assert!(written.contains(host), "{written}");
 }
 
@@ -2237,7 +2262,7 @@ async fn a_revocation_names_its_issuer_by_role_whatever_the_issuer_is_called() {
 
 /// A CSR descends from the certificate the connection presented, whichever Agent the message
 /// names: a self-asserted `instance_uid` cannot lift a renewal out of its chain, and behind a
-/// Gateway revoking the Gateway reaches what was renewed through it (ADR-0044 clause 9 and ADR-0015 clause 19).
+/// Gateway revoking the Gateway reaches what was renewed through it (ADR-0050 clause 9 and ADR-0015 clause 19).
 /// Verifies: ADR-0038
 #[tokio::test]
 async fn a_csr_for_another_agent_still_descends_from_the_presented_certificate() {
@@ -2280,7 +2305,7 @@ async fn a_csr_for_another_agent_still_descends_from_the_presented_certificate()
     );
 }
 
-// ---- The audit record (ADR-0039) ----
+// ---- The audit record (ADR-0046) ----
 
 /// An audit record on the filesystem, in `dir`.
 fn audit_in(dir: &std::path::Path) -> Arc<dyn fleet_server::audit::Audit> {
@@ -2333,7 +2358,7 @@ fn named<'a>(entries: &'a [serde_json::Value], event: &str) -> Vec<&'a serde_jso
 
 /// A WebSocket admission and a refusal each leave exactly one entry, the refusal naming the
 /// check that refused — here a revoked certificate.
-/// Verifies: ADR-0039
+/// Verifies: ADR-0046
 #[tokio::test]
 async fn an_admission_and_its_refusal_each_leave_one_entry() {
     let pki = Pki::new();
@@ -2374,7 +2399,7 @@ async fn an_admission_and_its_refusal_each_leave_one_entry() {
 
 /// An `Authorization` header a Client of the previous version sends is never written to the
 /// record, neither its value nor any hash of it: the admission entry holds the certificate alone.
-/// Verifies: ADR-0039
+/// Verifies: ADR-0046
 #[tokio::test]
 async fn an_authorization_an_older_client_sends_is_never_written() {
     use sha2::Digest as _;
@@ -2424,7 +2449,7 @@ async fn an_authorization_an_older_client_sends_is_never_written() {
 }
 
 /// A renewal is recorded with the certificate it issued and the one it renewed.
-/// Verifies: ADR-0039
+/// Verifies: ADR-0046
 #[tokio::test]
 async fn an_issued_certificate_is_recorded_with_its_predecessor() {
     let pki = Pki::new();
@@ -2460,7 +2485,7 @@ async fn an_issued_certificate_is_recorded_with_its_predecessor() {
 }
 
 /// A revocation records the session it ended.
-/// Verifies: ADR-0039
+/// Verifies: ADR-0046
 #[tokio::test]
 async fn a_revocation_records_the_sessions_it_ended() {
     let pki = Pki::new();
@@ -2493,9 +2518,351 @@ async fn a_revocation_records_the_sessions_it_ended() {
     assert_eq!(ended[0]["serial"], serial.as_str());
 }
 
+/// An audit record that, once set to, takes an operator's act and refuses everything after it: the
+/// queue filled, or a write failed, between `operator.act` and the act's own entry.
+struct FullAfterTheAct {
+    inner: Arc<dyn fleet_server::audit::Audit>,
+    full: std::sync::atomic::AtomicBool,
+}
+
+impl fleet_server::audit::Audit for FullAfterTheAct {
+    fn record(
+        &self,
+        entry: fleet_server::audit::Entry,
+    ) -> Result<(), fleet_server::audit::Unavailable> {
+        if self.full.load(std::sync::atomic::Ordering::SeqCst) && entry.event != "operator.act" {
+            return Err(fleet_server::audit::Unavailable);
+        }
+        self.inner.record(entry)
+    }
+
+    fn reserve(&self) -> Result<fleet_server::audit::Permit, fleet_server::audit::Unavailable> {
+        if self.full.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(fleet_server::audit::Unavailable);
+        }
+        self.inner.reserve()
+    }
+}
+
+/// A revocation whose entry cannot be queued after its `operator.act` was is not made: it is
+/// answered `503`, the list stays as it was, and the session of the certificate goes on.
+/// Verifies: ADR-0046
+#[tokio::test]
+async fn a_revocation_whose_entry_cannot_be_queued_is_not_made() {
+    let pki = Pki::new();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let audit = Arc::new(FullAfterTheAct {
+        inner: audit_in(dir.path()),
+        full: std::sync::atomic::AtomicBool::new(false),
+    });
+    let served = serve(
+        &pki,
+        Setup {
+            audit: Some(audit.clone()),
+            ..revocations_setup(&pki)
+        },
+    )
+    .await;
+    let (cert, key) = pki.issue("edge-01");
+    let mut socket = websocket(&served, &cert, &key, None)
+        .await
+        .expect("admitted");
+    exchange(&mut socket, &InstanceUid::default()).await;
+    let serial = cert_id(&cert).serial;
+
+    audit.full.store(true, std::sync::atomic::Ordering::SeqCst);
+    let revoked = client(&served.ca_pem, None)
+        .post(operator(&served, "/api/v1/revocations"))
+        .json(&serde_json::json!({
+            "certificate": { "authority": "client", "serial": serial }
+        }))
+        .send()
+        .await
+        .expect("revoke");
+    assert_eq!(revoked.status(), 503);
+    assert!(
+        served
+            .revocations
+            .as_ref()
+            .expect("armed")
+            .list()
+            .is_empty(),
+        "the revocation was made"
+    );
+    // The session was not ended: it still answers.
+    exchange(&mut socket, &InstanceUid::default()).await;
+}
+
+/// A revocation answered `201` leaves an entry naming its certificate by `authority` and `serial`,
+/// under the `id` the answer gives.
+/// Verifies: ADR-0046
+#[tokio::test]
+async fn a_revocation_is_recorded_with_its_certificate() {
+    let pki = Pki::new();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let served = serve(
+        &pki,
+        Setup {
+            audit: Some(audit_in(dir.path())),
+            ..revocations_setup(&pki)
+        },
+    )
+    .await;
+    let revoked = client(&served.ca_pem, None)
+        .post(operator(&served, "/api/v1/revocations"))
+        .json(&serde_json::json!({
+            "certificate": { "authority": "client", "serial": "abc123" }
+        }))
+        .send()
+        .await
+        .expect("revoke");
+    assert_eq!(revoked.status(), 201);
+    let view: serde_json::Value = revoked.json().await.expect("json");
+    let all = entries(dir.path(), "revocation.revoked", 1).await;
+    let entry = named(&all, "revocation.revoked");
+    assert_eq!(entry.len(), 1, "{all:#?}");
+    assert_eq!(entry[0]["authority"], "client");
+    assert_eq!(entry[0]["serial"], "abc123");
+    assert_eq!(entry[0]["id"], view["id"]);
+}
+
+/// A Server with a marked Gateway `h-gw`, a floor `otelcol` 1.0.0, an open enrolment window and
+/// one request waiting in it, whose `id` it answers with: what the acts that withdraw trust act on.
+async fn trust_to_withdraw(
+    pki: &Pki,
+    bootstrap: &Pki,
+    audit: Arc<dyn fleet_server::audit::Audit>,
+) -> (Served, String) {
+    let served = serve(
+        pki,
+        Setup {
+            client_ca: Some(client_ca_of(pki)),
+            bootstrap: Some(bootstrap),
+            revocations: true,
+            floors: true,
+            audit: Some(audit),
+            ..Setup::default()
+        },
+    )
+    .await;
+    let operator_client = client(&served.ca_pem, None);
+    let (cert, key) = pki.issue_to_host_with("h-gw", &[]);
+    let gateway = client(&served.ca_pem, Some((&cert, &key)));
+    let _ = decode(
+        post(
+            &gateway,
+            &served.endpoint,
+            described(&InstanceUid::default(), &[]),
+        )
+        .await,
+    )
+    .await;
+    let marked = operator_client
+        .put(operator(&served, "/api/v1/hosts/h-gw/gateway"))
+        .json(&serde_json::json!({ "gateway": true }))
+        .send()
+        .await
+        .expect("mark");
+    assert_eq!(marked.status(), 204);
+    let floor = operator_client
+        .put(operator(&served, "/api/v1/package-floors/otelcol"))
+        .json(&serde_json::json!({ "version": "1.0.0", "signature": hex::encode([7u8; 64]) }))
+        .send()
+        .await
+        .expect("floor");
+    assert_eq!(floor.status(), 200);
+    let opened = operator_client
+        .post(operator(&served, "/api/v1/enrolment/window"))
+        .json(&serde_json::json!({ "open_for_secs": 600 }))
+        .send()
+        .await
+        .expect("open window");
+    assert_eq!(opened.status(), 200);
+    let (cert, key) = bootstrap.issue_bootstrap("bootstrap");
+    let enrolling = client(&served.ca_pem, Some((&cert, &key)));
+    let (csr, _key) = csr_for("edge-02");
+    decode(post(&enrolling, &served.endpoint, csr_report(csr)).await).await;
+    let id = served.state.enrolment().expect("enrolment").pending()[0]
+        .id
+        .clone();
+    (served, id)
+}
+
+/// The acts that withdraw trust, as an operator makes them: the Gateway mark of `h-gw` cleared,
+/// the floor of `otelcol` raised to 2.0.0, the request `id` rejected and the window closed.
+async fn withdraw_trust(served: &Served, id: &str) -> Vec<(&'static str, u16)> {
+    let operator_client = client(&served.ca_pem, None);
+    let cleared = operator_client
+        .put(operator(served, "/api/v1/hosts/h-gw/gateway"))
+        .json(&serde_json::json!({ "gateway": false }))
+        .send()
+        .await
+        .expect("clear");
+    let floor = operator_client
+        .put(operator(served, "/api/v1/package-floors/otelcol"))
+        .json(&serde_json::json!({ "version": "2.0.0", "signature": hex::encode([7u8; 64]) }))
+        .send()
+        .await
+        .expect("floor");
+    let rejected = operator_client
+        .post(operator(served, &format!("/api/v1/enrolments/{id}/reject")))
+        .send()
+        .await
+        .expect("reject");
+    let closed = operator_client
+        .delete(operator(served, "/api/v1/enrolment/window"))
+        .send()
+        .await
+        .expect("close");
+    vec![
+        ("host.gateway", cleared.status().as_u16()),
+        ("package_floor.set", floor.status().as_u16()),
+        ("enrolment.rejected", rejected.status().as_u16()),
+        ("enrolment.window", closed.status().as_u16()),
+    ]
+}
+
+/// An act that withdraws trust whose entry cannot be queued after its `operator.act` was is not
+/// made: it is answered `503`, and the mark, the floor, the request and the window stay as they
+/// were.
+/// Verifies: ADR-0046
+#[tokio::test]
+async fn an_act_withdrawing_trust_whose_entry_cannot_be_queued_is_not_made() {
+    let pki = Pki::new();
+    let bootstrap = Pki::named("opamp-fleet-test-bootstrap-ca");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let audit = Arc::new(FullAfterTheAct {
+        inner: audit_in(dir.path()),
+        full: std::sync::atomic::AtomicBool::new(false),
+    });
+    let (served, id) = trust_to_withdraw(&pki, &bootstrap, audit.clone()).await;
+
+    audit.full.store(true, std::sync::atomic::Ordering::SeqCst);
+    for (act, status) in withdraw_trust(&served, &id).await {
+        assert_eq!(status, 503, "{act}");
+    }
+    assert!(
+        served
+            .revocations
+            .as_ref()
+            .expect("armed")
+            .is_gateway("h-gw"),
+        "the mark was cleared"
+    );
+    assert_eq!(
+        served.state.floors().expect("armed").all()["otelcol"].version,
+        "1.0.0",
+        "the floor was raised"
+    );
+    let enrolment = served.state.enrolment().expect("enrolment");
+    assert_eq!(enrolment.pending().len(), 1, "the request was rejected");
+    assert!(enrolment.is_open(), "the window was closed");
+}
+
+/// Each act that withdraws trust, answered as made, leaves the entry a restore repeats it by: the
+/// Gateway mark's names its host and that it is cleared, the floor's its Agent type and version,
+/// the rejection's the request's `id`, and the window's that it is closed.
+/// Verifies: ADR-0046
+#[tokio::test]
+async fn an_act_withdrawing_trust_is_recorded_with_what_a_restore_needs() {
+    let pki = Pki::new();
+    let bootstrap = Pki::named("opamp-fleet-test-bootstrap-ca");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (served, id) = trust_to_withdraw(&pki, &bootstrap, audit_in(dir.path())).await;
+
+    let answered = withdraw_trust(&served, &id).await;
+    assert_eq!(
+        answered,
+        vec![
+            ("host.gateway", 204),
+            ("package_floor.set", 200),
+            ("enrolment.rejected", 204),
+            ("enrolment.window", 204),
+        ]
+    );
+    let all = entries(dir.path(), "enrolment.window", 2).await;
+    let last = |event: &str| -> serde_json::Value {
+        (*named(&all, event)
+            .last()
+            .unwrap_or_else(|| panic!("no {event}: {all:#?}")))
+        .clone()
+    };
+    let gateway = last("host.gateway");
+    assert_eq!(gateway["outcome"], "cleared");
+    assert_eq!(gateway["host"], "h-gw");
+    assert_eq!(gateway["gateway"], false);
+    let floor = last("package_floor.set");
+    assert_eq!(floor["outcome"], "set");
+    assert_eq!(floor["agent_type"], "otelcol");
+    assert_eq!(floor["version"], "2.0.0");
+    let rejected = last("enrolment.rejected");
+    assert_eq!(rejected["outcome"], "rejected");
+    assert_eq!(rejected["id"], id.as_str());
+    assert_eq!(last("enrolment.window")["outcome"], "closed");
+}
+
+/// A revocation of a bootstrap certificate whose PKCS#12 file cannot be removed is made, and
+/// answered `500` saying so; its entry is on the record all the same.
+/// Verifies: ADR-0046
+#[cfg(unix)]
+#[tokio::test]
+async fn a_revocation_whose_file_stays_is_recorded_all_the_same() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let pki = Pki::new();
+    let bootstrap = Pki::named("acme bootstrap CA");
+    let audit_dir = tempfile::tempdir().expect("tempdir");
+    let served = serve(
+        &pki,
+        Setup {
+            client_ca: Some(client_ca_of(&pki)),
+            bootstrap: Some(&bootstrap),
+            issue_bootstrap: true,
+            revocations: true,
+            audit: Some(audit_in(audit_dir.path())),
+            ..Setup::default()
+        },
+    )
+    .await;
+    let operator_client = client(&served.ca_pem, None);
+    let issued: serde_json::Value = operator_client
+        .post(operator(&served, "/api/v1/bootstrap-certificates"))
+        .json(&serde_json::json!({
+            "subject": customer_and_site(),
+            "password": "a password of the operator"
+        }))
+        .send()
+        .await
+        .expect("issue")
+        .json()
+        .await
+        .expect("json");
+    let serial = issued["serial"].as_str().expect("serial").to_string();
+    let files = served.config_dir.join("fleet-configs/bootstrap");
+    std::fs::set_permissions(&files, std::fs::Permissions::from_mode(0o555)).expect("chmod");
+    let revoked = operator_client
+        .post(operator(&served, "/api/v1/revocations"))
+        .json(&serde_json::json!({
+            "certificate": { "authority": "bootstrap", "serial": serial }
+        }))
+        .send()
+        .await
+        .expect("revoke");
+    std::fs::set_permissions(&files, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    assert_eq!(revoked.status(), 500);
+    assert_eq!(
+        served.revocations.as_ref().expect("armed").list().len(),
+        1,
+        "the revocation was made"
+    );
+    let all = entries(audit_dir.path(), "revocation.revoked", 1).await;
+    let entry = named(&all, "revocation.revoked");
+    assert_eq!(entry[0]["authority"], "bootstrap");
+    assert_eq!(entry[0]["serial"], serial.as_str());
+}
+
 /// An operator's act is recorded with the operator's name before it runs and with its outcome
 /// after, and a refused sign-in is recorded too.
-/// Verifies: ADR-0039
+/// Verifies: ADR-0046
 #[tokio::test]
 async fn an_operator_act_names_the_operator() {
     let pki = Pki::new();
@@ -2556,7 +2923,7 @@ async fn an_operator_act_names_the_operator() {
 }
 
 /// A record that cannot be written stops admission: no Agent is admitted without its entry.
-/// Verifies: ADR-0039
+/// Verifies: ADR-0046
 #[tokio::test]
 async fn an_audit_that_cannot_write_refuses_admission() {
     struct Broken;
@@ -2608,7 +2975,7 @@ async fn an_audit_that_cannot_write_refuses_admission() {
 
 /// A record that cannot be written stops issuance: a member whose session was admitted while the
 /// record worked is handed no certificate once it fails.
-/// Verifies: ADR-0039
+/// Verifies: ADR-0046
 #[tokio::test]
 async fn an_audit_that_cannot_write_issues_no_certificate() {
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -2756,7 +3123,7 @@ async fn fetch_list(
 
 /// A member whose host is not marked as a Gateway and asks for the list is refused, and the refusal
 /// is recorded with the host that asked.
-/// Verifies: ADR-0039
+/// Verifies: ADR-0046
 #[tokio::test]
 async fn an_unmarked_member_asking_for_the_list_leaves_a_refusal() {
     let pki = Pki::new();
@@ -3086,7 +3453,7 @@ impl fleet_server::audit_log::AuditStore for Lines {
 /// from one address the rest are counted in `agent_rate.throttled.aggregated`. The record runs on
 /// the Server's frozen clock, so every refusal falls into one second: ten are written and the
 /// other fifteen are counted once the clock has moved past it.
-/// Verifies: ADR-0045, ADR-0039
+/// Verifies: ADR-0045, ADR-0046
 #[tokio::test]
 async fn a_throttled_message_leaves_an_aggregated_refusal_naming_the_host() {
     const REFUSED: u64 = 25;
@@ -3175,7 +3542,7 @@ async fn a_throttled_message_leaves_an_aggregated_refusal_naming_the_host() {
 /// for a fresh key is answered `Unavailable` with `retry_info` and audited once for the window,
 /// a request of another bootstrap certificate is still queued, and a re-sent request of the first
 /// still joins its own entry.
-/// Verifies: ADR-0022
+/// Verifies: ADR-0052
 #[tokio::test]
 async fn one_bootstrap_certificate_holds_at_most_its_share_of_the_queue() {
     let pki = Pki::new();
@@ -3276,7 +3643,7 @@ async fn one_bootstrap_certificate_holds_at_most_its_share_of_the_queue() {
 /// Each `Unavailable` this Server sends carries the `instance_uid` of the message it answers — the
 /// field the Client and a Gateway route a reply by: the rate limit's, the Agent-record ceiling's, a
 /// CSR held back for its record, the full enrolment queue and the closed enrolment window.
-/// Verifies: ADR-0045, ADR-0038, ADR-0039
+/// Verifies: ADR-0045, ADR-0038, ADR-0046
 #[tokio::test]
 async fn every_unavailable_reply_names_the_agent_it_answers() {
     let names_its_agent = |reply: &ServerToAgent, uid: &InstanceUid, case: &str| {
@@ -3402,7 +3769,7 @@ async fn every_unavailable_reply_names_the_agent_it_answers() {
             bootstrap_subject: String::new(),
             carried: Ok(fleet_server::revocation::SubjectValues::default()),
             bootstrap_fingerprint: String::new(),
-            // One bootstrap certificate holds a quarter of the queue at most (ADR-0022): the
+            // One bootstrap certificate holds a quarter of the queue at most (ADR-0052): the
             // fillers come with one each, so they fill it all.
             bootstrap: fleet_server::revocation::CertId {
                 issuer: String::new(),
@@ -3713,7 +4080,7 @@ async fn a_certificate_naming_no_host_fetches_nothing() {
 /// A fetch that is not offered leaves one `download.refused` entry naming the check, the host, the
 /// certificate's serial and the artifact asked for; it is no failure the admission throttle counts,
 /// which here backs off after one.
-/// Verifies: ADR-0027, ADR-0039
+/// Verifies: ADR-0027, ADR-0046
 #[tokio::test]
 async fn a_refused_fetch_leaves_one_download_refused_entry_naming_its_check() {
     let pki = Pki::new();
@@ -3858,8 +4225,8 @@ async fn a_download_costs_a_token_of_the_hosts_bucket() {
 
 /// A bootstrap certificate the Server issues carries the subject the operator named into the
 /// enrolment queue, is listed until it is revoked by its serial, and once revoked opens nothing
-/// (ADR-0022 clauses 1 and 3 and ADR-0044 clause 11 and ADR-0038 clause 9).
-/// Verifies: ADR-0022
+/// (ADR-0052 clauses 1 and 3 and ADR-0050 clause 11 and ADR-0038 clause 9).
+/// Verifies: ADR-0052
 #[tokio::test]
 async fn an_issued_bootstrap_certificate_enrols_is_listed_and_revoked_by_its_serial() {
     let pki = Pki::new();
@@ -3911,7 +4278,7 @@ async fn an_issued_bootstrap_certificate_enrols_is_listed_and_revoked_by_its_ser
     let recorded = named(&recorded, "enrolment.bootstrap_issued");
     assert_eq!(recorded.len(), 1);
     assert_eq!(recorded[0]["serial"], serial.as_str());
-    // The key is in no file the Server writes in the clear (ADR-0022 clause 3).
+    // The key is in no file the Server writes in the clear (ADR-0052 clause 3).
     let key_body = key
         .lines()
         .find(|line| !line.starts_with("-----"))
@@ -4096,7 +4463,7 @@ async fn revoking_a_bootstrap_certificate_withdraws_the_requests_waiting_with_it
 
 /// The issuing route answers a password of 7 characters `400`, naming the rule, and issues a
 /// bootstrap certificate under one of 8.
-/// Verifies: ADR-0022
+/// Verifies: ADR-0052
 #[tokio::test]
 async fn a_bootstrap_password_is_at_least_eight_characters() {
     let pki = Pki::new();
@@ -4133,8 +4500,8 @@ async fn a_bootstrap_password_is_at_least_eight_characters() {
 /// Issued with a password, a bootstrap certificate's key is in no answer: the Server keeps a
 /// PKCS#12 file of it under the password and hands it out as often as asked, each download on the
 /// record, until the certificate is revoked — and the file enrols like the pair. The password is
-/// in no file the Server writes (ADR-0022 clauses 3 and 5 and ADR-0044 clause 11).
-/// Verifies: ADR-0022
+/// in no file the Server writes (ADR-0052 clauses 3 and 5 and ADR-0050 clause 11).
+/// Verifies: ADR-0052
 #[tokio::test]
 async fn a_bootstrap_certificate_issued_with_a_password_is_a_pkcs12_file_until_revoked() {
     const PASSWORD: &str = "a password of the operator";
@@ -4312,12 +4679,16 @@ impl fleet_server::audit::Audit for Refusable {
         }
         self.inner.record(entry)
     }
+
+    fn reserve(&self) -> Result<fleet_server::audit::Permit, fleet_server::audit::Unavailable> {
+        self.inner.reserve()
+    }
 }
 
 /// A revoked bootstrap certificate's entry can be deleted, with its PKCS#12 file, and the deletion
 /// is on the record; its revocation stays, so it is still refused. A valid one is not deleted, an
-/// unknown serial is not found, and without an audit record nothing is deleted (ADR-0022 clause 7).
-/// Verifies: ADR-0022
+/// unknown serial is not found, and without an audit record nothing is deleted (ADR-0052 clause 7).
+/// Verifies: ADR-0052
 #[tokio::test]
 async fn a_revoked_bootstrap_certificate_is_deleted_from_the_list_and_stays_refused() {
     let pki = Pki::new();
@@ -4464,9 +4835,9 @@ async fn a_revoked_bootstrap_certificate_is_deleted_from_the_list_and_stays_refu
 }
 
 /// Without the bootstrap CA's key the Server issues nothing and says why, a request outside the
-/// bounds is refused, and one naming only a customer, a site and a password is issued (ADR-0022
+/// bounds is refused, and one naming only a customer, a site and a password is issued (ADR-0052
 /// clauses 1 and 3, ADR-0032 clause 14 and ADR-0038 clause 17).
-/// Verifies: ADR-0022, ADR-0032
+/// Verifies: ADR-0052, ADR-0032
 #[tokio::test]
 async fn issuing_needs_the_key_and_a_request_within_bounds() {
     let pki = Pki::new();
@@ -4549,8 +4920,8 @@ async fn issuing_needs_the_key_and_a_request_within_bounds() {
 
 /// A bootstrap certificate names a customer and a site and is issued under a password: a
 /// request without `organization`, without `organizational_unit` or without `password` is `400`
-/// naming the field, issues nothing, and no answer ever carries a private key (ADR-0022 clauses 1 and 3).
-/// Verifies: ADR-0022
+/// naming the field, issues nothing, and no answer ever carries a private key (ADR-0052 clauses 1 and 3).
+/// Verifies: ADR-0052
 #[tokio::test]
 async fn issuing_without_a_customer_a_site_or_a_password_is_refused_naming_it() {
     let pki = Pki::new();
@@ -4620,7 +4991,7 @@ async fn issuing_without_a_customer_a_site_or_a_password_is_refused_naming_it() 
 /// Each rule a subject value is issued by is answered `400` over the API, naming the attribute:
 /// a lower-case or three-letter country, an empty value, one of 65 characters, and one holding a
 /// control character. A value of 64 characters is issued.
-/// Verifies: ADR-0022
+/// Verifies: ADR-0052
 #[tokio::test]
 async fn a_subject_value_outside_the_rules_is_refused_400() {
     let pki = Pki::new();
@@ -4739,11 +5110,11 @@ async fn the_operator_plane_serves_its_own_certificate_and_the_agent_plane_keeps
     assert!(answered.status().is_success(), "{}", answered.status());
 }
 
-// ---- A bootstrap certificate's subject, carried into the host certificate (ADR-0022) ----
+// ---- A bootstrap certificate's subject, carried into the host certificate (ADR-0052) ----
 
 /// A renewal through its proof — the branch a Gateway-carried renewal takes — carries the values
 /// of the certificate the proof names, not those of the certificate the connection presented.
-/// Verifies: ADR-0022
+/// Verifies: ADR-0052
 #[tokio::test]
 async fn a_renewal_by_its_proof_carries_the_proven_certificates_values() {
     let pki = Pki::new();
@@ -4827,7 +5198,7 @@ fn six_values() -> serde_json::Value {
 /// values and not the request's subject; the approval signs them into the host certificate and
 /// ignores the CSR's; the Host carries them, and an Agent arriving with the issued certificate is
 /// described by them as `fleet.host.*`.
-/// Verifies: ADR-0022
+/// Verifies: ADR-0052
 #[tokio::test]
 async fn an_enrolment_carries_the_bootstrap_subject_into_the_host_and_its_agents() {
     let pki = Pki::new();
@@ -4947,7 +5318,7 @@ async fn an_enrolment_carries_the_bootstrap_subject_into_the_host_and_its_agents
 
 /// A bootstrap certificate from another CA whose subject names OU twice enrols, but its approval
 /// is refused with `409` naming the attribute, and nothing is signed.
-/// Verifies: ADR-0022
+/// Verifies: ADR-0052
 #[tokio::test]
 async fn a_foreign_bootstrap_certificate_with_ou_twice_is_refused_at_approval() {
     let pki = Pki::new();
@@ -5043,7 +5414,7 @@ async fn a_foreign_bootstrap_certificate_with_ou_twice_is_refused_at_approval() 
 /// A bootstrap certificate from another CA that names a customer but no site enrols, but the queue
 /// says why it cannot be carried and its approval is refused with `409` naming
 /// `organizational_unit`; nothing is signed and no Host is written.
-/// Verifies: ADR-0022
+/// Verifies: ADR-0052
 #[tokio::test]
 async fn a_foreign_bootstrap_certificate_without_ou_is_refused_at_approval() {
     let pki = Pki::new();
@@ -5132,7 +5503,7 @@ async fn a_foreign_bootstrap_certificate_without_ou_is_refused_at_approval() {
 
 /// A renewal carries the values of the certificate it renews, and only those: neither the CSR's
 /// nor anything else.
-/// Verifies: ADR-0022
+/// Verifies: ADR-0052
 #[tokio::test]
 async fn a_renewal_carries_the_predecessors_values_unchanged() {
     let pki = Pki::new();
@@ -5410,7 +5781,7 @@ async fn gateway_presenting(
 /// waits in the queue naming the Gateway's host in place of a peer address, there and in the audit,
 /// becomes no Agent, and its approval mints a host of its own — never the Gateway's — whose
 /// certificate the enrolling host collects in a later reply, addressed to it.
-/// Verifies: ADR-0015
+/// Verifies: ADR-0015, ADR-0050
 #[tokio::test]
 async fn an_enrolment_through_a_gateway_is_decided_as_any_enrolment() {
     let pki = Pki::new();
@@ -5464,12 +5835,11 @@ async fn an_enrolment_through_a_gateway_is_decided_as_any_enrolment() {
     let reply = decode(post(&gateway, &served.endpoint, with_csr(&uid, csr)).await).await;
     assert_eq!(reply.instance_uid, uid.as_bytes());
     let certificate = issued(reply).expect("the issued certificate");
-    let host = fleet_server::ca::facts(
+    let facts = fleet_server::ca::facts(
         opamp::tls::certificates(certificate.as_bytes()).expect("pem")[0].as_ref(),
     )
-    .expect("facts")
-    .host
-    .expect("a host");
+    .expect("facts");
+    let host = facts.host.expect("a host");
     assert_ne!(host, "gw", "the Gateway's host was handed out");
 
     let all = entries(dir.path(), "enrolment.approved", 1).await;
@@ -5478,6 +5848,16 @@ async fn an_enrolment_through_a_gateway_is_decided_as_any_enrolment() {
         assert_eq!(entry.len(), 1, "{event}: {all:#?}");
         assert_eq!(entry[0]["gateway"], "gw", "{event}");
     }
+    // The signature names the request it approves, and the approval the certificate it issued
+    // (ADR-0050 clause 9).
+    assert_eq!(
+        named(&all, "enrolment.approved")[0]["serial"],
+        facts.id.serial.as_str()
+    );
+    let signed = named(&all, "issuance.signed");
+    assert_eq!(signed.len(), 1, "{all:#?}");
+    assert_eq!(signed[0]["request"], pending[0].id.as_str());
+    assert_eq!(signed[0]["serial"], facts.id.serial.as_str());
 }
 
 /// Through a Gateway, without an open window the request is answered `Unavailable`; a bootstrap
@@ -5906,4 +6286,425 @@ async fn an_enrolment_request_is_read_from_exactly_one_pem_block() {
         "queued: {:?}",
         enrolment.pending()
     );
+}
+
+/// The Hosts, the certificates and the revocations a page at a time: each in its fixed order,
+/// pages that follow each other by their `Link`, every one counting all that match, and filters
+/// applied before the page is cut.
+/// Verifies: ADR-0049
+#[tokio::test]
+async fn the_hosts_the_certificates_and_the_revocations_page_in_their_fixed_order() {
+    let pki = Pki::new();
+    let served = serve(&pki, revocations_setup(&pki)).await;
+    let mut serials = Vec::new();
+    for name in ["edge-01", "edge-02", "edge-03"] {
+        let (cert, key) = pki.issue(name);
+        let http = client(&served.ca_pem, Some((&cert, &key)));
+        let (csr, _) = csr_for(name);
+        let reply = decode(
+            post(
+                &http,
+                &served.endpoint,
+                with_csr(&InstanceUid::default(), csr),
+            )
+            .await,
+        )
+        .await;
+        let issued = String::from_utf8(
+            reply
+                .connection_settings
+                .and_then(|s| s.opamp)
+                .and_then(|o| o.certificate)
+                .expect("issued")
+                .cert,
+        )
+        .expect("pem");
+        serials.push(cert_id(&issued).serial);
+    }
+    let revocations = served.revocations.as_ref().expect("armed");
+    for serial in &serials {
+        revocations
+            .revoke_certificate("client", serial)
+            .expect("revoke");
+    }
+    let operator_client = client(&served.ca_pem, None);
+    let base = format!("https://localhost:{}", served.operator_port);
+    let read = |path: String| {
+        let operator_client = operator_client.clone();
+        let base = base.clone();
+        async move {
+            let response = operator_client
+                .get(format!("{base}{path}"))
+                .send()
+                .await
+                .expect("send");
+            let status = response.status();
+            let total = response
+                .headers()
+                .get("x-total-count")
+                .map(|v| v.to_str().expect("text").to_string());
+            let next = response.headers().get("link").map(|link| {
+                let link = link.to_str().expect("text");
+                assert!(link.ends_with("; rel=\"next\""), "{link}");
+                link.trim_start_matches('<')
+                    .split('>')
+                    .next()
+                    .expect("a target")
+                    .to_string()
+            });
+            let body: serde_json::Value = response.json().await.expect("json");
+            (status, total, next, body)
+        }
+    };
+    let all = |route: &'static str, field: &'static str| {
+        let read = &read;
+        async move {
+            let mut path = format!("{route}?limit=2");
+            let mut seen = Vec::new();
+            let mut pages = 0;
+            loop {
+                let (status, total, next, body) = read(path).await;
+                assert_eq!(status, 200, "{body}");
+                assert_eq!(total.as_deref(), Some("3"), "every page counts all");
+                pages += 1;
+                seen.extend(
+                    body.as_array()
+                        .expect("a page")
+                        .iter()
+                        .map(|entry| entry.pointer(field).expect(field).to_string()),
+                );
+                match next {
+                    Some(next) => path = next,
+                    None => break,
+                }
+            }
+            assert_eq!(pages, 2, "{route}: three entries, two to a page");
+            seen
+        }
+    };
+    let hosts = all("/api/v1/hosts", "/host").await;
+    let mut sorted = hosts.clone();
+    sorted.sort();
+    assert_eq!(hosts, sorted, "Hosts by host id");
+    assert_eq!(hosts.len(), 3);
+    let mut certificates = all("/api/v1/certificates", "/serial").await;
+    certificates.sort();
+    let mut issued: Vec<String> = serials.iter().map(|s| format!("{s:?}")).collect();
+    issued.sort();
+    assert_eq!(certificates, issued, "each certificate once");
+    let mut revoked = all("/api/v1/revocations", "/certificate/serial").await;
+    revoked.sort();
+    assert_eq!(revoked, issued, "each revocation once");
+    for (route, field) in [
+        ("/api/v1/certificates", "issued_ms"),
+        ("/api/v1/revocations", "revoked_ms"),
+    ] {
+        let (_, _, _, body) = read(route.to_string()).await;
+        let times: Vec<u64> = body
+            .as_array()
+            .expect("whole")
+            .iter()
+            .map(|entry| entry[field].as_u64().expect("a time"))
+            .collect();
+        assert!(times.is_sorted(), "{route} by {field}: {times:?}");
+    }
+
+    let count = |path: &'static str| {
+        let read = &read;
+        async move {
+            let (status, total, _, body) = read(path.to_string()).await;
+            assert_eq!(status, 200, "{body}");
+            total.expect("counted")
+        }
+    };
+    let one = |route: &str, q: &str| format!("{route}?q={q}");
+    let host = hosts[1].trim_matches('"').to_uppercase();
+    let (status, total, _, _) = read(one("/api/v1/hosts", &host)).await;
+    assert_eq!(
+        (status.as_u16(), total.as_deref()),
+        (200, Some("1")),
+        "q over the host id, any case"
+    );
+    assert_eq!(count("/api/v1/hosts?gateway=false").await, "3");
+    assert_eq!(count("/api/v1/hosts?gateway=true").await, "0");
+    let (_, total, _, _) = read(one("/api/v1/certificates", &serials[1])).await;
+    assert_eq!(total.as_deref(), Some("1"), "q over the serial");
+    let (_, total, _, _) = read(one("/api/v1/revocations", &serials[2])).await;
+    assert_eq!(total.as_deref(), Some("1"), "q over the serial revoked");
+    let (_, total, _, _) = read(one("/api/v1/revocations", hosts[0].trim_matches('"'))).await;
+    assert_eq!(
+        total.as_deref(),
+        Some("1"),
+        "q over the host of the certificate revoked"
+    );
+    // A cursor made by hand whose key is of the other kind the list sorts by.
+    let forged = |key: serde_json::Value| {
+        use base64::Engine as _;
+        use sha2::Digest as _;
+        let digest = hex::encode(&sha2::Sha256::digest(b"")[..16]);
+        let body = serde_json::json!({"p": {"key": key, "tiebreak": "x"}, "d": digest});
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(body.to_string())
+    };
+    for path in [
+        format!(
+            "/api/v1/hosts?limit=2&cursor={}",
+            forged(serde_json::json!({"Int": 1}))
+        ),
+        format!(
+            "/api/v1/certificates?limit=2&cursor={}",
+            forged(serde_json::json!({"Text": "a"}))
+        ),
+        format!(
+            "/api/v1/revocations?limit=2&cursor={}",
+            forged(serde_json::json!({"Text": "a"}))
+        ),
+    ] {
+        let (status, _, _, body) = read(path.clone()).await;
+        assert_eq!(status, 400, "{path}: {body}");
+    }
+    let (status, _, _, _) = read(format!(
+        "/api/v1/certificates?limit=2&cursor={}",
+        forged(serde_json::json!({"Int": 1}))
+    ))
+    .await;
+    assert_eq!(status, 200, "a cursor of the right kind is a position");
+    for refused in [
+        "/api/v1/hosts?limit=0",
+        "/api/v1/hosts?gateway=maybe",
+        "/api/v1/certificates?sort=serial",
+        "/api/v1/revocations?cursor=nothing",
+    ] {
+        let (status, _, _, body) = read(refused.to_string()).await;
+        assert_eq!(status, 400, "{refused}: {body}");
+    }
+}
+
+// ---- A report that waits for its store ----
+
+/// The filesystem's Agent store, whose write of one Agent's record waits until it is let go.
+struct HeldWrite {
+    inner: fleet_server::fs::FsAgentStore,
+    held: InstanceUid,
+    entered: std::sync::Mutex<std::sync::mpsc::Sender<()>>,
+    released: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl fleet_server::agent_store::AgentStore for HeldWrite {
+    fn load(
+        &self,
+    ) -> Result<
+        std::collections::HashMap<InstanceUid, fleet_server::agent_store::PersistedAgent>,
+        String,
+    > {
+        self.inner.load()
+    }
+    fn get(
+        &self,
+        uid: &InstanceUid,
+    ) -> Result<Option<fleet_server::agent_store::PersistedAgent>, String> {
+        self.inner.get(uid)
+    }
+    fn put(
+        &self,
+        uid: &InstanceUid,
+        record: &fleet_server::agent_store::PersistedAgent,
+    ) -> Result<(), String> {
+        self.inner.put(uid, record)
+    }
+    fn write_report(
+        &self,
+        uid: &InstanceUid,
+        record: &fleet_server::agent_store::PersistedAgent,
+    ) -> Result<bool, String> {
+        if *uid == self.held {
+            let _ = self.entered.lock().expect("hook lock").send(());
+            let _ = self
+                .released
+                .lock()
+                .expect("hook lock")
+                .recv_timeout(std::time::Duration::from_secs(30));
+        }
+        self.inner.write_report(uid, record)
+    }
+    fn set_labels(
+        &self,
+        uid: &InstanceUid,
+        labels: &std::collections::BTreeMap<String, String>,
+    ) -> Result<bool, String> {
+        self.inner.set_labels(uid, labels)
+    }
+    fn set_restart_pending(
+        &self,
+        uid: &InstanceUid,
+        pending: bool,
+    ) -> Result<Option<bool>, String> {
+        self.inner.set_restart_pending(uid, pending)
+    }
+    fn remove(&self, uid: &InstanceUid) -> Result<(), String> {
+        self.inner.remove(uid)
+    }
+    fn rekey(
+        &self,
+        old: &InstanceUid,
+        new: &InstanceUid,
+        record: &fleet_server::agent_store::PersistedAgent,
+    ) -> Result<(), String> {
+        self.inner.rekey(old, new, record)
+    }
+    fn release(
+        &self,
+        revisions: &[fleet_server::configs::Pinned],
+        agents: &[(InstanceUid, fleet_server::agent_store::PersistedAgent)],
+    ) -> Result<Vec<InstanceUid>, String> {
+        self.inner.release(revisions, agents)
+    }
+    fn pinning(&self, pin: fleet_server::agent_store::Pin<'_>) -> usize {
+        self.inner.pinning(pin)
+    }
+    fn referenced_revisions(&self, name: &str) -> std::collections::BTreeSet<String> {
+        self.inner.referenced_revisions(name)
+    }
+}
+
+/// While one Agent's report waits for its store, another host's TLS handshake on the Agent plane
+/// completes and its report is answered: the report runs off the runtime's workers, so the one
+/// worker of the Server's runtime here stays free, and the fleet lock is not held across the
+/// call.
+/// Verifies: ADR-0048
+#[test]
+fn a_handshake_completes_and_a_report_is_answered_while_another_reports_store_call_waits() {
+    let pki = Pki::new();
+    let (held, other) = (InstanceUid([0x51; 16]), InstanceUid([0x52; 16]));
+    let (entered, entering) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let setup = Setup {
+        agents: Some(Box::new(move |data_dir: &std::path::Path| {
+            Box::new(HeldWrite {
+                inner: fleet_server::fs::FsAgentStore::open(data_dir).expect("agents"),
+                held,
+                entered: std::sync::Mutex::new(entered),
+                released: std::sync::Mutex::new(released),
+            }) as Box<dyn fleet_server::agent_store::AgentStore>
+        })),
+        ..Setup::default()
+    };
+    // The Server on a runtime of one worker, the test's clients on another runtime.
+    let server = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .expect("the Server's runtime");
+    let served = server.block_on(serve(&pki, setup));
+    let clients = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("the clients' runtime");
+    clients.block_on(async {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message as Ws;
+        let (cert, key) = pki.issue("edge-held");
+        let mut waiting = websocket(&served, &cert, &key, None)
+            .await
+            .expect("the first host's session");
+        let framed = opamp::frame::encode_within(&report(&held), usize::MAX).expect("frame");
+        waiting.send(Ws::Binary(framed.into())).await.expect("send");
+        tokio::task::spawn_blocking(move || {
+            entering
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("the first Agent's write is under way");
+        })
+        .await
+        .expect("waited");
+
+        let (cert, key) = pki.issue("edge-other");
+        let answered = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let mut socket = websocket(&served, &cert, &key, None)
+                .await
+                .expect("the handshake completes");
+            exchange(&mut socket, &other).await;
+        })
+        .await;
+        let _ = release.send(());
+        answered.expect("the other host is answered while the write waits");
+        loop {
+            match tokio::time::timeout(std::time::Duration::from_secs(10), waiting.next())
+                .await
+                .expect("the first Agent is answered once its write is let go")
+            {
+                Some(Ok(Ws::Binary(_))) => break,
+                Some(Ok(_)) => continue,
+                other => panic!("the session ended early: {other:?}"),
+            }
+        }
+    });
+    drop(served);
+}
+
+/// An Agent whose report waits for its store call is answered a WebSocket ping on the same
+/// connection meanwhile, so a stall of the Server's handling ends no live connection for silence;
+/// its reply follows once the call is let go.
+/// Verifies: ADR-0048
+#[test]
+fn a_ping_is_answered_on_a_connection_whose_report_waits_for_its_store_call() {
+    let pki = Pki::new();
+    let held = InstanceUid([0x53; 16]);
+    let (entered, entering) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let setup = Setup {
+        agents: Some(Box::new(move |data_dir: &std::path::Path| {
+            Box::new(HeldWrite {
+                inner: fleet_server::fs::FsAgentStore::open(data_dir).expect("agents"),
+                held,
+                entered: std::sync::Mutex::new(entered),
+                released: std::sync::Mutex::new(released),
+            }) as Box<dyn fleet_server::agent_store::AgentStore>
+        })),
+        ..Setup::default()
+    };
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("the runtime");
+    runtime.block_on(async {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message as Ws;
+        let served = serve(&pki, setup).await;
+        let (cert, key) = pki.issue("edge-pinged");
+        let mut socket = websocket(&served, &cert, &key, None)
+            .await
+            .expect("the session");
+        let framed = opamp::frame::encode_within(&report(&held), usize::MAX).expect("frame");
+        socket.send(Ws::Binary(framed.into())).await.expect("send");
+        tokio::task::spawn_blocking(move || {
+            entering
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("the Agent's write is under way");
+        })
+        .await
+        .expect("waited");
+
+        socket
+            .send(Ws::Ping(b"alive".to_vec().into()))
+            .await
+            .expect("ping");
+        let ponged = tokio::time::timeout(std::time::Duration::from_secs(10), socket.next()).await;
+        let _ = release.send(());
+        match ponged.expect("the ping is answered while the write waits") {
+            Some(Ok(Ws::Pong(payload))) => assert_eq!(&payload[..], b"alive"),
+            other => panic!("expected the pong first, got {other:?}"),
+        }
+        loop {
+            match tokio::time::timeout(std::time::Duration::from_secs(10), socket.next())
+                .await
+                .expect("the Agent is answered once its write is let go")
+            {
+                Some(Ok(Ws::Binary(_))) => break,
+                Some(Ok(_)) => continue,
+                other => panic!("the session ended early: {other:?}"),
+            }
+        }
+        drop(served);
+    });
 }

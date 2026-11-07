@@ -1,4 +1,4 @@
-//! Enrolment and the renewals after it, end to end (ADR-0038 clauses 8 and 10 and ADR-0022 clauses 9 and 10): the real
+//! Enrolment and the renewals after it, end to end (ADR-0038 clauses 8 and 10 and ADR-0052 clauses 9 and 10): the real
 //! Client binary enrols with a bootstrap certificate over mutual TLS, an operator approves its
 //! request, and it renews what it was issued — each step costing the register exactly one
 //! certificate.
@@ -84,10 +84,10 @@ async fn an_enrolment_needs_no_heartbeat() {
     .await;
 }
 
-/// The questionnaire's enrolment (ADR-0022 clause 16) carries a host to its first certificate with
+/// The questionnaire's enrolment (ADR-0052 clause 16) carries a host to its first certificate with
 /// the bootstrap pair where it lies: it returns once an operator approved the request, the issued
 /// certificate is in the state directory, and nothing was copied beside the configuration.
-/// Verifies: ADR-0019, ADR-0022
+/// Verifies: ADR-0019, ADR-0052
 #[tokio::test]
 async fn the_questionnaires_enrolment_stores_the_issued_certificate_and_copies_nothing() {
     let served = Served::start(600).await;
@@ -153,8 +153,8 @@ async fn the_questionnaires_enrolment_stores_the_issued_certificate_and_copies_n
 
 /// A `bootstrap.p12` enrols as the pair does, from memory: the questionnaire's enrolment opens it
 /// under its password and stores the issued certificate, and the bootstrap key it decrypted is in
-/// no file it writes (ADR-0022 clauses 15 and 16).
-/// Verifies: ADR-0022
+/// no file it writes (ADR-0052 clauses 15 and 16).
+/// Verifies: ADR-0052
 #[tokio::test]
 async fn a_bootstrap_p12_enrols_and_its_key_is_never_written() {
     const PASSWORD: &str = "a password of the operator";

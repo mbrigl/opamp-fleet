@@ -9,13 +9,14 @@
 mod common;
 
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use fleet_server::agent_store::AgentStore;
 use fleet_server::fleet::{AgentView, AppState};
 use futures_util::SinkExt;
-use opamp::proto::{AgentCapabilities, AgentToServer};
+use opamp::proto::{AgentCapabilities, AgentToServer, ConnectionSettingsStatuses};
 use opamp::uid::InstanceUid;
 use rcgen::{CertificateParams, DnType, IsCa, Issuer, KeyPair};
 use tokio_tungstenite::tungstenite::Message;
@@ -101,11 +102,16 @@ impl Pki {
     }
 }
 
-struct ClientUnderTest(Child);
+/// The Client binary, and the file its output goes to, printed when the test fails.
+struct ClientUnderTest(Child, PathBuf);
 
 impl Drop for ClientUnderTest {
     fn drop(&mut self) {
         common::stop_client(&mut self.0);
+        if std::thread::panicking() {
+            let output = std::fs::read_to_string(&self.1).unwrap_or_else(|e| e.to_string());
+            eprintln!("--- the client's output ---\n{output}--- end ---");
+        }
     }
 }
 
@@ -134,15 +140,20 @@ async fn spawn_server() -> (std::net::SocketAddr, Arc<AppState>, tempfile::TempD
     (addr, state, dir)
 }
 
+/// Starts the Client on `config_path`, its output written beside the file.
 fn spawn_client(config_path: &Path) -> ClientUnderTest {
+    let log = config_path.with_extension("log");
+    let output = std::fs::File::create(&log).expect("create the client's log");
+    let errors = output.try_clone().expect("share the client's log");
     ClientUnderTest(
         Command::new(env!("CARGO_BIN_EXE_supervisor"))
             .arg("--config")
             .arg(config_path)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stdout(output)
+            .stderr(errors)
             .spawn()
             .expect("spawn the client"),
+        log,
     )
 }
 
@@ -287,7 +298,7 @@ async fn a_verified_offer_restarts_the_gateway_and_leaves_the_supervisors_runnin
             // verify by connecting, so it exercises the whole switch without moving the endpoint.
             .with_connection_offer(Some(fleet_server::fleet::ConnectionOffer::from_config(
                 &toml::from_str::<fleet_server::config::ConnectionOfferConfig>(
-                    "heartbeat_interval_secs = 2\n",
+                    "heartbeat_interval_secs = 5\n",
                 )
                 .expect("offer config"),
             ))),
@@ -332,26 +343,40 @@ async fn a_verified_offer_restarts_the_gateway_and_leaves_the_supervisors_runnin
     let _client = spawn_client(&config_path);
 
     // The offer is applied and acknowledged — which is what ends the transport run and restarts the
-    // gateway task underneath.
-    wait_until("the offer applied", || {
+    // gateway task underneath. The Client reports the offer applied once it verified it by
+    // connecting; the Server's record of the Agent holds that report. The Client dials its second
+    // connection as soon as it closes the first, so its report may arrive while the Server still
+    // holds the first connection open: with no host presented that is a duplicate, and the Server
+    // re-keys the Agent (ADR-0048 clause 8). Two records then carry the name, so the wait looks at
+    // each and follows the one that holds the report, by its `instance_uid`.
+    let records = fleet_server::fs::FsAgentStore::open(&dir.path().join("fleet-configs"))
+        .expect("the server's records");
+    let (applied_uid, applied_at) = wait_until("the offer reported applied", || {
         state
             .snapshot()
-            .iter()
-            .any(|a| a.service_instance_name == "edge-host")
-            .then_some(())
+            .into_iter()
+            .filter(|a| a.service_instance_name == "edge-host")
+            .find_map(|view| {
+                let record = records
+                    .get(&InstanceUid::parse(&view.instance_uid)?)
+                    .ok()??;
+                let status = record.connection_settings_status?;
+                (status.status == ConnectionSettingsStatuses::Applied as i32)
+                    .then_some((view.instance_uid, view.sequence_num))
+            })
     })
     .await;
-    // Proof that the switch actually happened, and not merely that the Client connected: the file
-    // configures no heartbeat, so the default is 30 s and this Agent would report only on change.
-    // The offer sets 2 s. A `sequence_num` climbing on its own is therefore the offered interval in
-    // force — which only happens after the Client verified the offer by connecting and the run
-    // restarted. Without this the test would pass whether or not the gateway was ever rebuilt.
+    // Proof that the offer is in force, and not merely reported: the file configures no
+    // heartbeat, so the default is 30 s and this Agent would report only on change. The offer sets
+    // 5 s. Two reports more on their own are therefore the offered interval in force, which only
+    // happens after the run restarted on it. Without this the test would pass whether or not the
+    // gateway was ever rebuilt.
     wait_until("the offered heartbeat in force", || {
         state
             .snapshot()
             .iter()
-            .find(|a| a.service_instance_name == "edge-host")
-            .filter(|a| a.sequence_num >= 4)
+            .find(|a| a.instance_uid == applied_uid)
+            .filter(|a| a.sequence_num >= applied_at + 2)
             .map(|_| ())
     })
     .await;
@@ -380,9 +405,14 @@ async fn a_verified_offer_restarts_the_gateway_and_leaves_the_supervisors_runnin
         .await
         .expect("send through the restarted gateway");
 
-    let agents = wait_until("three agents after the restart", || {
+    // The Agent behind the restarted Gateway arrives. It is looked for by its `instance_uid`,
+    // not by a count of records, which a re-key of the Client's Agent raises by one.
+    let agents = wait_until("the gatewayed agent after the restart", || {
         let snapshot = state.snapshot();
-        (snapshot.len() == 3).then_some(snapshot)
+        snapshot
+            .iter()
+            .any(|a| a.instance_uid == downstream.to_string())
+            .then_some(snapshot)
     })
     .await;
     assert!(

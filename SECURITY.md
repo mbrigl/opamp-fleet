@@ -80,7 +80,8 @@ tag, a mutable reference accepted with its risk in
 ## Fleet trust model
 
 **Admission is a fleet-wide trust boundary; within it the host is the only bound between Agents**
-([ADR-0022](docs/adr/0022-bootstrap-certificates-and-enrolment.md) clause 11,
+([ADR-0052](docs/adr/0052-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)
+clause 11,
 [ADR-0038](docs/adr/0038-admission-by-client-certificate-and-revocation.md) clause 12, and
 [ADR-0015](docs/adr/0015-client-modes-and-the-gateway.md) clause 18). A peer reaches the OpAMP
 endpoint by proving *fleet membership* with a client certificate

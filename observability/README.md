@@ -144,7 +144,8 @@ store is reached, a connection error that it is not.
 ### The S3 store
 
 The stack carries rustfs, an S3-compatible store, for a development Server that keeps its
-artifacts in a bucket ([ADR-0044](../docs/adr/0044-the-servers-state-and-its-stores.md)).
+artifacts in a bucket
+([ADR-0050](../docs/adr/0050-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)).
 It is published on port 9100 and forwarded onto the Dev Container's loopback like the Collector,
 so `http://127.0.0.1:9100` is the same store on the host and in the container. The Server creates
 no bucket; create `fleet` once, with the development key pair of `compose.yaml`:
@@ -164,7 +165,8 @@ fleet-server s3::`.
 ### The database
 
 The stack carries PostgreSQL for a development Server that keeps its records in a database
-([ADR-0044](../docs/adr/0044-the-servers-state-and-its-stores.md)). It is published on
+([ADR-0050](../docs/adr/0050-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)).
+It is published on
 port 5432 and forwarded onto the Dev Container's loopback like the Collector, so `127.0.0.1:5432` is
 the same database on the host and in the container. The image creates the database and the role
 `fleet`, password `fleet`, on its first start; the Server creates its own tables. Point the Server

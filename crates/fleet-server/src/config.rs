@@ -35,12 +35,12 @@ pub struct ServerConfig {
     #[serde(default)]
     pub rest: RestConfig,
     /// Where the Server keeps what it keeps on its own disk, one subdirectory per domain
-    /// (ADR-0044): created owner-only when missing, and holding nothing but its fixed layout.
+    /// (ADR-0050): created owner-only when missing, and holding nothing but its fixed layout.
     /// `fleet-data` where it is not named, read through [`data_dir`](Self::data_dir); refused with
     /// PostgreSQL and S3, which keep nothing on the disk
-    /// (ADR-0044 clause 1).
+    /// (ADR-0050 clause 1).
     pub data_dir: Option<PathBuf>,
-    /// Refused at startup: the state lives under `data_dir` (ADR-0044), and `server migrate` moves
+    /// Refused at startup: the state lives under `data_dir` (ADR-0050), and `server migrate` moves
     /// an older installation there. Read only so that a leftover key can be named.
     pub config_dir: Option<IgnoredAny>,
     /// TLS for the Agent plane, and for the Operator plane unless `[rest.tls]` names its own
@@ -58,18 +58,18 @@ pub struct ServerConfig {
     /// Optional destinations for the Agents' own telemetry (ADR-0016); absent means none is
     /// offered and no Agent reports any.
     pub telemetry_offer: Option<TelemetryOfferConfig>,
-    /// Refused at startup, like `config_dir` (ADR-0044). Read only so that a leftover key can be
+    /// Refused at startup, like `config_dir` (ADR-0050). Read only so that a leftover key can be
     /// named.
     pub packages_dir: Option<IgnoredAny>,
     /// How the Server checks the signatures on its Package entries (ADR-0027).
     #[serde(default)]
     pub packages: PackagesConfig,
     /// Where the artifacts' bytes are kept: the filesystem under `data_dir`, or a bucket of an
-    /// S3-compatible object store (ADR-0044).
+    /// S3-compatible object store (ADR-0050).
     #[serde(default)]
     pub blobs: BlobsConfig,
     /// Where the Server keeps its records: files under `data_dir`, or one PostgreSQL database
-    /// (ADR-0044).
+    /// (ADR-0050).
     #[serde(default)]
     pub database: DatabaseConfig,
     /// Refused at startup: every package is offered as a path the Client resolves against its own
@@ -117,7 +117,7 @@ pub struct ServerConfig {
     pub max_new_connections_per_sec: u32,
     /// How long an orderly shutdown spreads the closing of the WebSocket sessions over, in seconds,
     /// from 0 to 300; 0 closes them all at once
-    /// (ADR-0041
+    /// (ADR-0048
     /// clause 3).
     #[serde(default = "default_drain_secs")]
     pub drain_secs: u64,
@@ -127,7 +127,7 @@ pub struct ServerConfig {
     /// How repeated admission failures from one peer address are throttled (ADR-0038 clause 19).
     #[serde(default)]
     pub admission_throttle: AdmissionThrottleConfig,
-    /// How large the audit record grows and how much of it is kept (ADR-0039).
+    /// How large the audit record grows and how much of it is kept (ADR-0046).
     #[serde(default)]
     pub audit: AuditConfig,
     /// How often an admitted peer may be heard on the Agent plane (ADR-0045).
@@ -192,14 +192,14 @@ impl AgentRateLimitConfig {
     }
 }
 
-/// The Agents a host may speak for at most (ADR-0022 clause 11), which the limit has to carry at
+/// The Agents a host may speak for at most (ADR-0052 clause 11), which the limit has to carry at
 /// the fleet's heartbeat (ADR-0045 clause 23).
 const AGENTS_PER_HOST: u64 = 256;
 
 /// The heartbeat the Baseline uses when none is offered.
 const BASELINE_HEARTBEAT_SECS: u64 = 30;
 
-/// The `[audit]` section (ADR-0044 clause 12): the bound of the
+/// The `[audit]` section (ADR-0050 clause 12): the bound of the
 /// record on the store it is kept in. Each key applies to one store; [`check`](Self::check) refuses
 /// one set for the other.
 #[derive(Debug, Default, Deserialize)]
@@ -315,7 +315,7 @@ impl PackagesConfig {
     }
 }
 
-/// The `[blobs]` section (ADR-0044 clause 14): which store keeps the artifacts' bytes. One store,
+/// The `[blobs]` section (ADR-0050 clause 14): which store keeps the artifacts' bytes. One store,
 /// the filesystem by default; both are supported in production.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -349,7 +349,7 @@ impl BlobsConfig {
         self.s3.as_ref().filter(|_| self.store == "s3")
     }
 
-    /// Loud validation (ADR-0044 clauses 14, 17 and 18): a known store, the bucket's section exactly
+    /// Loud validation (ADR-0050 clauses 14, 17 and 18): a known store, the bucket's section exactly
     /// when the store is S3, and an S3 connection that stays off plaintext and holds no half of a
     /// key pair.
     fn check(&self) -> Result<(), String> {
@@ -373,13 +373,13 @@ impl BlobsConfig {
     }
 }
 
-/// The `[blobs.s3]` section (ADR-0044 clauses 16 to 18): the one bucket that keeps the artifacts,
+/// The `[blobs.s3]` section (ADR-0050 clauses 16 to 18): the one bucket that keeps the artifacts,
 /// and how the Server reaches it. Every setting of the connection is here and nowhere else; the
 /// Server reads no `AWS_*` variable that would change one.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct S3BlobsConfig {
-    /// The store's URL, `https://`; `http://` only to 127.0.0.1 or ::1 (ADR-0044 clause 17).
+    /// The store's URL, `https://`; `http://` only to 127.0.0.1 or ::1 (ADR-0050 clause 17).
     pub endpoint: String,
     /// The bucket. The Server does not create it.
     pub bucket: String,
@@ -392,7 +392,7 @@ pub struct S3BlobsConfig {
     /// One PEM root for a store whose certificate no public root signs.
     pub ca_file: Option<PathBuf>,
     /// The key ID of a static key pair, set together with `secret_access_key_file`. Without both,
-    /// the Server uses its platform's workload identity (ADR-0044 clause 18).
+    /// the Server uses its platform's workload identity (ADR-0050 clause 18).
     pub access_key_id: Option<String>,
     /// The file holding the secret of that key pair, readable by its owner and group alone.
     pub secret_access_key_file: Option<PathBuf>,
@@ -486,7 +486,7 @@ impl S3BlobsConfig {
     }
 }
 
-/// The `[database]` section (ADR-0044 clause 1): where the Server keeps its records. One store,
+/// The `[database]` section (ADR-0050 clause 1): where the Server keeps its records. One store,
 /// the filesystem under `data_dir` by default; both are supported in production.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -499,7 +499,7 @@ pub struct DatabaseConfig {
     /// The database, when `store = "postgres"`; refused beside `store = "fs"`.
     pub postgres: Option<PostgresConfig>,
     /// How often an instance renews its lease, in seconds; PostgreSQL only
-    /// (ADR-0041
+    /// (ADR-0048
     /// clause 3).
     pub lease_renew_secs: Option<u64>,
     /// How long after its last renewal a lease lapses, in seconds, at least three renewals;
@@ -508,6 +508,9 @@ pub struct DatabaseConfig {
     /// How often an instance writes the presence of the Agents it carries, in seconds, from 10 to
     /// 60; PostgreSQL only (ADR-0043 clause 4).
     pub presence_interval_secs: Option<u64>,
+    /// The connections an instance's pool holds at most, from 2 to 256; PostgreSQL only
+    /// (ADR-0050 clause 24).
+    pub pool_size: Option<usize>,
 }
 
 impl Default for DatabaseConfig {
@@ -518,9 +521,16 @@ impl Default for DatabaseConfig {
             lease_renew_secs: None,
             lease_secs: None,
             presence_interval_secs: None,
+            pool_size: None,
         }
     }
 }
+
+/// The connections an instance's pool holds at most, by default (ADR-0050 clause 24).
+pub const DEFAULT_POOL_SIZE: usize = 16;
+/// The fewest and the most connections a pool may hold: at least two, so one is left beside a
+/// creation of an Agent's record.
+const POOL_SIZES: std::ops::RangeInclusive<usize> = 2..=256;
 
 /// How often an instance renews its lease, by default.
 const DEFAULT_LEASE_RENEW_SECS: u64 = 10;
@@ -533,7 +543,7 @@ const DEFAULT_PRESENCE_INTERVAL_SECS: u64 = 30;
 const PRESENCE_INTERVAL_SECS: std::ops::RangeInclusive<u64> = 10..=60;
 
 /// The lease every instance on PostgreSQL holds while it serves
-/// (ADR-0041
+/// (ADR-0048
 /// clause 3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LeaseTimes {
@@ -552,6 +562,20 @@ impl DatabaseConfig {
     #[must_use]
     pub fn postgres(&self) -> Option<&PostgresConfig> {
         self.postgres.as_ref().filter(|_| self.store == "postgres")
+    }
+
+    /// The connections the pool holds at most, the default where the key is not set.
+    #[must_use]
+    pub fn pool_size(&self) -> usize {
+        self.pool_size.unwrap_or(DEFAULT_POOL_SIZE)
+    }
+
+    /// Hands the pool's size to the `[database.postgres]` section, which opens the database.
+    fn carry_pool_size(&mut self) {
+        let size = self.pool_size();
+        if let Some(postgres) = &mut self.postgres {
+            postgres.pool_size = size;
+        }
     }
 
     /// The lease's times, the defaults where a key is not set.
@@ -586,6 +610,7 @@ impl DatabaseConfig {
                 ("lease_renew_secs", self.lease_renew_secs),
                 ("lease_secs", self.lease_secs),
                 ("presence_interval_secs", self.presence_interval_secs),
+                ("pool_size", self.pool_size.map(|size| size as u64)),
             ] {
                 if value.is_some() {
                     return Err(format!(
@@ -617,6 +642,14 @@ impl DatabaseConfig {
                 ));
             }
         }
+        if !POOL_SIZES.contains(&self.pool_size()) {
+            return Err(format!(
+                "[database] pool_size must be from {} to {}, not {}",
+                POOL_SIZES.start(),
+                POOL_SIZES.end(),
+                self.pool_size()
+            ));
+        }
         if lapse < renew.saturating_mul(3) {
             return Err(format!(
                 "[database] lease_secs must hold at least three renewals of lease_renew_secs \
@@ -628,7 +661,7 @@ impl DatabaseConfig {
         Ok(())
     }
 
-    /// Loud validation (ADR-0044 clauses 1 and 24): a known store, the database's section exactly
+    /// Loud validation (ADR-0050 clauses 1 and 24): a known store, the database's section exactly
     /// when the store is PostgreSQL, and a connection that stays off plaintext beyond the loopback.
     fn check(&self) -> Result<(), String> {
         self.check_lease()?;
@@ -652,7 +685,7 @@ impl DatabaseConfig {
     }
 }
 
-/// The `[database.postgres]` section (ADR-0044 clause 24): the one database that keeps the records,
+/// The `[database.postgres]` section (ADR-0050 clause 24): the one database that keeps the records,
 /// and how the Server reaches it. Every setting of the connection is here and nowhere else; the
 /// Server reads no `PG*` variable that would change one.
 #[derive(Debug, Deserialize)]
@@ -674,6 +707,14 @@ pub struct PostgresConfig {
     /// `false` connects without TLS, which is allowed to a loopback IP literal alone (Q-1).
     #[serde(default = "default_postgres_tls")]
     pub tls: bool,
+    /// The connections the pool holds at most: `[database] pool_size`, carried here when the
+    /// configuration is loaded.
+    #[serde(skip, default = "default_pool_size")]
+    pub pool_size: usize,
+}
+
+fn default_pool_size() -> usize {
+    DEFAULT_POOL_SIZE
 }
 
 fn default_postgres_port() -> u16 {
@@ -725,7 +766,7 @@ impl PostgresConfig {
 }
 
 /// The secret in `file`, which no account outside the file's group may read and no account but
-/// its owner may write: the key `key` names it in every refusal (ADR-0044 clauses 18 and
+/// its owner may write: the key `key` names it in every refusal (ADR-0050 clauses 18 and
 /// 24). Group read is allowed — `0640`, or `0440` with a group of the orchestrator's choice,
 /// as Kubernetes mounts a secret with `fsGroup` — and nothing for others, nor group write.
 /// Surrounding whitespace is dropped, and an empty secret is refused. The file's bytes and the
@@ -804,7 +845,7 @@ pub struct EnrolmentConfig {
     #[serde(default)]
     pub bootstrap_ca_key_file: Option<PathBuf>,
     /// The most requests of one bootstrap certificate the pending queue holds at once, 1 to
-    /// [`MAX_PENDING`](crate::enrolment::MAX_PENDING) (ADR-0022).
+    /// [`MAX_PENDING`](crate::enrolment::MAX_PENDING) (ADR-0052).
     #[serde(default = "default_max_pending_per_bootstrap")]
     pub max_pending_per_bootstrap: usize,
 }
@@ -1226,7 +1267,7 @@ fn listeners_collide(a: SocketAddr, b: SocketAddr) -> bool {
 impl ServerConfig {
     /// Where the Server keeps what it keeps on its own disk: `data_dir`, `fleet-data` where it is
     /// not named, and `None` with PostgreSQL and S3, which keep nothing there
-    /// (ADR-0044 clause 1).
+    /// (ADR-0050 clause 1).
     #[must_use]
     pub fn data_dir(&self) -> Option<&Path> {
         if self.keeps_nothing_on_disk() {
@@ -1324,6 +1365,7 @@ impl ServerConfig {
             .read_table_files()
             .and_then(|()| config.check())
             .map_err(|e| format!("{origin}: {e}"))?;
+        config.database.carry_pool_size();
         Ok(Layered {
             config,
             origin,
@@ -1361,7 +1403,7 @@ impl ServerConfig {
                     .to_string(),
             );
         }
-        // One root for all state (ADR-0044 clause 1). A leftover key is refused rather than
+        // One root for all state (ADR-0050 clause 1). A leftover key is refused rather than
         // ignored: the directory it names holds the fleet's trust data, which this Server would
         // otherwise start without.
         for (key, named) in [
@@ -1371,7 +1413,7 @@ impl ServerConfig {
             if named {
                 return Err(format!(
                     "{key} is removed — the Server keeps all of its state under data_dir \
-                     (ADR-0044). Stop the Server, run `server migrate --config-dir <old> \
+                     (ADR-0050). Stop the Server, run `server migrate --config-dir <old> \
                      --packages-dir <old> --data-dir <new>`, then replace config_dir and \
                      packages_dir with data_dir"
                 ));
@@ -2032,7 +2074,7 @@ mod tests {
     /// All state lives under one `data_dir`, `fleet-data` by default, and a leftover `config_dir`
     /// or `packages_dir` fails startup naming the key and `server migrate` — the directory it
     /// names holds trust data this Server would otherwise start without.
-    /// Verifies: ADR-0044
+    /// Verifies: ADR-0050
     #[test]
     fn a_leftover_config_dir_or_packages_dir_fails_startup_naming_server_migrate() {
         let cfg: ServerConfig = toml::from_str("").expect("parse");
@@ -2337,7 +2379,7 @@ mod tests {
 
     /// The share of the enrolment queue one bootstrap certificate may hold runs from 1 to 1024,
     /// 256 by default; anything else fails startup naming the key.
-    /// Verifies: ADR-0022
+    /// Verifies: ADR-0052
     #[test]
     fn max_pending_per_bootstrap_runs_from_1_to_1024() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2929,8 +2971,8 @@ mod tests {
 
     /// `[blobs]`: the filesystem by default; `"s3"` with its bucket; any other store, a bucket
     /// beside the filesystem, a plaintext endpoint off the loopback, and half a key pair each fail
-    /// startup naming the key — with no store to reach (ADR-0044 clauses 14, 17 and 18).
-    /// Verifies: ADR-0044
+    /// startup naming the key — with no store to reach (ADR-0050 clauses 14, 17 and 18).
+    /// Verifies: ADR-0050
     #[test]
     fn the_blob_store_is_chosen_and_checked_naming_the_key() {
         let load = |blobs: &str| {
@@ -3020,8 +3062,8 @@ mod tests {
     }
 
     /// The store's keys come through the environment like every other key, the secret's file
-    /// included, with no code of their own (ADR-0044 clause 17, ADR-0030).
-    /// Verifies: ADR-0044
+    /// included, with no code of their own (ADR-0050 clause 17, ADR-0030).
+    /// Verifies: ADR-0050
     #[test]
     fn the_blob_store_is_configured_from_the_environment_too() {
         let mut pairs = TLS_VARIABLES.to_vec();
@@ -3060,7 +3102,7 @@ mod tests {
 
     /// The rate of new Agent-plane connections defaults to 200 a second and the drain to 20
     /// seconds; a rate of zero and a drain past 300 seconds fail startup naming the key.
-    /// Verifies: ADR-0045, ADR-0041
+    /// Verifies: ADR-0045, ADR-0048
     #[test]
     fn the_new_connection_rate_and_the_drain_are_bounded() {
         let load = |keys: &str| {
@@ -3094,7 +3136,7 @@ mod tests {
 
     /// An instance must be alone on its database while it keeps its blobs as files or a CA key in a
     /// file, and names the key; with the blobs in S3 and no CA key on the Server it shares it.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0048
     #[test]
     fn an_instance_with_files_of_its_own_must_be_alone() {
         let s3 = "[blobs]\nstore = \"s3\"\n[blobs.s3]\nendpoint = \"https://s3.example\"\n\
@@ -3133,11 +3175,53 @@ mod tests {
         );
     }
 
+    /// `[database] pool_size` is 16 by default, from 2 to 256, PostgreSQL's alone, and reaches the
+    /// connection settings the pool is opened with; one outside the range, or set beside the
+    /// filesystem store, fails startup naming the key.
+    /// Verifies: ADR-0050
+    #[test]
+    fn the_pool_size_is_checked_and_reaches_the_pool() {
+        let load = |database: &str| {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("server.toml");
+            std::fs::write(&path, format!("{TLS}{database}")).expect("write");
+            ServerConfig::load(&path)
+        };
+        let with = |keys: &str| {
+            format!(
+                "[database]\nstore = \"postgres\"\n{keys}[database.postgres]\n\
+                 host = \"db.example\"\ndbname = \"fleet\"\nuser = \"fleet\"\n\
+                 password_file = \"/run/secrets/db\"\n"
+            )
+        };
+        let size = |keys: &str| {
+            let config = load(&with(keys)).expect("loads");
+            (
+                config.database.pool_size(),
+                config.database.postgres().expect("postgres").pool_size,
+            )
+        };
+        assert_eq!(size(""), (16, 16), "the default");
+        assert_eq!(size("pool_size = 2\n"), (2, 2));
+        assert_eq!(size("pool_size = 256\n"), (256, 256));
+        for (database, named) in [
+            (with("pool_size = 1\n"), "[database] pool_size"),
+            (with("pool_size = 257\n"), "[database] pool_size"),
+            (
+                "[database]\npool_size = 16\n".to_string(),
+                "[database] pool_size",
+            ),
+        ] {
+            let e = load(&database).expect_err("refused");
+            assert!(e.contains(named), "{database}: {e}");
+        }
+    }
+
     /// The lease keys and the presence interval belong to PostgreSQL: with the filesystem store
     /// each one set fails startup naming it; with PostgreSQL they default to 10, 30 and 30 seconds,
     /// and a lease shorter than three renewals, a renewal of zero, or a presence interval outside 10
     /// to 60 seconds fails naming the key.
-    /// Verifies: ADR-0041, ADR-0043
+    /// Verifies: ADR-0048, ADR-0043
     #[test]
     fn the_lease_keys_apply_to_postgresql_alone() {
         let load = |database: &str| {
@@ -3220,8 +3304,8 @@ mod tests {
 
     /// The `[audit]` keys apply to one store each: `max_file_bytes` and `keep_files` to the files,
     /// `retain_days` (default 365, at least 1) to PostgreSQL. A key set for the other store fails
-    /// startup naming it (ADR-0044 clause 12).
-    /// Verifies: ADR-0044, ADR-0042
+    /// startup naming it (ADR-0050 clause 12).
+    /// Verifies: ADR-0050, ADR-0047
     #[test]
     fn each_audit_key_applies_to_its_own_store_alone() {
         let load = |text: &str| {
@@ -3282,8 +3366,8 @@ mod tests {
     /// With PostgreSQL and S3 the Server keeps nothing on its disk: it has no data directory, and a
     /// `data_dir` named in the file or in the environment fails startup naming the key. With either
     /// store on the disk, `data_dir` is `fleet-data` where it is not named
-    /// (ADR-0044 clause 1).
-    /// Verifies: ADR-0044
+    /// (ADR-0050 clause 1).
+    /// Verifies: ADR-0050
     #[test]
     fn with_postgresql_and_s3_a_named_data_dir_fails_startup_naming_it() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3359,8 +3443,8 @@ mod tests {
     /// `[database]`: the filesystem by default; `"postgres"` with its database. Any other store, a
     /// database beside the filesystem, a missing `[database.postgres]` key, and `tls = false` with a
     /// host that is not a loopback IP literal each fail startup naming the key — with no database
-    /// to reach (ADR-0044 clauses 1 and 24).
-    /// Verifies: ADR-0044
+    /// to reach (ADR-0050 clauses 1 and 24).
+    /// Verifies: ADR-0050
     #[test]
     fn the_record_store_is_chosen_and_checked_naming_the_key() {
         let load = |database: &str| {
@@ -3446,8 +3530,8 @@ mod tests {
     }
 
     /// The database's keys come through the environment like every other key, the password's file
-    /// included, with no code of their own (ADR-0044 clause 24, ADR-0030).
-    /// Verifies: ADR-0044
+    /// included, with no code of their own (ADR-0050 clause 24, ADR-0030).
+    /// Verifies: ADR-0050
     #[test]
     fn the_record_store_is_configured_from_the_environment_too() {
         let mut pairs = TLS_VARIABLES.to_vec();

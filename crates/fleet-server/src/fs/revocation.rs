@@ -1,5 +1,5 @@
 //! The register, the revocation list and the Hosts on the filesystem (ADR-0038, ADR-0043,
-//! ADR-0044): the default adapter behind [`LedgerStore`](crate::revocation::LedgerStore).
+//! ADR-0050): the default adapter behind [`LedgerStore`](crate::revocation::LedgerStore).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -183,12 +183,13 @@ impl LedgerStore for FsLedgerStore {
         Ok(())
     }
 
-    fn remove_issued(&self, id: &CertId) -> Result<(), String> {
+    /// The Server is the files' only writer, so the prune's finding stands.
+    fn remove_issued(&self, id: &CertId, _now_ms: u64) -> Result<bool, String> {
         super::remove_file(&self.path(id))?;
         if let Some(links) = self.links.lock().expect("links lock").as_mut() {
             links.remove(id);
         }
-        Ok(())
+        Ok(true)
     }
 
     fn register_issued(
@@ -325,14 +326,16 @@ mod tests {
         let ledger = reopened.load().expect("load");
         assert_eq!(ledger.issued, vec![issued.clone()]);
         assert_eq!(ledger.revocations, vec![revocation]);
-        reopened.remove_issued(&issued.facts.id).expect("remove");
+        assert!(reopened
+            .remove_issued(&issued.facts.id, u64::MAX)
+            .expect("remove"));
         assert!(reopened.load().expect("load").issued.is_empty());
     }
 
     /// Each Host is a file of its own, written when it changes and removed when it goes; a name
     /// no Host maps to is escaped, and a file whose name disagrees with what it holds — or one
     /// the layout does not name — fails the load naming it.
-    /// Verifies: ADR-0044
+    /// Verifies: ADR-0050
     #[test]
     fn each_host_is_a_file_of_its_own_and_its_name_must_match() {
         let dir = tempfile::tempdir().expect("tempdir");

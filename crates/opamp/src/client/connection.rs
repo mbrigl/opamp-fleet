@@ -224,21 +224,31 @@ impl Connection {
         Ok(self.tls.rustls_config()?.map(ws::Connector::Rustls))
     }
 
+    fn ws_settings(&self) -> Result<ws::Settings, String> {
+        Ok(ws::Settings {
+            endpoint: self.endpoint.clone(),
+            headers: self.headers()?,
+            connector: self.connector()?,
+            max_message_size: self.max_message_size,
+            heartbeat: self.heartbeat,
+        })
+    }
+
     /// Opens one WebSocket to the endpoint with this connection's credential and TLS, for a caller
-    /// that drives the socket itself.
+    /// that drives the socket itself. The name's resolution gets one silence bound, and each
+    /// address it resolves to, in turn, one for the TCP connection, the TLS handshake and the
+    /// upgrade together, so an endpoint that accepts and never answers fails the call
+    /// (ADR-0051
+    /// clause 3).
     ///
     /// # Errors
-    /// Returns an error when the material cannot be used or the server cannot be reached.
+    /// Returns an error when the material cannot be used, no address of the server can be
+    /// reached within its bound, or the server refused the upgrade.
     pub async fn connect_websocket(&self) -> Result<ws::Socket, String> {
         self.scheme()?;
-        ws::connect(
-            &self.endpoint,
-            &self.headers()?,
-            self.connector()?,
-            self.max_message_size,
-        )
-        .await
-        .map_err(|e| format!("cannot reach {}: {e}", self.endpoint))
+        ws::open(&self.ws_settings()?, None)
+            .await
+            .map_err(|e| format!("cannot reach {}: {e}", self.endpoint))
     }
 }
 
@@ -253,16 +263,7 @@ pub async fn run<S: Session, X: StopSignal>(
     stop: &mut X,
 ) -> Result<Ended, String> {
     match connection.scheme()? {
-        Scheme::WebSocket => {
-            let settings = ws::Settings {
-                endpoint: connection.endpoint.clone(),
-                headers: connection.headers()?,
-                connector: connection.connector()?,
-                max_message_size: connection.max_message_size,
-                heartbeat: connection.heartbeat,
-            };
-            ws::run(&settings, session, stop).await
-        }
+        Scheme::WebSocket => ws::run(&connection.ws_settings()?, session, stop).await,
         Scheme::Http => {
             let settings = http::Settings {
                 endpoint: connection.endpoint.clone(),
@@ -367,6 +368,42 @@ mod tests {
     }
 
     /// Verifies: ADR-0008, ADR-0045
+    /// The probe of an offered endpoint that accepts the TCP connection and never answers fails
+    /// once the bound has passed, rather than holding the session that asked for it
+    /// (ADR-0051
+    /// clause 3).
+    /// Verifies: ADR-0051
+    #[tokio::test]
+    async fn a_probe_of_an_endpoint_that_never_answers_fails_within_the_bound() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                held.push(stream);
+            }
+        });
+        let heartbeat = Duration::from_millis(500);
+        let mut offered = connection(&format!("ws://{addr}/v1/opamp"), None);
+        offered.heartbeat = Some(heartbeat);
+        let started = tokio::time::Instant::now();
+        let probed = tokio::time::timeout(Duration::from_secs(10), probe(&offered, || None))
+            .await
+            .expect("the probe ends within the test's bound");
+        let failed = started.elapsed();
+        assert!(
+            probed.is_err(),
+            "an endpoint that never answers fails the probe"
+        );
+        assert!(failed >= heartbeat, "not before the bound: {failed:?}");
+        assert!(
+            failed < heartbeat + Duration::from_millis(2_500),
+            "once the bound passes: {failed:?}"
+        );
+    }
+
     #[tokio::test]
     async fn plaintext_off_the_loopback_is_refused_before_connecting() {
         let refused = connection("ws://192.0.2.1:9/v1/opamp", None);

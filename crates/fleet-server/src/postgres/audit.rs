@@ -1,5 +1,5 @@
 //! The audit record on PostgreSQL, one hash chain per lease
-//! (ADR-0042): the adapter
+//! (ADR-0047): the adapter
 //! behind [`AuditStore`], the opening and closing of chains that a lease's take and renewal do in
 //! their own transactions, and `server audit-verify --config`.
 //!
@@ -14,7 +14,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use tokio_postgres::GenericClient;
+use super::Cached as GenericClient;
 
 use super::{client, sql, Database, Exclusive, CALL_TIMEOUT};
 use crate::audit::Entry;
@@ -225,7 +225,7 @@ pub(crate) struct Written {
 }
 
 impl Written {
-    /// Emits the `tracing` copy of the line (ADR-0039 clause 6).
+    /// Emits the `tracing` copy of the line (ADR-0046 clause 6).
     pub(crate) fn emit(&self) {
         crate::audit_log::emit(self.seq, self.event, "recorded", &self.line);
     }
@@ -306,15 +306,37 @@ pub(crate) async fn open_chain(
     })
 }
 
-/// Closes the chain of the lapsed lease `chain` for the instance whose own chain is `closed_by`
-/// (ADR-0041
-/// clause 18): `audit.chain_closed` with `reason` `lease_lapsed` after its last entry, and that
-/// entry's hash and the time in its record. A chain already closed, or a lease that opened none, is
-/// left as it is.
+/// Why the chain of a lease taken over is closed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Ended {
+    /// The lease lapsed: `reason` `lease_lapsed`.
+    Lapsed,
+    /// The lease had not lapsed, but its holder had to be alone and its lock is free, so its
+    /// process is gone: `reason` `holder_gone`.
+    HolderGone,
+}
+
+impl Ended {
+    fn reason(self) -> &'static str {
+        match self {
+            Ended::Lapsed => "lease_lapsed",
+            Ended::HolderGone => "holder_gone",
+        }
+    }
+}
+
+/// Closes the chain of the lease `chain` taken over, for the instance whose own chain is
+/// `closed_by`
+/// (ADR-0048
+/// clause 18): `audit.chain_closed` with the `reason` `ended` names after its last entry, and that
+/// entry's hash and the time in its record
+/// (ADR-0047
+/// clause 3). A chain already closed, or a lease that opened none, is left as it is.
 pub(crate) async fn close_lapsed(
     transaction: &impl GenericClient,
     chain: &str,
     closed_by: &str,
+    ended: Ended,
 ) -> Result<Option<Written>, String> {
     let open = transaction
         .query_opt(
@@ -340,7 +362,7 @@ pub(crate) async fn close_lapsed(
         });
     let entry = Entry::new("audit.chain_closed", "recorded")
         .with("chain", chain)
-        .with("reason", "lease_lapsed")
+        .with("reason", ended.reason())
         .with("closed_by", closed_by);
     let line = render(super::unsigned(seq + 1), now_ms(), &entry, &prev);
     transaction
@@ -374,7 +396,7 @@ pub struct Verified {
 
 /// Walks every chain of the record on the database `config` names, with the Server's own
 /// credentials and without changing anything
-/// (ADR-0042 clauses 5 and 6),
+/// (ADR-0047 clauses 5 and 6),
 /// and, with `archive`, checks that the file record there ends on the entry the first chain names
 /// as its predecessor.
 ///
@@ -479,7 +501,7 @@ pub fn verify(database: &Database, archive: Option<&Path>) -> Result<Verified, S
                     })
                     .map(|(_, link)| (link.last_seq, link.last_hash.clone()))
                     .collect();
-                let walked = walk(&*transaction, chain, pruned)
+                let walked = walk(&transaction, chain, pruned)
                     .await?
                     .and_then(|walk| walk.finish(closed_hash.as_deref()));
                 if walked.is_ok() {
@@ -696,7 +718,7 @@ async fn walk(
 
 /// Offers the file record in `dir`, a Server's `data_dir/audit/` from before its record moved into
 /// the database, as the archive the first chain names
-/// (ADR-0042 clause 6), while
+/// (ADR-0047 clause 6), while
 /// the database holds no chain; once it holds one, the offer would be moot, and `dir` is not read.
 ///
 /// # Errors
@@ -810,6 +832,16 @@ mod tests {
     }
 
     fn writing(test: &TestDatabase, host: &str) -> Writing {
+        writing_proved(test, host, None)
+    }
+
+    /// [`writing`], each decision checked against `proof` as the Server checks it against the
+    /// lease's clock.
+    fn writing_proved(
+        test: &TestDatabase,
+        host: &str,
+        proof: Option<crate::instance::Proof>,
+    ) -> Writing {
         let database = shared(test);
         let chain = database.take_lease(host, LAPSE).expect("lease").instance_id;
         let (held, watched) = watch::channel(Some(chain.clone()));
@@ -818,6 +850,7 @@ mod tests {
             Limits::default(),
             Arc::new(crate::clock::SystemClock),
             watched,
+            proof,
         )
         .expect("start");
         Writing {
@@ -849,7 +882,7 @@ mod tests {
 
     /// Two instances on one database each write their own chain, every entry naming it, and
     /// `audit-verify` passes over both and lists both as open.
-    /// Verifies: ADR-0042
+    /// Verifies: ADR-0047
     #[test]
     fn two_instances_each_write_their_own_chain_and_both_verify() {
         let Some(test) = TestDatabase::named() else {
@@ -895,9 +928,73 @@ mod tests {
         );
     }
 
+    /// A revocation the Operator plane answers `201` on PostgreSQL leaves, in the instance's chain,
+    /// an entry naming its certificate by `authority` and `serial`.
+    /// Verifies: ADR-0046
+    #[test]
+    fn a_revocation_is_recorded_with_its_certificate() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let Writing {
+            database,
+            held: _held,
+            audit,
+            chain,
+        } = writing(&test, "host-a");
+        let audit = Arc::new(audit);
+        let revocations = crate::revocation::Revocations::open(
+            Box::new(super::super::ledger::PgLedgerStore::new(database.clone())),
+            Arc::new(crate::clock::SystemClock),
+            vec![crate::revocation::Authority {
+                role: "client".to_string(),
+                subject: "0".repeat(64),
+                name: "client CA".to_string(),
+            }],
+        )
+        .expect("revocations");
+        opamp::tls::install_ring_provider();
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let status = runtime.block_on(async {
+            let state = crate::fleet::AppState::on(&crate::Records::Postgres(database.clone()))
+                .expect("state")
+                .with_revocations(Some(Arc::new(revocations)))
+                .with_audit(Some(audit.clone() as Arc<dyn crate::audit::Audit>));
+            let router = crate::api::router(Arc::new(state), None);
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind");
+            let address = listener.local_addr().expect("address");
+            tokio::spawn(async move { axum::serve(listener, router).await });
+            reqwest::Client::new()
+                .post(format!("http://{address}/api/v1/revocations"))
+                .json(&serde_json::json!({
+                    "certificate": { "authority": "client", "serial": "abc123" }
+                }))
+                .timeout(Duration::from_secs(10))
+                .send()
+                .await
+                .expect("revoke")
+                .status()
+        });
+        assert_eq!(status, 201);
+        assert!(audit.drain(Duration::from_secs(10)), "written");
+        let revoked: Vec<String> = lines(&test, &chain)
+            .into_iter()
+            .filter(|line| line.contains("\"revocation.revoked\""))
+            .collect();
+        assert_eq!(revoked.len(), 1, "{revoked:#?}");
+        assert!(
+            revoked[0].contains("\"authority\":\"client\"")
+                && revoked[0].contains("\"serial\":\"abc123\""),
+            "{}",
+            revoked[0]
+        );
+    }
+
     /// An orderly shutdown closes the chain with `audit.chain_closed`, `reason` `shutdown`, and
     /// its record holds that entry's hash.
-    /// Verifies: ADR-0042
+    /// Verifies: ADR-0047
     #[test]
     fn an_orderly_shutdown_closes_the_chain() {
         let Some(test) = TestDatabase::named() else {
@@ -936,7 +1033,7 @@ mod tests {
     /// its lapsed lease, at a take or at a renewal, closes it with `audit.chain_closed`, `reason`
     /// `lease_lapsed` and `closed_by` its own chain, and from then on the store refuses the dead
     /// chain an entry. Two instances that try at once take it over once.
-    /// Verifies: ADR-0042, ADR-0041
+    /// Verifies: ADR-0047, ADR-0048
     #[test]
     fn the_instance_that_takes_over_a_lapsed_lease_closes_its_chain() {
         let Some(test) = TestDatabase::named() else {
@@ -1013,7 +1110,7 @@ mod tests {
     /// Entries queued under a lease that lapses before they are written go into the chain of the
     /// instance's next lease, after its `audit.chain_opened`, each marked `taken_under` the old
     /// chain; the old chain, closed by the take, holds none of them, and both chains verify.
-    /// Verifies: ADR-0042
+    /// Verifies: ADR-0047
     #[test]
     fn entries_queued_when_a_lease_lapses_land_in_the_next_chain_marked_with_the_old() {
         let Some(test) = TestDatabase::named() else {
@@ -1072,9 +1169,113 @@ mod tests {
         assert!(!verified.failed, "{:?}", verified.lines);
     }
 
+    /// A decision recorded while the instance holds no lease — none named, or the one named lapsed
+    /// by the lease's clock — is marked `taken_under` `none`, in the next chain and in the chain
+    /// of the lease whose clock ran out alike; the writer's own closing entry carries no mark, and
+    /// the record verifies.
+    /// Verifies: ADR-0047
+    #[test]
+    fn a_decision_taken_under_no_lease_is_marked_taken_under_none() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let now_ms = Arc::new(AtomicU64::new(0));
+        let clock = crate::clock::Elapsed::new({
+            let now_ms = now_ms.clone();
+            move || Duration::from_millis(now_ms.load(Ordering::SeqCst))
+        });
+        let proof = crate::instance::Proof::until(clock, Duration::from_secs(1));
+        let a = writing_proved(&test, "host-a", Some(proof));
+        a.audit.record(admitted(1)).expect("record");
+        assert!(a.audit.drain(Duration::from_secs(10)));
+        let old = a.chain.clone();
+        assert!(!lines(&test, &old)[1].contains("taken_under"));
+
+        // No lease held: decided now, written into the next chain.
+        lapse(&test, &old);
+        a.held.send_replace(None);
+        a.audit.record(admitted(2)).expect("queued");
+        assert!(
+            !a.audit.drain(Duration::from_secs(10)),
+            "written without a lease"
+        );
+        let new = a
+            .database
+            .take_lease("host-a", LAPSE)
+            .expect("new lease")
+            .instance_id;
+        a.held.send_replace(Some(new.clone()));
+        assert!(a.audit.drain(Duration::from_secs(10)), "not written");
+        let chain = lines(&test, &new);
+        let moved = &chain[1];
+        assert!(
+            moved.contains("\"n\":2") && moved.contains("\"taken_under\":\"none\""),
+            "{chain:#?}"
+        );
+
+        // The lease is named still, and the database holds it, but its clock ran out.
+        now_ms.store(2000, Ordering::SeqCst);
+        a.audit.record(admitted(3)).expect("queued");
+        assert!(a.audit.drain(Duration::from_secs(10)), "not written");
+        let chain = lines(&test, &new);
+        let late = chain.last().expect("entries");
+        assert!(
+            late.contains("\"n\":3")
+                && late.contains("\"taken_under\":\"none\"")
+                && late.contains(&format!("\"chain\":\"{new}\"")),
+            "{late}"
+        );
+
+        assert!(a.audit.close(Duration::from_secs(10)), "not closed");
+        let chain = lines(&test, &new);
+        let closing = chain.last().expect("entries");
+        assert!(
+            closing.contains("audit.chain_closed") && !closing.contains("taken_under"),
+            "{closing}"
+        );
+        let verified = verify(&a.database, None).expect("verify");
+        assert!(!verified.failed, "{:?}", verified.lines);
+    }
+
+    /// After the shutdown's close nothing more is recorded: a decision is refused and counted, and
+    /// one that passed the checks just before the close is counted by the writer rather than
+    /// written; the closed chain still ends on its closing entry and verifies.
+    /// Verifies: ADR-0046
+    #[test]
+    fn a_decision_after_the_shutdowns_close_is_refused_and_counted() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let a = writing(&test, "host-a");
+        a.audit.record(admitted(1)).expect("record");
+        assert!(a.audit.close(Duration::from_secs(10)), "not closed");
+        assert_eq!(a.audit.unrecorded_count(), 0);
+        assert!(
+            a.audit.record(admitted(2)).is_err(),
+            "recorded after the close"
+        );
+        assert_eq!(a.audit.unrecorded_count(), 1);
+        a.audit.queue_past_the_checks(admitted(3));
+        assert!(
+            a.audit.drain(Duration::from_secs(10)),
+            "the writer failed on what came after the close"
+        );
+        assert_eq!(a.audit.unrecorded_count(), 2);
+        let chain = lines(&test, &a.chain);
+        assert!(
+            chain
+                .last()
+                .is_some_and(|line| line.contains("audit.chain_closed")),
+            "{chain:#?}"
+        );
+        let verified = verify(&a.database, None).expect("verify");
+        assert!(!verified.failed, "{:?}", verified.lines);
+    }
+
     /// An entry removed from the middle of a chain fails `audit-verify`, which names the chain and
     /// the entry that no longer follows; the other chains are still walked.
-    /// Verifies: ADR-0042
+    /// Verifies: ADR-0047
     #[test]
     fn an_entry_removed_from_the_middle_of_a_chain_fails_naming_it() {
         let Some(test) = TestDatabase::named() else {
@@ -1129,7 +1330,7 @@ mod tests {
     /// files' last entry as the archive and names it as the predecessor, so `audit-verify
     /// --archive` checks the link. A later chain names none, and an archive recorded already is
     /// kept.
-    /// Verifies: ADR-0042
+    /// Verifies: ADR-0047
     #[test]
     fn the_first_chain_names_the_files_a_server_on_postgresql_wrote_before() {
         let Some(test) = TestDatabase::named() else {
@@ -1167,7 +1368,7 @@ mod tests {
 
     /// A first start with an empty or no `data_dir/audit/` records no archive and names no
     /// predecessor.
-    /// Verifies: ADR-0042
+    /// Verifies: ADR-0047
     #[test]
     fn a_first_start_without_audit_files_records_no_archive() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1254,6 +1455,7 @@ mod tests {
             Limits::default(),
             Arc::new(crate::clock::SystemClock),
             watched,
+            None,
         )
         .expect("start");
         (
@@ -1272,10 +1474,125 @@ mod tests {
         lines.iter().filter(|line| line.contains(needle)).count()
     }
 
+    /// Refusals that passed the checks just before the shutdown's close and were counted for their
+    /// aggregate are counted as unrecorded when the aggregate falls due, and the count of a decision
+    /// refused after the close stays: no line is written past the closing entry.
+    /// Verifies: ADR-0046
+    #[test]
+    fn an_aggregate_past_the_shutdowns_close_is_counted_and_keeps_the_count() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let a = writing(&test, "host-a");
+        a.audit.record(admitted(1)).expect("record");
+        assert!(a.audit.close(Duration::from_secs(10)), "not closed");
+        assert!(
+            a.audit.record(admitted(2)).is_err(),
+            "recorded after the close"
+        );
+        a.audit.aggregate_past_the_checks("admission.refused", 5);
+        assert!(
+            a.audit.drain(Duration::from_secs(10)),
+            "the writer failed on the aggregate"
+        );
+        assert_eq!(a.audit.unrecorded_count(), 6);
+        let chain = lines(&test, &a.chain);
+        assert!(
+            chain
+                .last()
+                .is_some_and(|line| line.contains("audit.chain_closed")),
+            "{chain:#?}"
+        );
+    }
+
+    /// A store whose closing write is answered with an error, as a commit whose answer was lost
+    /// is: after it landed, with `lands`, or without it.
+    struct LostClose {
+        inner: PgAuditStore,
+        lands: bool,
+    }
+
+    impl AuditStore for LostClose {
+        fn chain(&mut self) -> Chain {
+            self.inner.chain()
+        }
+        fn tail(&mut self) -> Result<Option<Tail>, String> {
+            self.inner.tail()
+        }
+        fn append(&mut self, seq: u64, lines: &[&str]) -> Result<(), String> {
+            self.inner.append(seq, lines)
+        }
+        fn close(&mut self, seq: u64, lines: &[&str]) -> Result<(), String> {
+            if self.lands {
+                self.inner.close(seq, lines)?;
+            }
+            Err("the commit's answer was lost".to_string())
+        }
+        fn stored(&mut self, chain: &str, seq: u64) -> Result<Vec<String>, String> {
+            self.inner.stored(chain, seq)
+        }
+        fn current_bytes(&self) -> u64 {
+            0
+        }
+        fn rotate(&mut self, _keep: usize) -> Result<Vec<(String, String)>, String> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// A shutdown's close whose answer was lost counts as written when the chain holds its closing
+    /// entry, so the lease can be released, and the record verifies; one that did not land is
+    /// not, and leaves the chain open for the instance that takes over its lease.
+    /// Verifies: ADR-0047
+    #[test]
+    fn a_close_whose_answer_was_lost_counts_as_written_once_the_chain_holds_it() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        for lands in [true, false] {
+            let database = shared(&test);
+            let chain = database
+                .take_lease("host-a", LAPSE)
+                .expect("lease")
+                .instance_id;
+            let (_held, watched) = watch::channel(Some(chain.clone()));
+            let audit = AuditLog::start_under(
+                Box::new(LostClose {
+                    inner: PgAuditStore::new(database.clone(), watched.clone()),
+                    lands,
+                }),
+                Limits::default(),
+                Arc::new(crate::clock::SystemClock),
+                watched,
+                None,
+            )
+            .expect("start");
+            audit.record(admitted(1)).expect("record");
+            assert_eq!(
+                audit.close(Duration::from_secs(10)),
+                lands,
+                "a close that {} landed",
+                if lands { "had" } else { "had not" }
+            );
+            let closed = test.rows(&format!(
+                "SELECT closed_hash FROM audit_chains WHERE id = '{chain}'"
+            ));
+            assert_eq!(closed[0][0].is_some(), lands, "{closed:?}");
+            let entries = lines(&test, &chain);
+            assert_eq!(
+                count(&entries, "audit.chain_closed"),
+                usize::from(lands),
+                "{entries:#?}"
+            );
+            assert_eq!(count(&entries, "\"n\":1"), 1, "{entries:#?}");
+        }
+        let verified = verify(&shared(&test), None).expect("verify");
+        assert!(!verified.failed, "{:?}", verified.lines);
+    }
+
     /// A write that landed although its answer was lost is recognised as landed: alone, it is not
     /// written again, and with an entry queued while the answer was awaited, only that entry is
     /// written after it. The writer recovers, and each decision is in the chain once.
-    /// Verifies: ADR-0042
+    /// Verifies: ADR-0047
     #[test]
     fn a_write_whose_answer_was_lost_is_not_written_again() {
         let Some(test) = TestDatabase::named() else {
@@ -1319,7 +1636,7 @@ mod tests {
     /// A write into a chain whose answer was lost, and then a new lease: the lines that landed in
     /// the old chain stay there alone, and only the rest is written into the new one, so no
     /// decision is recorded twice.
-    /// Verifies: ADR-0042
+    /// Verifies: ADR-0047
     #[test]
     fn a_landed_write_is_not_written_again_into_the_next_chain() {
         let Some(test) = TestDatabase::named() else {
@@ -1356,7 +1673,7 @@ mod tests {
     /// transaction, on the chain's row, and then finds the chain closed: it never writes past the
     /// closing entry. The take's transaction is held open by the test until the writer is seen
     /// waiting.
-    /// Verifies: ADR-0042
+    /// Verifies: ADR-0047
     #[test]
     fn a_writer_waits_for_a_closing_take_and_then_finds_the_chain_closed() {
         let Some(test) = TestDatabase::named() else {
@@ -1373,7 +1690,7 @@ mod tests {
                 closer.run_within(Duration::from_secs(30), move |pool| async move {
                     let mut client = client(&pool).await?;
                     let transaction = client.transaction().await.map_err(sql)?;
-                    close_lapsed(&*transaction, &chain, "test-closer")
+                    close_lapsed(&transaction, &chain, "test-closer", Ended::Lapsed)
                         .await?
                         .expect("an open chain");
                     locked.send(()).expect("the test listens");
@@ -1426,7 +1743,7 @@ mod tests {
 
     /// An archive that ends in a torn line, a crash mid-write, is refused, naming the file, rather
     /// than recorded as an end that could never verify; one whose chain breaks is refused too.
-    /// Verifies: ADR-0042
+    /// Verifies: ADR-0047
     #[test]
     fn an_archive_that_ends_in_a_torn_line_is_refused_naming_the_file() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1456,7 +1773,7 @@ mod tests {
     /// An archive the file store repaired after a crash (the torn line kept, then
     /// `audit.chain_broken` chained on it) is taken as the archive and its link verifies; only a
     /// torn line still at the end is refused.
-    /// Verifies: ADR-0042
+    /// Verifies: ADR-0047
     #[test]
     fn an_archive_the_file_store_repaired_after_a_crash_is_linked() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1519,7 +1836,7 @@ mod tests {
     /// Lines before a genuine repair replaced by a chain of their own from 64 zeros: the repair
     /// still chains on the torn line and the archive still ends where the predecessor names, but
     /// the repair's `last_whole` names an entry that is gone, so `audit-verify --archive` fails.
-    /// Verifies: ADR-0039
+    /// Verifies: ADR-0046
     #[test]
     fn an_archive_whose_entries_before_a_repair_were_replaced_fails_audit_verify() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1560,7 +1877,7 @@ mod tests {
 
     /// An archive whose repair names no `last_whole` holds, and `audit-verify --archive` names it
     /// as a repair without a link.
-    /// Verifies: ADR-0039
+    /// Verifies: ADR-0046
     #[test]
     fn an_archive_with_a_repair_without_a_link_holds_and_names_it() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1610,7 +1927,7 @@ mod tests {
     /// A batch whose first lines are stored, but stored differently than this instance wrote
     /// them, is refused, and the refusal says what to do: check the record, and restart onto a
     /// new lease.
-    /// Verifies: ADR-0042
+    /// Verifies: ADR-0047
     #[test]
     fn a_line_stored_where_this_instance_wrote_another_is_refused_naming_the_next_step() {
         let Some(test) = TestDatabase::named() else {
@@ -1638,7 +1955,7 @@ mod tests {
 
     /// The archive is read and offered only while the database holds no chain: a later start
     /// neither reads `data_dir/audit/` nor stops on it, and the first chain names nothing new.
-    /// Verifies: ADR-0042
+    /// Verifies: ADR-0047
     #[test]
     fn the_archive_is_offered_only_before_the_first_chain() {
         let Some(test) = TestDatabase::named() else {
@@ -1670,7 +1987,7 @@ mod tests {
 
     /// A chain that names a predecessor while the database records no archive fails
     /// `audit-verify`, with or without `--archive`: the archive's row is gone.
-    /// Verifies: ADR-0042
+    /// Verifies: ADR-0047
     #[test]
     fn a_predecessor_whose_archive_row_is_gone_fails_verification() {
         let Some(test) = TestDatabase::named() else {
@@ -1699,7 +2016,7 @@ mod tests {
 
     /// An archive the database records that no chain names as its predecessor fails
     /// `audit-verify`, with or without `--archive`: the first chain is gone.
-    /// Verifies: ADR-0042
+    /// Verifies: ADR-0047
     #[test]
     fn an_archive_no_chain_names_fails_verification() {
         let Some(test) = TestDatabase::named() else {

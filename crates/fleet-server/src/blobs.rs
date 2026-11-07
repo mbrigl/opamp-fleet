@@ -1,4 +1,4 @@
-//! Artifact bytes, kept by their SHA-256 (ADR-0044 clause 13): the blob port.
+//! Artifact bytes, kept by their SHA-256 (ADR-0050 clause 13): the blob port.
 //!
 //! A Package entry names its artifact by the hash of its bytes and nothing else, so bytes held by
 //! two entries are stored once, and a blob's name is its own integrity check. Which blobs are still
@@ -11,7 +11,7 @@
 
 use std::io::Read;
 
-/// The blob port (ADR-0044 clause 13). A hash is the lowercase hex SHA-256 of the bytes.
+/// The blob port (ADR-0050 clause 13). A hash is the lowercase hex SHA-256 of the bytes.
 pub trait BlobStore: Send + Sync {
     /// Stores the bytes `bytes` yields, hashing them on the way, and answers their hash and size.
     /// Bytes already stored are stored once. A stream that fails stores nothing.
@@ -47,7 +47,7 @@ pub trait BlobStore: Send + Sync {
     fn list(&self) -> Result<Vec<(String, u64)>, String>;
 
     /// Deletes what uploads that were cut off left behind, of every writer that is no longer live
-    /// (ADR-0044 clause 16), and answers how many objects it
+    /// (ADR-0050 clause 16), and answers how many objects it
     /// deleted: what every sweep runs, under the blob store's lock. A store that stages no upload
     /// apart from its blobs, or whose one Server cleans up only at startup, deletes nothing here,
     /// which the default does.
@@ -60,13 +60,15 @@ pub trait BlobStore: Send + Sync {
 }
 
 /// A hold on the blob store's lock
-/// (ADR-0044 clause 14), released when it is dropped. A store
+/// (ADR-0050 clause 14), released when it is dropped. A store
 /// that is its one Server's alone holds nothing.
 pub struct BlobHold {
-    #[allow(dead_code)]
-    held: Option<Box<dyn Send>>,
+    held: Option<Box<dyn std::any::Any + Send>>,
     /// Set once the lock is gone while the hold lives, as when its session ended.
     lost: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// What the marks of the sweep that holds it are known by, where it marks
+    /// ([`PackageBackend::mark`](crate::packages::PackageBackend::mark)).
+    sweep: Option<String>,
     /// The `statement_timeout` and `lock_timeout` of the hold's session, where it has one.
     #[cfg(test)]
     pub(crate) settings: Option<(String, String)>,
@@ -79,17 +81,24 @@ impl BlobHold {
         BlobHold {
             held: None,
             lost: None,
+            sweep: None,
             #[cfg(test)]
             settings: None,
         }
     }
 
-    /// A hold that `held` keeps until it is dropped, `lost` set once the lock is gone before.
+    /// A hold that `held` keeps until it is dropped, `lost` set once the lock is gone before, its
+    /// sweep's marks known by `sweep`.
     #[must_use]
-    pub fn of(held: Box<dyn Send>, lost: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Self {
+    pub fn of(
+        held: Box<dyn std::any::Any + Send>,
+        lost: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        sweep: Option<String>,
+    ) -> Self {
         BlobHold {
             held: Some(held),
             lost: Some(lost),
+            sweep,
             #[cfg(test)]
             settings: None,
         }
@@ -101,6 +110,19 @@ impl BlobHold {
     pub(crate) fn with_settings(mut self, settings: (String, String)) -> Self {
         self.settings = Some(settings);
         self
+    }
+
+    /// What keeps the hold, when it is a `T`: what the adapter that made it reads its session
+    /// from.
+    #[must_use]
+    pub fn held<T: 'static>(&self) -> Option<&T> {
+        self.held.as_ref()?.downcast_ref()
+    }
+
+    /// What the marks of the sweep that holds it are known by, if it marks.
+    #[must_use]
+    pub fn sweep(&self) -> Option<&str> {
+        self.sweep.as_deref()
     }
 
     /// Whether the lock is gone while the hold lives.

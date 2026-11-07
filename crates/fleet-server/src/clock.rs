@@ -15,3 +15,15 @@ impl Clock for SystemClock {
             .unwrap_or(0)
     }
 }
+
+pub use crate::fleet::Elapsed;
+
+impl Elapsed {
+    /// `std::time::Instant` since its first reading: a suspend counts on some systems and not on
+    /// others, on Linux not.
+    #[must_use]
+    pub fn monotonic() -> Self {
+        static ORIGIN: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        Elapsed::new(|| ORIGIN.get_or_init(std::time::Instant::now).elapsed())
+    }
+}

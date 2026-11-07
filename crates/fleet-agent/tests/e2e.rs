@@ -204,12 +204,17 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
     let uids: std::collections::HashSet<_> = agents.iter().map(|a| &a.instance_uid).collect();
     assert_eq!(uids.len(), AGENTS, "each Agent has its own identity");
 
-    // The Foreign Agent runs from the start; the Collector awaits its first configuration.
+    // The Foreign Agent runs from the start; the Collector awaits its first configuration. Its
+    // first report may still say it is starting, so the wait is for the report that follows.
     let first_stub_pid = wait_until("the stub to run", || stub_pid(&stub_marker)).await;
+    wait_until("the collector awaiting configuration", || {
+        let snapshot = state.snapshot();
+        view(&snapshot, "otelcol")
+            .is_some_and(|a| !a.healthy && a.health_status == "awaiting configuration")
+            .then_some(())
+    })
+    .await;
     assert!(!otelcol_marker.exists(), "no config, no collector");
-    let otelcol = view(&agents, "otelcol").expect("otelcol view");
-    assert!(!otelcol.healthy);
-    assert_eq!(otelcol.health_status, "awaiting configuration");
 
     // The operator distributes a Configuration for the supervised type, and a YAML one typed for
     // the Client itself — saved, put into a Deployment claiming all three, then rolled out,
