@@ -1160,8 +1160,14 @@ two the one left takes them all. Size them so that one instance fewer still carr
 - **Peers that share an address.** Affinity sends every host behind one address translation, and
   every connection of a Gateway, to one instance, so such a group weighs on one instance alone.
 
-No load has been proven on several instances yet: how many Agents they carry and how long a
-failover of a large fleet takes are not yet measured.
+Two tests in `crates/fleet-server/tests/g20.rs` measure G-20, three instances on one host with 8
+CPUs. In the failover, 10 000 simulated hosts of one Agent each and a Gateway of ten connections
+carrying ten Agents each connect, and one instance is killed, in another run frozen: every Agent it
+carried was connected to another instance within `lease_secs` and two heartbeat intervals, at about
+435 new Agents a second. In the load test, three instances carry 100 000 Agents, ten on each
+connection, for ten minutes, with no presence batch written late and no notification left unread.
+`scripts/check-g20.sh` runs both on a machine with 8 CPUs and 8 GiB of memory, as does the *G-20*
+workflow on demand, which has not yet run on a hosted runner.
 
 ### A rolling update
 
