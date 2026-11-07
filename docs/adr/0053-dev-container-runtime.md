@@ -1,8 +1,8 @@
-# ADR-draft-dev-container-runtime: The Dev Container keeps the host daemon out of reach, its Features locked, and each project under a path of its own
+# ADR-0053: The Dev Container keeps the host daemon out of reach, its Features locked, and each project under a path of its own
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-11-07
-- **Deciders:** Markus Brigl
+- **Deciders:** NUC maintainer, Markus Brigl
 - **Applies to:** `.devcontainer/`, `.vscode/settings.json`, `scripts/check-devcontainer.sh`, and everything the container pulls in
 - **Supersedes:** [ADR-0004](0004-dev-container-runtime.md)
 
