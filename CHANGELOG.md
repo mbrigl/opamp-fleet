@@ -230,13 +230,15 @@ once its tag exists.
   `opamp` crate's WebSocket driver now send a WebSocket ping once nothing has arrived for half a
   heartbeat interval, end the connection once nothing has arrived for a whole one, and reconnect
   after the delay drawn over `[0, 30 s)`; a pong gets the rest of the interval from when its ping
-  went out, so an Agent busy with an install does not drop a live Server. Opening a connection,
-  the TLS handshake and the upgrade included, is bounded by one interval too, the probe of an
-  offered endpoint among them. With heartbeats disabled the bound is 30 seconds. The
-  line *nothing arrived from the server within the bound; ending the connection* carries
-  `bound_ms`. `opamp::client::ws::Silence` names the bounds; the crate's other functions and
-  settings are unchanged, but `Connection::connect_websocket` now fails once an interval has
-  passed.
+  went out, so an Agent busy with an install does not drop a live Server. Opening a connection
+  is bounded too, the probe of an offered endpoint among them: resolving the name gets one
+  interval, and each address it resolves to, tried in turn, gets one for the TCP connection, the
+  TLS handshake and the upgrade together, so a name whose first address is dead, as `::1` is to a
+  Server listening on `127.0.0.1` only, still connects. An HTTP answer to the upgrade ends the
+  attempt. With heartbeats disabled the bound is 30 seconds. The line *nothing arrived from the
+  server within the bound; ending the connection* carries `bound_ms`.
+  `opamp::client::ws::Silence` names the bounds; the crate's other functions and settings are
+  unchanged, but `Connection::connect_websocket` now fails once those bounds have passed.
   **What to do:** nothing. A Client whose `heartbeat_interval_secs` is very short now also ends a
   connection that is silent that long. A Server instance that handles no message for a whole
   interval, overloaded rather than lost, now loses its Agents to the other instances, which

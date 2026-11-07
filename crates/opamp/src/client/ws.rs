@@ -1,7 +1,7 @@
 //! The WebSocket transport: one connection, reconnected with backoff, carrying every Agent of the
 //! session — the *n* over one of ADR-0015.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
 use crate::frame;
@@ -220,31 +220,93 @@ pub async fn run_from<S: Session, X: StopSignal>(
     }
 }
 
-/// One attempt to open a connection for [`run_from`]: the TCP connection, the TLS handshake and the
-/// upgrade together get one silence bound, so an endpoint that accepts and never answers is a
-/// failed attempt rather than a wait without end.
-async fn open(settings: &Settings, local: Option<IpAddr>) -> Result<Socket, Connect> {
+/// One attempt to open a connection, for [`run_from`] and for `Connection::connect_websocket`:
+/// the endpoint's name is resolved within one silence bound, and its addresses are tried in turn
+/// by [`open_each`], so an endpoint that accepts and never answers is a failed attempt rather than
+/// a wait without end, and one dead address does not hide the next
+/// (ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended clause 3).
+pub(crate) async fn open(settings: &Settings, local: Option<IpAddr>) -> Result<Socket, Connect> {
     let bound = Silence::of(settings.heartbeat).end_after;
-    tokio::time::timeout(
-        bound,
-        connect_from(
-            &settings.endpoint,
-            &settings.headers,
-            settings.connector.clone(),
-            settings.max_message_size,
-            local,
-        ),
-    )
-    .await
-    .unwrap_or_else(|_| {
-        Err(Connect::Refused(WsError::Io(std::io::Error::new(
-            std::io::ErrorKind::TimedOut,
-            format!(
-                "nothing arrived within {} ms of opening the connection",
-                bound.as_millis()
-            ),
-        ))))
-    })
+    let (_, host, port) = target(&settings.endpoint, &settings.headers)?;
+    let addresses =
+        match tokio::time::timeout(bound, tokio::net::lookup_host((host.as_str(), port))).await {
+            Ok(Ok(addresses)) => addresses.collect(),
+            Ok(Err(e)) => return Err(Connect::Refused(WsError::Io(e))),
+            Err(_) => {
+                return Err(timed_out(format!(
+                    "{host} did not resolve within {} ms",
+                    bound.as_millis()
+                )))
+            }
+        };
+    open_each(settings, local, addresses, bound).await
+}
+
+/// Opens a WebSocket to the first of `addresses`, in their order, that one is opened to within
+/// `bound`, the TCP connection, the TLS handshake and the upgrade together. The TLS server name
+/// and the `Host` header are the endpoint's name. An address not reached, by its bound or by an
+/// error of the connection, the handshake or the I/O, gives way to the next; an HTTP answer to the
+/// upgrade is the Server's and ends the attempt as it is. With `local`, only the addresses of its
+/// family are tried, each from it.
+async fn open_each(
+    settings: &Settings,
+    local: Option<IpAddr>,
+    addresses: Vec<SocketAddr>,
+    bound: Duration,
+) -> Result<Socket, Connect> {
+    let mut last = None;
+    for remote in addresses
+        .into_iter()
+        .filter(|remote| local.is_none_or(|local| remote.is_ipv4() == local.is_ipv4()))
+    {
+        let attempt = async {
+            let (request, _, _) = target(&settings.endpoint, &settings.headers)?;
+            let stream = stream_to(remote, local)
+                .await
+                .map_err(|e| Connect::Refused(WsError::Io(e)))?;
+            client_async_tls_with_config(
+                request,
+                stream,
+                Some(config(settings.max_message_size)),
+                settings.connector.clone(),
+            )
+            .await
+            .map(|(socket, _)| socket)
+            .map_err(Connect::Refused)
+        };
+        match tokio::time::timeout(bound, attempt).await {
+            Ok(Ok(socket)) => return Ok(socket),
+            Ok(Err(ended @ (Connect::Refused(WsError::Http(_)) | Connect::InvalidEndpoint(_)))) => {
+                return Err(ended)
+            }
+            Ok(Err(Connect::Refused(WsError::Io(e)))) => {
+                last = Some(Connect::Refused(WsError::Io(std::io::Error::new(
+                    e.kind(),
+                    format!("{remote}: {e}"),
+                ))));
+            }
+            Ok(Err(e)) => last = Some(e),
+            Err(_) => {
+                last = Some(timed_out(format!(
+                    "nothing arrived from {remote} within {} ms of opening the connection",
+                    bound.as_millis()
+                )));
+            }
+        }
+    }
+    Err(last.unwrap_or_else(|| {
+        Connect::Refused(WsError::Io(std::io::Error::new(
+            std::io::ErrorKind::AddrNotAvailable,
+            format!("no address of {} to connect to", settings.endpoint),
+        )))
+    }))
+}
+
+fn timed_out(message: String) -> Connect {
+    Connect::Refused(WsError::Io(std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        message,
+    )))
 }
 
 /// What to wait before the next attempt: the first reconnect after a connection that stood was
@@ -306,19 +368,39 @@ pub async fn connect_from(
     max_message_size: usize,
     local: Option<IpAddr>,
 ) -> Result<Socket, Connect> {
-    let config = WebSocketConfig::default()
-        .max_message_size(Some(max_message_size))
-        .max_frame_size(Some(max_message_size));
-    let mut request = endpoint
-        .into_client_request()
-        .map_err(|e| Connect::InvalidEndpoint(format!("invalid endpoint {endpoint}: {e}")))?;
-    request.headers_mut().extend(headers.clone());
+    let (request, host, port) = target(endpoint, headers)?;
+    let config = config(max_message_size);
     let Some(local) = local else {
         return connect_async_tls_with_config(request, Some(config), false, connector)
             .await
             .map(|(socket, _)| socket)
             .map_err(Connect::Refused);
     };
+    let stream = bound_stream(local, &host, port)
+        .await
+        .map_err(|e| Connect::Refused(WsError::Io(e)))?;
+    client_async_tls_with_config(request, stream, Some(config), connector)
+        .await
+        .map(|(socket, _)| socket)
+        .map_err(Connect::Refused)
+}
+
+/// The upgrade request to `endpoint` with `headers`, and the host and port it names.
+fn target(
+    endpoint: &str,
+    headers: &HeaderMap,
+) -> Result<
+    (
+        tokio_tungstenite::tungstenite::handshake::client::Request,
+        String,
+        u16,
+    ),
+    Connect,
+> {
+    let mut request = endpoint
+        .into_client_request()
+        .map_err(|e| Connect::InvalidEndpoint(format!("invalid endpoint {endpoint}: {e}")))?;
+    request.headers_mut().extend(headers.clone());
     let uri = request.uri();
     let host = uri
         .host()
@@ -333,13 +415,14 @@ pub async fn connect_from(
         } else {
             80
         });
-    let stream = bound_stream(local, &host, port)
-        .await
-        .map_err(|e| Connect::Refused(WsError::Io(e)))?;
-    client_async_tls_with_config(request, stream, Some(config), connector)
-        .await
-        .map(|(socket, _)| socket)
-        .map_err(Connect::Refused)
+    Ok((request, host, port))
+}
+
+/// The socket's limits: the receive limit, and the per-frame cap moved with it.
+fn config(max_message_size: usize) -> WebSocketConfig {
+    WebSocketConfig::default()
+        .max_message_size(Some(max_message_size))
+        .max_frame_size(Some(max_message_size))
 }
 
 /// A TCP connection to `host:port` from `local`, trying each address of `host` of `local`'s family.
@@ -349,13 +432,7 @@ async fn bound_stream(local: IpAddr, host: &str, port: u16) -> std::io::Result<T
         if remote.is_ipv4() != local.is_ipv4() {
             continue;
         }
-        let socket = if local.is_ipv4() {
-            tokio::net::TcpSocket::new_v4()?
-        } else {
-            tokio::net::TcpSocket::new_v6()?
-        };
-        socket.bind(std::net::SocketAddr::new(local, 0))?;
-        match socket.connect(remote).await {
+        match stream_to(remote, Some(local)).await {
             Ok(stream) => return Ok(stream),
             Err(e) => last = Some(e),
         }
@@ -366,6 +443,20 @@ async fn bound_stream(local: IpAddr, host: &str, port: u16) -> std::io::Result<T
             format!("no address of {host} in the family of {local}"),
         )
     }))
+}
+
+/// A TCP connection to `remote`, from `local` where it names one.
+async fn stream_to(remote: SocketAddr, local: Option<IpAddr>) -> std::io::Result<TcpStream> {
+    let Some(local) = local else {
+        return TcpStream::connect(remote).await;
+    };
+    let socket = if local.is_ipv4() {
+        tokio::net::TcpSocket::new_v4()?
+    } else {
+        tokio::net::TcpSocket::new_v6()?
+    };
+    socket.bind(SocketAddr::new(local, 0))?;
+    socket.connect(remote).await
 }
 
 async fn serve<S: Session, X: StopSignal>(
@@ -1246,6 +1337,126 @@ mod tests {
         assert!(
             failed < heartbeat + WITHIN,
             "once the bound passes, within {WITHIN:?} of it: {failed:?}"
+        );
+    }
+
+    /// A name whose first address accepts a TCP connection and never answers, as a frozen
+    /// process's kernel does, still connects: that address gives way to the next once its own
+    /// interval has passed, and the upgrade to the next carries the name, not the address
+    /// (ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended
+    /// clause 3).
+    /// Verifies: ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended
+    #[tokio::test]
+    async fn an_address_not_reached_within_its_interval_gives_way_to_the_next() {
+        // The kernel completes the TCP connection into the backlog; nothing ever answers it.
+        let silent = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addresses = vec![
+            silent.local_addr().expect("addr"),
+            listener.local_addr().expect("addr"),
+        ];
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let mut host = None;
+            // The callback's error type is tungstenite's, large as it is.
+            #[allow(clippy::result_large_err)]
+            let record = |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                          response| {
+                host = request
+                    .headers()
+                    .get("host")
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_string);
+                Ok(response)
+            };
+            let socket = tokio_tungstenite::accept_hdr_async(stream, record)
+                .await
+                .expect("handshake");
+            (socket, host)
+        });
+        let interval = Duration::from_millis(500);
+        let mut settings = settings_for(addresses[0], interval);
+        settings.endpoint = "ws://fleet.example:4320/v1/opamp".to_string();
+        let started = tokio::time::Instant::now();
+        let opened = tokio::time::timeout(
+            Duration::from_secs(10),
+            open_each(&settings, None, addresses, interval),
+        )
+        .await
+        .expect("the attempt ends within the test's bound");
+        let took = started.elapsed();
+        assert!(opened.is_ok(), "the second address opens: {opened:?}");
+        assert!(
+            took >= interval,
+            "the first address had its interval: {took:?}"
+        );
+        assert!(
+            took < interval + WITHIN,
+            "and the second was tried right after it: {took:?}"
+        );
+        let (_socket, host) = server.await.expect("the server task");
+        assert_eq!(
+            host.as_deref(),
+            Some("fleet.example:4320"),
+            "the name is the host"
+        );
+    }
+
+    /// An HTTP answer to the upgrade is the Server's verdict, not an address that was not
+    /// reached: a refusal on the first address ends the attempt as it is, and the next address is
+    /// not tried
+    /// (ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended
+    /// clause 3).
+    /// Verifies: ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended
+    #[tokio::test]
+    async fn an_http_answer_on_the_first_address_ends_the_attempt() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let refusing = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        // Never accepted: a connection to it would wait in its backlog, where `accept` finds it.
+        let next = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        next.set_nonblocking(true).expect("non-blocking");
+        let addresses = vec![
+            refusing.local_addr().expect("addr"),
+            next.local_addr().expect("addr"),
+        ];
+        let _refuse = tokio::spawn(async move {
+            let (mut stream, _) = refusing.accept().await.expect("accept");
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 1024];
+            while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                let read = stream.read(&mut buffer).await.expect("read");
+                assert!(read > 0, "the request ends before its headers do");
+                request.extend_from_slice(&buffer[..read]);
+            }
+            stream
+                .write_all(b"HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\n\r\n")
+                .await
+                .expect("answer");
+            std::future::pending::<()>().await;
+        });
+        let interval = Duration::from_secs(2);
+        let settings = settings_for(addresses[0], interval);
+        let opened = tokio::time::timeout(
+            Duration::from_secs(10),
+            open_each(&settings, None, addresses, interval),
+        )
+        .await
+        .expect("the attempt ends within the test's bound");
+        match opened {
+            Err(Connect::Refused(WsError::Http(response))) => {
+                assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            }
+            other => panic!("the refusal comes back as it is: {other:?}"),
+        }
+        assert_eq!(
+            next.accept().map(|_| ()).map_err(|e| e.kind()),
+            Err(std::io::ErrorKind::WouldBlock),
+            "the next address was not tried"
         );
     }
 

@@ -224,36 +224,31 @@ impl Connection {
         Ok(self.tls.rustls_config()?.map(ws::Connector::Rustls))
     }
 
+    fn ws_settings(&self) -> Result<ws::Settings, String> {
+        Ok(ws::Settings {
+            endpoint: self.endpoint.clone(),
+            headers: self.headers()?,
+            connector: self.connector()?,
+            max_message_size: self.max_message_size,
+            heartbeat: self.heartbeat,
+        })
+    }
+
     /// Opens one WebSocket to the endpoint with this connection's credential and TLS, for a caller
-    /// that drives the socket itself. The TCP connection, the TLS handshake and the upgrade get one
-    /// silence bound together, so an endpoint that accepts and never answers fails the call
+    /// that drives the socket itself. The name's resolution gets one silence bound, and each
+    /// address it resolves to, in turn, one for the TCP connection, the TLS handshake and the
+    /// upgrade together, so an endpoint that accepts and never answers fails the call
     /// (ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended
     /// clause 3).
     ///
     /// # Errors
-    /// Returns an error when the material cannot be used, the server cannot be reached, or nothing
-    /// arrived within the bound.
+    /// Returns an error when the material cannot be used, no address of the server can be
+    /// reached within its bound, or the server refused the upgrade.
     pub async fn connect_websocket(&self) -> Result<ws::Socket, String> {
         self.scheme()?;
-        let bound = ws::Silence::of(self.heartbeat).end_after;
-        tokio::time::timeout(
-            bound,
-            ws::connect(
-                &self.endpoint,
-                &self.headers()?,
-                self.connector()?,
-                self.max_message_size,
-            ),
-        )
-        .await
-        .map_err(|_| {
-            format!(
-                "cannot reach {}: nothing arrived within {} ms of opening the connection",
-                self.endpoint,
-                bound.as_millis()
-            )
-        })?
-        .map_err(|e| format!("cannot reach {}: {e}", self.endpoint))
+        ws::open(&self.ws_settings()?, None)
+            .await
+            .map_err(|e| format!("cannot reach {}: {e}", self.endpoint))
     }
 }
 
@@ -268,16 +263,7 @@ pub async fn run<S: Session, X: StopSignal>(
     stop: &mut X,
 ) -> Result<Ended, String> {
     match connection.scheme()? {
-        Scheme::WebSocket => {
-            let settings = ws::Settings {
-                endpoint: connection.endpoint.clone(),
-                headers: connection.headers()?,
-                connector: connection.connector()?,
-                max_message_size: connection.max_message_size,
-                heartbeat: connection.heartbeat,
-            };
-            ws::run(&settings, session, stop).await
-        }
+        Scheme::WebSocket => ws::run(&connection.ws_settings()?, session, stop).await,
         Scheme::Http => {
             let settings = http::Settings {
                 endpoint: connection.endpoint.clone(),
