@@ -181,7 +181,9 @@ The plan lands on `main` in three stages, each a release of its own.
    bounds: instances are upgraded together, no load is proven, and with a CA key as a file on the
    Server an instance runs alone. Its decisions are the eight drafts it numbers and accepts.
 2. **G-20: the fleet at scale, and an upgrade without a stop.** Tickets 07, 11, 14, 15, 34 to 41
-   done; no ticket of this plan is open for stage 2. Ticket 35 is closed as resolved by tickets
+   done; no ticket of this plan is open for stage 2. One ticket of the design revision blocks it:
+   docs/plan/revision-2026-11-06/09-a-key-rejected-in-a-restore-stays-refused-beyond-its-window.md.
+   Ticket 35 is closed as resolved by tickets
    36, 37 and 40: the load test at 450 connections a second and the failover on a host with every
    core busy hold exactly the Agents, and a row left held could not be reproduced. The failover
    counts the held rows of the Gateway's Agents and of the single-Agent hosts apart, and that
@@ -225,6 +227,11 @@ The plan lands on `main` in three stages, each a release of its own.
     deleted members, the sweep, the lease across a suspend, a commit whose answer is lost, one
     snapshot per read, a queued restart, the audit record's leases and the revocation list's
     version. They block G-20. The other findings are tickets in plan directories of their own.
+- **Open before stage 2 lands:**
+  - docs/plan/revision-2026-11-06/09-a-key-rejected-in-a-restore-stays-refused-beyond-its-window.md:
+    after a database restore, a request approved since the backup can be approved again once its
+    window closes and its host sends it again, which signs a certificate for its key that no
+    revocation names. It blocks G-20.
 - **Once stage 1 is on `main`,** this branch takes `main` up, and its drafts cite the numbers the
   stage-1 drafts got.
 - **Beside `feat/core-repack`.** That branch carries the `supervisor.*` label rule of the fleet
