@@ -124,6 +124,28 @@ once its tag exists.
   **What to do:** nothing. A virtual machine paused by its hypervisor, whose clocks do not count
   the pause, is not covered: such an instance serves on until its next renewal finds its lease
   lapsed, as before.
+- **An act whose answer is lost is taken up once it commits**
+  ([ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side](docs/adr/draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+  clauses 8 and 10). On PostgreSQL an act whose commit landed while its answer was lost, on a
+  dropped connection or the bound of a call, was taken as failed, and the instance that made it
+  passed its own notification over. Its memory kept what was there before until its listening
+  connection was made again, or, for a revocation, until its next renewal. A re-key left the
+  Agent's row under the new identity, connected and held by this instance, while the Agent was
+  created again under its old one; that row counted against `max_agents` until it was forgotten.
+  An instance now reads again what such an act names, at once and again when the act's own
+  notification arrives. A re-key reads the row back before it answers, and assigns the new
+  identity where the move landed. Where that read back fails, the move's own notification, the
+  Agent's next report or a write that finds the old row gone reads it back, again until it holds;
+  the Agent and its session are kept under the old identity meanwhile, a session that ended is
+  written disconnected on the new row once it holds, and the new identity is assigned at the next
+  report. Until then a report under the old identity of which the instance holds no record is
+  answered `Unavailable`.
+  **What to do:** nothing. An act answered `500` may have landed: read it back, or make it again;
+  setting a label or a floor and adding a revocation again changes nothing more. An extra row of
+  an Agent a re-key left, before this release or because the Agent reconnected to another
+  instance before it was assigned its new identity, reads as disconnected, at the latest once the
+  instance that re-keyed it has stopped and its lease lapsed, and is forgotten by the silence
+  bound, or at once through `DELETE /api/v1/agents/{uid}`.
 
 ## [0.8.0]
 

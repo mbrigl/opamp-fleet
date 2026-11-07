@@ -621,6 +621,7 @@ pub fn follow(
         if due.ledger {
             counted.ledger.fetch_add(1, Ordering::SeqCst);
         }
+        counted.reads.fetch_add(1, Ordering::SeqCst);
         Ok(())
     };
     tokio::spawn(take_up(hearing, read, RELOAD_RETRY_FIRST, RELOAD_RETRY_MAX));
@@ -704,9 +705,17 @@ impl PresenceBatches {
 #[derive(Clone, Default)]
 pub struct Following {
     ledger: Arc<AtomicU64>,
+    reads: Arc<AtomicU64>,
 }
 
 impl Following {
+    /// How many reads again for what was heard have finished, whatever they read: for watching the
+    /// take-up, as the tests do.
+    #[must_use]
+    pub fn reads(&self) -> u64 {
+        self.reads.load(Ordering::SeqCst)
+    }
+
     /// How many reads that read the ledger again for what was heard have finished, everything else
     /// they were due included.
     #[must_use]

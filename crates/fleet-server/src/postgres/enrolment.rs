@@ -296,7 +296,8 @@ impl EnrolmentStore for PgEnrolmentStore {
                             )
                             .await
                             .map_err(sql)?;
-                        notify(&***held.client(), ENROLMENT, &request_id).await?;
+                        // Announced by the call that commits it, below, so a commit whose answer
+                        // is lost is read again.
                         Found::Revoked
                     } else {
                         Found::Waiting(request)
@@ -372,7 +373,11 @@ impl EnrolmentStore for PgEnrolmentStore {
                 }
             },
         };
+        let id = id.to_string();
         self.database.run(move |_| async move {
+            if finish == "COMMIT" {
+                notify(&***held.client(), ENROLMENT, &id).await?;
+            }
             held.client().batch_execute(finish).await.map_err(sql)?;
             drop(held.let_go());
             answer
@@ -1012,6 +1017,65 @@ mod tests {
                 "round {round}: signed once"
             );
         }
+    }
+
+    /// A withdrawal of a request whose bootstrap certificate the list names announces itself in the
+    /// call that commits it: where that call loses its answer, the instance is handed the
+    /// notification, so it reads its queue again.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    #[test]
+    fn a_withdrawal_whose_commit_lost_its_answer_is_handed_on() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        // Made ready on the usual bound, so tests beside this one that slow the database fail
+        // no step but the one whose answer is lost.
+        let ready = test.shared();
+        let setting_up = PgEnrolmentStore::new(ready.clone());
+        setting_up.open_window(u64::MAX / 4).expect("open");
+        setting_up
+            .take(&request("a", "1"), 1_000, 8, 8)
+            .expect("take");
+        crate::revocation::LedgerStore::add_revocation(
+            &crate::postgres::ledger::PgLedgerStore::new(ready),
+            &crate::revocation::Revocation {
+                id: "r1".to_string(),
+                revoked: crate::revocation::Revoked::Certificate {
+                    authority: "bootstrap".to_string(),
+                    issuers: vec![bootstrap("1").issuer],
+                    serial: "1".to_string(),
+                },
+                revoked_ms: 1,
+            },
+            100,
+        )
+        .expect("revoke");
+        let database = test.shared_within(std::time::Duration::from_secs(3));
+        let store = PgEnrolmentStore::new(database.clone());
+        let (handed, handing) = std::sync::mpsc::channel();
+        database.listen(move |what| {
+            if let crate::postgres::notify::Heard::Notified(notice) = what {
+                let _ = handed.send(notice);
+            }
+        });
+        let gate = test.hold_commits("enrolment_requests", 0x28_0006);
+        let mut sign = || Ok((Decision::Approved("pem".to_string()), None));
+        let answered = store.approve(
+            "a",
+            &bootstrap("1"),
+            &mut sign,
+            &crate::enrolment::tests::kept(),
+        );
+        assert!(
+            answered.is_err(),
+            "the commit's answer is lost: {answered:?}"
+        );
+        assert_eq!(
+            handing.recv_timeout(std::time::Duration::from_secs(30)),
+            Ok(crate::postgres::notify::Notice::new(ENROLMENT, "a")),
+            "handed on at once"
+        );
+        gate.open();
     }
 
     /// A request whose bootstrap certificate another instance revoked is withdrawn when it is
