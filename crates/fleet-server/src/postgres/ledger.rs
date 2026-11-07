@@ -272,11 +272,8 @@ impl LedgerStore for PgLedgerStore {
     /// transaction: a Gateway mark committed before it is seen, and one that waits for it releases
     /// what it bound. A Host whose row is marked as a Gateway is bound none (ADR-0043 clause 16).
     /// The hold is one that conflicts with itself, so two binders of one Host wait for each other
-    /// rather than both holding a share of the row they then write. An `instance_uid` another
-    /// Host's array lists, as a release before the bindings' table bound it, is answered as that
-    /// Host's too, and a new binding goes into the Host's array as well; a Gateway's array binds
-    /// nothing. No such release runs on this schema, whose oldest Server is 0.8.0: the arrays are
-    /// kept for the removal rule of ADR-0044 clause 22.
+    /// rather than both holding a share of the row they then write. The Hosts' arrays are neither
+    /// read nor added to (see `unbind_in`).
     fn bind_seen(&self, instance_uid: &str, host: &str, row: &Host) -> Result<Bound, String> {
         let (instance_uid, host, row) = (instance_uid.to_string(), host.to_string(), row.clone());
         self.database.run(move |pool| async move {
@@ -293,19 +290,6 @@ impl LedgerStore for PgLedgerStore {
                 .get(0);
             if gateway {
                 return Ok(Bound::Gateway);
-            }
-            if let Some(row) = transaction
-                .query_opt(
-                    "SELECT host FROM hosts WHERE NOT gateway AND host <> $2 \
-                     AND $1 = ANY(instance_uids) \
-                     AND NOT EXISTS (SELECT 1 FROM host_bindings WHERE instance_uid = $1) \
-                     ORDER BY host LIMIT 1",
-                    &[&instance_uid, &host],
-                )
-                .await
-                .map_err(sql)?
-            {
-                return Ok(Bound::Taken(row.get(0)));
             }
             let inserted = transaction
                 .execute(
@@ -326,9 +310,6 @@ impl LedgerStore for PgLedgerStore {
             if holder != host {
                 // Refused: the transaction is dropped, so the row made for it is not kept either.
                 return Ok(Bound::Taken(holder));
-            }
-            if inserted > 0 {
-                append_to_array(&*transaction, &instance_uid, &host).await?;
             }
             if made || inserted > 0 {
                 notify(&*transaction, HOST, &host).await?;
@@ -378,9 +359,6 @@ impl LedgerStore for PgLedgerStore {
                 .await
                 .map_err(sql)?
                 .get(0);
-            if holder == host {
-                append_to_array(&*transaction, &new, &host).await?;
-            }
             notify(&*transaction, HOST, &host).await?;
             transaction.commit().await.map_err(sql)?;
             let bound = if holder == host {
@@ -491,9 +469,8 @@ impl LedgerStore for PgLedgerStore {
     }
 
     /// Writes each Host that changed since the last commit, and removes each one that is gone with
-    /// its bindings. The `instance_uids` a Host's row keeps are those this instance holds, the
-    /// array a release before the bindings' table read, kept for the removal rule of
-    /// ADR-0044 clause 22; the bindings are read from that table.
+    /// its bindings. A Host's array only loses the `instance_uid`s the Host no longer speaks for
+    /// (see `unbind_in`); the bindings are read from their table.
     fn save_hosts(&self, hosts: &BTreeMap<String, Host>) -> Result<(), String> {
         let mut written = self.written_hosts.lock().expect("hosts lock");
         let changed: Vec<(String, Host)> = hosts
@@ -532,10 +509,12 @@ impl LedgerStore for PgLedgerStore {
 }
 
 /// Removes the binding of `instance_uid` inside the caller's transaction: the Host it was bound to,
-/// `None` when it was bound to none. The Hosts' arrays, which a release before the bindings' table
-/// bound by and which are kept for the removal rule of
-/// ADR-0044 clause 22, lose it too, so neither finds it bound
-/// once it is released.
+/// `None` when it was bound to none. The Hosts' arrays lose it too. This release adds nothing to
+/// them and reads them no more, but a Server of 0.8.0 beside it reads an array for an
+/// `instance_uid` no binding holds, and must not find a released one held there. The release after
+/// this one stops this, and the release after that removes the arrays
+/// (ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision
+/// clause 22).
 async fn unbind_in(
     client: &impl GenericClient,
     instance_uid: &str,
@@ -560,8 +539,7 @@ async fn unbind_in(
 }
 
 /// Makes `host`'s row as `entry` holds it when the store has none, its array empty: what binds the
-/// Host is its rows in `host_bindings`, each listed in the array by the act that binds it. Answers
-/// whether it made the row.
+/// Host is its rows in `host_bindings`. Answers whether it made the row.
 async fn insert_host_row(
     client: &impl GenericClient,
     host: &str,
@@ -604,26 +582,6 @@ async fn write_seen(client: &impl GenericClient, host: &str, entry: &Host) -> Re
         .await
         .map_err(sql)?;
     Ok(moved > 0)
-}
-
-/// Lists `instance_uid` in `host`'s array inside the caller's transaction, as a release before the
-/// bindings' table bound by it, kept for the removal rule of
-/// ADR-0044 clause 22; a Host with no row yet takes it with the
-/// row its act writes.
-async fn append_to_array(
-    client: &impl GenericClient,
-    instance_uid: &str,
-    host: &str,
-) -> Result<(), String> {
-    client
-        .execute(
-            "UPDATE hosts SET instance_uids = array_append(instance_uids, $1) \
-             WHERE host = $2 AND NOT $1 = ANY(instance_uids)",
-            &[&instance_uid, &host],
-        )
-        .await
-        .map_err(sql)?;
-    Ok(())
 }
 
 /// Binds every `instance_uid` `entry` speaks for to `host`, in a database that holds no binding of
@@ -986,11 +944,14 @@ pub(crate) async fn write_host(
 ) -> Result<(), String> {
     let uids: Vec<&str> = entry.instance_uids.iter().map(String::as_str).collect();
     let subject = serde_json::to_value(&entry.subject).expect("subject values serialize");
+    // The array only loses what `entry` no longer speaks for: see `unbind_in`.
     client
         .execute(
             "INSERT INTO hosts (host, gateway, instance_uids, subject, approved_ms, \
-             valid_until_ms) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (host) DO UPDATE SET \
-             gateway = EXCLUDED.gateway, instance_uids = EXCLUDED.instance_uids, \
+             valid_until_ms) VALUES ($1, $2, '{}', $4, $5, $6) ON CONFLICT (host) DO UPDATE SET \
+             gateway = EXCLUDED.gateway, \
+             instance_uids = ARRAY(SELECT uid FROM unnest(hosts.instance_uids) AS uid \
+             WHERE uid = ANY($3::text[])), \
              subject = EXCLUDED.subject, approved_ms = EXCLUDED.approved_ms, \
              valid_until_ms = EXCLUDED.valid_until_ms",
             &[
@@ -1463,6 +1424,18 @@ mod tests {
         );
     }
 
+    /// Lists each Host's `instance_uid`s in its array, as a release before the bindings' table
+    /// wrote them: this release writes none there.
+    fn listed_in_the_arrays(test: &TestDatabase, hosts: &BTreeMap<String, Host>) {
+        for (name, entry) in hosts {
+            let uids: Vec<&str> = entry.instance_uids.iter().map(String::as_str).collect();
+            test.sql(&format!(
+                "UPDATE hosts SET instance_uids = '{{{}}}' WHERE host = '{name}'",
+                uids.join(",")
+            ));
+        }
+    }
+
     /// The bindings move out of the Hosts' arrays of a database a release before them wrote: each
     /// `instance_uid` an array holds is bound to its Host. An `instance_uid` two Hosts' arrays hold
     /// fails the migration, naming it, and changes nothing.
@@ -1493,6 +1466,7 @@ mod tests {
             PgLedgerStore::new(database.clone())
                 .save_hosts(&hosts)
                 .expect("save");
+            listed_in_the_arrays(&test, &hosts);
             // The database as the release before the bindings left it.
             test.sql(&format!(
                 "DROP TABLE host_bindings; DROP INDEX certificates_predecessor; \
@@ -2150,24 +2124,77 @@ mod tests {
         assert_eq!(store.load().expect("load").hosts, after);
     }
 
-    /// An `instance_uid` another Host's array lists, and no binding row holds, is answered as that
-    /// Host's, as the release before the bindings' table, which bound by the arrays alone, left
-    /// it.
-    /// Verifies: ADR-0041
+    /// This release adds nothing to the Hosts' `instance_uids` arrays and no longer reads them. It
+    /// still takes an `instance_uid` out of them once its binding is released, so a Server of
+    /// 0.8.0 beside it, which reads an array for an `instance_uid` no binding holds, never takes
+    /// a released binding for one that is held
+    /// (ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision
+    /// clause 22).
+    /// Verifies: ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision
     #[test]
-    fn an_instance_uid_only_an_array_lists_is_that_hosts() {
+    fn the_hosts_arrays_are_added_to_no_more_and_lose_what_is_released() {
         let Some(test) = TestDatabase::named() else {
             return;
         };
-        let store = PgLedgerStore::new(test.open());
+        let database = test.open();
+        let store = PgLedgerStore::new(database.clone());
+        let arrays = || test.rows("SELECT host, instance_uids::text FROM hosts ORDER BY host");
+        let row = |host: &str, uids: &str| vec![Some(host.to_string()), Some(uids.to_string())];
+        // As a Server of 0.8.0 leaves a Host: bound, and listed in its array.
         store
-            .save_hosts(&BTreeMap::from([("a".to_string(), host(&["01"], false))]))
+            .save_hosts(&BTreeMap::from([("a".to_string(), host(&[], false))]))
             .expect("save");
-        assert!(test
-            .rows("SELECT 1 FROM host_bindings WHERE instance_uid = '01'")
-            .is_empty());
-        assert_eq!(store.bind("01", "b"), Ok(Bound::Taken("a".to_string())));
-        assert_eq!(store.bind("01", "a"), Ok(Bound::Bound));
+        test.sql(
+            "INSERT INTO host_bindings VALUES ('01', 'a'), ('02', 'a'); \
+             UPDATE hosts SET instance_uids = '{01,02}' WHERE host = 'a'",
+        );
+
+        // Binding, a new Host, a rekey and a save add nothing.
+        assert_eq!(store.bind("03", "a"), Ok(Bound::Bound));
+        assert_eq!(
+            store.bind_seen("04", "b", &host(&[], false)),
+            Ok(Bound::Bound)
+        );
+        assert_eq!(
+            store.rebind("04", "05"),
+            Ok(Some(("b".to_string(), Bound::Bound)))
+        );
+        store
+            .save_hosts(&BTreeMap::from([
+                ("a".to_string(), host(&["01", "02", "03"], false)),
+                ("b".to_string(), host(&["05"], false)),
+                ("c".to_string(), host(&["06"], false)),
+            ]))
+            .expect("save");
+        assert_eq!(
+            arrays(),
+            [row("a", "{01,02}"), row("b", "{}"), row("c", "{}")],
+            "nothing added"
+        );
+
+        // A released binding leaves the array, by an unbind, a rekey, or a save without it.
+        assert_eq!(store.unbind("01"), Ok(Some("a".to_string())));
+        assert_eq!(arrays()[0], row("a", "{02}"), "unbound");
+        test.sql("UPDATE hosts SET instance_uids = '{01,02}' WHERE host = 'a'");
+        test.sql("INSERT INTO host_bindings VALUES ('01', 'a')");
+        assert_eq!(
+            store.rebind("01", "07"),
+            Ok(Some(("a".to_string(), Bound::Bound)))
+        );
+        assert_eq!(arrays()[0], row("a", "{02}"), "rekeyed");
+        store
+            .save_hosts(&BTreeMap::from([
+                ("a".to_string(), host(&["03", "07"], false)),
+                ("b".to_string(), host(&["05"], false)),
+                ("c".to_string(), host(&["06"], false)),
+            ]))
+            .expect("save");
+        assert_eq!(arrays()[0], row("a", "{}"), "saved without it");
+
+        // An `instance_uid` only an array lists, as no release since the bindings' table leaves
+        // one, is no longer read: it binds where it is seen.
+        test.sql("UPDATE hosts SET instance_uids = '{08}' WHERE host = 'a'");
+        assert_eq!(store.bind("08", "b"), Ok(Bound::Bound));
     }
 
     /// A Gateway's Host is bound none when the bindings leave the arrays: an `instance_uid` a
@@ -2181,12 +2208,14 @@ mod tests {
             return;
         };
         let database = test.open();
+        let hosts = BTreeMap::from([
+            ("g".to_string(), host(&["01"], true)),
+            ("h".to_string(), host(&["01"], false)),
+        ]);
         PgLedgerStore::new(database.clone())
-            .save_hosts(&BTreeMap::from([
-                ("g".to_string(), host(&["01"], true)),
-                ("h".to_string(), host(&["01"], false)),
-            ]))
+            .save_hosts(&hosts)
             .expect("save");
+        listed_in_the_arrays(&test, &hosts);
         test.sql(&format!(
             "DROP TABLE host_bindings; DROP INDEX certificates_predecessor; \
              DELETE FROM {SCHEMA_TABLE} WHERE version = 4"

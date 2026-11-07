@@ -142,6 +142,14 @@ pub struct Database {
     /// sessions ended at all.
     holds_lost: Arc<std::sync::atomic::AtomicUsize>,
     holds_ended: Arc<std::sync::atomic::AtomicUsize>,
+    /// The release this instance is, `MAJOR.MINOR.PATCH`: what its lease records and what the
+    /// schema is checked against ([`schema::server_version`], or what a test names).
+    release: &'static str,
+    /// Set once a lease taken after a lost one found a schema that needs a newer Server: the
+    /// refusal, naming both versions, and the instance stops
+    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// clause 16).
+    outdated: std::sync::Mutex<Option<String>>,
     /// Dropped last: the connections' tasks run on it.
     bridge: Bridge,
 }
@@ -176,8 +184,31 @@ impl Database {
         exclusive: Exclusive,
         schema: Option<&str>,
     ) -> Result<Arc<Self>, String> {
-        let database = Self::connect_as(config, schema, CALL_TIMEOUT, exclusive)?;
-        let applied = database.apply_schema(schema::MIGRATIONS)?;
+        Self::open_as(
+            config,
+            exclusive,
+            schema,
+            schema::server_version(),
+            schema::MIGRATIONS,
+        )
+    }
+
+    /// [`open_in`](Self::open_in), as a Server of `release` whose schema is `migrations`: what the
+    /// tests of two versions side by side start each version as.
+    ///
+    /// # Errors
+    /// As [`open`](Self::open).
+    #[doc(hidden)]
+    pub fn open_as(
+        config: &PostgresConfig,
+        exclusive: Exclusive,
+        schema: Option<&str>,
+        release: &'static str,
+        migrations: &'static [schema::Migration],
+    ) -> Result<Arc<Self>, String> {
+        let mut database = Self::connect_as(config, schema, CALL_TIMEOUT, exclusive)?;
+        database.release = release;
+        let applied = database.apply_schema(migrations)?;
         if !applied.versions.is_empty() {
             tracing::info!(
                 database = %database.name,
@@ -324,6 +355,8 @@ impl Database {
             sweep_wait: std::sync::atomic::AtomicU64::new(
                 u64::try_from(SWEEP_WAIT.as_millis()).unwrap_or(u64::MAX),
             ),
+            release: schema::server_version(),
+            outdated: std::sync::Mutex::new(None),
             bridge,
         })
     }
@@ -332,6 +365,30 @@ impl Database {
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// The release this instance is, as its lease records it.
+    #[must_use]
+    pub fn release(&self) -> &'static str {
+        self.release
+    }
+
+    /// The refusal of a schema that needs a newer Server, once a lease taken after a lost one
+    /// found it: the instance serves no more and stops.
+    #[must_use]
+    pub fn outdated(&self) -> Option<String> {
+        self.outdated
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Records that a lease found a schema that needs a newer Server.
+    pub(crate) fn set_outdated(&self, refusal: &str) {
+        *self
+            .outdated
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(refusal.to_string());
     }
 
     /// Whether this instance must be alone on the database, and why.
@@ -347,17 +404,21 @@ impl Database {
         self.lost.load(Ordering::SeqCst)
     }
 
-    /// Applies `migrations` in one transaction (ADR-0044 clause 22).
+    /// Applies `migrations` in one transaction (ADR-0044 clause 22), once the schema and the
+    /// releases of the live leases are checked under the migrations' lock
+    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// clause 16).
     ///
     /// # Errors
-    /// Returns an error naming the database when the schema needs a newer Server, when this
+    /// Returns an error naming the database when the schema needs a newer Server, when a live
+    /// lease is of a release older than the schema would need once migrated, when this
     /// instance shares the database and another Server holds it alone, or when a statement fails;
     /// the transaction is then rolled back and the database left as it was.
     pub(crate) fn apply_schema(
         &self,
         migrations: &'static [schema::Migration],
     ) -> Result<schema::Applied, String> {
-        let ours = schema::server_version();
+        let ours = self.release;
         let shared = matches!(self.exclusive, Exclusive::Shared);
         self.run(move |pool| async move {
             let mut client = client(&pool).await?;
@@ -693,7 +754,7 @@ const BLOB_LOCK_NAME: &str = "the blob store's lock (opamp-fleet-server-blobs)";
 pub(crate) const SWEEP_WAIT: Duration = Duration::from_secs(60);
 
 /// The lock a migration of the schema holds for its transaction.
-const MIGRATION_LOCK: &str =
+pub(crate) const MIGRATION_LOCK: &str =
     "hashtextextended('opamp-fleet-server-schema:' || coalesce(current_schema(), ''), 0)";
 
 /// Why every call is refused once the lock's connection has ended.
@@ -1976,6 +2037,233 @@ mod tests {
             test.rows("SELECT count(*) FROM fleet_schema"),
             [[Some(schema::MIGRATIONS.len().to_string())]],
             "migrated once the lock was free"
+        );
+    }
+
+    /// The schema of a Server two releases on: this release's migrations and one more, which
+    /// names 0.9.0 as the oldest Server that understands what it leaves. `sql` is that
+    /// migration's.
+    fn two_releases_on(sql: &'static str) -> &'static [schema::Migration] {
+        let mut migrations = schema::MIGRATIONS.to_vec();
+        migrations.push(schema::Migration {
+            version: i32::try_from(migrations.len() + 1).expect("few"),
+            oldest_server: "0.9.0",
+            sql,
+        });
+        Box::leak(migrations.into_boxed_slice())
+    }
+
+    /// A live lease as a Server of 0.8.0 takes one: no release written, so the column's default
+    /// names it.
+    fn lease_as_0_8_0_takes_it(test: &TestDatabase, must_be_alone: bool) {
+        test.sql(&format!(
+            "INSERT INTO leases \
+             (instance_id, host, must_be_alone, taken_at, renewed_at, expires_at) \
+             VALUES ('{}', 'host-old', {must_be_alone}, now(), now(), now() + interval '1 hour')",
+            lease::new_instance_id().expect("an id")
+        ));
+    }
+
+    /// An instance refuses its start, naming its own release and the older one and leaving the
+    /// schema as it was, while a live lease names a release older than the oldest Server the
+    /// schema names once its own migrations are applied, whether they are applied already or not.
+    /// A lease of 0.8.0 counts as 0.8.0 by the column's default; a lapsed lease, and the live one
+    /// of an instance that had to be alone and whose lock is free, count as none; with no such
+    /// lease the instance applies every migration it lacks
+    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// clause 16).
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    #[test]
+    fn an_instance_refuses_its_start_while_a_live_lease_is_older_than_the_schema_it_leaves() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let ahead = two_releases_on("CREATE TABLE fleet_test_ahead (n integer)");
+        let schema_rows =
+            || test.rows("SELECT version, oldest_server FROM fleet_schema ORDER BY version");
+        let open_ahead = || {
+            Database::open_as(
+                &test.config(),
+                Exclusive::Shared,
+                Some(&test.schema),
+                "0.10.0",
+                ahead,
+            )
+        };
+
+        // An instance of 0.8.4 holds a lease on this release's schema.
+        let older = Database::open_as(
+            &test.config(),
+            Exclusive::Shared,
+            Some(&test.schema),
+            "0.8.4",
+            schema::MIGRATIONS,
+        )
+        .expect("0.8.4 migrates");
+        let held = older
+            .take_lease("host-older", Duration::from_secs(3600))
+            .expect("a lease");
+        let before = schema_rows();
+        let err = open_ahead().map(|_| ()).expect_err("a live lease of 0.8.4");
+        for named in ["0.8.4", "0.9.0", "0.10.0", held.instance_id.as_str()] {
+            assert!(err.contains(named), "{named}: {err}");
+        }
+        assert!(
+            err.contains(&format!("database {}", test.config.dbname)),
+            "{err}"
+        );
+        assert_eq!(schema_rows(), before, "nothing migrated");
+
+        // Its lease released, the instance migrates.
+        older.release_lease(&held.instance_id).expect("released");
+        drop(open_ahead().expect("no live lease"));
+        assert_eq!(
+            schema_rows().len(),
+            ahead.len(),
+            "every migration it lacked"
+        );
+
+        // Applied already: a lease of 0.8.0, recorded by the default, still refuses it.
+        lease_as_0_8_0_takes_it(&test, false);
+        assert_eq!(
+            test.rows("SELECT release FROM leases"),
+            [[Some("0.8.0".to_string())]],
+            "a lease of 0.8.0 records 0.8.0"
+        );
+        let before = schema_rows();
+        let err = open_ahead().map(|_| ()).expect_err("a live lease of 0.8.0");
+        assert!(err.contains("of Server 0.8.0"), "{err}");
+        assert!(err.contains("needs Server 0.9.0"), "{err}");
+        assert_eq!(schema_rows(), before, "left as it was");
+
+        // A lapsed lease counts as none, and so does the live lease of an instance that had to
+        // be alone, its lock free: clause 2 takes it over.
+        test.sql("UPDATE leases SET expires_at = now() - interval '1 second'");
+        lease_as_0_8_0_takes_it(&test, true);
+        let opened = open_ahead().expect("only leases taken over");
+        let taken = opened
+            .take_lease("host-ahead", Duration::from_secs(3600))
+            .expect("a lease");
+        assert_eq!(taken.taken_over.len(), 2, "both taken over");
+        assert_eq!(
+            test.rows("SELECT release FROM leases"),
+            [[Some("0.10.0".to_string())]],
+            "a lease names the release of its instance"
+        );
+    }
+
+    /// An instance whose migrations name the oldest Server a live lease's release is, or older,
+    /// serves beside it: a newer patch release of 0.8 beside a lease of 0.8.0.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    #[test]
+    fn a_patch_release_serves_beside_a_lease_of_the_release_its_migrations_name() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        drop(test.shared());
+        lease_as_0_8_0_takes_it(&test, false);
+        let patch = Database::open_as(
+            &test.config(),
+            Exclusive::Shared,
+            Some(&test.schema),
+            "0.8.1",
+            schema::MIGRATIONS,
+        )
+        .expect("a patch release beside 0.8.0");
+        patch
+            .take_lease("host-patch", Duration::from_secs(3600))
+            .expect("serves");
+        let mut releases = test.rows("SELECT release FROM leases ORDER BY release");
+        releases.dedup();
+        assert_eq!(
+            releases,
+            [[Some("0.8.0".to_string())], [Some("0.8.1".to_string())]]
+        );
+    }
+
+    /// Of a lease taken while a Server two releases on migrates, the later sees the earlier: the
+    /// lease waits for the migrations' lock, then finds the schema that needs a newer Server and
+    /// is refused, naming both versions, taking nothing and keeping the refusal
+    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// clause 16). The other order, the lease first, is
+    /// `an_instance_refuses_its_start_while_a_live_lease_is_older_than_the_schema_it_leaves`.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    #[test]
+    fn a_lease_taken_while_a_newer_server_migrates_sees_its_schema_and_is_refused() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        const KEY: i64 = 4_711_000_161;
+        let ahead = two_releases_on(
+            "SELECT pg_advisory_lock_shared(4711000161); \
+             SELECT pg_advisory_unlock_shared(4711000161); \
+             CREATE TABLE fleet_test_ahead (n integer);",
+        );
+        let older = Database::open_as(
+            &test.config(),
+            Exclusive::Shared,
+            Some(&test.schema),
+            "0.8.0",
+            schema::MIGRATIONS,
+        )
+        .expect("0.8.0 migrates");
+        let waits_for_the_migrations = |waiting: usize| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
+            while test
+                .rows(&format!(
+                    "SELECT 1 FROM pg_locks, (SELECT {MIGRATION_LOCK} AS key) k \
+                     WHERE locktype = 'advisory' AND NOT granted \
+                     AND classid = ((k.key >> 32) & 4294967295)::oid \
+                     AND objid = (k.key & 4294967295)::oid"
+                ))
+                .len()
+                != waiting
+            {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "never {waiting} waiting for the migrations' lock"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        let gate = test.gate(KEY);
+        std::thread::scope(|scope| {
+            let migrating = scope.spawn(|| {
+                Database::open_as(
+                    &test.config(),
+                    Exclusive::Shared,
+                    Some(&test.schema),
+                    "0.10.0",
+                    ahead,
+                )
+                .map(|_| ())
+            });
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
+            while test.sessions("wait_event_type = 'Lock'") != 1 {
+                assert!(std::time::Instant::now() < deadline, "the migration waits");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let taking = scope.spawn(|| older.take_lease("host-older", Duration::from_secs(3600)));
+            waits_for_the_migrations(1);
+            gate.open();
+            migrating
+                .join()
+                .expect("migrating")
+                .expect("the newer Server migrates");
+            let err = taking
+                .join()
+                .expect("taking")
+                .map(|_| ())
+                .expect_err("refused");
+            for named in ["needs Server 0.9.0", "this Server is 0.8.0"] {
+                assert!(err.contains(named), "{named}: {err}");
+            }
+            assert_eq!(older.outdated(), Some(err), "the refusal is kept");
+        });
+        assert_eq!(
+            test.rows("SELECT count(*) FROM leases"),
+            [[Some("0".to_string())]],
+            "no lease taken"
         );
     }
 

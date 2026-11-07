@@ -38,6 +38,17 @@ once its tag exists.
   page by `limit` and the `Link` header. A script that sends a query parameter these routes do not
   name gets `400` now.
 
+- **Two consecutive releases serve one PostgreSQL database side by side**
+  ([ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side](docs/adr/draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+  clause 16). The instances of 0.8.0 keep serving beside those of this release, so a rolling
+  update may replace them one at a time. Migration 12 records the release of each lease; a lease
+  of 0.8.0 counts as 0.8.0. An instance refuses its start, naming both releases and changing
+  nothing, while a live lease is of a release older than the oldest Server the schema names once
+  its migrations are applied. An instance whose lease lapsed while a newer release migrated stops
+  when it takes its new lease and exits with a failure.
+  **What to do:** nothing for the step from 0.8.0. To skip a release, stop every instance of the
+  older one first.
+
 ### Fixed
 
 - **An approval records its certificate only with its decision**

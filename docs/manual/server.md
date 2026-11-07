@@ -873,14 +873,29 @@ it was issued if it is listed.
 
 ### Upgrading the instances
 
-Every instance on one database runs one release. To upgrade, stop every instance, then start each
-again on the new release; the first to start migrates the schema, and instances that start together
-wait for it. Stopping the old ones first is yours: an orchestrator's rolling update, which starts a
-new instance before it stops an old one, does not fit. Where the Server can tell, it refuses the
-wrong order: an instance that shares the database starts, and migrates, only once no Server holds
-the database alone, as a Server of 0.7.1 does while it runs. Two releases side by side, for an
-upgrade without a stop, are not built yet. Nor has any load been proven on several instances: how
-many Agents they carry and how long a failover of a large fleet takes are not yet measured.
+Two consecutive releases serve one database side by side, so an orchestrator's rolling update may
+replace the instances one at a time. The migrations of a release name the release before it as the
+oldest Server that understands the schema they leave, so the instances of that release that still
+run serve on it; what a release stops using goes with a later one. The first instance of the new
+release to start migrates the schema, and instances that start together wait for it.
+
+Each lease records the release of its instance; a lease of 0.8.0, which records none, counts as
+0.8.0. An instance stops at its start, naming both releases and changing nothing, while a live lease
+is of a release older than the oldest Server its migrations leave: stop the instances of that
+release first. So an upgrade that skips a release waits until every instance of the older one has
+stopped, and a Server alone may skip releases. To skip a release from 0.8.0, scale the instances of
+0.8.0 to zero before the newer release starts, so that none of them is restarted meanwhile. An
+instance of 0.8.0 checks the schema only at its own start and could take its lease just after the
+newer release checked the leases. Releases from the one after 0.8.0 on close that gap themselves.
+A lease that lapsed counts as none, and so does the lease of an instance that had to be alone and
+whose process is gone. An instance whose lease lapsed while a newer release migrated checks the
+schema as it takes its new lease, and on one that needs a newer Server it stops, naming both
+versions, and exits with a failure, as at a failed start.
+
+An instance that shares the database starts, and migrates, only once no Server holds the database
+alone, as a Server of 0.7.1 does while it runs. The upgrade from 0.7.1 therefore still stops every
+Server first. No load has been proven on several instances yet: how many Agents they carry and how
+long a failover of a large fleet takes are not yet measured.
 
 The first start of this release on a database migrates it to the schema of the paged lists: it
 adds columns to the Agents' table and builds three indexes over it, one of them over a digest of

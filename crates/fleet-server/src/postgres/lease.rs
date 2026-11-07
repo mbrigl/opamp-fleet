@@ -11,7 +11,7 @@
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
-use super::{client, sql, Database, Exclusive, EXCLUSIVE_LOCK};
+use super::{client, schema, sql, Database, Exclusive, EXCLUSIVE_LOCK, MIGRATION_LOCK};
 
 /// The lock a lease is taken under.
 const LEASES_LOCK: &str = "hashtextextended('opamp-fleet-server-leases:' || \
@@ -74,6 +74,11 @@ impl Database {
     /// alone; a live lease of one that had to be alone and whose lock is free it takes over too.
     /// A lapsed lease it takes over as well, removing it; [`Taken::taken_over`] names each.
     ///
+    /// The lease is taken under the migrations' lock and refused, naming both versions, on a
+    /// schema that needs a newer Server than this instance's release, which it records
+    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// clause 16). Such a refusal is kept: [`Database::outdated`] answers it from then on.
+    ///
     /// # Errors
     /// Returns an error naming the database when it cannot be reached, and the refusals above.
     pub fn take_lease(&self, host: &str, lapse: Duration) -> Result<Taken, String> {
@@ -95,14 +100,30 @@ impl Database {
         let exclusive = self.exclusive().clone();
         let files = self.archive_offered();
         let host = host.to_string();
+        let release = self.release();
         let sent = Instant::now();
-        let (id, taken_over) = self.run_within(bound, move |pool| async move {
+        let taking = self.run_within(bound, move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
             transaction
                 .execute(&format!("SELECT pg_advisory_xact_lock({LEASES_LOCK})"), &[])
                 .await
                 .map_err(sql)?;
+            // The schema again, under the migrations' lock: of this lease and a migration that
+            // runs at once, the one later sees the other, so no instance serves on a schema it
+            // does not understand
+            // (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+            // clause 16).
+            transaction
+                .execute(
+                    &format!("SELECT pg_advisory_xact_lock({MIGRATION_LOCK})"),
+                    &[],
+                )
+                .await
+                .map_err(sql)?;
+            if let Err(refusal) = schema::check(&*transaction, release).await {
+                return Ok(Err(refusal));
+            }
             let live = transaction
                 .query(
                     "SELECT instance_id::text, must_be_alone FROM leases WHERE expires_at > now()",
@@ -175,14 +196,15 @@ impl Database {
             transaction
                 .execute(
                     "INSERT INTO leases \
-                     (instance_id, host, must_be_alone, taken_at, renewed_at, expires_at) \
+                     (instance_id, host, must_be_alone, taken_at, renewed_at, expires_at, release) \
                      VALUES ($1::text::uuid, $2, $3, now(), now(), \
-                     now() + make_interval(secs => $4))",
+                     now() + make_interval(secs => $4), $5)",
                     &[
                         &instance_id,
                         &host,
                         &exclusive.alone(),
                         &lapse.as_secs_f64(),
+                        &release,
                     ],
                 )
                 .await
@@ -191,7 +213,12 @@ impl Database {
             for line in &written {
                 line.emit();
             }
-            Ok((instance_id, taken_over))
+            Ok(Ok((instance_id, taken_over)))
+        })?;
+        let (id, taken_over) = taking.map_err(|refusal| {
+            let refusal = format!("{}: {refusal}", self.name());
+            self.set_outdated(&refusal);
+            refusal
         })?;
         Ok(Taken {
             instance_id: id,

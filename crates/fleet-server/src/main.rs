@@ -994,6 +994,15 @@ async fn main() {
     if let Err(e) = &served {
         error!("{e}");
     }
+    // A new lease that found a schema a newer Server migrated stops the instance as a failed
+    // start does, naming both versions
+    // (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    // clause 16).
+    if let fleet_server::Records::Postgres(database) = &records {
+        if let Some(refusal) = database.outdated() {
+            eprintln!("{refusal}");
+        }
+    }
     // The graceful-shutdown flush (ADR-0043): every record's current timestamp and sequence
     // number, so the ordinary restart restores a fleet without gaps or false silence.
     state.flush_agents();
