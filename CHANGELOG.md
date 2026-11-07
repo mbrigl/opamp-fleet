@@ -65,6 +65,32 @@ once its tag exists.
 
 ### Fixed
 
+- **A revocation is made only with its certificate on the audit record**
+  ([ADR-draft-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again](docs/adr/draft-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again.md)
+  clauses 1 and 5). The `revocation.revoked` that names a revoked certificate followed the
+  revocation and was dropped when the audit record's queue filled, or a write failed, after the
+  revocation's `operator.act` was queued: the revocation took effect, and the record did not say
+  which certificate it revoked, so a restore of the database could not set it again. A
+  revocation now holds a place in the queue before it runs, is answered `503` and not made where
+  none is free, and writes its entry into that place once made. A bootstrap certificate's
+  revocation whose PKCS#12 file could not be removed, answered `500`, left no `revocation.revoked`
+  at all; it now leaves one. A revocation whose store answered an error, which may have made it
+  all the same, leaves one with the outcome `unknown`, which a restore sets again.
+  **What to do:** nothing; a `503` to a revocation is retried like any other.
+
+- **Every act a restore repeats is made only with its entry on the audit record**
+  ([ADR-draft-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again](docs/adr/draft-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again.md)
+  clauses 1 and 5). A Gateway mark set or cleared, a floor set, a request rejected and the
+  enrolment window closed by an operator wrote their entries after the act, and lost them when
+  the queue filled or a write failed in between, so a restore of the database did not repeat
+  them: a Host carried other hosts' Agents again, a floor came back lower, or a rejected request
+  came back pending. Each now holds a place in the queue before it runs, as a revocation does, is
+  answered `503` and not made where none is free, and writes its entry into that place once made.
+  `host.gateway` now names, as `gateway`, whether the mark is set. An act whose store answered an
+  error leaves its entry with the outcome `unknown`, which a restore repeats; for a Gateway mark,
+  it clears the mark whichever was asked for.
+  **What to do:** nothing; a `503` to one of these acts is retried like any other.
+
 - **An instance on PostgreSQL takes up its Agents without waiting one database round trip at a
   time**
   ([ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side](docs/adr/draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)

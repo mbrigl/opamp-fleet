@@ -2090,18 +2090,25 @@ async fn put_package_floor(
             );
         }
     };
+    // A floor is set only with its entry's place held, so a restore finds every floor raised;
+    // only one known to have failed gives the place back unwritten.
+    let Ok(place) = hold_place(&state) else {
+        return crate::transport::busy();
+    };
+    let floor_entry = |outcome: &str| {
+        crate::audit::Entry::new("package_floor.set", outcome)
+            .with("agent_type", agent_type.clone())
+            .with("version", spec.version.clone())
+    };
     match floors.put(&agent_type, &spec.version, signature.clone()) {
         Ok(signature_state) => {
             info!(
                 agent_type = %agent_type, version = %spec.version,
                 state = signature_state.as_str(), "package floor set"
             );
-            note(
-                &state,
-                crate::audit::Entry::new("package_floor.set", "set")
-                    .with("agent_type", agent_type.clone())
-                    .with("version", spec.version.clone())
-                    .with("signature_state", signature_state.as_str()),
+            fill_place(
+                place,
+                floor_entry("set").with("signature_state", signature_state.as_str()),
             );
             let floor = crate::floors::Floor {
                 version: spec.version,
@@ -2118,10 +2125,15 @@ async fn put_package_floor(
                 spec.version
             ),
         ),
-        Err(FloorError::Store(e)) => error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("the floor could not be persisted: {e}"),
-        ),
+        Err(FloorError::Store(e)) => {
+            // The store may hold it all the same, so the record names it, toward setting it
+            // again at a restore.
+            fill_place(place, floor_entry("unknown"));
+            error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("the floor could not be persisted: {e}"),
+            )
+        }
     }
 }
 
@@ -3319,11 +3331,16 @@ async fn close_enrolment_window(State(state): State<Arc<AppState>>) -> Response 
     let Some(enrolment) = state.enrolment() else {
         return enrolment_off();
     };
+    // The window is closed only with its entry's place held. It is closed here whatever the store
+    // answers, so the entry says `closed` either way.
+    let Ok(place) = hold_place(&state) else {
+        return crate::transport::busy();
+    };
     let expired = enrolment.pending().len();
     let saved = enrolment.close();
     info!("enrolment window closed");
-    note(
-        &state,
+    fill_place(
+        place,
         crate::audit::Entry::new("enrolment.window", "closed").with("expired_requests", expired),
     );
     match saved {
@@ -3462,22 +3479,32 @@ async fn reject_enrolment(
         return enrolment_off();
     };
     let gateway = through_gateway(&state, &id);
+    // A request is rejected only with its entry's place held, so a restore rejects it again; only
+    // a rejection known to have failed gives the place back unwritten.
+    let Ok(place) = hold_place(&state) else {
+        return crate::transport::busy();
+    };
+    let rejection = |outcome: &str| {
+        crate::audit::Entry::new("enrolment.rejected", outcome)
+            .with("id", id.clone())
+            .with("gateway", gateway.clone())
+    };
     match enrolment.reject(&id) {
         Ok(()) => {
             info!(request = %id, "enrolment request rejected");
-            note(
-                &state,
-                crate::audit::Entry::new("enrolment.rejected", "rejected")
-                    .with("id", id.clone())
-                    .with("gateway", gateway),
-            );
+            fill_place(place, rejection("rejected"));
             StatusCode::NO_CONTENT.into_response()
         }
         Err(crate::enrolment::DecisionError::Deciding) => deciding(&id),
-        Err(crate::enrolment::DecisionError::Store(e)) => error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("the rejection could not be persisted, and the request still waits: {e}"),
-        ),
+        Err(crate::enrolment::DecisionError::Store(e)) => {
+            // The store may hold it all the same, so the record names it, toward rejecting it
+            // again at a restore.
+            fill_place(place, rejection("unknown"));
+            error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("the rejection could not be persisted, and the request still waits: {e}"),
+            )
+        }
         Err(_) => error(
             StatusCode::NOT_FOUND,
             format!("no pending enrolment request {id:?}"),
@@ -3637,11 +3664,28 @@ impl RevocationView {
     }
 }
 
-/// Records what an operator act did, beside the act itself (ADR-0039 clause 1). The act was
-/// already recorded before it ran, so a detail that cannot be recorded changes nothing.
+/// Records what an operator act did, beside the act itself (ADR-0039 clause 1), and drops it where
+/// the record cannot take it by then: the act was recorded before it ran. What it still records
+/// grants trust, so a restore that misses it errs toward withdrawing. The acts a restore repeats,
+/// which withdraw trust, hold their entry's place before they run instead ([`hold_place`]).
 fn note(state: &AppState, entry: crate::audit::Entry) {
     if let Some(audit) = state.audit() {
         audit.refusal(entry);
+    }
+}
+
+/// Holds a place in the record for the entry of an act about to run, which says what the act did
+/// once it has (ADR-draft-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again
+/// clause 5): without one the act does not run, and is answered `503`. `None` where the Server
+/// keeps no record.
+fn hold_place(state: &AppState) -> Result<Option<crate::audit::Permit>, crate::audit::Unavailable> {
+    state.audit().map(|audit| audit.reserve()).transpose()
+}
+
+/// Writes what an act did into the place [`hold_place`] held for it.
+fn fill_place(place: Option<crate::audit::Permit>, entry: crate::audit::Entry) {
+    if let Some(place) = place {
+        place.write(entry);
     }
 }
 
@@ -3863,21 +3907,29 @@ async fn set_gateway(
     if state.revocations().is_none() {
         return revocation_off();
     }
+    // A mark is set or cleared only with its entry's place held, so a restore finds every mark
+    // cleared; only a change known to have failed gives the place back unwritten.
+    let Ok(place) = hold_place(&state) else {
+        return crate::transport::busy();
+    };
+    let mark = |outcome: &str| {
+        crate::audit::Entry::new("host.gateway", outcome)
+            .with("host", host.clone())
+            .with("gateway", request.gateway)
+    };
     match state.set_gateway(&host, request.gateway) {
         Ok(true) => {
             info!(%host, gateway = request.gateway, "gateway mark set");
-            note(
-                &state,
-                crate::audit::Entry::new(
-                    "host.gateway",
-                    if request.gateway { "set" } else { "cleared" },
-                )
-                .with("host", host),
-            );
+            fill_place(place, mark(if request.gateway { "set" } else { "cleared" }));
             StatusCode::NO_CONTENT.into_response()
         }
         Ok(false) => error(StatusCode::NOT_FOUND, format!("no host {host:?}")),
-        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e),
+        Err(e) => {
+            // The store may hold it all the same, so the record names what was asked; a restore
+            // clears the mark, whichever it was (toward withdrawing trust).
+            fill_place(place, mark("unknown"));
+            error(StatusCode::INTERNAL_SERVER_ERROR, e)
+        }
     }
 }
 
@@ -3996,6 +4048,11 @@ async fn revoke(
         Ok(request) => request,
         Err(e) => return error(StatusCode::BAD_REQUEST, e.to_string()),
     };
+    // A revocation is made only with its entry's place held, so the record names every certificate
+    // revoked; only one known to have failed gives the place back unwritten.
+    let Ok(place) = hold_place(&state) else {
+        return crate::transport::busy();
+    };
     let outcome =
         revocations.revoke_certificate(&request.certificate.authority, &request.certificate.serial);
     match outcome {
@@ -4015,6 +4072,14 @@ async fn revoke(
                 withdrawn = state
                     .enrolment()
                     .map_or(0, |enrolment| enrolment.withdraw_revoked(issuers, serial));
+            }
+            // Written before anything after the revocation can fail: the revocation is made.
+            fill_place(
+                place,
+                revocation_entry("revocation.revoked", "revoked", &entry)
+                    .with("withdrawn_requests", withdrawn),
+            );
+            if authority == "bootstrap" {
                 if let Some(Err(e)) = state.bootstrap().map(|b| b.forget_p12(serial)) {
                     // Said, not swallowed: lifting this revocation would make the file
                     // downloadable again.
@@ -4028,11 +4093,6 @@ async fn revoke(
                     );
                 }
             }
-            note(
-                &state,
-                revocation_entry("revocation.revoked", "revoked", &entry)
-                    .with("withdrawn_requests", withdrawn),
-            );
             (StatusCode::CREATED, Json(RevocationView::of(entry))).into_response()
         }
         Err(RevokeError::Invalid(e)) => error(StatusCode::BAD_REQUEST, e),
@@ -4043,7 +4103,18 @@ async fn revoke(
                 crate::revocation::MAX_REVOCATIONS
             ),
         ),
-        Err(RevokeError::Store(e)) => error(StatusCode::INTERNAL_SERVER_ERROR, e),
+        Err(RevokeError::Store {
+            error: e,
+            attempted,
+        }) => {
+            // The store may hold it all the same, so the record names it, toward revoking it
+            // again at a restore.
+            fill_place(
+                place,
+                revocation_entry("revocation.revoked", "unknown", &attempted),
+            );
+            error(StatusCode::INTERNAL_SERVER_ERROR, e)
+        }
     }
 }
 
@@ -4084,6 +4155,261 @@ async fn lift_revocation(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A register whose revocation is written and whose answer is then lost, as a commit whose
+    /// answer never arrived: the store holds what it was answered `Err` for.
+    #[derive(Default)]
+    struct LostAnswer(std::sync::Mutex<Vec<crate::revocation::Revocation>>);
+
+    impl crate::revocation::LedgerStore for LostAnswer {
+        fn load(&self) -> Result<crate::revocation::Ledger, String> {
+            Ok(crate::revocation::Ledger::default())
+        }
+        fn put_issued(&self, _: &crate::revocation::Issued) -> Result<(), String> {
+            Ok(())
+        }
+        fn remove_issued(&self, _: &crate::revocation::CertId, _: u64) -> Result<bool, String> {
+            Ok(false)
+        }
+        fn add_revocation(
+            &self,
+            entry: &crate::revocation::Revocation,
+            _: usize,
+        ) -> Result<crate::revocation::Added, String> {
+            self.0.lock().expect("lock").push(entry.clone());
+            Err("the connection closed before the commit was answered".into())
+        }
+        fn remove_revocation(&self, _: &str) -> Result<bool, String> {
+            Ok(false)
+        }
+        fn save_hosts(&self, _: &BTreeMap<String, crate::revocation::Host>) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    /// The entries recorded, places written into included.
+    #[derive(Default)]
+    struct Recorded(Arc<std::sync::Mutex<Vec<crate::audit::Entry>>>);
+
+    impl crate::audit::Audit for Recorded {
+        fn record(&self, entry: crate::audit::Entry) -> Result<(), crate::audit::Unavailable> {
+            self.0.lock().expect("lock").push(entry);
+            Ok(())
+        }
+
+        fn reserve(&self) -> Result<crate::audit::Permit, crate::audit::Unavailable> {
+            let entries = self.0.clone();
+            Ok(crate::audit::Permit::new(move |entry| {
+                entries.lock().expect("lock").push(entry);
+            }))
+        }
+    }
+
+    /// A revocation whose store answers an error may have been made all the same, so its place is
+    /// written with the outcome `unknown`, naming the certificate as a revocation that was made
+    /// would, and a restore sets it again.
+    /// Verifies: ADR-draft-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again
+    #[tokio::test]
+    async fn a_revocation_whose_store_answer_was_lost_is_recorded_as_unknown() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let revocations = crate::revocation::Revocations::open(
+            Box::new(LostAnswer::default()),
+            Arc::new(crate::clock::SystemClock),
+            vec![crate::revocation::Authority {
+                role: "client".to_string(),
+                subject: "0".repeat(64),
+                name: "client CA".to_string(),
+            }],
+        )
+        .expect("revocations");
+        let audit = Recorded::default();
+        let entries = audit.0.clone();
+        let state = AppState::new(dir.path().to_path_buf())
+            .expect("state")
+            .with_revocations(Some(Arc::new(revocations)))
+            .with_audit(Some(Arc::new(audit) as Arc<dyn crate::audit::Audit>));
+        let response = revoke(
+            State(Arc::new(state)),
+            SameOrigin,
+            Json(serde_json::json!({
+                "certificate": { "authority": "client", "serial": "0ABC123" }
+            })),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let entries = entries.lock().expect("lock");
+        let revoked: Vec<&crate::audit::Entry> = entries
+            .iter()
+            .filter(|entry| entry.event == "revocation.revoked")
+            .collect();
+        assert_eq!(revoked.len(), 1, "{entries:#?}");
+        assert_eq!(revoked[0].outcome, "unknown");
+        let field = |key: &str| revoked[0].fields.get(key).cloned();
+        let text = |value: &str| Some(crate::audit::Field::Text(value.to_string()));
+        assert_eq!(field("authority"), text("client"));
+        assert_eq!(field("serial"), text("abc123"));
+        assert!(field("id").is_some(), "{:?}", revoked[0]);
+    }
+
+    /// A register that knows the Gateway `h-gw`, and whose write of the hosts is answered `Err`
+    /// after it may have landed.
+    struct LostHosts;
+
+    impl crate::revocation::LedgerStore for LostHosts {
+        fn load(&self) -> Result<crate::revocation::Ledger, String> {
+            let mut ledger = crate::revocation::Ledger::default();
+            ledger.hosts.insert(
+                "h-gw".to_string(),
+                crate::revocation::Host {
+                    gateway: true,
+                    ..crate::revocation::Host::default()
+                },
+            );
+            Ok(ledger)
+        }
+        fn put_issued(&self, _: &crate::revocation::Issued) -> Result<(), String> {
+            Ok(())
+        }
+        fn remove_issued(&self, _: &crate::revocation::CertId, _: u64) -> Result<bool, String> {
+            Ok(false)
+        }
+        fn add_revocation(
+            &self,
+            _: &crate::revocation::Revocation,
+            _: usize,
+        ) -> Result<crate::revocation::Added, String> {
+            Err("not in this test".into())
+        }
+        fn remove_revocation(&self, _: &str) -> Result<bool, String> {
+            Ok(false)
+        }
+        fn save_hosts(&self, _: &BTreeMap<String, crate::revocation::Host>) -> Result<(), String> {
+            Err("the connection closed before the commit was answered".into())
+        }
+    }
+
+    /// Floors whose write is answered `Err` after it may have landed.
+    struct LostFloor;
+
+    impl crate::floors::FloorStore for LostFloor {
+        fn load(&self) -> Result<BTreeMap<String, crate::floors::Floor>, String> {
+            Ok(BTreeMap::new())
+        }
+        fn put(&self, _: &str, _: &crate::floors::Floor) -> Result<crate::floors::Put, String> {
+            Err("the connection closed before the commit was answered".into())
+        }
+        fn remove(&self, _: &str) -> Result<bool, String> {
+            Ok(false)
+        }
+    }
+
+    /// An enrolment store in memory whose writes, once `failing` is set, are answered `Err`.
+    #[derive(Clone, Default)]
+    struct Failing(
+        Arc<std::sync::Mutex<Option<crate::enrolment::Persisted>>>,
+        Arc<std::sync::atomic::AtomicBool>,
+    );
+
+    impl crate::enrolment::EnrolmentStore for Failing {
+        fn load(&self) -> Result<Option<crate::enrolment::Persisted>, String> {
+            Ok(self.0.lock().expect("lock").clone())
+        }
+        fn save(&self, persisted: &crate::enrolment::Persisted) -> Result<(), String> {
+            if self.1.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err("the connection closed before the commit was answered".into());
+            }
+            *self.0.lock().expect("lock") = Some(persisted.clone());
+            Ok(())
+        }
+    }
+
+    /// An act that withdraws trust whose store answers an error may have been made all the same,
+    /// so its place is written with the outcome `unknown` and what it was asked to do, and a
+    /// restore repeats it; a window closed here is closed whatever its store answers, so its entry
+    /// says `closed`.
+    /// Verifies: ADR-draft-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again
+    #[tokio::test]
+    async fn an_act_withdrawing_trust_whose_store_answered_an_error_is_recorded_all_the_same() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let revocations = crate::revocation::Revocations::open(
+            Box::new(LostHosts),
+            Arc::new(crate::clock::SystemClock),
+            Vec::new(),
+        )
+        .expect("revocations");
+        let floors = crate::floors::PackageFloors::open(Box::new(LostFloor)).expect("floors");
+        let store = Failing::default();
+        let enrolment = crate::enrolment::Enrolment::open_on(
+            Arc::new(crate::clock::SystemClock),
+            Box::new(store.clone()),
+        )
+        .expect("enrolment");
+        enrolment.open(600).expect("open the window");
+        enrolment.submit(
+            crate::enrolment::tests::request("a"),
+            crate::enrolment::tests::requester(),
+        );
+        let id = enrolment.pending()[0].id.clone();
+        store.1.store(true, std::sync::atomic::Ordering::SeqCst);
+        let audit = Recorded::default();
+        let entries = audit.0.clone();
+        let state = Arc::new(
+            AppState::new(dir.path().to_path_buf())
+                .expect("state")
+                .with_revocations(Some(Arc::new(revocations)))
+                .with_floors(Some(Arc::new(floors)))
+                .with_enrolment(Some(Arc::new(enrolment)))
+                .with_audit(Some(Arc::new(audit) as Arc<dyn crate::audit::Audit>)),
+        );
+
+        let cleared = set_gateway(
+            State(state.clone()),
+            SameOrigin,
+            Path("h-gw".to_string()),
+            Json(GatewayRequest { gateway: false }),
+        )
+        .await;
+        let floor = put_package_floor(
+            State(state.clone()),
+            Path("otelcol".to_string()),
+            Json(FloorSpec {
+                version: "2.0.0".to_string(),
+                signature: hex::encode([7u8; 64]),
+            }),
+        )
+        .await;
+        let rejected = reject_enrolment(State(state.clone()), SameOrigin, Path(id.clone())).await;
+        let closed = close_enrolment_window(State(state.clone())).await;
+        for response in [&cleared, &floor, &rejected, &closed] {
+            assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        }
+
+        let entries = entries.lock().expect("lock");
+        let only = |event: &str| -> crate::audit::Entry {
+            let named: Vec<&crate::audit::Entry> = entries
+                .iter()
+                .filter(|entry| entry.event == event)
+                .collect();
+            assert_eq!(named.len(), 1, "{event}: {entries:#?}");
+            named[0].clone()
+        };
+        let text = |value: &str| Some(crate::audit::Field::Text(value.to_string()));
+        let gateway = only("host.gateway");
+        assert_eq!(gateway.outcome, "unknown");
+        assert_eq!(gateway.fields.get("host").cloned(), text("h-gw"));
+        assert_eq!(
+            gateway.fields.get("gateway").cloned(),
+            Some(crate::audit::Field::Flag(false))
+        );
+        let floor = only("package_floor.set");
+        assert_eq!(floor.outcome, "unknown");
+        assert_eq!(floor.fields.get("agent_type").cloned(), text("otelcol"));
+        assert_eq!(floor.fields.get("version").cloned(), text("2.0.0"));
+        let rejected = only("enrolment.rejected");
+        assert_eq!(rejected.outcome, "unknown");
+        assert_eq!(rejected.fields.get("id").cloned(), text(&id));
+        assert_eq!(only("enrolment.window").outcome, "closed");
+    }
 
     /// A store refusal of the Package routes is answered with the status the REST contract names
     /// for it — among them the signature write onto an entry another instance replaced, a

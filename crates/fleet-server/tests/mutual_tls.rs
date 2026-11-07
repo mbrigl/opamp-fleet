@@ -2511,6 +2511,348 @@ async fn a_revocation_records_the_sessions_it_ended() {
     assert_eq!(ended[0]["serial"], serial.as_str());
 }
 
+/// An audit record that, once set to, takes an operator's act and refuses everything after it: the
+/// queue filled, or a write failed, between `operator.act` and the act's own entry.
+struct FullAfterTheAct {
+    inner: Arc<dyn fleet_server::audit::Audit>,
+    full: std::sync::atomic::AtomicBool,
+}
+
+impl fleet_server::audit::Audit for FullAfterTheAct {
+    fn record(
+        &self,
+        entry: fleet_server::audit::Entry,
+    ) -> Result<(), fleet_server::audit::Unavailable> {
+        if self.full.load(std::sync::atomic::Ordering::SeqCst) && entry.event != "operator.act" {
+            return Err(fleet_server::audit::Unavailable);
+        }
+        self.inner.record(entry)
+    }
+
+    fn reserve(&self) -> Result<fleet_server::audit::Permit, fleet_server::audit::Unavailable> {
+        if self.full.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(fleet_server::audit::Unavailable);
+        }
+        self.inner.reserve()
+    }
+}
+
+/// A revocation whose entry cannot be queued after its `operator.act` was is not made: it is
+/// answered `503`, the list stays as it was, and the session of the certificate goes on.
+/// Verifies: ADR-draft-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again
+#[tokio::test]
+async fn a_revocation_whose_entry_cannot_be_queued_is_not_made() {
+    let pki = Pki::new();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let audit = Arc::new(FullAfterTheAct {
+        inner: audit_in(dir.path()),
+        full: std::sync::atomic::AtomicBool::new(false),
+    });
+    let served = serve(
+        &pki,
+        Setup {
+            audit: Some(audit.clone()),
+            ..revocations_setup(&pki)
+        },
+    )
+    .await;
+    let (cert, key) = pki.issue("edge-01");
+    let mut socket = websocket(&served, &cert, &key, None)
+        .await
+        .expect("admitted");
+    exchange(&mut socket, &InstanceUid::default()).await;
+    let serial = cert_id(&cert).serial;
+
+    audit.full.store(true, std::sync::atomic::Ordering::SeqCst);
+    let revoked = client(&served.ca_pem, None)
+        .post(operator(&served, "/api/v1/revocations"))
+        .json(&serde_json::json!({
+            "certificate": { "authority": "client", "serial": serial }
+        }))
+        .send()
+        .await
+        .expect("revoke");
+    assert_eq!(revoked.status(), 503);
+    assert!(
+        served
+            .revocations
+            .as_ref()
+            .expect("armed")
+            .list()
+            .is_empty(),
+        "the revocation was made"
+    );
+    // The session was not ended: it still answers.
+    exchange(&mut socket, &InstanceUid::default()).await;
+}
+
+/// A revocation answered `201` leaves an entry naming its certificate by `authority` and `serial`,
+/// under the `id` the answer gives.
+/// Verifies: ADR-draft-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again
+#[tokio::test]
+async fn a_revocation_is_recorded_with_its_certificate() {
+    let pki = Pki::new();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let served = serve(
+        &pki,
+        Setup {
+            audit: Some(audit_in(dir.path())),
+            ..revocations_setup(&pki)
+        },
+    )
+    .await;
+    let revoked = client(&served.ca_pem, None)
+        .post(operator(&served, "/api/v1/revocations"))
+        .json(&serde_json::json!({
+            "certificate": { "authority": "client", "serial": "abc123" }
+        }))
+        .send()
+        .await
+        .expect("revoke");
+    assert_eq!(revoked.status(), 201);
+    let view: serde_json::Value = revoked.json().await.expect("json");
+    let all = entries(dir.path(), "revocation.revoked", 1).await;
+    let entry = named(&all, "revocation.revoked");
+    assert_eq!(entry.len(), 1, "{all:#?}");
+    assert_eq!(entry[0]["authority"], "client");
+    assert_eq!(entry[0]["serial"], "abc123");
+    assert_eq!(entry[0]["id"], view["id"]);
+}
+
+/// A Server with a marked Gateway `h-gw`, a floor `otelcol` 1.0.0, an open enrolment window and
+/// one request waiting in it, whose `id` it answers with: what the acts that withdraw trust act on.
+async fn trust_to_withdraw(
+    pki: &Pki,
+    bootstrap: &Pki,
+    audit: Arc<dyn fleet_server::audit::Audit>,
+) -> (Served, String) {
+    let served = serve(
+        pki,
+        Setup {
+            client_ca: Some(client_ca_of(pki)),
+            bootstrap: Some(bootstrap),
+            revocations: true,
+            floors: true,
+            audit: Some(audit),
+            ..Setup::default()
+        },
+    )
+    .await;
+    let operator_client = client(&served.ca_pem, None);
+    let (cert, key) = pki.issue_to_host_with("h-gw", &[]);
+    let gateway = client(&served.ca_pem, Some((&cert, &key)));
+    let _ = decode(
+        post(
+            &gateway,
+            &served.endpoint,
+            described(&InstanceUid::default(), &[]),
+        )
+        .await,
+    )
+    .await;
+    let marked = operator_client
+        .put(operator(&served, "/api/v1/hosts/h-gw/gateway"))
+        .json(&serde_json::json!({ "gateway": true }))
+        .send()
+        .await
+        .expect("mark");
+    assert_eq!(marked.status(), 204);
+    let floor = operator_client
+        .put(operator(&served, "/api/v1/package-floors/otelcol"))
+        .json(&serde_json::json!({ "version": "1.0.0", "signature": hex::encode([7u8; 64]) }))
+        .send()
+        .await
+        .expect("floor");
+    assert_eq!(floor.status(), 200);
+    let opened = operator_client
+        .post(operator(&served, "/api/v1/enrolment/window"))
+        .json(&serde_json::json!({ "open_for_secs": 600 }))
+        .send()
+        .await
+        .expect("open window");
+    assert_eq!(opened.status(), 200);
+    let (cert, key) = bootstrap.issue_bootstrap("bootstrap");
+    let enrolling = client(&served.ca_pem, Some((&cert, &key)));
+    let (csr, _key) = csr_for("edge-02");
+    decode(post(&enrolling, &served.endpoint, csr_report(csr)).await).await;
+    let id = served.state.enrolment().expect("enrolment").pending()[0]
+        .id
+        .clone();
+    (served, id)
+}
+
+/// The acts that withdraw trust, as an operator makes them: the Gateway mark of `h-gw` cleared,
+/// the floor of `otelcol` raised to 2.0.0, the request `id` rejected and the window closed.
+async fn withdraw_trust(served: &Served, id: &str) -> Vec<(&'static str, u16)> {
+    let operator_client = client(&served.ca_pem, None);
+    let cleared = operator_client
+        .put(operator(served, "/api/v1/hosts/h-gw/gateway"))
+        .json(&serde_json::json!({ "gateway": false }))
+        .send()
+        .await
+        .expect("clear");
+    let floor = operator_client
+        .put(operator(served, "/api/v1/package-floors/otelcol"))
+        .json(&serde_json::json!({ "version": "2.0.0", "signature": hex::encode([7u8; 64]) }))
+        .send()
+        .await
+        .expect("floor");
+    let rejected = operator_client
+        .post(operator(served, &format!("/api/v1/enrolments/{id}/reject")))
+        .send()
+        .await
+        .expect("reject");
+    let closed = operator_client
+        .delete(operator(served, "/api/v1/enrolment/window"))
+        .send()
+        .await
+        .expect("close");
+    vec![
+        ("host.gateway", cleared.status().as_u16()),
+        ("package_floor.set", floor.status().as_u16()),
+        ("enrolment.rejected", rejected.status().as_u16()),
+        ("enrolment.window", closed.status().as_u16()),
+    ]
+}
+
+/// An act that withdraws trust whose entry cannot be queued after its `operator.act` was is not
+/// made: it is answered `503`, and the mark, the floor, the request and the window stay as they
+/// were.
+/// Verifies: ADR-draft-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again
+#[tokio::test]
+async fn an_act_withdrawing_trust_whose_entry_cannot_be_queued_is_not_made() {
+    let pki = Pki::new();
+    let bootstrap = Pki::named("opamp-fleet-test-bootstrap-ca");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let audit = Arc::new(FullAfterTheAct {
+        inner: audit_in(dir.path()),
+        full: std::sync::atomic::AtomicBool::new(false),
+    });
+    let (served, id) = trust_to_withdraw(&pki, &bootstrap, audit.clone()).await;
+
+    audit.full.store(true, std::sync::atomic::Ordering::SeqCst);
+    for (act, status) in withdraw_trust(&served, &id).await {
+        assert_eq!(status, 503, "{act}");
+    }
+    assert!(
+        served
+            .revocations
+            .as_ref()
+            .expect("armed")
+            .is_gateway("h-gw"),
+        "the mark was cleared"
+    );
+    assert_eq!(
+        served.state.floors().expect("armed").all()["otelcol"].version,
+        "1.0.0",
+        "the floor was raised"
+    );
+    let enrolment = served.state.enrolment().expect("enrolment");
+    assert_eq!(enrolment.pending().len(), 1, "the request was rejected");
+    assert!(enrolment.is_open(), "the window was closed");
+}
+
+/// Each act that withdraws trust, answered as made, leaves the entry a restore repeats it by: the
+/// Gateway mark's names its host and that it is cleared, the floor's its Agent type and version,
+/// the rejection's the request's `id`, and the window's that it is closed.
+/// Verifies: ADR-draft-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again
+#[tokio::test]
+async fn an_act_withdrawing_trust_is_recorded_with_what_a_restore_needs() {
+    let pki = Pki::new();
+    let bootstrap = Pki::named("opamp-fleet-test-bootstrap-ca");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (served, id) = trust_to_withdraw(&pki, &bootstrap, audit_in(dir.path())).await;
+
+    let answered = withdraw_trust(&served, &id).await;
+    assert_eq!(
+        answered,
+        vec![
+            ("host.gateway", 204),
+            ("package_floor.set", 200),
+            ("enrolment.rejected", 204),
+            ("enrolment.window", 204),
+        ]
+    );
+    let all = entries(dir.path(), "enrolment.window", 2).await;
+    let last = |event: &str| -> serde_json::Value {
+        (*named(&all, event)
+            .last()
+            .unwrap_or_else(|| panic!("no {event}: {all:#?}")))
+        .clone()
+    };
+    let gateway = last("host.gateway");
+    assert_eq!(gateway["outcome"], "cleared");
+    assert_eq!(gateway["host"], "h-gw");
+    assert_eq!(gateway["gateway"], false);
+    let floor = last("package_floor.set");
+    assert_eq!(floor["outcome"], "set");
+    assert_eq!(floor["agent_type"], "otelcol");
+    assert_eq!(floor["version"], "2.0.0");
+    let rejected = last("enrolment.rejected");
+    assert_eq!(rejected["outcome"], "rejected");
+    assert_eq!(rejected["id"], id.as_str());
+    assert_eq!(last("enrolment.window")["outcome"], "closed");
+}
+
+/// A revocation of a bootstrap certificate whose PKCS#12 file cannot be removed is made, and
+/// answered `500` saying so; its entry is on the record all the same.
+/// Verifies: ADR-draft-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again
+#[cfg(unix)]
+#[tokio::test]
+async fn a_revocation_whose_file_stays_is_recorded_all_the_same() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let pki = Pki::new();
+    let bootstrap = Pki::named("acme bootstrap CA");
+    let audit_dir = tempfile::tempdir().expect("tempdir");
+    let served = serve(
+        &pki,
+        Setup {
+            client_ca: Some(client_ca_of(&pki)),
+            bootstrap: Some(&bootstrap),
+            issue_bootstrap: true,
+            revocations: true,
+            audit: Some(audit_in(audit_dir.path())),
+            ..Setup::default()
+        },
+    )
+    .await;
+    let operator_client = client(&served.ca_pem, None);
+    let issued: serde_json::Value = operator_client
+        .post(operator(&served, "/api/v1/bootstrap-certificates"))
+        .json(&serde_json::json!({
+            "subject": customer_and_site(),
+            "password": "a password of the operator"
+        }))
+        .send()
+        .await
+        .expect("issue")
+        .json()
+        .await
+        .expect("json");
+    let serial = issued["serial"].as_str().expect("serial").to_string();
+    let files = served.config_dir.join("fleet-configs/bootstrap");
+    std::fs::set_permissions(&files, std::fs::Permissions::from_mode(0o555)).expect("chmod");
+    let revoked = operator_client
+        .post(operator(&served, "/api/v1/revocations"))
+        .json(&serde_json::json!({
+            "certificate": { "authority": "bootstrap", "serial": serial }
+        }))
+        .send()
+        .await
+        .expect("revoke");
+    std::fs::set_permissions(&files, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    assert_eq!(revoked.status(), 500);
+    assert_eq!(
+        served.revocations.as_ref().expect("armed").list().len(),
+        1,
+        "the revocation was made"
+    );
+    let all = entries(audit_dir.path(), "revocation.revoked", 1).await;
+    let entry = named(&all, "revocation.revoked");
+    assert_eq!(entry[0]["authority"], "bootstrap");
+    assert_eq!(entry[0]["serial"], serial.as_str());
+}
+
 /// An operator's act is recorded with the operator's name before it runs and with its outcome
 /// after, and a refused sign-in is recorded too.
 /// Verifies: ADR-0039
@@ -4329,6 +4671,10 @@ impl fleet_server::audit::Audit for Refusable {
             return Err(fleet_server::audit::Unavailable);
         }
         self.inner.record(entry)
+    }
+
+    fn reserve(&self) -> Result<fleet_server::audit::Permit, fleet_server::audit::Unavailable> {
+        self.inner.reserve()
     }
 }
 

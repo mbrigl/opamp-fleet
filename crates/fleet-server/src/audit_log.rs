@@ -32,11 +32,18 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use tracing::{error, info};
 
-use crate::audit::{Audit, Entry, Field, Unavailable};
+use crate::audit::{Audit, Entry, Field, Permit, Unavailable};
 use crate::fleet::Clock;
 
-/// The entries waiting for the writer at most (ADR-0039 clause 5).
+/// The entries waiting for the writer at most, the places held for entries counted among them
+/// (ADR-0039 clause 5).
 pub const CHANNEL_CAPACITY: usize = 10_000;
+
+/// The room the channel keeps beyond [`CHANNEL_CAPACITY`] for the writer's requests, a drain or
+/// the shutdown's close: they find room even while entries and places fill the 10 000, and never
+/// make the send of a place held fail. A request queued below the 10 000 takes one of them until
+/// the writer takes it.
+const CONTROL_ROOM: usize = 64;
 
 /// The refusals of one event from one peer written per second before the rest are counted.
 pub const REFUSALS_PER_SECOND: u32 = 10;
@@ -193,6 +200,15 @@ pub struct AuditLog {
     held: Option<(crate::instance::Held, Option<crate::instance::Proof>)>,
     /// Set once the shutdown closed the chain: nothing is recorded after it.
     closed: Arc<AtomicBool>,
+    /// The messages in the channel and the places held for entries not yet written: entries and
+    /// places are given one while the count is below [`CHANNEL_CAPACITY`], requests of the writer
+    /// while it is below [`CONTROL_ROOM`] more, so a message given its place is never refused by
+    /// the channel.
+    pending: Arc<AtomicUsize>,
+    /// The places held and not yet written or given back, which the shutdown's close waits for.
+    places: Arc<AtomicUsize>,
+    /// Set once the shutdown's close began: no place is given after it.
+    closing: Arc<AtomicBool>,
 }
 
 /// Which refusals are aggregated together: the event and the peer, an IPv6 peer by its /64.
@@ -341,7 +357,8 @@ impl AuditLog {
                     .then(|| tail.last_whole.unwrap_or_else(|| GENESIS.to_string())),
             ),
         };
-        let (tx, rx) = std::sync::mpsc::sync_channel(CHANNEL_CAPACITY);
+        let (tx, rx) = std::sync::mpsc::sync_channel(CHANNEL_CAPACITY + CONTROL_ROOM);
+        let pending = Arc::new(AtomicUsize::new(0));
         let failing = Arc::new(AtomicBool::new(false));
         let unrecorded = Arc::new(AtomicU64::new(0));
         let refusals = Arc::new(Mutex::new(Refusals::default()));
@@ -362,6 +379,7 @@ impl AuditLog {
             batch_start_prev: String::new(),
             per_lease,
             closed: closed.clone(),
+            pending: pending.clone(),
             chain: match chain {
                 Chain::Lease(id) => Some(id),
                 Chain::One | Chain::Unleased => None,
@@ -391,6 +409,9 @@ impl AuditLog {
             queued_refusals,
             held,
             closed,
+            pending,
+            places: Arc::new(AtomicUsize::new(0)),
+            closing: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -408,11 +429,25 @@ impl AuditLog {
     /// clause 3). A closing write whose answer was lost counts as written when the chain holds its
     /// closing entry. Once the chain is closed every decision is refused and counted
     /// ([`unrecorded_count`](Self::unrecorded_count)).
-    /// `false` when something queued was not written or the chain could not be closed: its lease
-    /// is then left to lapse, so the instance that takes it over closes the chain.
+    /// From its start no place is given ([`Audit::reserve`]), and it waits within `timeout` for
+    /// the places held to be written or given back.
+    /// `false` when something queued was not written, a place was still held when `timeout` ran
+    /// out, or the chain could not be closed: its lease is then left to lapse, so the instance that
+    /// takes it over closes the chain.
     #[must_use]
     pub fn close(&self, timeout: Duration) -> bool {
-        self.ask(timeout, Message::Close)
+        let deadline = std::time::Instant::now() + timeout;
+        self.closing.store(true, Ordering::SeqCst);
+        while self.places.load(Ordering::SeqCst) > 0 {
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        self.ask(
+            deadline.saturating_duration_since(std::time::Instant::now()),
+            Message::Close,
+        )
     }
 
     /// Sends the writer the request `message` makes of an answer channel, and waits for its answer
@@ -424,19 +459,16 @@ impl AuditLog {
     ) -> bool {
         let deadline = std::time::Instant::now() + timeout;
         let (done, written) = std::sync::mpsc::sync_channel(1);
-        let mut message = message(done);
-        loop {
-            match self.tx.try_send(message) {
-                Ok(()) => break,
-                Err(std::sync::mpsc::TrySendError::Full(back)) => {
-                    if std::time::Instant::now() >= deadline {
-                        return false;
-                    }
-                    message = back;
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => return false,
+        while !place(&self.pending, CHANNEL_CAPACITY + CONTROL_ROOM) {
+            if std::time::Instant::now() >= deadline {
+                return false;
             }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // Given its place, the request finds room; only a writer that is gone refuses it.
+        if self.tx.try_send(message(done)).is_err() {
+            self.pending.fetch_sub(1, Ordering::SeqCst);
+            return false;
         }
         written
             .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
@@ -457,13 +489,18 @@ impl AuditLog {
 
     /// The lease a decision recorded now is taken under.
     fn under(&self) -> Under {
-        let Some((held, proof)) = &self.held else {
-            return Under::Unmarked;
-        };
-        if proof.as_ref().is_some_and(|proof| !proof.holds()) {
-            return Under::NoLease;
+        under(self.held.as_ref())
+    }
+
+    /// Queues `entry`, decided under `under`, in a place of the channel's entries; `Err` when none
+    /// is free.
+    fn queue(&self, entry: Entry, under: Under) -> Result<(), ()> {
+        if !place(&self.pending, CHANNEL_CAPACITY) {
+            return Err(());
         }
-        held.borrow().clone().map_or(Under::NoLease, Under::Lease)
+        self.tx.try_send(Message::Entry(entry, under)).map_err(|_| {
+            self.pending.fetch_sub(1, Ordering::SeqCst);
+        })
     }
 
     /// Counts `count` refusals of `event` past their second's allowance, as a refusal that passed
@@ -488,10 +525,77 @@ impl AuditLog {
     /// what a decision that passed them just before the shutdown's close does.
     #[cfg(test)]
     pub(crate) fn queue_past_the_checks(&self, entry: Entry) {
-        self.tx
-            .try_send(Message::Entry(entry, Under::NoLease))
-            .map_err(|_| ())
+        self.queue(entry, Under::NoLease)
             .expect("room in the channel");
+    }
+
+    /// The messages in the channel and the places held, as the writer has not yet taken them.
+    #[cfg(test)]
+    pub(crate) fn pending(&self) -> usize {
+        self.pending.load(Ordering::SeqCst)
+    }
+}
+
+/// Takes a place of `pending` below `bound`; `false` when every one is taken.
+fn place(pending: &AtomicUsize, bound: usize) -> bool {
+    pending
+        .try_update(Ordering::SeqCst, Ordering::SeqCst, |taken| {
+            (taken < bound).then_some(taken + 1)
+        })
+        .is_ok()
+}
+
+/// The lease a decision taken now is taken under, by what `held` names and its proof.
+fn under(held: Option<&(crate::instance::Held, Option<crate::instance::Proof>)>) -> Under {
+    let Some((held, proof)) = held else {
+        return Under::Unmarked;
+    };
+    if proof.as_ref().is_some_and(|proof| !proof.holds()) {
+        return Under::NoLease;
+    }
+    held.borrow().clone().map_or(Under::NoLease, Under::Lease)
+}
+
+/// A place held in the channel for the entry of one act ([`Audit::reserve`]): given back when it
+/// is dropped unwritten, or when the writer is gone.
+struct Place {
+    tx: std::sync::mpsc::SyncSender<Message>,
+    pending: Arc<AtomicUsize>,
+    places: Arc<AtomicUsize>,
+    queued_refusals: Arc<AtomicUsize>,
+    unrecorded: Arc<AtomicU64>,
+    held: Option<(crate::instance::Held, Option<crate::instance::Proof>)>,
+    /// Set once the entry is in the channel, whose place the writer gives back when it takes it.
+    sent: bool,
+}
+
+impl Place {
+    /// Queues `entry` into the place, decided under the lease held now, as the act it records
+    /// has just been taken.
+    fn write(mut self, entry: Entry) {
+        let refusal = entry.is_refusal();
+        if refusal {
+            // The writer counts every refusal it takes out of the refusals' share.
+            self.queued_refusals.fetch_add(1, Ordering::SeqCst);
+        }
+        let under = under(self.held.as_ref());
+        if self.tx.try_send(Message::Entry(entry, under)).is_ok() {
+            self.sent = true;
+            return;
+        }
+        if refusal {
+            self.queued_refusals.fetch_sub(1, Ordering::SeqCst);
+        }
+        self.unrecorded.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+impl Drop for Place {
+    fn drop(&mut self) {
+        self.places.fetch_sub(1, Ordering::SeqCst);
+        if !self.sent {
+            self.pending.fetch_sub(1, Ordering::SeqCst);
+        }
     }
 }
 
@@ -507,10 +611,7 @@ impl Audit for AuditLog {
         }
         let under = self.under();
         if !entry.is_refusal() {
-            return self
-                .tx
-                .try_send(Message::Entry(entry, under))
-                .map_err(|_| self.unrecorded());
+            return self.queue(entry, under).map_err(|()| self.unrecorded());
         }
         let second = self.clock.now_ms() / 1000;
         let counted = self
@@ -527,10 +628,36 @@ impl Audit for AuditLog {
             self.queued_refusals.fetch_sub(1, Ordering::SeqCst);
             return Err(self.unrecorded());
         }
-        self.tx.try_send(Message::Entry(entry, under)).map_err(|_| {
+        self.queue(entry, under).map_err(|()| {
             self.queued_refusals.fetch_sub(1, Ordering::SeqCst);
             self.unrecorded()
         })
+    }
+
+    /// Holds a place among the channel's entries for the entry of an act. Answers
+    /// [`Unavailable`], and counts the act as unrecorded, where [`record`](Audit::record) would,
+    /// and once the shutdown's close began.
+    fn reserve(&self) -> Result<Permit, Unavailable> {
+        if self.failing.load(Ordering::SeqCst) || self.closed.load(Ordering::SeqCst) {
+            return Err(self.unrecorded());
+        }
+        // Counted before `closing` is read, as the close sets `closing` before it reads the count,
+        // so a place is either refused or waited for.
+        self.places.fetch_add(1, Ordering::SeqCst);
+        if self.closing.load(Ordering::SeqCst) || !place(&self.pending, CHANNEL_CAPACITY) {
+            self.places.fetch_sub(1, Ordering::SeqCst);
+            return Err(self.unrecorded());
+        }
+        let place = Place {
+            tx: self.tx.clone(),
+            pending: self.pending.clone(),
+            places: self.places.clone(),
+            queued_refusals: self.queued_refusals.clone(),
+            unrecorded: self.unrecorded.clone(),
+            held: self.held.clone(),
+            sent: false,
+        };
+        Ok(Permit::new(move |entry| place.write(entry)))
     }
 }
 
@@ -554,6 +681,7 @@ pub fn render(seq: u64, time_ms: u64, entry: &Entry, prev: &str) -> String {
             Field::Text(text) => Value::from(text.clone()),
             Field::Unsigned(n) => Value::from(*n),
             Field::Signed(n) => Value::from(*n),
+            Field::Flag(flag) => Value::from(*flag),
         };
         line.insert(key.clone(), value);
     }
@@ -590,6 +718,8 @@ struct Writer {
     per_lease: bool,
     /// Set once the shutdown closed the chain: what comes after it is counted, not written.
     closed: Arc<AtomicBool>,
+    /// What [`AuditLog`] counts in the channel, which each message taken out of it gives back.
+    pending: Arc<AtomicUsize>,
     /// The chain the batch's lines are given their place in, where the store keeps one per lease.
     chain: Option<String>,
 }
@@ -672,6 +802,8 @@ impl Writer {
     }
 
     fn handle(&mut self, message: Message) {
+        // Taken out of the channel, the message gives its place back.
+        self.pending.fetch_sub(1, Ordering::SeqCst);
         match message {
             Message::Entry(entry, under) => self.take(entry, under),
             Message::Drain(done) => {
@@ -1914,6 +2046,102 @@ mod tests {
         assert!(
             lines.iter().any(|l| l.contains("\"unrecorded_before\":2")),
             "the admission that found no room and the refusal are counted"
+        );
+    }
+
+    /// A place held for an act's entry counts against the channel from the moment it is held: the
+    /// entries queued after it find one place less, a place dropped unwritten gives it back, one
+    /// written is queued though the channel is full by then, a place asked for while the channel
+    /// is full is refused and counted, a drain waiting in the channel leaves the place held its
+    /// room, and once the writer has taken everything no place is left counted.
+    /// Verifies: ADR-draft-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again
+    #[test]
+    fn a_held_place_counts_against_the_channel_until_it_is_written_or_given_back() {
+        let memory = Memory::default();
+        let audit =
+            AuditLog::start(Box::new(memory.clone()), Limits::default(), clock()).expect("start");
+        let kept = audit.reserve().expect("a place");
+        let given_back = audit.reserve().expect("a place");
+        // The writer waits on the store while the test holds it, and the channel fills.
+        let held = memory.0.lock().expect("lock");
+        let mut queued = 0;
+        while audit
+            .record(Entry::new("admission.admitted", "admitted"))
+            .is_ok()
+        {
+            queued += 1;
+            assert!(queued <= CHANNEL_CAPACITY, "the channel never filled");
+        }
+        assert_eq!(audit.pending(), CHANNEL_CAPACITY, "two places held");
+        assert!(
+            audit.reserve().is_err(),
+            "a place while the channel is full"
+        );
+        drop(given_back);
+        assert_eq!(audit.pending(), CHANNEL_CAPACITY - 1, "given back");
+        audit
+            .record(Entry::new("admission.admitted", "admitted"))
+            .expect("the place given back is taken");
+        assert!(audit
+            .record(Entry::new("admission.admitted", "admitted"))
+            .is_err());
+        std::thread::scope(|scope| {
+            // A drain waiting in the channel takes the room beyond the entries, not the place held.
+            let drained = scope.spawn(|| audit.drain(Duration::from_secs(10)));
+            until("the drain was not queued", || {
+                audit.pending() == CHANNEL_CAPACITY + 1
+            });
+            kept.write(Entry::new("revocation.revoked", "revoked").with("serial", "abc123"));
+            drop(held);
+            assert!(drained.join().expect("drain"), "written");
+        });
+        written(&audit);
+        let lines = memory.lines();
+        assert!(
+            lines.iter().any(|l| l.contains("\"revocation.revoked\"")),
+            "the held place was written"
+        );
+        assert_eq!(audit.pending(), 0, "every place given back");
+        audit
+            .record(Entry::new("admission.admitted", "admitted"))
+            .expect("room again");
+        written(&audit);
+        let told: Vec<String> = memory
+            .lines()
+            .into_iter()
+            .filter(|l| l.contains("unrecorded_before"))
+            .collect();
+        assert!(
+            told.len() == 1 && told[0].contains("\"unrecorded_before\":3"),
+            "the place refused and the two admissions refused are counted: {told:?}"
+        );
+    }
+
+    /// The shutdown's close gives no place once it began, fails while a place is still held when
+    /// its bound runs out, and otherwise waits for the place to be written before it closes.
+    /// Verifies: ADR-draft-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again
+    #[test]
+    fn the_close_waits_for_the_places_held_and_gives_none_once_it_began() {
+        let memory = Memory::default();
+        let audit =
+            AuditLog::start(Box::new(memory.clone()), Limits::default(), clock()).expect("start");
+        let kept = audit.reserve().expect("a place");
+        assert!(
+            !audit.close(Duration::from_millis(50)),
+            "closed with a place held"
+        );
+        assert!(audit.reserve().is_err(), "a place once the close began");
+        std::thread::scope(|scope| {
+            let closing = scope.spawn(|| audit.close(Duration::from_secs(10)));
+            kept.write(Entry::new("revocation.revoked", "revoked").with("serial", "abc123"));
+            assert!(closing.join().expect("close"), "closed");
+        });
+        assert!(
+            memory
+                .lines()
+                .iter()
+                .any(|l| l.contains("\"revocation.revoked\"")),
+            "the place was written before the close ended"
         );
     }
 

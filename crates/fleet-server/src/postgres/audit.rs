@@ -928,6 +928,70 @@ mod tests {
         );
     }
 
+    /// A revocation the Operator plane answers `201` on PostgreSQL leaves, in the instance's chain,
+    /// an entry naming its certificate by `authority` and `serial`.
+    /// Verifies: ADR-draft-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again
+    #[test]
+    fn a_revocation_is_recorded_with_its_certificate() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let Writing {
+            database,
+            held: _held,
+            audit,
+            chain,
+        } = writing(&test, "host-a");
+        let audit = Arc::new(audit);
+        let revocations = crate::revocation::Revocations::open(
+            Box::new(super::super::ledger::PgLedgerStore::new(database.clone())),
+            Arc::new(crate::clock::SystemClock),
+            vec![crate::revocation::Authority {
+                role: "client".to_string(),
+                subject: "0".repeat(64),
+                name: "client CA".to_string(),
+            }],
+        )
+        .expect("revocations");
+        opamp::tls::install_ring_provider();
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let status = runtime.block_on(async {
+            let state = crate::fleet::AppState::on(&crate::Records::Postgres(database.clone()))
+                .expect("state")
+                .with_revocations(Some(Arc::new(revocations)))
+                .with_audit(Some(audit.clone() as Arc<dyn crate::audit::Audit>));
+            let router = crate::api::router(Arc::new(state), None);
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind");
+            let address = listener.local_addr().expect("address");
+            tokio::spawn(async move { axum::serve(listener, router).await });
+            reqwest::Client::new()
+                .post(format!("http://{address}/api/v1/revocations"))
+                .json(&serde_json::json!({
+                    "certificate": { "authority": "client", "serial": "abc123" }
+                }))
+                .timeout(Duration::from_secs(10))
+                .send()
+                .await
+                .expect("revoke")
+                .status()
+        });
+        assert_eq!(status, 201);
+        assert!(audit.drain(Duration::from_secs(10)), "written");
+        let revoked: Vec<String> = lines(&test, &chain)
+            .into_iter()
+            .filter(|line| line.contains("\"revocation.revoked\""))
+            .collect();
+        assert_eq!(revoked.len(), 1, "{revoked:#?}");
+        assert!(
+            revoked[0].contains("\"authority\":\"client\"")
+                && revoked[0].contains("\"serial\":\"abc123\""),
+            "{}",
+            revoked[0]
+        );
+    }
+
     /// An orderly shutdown closes the chain with `audit.chain_closed`, `reason` `shutdown`, and
     /// its record holds that entry's hash.
     /// Verifies: ADR-0042
