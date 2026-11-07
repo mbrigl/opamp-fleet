@@ -248,12 +248,13 @@ The plan lands on `main` in three stages, each a release of its own.
   ADR-0038 and
   ADR-0040. Once stage 1 is on `main` they carry
   numbers, and the plan's references take them up.
-- Implemented here, all proposed: the eleven drafts of stages 2 and 3 named under *Stages*. The
-  paging draft adds to the fleet record's port and to the stores' columns without restating either;
-  the PKCS#11 draft adds the audit export under the open outbound rule of the TLS draft's clause 21,
-  decides the module's own connection under that clause's rule for a library the Server loads, and
-  the token's keys beside the alone rule of the instances draft's clause 2. Each restatement
-  supersedes the ADR it restates when the human accepts it.
+- Implemented here, all proposed: the seven drafts of stage 2 named under *Stages*; the four drafts
+  of stage 3 are implemented on `feat/multi-instance-stage-3`. The paging draft adds to the fleet
+  record's port and to the stores' columns without restating either. On that branch the PKCS#11
+  draft adds the audit export under the open outbound rule of the TLS draft's clause 21, decides the
+  module's own connection under that clause's rule for a library the Server loads, and the token's
+  keys beside the alone rule of the instances draft's clause 2. Each restatement supersedes the ADR
+  it restates when the human accepts it.
 - The specification change G-20 is drafted on this branch and lands with stage 2; only the human
   lands it.
 - No new ADR is needed beyond these.
