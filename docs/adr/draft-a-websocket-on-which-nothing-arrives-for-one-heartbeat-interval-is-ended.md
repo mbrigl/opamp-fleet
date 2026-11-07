@@ -3,7 +3,7 @@
 - **Status:** 🟡 proposed
 - **Date:** 2026-11-05
 - **Deciders:** Markus Brigl
-- **Applies to:** how long a WebSocket the Agent's end opens may stay silent: the driver in `crates/opamp/src/client/ws.rs` (`run`, `run_from` and `serve`), the Gateway's upstream pool in `crates/fleet-agent/src/gateway/pool.rs`, and every other WebSocket an Agent, a Client or a Gateway opens to a Server
+- **Applies to:** how long a WebSocket the Agent's end opens may stay silent: the driver in `crates/opamp/src/client/ws.rs` (`run`, `run_from` and `serve`), the Gateway's upstream pool in `crates/fleet-agent/src/gateway/pool.rs`, every other WebSocket an Agent, a Client or a Gateway opens to a Server, and the reading of a WebSocket by the endpoint in `crates/opamp/src/server.rs` (`serve_socket`) the Server, the Supervisor Endpoint and the Gateway's endpoint share
 
 ## Context
 
@@ -44,7 +44,8 @@ driver's settings.
 
 We will end a WebSocket that an Agent, a Client or a Gateway opened to a Server once nothing has
 arrived on it for one heartbeat interval, after sending a WebSocket ping when nothing has arrived
-for half of one, and reconnect as after a lost connection.
+for half of one, and reconnect as after a lost connection, and have the end that listens answer a
+ping while it handles a message.
 
 1. **Anything that arrives counts.** A message, a pong, a ping or a close from the Server is a
    sign of life; the bounds run from the last one. A ping goes out only when nothing has arrived
@@ -65,12 +66,24 @@ for half of one, and reconnect as after a lost connection.
 5. **Nothing at the TCP level.** No TCP keepalive and no TCP user timeout are set.
 6. **No existing interface changes.** No public function or setting of `crates/opamp` changes;
    the bounds come from the heartbeat already in the settings. `ws::Silence` is added, so that
-   the Gateway's pool derives the same bounds; an addition, not a break under ADR-0008 clause 2.
-   `Connection::connect_websocket` keeps its signature and now fails once an interval has passed.
+   the Gateway's pool derives the same bounds, and so is `ws::run_from`, `run` with every
+   connection opened from a local address the caller names
+   ([ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side](draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+   clause 20); additions, not breaks under ADR-0008 clause 2. `Connection::connect_websocket`
+   keeps its signature and now fails once an interval has passed.
+7. **The end that listens answers a ping while it handles a message.** The endpoint of
+   `crates/opamp`, which the Server, the Supervisor Endpoint and the Gateway's endpoint share,
+   reads a WebSocket on while it handles one of its messages, so a stall of the handling, on the
+   disk, the database's pool or a lock, ends no connection for silence. The messages read
+   meanwhile wait and are handed to the handler one at a time, in the order they arrived, and
+   their replies go out in that order. Once eight wait, or as many bytes as the message limit,
+   the connection is read no further until one is handled. A reply to a message handled after
+   the peer closed cannot go out and is handed back to the handler as unsent.
 
 **Out of scope:** how the Server notices an Agent that stopped answering; plain HTTP, which
-`HTTP_TIMEOUT` already bounds; the Supervisor Endpoint and the Gateway's endpoint, where the
-Agent's end is the one that listens.
+`HTTP_TIMEOUT` already bounds; ending a silent connection on the Supervisor Endpoint and the
+Gateway's endpoint, where the Agent's end is the one that listens and answers pings as clause 7
+says.
 
 ## Alternatives considered
 
@@ -114,12 +127,9 @@ Agent's end is the one that listens.
   answers no longer holds the Agent forever.
 - Negative / trade-offs: an instance that reads nothing for a whole interval, overloaded rather
   than lost, loses its Agents to the others; its connections come back spread by the drawn delay.
-  The Server reads a connection on while it handles one of its messages and answers its pings
-  meanwhile, so a stall of its handling, on the disk, the database's pool or a lock, ends no
-  connection for silence. The messages read meanwhile wait and are handled one at a time in the
-  order they arrived; once eight wait, or as many bytes as the message limit, the connection is
-  read no further until one is handled, so a peer that sends that much ahead of its answers is
-  answered no ping meanwhile.
+  A stall of the Server's handling is not such a case (clause 7), but a peer that sends eight
+  messages or the message limit ahead of its answers is read no further, and answered no ping,
+  until one is handled.
 - Negative / trade-offs: a message counts only once it has arrived whole. A `ServerToAgent` that
   takes longer than an interval to arrive, near the message limit on a slow link, ends the
   connection before it is complete, and is sent again after the reconnect.
@@ -157,6 +167,12 @@ Agent's end is the one that listens.
   `an_ended_upstream_connection_is_closed_towards_the_server` (clause 4).
 - [`crates/fleet-server/tests/ws_transport.rs`](../../crates/fleet-server/tests/ws_transport.rs):
   `the_server_answers_a_ping_with_a_pong` (the Server's side of clause 1).
+- [`crates/opamp/src/server.rs`](../../crates/opamp/src/server.rs):
+  `a_ping_is_answered_while_a_message_is_handled`,
+  `the_messages_of_one_connection_are_handled_one_at_a_time_and_answered_in_order`,
+  `a_connection_with_eight_messages_waiting_is_read_no_further_until_one_is_handled`,
+  `a_connection_with_the_limit_in_bytes_waiting_is_read_no_further_until_one_is_handled`,
+  `messages_before_a_peers_close_are_handled_and_their_replies_reported_unsent` (clause 7).
 - [`crates/fleet-server/tests/g20.rs`](../../crates/fleet-server/tests/g20.rs):
   `g20_a_frozen_instance_s_agents_are_carried_by_the_others_within_the_bounds`, the failover with
   the instance stopped by `SIGSTOP` rather than killed, under G-20's bounds.
