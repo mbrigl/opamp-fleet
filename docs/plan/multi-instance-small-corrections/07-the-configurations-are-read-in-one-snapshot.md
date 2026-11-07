@@ -30,7 +30,7 @@ is attempted again.
 
 ## Read first
 
-- ADR-0043; ADR-0048 clause 12
+- ADR-0030; ADR-0025 clause 12
 - `postgres/configs.rs` `load` and `read_all`; `configs.rs` `ConfigStore::open` and `reload`
 - `postgres/agents.rs` `an_agent_is_read_in_one_snapshot_whatever_commits_while_it_waits` and
   `TestDatabase::hold_reads`: the seam that holds a table against reads between two statements

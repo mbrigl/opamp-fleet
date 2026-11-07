@@ -2,7 +2,7 @@
 
 ## What to build
 
-A host speaks for at most 256 Agents (ADR-0045, *A host speaks for at most 256 Agents*;
+A host speaks for at most 256 Agents (ADR-0012, *A host speaks for at most 256 Agents*;
 `MAX_UIDS_PER_HOST`). `Revocations::admits` counts it from the instance's memory: the
 `instance_uid`s its copy of the Host lists, and the bindings it is making for the Host. On
 PostgreSQL `bind_seen` writes a binding without counting the Host's bindings in the database. So a
@@ -15,7 +15,7 @@ lease renewal, so the window can be one renewal long.
 
 `bind_seen` already holds the Host's row `FOR NO KEY UPDATE`, so two binders of one Host wait for
 each other. It counts the Host's bindings there and refuses a binding past the bound, so the bound
-is counted in the transaction that would pass it, as ADR-0048 clause 19 does for the
+is counted in the transaction that would pass it, as ADR-0025 clause 19 does for the
 other bounds.
 
 ## Acceptance criteria
@@ -28,8 +28,8 @@ other bounds.
 
 ## Read first
 
-- ADR-0045, *A host speaks for at most 256 Agents*
-- ADR-0048
+- ADR-0012, *A host speaks for at most 256 Agents*
+- ADR-0025
   clause 19
 - `revocation.rs` `admits`, `check_report_by_act`; `postgres/ledger.rs` `bind_seen`
 

@@ -1,7 +1,7 @@
-//! Package records in PostgreSQL (ADR-0050 clause 6): the PostgreSQL adapter behind
+//! Package records in PostgreSQL (ADR-0023 clause 6): the PostgreSQL adapter behind
 //! [`PackageBackend`](crate::packages::PackageBackend) — one row per Package and one per entry,
 //! each entry naming its artifact by hash, and each call one transaction on the rows it names
-//! (ADR-0048
+//! (ADR-0025
 //! clause 19). The bytes are the blob store's, with either.
 
 use std::collections::BTreeMap;
@@ -62,7 +62,7 @@ impl PackageBackend for PgPackageBackend {
     /// ([`hold_unassigned`]). The transaction takes the blob store's lock shared first, and asks
     /// `stored` under it before it locks the Package's row: a sweep holds the lock alone, so none
     /// runs between the answer and the commit, and none deletes the blob the entry names
-    /// (ADR-0050 clause 14). A blob a sweep marked is refused before the store is asked: that
+    /// (ADR-0023 clause 14). A blob a sweep marked is refused before the store is asked: that
     /// sweep may still delete it once its lock is gone. The lock goes with the
     /// transaction, its session's end included, which writes no entry.
     fn put_entry(&self, id: &PackageId, entry: &Entry, stored: Stored) -> Result<(), String> {
@@ -227,12 +227,12 @@ impl PackageBackend for PgPackageBackend {
         })
     }
 
-    /// On a connection of its own (ADR-0050 clause 14).
+    /// On a connection of its own (ADR-0023 clause 14).
     fn hold_blobs(&self) -> Result<crate::blobs::BlobHold, String> {
         self.hold()
     }
 
-    /// On the session that holds the lock (ADR-0050 clause 14): the marks of every lease that is
+    /// On the session that holds the lock (ADR-0023 clause 14): the marks of every lease that is
     /// not live, or of none, are taken away first once they were last renewed more than
     /// [`MARKS_OUTLIVE`](super::MARKS_OUTLIVE) before, which a sweep that stopped short left; then
     /// each hash no stored entry names is marked in one statement, under the lease this instance
@@ -323,11 +323,11 @@ impl PgPackageBackend {
 }
 
 /// Holds the Package's row `FOR UPDATE` until the caller's transaction ends, and then counts the
-/// stored assignments that pin it, failing with `refusal` when any does (ADR-0026 clauses 12 and
+/// stored assignments that pin it, failing with `refusal` when any does (ADR-0033 clauses 12 and
 /// 13). A rollout holds the row of each Package it pins `FOR KEY SHARE` until its assignments are
 /// committed, so the count waits for it and sees them, and no rollout pins the Package until this
 /// transaction ends
-/// (ADR-0048
+/// (ADR-0025
 /// clause 19). Answers whether the Package is stored.
 async fn hold_unassigned(
     client: &impl GenericClient,
@@ -644,14 +644,14 @@ mod tests {
         assert_eq!(loaded(&*open()), [shown(&signed)]);
     }
 
-    /// Verifies: G-19, ADR-0050
+    /// Verifies: G-19, ADR-0023
     #[test]
     fn the_package_port_contract_holds_on_the_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
         contract(&|| Box::new(FsPackageBackend::open(dir.path()).expect("open")));
     }
 
-    /// Verifies: G-19, ADR-0050
+    /// Verifies: G-19, ADR-0023
     #[test]
     fn the_package_port_contract_holds_on_postgres() {
         let Some(test) = TestDatabase::named() else {
@@ -685,7 +685,7 @@ mod tests {
         assert_eq!(loaded(store), [shown(&before)]);
     }
 
-    /// Verifies: ADR-0050
+    /// Verifies: ADR-0023
     #[test]
     fn a_package_put_is_whole_or_nothing_on_the_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -699,7 +699,7 @@ mod tests {
 
     /// One transaction per call, and a row that does not decode fails the load naming the
     /// Package.
-    /// Verifies: ADR-0050
+    /// Verifies: ADR-0023
     #[test]
     fn a_package_put_is_whole_or_nothing_and_a_bad_row_is_named_on_postgres() {
         let Some(test) = TestDatabase::named() else {
@@ -720,7 +720,7 @@ mod tests {
     /// A deletion of a Package through B while a rollout through A that pins it has not yet
     /// committed waits for the rollout, and then refuses it from the assignment the rollout
     /// stored: the rollout holds the Package's row until it commits.
-    /// Verifies: ADR-0048, ADR-0026
+    /// Verifies: ADR-0025, ADR-0033
     #[test]
     fn a_deletion_waits_for_a_rollout_that_pins_the_package_and_is_refused() {
         use crate::agent_store::{tests::record, AgentStore as _};
@@ -880,7 +880,7 @@ mod tests {
     /// it. An upload of the same bytes through B is refused, to be uploaded again, while the mark
     /// stands; once A's sweep is done and its mark gone, the upload again commits, and the blob
     /// its entry names is stored.
-    /// Verifies: ADR-0050
+    /// Verifies: ADR-0023
     #[test]
     fn an_upload_beside_a_sweep_whose_session_ended_keeps_its_artifact() {
         let _beside = LOSING_SWEEPS
@@ -945,7 +945,7 @@ mod tests {
 
     /// A sweep whose hold is lost by the time it reaches a deletion deletes nothing more and says
     /// so in the log: the one blob it was deleting goes, the other stays, and no mark is left.
-    /// Verifies: ADR-0050
+    /// Verifies: ADR-0023
     #[test]
     fn a_sweep_whose_hold_is_lost_deletes_nothing_more_and_says_so() {
         let _alone = LOSING_SWEEPS
@@ -1016,7 +1016,7 @@ mod tests {
     /// A sweep whose session has ended marks nothing, and so deletes nothing: its marks are
     /// written on the session that holds the lock, never through the pool, where they would land
     /// with the lock gone and an upload between its check and its commit.
-    /// Verifies: ADR-0050
+    /// Verifies: ADR-0023
     #[test]
     fn a_sweep_marks_nothing_once_its_session_has_ended() {
         let Some(test) = TestDatabase::named() else {
@@ -1041,7 +1041,7 @@ mod tests {
     /// last renewed longer ago than a sweep that lost its lock may still be deleting; it keeps
     /// younger ones, which such a sweep may still be deleting by, and those of a live lease. It
     /// marks under its own lease, and takes its own marks away once it is done.
-    /// Verifies: ADR-0050
+    /// Verifies: ADR-0023
     #[test]
     fn a_sweep_takes_away_old_marks_of_a_lease_that_is_not_live_and_keeps_the_others() {
         let Some(test) = TestDatabase::named() else {
@@ -1095,7 +1095,7 @@ mod tests {
     /// Before each deletion a sweep renews, on its own session, the mark of the blob it is about
     /// to delete, and finds whether it is still there; the marks of the blobs after it are left
     /// as they are, so a sweep of many blobs writes each mark once.
-    /// Verifies: ADR-0050
+    /// Verifies: ADR-0023
     #[test]
     fn a_sweep_renews_a_marks_time_and_finds_a_blob_another_sweep_unmarked() {
         let Some(test) = TestDatabase::named() else {
@@ -1135,7 +1135,7 @@ mod tests {
     /// A mark of a lease that is not live outlives the renewal that answered, which the database
     /// may have stamped up to one call's bound before, and the one call to the blob store that
     /// follows it, with a margin.
-    /// Verifies: ADR-0050
+    /// Verifies: ADR-0023
     #[test]
     fn the_marks_outlive_a_renewal_its_call_and_the_longest_blob_call() {
         assert!(
@@ -1205,7 +1205,7 @@ mod tests {
 
     /// A startup sweep marks under the lease its instance is about to take, which is not live yet:
     /// another instance's sweep keeps that mark while the sweep may still be deleting.
-    /// Verifies: ADR-0050
+    /// Verifies: ADR-0023
     #[test]
     fn a_startup_sweeps_marks_outlive_its_lost_session_and_keep_an_uploads_artifact() {
         let _beside = LOSING_SWEEPS
@@ -1225,7 +1225,7 @@ mod tests {
     }
 
     /// A sweep whose lease lapsed meanwhile: another instance's sweep keeps its young mark.
-    /// Verifies: ADR-0050
+    /// Verifies: ADR-0023
     #[test]
     fn a_lapsed_leases_marks_outlive_its_lost_session_and_keep_an_uploads_artifact() {
         let _beside = LOSING_SWEEPS
@@ -1245,7 +1245,7 @@ mod tests {
 
     /// A sweep whose hold is lost by the time its deletions are done cleans up no staging object:
     /// the cleanup runs under the lock too.
-    /// Verifies: ADR-0050
+    /// Verifies: ADR-0023
     #[test]
     fn a_sweep_whose_hold_is_lost_cleans_up_no_staging_object() {
         let _beside = LOSING_SWEEPS
@@ -1330,7 +1330,7 @@ mod tests {
     /// B deletes the one entry it holds of a blob; an entry written through A, which B has not
     /// read, names the same blob, and B's sweep keeps it: it reads the stored entries under the
     /// blob store's lock, not what B holds.
-    /// Verifies: ADR-0050, ADR-0048
+    /// Verifies: ADR-0023, ADR-0025
     #[test]
     fn a_sweep_keeps_a_blob_an_entry_stored_through_another_writer_names() {
         let Some(test) = TestDatabase::named() else {
@@ -1372,7 +1372,7 @@ mod tests {
     /// An upload holds the blob store's lock shared from its check that its blob is stored until
     /// its entry is committed: a sweep that starts meanwhile, at another instance's start, waits
     /// for it, then reads the entry and keeps the blob.
-    /// Verifies: ADR-0050
+    /// Verifies: ADR-0023
     #[test]
     fn an_upload_holds_off_a_sweep_until_its_entry_is_committed() {
         let Some(test) = TestDatabase::named() else {
@@ -1420,7 +1420,7 @@ mod tests {
 
     /// An upload whose blob a sweep deleted before the upload checked for it is refused, to be
     /// uploaded again, and writes no entry.
-    /// Verifies: ADR-0050
+    /// Verifies: ADR-0023
     #[test]
     fn an_upload_whose_blob_a_sweep_took_first_is_refused() {
         let Some(test) = TestDatabase::named() else {
@@ -1459,7 +1459,7 @@ mod tests {
     /// A sweep waits the whole of its wait for the blob store's lock, 60 seconds, which the
     /// pool's `statement_timeout` of 10 seconds would otherwise cut short; an upload waits the
     /// pool's `lock_timeout` of 5 seconds.
-    /// Verifies: ADR-0050
+    /// Verifies: ADR-0023
     #[test]
     fn a_sweep_waits_its_whole_wait_for_the_lock_and_an_upload_five_seconds() {
         let Some(test) = TestDatabase::named() else {
@@ -1491,7 +1491,7 @@ mod tests {
 
     /// A hold on the blob store's lock whose session the database ends is marked lost, and
     /// logged: the lock is gone with the session.
-    /// Verifies: ADR-0050
+    /// Verifies: ADR-0023
     #[test]
     fn a_hold_whose_session_ends_is_marked_lost() {
         let Some(test) = TestDatabase::named() else {
@@ -1515,7 +1515,7 @@ mod tests {
     /// An upload whose transaction loses its session after the check that its blob is stored, and
     /// with it the blob store's lock, writes no entry: a sweep may run once the lock is gone, and
     /// the entry would name what it deleted.
-    /// Verifies: ADR-0050
+    /// Verifies: ADR-0023
     #[test]
     fn an_upload_whose_session_ends_before_its_commit_writes_no_entry() {
         let Some(test) = TestDatabase::named() else {
@@ -1572,7 +1572,7 @@ mod tests {
     }
 
     /// A sweep at startup that cannot have the blob store's lock fails the start, naming the lock.
-    /// Verifies: ADR-0050
+    /// Verifies: ADR-0023
     #[test]
     fn a_startup_sweep_that_cannot_have_the_lock_fails_naming_it() {
         let Some(test) = TestDatabase::named() else {

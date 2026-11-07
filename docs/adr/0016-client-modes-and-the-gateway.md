@@ -1,4 +1,4 @@
-# ADR-0015: Client modes, the Supervisor Endpoint and the Gateway
+# ADR-0016: Client modes, the Supervisor Endpoint and the Gateway
 
 - **Status:** 🟢 accepted
 - **Date:** 2026-10-24
@@ -31,14 +31,15 @@ one to remove later.
 certificate upstream, so the Server never sees a downstream certificate and cannot refuse it. A
 certificate the Server has revoked would stay a member behind a Gateway until it expires unless
 the Gateway refuses it. The specification puts security before convenience (Strategy, *Security
-before convenience*; G-17, the Server accepts only authenticated Agent identities; Q-1, no Agent
-is admitted onto the Server or a Gateway without a client certificate).
+before convenience*; G-17, the Server admits an Agent only over a client certificate the fleet's
+client CA issued and that is not revoked; Q-1, no Agent is admitted onto the Server or a Gateway
+without a client certificate).
 
 **Behind a Gateway the handshake is the only proof of membership.** No per-Agent proof crosses a
 terminating Gateway: the Server sees the Gateway's certificate, and the downstream one stays on
 the downstream hop. A host an operator marked as a Gateway speaks for any Agent
-([ADR-0022](0022-bootstrap-certificates-and-enrolment.md)). Several things follow from that and
-are closed here:
+([ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)).
+Several things follow from that and are closed here:
 
 - A CSR without a renewal proof renews the certificate its connection presented. Behind a Gateway
   that is the Gateway's certificate, whose host carries the Gateway mark, so a member behind a
@@ -97,7 +98,7 @@ proves the certificate it rests on, which the Server decides as any enrolment.
    it is in.
 
 2. **Every Supervisor exposes a Supervisor Endpoint, unconditionally.** It binds `127.0.0.1` on
-   the block's `endpoint_port` ([ADR-0017](0017-supervisor-mode-and-its-kinds.md)) before the
+   the block's `endpoint_port` ([ADR-0018](0018-supervisor-mode-and-its-kinds.md)) before the
    Managed Process starts, so a taken port fails startup. It is WebSocket-only, declares
    `AcceptsStatus` and `AcceptsEffectiveConfig`, and folds what the process reports into the
    owning Agent, whose `instance_uid` stays the Supervisor's. For a Managed Process that speaks no
@@ -122,11 +123,10 @@ proves the certificate it rests on, which the Server decides as any enrolment.
    connection cannot carry the Server's pushes to the Agents behind the Gateway.
 
 5. **The downstream endpoint serves both transports.** A downstream Client picks its transport by
-   the scheme of its endpoint
-   ([ADR-0045](0045-tls-1-3-two-planes-and-bounded-input.md)), so the Gateway serves a WebSocket
-   upgrade and a plain-HTTP POST on `/v1/opamp`, with the Baseline's message size limit, protobuf
-   media type and gzip rules enforced per hop through the shared `opamp::endpoint` helpers
-   ([ADR-0008](0008-five-crates-on-tokio-and-axum.md)).
+   the scheme of its endpoint ([ADR-0012](0012-tls-1-3-two-planes-and-bounded-input.md)), so the
+   Gateway serves a WebSocket upgrade and a plain-HTTP POST on `/v1/opamp`, with the Baseline's
+   message size limit, protobuf media type and gzip rules enforced per hop through the shared
+   `opamp::endpoint` helpers ([ADR-0008](0008-five-crates-on-tokio-and-axum.md)).
 
 6. **axum serves it, as an ordinary dependency of the Client crate behind no Cargo feature.** The
    mode lives in `crates/fleet-agent/src/gateway/` (`mod.rs` the endpoint, `pool.rs` the upstream
@@ -161,7 +161,7 @@ proves the certificate it rests on, which the Server decides as any enrolment.
     routes are released and the Gateway forwards nothing. Such an Agent stays connected in the
     fleet view with a `last_seen_ms` that stops advancing, and reads as stale once its staleness
     budget runs out when it declared `ReportsHeartbeat`
-    ([ADR-0043](0043-the-fleet-record-of-agents-and-hosts.md)).
+    ([ADR-0030](0030-the-fleet-record-of-agents-and-hosts.md)).
 
 11. **The downstream handshake and the Server's revocation list are a downstream Agent's
     admission; the Gateway holds no policy of its own, and its own hop is its own.**
@@ -183,18 +183,18 @@ proves the certificate it rests on, which the Server decides as any enrolment.
       an enrolling peer nothing but what clause 24 allows. And it passes on an uploaded artifact
       from its package cache only to a host whose Agent it relayed the Server's offer of that
       artifact to, and answers every other download request `404` (clause 15). What a host may
-      receive is the Server's own bound
-      ([ADR-0043](0043-the-fleet-record-of-agents-and-hosts.md), what a host's Agents inherit
-      from it), applied to what the Server sent through this Gateway.
+      receive is the Server's own bound ([ADR-0030](0030-the-fleet-record-of-agents-and-hosts.md),
+      what a host's Agents inherit from it), applied to what the Server sent through this Gateway.
     - Four parts of these refusals are the Gateway's own: it binds an `instance_uid` to the host
       of the first report for it, it refuses a report under a binding that is another host's, it
       answers `404` for an artifact too large for its cache or whose fetch failed, and it answers
-      `503` while a fetch runs ([ADR-0027](0027-packages-signatures-and-delivery.md), the
+      `503` while a fetch runs ([ADR-0034](0034-packages-signatures-and-delivery.md), the
       Gateway's package cache; clause 15).
     - The client CA, the bootstrap CA and the list are the Server's, so the Gateway applies the
       Server's admission policy and holds no admission policy of its own
-      ([ADR-0038](0038-admission-by-client-certificate-and-revocation.md), mutual TLS per hop;
-      [ADR-0022](0022-bootstrap-certificates-and-enrolment.md), what a certificate proves).
+      ([ADR-0026](0026-admission-by-client-certificate-and-revocation.md), mutual TLS per hop;
+      [ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md),
+      what a certificate proves).
     - Upstream the Gateway presents the Client's own identity, so every downstream Agent arrives
       as a member, under the Gateway's certificate. The Gateway forwards no `Authorization`: one a
       downstream peer sends is ignored, never refused, and nothing is sent upstream in its place.
@@ -215,7 +215,7 @@ proves the certificate it rests on, which the Server decides as any enrolment.
       answered `403`, with a message saying that the `instance_uid` is not this host's to report
       for. Either way it is logged as every refusal of the Gateway is: the first five per host and
       minute one by one, the rest counted into one line
-      ([ADR-0027](0027-packages-signatures-and-delivery.md), the Gateway's log of what it
+      ([ADR-0034](0034-packages-signatures-and-delivery.md), the Gateway's log of what it
       refuses).
     - A report of an enrolling peer binds nothing. It is forwarded as clause 24 says, and its
       exchange is its route for its one reply, gone when the reply is sent or the exchange ends.
@@ -228,7 +228,7 @@ proves the certificate it rests on, which the Server decides as any enrolment.
 14. **The Gateway refuses what the Server revoked, and admits nobody while it cannot know.** The
     Gateway fetches the revoked certificates of the fleet's client CA from its Server, on the
     Server's revocation route for Gateways
-    ([ADR-0038](0038-admission-by-client-certificate-and-revocation.md)), over its own upstream
+    ([ADR-0026](0026-admission-by-client-certificate-and-revocation.md)), over its own upstream
     origin, with its own certificate and no `Authorization`, every `REVOCATION_REFRESH` (30 s),
     conditionally on the list it holds. It keeps the list in memory only. A downstream peer whose
     certificate is on the list is answered `401` after the handshake and before anything is
@@ -250,11 +250,12 @@ proves the certificate it rests on, which the Server decides as any enrolment.
     `503` while the Gateway holds no current list (clauses 14, 11).
     - **Binding.** An `instance_uid` is bound to the host of the certificate of the first
       downstream connection that reports for it, as the Server binds an `instance_uid` to the
-      host that first reports it ([ADR-0022](0022-bootstrap-certificates-and-enrolment.md)), and
-      the binding is kept across the Gateway's restarts (clause 16) until it ends (clause 17). The
-      host is the one the certificate names (`urn:opamp-fleet:host:<id>`). A certificate that
+      host that first reports it
+      ([ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)),
+      and the binding is kept across the Gateway's restarts (clause 16) until it ends (clause 17).
+      The host is the one the certificate names (`urn:opamp-fleet:host:<id>`). A certificate that
       names none is a host of its own: the host the Server derives from its issuer and serial
-      when it first renews it (ADR-0022), computed the same way. So it neither shares a binding
+      when it first renews it (ADR-0027), computed the same way. So it neither shares a binding
       with another certificate nor takes one over, and the certificate its renewal brings names
       the same host. The derived host binds for routing only: offers and downloads are recorded
       and served only for a host a certificate names (*Offers*, *Requests*). A host holds at most
@@ -272,7 +273,7 @@ proves the certificate it rests on, which the Server decides as any enrolment.
       bound to; any other is not recorded, and that is logged. An Agent's current offer is the
       files of the last recorded `packages_available` relayed to it: a later one replaces it, one
       that names no Server-hosted file removes it, a message without `packages_available` leaves
-      it standing ([ADR-0027](0027-packages-signatures-and-delivery.md), what an offer is), and a
+      it standing ([ADR-0034](0034-packages-signatures-and-delivery.md), what an offer is), and a
       downstream disconnect does not end it. The offers held are bounded by the offers the Server
       makes through the Gateway. The offers are kept in memory only, indexed by host; a restart
       ends them.
@@ -285,14 +286,14 @@ proves the certificate it rests on, which the Server decides as any enrolment.
       fetched on a request at most once per relayed offer of it — the next relayed offer re-arms
       it — and that request is answered `503` with `Retry-After: 30`. After a failed fetch it is
       not fetched again until the Gateway's package cache says so
-      ([ADR-0027](0027-packages-signatures-and-delivery.md)).
+      ([ADR-0034](0034-packages-signatures-and-delivery.md)).
     - **Everything else** is answered `404`, with the same status, headers and body whether no
       such offer was recorded, it was recorded for another host, the artifact could not be
       fetched or verified, it is too large for the cache, or the request names nothing the route
       knows.
 
     The bound on what a host receives is the Server's
-    ([ADR-0043](0043-the-fleet-record-of-agents-and-hosts.md)), applied to what the Server sent
+    ([ADR-0030](0030-the-fleet-record-of-agents-and-hosts.md)), applied to what the Server sent
     through the Gateway. The binding, the `404` for an artifact too large or not fetched, and the
     `503` while a fetch runs are the Gateway's own. Together they are the download refusal of
     clause 11.
@@ -319,10 +320,9 @@ proves the certificate it rests on, which the Server decides as any enrolment.
       and rewrites it whole from what it holds when it starts and when it has grown to twice as
       many lines as it holds live bindings and hosts, as a new file synced and renamed over the
       old. A store is at most 512 MiB. It is written as the Client writes into its state
-      directory, without following a link
-      ([ADR-0037](0037-the-accounts-the-service-runs-under.md)), readable and writable by the
-      Client's account alone: `0600` on Unix, under the restricted ACL the install gives the state
-      directory on Windows.
+      directory, without following a link ([ADR-0021](0021-the-accounts-the-service-runs-under.md)),
+      readable and writable by the Client's account alone: `0600` on Unix, under the restricted ACL
+      the install gives the state directory on Windows.
     - **An unreadable store refuses every downstream Agent.** At start the Gateway reads the store
       without following a link. Where it is not a regular file — on Unix one the Client's account
       owns with mode `0600`, on Windows one that is not a reparse point — is larger than its
@@ -355,15 +355,16 @@ proves the certificate it rests on, which the Server decides as any enrolment.
     certificate was issued by the client CA, is valid now, is not revoked, and its key verifies
     the signature. The new certificate is then issued to that certificate's host, with it as the
     predecessor in the Server's register of what it signed
-    ([ADR-0044](0044-the-servers-state-and-its-stores.md)). This holds through a Gateway, which
-    presents its own certificate. A proof that does not hold is answered `BadRequest`. A CSR
-    without a renewal proof — a third-party client's — renews the certificate its connection
-    presented, and its host, unless that host is marked as a Gateway. Then a CSR that carries a
-    bootstrap proof is an enrolment through the Gateway (clause 25), and any other is answered
-    `BadRequest` with a message saying that a certificate requested through a Gateway needs a
-    renewal or a bootstrap proof. Nothing is signed, and the refusal is recorded as every refused
-    CSR is ([ADR-0039](0039-an-append-only-audit-record.md)). This holds whatever `instance_uid`
-    the message names, and for the Gateway's own Agent too.
+    ([ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)).
+    This holds through a Gateway, which presents its own certificate. A proof that does not hold
+    is answered `BadRequest`. A CSR without a renewal proof — a third-party client's — renews the
+    certificate its connection presented, and its host, unless that host is marked as a Gateway.
+    Then a CSR that carries a bootstrap proof is an enrolment through the Gateway (clause 25), and
+    any other is answered `BadRequest` with a message saying that a certificate requested through a
+    Gateway needs a renewal or a bootstrap proof. Nothing is signed, and the refusal is recorded as
+    every refused CSR is
+    ([ADR-0028](0028-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again.md)).
+    This holds whatever `instance_uid` the message names, and for the Gateway's own Agent too.
 
 19. **Behind a Gateway the Gateway refuses what the Server revoked.** A downstream Agent is
     revoked by revoking the Gateway's certificate, which ends every Agent the Gateway carries; or
@@ -402,7 +403,7 @@ proves the certificate it rests on, which the Server decides as any enrolment.
     - The Server reads the six attributes from the bootstrap certificate the request proves
       (clause 22). That certificate may come from a foreign PKI, so the Server applies again the
       rules by which the operator names the six attributes
-      ([ADR-0022](0022-bootstrap-certificates-and-enrolment.md)).
+      ([ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)).
     - An attribute that appears twice, has the wrong encoding or length, or is a `country` that
       is not two upper-case letters, and a missing `organization` or `organizational_unit`, make
       the approval fail (`409`) with a message naming the attribute. Nothing is signed, and the
@@ -414,7 +415,7 @@ proves the certificate it rests on, which the Server decides as any enrolment.
       list. The Enrolments tab offers the list.
     - Other attributes of the bootstrap certificate are not copied. Its common name is never
       copied, because the host certificate's common name is its CA's, with `CA` turned into
-      `Certificate` ([ADR-0032](0032-the-operator-program-opamp-fleetctl.md)).
+      `Certificate` ([ADR-0037](0037-the-operator-program-opamp-fleetctl.md)).
 
 24. **An enrolling peer sends one thing, over plain HTTP.** A WebSocket upgrade from an enrolling
     peer is refused `403`, with a message saying that an enrolment through a Gateway is a
@@ -428,12 +429,13 @@ proves the certificate it rests on, which the Server decides as any enrolment.
     certificate's tokens (clause 26). The Gateway does not check the proof's signature: the
     Server does. It records no offer for an enrolling peer and serves it no download. The Client
     re-sends its request until it is answered, as on a direct enrolment connection
-    ([ADR-0022](0022-bootstrap-certificates-and-enrolment.md)), and collects its certificate in
-    the reply to the request that finds it approved. A Client that holds no issued certificate
-    and whose endpoint is `https://` or `http://` therefore sends its CSR alone from its first
-    report on, so a Gateway relays it; answered `BadRequest`, it falls back to the reports of a
-    member until an exchange fails, so a host that holds a provisioned member certificate is not
-    held up. A Client behind a Gateway names it with an `https://` endpoint while it enrols.
+    ([ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)),
+    and collects its certificate in the reply to the request that finds it approved. A Client
+    that holds no issued certificate and whose endpoint is `https://` or `http://` therefore sends
+    its CSR alone from its first report on, so a Gateway relays it; answered `BadRequest`, it falls
+    back to the reports of a member until an exchange fails, so a host that holds a provisioned
+    member certificate is not held up. A Client behind a Gateway names it with an `https://`
+    endpoint while it enrols.
 
 25. **The Server decides an enrolment through a Gateway as any enrolment.** A CSR that carries a
     bootstrap proof over the certificate of a host marked as a Gateway is an enrolment request:
@@ -457,11 +459,12 @@ proves the certificate it rests on, which the Server decides as any enrolment.
       been renewed yet): its issuer and serial.
     - **A bootstrap certificate on an enrolment connection:** the peer address, an IPv6 one by its
       /64 (`throttle::peer_key`). A bootstrap certificate may be one for the whole fleet
-      ([ADR-0038](0038-admission-by-client-certificate-and-revocation.md)), so its issuer and
+      ([ADR-0026](0026-admission-by-client-certificate-and-revocation.md)), so its issuer and
       serial would put every enrolling host in one bucket. The enrolment window
-      ([ADR-0044](0044-the-servers-state-and-its-stores.md)), the bound on the queue and the
-      operator's approval ([ADR-0022](0022-bootstrap-certificates-and-enrolment.md)) already bound
-      what enrolment costs.
+      ([ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)),
+      the bound on the queue and the operator's approval
+      ([ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md))
+      already bound what enrolment costs.
     - **A host marked as a Gateway** (`Revocations::is_gateway`), in two buckets, and a message
       must take a token from both:
       - the bucket of the Agent the message names, keyed by the host and the message's
@@ -488,7 +491,7 @@ proves the certificate it rests on, which the Server decides as any enrolment.
       message.
 
     A connection with no certificate exists only behind `Admission::open`, which no Server
-    configuration serves ([ADR-0038](0038-admission-by-client-certificate-and-revocation.md)). It
+    configuration serves ([ADR-0026](0026-admission-by-client-certificate-and-revocation.md)). It
     is counted by its peer address.
 
 27. **A Supervisor Endpoint token per start.** 32 bytes from the system's secure random source,
@@ -519,13 +522,14 @@ proves the certificate it rests on, which the Server decides as any enrolment.
 - moving a binding to the identity the Server gives an Agent through `AgentIdentification`, whose
   old `instance_uid` stays bound to its host until that host gives it up or its certificate ends;
 - keeping the offers across a restart, which the Server does not offer again while the Agent's
-  `all_packages_hash` stands ([ADR-0027](0027-packages-signatures-and-delivery.md));
+  `all_packages_hash` stands ([ADR-0034](0034-packages-signatures-and-delivery.md));
 - bindings shared between Gateways, so a host that reports through two keeps an end at each;
-- a rate per downstream member certificate at the Gateway;
+- the rate a Gateway holds each downstream host to
+  ([ADR-0022](0022-a-gateway-rate-limits-each-downstream-host-as-the-server-limits-a-host.md));
 - a bootstrap certificate issued below an intermediate CA, which cannot enrol through a Gateway
   (the proof carries no chain); a member certificate issued below an intermediate of the client
   CA, which a Gateway with `bootstrap_ca_file` takes for an enrolling peer, as the Server takes
-  one for an enrolling host ([ADR-0038](0038-admission-by-client-certificate-and-revocation.md));
+  one for an enrolling host ([ADR-0026](0026-admission-by-client-certificate-and-revocation.md));
 - a proof for a bootstrap certificate from a CA other than `[enrolment]`'s;
 - enrolment through nested Gateways, where the outer Gateway sees the inner one's certificate;
 - a WebSocket push of the approval to an enrolling peer behind a Gateway, and telling a Gateway
@@ -550,7 +554,7 @@ proves the certificate it rests on, which the Server decides as any enrolment.
   the Server's: the client CA the Server issues from, the bootstrap CA, and the revocation list.
 - **A per-Agent proof of membership that travels end to end through the Gateway, or a fleet-wide
   credential forwarded in a header.** No proof of that kind exists on the Agent plane
-  ([ADR-0038](0038-admission-by-client-certificate-and-revocation.md)). A fleet-wide credential
+  ([ADR-0026](0026-admission-by-client-certificate-and-revocation.md)). A fleet-wide credential
   proves membership, which the downstream handshake already proves, identifies no Agent, and is
   held by every host.
 - **Keeping the upstream pool partitioned by downstream peer.** Nothing peer-specific travels
@@ -732,8 +736,8 @@ proves the certificate it rests on, which the Server decides as any enrolment.
   release that skips an Agent still routed), `crates/fleet-agent/src/gateway/mod.rs` (the places
   released at the end of an enrolment exchange and when a downstream WebSocket closes),
   `crates/fleet-agent/src/gateway/policy.rs` (the bindings), and
-  [`docs/HARDENING.md`](../HARDENING.md), *The local endpoint* and the Gateway entry of *Where
-  each bound applies today*.
+  [`docs/HARDENING.md`](../HARDENING.md), the Supervisor Endpoint's token under *What already
+  holds* and the Gateway entry of *Where each bound applies today*.
 
 ## Consequences
 
@@ -758,17 +762,18 @@ proves the certificate it rests on, which the Server decides as any enrolment.
   neither — or fill the Gateway host's places. Every certificate renewed through a Gateway stays
   in its own chain. A host that leaves the fleet frees its `instance_uid`s when its certificate
   ends, at the latest after one certificate life (30 days by default,
-  [ADR-0038](0038-admission-by-client-certificate-and-revocation.md)), at once when it is revoked.
+  [ADR-0026](0026-admission-by-client-certificate-and-revocation.md)), at once when it is revoked.
 - Positive: a host that only a Gateway reaches can enrol, with the same window, queue and approval
   as one that connects directly, and its certificate is its own host's. A proof and the key the
   Server signs always come from the same request.
 - Negative / trade-offs: behind a Gateway the Server judges no proof of a downstream Agent's
   membership; the Gateway's handshake and the list are the whole admission. A compromised Gateway
   speaks for any Agent, which the admission decision already accepts for a marked Gateway
-  ([ADR-0022](0022-bootstrap-certificates-and-enrolment.md)). A Gateway whose `client_ca_file`
-  names anything but the fleet's client CA admits what the Server never issued, and the Server
-  cannot see that file; the manual and review hold it. An unmarked Gateway is refused the list and
-  so admits nobody, which keeps that reliance to the hosts an operator marked.
+  ([ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)).
+  A Gateway whose `client_ca_file` names anything but the fleet's client CA admits what the Server
+  never issued, and the Server cannot see that file; the manual and review hold it. An unmarked
+  Gateway is refused the list and so admits nobody, which keeps that reliance to the hosts an
+  operator marked.
 - Negative / trade-offs: every Supervisor binds a loopback port whether or not its Managed Process
   uses it.
 - Negative / trade-offs: losing one pooled connection marks every Agent riding it disconnected
@@ -814,8 +819,8 @@ proves the certificate it rests on, which the Server decides as any enrolment.
 - Follow-ups: re-balancing when the pool grows, if a real fleet is ever lopsided enough;
   consolidating TLS material on the Client if a fourth place appears; binding at the Server what a
   Gateway carries; a command to end a binding by hand; moving a binding with a re-keyed
-  `instance_uid`; offers that outlast a restart; a rate per downstream member certificate;
-  enrolment through nested Gateways; a push of the approval.
+  `instance_uid`; offers that outlast a restart; enrolment through nested Gateways; a push of the
+  approval.
 
 ## Enforcement
 
@@ -869,7 +874,7 @@ proves the certificate it rests on, which the Server decides as any enrolment.
   `the_revocation_list_is_fetched_without_authorization`, even with an `[auth]` section left in
   `supervisor.toml` (clause 14).
 - The download bound of clauses 11 and 15, marked as verifying this ADR beside
-  [ADR-0027](0027-packages-signatures-and-delivery.md):
+  [ADR-0034](0034-packages-signatures-and-delivery.md):
   [`crates/fleet-agent/tests/gateway_package_cache.rs`](../../crates/fleet-agent/tests/gateway_package_cache.rs)
   `another_host_and_a_certificate_naming_no_host_are_answered_as_for_an_artifact_not_held` and
   `a_revoked_certificate_is_refused_on_the_download_route`.

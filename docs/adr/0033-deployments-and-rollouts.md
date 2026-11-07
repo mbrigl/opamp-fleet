@@ -1,4 +1,4 @@
-# ADR-0026: A Deployment is the one thing aimed and rolled out, and a rollout pins what it releases
+# ADR-0033: A Deployment is the one thing aimed and rolled out, and a rollout pins what it releases
 
 - **Status:** 🟢 accepted
 - **Date:** 2026-10-17
@@ -36,7 +36,7 @@ Deployment, and an Agent in no Deployment is offered nothing. The human settled 
 - **One deletion rule:** a resource that an assignment pins cannot be deleted.
 
 *Which.* A Package fits an Agent by type and Platform and is aimed at it by a Deployment
-([ADR-0027](0027-packages-signatures-and-delivery.md)). Fit and aim alone would count Agents that
+([ADR-0034](0034-packages-signatures-and-delivery.md)). Fit and aim alone would count Agents that
 already run the version, propose it to Agents that need nothing, and let the act aim backwards
 under the same label as a forward one — the shape in which a compromised Server pushes a
 known-vulnerable build, and one the Client's own install already refuses, because an Ed25519
@@ -84,12 +84,11 @@ Configuration, Package or Deployment that an assignment pins.
 3. **A Selector is equality, AND, over the effective description, and it aims a Deployment.**
    - It is a string-to-string map. An Agent matches when every pair equals a string-valued entry
      of its effective description, whose content
-     [ADR-0043](0043-the-fleet-record-of-agents-and-hosts.md) clause 18 states.
+     [ADR-0030](0030-the-fleet-record-of-agents-and-hosts.md) clause 18 states.
    - An array-valued attribute (`host.ip`) is displayed but never matched.
    - There are no set-based operators. They would extend the same field compatibly.
-   - A Deployment's Selector is never empty
-     ([ADR-0027](0027-packages-signatures-and-delivery.md)), so no Selector reaches every Agent
-     by default.
+   - A Deployment's Selector is never empty ([ADR-0034](0034-packages-signatures-and-delivery.md)),
+     so no Selector reaches every Agent by default.
 
 4. **The type is fitted inside the Deployment.**
    - A Configuration reaches only the Agents of its Deployment whose reported `service.name`
@@ -98,12 +97,12 @@ Configuration, Package or Deployment that an assignment pins.
      type.
    - An Agent that reports no `service.name` receives no Configuration.
    - Packages are fitted by type and Platform as
-     [ADR-0027](0027-packages-signatures-and-delivery.md) says.
+     [ADR-0034](0034-packages-signatures-and-delivery.md) says.
 
 5. **A Deployment is a name, a Selector, Packages and Configurations.**
    - The name follows the grammar a Configuration's name follows. The Selector is clause 3's.
    - The Packages are at most one per Agent type
-     ([ADR-0027](0027-packages-signatures-and-delivery.md)).
+     ([ADR-0034](0034-packages-signatures-and-delivery.md)).
    - The Configurations are named, in any number. A Configuration may sit in several
      Deployments.
    - `PUT /api/v1/deployments/{name}` creates a Deployment with `{selector}`, `PUT …/selector`
@@ -112,13 +111,13 @@ Configuration, Package or Deployment that an assignment pins.
      `PUT|DELETE …/configurations/{configuration}` holds or drops a Configuration; one the Server
      does not hold is `404`.
    - A Deployment is persisted through the store
-     [ADR-0044](0044-the-servers-state-and-its-stores.md) names: owner-only, one JSON file per
-     Deployment in the filesystem adapter, one row in the PostgreSQL adapter. A stored Deployment
-     that does not parse, or whose name disagrees with its content, fails startup naming it.
-     Saving distributes nothing.
+     [ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
+     names: owner-only, one JSON file per Deployment in the filesystem adapter, one row in the
+     PostgreSQL adapter. A stored Deployment that does not parse, or whose name disagrees with its
+     content, fails startup naming it. Saving distributes nothing.
 
 6. **The assignment is per Agent, persisted, and pins one release.**
-   - Each Agent's record ([ADR-0043](0043-the-fleet-record-of-agents-and-hosts.md)) stores what
+   - Each Agent's record ([ADR-0030](0030-the-fleet-record-of-agents-and-hosts.md)) stores what
      its last rollout released to it:
      - the Deployment it was released through;
      - the Package pinned, if any;
@@ -152,7 +151,7 @@ Configuration, Package or Deployment that an assignment pins.
      another Deployment, or an Agent in no Deployment or in conflict, is `409`.
    - A rollout **replaces** the Agent's assignment. It pins two things as of the press: the
      Package the Deployment holds for the Agent's type, if it is a candidate by
-     [ADR-0028](0028-package-versions-high-water-mark-and-floor.md) and clauses 14–17; and every
+     [ADR-0035](0035-package-versions-high-water-mark-and-floor.md) and clauses 14–17; and every
      Configuration of the Deployment that fits the Agent's type, at its saved revision. A
      Configuration no longer in the Deployment leaves the Agent's map. The hash gates send only
      what changed.
@@ -168,7 +167,7 @@ Configuration, Package or Deployment that an assignment pins.
    - Two cases are refused (`409`) for every act, and nothing is released:
      - a Deployment holding no Package and no Configuration;
      - a Deployment in which an entry of a Package it holds carries no signature
-       ([ADR-0027](0027-packages-signatures-and-delivery.md)). The message names each such
+       ([ADR-0034](0034-packages-signatures-and-delivery.md)). The message names each such
        Package by its display name and the platforms it is unsigned for.
    - `POST /api/v1/configurations/{name}/rollout` does not exist (`404`). A bare Package or
      Configuration cannot be named in an act.
@@ -180,7 +179,7 @@ Configuration, Package or Deployment that an assignment pins.
 
 11. **A Deployment freezes nothing that a standing offer travels with.**
     - An assignment pins the Package and the revisions, and the signature is the entry's
-      ([ADR-0027](0027-packages-signatures-and-delivery.md)). So the Selector, the Packages and
+      ([ADR-0034](0034-packages-signatures-and-delivery.md)). So the Selector, the Packages and
       the Configurations of a Deployment stay editable in every state.
     - Swapping the version a Deployment holds, or the revision of a Configuration, shows as
       waiting for the Agents already released, and the next press moves them.
@@ -190,7 +189,7 @@ Configuration, Package or Deployment that an assignment pins.
     - Deleting a Configuration, a Package or a Deployment is refused (`409`) while any Agent's
       assignment names it. The message says how many Agents pin it.
     - The way to delete is to roll those Agents out through a Deployment without it, or to forget
-      them ([ADR-0043](0043-the-fleet-record-of-agents-and-hosts.md)).
+      them ([ADR-0030](0030-the-fleet-record-of-agents-and-hosts.md)).
     - A deleted Configuration or Package leaves every Deployment that held it.
     - Nothing recalls what an Agent installed: the protocol has no revert, and the Agent keeps
       running it. A rollout that drops a Configuration from an Agent's map and keeps another one
@@ -204,7 +203,7 @@ Configuration, Package or Deployment that an assignment pins.
 
 14. **What the Agent runs decides, in both directions.** Where the Agent reports a
     `service.version` among its identifying attributes that parses as a version
-    ([ADR-0033](0033-the-products-version.md)), the Package's version must be **strictly
+    ([ADR-0038](0038-the-products-version.md)), the Package's version must be **strictly
     greater** than it by SemVer precedence, build metadata ignored. Equal does not match: a
     Package the Agent already runs would reach it with nothing.
 
@@ -226,7 +225,7 @@ Configuration, Package or Deployment that an assignment pins.
     it is how a Package offered, pending or downloading but not yet installed is reported.
 
 18. **The Client applies the same rule to an offer it receives.** For the Package that carries the
-    Client itself ([ADR-0018](0018-the-client-updates-itself-from-a-signed-package.md)), *already
+    Client itself ([ADR-0019](0019-the-client-updates-itself-from-a-signed-package.md)), *already
     installed* means the version this process runs is the offered one — not that a recorded
     package hash matches. A record whose hash equals the offer does not end the offer on a host
     that is not running it.
@@ -244,8 +243,8 @@ Configuration, Package or Deployment that an assignment pins.
 
 21. **Rollback is not a rollout.** No act moves an Agent to an older version than it runs. An
     operator who wants an Agent back on its predecessor has the Agent's retention window
-    ([ADR-0027](0027-packages-signatures-and-delivery.md)) and, for the Client itself, the
-    pointer move of [ADR-0018](0018-the-client-updates-itself-from-a-signed-package.md); a bad
+    ([ADR-0034](0034-packages-signatures-and-delivery.md)) and, for the Client itself, the
+    pointer move of [ADR-0019](0019-the-client-updates-itself-from-a-signed-package.md); a bad
     version is otherwise taken back by publishing the old content as a new, greater version. A
     deliberate Server-driven downgrade is left undecided: it is a separate act with its own
     authorisation question, and it must never be the same press as a rollout.
@@ -284,14 +283,14 @@ Configuration, Package or Deployment that an assignment pins.
       *roll out* press, so the count beside a Deployment's press and the rows agree.
     - *Save*, *Upload* and *OK* never distribute.
 
-**Out of scope:** a fleet-wide base Configuration, and any "everyone" Deployment; releasing only
-a Deployment's Configurations or only its Packages; parameters and blocks in a Configuration
-(G-18, a decision of its own); where Deployments, Configurations and assignments are stored
-([ADR-0044](0044-the-servers-state-and-its-stores.md)); what a Package and its entries are
-([ADR-0027](0027-packages-signatures-and-delivery.md)); an opt-in convergence policy for Agents
-that appear later; a batched or paused progressive walk; an audit trail of who rolled out what
-(the operator plane has no per-operator identity); an operator override to re-install a version
-the test holds back; a Server-driven downgrade.
+**Out of scope:** a fleet-wide base Configuration, and any "everyone" Deployment; releasing only a
+Deployment's Configurations or only its Packages; parameters and blocks in a Configuration (G-18, a
+decision of its own); where Deployments, Configurations and assignments are stored
+([ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md));
+what a Package and its entries are ([ADR-0034](0034-packages-signatures-and-delivery.md)); an opt-in
+convergence policy for Agents that appear later; a batched or paused progressive walk; an audit
+trail of who rolled out what (the operator plane has no per-operator identity); an operator override
+to re-install a version the test holds back; a Server-driven downgrade.
 
 ## Alternatives considered
 
@@ -328,9 +327,8 @@ the test holds back; a Server-driven downgrade.
 - **A rollout option that releases only the Configurations or only the Packages.** The hash gates
   already send only what changed. The option can be added to the act without changing the model.
 - **A fleet-wide base Configuration, as an empty Selector or an implicit "everyone".** It brings
-  back the ranking between Deployments that
-  [ADR-0027](0027-packages-signatures-and-delivery.md) removes. The human chose to solve such a
-  need differently.
+  back the ranking between Deployments that [ADR-0034](0034-packages-signatures-and-delivery.md)
+  removes. The human chose to solve such a need differently.
 - **Cascading deletion of Configurations and Packages through the assignments.** It is cheaper
   to use, but a deletion silently changes what running Agents receive. The protection a
   Deployment has applies to all three.
@@ -361,9 +359,10 @@ the test holds back; a Server-driven downgrade.
   mode on the resource where the rule was asked for; an override is unavailable to the bulk act
   and the count. A downgrade, if wanted, is its own act.
 - **Persist a Deployment as JSON files of its own, outside the port
-  [ADR-0044](0044-the-servers-state-and-its-stores.md) puts every record behind.** A PostgreSQL
-  deployment would then keep its Deployments on the host while every other record lives in the
-  database. A Deployment is persisted through that store's port (clause 5).
+  [ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
+  puts every record behind.** A PostgreSQL deployment would then keep its Deployments on the host
+  while every other record lives in the database. A Deployment is persisted through that store's
+  port (clause 5).
 
 ## Sources / Prior art
 
@@ -378,8 +377,8 @@ the test holds back; a Server-driven downgrade.
   displayed as OutOfSync, nothing applied until Sync; the model for clause 8.
 - [Bindplane rollouts](https://docs.bindplane.com/feature-guides/deployment-and-management/rollouts)
   — edits create a version, collectors keep the old one, deployment starts on an explicit act.
-- [Bindplane: Fleets](https://docs.bindplane.com/feature-guides/deployment-and-management/fleets)
-  — Kubernetes-style label selectors matching agent labels; and
+- [Bindplane: Fleets](https://docs.bindplane.com/feature-guides/deployment-and-management/fleets) —
+  Kubernetes-style label selectors matching agent labels; and
   [progressive rollouts](https://docs.bindplane.com/feature-guides/deployment-and-management/progressive-rollouts)
   by label-selected stages.
 - [Bindplane — Bring Your Own
@@ -418,8 +417,6 @@ the test holds back; a Server-driven downgrade.
   the observation, not a record of intent.
 - OpenTelemetry semantic conventions, `service.version` — "the version string of the service API
   or implementation".
-- The working note on the Server's data model, in which the human chose each point of the
-  Deployment model.
 
 ## Consequences
 
@@ -443,16 +440,15 @@ the test holds back; a Server-driven downgrade.
   Collector reporting `0.98.0` while its status claims `2.0.0` matches a Package at `1.5.0`. What
   limits it is that nothing moves on its own. Conversely, a program self-reporting a number above
   its Package is unreachable by that Package's number until the Package is re-created at the
-  program's number ([ADR-0028](0028-package-versions-high-water-mark-and-floor.md)). For a
+  program's number ([ADR-0035](0035-package-versions-high-water-mark-and-floor.md)). For a
   program that reports no `service.version`, the claim decides.
 - Negative / trade-offs: a program already running a version cannot be replaced by the fleet's
   Package of that same version; adopting it means publishing under the next version.
-- Follow-ups: an opt-in convergence policy for late Agents; a progressive walk; an audit trail
-  once the operator plane has an identity; a diff view between an Agent's assigned revision and
-  the saved one; the Client reporting the version that came up after a self-update rather than
-  the staged one; showing the package status and the reported `service.version` side by side
-  where they disagree; an operator override for a genuine reinstall; a per-part rollout option,
-  if one is ever needed.
+- Follow-ups: an opt-in convergence policy for late Agents; a progressive walk; a diff view between
+  an Agent's assigned revision and the saved one; the Client reporting the version that came up
+  after a self-update rather than the staged one; showing the package status and the reported
+  `service.version` side by side where they disagree; an operator override for a genuine reinstall;
+  a per-part rollout option, if one is ever needed.
 
 ## Enforcement
 
@@ -466,8 +462,7 @@ the test holds back; a Server-driven downgrade.
   `a_deployment_holds_configurations_beside_its_packages`,
   `every_selector_pair_must_equal_a_reported_attribute`, `non_identifying_attributes_match_too`;
   [`fs/deployments.rs`](../../crates/fleet-server/src/fs/deployments.rs):
-  `a_deployment_survives_a_reopen`;
-  [`fs/configs.rs`](../../crates/fleet-server/src/fs/configs.rs):
+  `a_deployment_survives_a_reopen`; [`fs/configs.rs`](../../crates/fleet-server/src/fs/configs.rs):
   `a_file_in_a_retired_shape_refuses_to_open_and_names_it`,
   `a_stored_configuration_without_a_type_refuses_to_open_and_names_it`;
   [`fs/agents.rs`](../../crates/fleet-server/src/fs/agents.rs):

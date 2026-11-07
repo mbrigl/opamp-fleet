@@ -14,7 +14,7 @@ that code stays and how far a compromise of its repository reaches.
 Two third-party actions run in the workflows:
 
 - `Swatinem/rust-cache` in `checks.yml` (jobs `rust`, `client-windows`, `client-macos`,
-  `s3-store` and `postgres-store`), `ci.yml` (job `release-build`), `interop.yml` and
+  `s3-store` and `postgres-store`), `ci.yml` (job `release-build`), `interop.yml`, `g20.yml` and
   `service-smoke.yml`. It restores and saves `target/` and `~/.cargo`, so what it writes is
   compiled into the next run's test binaries.
 - `taiki-e/install-action` in `release.yml` (job `advisories`), `audit.yml` and `fuzz.yml`. It
@@ -40,9 +40,9 @@ its comment names a real release. Reading the diff does not catch this; resolvin
 tag does.
 
 GitHub's own actions (`actions/checkout`, `actions/upload-artifact`, `actions/download-artifact`,
-`actions/setup-go`) are maintained by the platform that runs the workflow. A compromise of their
-repositories is a compromise of GitHub Actions itself, and a SHA would not contain it. On their
-major tag they receive fixes without a pull request.
+`actions/setup-go`, `actions/attest`) are maintained by the platform that runs the workflow. A
+compromise of their repositories is a compromise of GitHub Actions itself, and a SHA would not
+contain it. On their major tag they receive fixes without a pull request.
 
 The specification's quality goal Q-3 asks that the supply chain be checked before a change merges,
 and its threat model counts CI actions in that supply chain. An action is part of it even though
@@ -185,5 +185,5 @@ repository. It fails when the commented tag does not exist or does not peel to t
   to the tag object's own ID, and a missing tag each fail.
 
 **Not mechanically decidable:** whether a new third-party action is trustworthy enough to add, and
-whether Dependabot is enabled for the repository, which is a setting. Review holds the first; the
-repository settings checklist in `README.md` holds the second.
+whether Dependabot is enabled for the repository, which is a setting. Review holds the first. The
+repository settings in `CONTRIBUTING.md` do not list the second.

@@ -29,7 +29,7 @@ record named.
 
 ## Read first
 
-- ADR-0026 on what a rollout pins; ADR-0048 clauses 12 and 19
+- ADR-0033 on what a rollout pins; ADR-0025 clauses 12 and 19
 - `fleet.rs` the deletions and `forget_agent`; `postgres/agents.rs` `Pins`;
   `postgres/deployments.rs` `remove`, the golden path
 

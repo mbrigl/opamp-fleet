@@ -188,28 +188,16 @@ The plan lands on `main` in three stages, each a release of its own.
    counts the held rows of the Gateway's Agents and of the single-Agent hosts apart, and that
    count is the sensor for such a row. The lists page and name the holder, two versions run side
    by side, the manual runs three instances, and the load test decides G-20, which lands with it.
-   Its ADRs are
-   ADR-0048,
-   which supersedes ADR-0041,
-   ADR-0049,
-   ADR-0051,
-   ADR-0050,
-   which supersedes ADR-0044,
-   ADR-0046,
-   which supersedes ADR-0039,
-   ADR-0047,
-   which supersedes ADR-0042, and
-   ADR-0052,
-   which supersedes ADR-0022.
+   Its ADRs are ADR-0025, ADR-0031, ADR-0015, ADR-0023, ADR-0028, ADR-0029 and ADR-0027.
 3. **The keys on a token.** Tickets 12, 16 and 17. The CA keys live on a PKCS#11 token, so
    instances holding a CA run side by side, the heads of the audit chains are signed, and the
    record may be exported. Its four drafts are on the branch `feat/multi-instance-stage-3`,
    not on this one, so that the pull request of stage 2 numbers only its own:
    `draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one.md`,
    `draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token.md`,
-   `draft-the-operator-program-opamp-fleetctl.md`, which supersedes ADR-0032, and
+   `draft-the-operator-program-opamp-fleetctl.md`, which supersedes ADR-0037, and
    `draft-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md`,
-   which supersedes ADR-0038. They are accepted together.
+   which supersedes ADR-0026. They are accepted together.
 
 ## How the remaining work runs
 
@@ -238,14 +226,14 @@ The plan lands on `main` in three stages, each a release of its own.
 - Binding ADRs in force: 0002 (tests cite decisions), 0004 (the Dev Container, where SoftHSM2 is
   installed), 0006 (this plan), 0007 (the harness: nothing is worked unattended), 0008 and 0009
   (crates, ports and adapters), 0015, 0025, 0026, 0027, 0028, 0030 and 0032, the four of stage 1
-  in force, ADR-0038, ADR-0040, ADR-0043 and ADR-0045, and the seven of stage 2, ADR-0046 to
-  ADR-0052.
+  in force, ADR-0026, ADR-0039, ADR-0030 and ADR-0012, and the seven of stage 2, ADR-0028 to
+  ADR-0027.
 - Implemented here and accepted: the seven ADRs of stage 2 named under *Stages*; the four drafts
-  of stage 3 are implemented on `feat/multi-instance-stage-3`. ADR-0049 adds to the fleet
+  of stage 3 are implemented on `feat/multi-instance-stage-3`. ADR-0031 adds to the fleet
   record's port and to the stores' columns without restating either. On that branch the PKCS#11
-  draft adds the audit export under the open outbound rule of ADR-0045 clause 21, decides the
+  draft adds the audit export under the open outbound rule of ADR-0012 clause 21, decides the
   module's own connection under that clause's rule for a library the Server loads, and the token's
-  keys beside the alone rule of ADR-0048 clause 2. Each restatement supersedes the ADR
+  keys beside the alone rule of ADR-0025 clause 2. Each restatement supersedes the ADR
   it restates when the human accepts it.
 - The specification change G-20 is drafted on this branch and lands with stage 2; only the human
   lands it.

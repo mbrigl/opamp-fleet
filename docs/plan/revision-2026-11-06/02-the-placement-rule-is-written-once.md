@@ -2,7 +2,7 @@
 
 ## What to build
 
-ADR-0043 clause 19 places the Agents of a group under the group's one Client Agent, marks every
+ADR-0030 clause 19 places the Agents of a group under the group's one Client Agent, marks every
 member ambiguous where there are several, and lets the others inherit its labels. The rule is
 written twice: `inherit` in `crates/fleet-server/src/fleet.rs` places the Agents an instance
 holds, in memory, and `place_on_host` in `crates/fleet-server/src/listing.rs` places the Agents a
@@ -20,8 +20,8 @@ One function decides the placement of a group from its members, and both callers
 
 ## Read first
 
-- ADR-0043 clause 19;
-  ADR-0049
+- ADR-0030 clause 19;
+  ADR-0031
   clause 8 (the core owns the derivation).
 - `fleet.rs` `inherit`, `inherit_held`; `listing.rs` `place_on_host`; `postgres/agent_page.rs`.
 

@@ -1,4 +1,4 @@
-# ADR-0018: The Client updates itself from a signed package
+# ADR-0019: The Client updates itself from a signed package
 
 - **Status:** 🟢 accepted
 - **Date:** 2026-10-11
@@ -15,12 +15,11 @@ restart and roll back on failure (G-11).
 
 The machinery around a self-update is decided elsewhere: the versioned side-by-side layout with
 its `current` pointer, per-version `manifest.toml` and restart-on-failure registration
-([ADR-0019](0019-the-installed-service-and-its-state.md),
-[ADR-0037](0037-the-accounts-the-service-runs-under.md)), the verified download and the archive
-handling of package delivery
-([ADR-0027](0027-packages-signatures-and-delivery.md)), and the per-Agent offer
-([ADR-0026](0026-deployments-and-rollouts.md)). Four problems are specific to replacing the
-program that does the replacing.
+([ADR-0020](0020-the-installed-service-and-its-state.md),
+[ADR-0021](0021-the-accounts-the-service-runs-under.md)), the verified download and the archive
+handling of package delivery ([ADR-0034](0034-packages-signatures-and-delivery.md)), and the
+per-Agent offer ([ADR-0033](0033-deployments-and-rollouts.md)). Four problems are specific to
+replacing the program that does the replacing.
 
 - **Something on the wire has to represent the Client.** A Supervisor Agent cannot carry the
   Client's package beside its own: the Baseline knows *"normally only one top-level package, which
@@ -44,7 +43,7 @@ splits it over two questions, yet the second answer has no effect without the fi
 no key updates nothing, and with a key a "yes" is what the default already says. **Only one
 package name can carry this Client**, the Agent type its Client Agent reports, because a Server
 offers a package under the Agent type it is built for
-([ADR-0027](0027-packages-signatures-and-delivery.md)). Any other name points at another
+([ADR-0034](0034-packages-signatures-and-delivery.md)). Any other name points at another
 program's package or at none, so a configurable name is a way to misconfigure the narrowing and
 nothing else. **It belongs beside what it depends on.** The key that decides whether it takes
 effect sits in `[packages]`; a consent in a section of its own makes a reader of the file join two
@@ -63,8 +62,8 @@ service manager perform the restart.
 
 1. **The Client always presents a Client Agent.** It exists *alongside* the Supervisor Agents, not
    only when there are none, with its own `instance_uid`, health and `service.version` (the baked
-   version, [ADR-0033](0033-the-products-version.md)) and the Agent type `supervisor`
-   ([ADR-0019](0019-the-installed-service-and-its-state.md) clause 4). A Client that supervises
+   version, [ADR-0038](0038-the-products-version.md)) and the Agent type `supervisor`
+   ([ADR-0020](0020-the-installed-service-and-its-state.md) clause 4). A Client that supervises
    something is visible in its own fleet, and nobody has to ask which Client version a host runs.
 
 2. **The consent is `[packages] self_update`, it stands by default, and the one package it admits
@@ -82,7 +81,7 @@ service manager perform the restart.
    constant the Client Agent reports as `service.name`. The name a Server offers this Client's
    package under is therefore the name the Client reports, and the same in every variant build,
    whatever its product name: one published Package serves them all
-   ([ADR-0019](0019-the-installed-service-and-its-state.md) clause 3).
+   ([ADR-0020](0020-the-installed-service-and-its-state.md) clause 3).
 
    An absent key is consent, and so is an absent `[packages]`. While the consent stands and
    `verification_key` is set, the Client Agent declares `AcceptsPackages` and
@@ -101,7 +100,8 @@ service manager perform the restart.
 
 3. **Every install path can withdraw the consent, none asks for a name, and the answer is written
    into the configuration.** `service install --no-self-update` withdraws it on the
-   non-interactive `--endpoint` path ([ADR-0022](0022-bootstrap-certificates-and-enrolment.md)).
+   non-interactive `--endpoint` path
+   ([ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)).
    **The interactive questionnaire asks nothing about it**: it writes the consent, and the
    verification key it asks for just before decides whether the consent takes effect (clause 2).
    An empty key is accepted, and the install says that the Client installs no package, its own
@@ -118,7 +118,7 @@ service manager perform the restart.
    signature covers the artifact's bytes and carries no ordering, so an old release stays validly
    signed forever and is how a compromised Server would push a known-vulnerable build back. An
    offer of the release already running is not a failure and installs nothing
-   ([ADR-0026](0026-deployments-and-rollouts.md), on an offer of the running release). A Client
+   ([ADR-0033](0033-deployments-and-rollouts.md), on an offer of the running release). A Client
    that does not run from a versioned layout (a `cargo run` build, a loose binary) refuses with a
    message naming `supervisor service install`.
 
@@ -127,7 +127,7 @@ service manager perform the restart.
    Ed25519 signature must verify against `[packages] verification_key`**. An artifact offered
    without a signature, or whose signature does not verify, fails the install with `InstallFailed`
    naming the reason, and nothing is staged. The verified artifact is unpacked as package delivery
-   unpacks one ([ADR-0027](0027-packages-signatures-and-delivery.md)) into
+   unpacks one ([ADR-0034](0034-packages-signatures-and-delivery.md)) into
    `<layout root>/versions/supervisor-<MAJOR.MINOR.PATCH>-<hash>/`, the binary is made executable
    and `manifest.toml` records the version and the binary's SHA-256, the same layout
    `service install` produces. The running binary is never touched.
@@ -137,7 +137,7 @@ service manager perform the restart.
    `supervisor self-check ok version=<version>`. It must exit successfully, print that line, and
    report the offered release, compared without build metadata but with the pre-release, so a
    `-dev` build is never accepted as the release it heads for
-   ([ADR-0033](0033-the-products-version.md)). A binary that cannot exec (wrong architecture,
+   ([ADR-0038](0038-the-products-version.md)). A binary that cannot exec (wrong architecture,
    truncated artifact, missing loader) is the one failure no post-restart mechanism can catch, and
    a program that runs but answers differently is not this Client. A failed probe fails the install
    with the previous version still current and running.
@@ -145,7 +145,7 @@ service manager perform the restart.
 7. **A marker is written before the pointer moves.** `update-marker.json` in the state directory,
    outside `versions/` so that it survives the switch, records the previous version directory, the
    new one, the offered version, the offered package hash, an attempt counter and the install's
-   trace ([ADR-0016](0016-what-an-agent-reports-about-itself.md)). Then `current` is repointed. A
+   trace ([ADR-0017](0017-what-an-agent-reports-about-itself.md)). Then `current` is repointed. A
    crash between the two leaves a marker naming a switch that did not happen, which the next start
    resolves.
 
@@ -164,7 +164,7 @@ service manager perform the restart.
    On Windows all three are required: the `sc.exe` backend of `service-manager` registers no
    recovery actions, the SCM ignores a clean non-zero stop unless the non-crash flag is set, and a
    status of `Win32(0)` is a clean stop whatever happened. The registration that sets them is
-   [ADR-0019](0019-the-installed-service-and-its-state.md)'s (clause 17). **Crashing on purpose is
+   [ADR-0020](0020-the-installed-service-and-its-state.md)'s (clause 17). **Crashing on purpose is
    never the mechanism**: it throws away the graceful shutdown and the `agent_disconnect`, and
    makes every self-update look like a fault.
 
@@ -194,7 +194,7 @@ service manager perform the restart.
 
 **Out of scope:** rolling back on post-update health rather than on "did it come back"; a
 Server-driven downgrade, which the Client refuses (clause 4) and the Server never offers
-([ADR-0026](0026-deployments-and-rollouts.md)); a privileged updater helper for a low-privileged
+([ADR-0033](0033-deployments-and-rollouts.md)); a privileged updater helper for a low-privileged
 service account; closing the non-atomic Windows pointer switch, which would need a different
 Windows layout.
 
@@ -223,7 +223,7 @@ Windows layout.
   legitimately carry this Client is its Agent type; any other names another program's package or
   none, so the freedom could only misconfigure the narrowing.
 - **The name from the product name.** Every variant build would need a Package of its own, where
-  one serves them all; [ADR-0019](0019-the-installed-service-and-its-state.md) clause 3 keeps the
+  one serves them all; [ADR-0020](0020-the-installed-service-and-its-state.md) clause 3 keeps the
   product name off the Agent type for that reason.
 - **The name from the running file's name.** Renaming or linking the binary would redirect the
   self-update to another package.
@@ -299,7 +299,7 @@ Windows layout.
   aimed at "every Agent" grow by one row per host.
 - Negative / trade-offs: an operator who never chose is in the larger position. The package name,
   the signature and the explicit act that releases a package
-  ([ADR-0026](0026-deployments-and-rollouts.md)) bound it, but a compromised Server reaches further
+  ([ADR-0033](0033-deployments-and-rollouts.md)) bound it, but a compromised Server reaches further
   than with the consent off: it can roll a consenting host forward to any signed release.
 - Negative / trade-offs: a host with the consent but no verification key does not update itself
   until the key is set; the startup notice is the only sign of it on the host, and the Server sees

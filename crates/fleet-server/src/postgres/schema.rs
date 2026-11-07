@@ -1,4 +1,4 @@
-//! The Server's schema (ADR-0050 clause 22): embedded as numbered migrations, applied by the Server
+//! The Server's schema (ADR-0023 clause 22): embedded as numbered migrations, applied by the Server
 //! itself at startup, each recorded in `fleet_schema` with the oldest Server version that
 //! understands the schema it leaves.
 //!
@@ -76,7 +76,7 @@ pub const MIGRATIONS: &[Migration] = &[
     // a database, and name it. A Server of 0.7.1 holds no lease, keeps its audit record in files
     // and leaves the revocation list's version where it was, so it refuses the schema they leave
     // rather than serve beside the instances of 0.8.0
-    // (ADR-0050 clause 22).
+    // (ADR-0023 clause 22).
     //
     // A table only added.
     Migration {
@@ -131,7 +131,7 @@ pub const MIGRATIONS: &[Migration] = &[
     // Columns only added, with defaults, and indexes. A Server of 0.8.0 writes none of them, and
     // the rows it writes are derived again before the list of Agents reads them, so it serves on
     // the schema they leave
-    // (ADR-0049
+    // (ADR-0031
     // clause 8).
     Migration {
         version: 11,
@@ -140,7 +140,7 @@ pub const MIGRATIONS: &[Migration] = &[
     },
     // A column only added, with a default. A Server of 0.8.0 writes no release into it, and every
     // lease taken before it is one of 0.8.0, which the default names
-    // (ADR-0048
+    // (ADR-0025
     // clause 16).
     Migration {
         version: 12,
@@ -149,7 +149,7 @@ pub const MIGRATIONS: &[Migration] = &[
     },
     // A table only added. A Server of 0.8.0 reads and writes none of it, so its sweeps and uploads
     // are as before, beside the instances that mark
-    // (ADR-0050 clause 14).
+    // (ADR-0023 clause 14).
     Migration {
         version: 13,
         oldest_server: "0.8.0",
@@ -157,7 +157,7 @@ pub const MIGRATIONS: &[Migration] = &[
     },
     // A table, its row and the triggers that keep it only added. A Server of 0.8.0 reads none of
     // it, and what it adds and removes is counted all the same
-    // (ADR-0050 clause 22).
+    // (ADR-0023 clause 22).
     Migration {
         version: 14,
         oldest_server: "0.8.0",
@@ -166,7 +166,7 @@ pub const MIGRATIONS: &[Migration] = &[
     // A table only added. A Server of 0.8.0 reads and writes none of it: it neither refuses nor
     // drops a rejected key, so beside the instances of this release a rejected key may wait again
     // through it and be approved
-    // (ADR-0052
+    // (ADR-0027
     // clause 16).
     Migration {
         version: 15,
@@ -176,7 +176,7 @@ pub const MIGRATIONS: &[Migration] = &[
 ];
 
 /// The rejected keys, each the id of the request it refuses, with when it was rejected
-/// (ADR-0052
+/// (ADR-0027
 /// clause 16): written by a rejection under the queue's lock, read by every take under it and by
 /// every approval, and deleted by no close or end of the window.
 const ENROLMENT_REJECTED: &str = "
@@ -186,7 +186,7 @@ CREATE TABLE enrolment_rejected (
 );
 ";
 
-/// The count of the Agents' records (ADR-0050 clause 22): one row, raised and lowered by the
+/// The count of the Agents' records (ADR-0023 clause 22): one row, raised and lowered by the
 /// triggers on `agents` in the statement that adds or removes rows, so the Agent-record ceiling is
 /// decided from it and not from a count of every row. The triggers exist before the row is
 /// filled, and creating them locks `agents` against every addition and removal until the
@@ -232,7 +232,7 @@ CREATE TRIGGER agents_removed AFTER DELETE ON agents
 INSERT INTO agent_count (agents) SELECT count(*) FROM agents;
 ";
 
-/// The blobs a sweep marked before it deletes them (ADR-0050 clause 14): written on the session
+/// The blobs a sweep marked before it deletes them (ADR-0023 clause 14): written on the session
 /// that holds the blob store's lock, read by every upload in the transaction that checks its blob,
 /// and taken away by the sweep that wrote them, `sweep`, or by any sweep once their `lease` is
 /// not live.
@@ -247,7 +247,7 @@ CREATE INDEX blob_deletions_sweep ON blob_deletions (sweep);
 ";
 
 /// The release of the instance that holds each lease
-/// (ADR-0048
+/// (ADR-0025
 /// clause 16): what an instance compares with the oldest Server its migrations leave before it
 /// migrates.
 const LEASE_RELEASE: &str = "
@@ -258,7 +258,7 @@ ALTER TABLE leases ADD COLUMN release text NOT NULL DEFAULT '0.8.0';
 pub const RELEASE_BEFORE_THE_RECORD: &str = "0.8.0";
 
 /// The first schema: one table per kind of record, the parts of a record that are many in tables of
-/// their own (ADR-0050 clauses 4 to 6, 9 to 11 and 21). Unsigned integers are kept as `bigint` with
+/// their own (ADR-0023 clauses 4 to 6, 9 to 11 and 21). Unsigned integers are kept as `bigint` with
 /// their bits unchanged, so every value round-trips.
 ///
 /// PostgreSQL's `text` and `jsonb` refuse a NUL character, which a file keeps. Text an Agent or a
@@ -384,7 +384,7 @@ CREATE TABLE enrolment_requests (
 );
 ";
 
-/// The floor of each Agent type (ADR-0028 clause 15): one row per type, the signature as its
+/// The floor of each Agent type (ADR-0035 clause 15): one row per type, the signature as its
 /// bytes.
 const PACKAGE_FLOORS: &str = r"
 CREATE TABLE package_floors (
@@ -395,7 +395,7 @@ CREATE TABLE package_floors (
 ";
 
 /// The lease of every instance on this database
-/// (ADR-0048
+/// (ADR-0025
 /// clauses 1 to 3). The times are the database's own, so every instance reads the same clock. A
 /// lease whose `expires_at` has passed is lapsed, whatever its row still says.
 const LEASES: &str = r"
@@ -411,9 +411,9 @@ CREATE TABLE leases (
 
 /// Which Host each `instance_uid` is bound to: one row per binding, the `instance_uid` its key, so
 /// no two Hosts hold one
-/// (ADR-0048
+/// (ADR-0025
 /// clause 19). It is filled from the arrays of the Hosts not marked as Gateways, as a Gateway's
-/// Host is bound none (ADR-0043 clause 16); an `instance_uid` two such Hosts' arrays hold fails the
+/// Host is bound none (ADR-0030 clause 16); an `instance_uid` two such Hosts' arrays hold fails the
 /// migration, naming it and the Hosts, and changes nothing, for the operator to decide. A renewal's
 /// walk down its chain finds an entry's renewals by the index on the predecessor.
 const HOST_BINDINGS: &str = r"
@@ -439,7 +439,7 @@ CREATE INDEX certificates_predecessor ON certificates (predecessor_issuer, prede
 ";
 
 /// The members of each Deployment, one row each
-/// (ADR-0048
+/// (ADR-0025
 /// clause 19): its Packages keyed by Agent type, so it holds at most one of each, and its
 /// Configurations by name. They are filled from the `packages` and `configurations` columns of
 /// `deployments`, which stay and are written from these rows.
@@ -463,7 +463,7 @@ INSERT INTO deployment_configurations (deployment, configuration)
 ";
 
 /// The revocation list's one version
-/// (ADR-0050 clause 10): a counter in one row that the
+/// (ADR-0023 clause 10): a counter in one row that the
 /// transaction of every revocation added or widened and every lift increments. It is the `ETag`
 /// of the Gateways' list on every instance, and what each lease renewal compares.
 const REVOCATION_LIST_VERSION: &str = r"
@@ -475,7 +475,7 @@ INSERT INTO revocation_list_version (singleton, version) VALUES (true, 0);
 ";
 
 /// The audit record, one hash chain per lease
-/// (ADR-0047): a record per
+/// (ADR-0029): a record per
 /// chain, named by the instance id of the lease that opened it, with the hash of its closing entry
 /// once it is closed; each entry as the line it was hashed as; and the end of the file record a
 /// move from files left as the archive, which the first chain names as its predecessor.
@@ -500,10 +500,10 @@ CREATE TABLE audit_archive (
 );
 ";
 
-/// Where each Agent is connected (ADR-0043 clause 3): whether
+/// Where each Agent is connected (ADR-0030 clause 3): whether
 /// a connection carries it, and the instance that holds that connection, by the id of its lease.
 /// Each instance writes them for the Agents it carries in batches
-/// (ADR-0043 clause 4); a holder without a live lease reads as
+/// (ADR-0030 clause 4); a holder without a live lease reads as
 /// disconnected, whatever `connected` says (clause 6).
 const AGENT_PRESENCE: &str = r"
 ALTER TABLE agents ADD COLUMN connected boolean NOT NULL DEFAULT false;
@@ -511,7 +511,7 @@ ALTER TABLE agents ADD COLUMN holder uuid;
 ";
 
 /// How each Agent was taken
-/// (ADR-0048
+/// (ADR-0025
 /// clause 8): `takes` counts every take and every batch that names a holder anew, so an instance
 /// writes a disconnect only where the row still holds the count it was answered, with no clock
 /// compared; `holder_changes` holds when the holder changed, the latest eleven times, by the
@@ -522,7 +522,7 @@ ALTER TABLE agents ADD COLUMN holder_changes timestamptz[] NOT NULL DEFAULT '{}'
 ";
 
 /// When each audit entry was stored, by the database's clock: what its age is reckoned from when the
-/// record is pruned (ADR-0050 clause 12). Entries stored before
+/// record is pruned (ADR-0023 clause 12). Entries stored before
 /// take the time their line carries, read as text so that a line that is no entry keeps the time of
 /// the migration rather than stopping it.
 const AUDIT_RECORDED_AT: &str = r#"
@@ -534,7 +534,7 @@ CREATE INDEX audit_entries_recorded_at ON audit_entries (chain, recorded_at);
 "#;
 
 /// The digest of the columns of a row of `agents` its derived ones come from
-/// (ADR-0049
+/// (ADR-0031
 /// clause 8): what a row whose derived columns were written with it holds in `derived_from`. Each
 /// text column enters as its MD5, each `bytea` column length-prefixed, so two rows differ in the
 /// digest wherever they differ in a column, and every function in it is immutable, so the partial
@@ -558,7 +558,7 @@ macro_rules! stamp {
 pub(crate) use stamp;
 
 /// What the list of Agents reads of each record
-/// (ADR-0049
+/// (ADR-0031
 /// clause 8): the display name and the other sort keys, the reported values a Selector matches,
 /// the `service_name`, the machine that groups an Agent behind a Gateway, whether it is its
 /// Client's own Agent, one search text, and the digest of the columns they come from. A row whose
@@ -662,7 +662,7 @@ fn needs_newer(needs: &str, ours: &str) -> String {
 /// Refuses the schema when it names an oldest Server newer than `ours`, naming both versions: what
 /// an instance checks under the migrations' lock before it migrates and in the transaction that
 /// takes each lease
-/// (ADR-0048
+/// (ADR-0025
 /// clause 16).
 ///
 /// # Errors
@@ -695,7 +695,7 @@ async fn leases_record_releases(client: &impl GenericClient) -> Result<bool, Str
 /// `None` when there is none. A lease of an instance that had to be alone counts as none: the
 /// caller holds the exclusive lock or found it free, so that lease's process is gone, and the
 /// next lease taken takes it over
-/// (ADR-0048
+/// (ADR-0025
 /// clauses 2 and 16).
 async fn lease_older_than(
     client: &impl GenericClient,
@@ -749,7 +749,7 @@ async fn lease_older_than(
 /// refused before anything is written, naming both versions, and so is every schema while a live
 /// lease names a release older than the oldest Server the schema names once `migrations` are
 /// applied, naming both releases, whether they are applied already or not
-/// (ADR-0048
+/// (ADR-0025
 /// clause 16).
 ///
 /// # Errors
@@ -823,8 +823,8 @@ mod tests {
 
     /// The migrations are numbered from 1 without a gap, and none names a Server newer than this
     /// one — a build that refused its own schema would never start. This release's own name 0.8.0.
-    /// Verifies: ADR-0050
-    /// Verifies: ADR-0048
+    /// Verifies: ADR-0023
+    /// Verifies: ADR-0025
     #[test]
     fn the_migrations_are_numbered_and_this_server_understands_them() {
         for (index, migration) in MIGRATIONS.iter().enumerate() {
@@ -847,7 +847,7 @@ mod tests {
         }
         // The first release to run beside another serves beside 0.8.0: its migrations name it, so
         // the instances of 0.8.0 that still run serve on the schema they leave
-        // (ADR-0048
+        // (ADR-0025
         // clause 16).
         for migration in &MIGRATIONS[10..] {
             assert_eq!(
@@ -869,9 +869,9 @@ mod tests {
         assert_eq!(compare("not-a-version", "99.0.0"), Ordering::Greater);
     }
 
-    /// A migration only adds (ADR-0050 clause 22): nothing in the embedded schema drops, renames or
+    /// A migration only adds (ADR-0023 clause 22): nothing in the embedded schema drops, renames or
     /// alters a column away, and every table it creates is one [`TABLES`] knows.
-    /// Verifies: ADR-0050
+    /// Verifies: ADR-0023
     #[test]
     fn a_migration_only_adds() {
         for migration in MIGRATIONS {

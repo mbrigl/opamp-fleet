@@ -1,4 +1,4 @@
-# ADR-0033: `Cargo.toml` decides the product's version, the internal crate's build stamps it with git's provenance, and the commit is compared nowhere
+# ADR-0038: `Cargo.toml` decides the product's version, the internal crate's build stamps it with git's provenance, and the commit is compared nowhere
 
 - **Status:** 🟢 accepted
 - **Date:** 2026-10-03
@@ -14,9 +14,9 @@ project's own.
 The version a binary carries is load-bearing in several places at once: the OpAMP
 `service.version` identifying attribute tells the Server which build it is talking to, both CLIs
 print it, the Client's install layout names its version directories after it
-([ADR-0019](0019-the-installed-service-and-its-state.md)), and the self-update compares an offered
+([ADR-0020](0020-the-installed-service-and-its-state.md)), and the self-update compares an offered
 version against what a staged binary reports
-([ADR-0018](0018-the-client-updates-itself-from-a-signed-package.md)).
+([ADR-0019](0019-the-client-updates-itself-from-a-signed-package.md)).
 
 Forces:
 
@@ -74,12 +74,11 @@ compared nowhere.
 
 4. **The resolution runs in `crates/fleet-core/build.rs`, through `git2`, with no `git` binary.**
    The script discovers the repository upward from the manifest directory, reads HEAD and the
-   `refs/tags/version/*` references, and emits
-   `cargo:rustc-env=OPAMP_PRODUCT_RELEASE=<full string>` with `rerun-if-changed` on the
-   repository's `HEAD`, `refs` and `packed-refs` and `rerun-if-env-changed=OPAMP_PRODUCT_VERSION`.
-   `git2` (libgit2, vendored and statically built) is a **build**-dependency of `fleet-core` only:
-   nothing of it reaches a shipped binary, nothing parses CLI output, and the result does not vary
-   with the host's git version or locale.
+   `refs/tags/version/*` references, and emits `cargo:rustc-env=OPAMP_PRODUCT_RELEASE=<full string>`
+   with `rerun-if-changed` on the repository's `HEAD`, `refs` and `packed-refs` and
+   `rerun-if-env-changed=OPAMP_PRODUCT_VERSION`. `git2` (libgit2, vendored and statically built) is
+   a **build**-dependency of `fleet-core` only: nothing of it reaches a shipped binary, nothing
+   parses CLI output, and the result does not vary with the host's git version or locale.
 
 5. **`fleet_core::version::current()` is the one version helper, on both ends.** Every surface
    that states a version calls it, so all agree: the OpAMP `service.version` attribute, both CLIs'
@@ -113,8 +112,8 @@ compared nowhere.
    gate that keeps a version from naming a path outside the install layout. Beside it: `identity`
    (clause 10), `same_release`, and `precedence`, SemVer ordering with build metadata ignored,
    which the self-update's downgrade refusal
-   ([ADR-0018](0018-the-client-updates-itself-from-a-signed-package.md)) and the rollout
-   ([ADR-0026](0026-deployments-and-rollouts.md)) order by. It lives in `fleet-core` because the
+   ([ADR-0019](0019-the-client-updates-itself-from-a-signed-package.md)) and the rollout
+   ([ADR-0033](0033-deployments-and-rollouts.md)) order by. It lives in `fleet-core` because the
    Client writes these strings and the Server displays them, and it is this project's grammar, not
    OpAMP's.
 
@@ -143,8 +142,8 @@ compared nowhere.
     keep the full string too.
 
 **Out of scope:** what a release builds and publishes (targets and artifacts,
-[ADR-0040](0040-releases-attestations-and-the-server-image.md); installers,
-[ADR-0019](0019-the-installed-service-and-its-state.md)); whether a Managed Process's package
+[ADR-0039](0039-releases-attestations-and-the-server-image.md); installers,
+[ADR-0020](0020-the-installed-service-and-its-state.md)); whether a Managed Process's package
 version, free-form and an upstream project's own numbering, is parsed beyond what ordering needs;
 release-candidate tags (`version/1.2.3-rc.1`), refused by the grammar until a release-candidate
 flow is wanted.
@@ -192,11 +191,10 @@ flow is wanted.
 - **Leave `service_version` holding the full string and add a base field beside it.** Leaves a
   field called `service_version` holding something nobody would call a version.
 - **Name the variables for this project (`OPAMP_FLEET_VERSION`, `OPAMP_BUILD_VERSION`).** A variant
-  build (the `PRODUCT_NAME` clause of
-  [ADR-0019](0019-the-installed-service-and-its-state.md)) would set a variable that names a
-  product it is not, and a *build* version beside a *fleet* version does not say which is the
-  input and which the result. `OPAMP_PRODUCT_VERSION` and `OPAMP_PRODUCT_RELEASE` read as one
-  pair.
+  build (the `PRODUCT_NAME` clause of [ADR-0020](0020-the-installed-service-and-its-state.md)) would
+  set a variable that names a product it is not, and a *build* version beside a *fleet* version does
+  not say which is the input and which the result. `OPAMP_PRODUCT_VERSION` and
+  `OPAMP_PRODUCT_RELEASE` read as one pair.
 - **No prefix (`PRODUCT_VERSION`).** Common in other toolchains, so an ambient value would set the
   version. `OPAMP_` is the prefix the build uses for `OPAMP_BASELINE`
   ([ADR-0008](0008-five-crates-on-tokio-and-axum.md)) and names the protocol, not the product, so

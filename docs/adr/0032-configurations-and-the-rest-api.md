@@ -1,4 +1,4 @@
-# ADR-0025: Configurations compose into one config map, and the REST API is described by OpenAPI
+# ADR-0032: Configurations compose into one config map, and the REST API is described by OpenAPI
 
 - **Status:** 🟢 accepted
 - **Date:** 2026-08-12
@@ -7,14 +7,14 @@
 
 ## Context
 
-The specification asks the Server to be driven through an **OpenAPI-described** REST API (G-5),
-to send an Agent its configuration without being asked and never again once the Agent reports
-its hash (G-1, G-3), and to distribute each Managed Process's own configuration without an
-abstraction over its language (Non-Goal "Replacing an agent's configuration language").
+The specification asks the Server to be driven through an **OpenAPI-described** REST API (G-5), to
+send an Agent a configuration a rollout released to it without being asked, and never again once the
+Agent reports its hash (G-1, G-3), and to distribute each Managed Process's own configuration
+without an abstraction over its language (Non-Goal "Replacing an agent's configuration language").
 
 A Configuration is a named piece of an agent's own configuration language, written for one Agent
 type; it reaches Agents through the Deployments that hold it, which aim it and release it
-([ADR-0026](0026-deployments-and-rollouts.md)). What this ADR fixes is how the Configurations
+([ADR-0033](0033-deployments-and-rollouts.md)). What this ADR fixes is how the Configurations
 released to an Agent travel to it and what the Client does with them.
 
 OpAMP's `AgentConfigMap` is a map of named entries whose `config_hash` covers the whole map, so
@@ -38,7 +38,7 @@ make a REST API under `/api/v1`, described by an OpenAPI document generated code
 `utoipa`, the Server's contract.
 
 1. **The name follows the instance-name grammar** of
-   [ADR-0019](0019-the-installed-service-and-its-state.md) — 1–32 characters of lowercase
+   [ADR-0020](0020-the-installed-service-and-its-state.md) — 1–32 characters of lowercase
    letters, digits, and `-`, not starting or ending with `-`, not a Windows device name — because
    it becomes a file name on the Server, a config-map key on the wire, and an entry file on every
    Client.
@@ -57,7 +57,7 @@ make a REST API under `/api/v1`, described by an OpenAPI document generated code
 
 4. **Nothing released, nothing offered.** An Agent's map is composed from the Configurations an
    operator's rollout act released to it, never from matching alone
-   ([ADR-0026](0026-deployments-and-rollouts.md)); matching computes the candidates. An Agent
+   ([ADR-0033](0033-deployments-and-rollouts.md)); matching computes the candidates. An Agent
    with nothing released to it is offered nothing and keeps running what it runs.
 
 5. **The role travels verbatim; the Server owns no vocabulary.** The `role` of a Configuration
@@ -78,19 +78,18 @@ make a REST API under `/api/v1`, described by an OpenAPI document generated code
    configures its process from the entries leaves every roled one out: the Collector gets one
    `--config` per unroled entry, in sorted order.
 
-7. **The REST API is versioned by path and described by a generated document.** Every route
-   lives under `/api/v1`. The OpenAPI document is generated code-first with `utoipa` and
-   `utoipa-axum`: handlers and schemas are annotated where they live and routes registered once,
-   so document and behaviour cannot drift. It is served at `/api/v1/openapi.json`. The API is
-   served on the Operator plane
-   ([ADR-0045](0045-tls-1-3-two-planes-and-bounded-input.md)), behind its authentication
-   ([ADR-0038](0038-admission-by-client-certificate-and-revocation.md)), beside the rendered docs
+7. **The REST API is versioned by path and described by a generated document.** Every route lives
+   under `/api/v1`. The OpenAPI document is generated code-first with `utoipa` and `utoipa-axum`:
+   handlers and schemas are annotated where they live and routes registered once, so document and
+   behaviour cannot drift. It is served at `/api/v1/openapi.json`. The API is served on the Operator
+   plane ([ADR-0012](0012-tls-1-3-two-planes-and-bounded-input.md)), behind its authentication
+   ([ADR-0026](0026-admission-by-client-certificate-and-revocation.md)), beside the rendered docs
    page ([ADR-0008](0008-five-crates-on-tokio-and-axum.md)).
 
 **Out of scope:** what a Configuration holds, how it is aimed and released, its routes, and what
-deleting one does ([ADR-0026](0026-deployments-and-rollouts.md)); where Configurations are stored
-([ADR-0044](0044-the-servers-state-and-its-stores.md)); the meaning of a kind's own role values
-(each kind's own ADR); configuration history and audit.
+deleting one does ([ADR-0033](0033-deployments-and-rollouts.md)); where Configurations are stored
+([ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md));
+the meaning of a kind's own role values (each kind's own ADR); configuration history and audit.
 
 ## Alternatives considered
 

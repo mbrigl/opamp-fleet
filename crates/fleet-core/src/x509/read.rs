@@ -104,7 +104,7 @@ mod tests {
 
     /// The host is the first SAN URI with the prefix; the id is the issuer's hash and the serial
     /// without leading zeros.
-    /// Verifies: ADR-0052
+    /// Verifies: ADR-0027
     #[test]
     fn a_certificate_is_known_by_its_host_issuer_and_serial() {
         let key = rcgen::KeyPair::generate().expect("key");
@@ -128,7 +128,7 @@ mod tests {
     }
 
     /// A CA issued what it signed under its own name, and not what another key signed under it.
-    /// Verifies: ADR-0015
+    /// Verifies: ADR-0016
     #[test]
     fn a_ca_issued_only_what_it_signed_directly() {
         let ca_key = rcgen::KeyPair::generate().expect("ca key");

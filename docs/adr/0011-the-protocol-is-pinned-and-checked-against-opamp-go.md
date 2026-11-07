@@ -35,15 +35,15 @@ package `opamp.proto.v1`, so the path to the schema must live in exactly one pla
 
 The oracle meets three further facts:
 
-- **The oracle and the Baseline can stand at different versions.** `opamp-go` `v0.24.0`
-  implements `opamp-spec` `v0.20.0`, the Baseline itself, and `v0.25.0` is its newest release. An
-  oracle reading an older specification than the Baseline returns whenever either side moves, so
-  the duty to write it down stays.
+- **The oracle and the Baseline can stand at different versions.** `opamp-go` `v0.25.0`, its
+  newest release, implements `opamp-spec` `v0.20.0`, the Baseline itself. An oracle reading an
+  older specification than the Baseline returns whenever either side moves, so the duty to write
+  it down stays.
 - **Plaintext runs alone check the endpoint as a test builds it, not as it ships.** They run on
   the loopback with an open admission, as the rest of the suite does. The shipped Server refuses
   plaintext beyond the loopback and admits by a client certificate in a TLS 1.3 handshake alone
-  ([ADR-0045](0045-tls-1-3-two-planes-and-bounded-input.md),
-  [ADR-0038](0038-admission-by-client-certificate-and-revocation.md)), and the Client presents one
+  ([ADR-0012](0012-tls-1-3-two-planes-and-bounded-input.md),
+  [ADR-0026](0026-admission-by-client-certificate-and-revocation.md)), and the Client presents one
   on both transports. Whether `opamp-go` can speak to that endpoint, and ours to an `opamp-go`
   Server that requires the same, is what every deployment depends on.
 - **Not everything the scenario list names is observable on both ends.** `opamp-go`'s plain-HTTP
@@ -206,7 +206,7 @@ as it ships as well as in plaintext on the loopback.
   the source of the MUST/SHOULD/MAY rules and of the WebSocket framing (varint header `0`, then the
   protobuf body).
 - [`protox`](https://crates.io/crates/protox): pure-Rust protobuf compilation for `prost`
-  (`protox 0.9` pairs with `prost 0.14`); [`prost`](https://docs.rs/prost): generated types and
+  (`protox 0.10` pairs with `prost 0.14`); [`prost`](https://docs.rs/prost): generated types and
   `encoding::{encode_varint, decode_varint}`.
 - [`opamp-go`](https://github.com/open-telemetry/opamp-go): the reference implementation,
   `client`, `server`, `protobufs`. Its release notes give each release's `opamp-spec` version:
@@ -253,8 +253,8 @@ as it ships as well as in plaintext on the loopback.
   drives it against fixtures.
 - [`checks.yml`](../../.github/workflows/checks.yml) and [`ci.yml`](../../.github/workflows/ci.yml)
   build the workspace on Linux, Windows and macOS, and neither they nor the Dev Container install
-  `protoc`; every build compiles the generated types
-  from the vendored files through `BASELINE` (clauses 5 to 7).
+  `protoc`; every build compiles the generated types from the vendored files through `BASELINE`
+  (clauses 5 to 7).
 - `crates/opamp/src/frame.rs`: `round_trips_a_message`, `rejects_a_non_zero_header`,
   `rejects_a_truncated_header` (clause 8).
 - `crates/fleet-agent/tests/interop_opamp_go.rs`, run by

@@ -1,4 +1,4 @@
-//! The floors in PostgreSQL (ADR-0028 clause 15): the PostgreSQL adapter behind
+//! The floors in PostgreSQL (ADR-0035 clause 15): the PostgreSQL adapter behind
 //! [`FloorStore`](crate::floors::FloorStore) — one row per Agent type.
 
 use std::collections::BTreeMap;
@@ -214,7 +214,7 @@ mod tests {
         assert_eq!(after["otelcol"].version, "2.1.0");
     }
 
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0035
     #[test]
     fn the_floor_port_contract_holds_on_the_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -235,7 +235,7 @@ mod tests {
         assert!(error.contains("package-floors.json"), "{error}");
     }
 
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0035
     #[test]
     fn the_floor_port_contract_holds_on_postgres() {
         let Some(test) = TestDatabase::named() else {

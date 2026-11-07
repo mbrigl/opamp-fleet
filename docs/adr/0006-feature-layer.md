@@ -1,9 +1,9 @@
-# ADR-0006: Work larger than one session is planned in the tree as a feature spec cut into tracer-bullet tickets, files deleted when their work lands, and the design is revised when a spec closes or after a number of changes
+# ADR-0006: Work larger than one session is planned in the tree as a feature spec cut into tracer-bullet tickets, files deleted when their work lands, findings outside the plan go to a backlog, and the design is revised when a spec closes or after a number of changes
 
 - **Status:** 🟢 accepted
-- **Date:** 2026-09-17
+- **Date:** 2026-11-07
 - **Deciders:** NUC maintainer, Markus Brigl
-- **Applies to:** every change larger than one agent session, `docs/plan/`, the spec and ticket templates of the `plan-feature` skill, the pull request template, the `Last design revision` line of `docs/ARCHITECTURE.md`, `scripts/sensor-revision-due.sh`, `scripts/sensor-plan-frontier.sh`, and the claim script `.agents/skills/work-tickets/claim.sh`
+- **Applies to:** every change larger than one agent session, `docs/plan/`, the spec and ticket templates of the `plan-feature` skill, the pull request template, the `Last design revision` line of `docs/ARCHITECTURE.md`, `scripts/sensor-revision-due.sh`, `scripts/sensor-plan-frontier.sh`, the claim script `.agents/skills/work-tickets/claim.sh`, `docs/backlog/`, and `scripts/sensor-backlog.sh`
 
 ## Context
 
@@ -80,11 +80,28 @@ of what they touched — the modules, the accepted ADRs that bind them, and the 
 criteria they serve — and filed what it found
 ([`AGENTS.md` §5](../../AGENTS.md#5-quality-bar--definition-of-done)).
 
+A **finding** is a defect, a doubt, or an idea that no ticket covers. A session that makes one
+records it in the **backlog**. It does not widen its ticket. The project records the form of its
+backlog in an ADR of its own, from the backlog entry of the catalogue:
+
+- **Files:** one file per entry under `docs/backlog/`. The directory lies beside the plan, not in
+  it, so the frontier reads no entry as a ticket. An entry holds a title, what was observed, and
+  where. A session creates an entry in a commit of its own, so a branch that is dropped can hand
+  the entry on.
+- **Issues:** the issue tracker of the host, for a project whose reports arrive from outside.
+
+Without that ADR, the backlog is files. A sensor lists the entries on `main` and the entries that
+exist only on local branches not yet merged. The human decides which entry becomes a ticket. The
+design revision lists the entries that touch the modules it revisits. The commit that creates a
+ticket from an entry deletes the entry.
+
 The revision also comes due **without a spec**, on a count of the work done rather than on a
 date. [`docs/ARCHITECTURE.md`](../ARCHITECTURE.md) carries on one line the date of the last
 revision and the number of changes after which the next is due — `**Last design revision:**
-<YYYY-MM-DD or none yet>, due after <N> changes.` — and a sensor counts the changes since
-the commit that set that date, so the history decides where the count starts, not the clock. A
+<YYYY-MM-DD [(<n>)] or none yet>, due after <N> changes.` — and a sensor counts the changes since
+the commit that set that date, so the history decides where the count starts, not the clock; a
+second revision on one day writes its ordinal after the date, `(2)`, so that its commit sets a
+line of its own to count from. A
 **change** is a commit that touches anything outside `docs/`, merges excluded. The number ships
 as 20 and is the project's to set, on the line rather than in the sensor. The count is
 reported, never enforced: once the number is reached the revision runs over the modules those
@@ -92,9 +109,12 @@ changes touched, and it moves the date. The line sits in the overview because th
 corrects that document anyway, and because the overview is the one document that says how the
 system stands (ADR-0001).
 
-**Out of scope:** how work smaller than one session is planned; an artifact for an effort too
-foggy to be written as a spec; how reports that arrive from outside — bug reports, questions — are
-received and triaged; whether a due revision blocks a merge, which it does not.
+**Out of scope:**
+
+- how work smaller than one session is planned;
+- an artifact for an effort too foggy to be written as a spec;
+- how a finding is triaged beyond the decision whether it becomes a ticket;
+- whether a due revision blocks a merge, which it does not.
 
 ## Alternatives considered
 
@@ -135,6 +155,12 @@ received and triaged; whether a due revision blocks a merge, which it does not.
   with it; how much drift a project tolerates belongs in the project's own document.
 - **Counting lines changed rather than commits.** Nearer to entropy and far noisier: a formatter
   run is thousands of lines and no structure at all.
+- **Findings in the conversation or an agent's memory.** Lost with the session, and read by one
+  agent only.
+- **The backlog as one file, or under `docs/plan/`.** One file conflicts on every merge of two
+  branches that each add an entry; under the plan, the frontier would read each entry as a ticket.
+- **The issue tracker for every project.** Fits where reports arrive from outside; for the rest it
+  costs what the tracker costs the plan above, so it is a form the project chooses.
 
 ## Sources / Prior art
 
@@ -194,8 +220,8 @@ ticket rather than judged by the session that is stopping.
   visible, not impossible. A commit is a coarse measure of drift, so a project that squashes
   reaches the number more slowly than one that does not, and the date is moved by hand, by the
   revision's own change.
-- Follow-ups: the decision map, once an effort too foggy to slice has been met; triage of reports
-  arriving from outside.
+- Follow-ups: the decision map, once an effort too foggy to slice has been met; triage of
+  findings beyond the decision whether each becomes a ticket.
 
 ## Enforcement
 
@@ -210,10 +236,17 @@ the open tickets as claimed, blocked, or on the frontier with their *Mode*, and 
 without a *Blocked by* or a *Mode* section, which it cannot place; its self-test cites this ADR
 and runs the claim script of the `work-tickets` skill, in one repository and across two clones of
 one remote, where the second claim of a ticket must lose.
+`scripts/sensor-backlog.sh`, in the same job, lists the backlog entries on `main` and those only
+on unmerged local branches; it fails nothing, and its self-test cites this ADR.
 
-**Not mechanically decidable:** whether an effort was larger than one session and so had to be
-specced and sliced, whether the branch that landed a ticket's work deleted its file, and
-whether a spec was deleted without its design revision are review, as is whether a due revision
-was run at all and the date moved with it. The templates of the
-[`plan-feature`](../../.agents/skills/plan-feature/) skill carry the shape, and the merge message
-names the ticket a change deletes ([`AGENTS.md` §6](../../AGENTS.md#6-project-rules)).
+**Not mechanically decidable:** the review decides each of these.
+
+- whether an effort was larger than one session, and so had to be specced and sliced;
+- whether a finding went to the backlog rather than into a ticket;
+- whether the branch that landed a ticket's work deleted its file;
+- whether a spec was deleted without its design revision;
+- whether a due revision ran at all, and moved the date.
+
+The templates of the [`plan-feature`](../../.agents/skills/plan-feature/) skill carry the shape.
+The merge message names the ticket a change deletes
+([`AGENTS.md` §6](../../AGENTS.md#6-project-rules)).

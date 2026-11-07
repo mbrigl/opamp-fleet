@@ -64,9 +64,9 @@
   // "Git hooks" in CONTRIBUTING.md. The development observability stack runs on the host,
   // apart from this container (observability/compose.yaml); this puts its Collector on the
   // container's loopback, 127.0.0.1:4317 and :4318, because the Client sends own telemetry in
-  // plaintext to a loopback IP literal alone (ADR-0016), the stack's rustfs on :9100, the S3
-  // store a development Server may use (ADR-0050), and its PostgreSQL on :5432, the database it may
-  // keep its records in (ADR-0050). See observability/README.md.
+  // plaintext to a loopback IP literal alone (ADR-0017), the stack's rustfs on :9100, the S3
+  // store a development Server may use (ADR-0023), and its PostgreSQL on :5432, the database it may
+  // keep its records in (ADR-0023). See observability/README.md.
   "postStartCommand": {
     "hooks": "git config core.hooksPath .githooks",
     "merge": "git config merge.ff false && git config pull.ff only",
@@ -88,7 +88,7 @@
     }
   },
 
-  // The Server's two planes (ADR-0045), published the way each one is meant to be reached.
+  // The Server's two planes (ADR-0012), published the way each one is meant to be reached.
   //
   // The Agent plane (4320, OpAMP + package downloads) is where the fleet connects, so `appPort`
   // publishes it through Docker itself (`-p 0.0.0.0:4320:4320`) and the Server is reachable from

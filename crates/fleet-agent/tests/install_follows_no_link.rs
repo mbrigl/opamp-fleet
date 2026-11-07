@@ -1,5 +1,5 @@
 //! `service install` and `service config` run as root or as an Administrator, and write into the
-//! state directory and the executable layout, which belong to the service's account (ADR-0037). A link that account put at a name the install writes, or at a directory on the way to
+//! state directory and the executable layout, which belong to the service's account (ADR-0021). A link that account put at a name the install writes, or at a directory on the way to
 //! it, must never carry a privileged write, rename, mode change or owner change somewhere else:
 //! each case here plants one and checks that the install refused it or replaced it, and that what
 //! it pointed at is as it was.
@@ -98,7 +98,7 @@ mod unix {
 
     /// The pending key and the request, each written over a link at its name: the link is
     /// replaced by the file, and the file it pointed at keeps its bytes and its mode.
-    /// Verifies: ADR-0037
+    /// Verifies: ADR-0021
     #[test]
     fn a_certificate_request_writes_through_no_link() {
         for name in [PENDING_KEY_FILE, PENDING_CSR_FILE] {
@@ -120,7 +120,7 @@ mod unix {
     /// An issued certificate is staged and put in force over links at every name it passes
     /// through, its temporary names included; nothing they point at changes, and the pair in
     /// force is the one issued.
-    /// Verifies: ADR-0037
+    /// Verifies: ADR-0021
     #[test]
     fn an_issued_certificate_is_stored_through_no_link() {
         let state = tempfile::tempdir().expect("state");
@@ -152,7 +152,7 @@ mod unix {
 
     /// The instance identity and the connection settings, the other two files an enrolment
     /// writes into the state directory.
-    /// Verifies: ADR-0037
+    /// Verifies: ADR-0021
     #[test]
     fn the_identity_and_the_connection_settings_are_written_through_no_link() {
         let state = tempfile::tempdir().expect("state");
@@ -176,7 +176,7 @@ mod unix {
     /// A state directory the account replaced with a link is refused by everything an enrolment
     /// does there: nothing is created behind the link, and the directory it points at keeps its
     /// mode.
-    /// Verifies: ADR-0037
+    /// Verifies: ADR-0021
     #[test]
     fn a_state_directory_that_is_a_link_is_refused() {
         let root = tempfile::tempdir().expect("data root");
@@ -221,7 +221,7 @@ mod unix {
     /// The layout root belongs to the account too: a `versions` directory it replaced with a link
     /// is refused, and a link at the staged program or its manifest is replaced without the file it
     /// pointed at being written or made executable.
-    /// Verifies: ADR-0037
+    /// Verifies: ADR-0021
     #[test]
     fn staging_the_program_writes_through_no_link() {
         let root = tempfile::tempdir().expect("layout root");
@@ -256,7 +256,7 @@ mod unix {
     /// `service config` gives what it wrote to the configuration's owner, by name. A state
     /// directory that is a link is refused rather than walked through, and a file with a second
     /// hard link — another name for it may stand anywhere — keeps its owner.
-    /// Verifies: ADR-0037
+    /// Verifies: ADR-0021
     #[test]
     fn handing_the_written_files_over_follows_no_link() {
         let root = tempfile::tempdir().expect("data root");
@@ -297,7 +297,7 @@ mod unix {
     /// belongs to the account: a link at the copy or at its temporary name is replaced, never
     /// written through, and a link at the configuration's own name is refused, never followed —
     /// not even to create the file it points at.
-    /// Verifies: ADR-0037
+    /// Verifies: ADR-0021
     #[test]
     fn the_configuration_is_written_through_no_link() {
         let data = tempfile::tempdir().expect("data root");
@@ -331,7 +331,7 @@ mod unix {
 
     /// The state directory an install creates beneath a root is created one held directory at a
     /// time: a link the account put on the way is refused, and nothing is created behind it.
-    /// Verifies: ADR-0037
+    /// Verifies: ADR-0021
     #[test]
     fn the_state_directory_is_created_through_no_link() {
         let root = tempfile::tempdir().expect("data root");
@@ -385,7 +385,7 @@ mod windows {
 
     /// A state directory the account replaced with a junction is refused by everything an
     /// enrolment does there, and nothing is created behind it.
-    /// Verifies: ADR-0037
+    /// Verifies: ADR-0021
     #[test]
     fn a_state_directory_that_is_a_junction_is_refused() {
         let root = tempfile::tempdir().expect("data root");
@@ -411,7 +411,7 @@ mod windows {
     }
 
     /// A `versions` directory the account replaced with a junction is refused by the staging.
-    /// Verifies: ADR-0037
+    /// Verifies: ADR-0021
     #[test]
     fn staging_refuses_a_versions_junction() {
         let root = tempfile::tempdir().expect("layout root");
@@ -425,7 +425,7 @@ mod windows {
 
     /// On Windows the account may hold delete on the layout root itself and put a junction at its
     /// name: a root that is a reparse point is refused too.
-    /// Verifies: ADR-0037
+    /// Verifies: ADR-0021
     #[test]
     fn staging_refuses_a_layout_root_that_is_a_junction() {
         let parent = tempfile::tempdir().expect("parent");
@@ -444,7 +444,7 @@ mod windows {
     /// Creating one needs the symbolic-link privilege or Developer Mode, which an elevated run —
     /// a GitHub-hosted Windows runner — holds; without it the test fails rather than deciding
     /// nothing.
-    /// Verifies: ADR-0037
+    /// Verifies: ADR-0021
     #[test]
     fn a_file_symbolic_link_in_the_state_directory_is_replaced() {
         let state = tempfile::tempdir().expect("state");
@@ -461,7 +461,7 @@ mod windows {
 
     /// On Windows the account holds delete on the data root and may put a junction at its name:
     /// the configuration and the CA copy are not written into a data root that is a junction.
-    /// Verifies: ADR-0037
+    /// Verifies: ADR-0021
     #[test]
     fn the_configuration_is_not_written_through_a_data_root_junction() {
         let parent = tempfile::tempdir().expect("parent");
@@ -482,7 +482,7 @@ mod windows {
 
     /// The state directory an install creates beneath a root is created one held directory at a
     /// time: a junction the account put on the way is refused, and nothing is created behind it.
-    /// Verifies: ADR-0037
+    /// Verifies: ADR-0021
     #[test]
     fn the_state_directory_is_created_through_no_junction() {
         let root = tempfile::tempdir().expect("data root");
@@ -500,7 +500,7 @@ mod windows {
 
     /// The `current` pointer is switched in a held layout root: a root that is a junction is
     /// refused, and no pointer is removed or created behind it.
-    /// Verifies: ADR-0037
+    /// Verifies: ADR-0021
     #[test]
     fn the_current_pointer_is_not_switched_through_a_layout_root_junction() {
         let parent = tempfile::tempdir().expect("parent");

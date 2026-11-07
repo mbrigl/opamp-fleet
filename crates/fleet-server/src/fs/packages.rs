@@ -1,4 +1,4 @@
-//! The package store's metadata on the filesystem (ADR-0027, ADR-0050): the default adapter behind
+//! The package store's metadata on the filesystem (ADR-0034, ADR-0023): the default adapter behind
 //! [`PackageBackend`](crate::packages::PackageBackend) — one JSON file per Package under
 //! `<data_dir>/packages/`, its entries inside, each naming its artifact by hash. The bytes are the
 //! blob store's.
@@ -89,7 +89,7 @@ fn parse(stem: &str, path: &Path, text: &str) -> Result<Package, String> {
             .map(hex::decode)
             .transpose()
             .map_err(|e| format!("invalid signature in {}: {e}", path.display()))?;
-        // Held to the length a write is held to (ADR-0027 clause 18).
+        // Held to the length a write is held to (ADR-0034 clause 18).
         if let Some(signature) = &signature {
             if signature.len() != crate::packages::ED25519_SIGNATURE_LEN {
                 return Err(format!(
@@ -115,7 +115,7 @@ fn parse(stem: &str, path: &Path, text: &str) -> Result<Package, String> {
 
 impl PackageBackend for FsPackageBackend {
     /// A file that cannot be read, does not parse, or whose name disagrees with the identity it
-    /// holds fails the open naming it; so does anything else in the directory (ADR-0050 clause 6).
+    /// holds fails the open naming it; so does anything else in the directory (ADR-0023 clause 6).
     fn load(&self) -> Result<Vec<Package>, String> {
         let mut packages = Vec::new();
         for (stem, path) in super::json_files(&self.dir)? {
@@ -198,7 +198,7 @@ struct PackageMeta {
 }
 
 /// One entry as persisted: its platform, the blob that holds its bytes, named by hash only
-/// (ADR-0050 clause 13), their size, and the operator's signature.
+/// (ADR-0023 clause 13), their size, and the operator's signature.
 ///
 /// Unknown fields are refused, so an entry an older Server wrote — a reference to a source, or a
 /// `content_hash_hex` beside an artifact file — fails the open naming the file rather than loading
@@ -211,7 +211,7 @@ struct EntryMeta {
     /// The SHA-256 of the artifact, lowercase hex: the blob's name, and what the Agent verifies.
     sha256: String,
     size: u64,
-    /// The operator's Ed25519 signature over this entry, hex (ADR-0027); absent while unsigned.
+    /// The operator's Ed25519 signature over this entry, hex (ADR-0034); absent while unsigned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     signature_hex: Option<String>,
 }

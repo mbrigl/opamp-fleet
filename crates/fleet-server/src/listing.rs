@@ -1,5 +1,5 @@
 //! The lists that grow with the fleet, read a page at a time
-//! (ADR-0049):
+//! (ADR-0031):
 //! the filters, the order, the opaque cursor, and what an Agent's record gives the queries to
 //! search and sort by.
 //!
@@ -223,7 +223,7 @@ pub struct Derived {
     pub service_name: String,
     /// Every reported key outside the Server's `fleet.` space, with the value a Selector matches,
     /// `None` where the first value reported is no string or an empty one: the key is taken, and
-    /// no label can stand in for it (ADR-0043 clause 18).
+    /// no label can stand in for it (ADR-0030 clause 18).
     pub reported: BTreeMap<String, Option<String>>,
     /// `host.id=…` or `host.name=…`, empty when neither is reported.
     pub machine: String,
@@ -431,7 +431,7 @@ pub struct Candidate<'a> {
     pub holder: Option<&'a str>,
     /// The Host it last arrived over.
     pub host: Option<&'a str>,
-    /// What a Selector is matched against (ADR-0043 clause 18).
+    /// What a Selector is matched against (ADR-0030 clause 18).
     pub effective: Option<&'a AgentDescription>,
     pub own: &'a BTreeMap<String, String>,
     pub inherited: &'a BTreeMap<String, String>,
@@ -476,7 +476,7 @@ impl AgentFilter {
 /// labels it inherits.
 pub type Placed = (Option<InstanceUid>, bool, BTreeMap<String, String>);
 
-/// Where the Agents that arrived over one Host place each other (ADR-0043 clause 19): on a direct
+/// Where the Agents that arrived over one Host place each other (ADR-0030 clause 19): on a direct
 /// connection they are one group, behind a Gateway one group per machine they report. A group with
 /// exactly one Client Agent places the others under it, and they inherit its labels; one with more
 /// places nobody and marks every member ambiguous. Answers, per Agent of a group, its Client Agent,
@@ -558,7 +558,7 @@ mod tests {
 
     /// Pages follow each other without a gap or a repeat, ties broken by the tiebreak, in either
     /// direction, and the last page names no next one.
-    /// Verifies: ADR-0049
+    /// Verifies: ADR-0031
     #[test]
     fn pages_follow_each_other_in_a_stable_order() {
         let entries = || {
@@ -597,7 +597,7 @@ mod tests {
 
     /// On a direct connection the Agents of a Host are one group, behind a Gateway one per
     /// machine; one Client Agent places the others, two place nobody.
-    /// Verifies: ADR-0043
+    /// Verifies: ADR-0030
     #[test]
     fn the_agents_of_one_host_are_placed_by_their_group() {
         use opamp::attributes::string_attr;

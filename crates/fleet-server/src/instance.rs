@@ -1,5 +1,5 @@
 //! A Server instance on PostgreSQL
-//! (ADR-0048
+//! (ADR-0025
 //! clauses 1 to 3, 9 and 10): the lease it holds while it serves, the planes it opens only while it
 //! holds one, and the changes of other instances it takes up.
 //!
@@ -49,7 +49,7 @@ pub type Held = watch::Receiver<Option<String>>;
 
 /// Whether the lease is still held by the clock it is measured on, read at the moment of asking:
 /// what each request on either plane and each message of an Agent checks before it is answered
-/// (ADR-0048
+/// (ADR-0025
 /// clause 3). The lease thread reads the clock only every [`CHECKED_EVERY`], and after a suspend
 /// this answers at once.
 #[derive(Clone)]
@@ -219,7 +219,7 @@ impl Lease {
     }
 
     /// The revocation list's version as each renewal reads it
-    /// (ADR-0048
+    /// (ADR-0025
     /// clause 10), for [`follow`] to compare with the one the instance holds.
     #[must_use]
     pub fn list_versions(&self) -> watch::Receiver<Option<u64>> {
@@ -228,7 +228,7 @@ impl Lease {
 
     /// Changes each time this instance removes a lease that lapsed, its own lost one included,
     /// after it took its first: when the staging objects of that lease's uploads are deleted
-    /// (ADR-0050 clause 16).
+    /// (ADR-0023 clause 16).
     #[must_use]
     pub fn takeovers(&self) -> watch::Receiver<u64> {
         self.takeovers.clone()
@@ -361,7 +361,7 @@ async fn sleep_until(clock: &Elapsed, at: Duration) {
 /// id, and renews that. Ends, and with it what `held` sends, once the exclusive lock of an
 /// instance that must be alone is lost, or once a new lease finds a schema that needs a newer
 /// Server: such an instance takes it again only when it is started again
-/// (ADR-0048
+/// (ADR-0025
 /// clause 2).
 async fn renew(lease: &Renewing, taken: Taken) {
     let Renewing {
@@ -471,7 +471,7 @@ async fn renew(lease: &Renewing, taken: Taken) {
                 }
                 // A schema migrated by a newer Server while this one held no lease: it stops, as
                 // at a failed start
-                // (ADR-0048
+                // (ADR-0025
                 // clause 16).
                 Err(e) if database.outdated().is_some() => {
                     error!(
@@ -492,7 +492,7 @@ async fn renew(lease: &Renewing, taken: Taken) {
 }
 
 /// Takes over the leases that lapsed, after a renewal sent at `sent`
-/// (ADR-0048
+/// (ADR-0025
 /// clause 18), closing their audit chains; bounded by half a renewal interval, so a database that
 /// does not answer delays the next renewal by no more than that, well inside the lease. Answers
 /// whether it took over any.
@@ -536,10 +536,10 @@ fn lock_lost(lease: &Renewing, instance_id: &str) {
 }
 
 /// Takes up the changes other instances commit
-/// (ADR-0048
+/// (ADR-0025
 /// clauses 9 and 10): for each one announced, what its kind concerns is read again. A revocation, a
 /// Host or a register entry has the ledger read again, and the sessions check themselves against it
-/// (ADR-0038 clause 32); a floor has the floors read
+/// (ADR-0026 clause 32); a floor has the floors read
 /// again; an enrolment request or the window has the window and its queue read again, and the
 /// connections waiting on them answered; a Configuration, a Deployment or a Package has its store
 /// read again
@@ -554,7 +554,7 @@ fn lock_lost(lease: &Renewing, instance_id: &str) {
 /// notification that was missed without the connection ending, and a notice that was to follow a
 /// commit but was never sent, as when its instance ended between the two, are caught within one
 /// renewal
-/// (ADR-0048
+/// (ADR-0025
 /// clauses 9 and 10). The revocation list's version the renewal read is compared with the one
 /// held, and a version that moved is logged.
 pub fn follow(
@@ -640,10 +640,10 @@ pub fn follow(
 
 /// Writes the presence of the Agents this instance carries every `interval`, in one batch under the
 /// instance id of the lease it holds, and nothing while it holds none
-/// (ADR-0043 clause 4). A batch that fails is logged, and what
+/// (ADR-0030 clause 4). A batch that fails is logged, and what
 /// it held is written with the next one. A batch written later than its interval after it was
 /// due is logged as a warning naming how late it was
-/// (ADR-0048
+/// (ADR-0025
 /// clause 5). The batches run until they are stopped.
 pub fn write_presence(state: Arc<AppState>, held: Held, interval: Duration) -> PresenceBatches {
     let (stop, mut stopped) = tokio::sync::oneshot::channel();
@@ -685,7 +685,7 @@ pub fn write_presence(state: Arc<AppState>, held: Held, interval: Duration) -> P
 
 /// Every `interval`, the lease renewal interval, tries again to take away the marks of the sweeps
 /// of this instance that could not take them away when they were done: they refuse uploads of
-/// their blobs on every instance until they are gone (ADR-0050 clause 14). Runs until the runtime
+/// their blobs on every instance until they are gone (ADR-0023 clause 14). Runs until the runtime
 /// ends.
 pub fn retry_unmarks(state: Arc<AppState>, interval: Duration) {
     tokio::spawn(async move {
@@ -935,7 +935,7 @@ const RELOAD_RETRY_FIRST: Duration = Duration::from_millis(250);
 /// The longest wait before a failed read is tried again.
 const RELOAD_RETRY_MAX: Duration = Duration::from_secs(10);
 
-/// The two planes as the binary builds them (ADR-0045): what each serves, its TLS and how many
+/// The two planes as the binary builds them (ADR-0012): what each serves, its TLS and how many
 /// connections it holds at most.
 pub struct Planes {
     /// The OpAMP endpoint and the package downloads.
@@ -1106,7 +1106,7 @@ async fn bind_again(
 }
 
 /// The instance id the log names
-/// (ADR-0048
+/// (ADR-0025
 /// clause 1): the one the instance makes at startup, once its store is known to be PostgreSQL and
 /// before it takes its first lease under it; then the one of each new lease. Between a lost lease
 /// and the next it names the lost one, so every line names an instance. A line logged before the
@@ -1209,7 +1209,7 @@ mod tests {
 
     /// A request is served while the lease is held by its clock, and answered `503` once the clock
     /// has jumped past its lapse, as after a suspend, though nothing else has noticed yet.
-    /// Verifies: ADR-0048
+    /// Verifies: ADR-0025
     #[tokio::test]
     async fn a_request_is_answered_503_once_the_leases_clock_has_passed_its_lapse() {
         use std::sync::atomic::{AtomicU64, Ordering};
@@ -1325,7 +1325,7 @@ mod tests {
 
     /// Stopping the presence batches waits for the one being written, so the last batch at
     /// shutdown commits after it, never before.
-    /// Verifies: ADR-0043
+    /// Verifies: ADR-0030
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn stopping_the_presence_batches_waits_for_the_one_being_written() {
         use std::future::Future as _;
@@ -1419,7 +1419,7 @@ mod tests {
 
     /// A presence batch written later than its interval after it was due is logged as a warning
     /// naming how late it was.
-    /// Verifies: ADR-0048
+    /// Verifies: ADR-0025
     #[tokio::test]
     async fn a_presence_batch_written_late_is_logged_with_how_late() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1455,7 +1455,7 @@ mod tests {
     }
 
     /// A presence batch written within its interval logs no lateness.
-    /// Verifies: ADR-0048
+    /// Verifies: ADR-0025
     #[tokio::test]
     async fn a_presence_batch_written_in_time_logs_no_lateness() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1524,9 +1524,9 @@ mod tests {
     /// Each line names the instance id of the lease the instance holds, and none while it holds
     /// none; a line that names an instance id of its own names it once, as the lease's take and
     /// takeover do
-    /// (ADR-0048
+    /// (ADR-0025
     /// clause 1).
-    /// Verifies: ADR-0048
+    /// Verifies: ADR-0025
     #[test]
     fn each_line_names_the_instance_id_of_the_lease_held() {
         let id = LoggedId::default();
@@ -1554,7 +1554,7 @@ mod tests {
 
     /// The log follows the lease: the id it holds and each new one, and the last one while the
     /// lease is lost or can be held no more, so every line names an instance.
-    /// Verifies: ADR-0048
+    /// Verifies: ADR-0025
     #[tokio::test]
     async fn the_logged_id_follows_the_lease() {
         let (held, watched) = tokio::sync::watch::channel(Some("a1".to_string()));
@@ -1635,9 +1635,9 @@ mod tests {
 
     /// What is heard before a read starts is answered by one read, and each kind has what it
     /// concerns read again and nothing else
-    /// (ADR-0048
+    /// (ADR-0025
     /// clauses 9 and 19).
-    /// Verifies: ADR-0048
+    /// Verifies: ADR-0025
     #[tokio::test]
     async fn what_is_heard_at_once_is_answered_by_one_read_of_what_it_concerns() {
         let ledger = Due {
@@ -1735,9 +1735,9 @@ mod tests {
 
     /// A listening connection made again, and a notification of a kind the instance does not
     /// know, have everything read again
-    /// (ADR-0048
+    /// (ADR-0025
     /// clause 10).
-    /// Verifies: ADR-0048
+    /// Verifies: ADR-0025
     #[tokio::test]
     async fn a_missed_or_unknown_notification_has_everything_read_again() {
         assert_eq!(
@@ -1753,7 +1753,7 @@ mod tests {
 
     /// A read that fails is tried again, each wait longer, until one holds, together with what was
     /// heard meanwhile.
-    /// Verifies: ADR-0048
+    /// Verifies: ADR-0025
     #[tokio::test]
     async fn a_read_that_fails_is_tried_again_until_one_holds() {
         let (heard, hearing) = tokio::sync::mpsc::unbounded_channel();

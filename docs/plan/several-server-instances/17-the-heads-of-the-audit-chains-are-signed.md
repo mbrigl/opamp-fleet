@@ -23,7 +23,7 @@ the chains are the record. It does not block G-20.
   `draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one.md`
   clauses 8 and 14
 - Golden path: the chains of
-  ADR-0047 and `audit-verify`
+  ADR-0029 and `audit-verify`
 
 ## Blocked by
 

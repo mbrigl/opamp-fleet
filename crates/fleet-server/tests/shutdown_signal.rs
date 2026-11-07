@@ -20,7 +20,7 @@ impl Drop for ServerUnderTest {
     }
 }
 
-// Verifies: ADR-0045, ADR-0043, ADR-0050
+// Verifies: ADR-0012, ADR-0030, ADR-0023
 #[test]
 fn sigterm_shuts_the_server_down_gracefully() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -110,7 +110,7 @@ fn sigterm_shuts_the_server_down_gracefully() {
         "the server ended with {status:?} instead of shutting down"
     );
 
-    // Started on an empty data_dir, the Server laid out every directory of ADR-0028 clause 23,
+    // Started on an empty data_dir, the Server laid out every directory of ADR-0035 clause 23,
     // each owner-only, and nothing else.
     let data = dir.path().join("data");
     let mut found: Vec<String> = std::fs::read_dir(&data)

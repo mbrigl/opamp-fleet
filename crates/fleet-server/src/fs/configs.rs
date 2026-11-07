@@ -1,6 +1,6 @@
-//! Configurations on the filesystem (ADR-0026): the default adapter behind
+//! Configurations on the filesystem (ADR-0033): the default adapter behind
 //! [`ConfigBackend`](crate::configs::ConfigBackend) — one JSON file per Configuration under
-//! `<data_dir>/configurations/`, owner-only, written in one step (ADR-0050).
+//! `<data_dir>/configurations/`, owner-only, written in one step (ADR-0023).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -38,7 +38,7 @@ fn read(dir: &Path, name: &str) -> Result<Option<Configuration>, String> {
 }
 
 /// Adds one retained revision to the Configuration's file in `dir`, in one step — the write this
-/// store and a rollout's revisions (ADR-0050 clause 2) share. The file is this Server's alone, so
+/// store and a rollout's revisions (ADR-0023 clause 2) share. The file is this Server's alone, so
 /// what it reads is what it wrote.
 pub(crate) fn retain(dir: &Path, pinned: &Pinned) -> Result<(), String> {
     let mut config = read(dir, &pinned.configuration)?
@@ -59,14 +59,14 @@ fn parse(stem: &str, path: &Path, text: &str) -> Result<Configuration, String> {
     let value: serde_json::Value =
         serde_json::from_str(text).map_err(|e| format!("cannot parse {}: {e}", path.display()))?;
     if names_a_selector(&value) {
-        // The shape before ADR-0026: a Configuration aimed by itself. Read as content only,
+        // The shape before ADR-0033: a Configuration aimed by itself. Read as content only,
         // it would silently reach nobody — or, put into a Deployment, other hosts than it
         // named — so it is refused and the operator decides where it belongs.
         return Err(format!(
-            "{} carries a selector, and a Configuration has none any more (ADR-0026): put \
+            "{} carries a selector, and a Configuration has none any more (ADR-0033): put \
              it into a Deployment, whose Selector aims it, and remove the selector from \
              the file; a data directory an older Server wrote is moved by `server migrate` \
-             (ADR-0050)",
+             (ADR-0023)",
             path.display()
         ));
     }
@@ -75,7 +75,7 @@ fn parse(stem: &str, path: &Path, text: &str) -> Result<Configuration, String> {
     if config.name != stem {
         return Err(super::misnamed(path, "name"));
     }
-    // A Configuration is written for one Agent type (ADR-0026 clause 2); one without it
+    // A Configuration is written for one Agent type (ADR-0033 clause 2); one without it
     // would reach no Agent, so the operator saves it again with a type.
     crate::configs::check_type(&config.saved).map_err(|e| {
         format!(
@@ -199,8 +199,8 @@ mod tests {
     /// No legacy reader: a file in a shape this Server does not write is a startup error that names
     /// the path, not a file quietly read as something else. The retired shapes are covered — a
     /// flat record, a two-revision one, and a saved or retained revision still carrying the
-    /// selector a Configuration no longer has (ADR-0026).
-    /// Verifies: ADR-0026
+    /// selector a Configuration no longer has (ADR-0033).
+    /// Verifies: ADR-0033
     #[test]
     fn a_file_in_a_retired_shape_refuses_to_open_and_names_it() {
         for (file, body) in [
@@ -243,8 +243,8 @@ mod tests {
     }
 
     /// A stored Configuration without an Agent type fails the start, naming its file
-    /// (ADR-0026 clause 2).
-    /// Verifies: ADR-0026
+    /// (ADR-0033 clause 2).
+    /// Verifies: ADR-0033
     #[test]
     fn a_stored_configuration_without_a_type_refuses_to_open_and_names_it() {
         for body in [

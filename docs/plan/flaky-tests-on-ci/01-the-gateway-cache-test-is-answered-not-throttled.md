@@ -25,7 +25,7 @@ it did not send is a defect of that limit, not of the test.
 
 - [`AGENTS.md` §5](../../../AGENTS.md#5-quality-bar--definition-of-done), which counts a flaky
   test as a defect
-- ADR-0035 on the Gateway's rate limit per downstream host, and ADR-0045 on the Server's admission
+- ADR-0022 on the Gateway's rate limit per downstream host, and ADR-0012 on the Server's admission
   throttle
 - Seam: the test's upstream and Gateway in `crates/fleet-agent/tests/gateway_package_cache.rs`
 

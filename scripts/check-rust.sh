@@ -11,7 +11,7 @@
 #
 # fleet-agent is linted without any wrapped Supervisor kind and with each one alone, and tested
 # without any: the default build carries every kind, so only these show that a build leaving one
-# out still compiles and refuses the kind as unknown (ADR-0017 clause 2).
+# out still compiles and refuses the kind as unknown (ADR-0018 clause 2).
 #
 # Needs the Rust toolchain of rust-toolchain.toml; the Dev Container provides it.
 #

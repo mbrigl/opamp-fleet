@@ -1,4 +1,4 @@
-# ADR-0016: What an Agent reports about itself
+# ADR-0017: What an Agent reports about itself
 
 - **Status:** 🟢 accepted
 - **Date:** 2026-10-24
@@ -29,14 +29,14 @@ equals the Configuration's type, and a rollout pins the fitting ones to it. A De
 Selector can aim at `service.name`. A Package is resolved for the type the Agent reports. The
 Supervisor refuses an offered Package whose name is not its own type before anything is
 downloaded, and keeps the high-water mark per its own type
-([ADR-0028](0028-package-versions-high-water-mark-and-floor.md)); both read the Supervisor's
+([ADR-0035](0035-package-versions-high-water-mark-and-floor.md)); both read the Supervisor's
 value.
 
 **A Managed Process is code the Supervisor does not vouch for.** The Server ships its program as a
 Package and its configuration as Configurations, and a Configuration's language can run commands,
 such as an entry that runs a program, or whatever the configuration a `command` Agent's program
 reads makes it run. Every Managed Process is handed the Supervisor Endpoint's token
-([ADR-0015](0015-client-modes-and-the-gateway.md)), and so is every process it starts, through its
+([ADR-0016](0016-client-modes-and-the-gateway.md)), and so is every process it starts, through its
 environment: a command its configuration names, a deploy task, a script a `command` Agent runs.
 Any of them can connect to the Endpoint and report a description. Whatever it reports reaches the
 Server as the Supervisor's own statement, and the Server cannot tell the two apart. Admitted
@@ -53,7 +53,7 @@ unfiltered, such a report could state:
   that reports another platform is offered a binary built for another machine, which the
   Supervisor swaps over the program; only the health gate would catch it.
 - **A Client Agent.** The Client Agent is recognised by the `supervisor.kind.*` attributes that it
-  alone reports ([ADR-0043](0043-the-fleet-record-of-agents-and-hosts.md)). A process that reports
+  alone reports ([ADR-0030](0030-the-fleet-record-of-agents-and-hosts.md)). A process that reports
   one makes a second Client Agent in its group: nobody in the group inherits Labels, and every
   Agent of the host is marked ambiguous and drops out of every Deployment aimed by an inherited
   Label. Behind a Gateway the group is keyed by the reported `host.id` or `host.name`, so a process
@@ -65,12 +65,12 @@ unfiltered, such a report could state:
 What the process knows that nobody else does is its version, and for a Collector its `dist.name`.
 The rest of what a Collector's `opampextension` reports is `host.name`, `os.type`, `host.arch` and
 `os.description`, which the Supervisor reports from the same machine in the same spelling
-([ADR-0027](0027-packages-signatures-and-delivery.md)), plus attributes written in the Collector's
+([ADR-0034](0034-packages-signatures-and-delivery.md)), plus attributes written in the Collector's
 own configuration under `agent_description.non_identifying_attributes` and its resource
 attributes. G-16 has the Supervisor Endpoint relay a Collector's `service.*` description and
-leaves what the host is to the Supervisor and the operator. No kind on `main` states a type of its
-own; `collector` and `command` take the block's `service_name` or fall back to the program's file
-name.
+leaves what the host is to the Supervisor and the operator. No kind this project builds states a
+type of its own; `collector` and `command` take the block's `service_name` or fall back to the
+program's file name.
 
 **Where the Agent runs** is described with the semantic conventions' `os.*` and `host.*` keys. An
 operator also wants to see which addresses a host holds. The connection's peer address is the
@@ -95,7 +95,7 @@ metrics — "CPU or RAM usage" — as what own metrics are for.
 
 **"Own" cannot mean a Managed Process's internals.** Upstream's `opampsupervisor` answers the offer
 by configuring the Collector's internal telemetry. That road is closed here: a Supervisor passes a
-Configuration through without touching it ([ADR-0017](0017-supervisor-mode-and-its-kinds.md)), and
+Configuration through without touching it ([ADR-0018](0018-supervisor-mode-and-its-kinds.md)), and
 the specification's non-goals forbid an abstraction over a Managed Process's configuration
 language. What this Client can honestly report is what it observes from outside: its own process,
 and the processes it spawned and holds the pids of.
@@ -155,16 +155,16 @@ to the destinations the Server offers, in TLS 1.3 and in cleartext only to a loo
 
    | Source | When |
    |---|---|
-   | The kind's own type | a wrapped kind states it, the type of the one agent it wraps; a block of such a kind carrying `service_name` fails at startup naming the derived value ([ADR-0017](0017-supervisor-mode-and-its-kinds.md)) |
+   | The kind's own type | a wrapped kind states it, the type of the one agent it wraps; a block of such a kind carrying `service_name` fails at startup naming the derived value ([ADR-0018](0018-supervisor-mode-and-its-kinds.md)) |
    | The block key `service_name` | `collector` and `command`; must not be empty, and is not bound by the instance-name grammar, so a reverse FQDN is accepted |
    | The program's file name | the fallback: `otelcol`, `promtail` |
 
    The fallback is read from the configuration, never parsed out of a program's output. What the
    Managed Process reports is never a source of the type (clause 8). The Baseline's reverse-FQDN
    shape is a recommendation and is not enforced. The Client Agent reports the constant
-   `supervisor` ([ADR-0019](0019-the-installed-service-and-its-state.md)), never its configured
-   name. A Selector or a Configuration's type
-   ([ADR-0025](0025-configurations-and-the-rest-api.md)) on `service.name` aims at a type.
+   `supervisor` ([ADR-0020](0020-the-installed-service-and-its-state.md)), never its configured
+   name. A Selector or a Configuration's type ([ADR-0032](0032-configurations-and-the-rest-api.md))
+   on `service.name` aims at a type.
 
 2. **`service.instance.name` is the operator's name for the Agent**, non-identifying: the
    `[[supervisor]]` block's `name`, or the top-level `name` for the Client Agent. It is always
@@ -173,19 +173,19 @@ to the destinations the Server offers, in TLS 1.3 and in cleartext only to a loo
 
 3. **The block `name` keeps its local meaning.** It is the Supervisor's directory name and the
    uniqueness key across blocks, bound by the instance-name grammar of
-   [ADR-0019](0019-the-installed-service-and-its-state.md): lowercase, digits, `-`, no dots. A
+   [ADR-0020](0020-the-installed-service-and-its-state.md): lowercase, digits, `-`, no dots. A
    type may be a reverse FQDN; an instance name is a path component on three operating systems.
    That is why the two cannot share a key.
 
 4. **The identifying attributes** are `service.name`; `service.namespace`, only when the top-level
    `service_namespace` key in `supervisor.toml` is set, since only an operator knows the
    deployment; `service.version` — for the Client Agent its baked version
-   ([ADR-0033](0033-the-products-version.md)), for a Supervisor-backed Agent only what the Managed
+   ([ADR-0038](0038-the-products-version.md)), for a Supervisor-backed Agent only what the Managed
    Process reports, never invented from the Client's; and `service.instance.id`, the Instance UID.
 
 5. **Where the Agent runs is reported best effort, and absent rather than blank.** Beside
    `service.instance.name`, the non-identifying attributes are `os.type` and `host.arch` in the
-   conventions' vocabulary ([ADR-0027](0027-packages-signatures-and-delivery.md)), `os.name`,
+   conventions' vocabulary ([ADR-0034](0034-packages-signatures-and-delivery.md)), `os.name`,
    `os.version`, `os.build_id`, `os.description`, `host.name`, `host.id`, `host.cpu.model.name`,
    `host.ip`, and `host.mac`. What the platform cannot answer is left out: a placeholder would be
    something false a Selector could match. Nothing is taken from the connection.
@@ -250,10 +250,10 @@ to the destinations the Server offers, in TLS 1.3 and in cleartext only to a loo
     where the code reports nothing under the same key. What the code reports always wins, so an
     attribute can never restate the type or the instance name. An attribute that is added stands
     against the Managed Process: the fold leaves its key alone (clause 8). Tagging one Agent among
-    several is a Label's job ([ADR-0043](0043-the-fleet-record-of-agents-and-hosts.md)): a
+    several is a Label's job ([ADR-0030](0030-the-fleet-record-of-agents-and-hosts.md)): a
     `[[supervisor]]` block carrying an `attributes` table fails at startup with a message naming
     the Server's Label. The Client Agent also reports the kinds it was compiled with
-    ([ADR-0017](0017-supervisor-mode-and-its-kinds.md)).
+    ([ADR-0018](0018-supervisor-mode-and-its-kinds.md)).
 
 11. **The fleet view shows the instance name first and the type beneath it.** `AgentView` carries
     `service_name` (the type) and `service_instance_name`; the bundled UI's name column falls back
@@ -300,7 +300,7 @@ to the destinations the Server offers, in TLS 1.3 and in cleartext only to a loo
 16. **Logs are the Client's `tracing` output, bridged.** `opentelemetry-appender-tracing`'s
     `OpenTelemetryTracingBridge` turns events into OTLP log records at the level the log filter
     already selects. Stderr and the service-mode log file
-    ([ADR-0019](0019-the-installed-service-and-its-state.md)) keep everything they print; this adds
+    ([ADR-0020](0020-the-installed-service-and-its-state.md)) keep everything they print; this adds
     a destination. A record written inside an instrumented operation carries that operation's
     `TraceId` and `SpanId`, which is what makes a log-to-trace join answerable at the receiving
     end.
@@ -346,7 +346,7 @@ to the destinations the Server offers, in TLS 1.3 and in cleartext only to a loo
 
 21. **A self-update stays one trace across its restart.** The trace id and the span id of the
     `self.update` span go into the update marker
-    ([ADR-0018](0018-the-client-updates-itself-from-a-signed-package.md)) as hex, and the process
+    ([ADR-0019](0019-the-client-updates-itself-from-a-signed-package.md)) as hex, and the process
     that comes up after the restart opens `commit` or `roll_back` as a child of that span, its
     parent marked remote. A marker without ids, or with ids that do not parse, makes the
     post-restart span open its own trace; a trace is never a reason to fail an update.
@@ -431,7 +431,7 @@ to the destinations the Server offers, in TLS 1.3 and in cleartext only to a loo
 33. **`certificate`, `tls` and `proxy` behave as they do on the OpAMP settings.** An offered
     `certificate` is honoured: its `cert` is presented by the exporter, paired with the key this
     Client generated for its CSR — the client-certificate machinery of
-    [ADR-0038](0038-admission-by-client-certificate-and-revocation.md), reused as-is. A
+    [ADR-0026](0026-admission-by-client-certificate-and-revocation.md), reused as-is. A
     `private_key` in the offer is refused by name, because this Client's private key never leaves
     its host and is never accepted from the Server; a `cert` with no key on disk to pair with is
     refused by name too. `ca_cert` is not added to the trust store, as the Baseline advises. `tls`
@@ -464,14 +464,14 @@ starting a Collector once with a generated extension-only configuration; a Colle
 telemetry (an operator configures the Collector for it); the Server storing or forwarding
 telemetry — the specification keeps this project out of the telemetry-backend business;
 `AcceptsOtherConnectionSettings`; trace context across a Gateway hop
-([ADR-0015](0015-client-modes-and-the-gateway.md)); a sampling hint from the Server; a local switch
+([ADR-0016](0016-client-modes-and-the-gateway.md)); a sampling hint from the Server; a local switch
 on the Agent that drops the three capability bits. Also out of scope: the Supervisor Endpoint's
-token and which processes are handed it ([ADR-0015](0015-client-modes-and-the-gateway.md)); what a
+token and which processes are handed it ([ADR-0016](0016-client-modes-and-the-gateway.md)); what a
 Managed Process can read on its host, which includes the Client's `state_dir` and key while both
-run under one account ([ADR-0037](0037-the-accounts-the-service-runs-under.md)); `service.version`,
+run under one account ([ADR-0021](0021-the-accounts-the-service-runs-under.md)); `service.version`,
 which stays the process's word; what a compromised Client reports, since its code builds the whole
 description and no rule on the Client binds it; and the Server's precedence of the effective
-description ([ADR-0043](0043-the-fleet-record-of-agents-and-hosts.md)).
+description ([ADR-0030](0030-the-fleet-record-of-agents-and-hosts.md)).
 
 ## Alternatives considered
 
@@ -481,7 +481,7 @@ description ([ADR-0043](0043-the-fleet-record-of-agents-and-hosts.md)).
 - **No human instance name at all.** The most conformant reading, but a UID is not a name a person
   can use, and several Supervisors share one `host.name`.
 - **`host.name` as the instance name.** A property of the machine, while Supervisor Mode runs *n*
-  Agents on one machine ([ADR-0015](0015-client-modes-and-the-gateway.md)).
+  Agents on one machine ([ADR-0016](0016-client-modes-and-the-gateway.md)).
 - **The instance name outside `AgentDescription`**, as Bindplane does. Needs a channel this
   project does not have, and makes the name invisible to Selectors, which pin one Agent by it.
 - **The Managed Process's `service.name` as the first source of the type**, above the kind's own
@@ -509,7 +509,7 @@ description ([ADR-0043](0043-the-fleet-record-of-agents-and-hosts.md)).
 - **Stop handing the token to processes that speak no OpAMP.** It narrows who can reach the
   Endpoint, but a Collector's own children still inherit the token, and the type would still be the
   process's word. It is a separate decision about the Supervisor Endpoint
-  ([ADR-0015](0015-client-modes-and-the-gateway.md)) and can be taken beside this one.
+  ([ADR-0016](0016-client-modes-and-the-gateway.md)) and can be taken beside this one.
 - **Fold every key a process reports except `service.instance.id` and `service.instance.name`.**
   A process on one host could draw another host's Configurations, an artifact for another
   platform, and a whole host out of its Label-based rollouts. Rejected.
@@ -523,9 +523,9 @@ description ([ADR-0043](0043-the-fleet-record-of-agents-and-hosts.md)).
   Configuration fit and the artifact choice.** The Server receives one description and cannot tell
   which key the process supplied. Ignoring these keys for every Agent would remove the Supervisor's
   true values with the false ones: pinning one host by `host.name`
-  ([ADR-0027](0027-packages-signatures-and-delivery.md)) would stop working, the artifact could no
+  ([ADR-0034](0034-packages-signatures-and-delivery.md)) would stop working, the artifact could no
   longer be chosen, and the grouping behind a Gateway
-  ([ADR-0043](0043-the-fleet-record-of-agents-and-hosts.md)) would lose its key. The Supervisor
+  ([ADR-0030](0030-the-fleet-record-of-agents-and-hosts.md)) would lose its key. The Supervisor
   knows which value came from the process and can decide where the Server cannot. Rejected.
 - **Let an operator admit further keys per `[[supervisor]]` block.** That would restore a
   Collector's own tags. But it puts a per-Agent setting back into `supervisor.toml`, where tagging
@@ -637,7 +637,7 @@ description ([ADR-0043](0043-the-fleet-record-of-agents-and-hosts.md)).
   `host`](https://opentelemetry.io/docs/specs/semconv/registry/attributes/host/)
   and [`os`](https://opentelemetry.io/docs/specs/semconv/registry/attributes/os/) — `host.ip`,
   `host.mac`, `host.cpu.model.name`, `os.build_id`, their formats and loopback exclusion.
-- `sysinfo` 0.37 `Networks` API (`mac_address()`, `ip_networks()`), behind its `network` feature.
+- `sysinfo` 0.40 `Networks` API (`mac_address()`, `ip_networks()`), behind its `network` feature.
 - The Client's code: the fold and the operator attributes in
   `crates/fleet-agent/src/supervisor/agent/description.rs`; `service_name()` in
   `crates/fleet-agent/src/supervisor/agent.rs`, which `crates/fleet-agent/src/engine.rs` uses for
@@ -718,7 +718,7 @@ description ([ADR-0043](0043-the-fleet-record-of-agents-and-hosts.md)).
 - Positive: a Managed Process cannot draw another host's Configurations, be offered an artifact
   for another platform, make its host or another one ambiguous, or override the operator's
   attributes or shadow a Label outside `service.*`. That the Client Agent is recognised by the
-  attributes it alone reports ([ADR-0043](0043-the-fleet-record-of-agents-and-hosts.md)) holds on
+  attributes it alone reports ([ADR-0030](0030-the-fleet-record-of-agents-and-hosts.md)) holds on
   every honest Client.
 - Positive: the fleet view shows each host's addresses, the attributes are searchable, and the
   wire stays convention-shaped for any OpenTelemetry-aware consumer.

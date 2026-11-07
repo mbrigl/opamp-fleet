@@ -1,11 +1,11 @@
-//! The floors the operator signed (ADR-0028): one per Agent type, the version below which no
+//! The floors the operator signed (ADR-0035): one per Agent type, the version below which no
 //! Client takes a package of that type. The Server stores them, serves them to every member on
 //! the Agent plane, and checks their signatures only to say what it found — the Client's check
-//! decides (ADR-0028 clause 15).
+//! decides (ADR-0035 clause 15).
 //!
 //! A floor is raised, or removed and set anew: a write below the one stored is refused. The Server
 //! cannot sign a floor, so a Server that is compromised can withhold one but never lower what a
-//! Client has kept (ADR-0028 clause 20).
+//! Client has kept (ADR-0035 clause 20).
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;
@@ -13,14 +13,14 @@ use std::sync::Mutex;
 use crate::packages::{PackageId, SignatureState, SignatureVerifier, ED25519_SIGNATURE_LEN};
 
 /// One stored floor: the version and the operator's signature over its statement
-/// (`fleet_core::package::floor_statement`, ADR-0028 clause 14).
+/// (`fleet_core::package::floor_statement`, ADR-0035 clause 14).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Floor {
     pub version: String,
     pub signature: Vec<u8>,
 }
 
-/// The floors' store (ADR-0050): the filesystem adapter keeps them in
+/// The floors' store (ADR-0023): the filesystem adapter keeps them in
 /// `<data_dir>/package-floors.json` ([`FsFloorStore`](crate::fs::FsFloorStore)), the PostgreSQL
 /// adapter in `package_floors`. Each write is persisted before the act that made it is answered.
 pub trait FloorStore: Send + Sync {
@@ -32,7 +32,7 @@ pub trait FloorStore: Send + Sync {
 
     /// Stores `floor` for `agent_type` unless its version orders below the one stored, deciding
     /// from what the store holds, as another instance may have raised it since this one read it
-    /// (ADR-0048
+    /// (ADR-0025
     /// clause 19).
     ///
     /// # Errors
@@ -114,7 +114,7 @@ impl PackageFloors {
         })
     }
 
-    /// Checks every floor against the operator's public key (ADR-0028 clause 15) — feedback only.
+    /// Checks every floor against the operator's public key (ADR-0035 clause 15) — feedback only.
     #[must_use]
     pub fn with_verifier(mut self, verifier: Option<Box<dyn SignatureVerifier>>) -> Self {
         self.verifier = verifier;
@@ -148,7 +148,7 @@ impl PackageFloors {
     }
 
     /// Reads the floors again from the store, as another instance set or removed one
-    /// (ADR-0048
+    /// (ADR-0025
     /// clauses 9 and 12), so what this instance serves is what is stored. It reads under the lock,
     /// so no write of this instance's own lands between the read and the swap.
     ///
@@ -167,7 +167,7 @@ impl PackageFloors {
 
     /// Stores the floor of `agent_type` at `version` with `signature`, and says what its check
     /// found. An `Invalid` one is stored all the same: the Server's key may lag behind the
-    /// operator's, and the Client's check decides (ADR-0028 clause 15).
+    /// operator's, and the Client's check decides (ADR-0035 clause 15).
     ///
     /// # Errors
     /// [`FloorError::Invalid`] for a type, version or signature a floor cannot have,
@@ -213,7 +213,7 @@ impl PackageFloors {
     }
 
     /// Removes the floor of `agent_type`: `Ok(false)` when there is none. It only stops serving
-    /// the floor; a Client that kept it keeps it (ADR-0028 clause 20).
+    /// the floor; a Client that kept it keeps it (ADR-0035 clause 20).
     ///
     /// # Errors
     /// Returns an error when the removal could not be persisted; the floor is then kept.
@@ -251,7 +251,7 @@ pub(crate) mod tests {
 
     /// A floor is raised or set anew, never lowered; a version equal to the stored one replaces
     /// it; a type, version or signature a floor cannot have is refused, and nothing changes.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0035
     #[test]
     fn a_floor_is_raised_and_never_lowered() {
         let floors = PackageFloors::open(Box::new(Memory::default())).expect("open");
@@ -296,7 +296,7 @@ pub(crate) mod tests {
     }
 
     /// With a key, each floor is reported valid or invalid and stored either way.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0035
     #[test]
     fn a_floor_signature_is_checked_and_never_refused() {
         use ring::signature::{Ed25519KeyPair, KeyPair as _};

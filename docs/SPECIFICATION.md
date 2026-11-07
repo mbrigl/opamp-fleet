@@ -41,8 +41,8 @@ allows and demonstrably in step with its upstream specification.
 
 ## Vision
 
-An operator changes a configuration in one place and knows, within seconds, which agents took it and
-which did not, and why — across OpAMP-native Collectors and foreign, non-OpAMP agents alike. A
+An operator rolls out a configuration from one place and knows, within seconds, which agents took it
+and which did not, and why — across OpAMP-native Collectors and foreign, non-OpAMP agents alike. A
 change can address the whole fleet or a chosen subset of it, so a configuration can be rolled out to
 part of the fleet before all of it. And what the Server distributes is not only configuration but
 the agents' software itself: it can update an agent's binary in place, verified before it is applied
@@ -104,6 +104,10 @@ thing that closes the loop and widens only as the protocol and its agents actual
   Client installs as a native operating-system service and can replace its own binary in place, and
   it is built for Linux, macOS, and Windows so one client shape manages a heterogeneous fleet. The
   Server targets Linux only.
+- **Keep the Server's state in stores the operator runs.** The Server keeps its state under one
+  data directory, or in PostgreSQL and an S3-compatible object store. On the shared stores,
+  several Server instances serve one fleet, and any instance takes over the Agents of one that is
+  lost. Making the stores redundant is the operator's.
 - **Bring agents the project was never built for into OpAMP.** A Custom Supervisor plugin owns
   a foreign agent — one whose configuration format, lifecycle, and health nothing here already
   knows — and translates all three into OpAMP toward the Server, so heterogeneous agents share
@@ -122,31 +126,32 @@ thing that closes the loop and widens only as the protocol and its agents actual
   do: every input from the network is bounded before it is parsed, the parsers are fuzzed, and the
   dependencies are checked before they are merged.
 - **Close the loop before widening it.** A working control loop — configure, apply, report back
-  — for one managed process comes first. Targeting a subset of the fleet and updating an agent's
-  software are core goals, built on top of that loop once it holds, not before it.
+  — for one managed process comes first. Every capability that widens it builds on that loop
+  once it holds, not before it.
 - **Distribute software, not only configuration.** The Server can deliver and apply agent binaries,
   not just their configuration — verified before applying and rolled back on failure — but only
   as far as the managed processes actually support it, never pretending to a capability an agent
   lacks.
-- **Configure the whole fleet or a part of it.** A configuration can be directed at the whole fleet
-  or at a selected subset, so a change can be rolled out gradually; an Agent outside a target is
-  left running what it already runs.
+- **Configure the whole fleet or a part of it.** A Selector aims a configuration at the Agents it
+  matches, a part of the fleet or all of it, so a change can be rolled out gradually. An Agent
+  outside the aim keeps running what it already runs.
 - **One configuration, many hosts.** A Configuration is written once and serves every host it
   reaches: what differs between them is a parameter, filled in from what the Server knows about an
   Agent and its Host, or from what only the host knows. Secrets stay on the host.
 
 ## Goals / Success Criteria
 
-1. **G-1** — **The loop closes.** When a configuration changes on the Server, the Server shall
-   send it to every connected Agent it is meant for without that Agent asking, and the Agent
-   shall report it applied.
-2. **G-2** — **The Server knows the fleet's state.** The Server shall report for every connected
-   Agent its identity, its health, the configuration it holds, and whether it accepted or
-   rejected it, with the error of a rejection.
+1. **G-1** — **The loop closes.** When a rollout releases a configuration to an Agent, the Server
+   shall send it to that Agent without the Agent asking for it: at once over a WebSocket, and in
+   its next reply over plain HTTP. The Agent shall report it applied.
+2. **G-2** — **The Server knows the fleet's state.** The Server shall report through its REST API,
+   for every connected Agent, its identity, its health, the configuration it holds, and whether
+   it accepted or rejected that configuration.
 3. **G-3** — **No redundant reconfiguration.** When an Agent reports the config hash of the
    configuration it should run, the Server shall not send that configuration again.
 4. **G-4** — **A rejected configuration is visible.** When an Agent refuses a configuration, the
-   system shall surface the reason rather than fail silently.
+   Server shall show the refusal and the Agent's own reason in that Agent's state on the REST API,
+   rather than fail silently.
 5. **G-5** — **Any UI can drive the fleet.** The Server shall expose fleet state and
    configuration through an OpenAPI-described REST API as a stable contract, so that an external
    UI or portal reads the fleet and changes what it runs through that API alone. The Server
@@ -190,9 +195,11 @@ thing that closes the loop and widens only as the protocol and its agents actual
     `opampextension`, it shall report its `service.*` description, its health, and its effective
     configuration to its Supervisor's Supervisor Endpoint, which relays them upstream. What the
     host is stays the Supervisor's and the operator's to state.
-17. **G-17** — **The connection is secured and the Agent is identified.** Client-to-Server
-    traffic shall be TLS-protected with mutual TLS on both ends, and the Server shall accept only
-    authenticated Agent identities.
+17. **G-17** — **The connection is secured and the Agent is identified.** Every connection a
+    Client opens to the Server shall be TLS 1.3, and the Client shall present a client
+    certificate in its handshake. The Server shall admit an Agent only over a client certificate
+    that the fleet's client CA issued and that is not revoked. A certificate shall speak only for
+    the Agents of the host it was issued to.
 18. **G-18** — **One Configuration serves many hosts.** When a rollout releases a Configuration,
     the Server shall fill in its Server-side parameters per Agent, validate each value against
     its declared type, stop the rollout for an Agent whose value does not fit and say why, and
@@ -289,6 +296,9 @@ thing that closes the loop and widens only as the protocol and its agents actual
   - *A Managed Process and its account*: where a process account is registered, below the
     Client's account on its host; it must not gain the Client's key, program, or configuration.
     Without one, it runs as the Client's account.
+  - *The database and the object store*: the operator's, trusted with the Server's state. The
+    Server reaches them over TLS beyond the loopback (Q-1), and the fleet never reaches them
+    (G-19).
   - *The operator*: trusted. The project authenticates fleet membership, not who may do what.
   - *The supply chain*: dependencies and CI actions, checked before they merge.
 - The system shall never:
@@ -303,7 +313,8 @@ thing that closes the loop and widens only as the protocol and its agents actual
 
 ## Assumptions
 
-- **A fleet is in the order of a thousand hosts** and their Agents per Server.
+- **A fleet is up to about 100 000 Agents** per Server, served by one Server instance or by
+  several.
 - **One fleet is one trust domain,** operated by one organization: operators who must not see each
   other's hosts run separate Servers.
 - **The protocol keeps being released upstream** and `opamp-go` stays maintained, so the Baseline

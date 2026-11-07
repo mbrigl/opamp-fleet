@@ -18,7 +18,7 @@ error, not from its text.
 
 ## Read first
 
-- ADR-0027 on the package routes; ADR-0050 clause 13
+- ADR-0034 on the package routes; ADR-0023 clause 13
 - `api.rs` `package_error`; `postgres/mod.rs` `run_within`; `postgres/packages.rs`
   `put_entry`
 

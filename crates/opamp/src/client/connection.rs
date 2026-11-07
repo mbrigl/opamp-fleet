@@ -238,7 +238,7 @@ impl Connection {
     /// that drives the socket itself. The name's resolution gets one silence bound, and each
     /// address it resolves to, in turn, one for the TCP connection, the TLS handshake and the
     /// upgrade together, so an endpoint that accepts and never answers fails the call
-    /// (ADR-0051
+    /// (ADR-0015
     /// clause 3).
     ///
     /// # Errors
@@ -338,7 +338,7 @@ mod tests {
         assert!(Scheme::of("h/v1/opamp").is_err());
     }
 
-    /// Verifies: ADR-0008, ADR-0045
+    /// Verifies: ADR-0008, ADR-0012
     #[test]
     fn plaintext_is_refused_off_the_loopback_literals() {
         let allowed = |endpoint| connection(endpoint, Some("Bearer t")).scheme();
@@ -367,12 +367,12 @@ mod tests {
             .is_err());
     }
 
-    /// Verifies: ADR-0008, ADR-0045
+    /// Verifies: ADR-0008, ADR-0012
     /// The probe of an offered endpoint that accepts the TCP connection and never answers fails
     /// once the bound has passed, rather than holding the session that asked for it
-    /// (ADR-0051
+    /// (ADR-0015
     /// clause 3).
-    /// Verifies: ADR-0051
+    /// Verifies: ADR-0015
     #[tokio::test]
     async fn a_probe_of_an_endpoint_that_never_answers_fails_within_the_bound() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")

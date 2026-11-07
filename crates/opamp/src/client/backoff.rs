@@ -43,7 +43,7 @@ impl Backoff {
 
     /// The delay before the first reconnect after an established connection was lost, drawn
     /// uniformly over `[0, AFTER_LOSS)`; the failures after it start the exponential steps again
-    /// (ADR-0045 clause 4).
+    /// (ADR-0012 clause 4).
     ///
     /// The draw starts at zero, unlike [`advance`](Self::advance): the floor of equal jitter is
     /// what puts a whole fleet into the same half second once its Server goes away, and a fleet
@@ -69,7 +69,7 @@ mod tests {
 
     /// The ceiling still doubles and still caps; each delay lands in the lower-bounded half of its
     /// ceiling. Bounds rather than exact values, because the jitter is the point.
-    /// Verifies: ADR-0045
+    /// Verifies: ADR-0012
     #[test]
     fn backoff_doubles_and_caps_within_its_jittered_bounds() {
         // `half + rand(0, half)` never reaches `half + half`, so the ceiling is exclusive.
@@ -98,7 +98,7 @@ mod tests {
 
     /// The first reconnect after a lost connection is drawn over the whole of `[0, 30 s)`, not its
     /// upper half, and the failures after it start again from the first exponential step.
-    /// Verifies: ADR-0045
+    /// Verifies: ADR-0012
     #[test]
     fn the_first_reconnect_after_a_lost_connection_is_drawn_over_thirty_seconds() {
         let mut backoff = Backoff::new();
@@ -128,7 +128,7 @@ mod tests {
     /// the same instant. Drawn over enough attempts that an accidental tie is not a flake — with a
     /// nanosecond-resolution draw over half a second, ten matching pairs is not something that
     /// happens.
-    /// Verifies: ADR-0045
+    /// Verifies: ADR-0012
     #[test]
     fn two_backoffs_do_not_produce_the_same_ladder() {
         let mut one = Backoff::new();

@@ -31,7 +31,7 @@ Each gets a test that runs the two sides on two connections at once, as the rele
 
 ## Read first
 
-- ADR-0048 clause 19; ADR-0050 clauses 13 and 14; ADR-0047 clause 5
+- ADR-0025 clause 19; ADR-0023 clauses 13 and 14; ADR-0029 clause 5
 - Golden path: the release-order tests in `postgres/agents.rs`, which wait on
   `pg_stat_activity`
 

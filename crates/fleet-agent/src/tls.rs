@@ -1,4 +1,4 @@
-//! Which TLS material the Client uses (ADR-0045, ADR-0038), read from disk and handed to `opamp` as
+//! Which TLS material the Client uses (ADR-0012, ADR-0026), read from disk and handed to `opamp` as
 //! [`ClientTls`] (ADR-0008).
 //!
 //! The decisions are the Client's: an optional CA file that *replaces* the built-in roots, and the
@@ -14,19 +14,19 @@ use zeroize::Zeroizing;
 use crate::config::ClientConfig;
 
 /// The Server-issued client certificate, in the state directory beside the connection settings —
-/// it belongs to the Client's one upstream connection, not to any single Agent (ADR-0038).
+/// it belongs to the Client's one upstream connection, not to any single Agent (ADR-0026).
 pub const ISSUED_CERT_FILE: &str = "client-cert.pem";
 /// The private key of [`ISSUED_CERT_FILE`]. Generated on this host and never sent anywhere: what
 /// leaves is a CSR over its public half.
 pub const ISSUED_KEY_FILE: &str = "client-key.pem";
 /// The key a request in flight asks to be certified, kept apart from [`ISSUED_KEY_FILE`] so the
-/// certificate in force keeps its own key until the new one is proved (ADR-0038 clause 10).
+/// certificate in force keeps its own key until the new one is proved (ADR-0026 clause 10).
 pub const PENDING_KEY_FILE: &str = "client-key.pending.pem";
 /// An issued certificate staged beside [`PENDING_KEY_FILE`] while the two are put in force, so a
 /// swap cut short is completed at the next start rather than leaving a mismatched pair.
 pub const PENDING_CERT_FILE: &str = "client-cert.pending.pem";
 /// The request in flight, re-sent unchanged until it is answered — the enrolment queue knows a
-/// request by its public key (ADR-0052 clause 9).
+/// request by its public key (ADR-0027 clause 9).
 pub const PENDING_CSR_FILE: &str = "client-csr.pending.pem";
 
 /// The trust and the identity in force.
@@ -38,7 +38,7 @@ pub fn client_tls(config: &ClientConfig) -> Result<ClientTls, String> {
 }
 
 /// The same, for a **candidate** identity: an offered certificate is proved by connecting with it
-/// before it is stored (ADR-0013's MUST, applied to the certificate in ADR-0038), so the
+/// before it is stored (ADR-0013's MUST, applied to the certificate in ADR-0026), so the
 /// certificate under test comes from the offer while its key is the pending one on disk.
 ///
 /// # Errors
@@ -74,7 +74,7 @@ pub fn client_tls_for(
             })
         }
         // An identity opened from a `bootstrap.p12` stands in for the configured one until the
-        // Server's certificate is stored (ADR-0052 clause 15); the issued one outranks both.
+        // Server's certificate is stored (ADR-0027 clause 15); the issued one outranks both.
         None => match (&config.bootstrap_identity, config.is_enrolled()) {
             (Some(bootstrap), false) => Some(Identity {
                 cert_pem: bootstrap.cert_pem.clone(),
@@ -136,7 +136,7 @@ fn key_in(path: &Path, pem: Vec<u8>) -> Result<Zeroizing<Vec<u8>>, String> {
     Ok(pem)
 }
 
-/// The identity in the PKCS#12 file at `path`, under `password`, as PEM in memory (ADR-0052
+/// The identity in the PKCS#12 file at `path`, under `password`, as PEM in memory (ADR-0027
 /// clause 15). A file over [`fleet_core::pkcs12::MAX_FILE_BYTES`] is refused before it is read.
 ///
 /// # Errors
@@ -206,7 +206,7 @@ fn read(path: &Path) -> Result<Vec<u8>, String> {
 }
 
 /// A file of the state directory, never read through a link: an install reads it as root, and the
-/// directory belongs to the service's account (ADR-0037).
+/// directory belongs to the service's account (ADR-0021).
 fn state_file(path: &Path) -> Result<Vec<u8>, String> {
     crate::nofollow::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))
 }
@@ -216,9 +216,9 @@ mod tests {
     use super::*;
 
     /// A `bootstrap.p12` opens to PEM in memory and stands in for the configured identity until
-    /// the Server's certificate is stored; a file over the bound is refused unread (ADR-0052
+    /// the Server's certificate is stored; a file over the bound is refused unread (ADR-0027
     /// clause 15).
-    /// Verifies: ADR-0052
+    /// Verifies: ADR-0027
     #[test]
     fn an_opened_bootstrap_p12_is_presented_until_the_client_is_enrolled() {
         use fleet_core::pkcs12::file::OpenError;

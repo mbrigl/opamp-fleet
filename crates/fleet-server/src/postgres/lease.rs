@@ -1,5 +1,5 @@
 //! The lease every instance on one database holds while it serves
-//! (ADR-0048
+//! (ADR-0025
 //! clauses 1 to 3).
 //!
 //! A lease is a row of `leases` whose `expires_at` the database sets from its own clock, so every
@@ -31,7 +31,7 @@ pub struct Taken {
 #[derive(Clone, Copy, Debug)]
 pub struct Renewal {
     /// The revocation list's version as the database held it at the renewal
-    /// (ADR-0048
+    /// (ADR-0025
     /// clause 10).
     pub list_version: u64,
 }
@@ -71,7 +71,7 @@ impl Database {
     ///
     /// The lease is taken under the migrations' lock and refused, naming both versions, on a
     /// schema that needs a newer Server than this instance's release, which it records
-    /// (ADR-0048
+    /// (ADR-0025
     /// clause 16). Such a refusal is kept: [`Database::outdated`] answers it from then on.
     ///
     /// # Errors
@@ -106,7 +106,7 @@ impl Database {
             // The schema again, under the migrations' lock: of this lease and a migration that
             // runs at once, the one later sees the other, so no instance serves on a schema it
             // does not understand
-            // (ADR-0048
+            // (ADR-0025
             // clause 16).
             transaction
                 .execute(
@@ -179,7 +179,7 @@ impl Database {
                 .collect();
             // Each removed lease's chain is closed for it, and this lease's chain opened, in the
             // same transaction (clause 3 of
-            // ADR-0047).
+            // ADR-0029).
             let mut written = Vec::new();
             for (lapsed, by_time) in &removed {
                 let ended = if *by_time {
@@ -223,7 +223,7 @@ impl Database {
             refusal
         })?;
         // From now on this instance's sweeps mark under the lease, so that a sweep of another
-        // instance leaves their marks while it lives (ADR-0050 clause 14).
+        // instance leaves their marks while it lives (ADR-0023 clause 14).
         self.sweep_under(&id);
         Ok(Taken {
             instance_id: id,
@@ -267,7 +267,7 @@ impl Database {
 
     /// Takes over every lease other than `instance_id`'s that has lapsed, waiting at most `bound`
     /// for the answer: what an instance does after each renewal
-    /// (ADR-0048
+    /// (ADR-0025
     /// clause 18). Each lease is removed in one transaction with the closing of its audit chain,
     /// `closed_by` the chain of `instance_id`; the removal locks the lease, so one instance alone
     /// takes it. Answers the leases taken over.
@@ -315,7 +315,7 @@ impl Database {
     }
 
     /// The instance ids of the leases that are live: what the cleanup of the staging objects in
-    /// the bucket keeps (ADR-0050 clause 16).
+    /// the bucket keeps (ADR-0023 clause 16).
     ///
     /// # Errors
     /// Returns an error naming the database when it cannot be reached.
@@ -381,7 +381,7 @@ mod tests {
 
     /// Two instances that share the database each take a lease of their own and renew it; a lease
     /// that lapsed is renewed no more, and a released one is gone.
-    /// Verifies: ADR-0048
+    /// Verifies: ADR-0025
     #[test]
     fn instances_that_share_the_database_each_hold_a_lease() {
         let Some(test) = TestDatabase::named() else {
@@ -416,7 +416,7 @@ mod tests {
 
     /// The leases that are live are those not lapsed and not released: what the cleanup of the
     /// staging objects keeps.
-    /// Verifies: ADR-0050
+    /// Verifies: ADR-0023
     #[test]
     fn the_live_leases_are_those_neither_lapsed_nor_released() {
         let Some(test) = TestDatabase::named() else {
@@ -442,7 +442,7 @@ mod tests {
     /// An instance that must be alone fails startup while another live lease exists, naming the
     /// key and the number of leases; an instance that shares the database fails while one holds it
     /// alone; one that had to be alone and is gone has its lease taken over.
-    /// Verifies: ADR-0048
+    /// Verifies: ADR-0025
     #[test]
     fn an_instance_that_must_be_alone_is_alone() {
         let Some(test) = TestDatabase::named() else {
@@ -482,7 +482,7 @@ mod tests {
     /// The live lease of an instance that had to be alone and whose process is gone is taken over
     /// before it lapses, and its chain closed with `reason` `holder_gone` and `closed_by` the
     /// chain of the instance that took it over; the record verifies.
-    /// Verifies: ADR-0047
+    /// Verifies: ADR-0029
     #[test]
     fn the_chain_of_a_gone_holders_live_lease_is_closed_as_holder_gone() {
         let Some(test) = TestDatabase::named() else {
@@ -513,7 +513,7 @@ mod tests {
 
     /// A lease that lapsed is taken over by the next instance that takes one, which names it; a
     /// live lease of an instance that shares the database is not.
-    /// Verifies: ADR-0048
+    /// Verifies: ADR-0025
     #[test]
     fn a_lapsed_lease_is_taken_over_and_named() {
         let Some(test) = TestDatabase::named() else {
@@ -566,9 +566,9 @@ mod tests {
     /// An instance that takes over the lapsed lease of another logs its own instance id and the
     /// lapsed one as a takeover; one that takes a new lease after losing its own logs the lapsed
     /// one as its own, never as an instance that is gone
-    /// (ADR-0048
+    /// (ADR-0025
     /// clauses 1 and 3).
-    /// Verifies: ADR-0048
+    /// Verifies: ADR-0025
     #[test]
     fn a_take_names_a_lapsed_lease_as_a_takeover_or_as_its_own() {
         let Some(test) = TestDatabase::named() else {

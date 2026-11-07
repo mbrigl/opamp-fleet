@@ -1,5 +1,5 @@
 //! What every certificate this project makes gets, by the Server's client and bootstrap CAs and by
-//! the operator tool alike (ADR-0008 clause 18, ADR-0032 clause 5): a random serial, and a life
+//! the operator tool alike (ADR-0008 clause 18, ADR-0037 clause 5): a random serial, and a life
 //! that starts a little before it is signed.
 
 use rcgen::SerialNumber;
@@ -28,7 +28,7 @@ mod tests {
     use super::*;
 
     /// A serial is 16 bytes, positive, and not the one before.
-    /// Verifies: ADR-0032
+    /// Verifies: ADR-0037
     #[test]
     fn a_serial_is_sixteen_random_positive_bytes() {
         let first = random_serial().expect("serial").to_bytes();
