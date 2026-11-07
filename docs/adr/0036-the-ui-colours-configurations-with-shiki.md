@@ -1,4 +1,4 @@
-# ADR-0031: The bundled UI colours an Agent's effective configuration with Shiki
+# ADR-0036: The bundled UI colours an Agent's effective configuration with Shiki
 
 - **Status:** 🟢 accepted
 - **Date:** 2026-10-17
@@ -132,7 +132,7 @@ the browser.
 
 ## Enforcement
 
-Tests that carry `Verifies: ADR-0031`, in
+Tests that carry `Verifies: ADR-0036`, in
 [`crates/fleet-server/tests/rest_api.rs`](../../crates/fleet-server/tests/rest_api.rs):
 
 - `the_ui_serves_the_pinned_shiki_bundle`: the embedded `shiki.js` has the pinned SHA-256, and

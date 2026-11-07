@@ -1,7 +1,7 @@
-//! Named Configurations (ADR-0026): the persistent store, the type fit, and the composition of
+//! Named Configurations (ADR-0033): the persistent store, the type fit, and the composition of
 //! each Agent's Remote configuration. A Configuration is content only — a body, the Agent type it
 //! is written for and an optional role — and aims at nobody: a Deployment holds it, and the Deployment's
-//! Selector aims (ADR-0026). Saving is the only content state (ADR-0026) — **a saved Configuration
+//! Selector aims (ADR-0033). Saving is the only content state (ADR-0033) — **a saved Configuration
 //! reaches nobody by itself**. What an Agent is offered is composed from the assignment the
 //! operator's rollout act wrote; the store's part is to keep the saved revision, and to retain
 //! every pinned revision an assignment still references.
@@ -17,13 +17,13 @@ use sha2::{Digest, Sha256};
 /// One revision of a Configuration: everything an operator writes, and everything the fleet can
 /// be offered. The body is the Managed Process's own format — never interpreted here (the
 /// specification forbids abstracting over an agent's configuration language). It carries no
-/// Selector (ADR-0026), and a stored revision that still names one is refused rather than read.
+/// Selector (ADR-0033), and a stored revision that still names one is refused rather than read.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Revision {
     /// The configuration text handed to the Managed Process.
     pub body: String,
-    /// The Baseline's `AgentConfigObject.role` (ADR-0025), travelling unchanged to the Agent. Empty
+    /// The Baseline's `AgentConfigObject.role` (ADR-0032), travelling unchanged to the Agent. Empty
     /// — the default, and absent from the JSON — means top-level configuration, handled as any
     /// configuration is. `supplementary` means content the Managed Process reads *by path* rather
     /// than being configured with: a fragment, a certificate, a rule file. Any other value is
@@ -31,7 +31,7 @@ pub struct Revision {
     /// Agent type, so nothing here guesses at one it does not know.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub role: String,
-    /// The Agent type this Configuration is written for (ADR-0026 clauses 2 and 4), compared raw
+    /// The Agent type this Configuration is written for (ADR-0033 clauses 2 and 4), compared raw
     /// for equality against the `service.name` the Agent reports. It fits the Configuration to the
     /// Agents of the Deployment that holds it; it never aims. Required: the store refuses a saved
     /// revision without one ([`check_type`]). It is read as empty when a stored file lacks it, so
@@ -40,7 +40,7 @@ pub struct Revision {
     pub service_name: String,
 }
 
-/// The hash an assignment pins a revision by (ADR-0026): over what the Agent is delivered — body
+/// The hash an assignment pins a revision by (ADR-0033): over what the Agent is delivered — body
 /// and role, length-prefixed — never the type, which decides *whom* a revision reaches rather
 /// than what it is.
 pub fn revision_hash(revision: &Revision) -> String {
@@ -52,7 +52,7 @@ pub fn revision_hash(revision: &Revision) -> String {
     hex::encode(hasher.finalize())
 }
 
-/// A named Configuration as the store holds it (ADR-0026): the saved revision every `PUT`
+/// A named Configuration as the store holds it (ADR-0033): the saved revision every `PUT`
 /// writes — the only revision an operator edits — and the retained revisions that per-Agent
 /// assignments pin by content hash. Saving only saves; a revision enters `retained` through a
 /// rollout act and leaves it when no assignment references it any more.
@@ -60,7 +60,7 @@ pub fn revision_hash(revision: &Revision) -> String {
 #[serde(deny_unknown_fields)]
 pub struct Configuration {
     /// The name: a config-map key on the wire and a file name on both ends, so it follows the
-    /// ADR-0019 name grammar.
+    /// ADR-0020 name grammar.
     pub name: String,
     /// What editing operates on, and what a rollout act releases as one snapshot.
     pub saved: Revision,
@@ -71,7 +71,7 @@ pub struct Configuration {
     pub retained: BTreeMap<String, Revision>,
 }
 
-/// The role value this project understands (ADR-0025). Every other non-empty value is passed on
+/// The role value this project understands (ADR-0032). Every other non-empty value is passed on
 /// unchanged and handled the same way — written, not configured with.
 pub const ROLE_SUPPLEMENTARY: &str = "supplementary";
 
@@ -80,7 +80,7 @@ pub const ROLE_SUPPLEMENTARY: &str = "supplementary";
 pub struct ConfigEntry {
     pub name: String,
     pub body: String,
-    /// The Baseline's `AgentConfigObject.role` (ADR-0025); empty is top-level configuration.
+    /// The Baseline's `AgentConfigObject.role` (ADR-0032); empty is top-level configuration.
     pub role: String,
 }
 
@@ -90,7 +90,7 @@ pub struct ConfigEntry {
 #[derive(Clone)]
 pub struct DesiredConfig {
     /// The entries, sorted by name — deterministic like the entry order the Managed Process sees
-    /// (the Collector receives them as one `--config` per entry, ADR-0017).
+    /// (the Collector receives them as one `--config` per entry, ADR-0018).
     pub entries: Vec<ConfigEntry>,
     /// SHA-256 over the length-prefixed `(name, body, role)` triples in name order.
     pub hash: Vec<u8>,
@@ -110,7 +110,7 @@ impl DesiredConfig {
             // that gates every push (goal 3) — an ungated role change would never be delivered.
             // An empty role is hashed as nothing at all rather than as an empty field: it means
             // "no role", it goes on the wire unset, and every Configuration that predates
-            // ADR-0025 has one. Hashing it would move every existing hash on upgrade and restart
+            // ADR-0032 has one. Hashing it would move every existing hash on upgrade and restart
             // every Managed Process in the fleet to deliver a configuration identical to the one
             // it already runs — the precise opposite of what goal 3 asks. The framing stays
             // unambiguous: a role is length-prefixed like the other fields, and an omitted one
@@ -130,7 +130,7 @@ impl DesiredConfig {
     }
 }
 
-/// Refuses a revision without an Agent type (ADR-0026 clause 2): a Configuration is written for
+/// Refuses a revision without an Agent type (ADR-0033 clause 2): a Configuration is written for
 /// one type, and content for several is one Configuration per type.
 ///
 /// # Errors
@@ -138,14 +138,14 @@ impl DesiredConfig {
 pub fn check_type(revision: &Revision) -> Result<(), String> {
     if revision.service_name.trim().is_empty() {
         return Err(
-            "service_name is required: a Configuration is written for one Agent type (ADR-0026)"
+            "service_name is required: a Configuration is written for one Agent type (ADR-0033)"
                 .to_string(),
         );
     }
     Ok(())
 }
 
-/// Does this revision fit this Agent (ADR-0026 clause 4)? Its `service_name` must equal the
+/// Does this revision fit this Agent (ADR-0033 clause 4)? Its `service_name` must equal the
 /// `service.name` the Agent reports — compared raw, no canonicalisation, because there is no
 /// canonical set of Agent types. An Agent that reports no `service.name` fits no revision, and a
 /// revision without a type fits no Agent. Whom a Configuration aims at is not asked here: the
@@ -170,7 +170,7 @@ pub fn fits(revision: &Revision, description: Option<&AgentDescription>) -> bool
     reported == Some(revision.service_name.as_str())
 }
 
-/// One revision a rollout pins (ADR-0026 clause 6): the Configuration it is of, the hash an
+/// One revision a rollout pins (ADR-0033 clause 6): the Configuration it is of, the hash an
 /// assignment pins it by, and the revision. A rollout adds it by its hash and touches no other
 /// revision of the Configuration.
 #[derive(Debug, Clone, PartialEq)]
@@ -180,7 +180,7 @@ pub struct Pinned {
     pub revision: Revision,
 }
 
-/// The Configuration store's port (ADR-0009, ADR-0050 clause 2): where Configurations persist so a
+/// The Configuration store's port (ADR-0009, ADR-0023 clause 2): where Configurations persist so a
 /// Server restart does not lose what the fleet should run. It speaks in parts: the saved revision
 /// is written on its own, a retained revision is added by its hash only by the rollout that pins
 /// it ([`AgentStore::release`](crate::agent_store::AgentStore::release)) and removed by its hash
@@ -196,7 +196,7 @@ pub trait ConfigBackend: Send + Sync {
     fn save(&self, name: &str, saved: &Revision) -> Result<(), String>;
 
     /// Removes every retained revision of `name` that `referenced` does not name and no stored
-    /// assignment pins, and answers the ones kept (ADR-0026, ADR-0050 clause 2). A database
+    /// assignment pins, and answers the ones kept (ADR-0033, ADR-0023 clause 2). A database
     /// adapter reckons it in one transaction from the revisions and the assignments it stores,
     /// holding the Configuration's row against every rollout that pins one of its revisions; the
     /// filesystem adapter, its only writer, from `referenced`, which the Agent store answered. A
@@ -208,7 +208,7 @@ pub trait ConfigBackend: Send + Sync {
     ) -> Result<BTreeMap<String, Revision>, String>;
 
     /// Deletes one Configuration, its retained revisions with it, unless a stored assignment pins
-    /// it (ADR-0026 clause 12). A database adapter counts the assignments in the transaction that
+    /// it (ADR-0033 clause 12). A database adapter counts the assignments in the transaction that
     /// deletes, holding the Configuration's row against every rollout that pins one of its
     /// revisions, so a pin written through another instance refuses it, and takes the
     /// Configuration out of every Deployment that holds it in the same transaction; the
@@ -228,7 +228,7 @@ pub enum Removal {
     Pinned(usize),
 }
 
-/// The Configuration store: every Configuration and its retained revisions (ADR-0026). The
+/// The Configuration store: every Configuration and its retained revisions (ADR-0033). The
 /// in-memory map is the single source the control loop reads; the backend exists so a Server
 /// restart does not lose what the fleet should run.
 pub struct ConfigStore {
@@ -254,7 +254,7 @@ impl ConfigStore {
 
     /// Reads every Configuration again from the backend, as another instance saved, pinned,
     /// collected or deleted one
-    /// (ADR-0048
+    /// (ADR-0025
     /// clause 12): what is held is dropped and what is stored taken in its place. It reads under
     /// the lock, so no write of this instance's own lands between the read and the swap.
     ///
@@ -289,7 +289,7 @@ impl ConfigStore {
             .cloned()
     }
 
-    /// Creates a Configuration or replaces its **saved** revision (ADR-0026): validated,
+    /// Creates a Configuration or replaces its **saved** revision (ADR-0033): validated,
     /// persisted in one step — and distributed to nobody. Every retained revision keeps being
     /// offered untouched to the Agents assigned it, and none is written.
     pub fn put_saved(&self, name: &str, revision: Revision) -> Result<Configuration, String> {
@@ -330,7 +330,7 @@ impl ConfigStore {
         })
     }
 
-    /// Pins the saved revision of each of `names` for a rollout (ADR-0026 clause 6, ADR-0050
+    /// Pins the saved revision of each of `names` for a rollout (ADR-0033 clause 6, ADR-0023
     /// clause 2): hands `write` each one's hash and every revision it pins, under the store's
     /// lock, and makes them the store's — `write` persists them together with the assignments
     /// that pin them. Each pinned revision is handed on, held already or not: another instance
@@ -374,9 +374,9 @@ impl ConfigStore {
     }
 
     /// Drops every retained revision of `name` that `referenced` does not name and no stored
-    /// assignment pins — the collection half of ADR-0026's "the store retains every revision an
+    /// assignment pins — the collection half of ADR-0033's "the store retains every revision an
     /// assignment still references" — and holds what the store kept. The caller asks the Agent
-    /// store which revisions its assignments reference (ADR-0050 clause 2); a database store
+    /// store which revisions its assignments reference (ADR-0023 clause 2); a database store
     /// reckons the rest in its own transaction from the assignments it stores, so a revision
     /// another instance pinned is kept. A revision left behind by a failed write is harmless and
     /// collected on the next act, or when the Server next starts.
@@ -393,7 +393,7 @@ impl ConfigStore {
     }
 
     /// Deletes a Configuration — the saved revision and every retained one — unless a stored
-    /// assignment pins it (ADR-0026 clause 12), which the backend decides in the act that deletes:
+    /// assignment pins it (ADR-0033 clause 12), which the backend decides in the act that deletes:
     /// another instance may have pinned it since this one read it. The caller refuses it first
     /// while an assignment it holds pins it.
     ///
@@ -411,7 +411,7 @@ impl ConfigStore {
         Ok(removal)
     }
 
-    /// The candidates a Deployment holding `names` offers one Agent (ADR-0026 clause 9): each of
+    /// The candidates a Deployment holding `names` offers one Agent (ADR-0033 clause 9): each of
     /// those Configurations that exists and whose saved revision fits the Agent's type, as
     /// name → hash of the saved revision. What a rollout act would pin, and what the fleet view
     /// diffs against the Agent's assignment to show what is waiting. Never an offer.
@@ -429,11 +429,11 @@ impl ConfigStore {
             .collect()
     }
 
-    /// One Agent's composed Remote configuration, from its assignments (ADR-0026): each assigned
+    /// One Agent's composed Remote configuration, from its assignments (ADR-0033): each assigned
     /// Configuration's pinned revision as one entry. `None` when the Agent is assigned nothing —
     /// no offer is made and it keeps running what it already runs (goal 9). An assignment whose
     /// Configuration or revision is gone composes nothing rather than failing: a pinned
-    /// Configuration cannot be deleted (ADR-0026 clause 12), so the case is a race, not a state.
+    /// Configuration cannot be deleted (ADR-0033 clause 12), so the case is a race, not a state.
     pub fn compose(&self, assignments: &BTreeMap<String, String>) -> Option<DesiredConfig> {
         let configs = self.configs.read().expect("configs lock");
         let entries: Vec<ConfigEntry> = assignments
@@ -455,7 +455,7 @@ impl ConfigStore {
     }
 }
 
-/// The ADR-0019 name grammar, applied to Configuration names: they become file names here, wire
+/// The ADR-0020 name grammar, applied to Configuration names: they become file names here, wire
 /// config-map keys, and entry files on every Client — including Windows ones, hence the reserved
 /// device names. Kept in sync with the Client's instance-name parser by the shared test corpus.
 pub fn validate_name(name: &str) -> Result<(), String> {
@@ -612,9 +612,9 @@ pub(crate) mod tests {
             .collect()
     }
 
-    /// ADR-0026 clause 4: a revision fits only the Agents of its type. One without a type, which
+    /// ADR-0033 clause 4: a revision fits only the Agents of its type. One without a type, which
     /// the store never holds, fits no Agent at all.
-    /// Verifies: ADR-0026
+    /// Verifies: ADR-0033
     #[test]
     fn a_revision_reaches_only_agents_of_its_type() {
         let otelcol = description(&[("service.name", "otelcol"), ("os.type", "linux")]);
@@ -634,9 +634,9 @@ pub(crate) mod tests {
         assert!(!fits(&untyped, None));
     }
 
-    /// ADR-0026 clause 4: equality against a missing attribute fails, so an Agent that reports no
+    /// ADR-0033 clause 4: equality against a missing attribute fails, so an Agent that reports no
     /// `service.name` receives no Configuration.
-    /// Verifies: ADR-0026
+    /// Verifies: ADR-0033
     #[test]
     fn an_agent_without_a_type_receives_no_configuration() {
         let untyped_agent = description(&[("os.type", "linux")]);
@@ -647,9 +647,9 @@ pub(crate) mod tests {
         assert!(!fits(&typed(revision("b"), ""), Some(&untyped_agent)));
     }
 
-    /// ADR-0026 clause 2: the store refuses a revision without an Agent type, naming
+    /// ADR-0033 clause 2: the store refuses a revision without an Agent type, naming
     /// `service_name`, and keeps nothing of it.
-    /// Verifies: ADR-0026
+    /// Verifies: ADR-0033
     #[test]
     fn the_store_refuses_a_revision_without_a_type() {
         let store = ConfigStore::open(Box::new(Memory::default())).expect("open");
@@ -662,7 +662,7 @@ pub(crate) mod tests {
         assert!(store.get("base").is_none(), "nothing was saved");
     }
 
-    /// ADR-0026: saving only saves. A saved Configuration is composed for nobody until an
+    /// ADR-0033: saving only saves. A saved Configuration is composed for nobody until an
     /// assignment pins it, and only the assignment decides what an Agent is offered.
     #[test]
     fn a_saved_configuration_reaches_nobody_without_an_assignment() {
@@ -699,10 +699,10 @@ pub(crate) mod tests {
         );
     }
 
-    /// ADR-0026 clause 6: a rollout pins a snapshot. Editing the saved revision afterwards changes
+    /// ADR-0033 clause 6: a rollout pins a snapshot. Editing the saved revision afterwards changes
     /// nothing for an Agent assigned the pinned one, and the candidate hash moves so the fleet
     /// view can show a newer save waiting.
-    // Verifies: ADR-0026
+    // Verifies: ADR-0033
     #[test]
     fn an_assignment_pins_a_snapshot_and_later_edits_wait() {
         let memory = Memory::default();
@@ -733,7 +733,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// ADR-0026: a retained revision lives exactly as long as an assignment references it.
+    /// ADR-0033: a retained revision lives exactly as long as an assignment references it.
     #[test]
     fn retain_only_collects_unreferenced_revisions() {
         let memory = Memory::default();
@@ -886,9 +886,9 @@ pub(crate) mod tests {
     /// A Configuration with an empty role keeps the hash it had without one, so the hash does not
     /// move when the Server is upgraded — a moved hash restarts every Managed Process in the fleet
     /// to deliver a configuration identical to the one it already runs. The same pin guards
-    /// ADR-0025 and ADR-0026: neither the type, nor a revision split, nor the assignment model may
+    /// ADR-0032 and ADR-0033: neither the type, nor a revision split, nor the assignment model may
     /// enter the hash.
-    // Verifies: ADR-0025
+    // Verifies: ADR-0032
     #[test]
     fn an_empty_role_leaves_the_hash_where_it_was() {
         let memory = Memory::default();
@@ -909,9 +909,9 @@ pub(crate) mod tests {
         );
     }
 
-    /// The JSON contract of ADR-0025, on the stored revision: an unset role is absent on the way
+    /// The JSON contract of ADR-0032, on the stored revision: an unset role is absent on the way
     /// in and absent on the way out, so every stored file stays minimal; the type, which every
-    /// saved revision has (ADR-0026 clause 2), is always written.
+    /// saved revision has (ADR-0033 clause 2), is always written.
     #[test]
     fn an_unset_role_is_absent_from_the_stored_json() {
         let json = serde_json::to_string(&revision("b")).expect("serialize");
@@ -931,9 +931,9 @@ pub(crate) mod tests {
     }
 
     /// The candidates are the held Configurations that exist and fit the Agent's type, each at
-    /// its saved revision (ADR-0026 clauses 4 and 9). A name the store does not hold proposes
+    /// its saved revision (ADR-0033 clauses 4 and 9). A name the store does not hold proposes
     /// nothing, and an Agent that reports no type is proposed nothing.
-    /// Verifies: ADR-0026
+    /// Verifies: ADR-0033
     #[test]
     fn candidates_are_the_held_configurations_that_fit() {
         let memory = Memory::default();

@@ -1,4 +1,4 @@
-# ADR-0030: The Server's configuration: TOML layered with its environment
+# ADR-0024: The Server's configuration: TOML layered with its environment
 
 - **Status:** 🟢 accepted
 - **Date:** 2026-10-23
@@ -16,8 +16,9 @@ The Server runs in a container. A container is configured by its orchestrator, a
 orchestrator's natural channel is the environment: a variable per setting, changed per deployment
 without rebuilding the image or mounting a file. Every setting of `server.toml` must be reachable
 that way, the PostgreSQL connection and the object store of
-[ADR-0044](0044-the-servers-state-and-its-stores.md) among them. The Client runs as an
-operating-system service on the host it manages, not in a container.
+[ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
+among them. The Client runs as an operating-system service on the host it manages, not in a
+container.
 
 Secrets must not travel in the environment. A container's environment is shown by `docker
 inspect`, readable in `/proc/<pid>/environ` by the same user, copied into crash reports and
@@ -26,7 +27,7 @@ inherited by every child process. Docker's secrets reach a container as files un
 Server keeps every secret it needs in a file named by a `*_file` key: the PostgreSQL password,
 the S3 secret key, the CA keys. Two tables of `server.toml` may hold sensitive values inline:
 `[rest.auth.basic_users]`, whose Argon2id hashes an attacker can attack offline
-([ADR-0038](0038-admission-by-client-certificate-and-revocation.md)), and
+([ADR-0026](0026-admission-by-client-certificate-and-revocation.md)), and
 `[telemetry_offer.headers]`, which typically carries an access token for the receiving backend.
 
 The keys of those two tables are data — user names and header names — not schema. An environment
@@ -77,11 +78,11 @@ environment carry paths to secrets but never a secret itself.
 
 5. **Tables keyed by data are set whole, and the sensitive ones from a file.** A table whose keys
    are names an operator chooses cannot be reached key by key from the environment.
-   - `[rest.auth] basic_users_file` names a TOML file holding the `basic_users` table, readable
-     by the Server's account alone. Naming it beside `[rest.auth.basic_users]` in the same
-     document fails startup, naming both. The environment may set
-     `FLEET_SERVER__REST__AUTH__BASIC_USERS_FILE` but not
-     `FLEET_SERVER__REST__AUTH__BASIC_USERS`, which fails startup naming the file key.
+   - `[rest.auth] basic_users_file` names a TOML file holding the `basic_users` table, readable by
+     the Server's account alone. Naming it beside `[rest.auth.basic_users]` in the same document
+     fails startup, naming both. The environment may set
+     `FLEET_SERVER__REST__AUTH__BASIC_USERS_FILE` but not `FLEET_SERVER__REST__AUTH__BASIC_USERS`,
+     which fails startup naming the file key.
    - `[telemetry_offer] headers_file` names a TOML file holding the `headers` table, under the
      same rules: never beside `headers`, and from the environment only as a path.
    - `server.toml` itself may still carry both tables inline; an operator who keeps the file
@@ -101,11 +102,11 @@ environment carry paths to secrets but never a secret itself.
    the Server logs, at info level, the name of every key its environment set, and never a value.
 
 8. **No other variable configures the Server.** The `AWS_*` variables are read as
-   [ADR-0044](0044-the-servers-state-and-its-stores.md) clauses 17 and 18 say: for credentials
-   only, never for an endpoint or an option. `FLEET_TEST_*` variables are read by tests alone.
-   Where ADR-0044 says the S3 connection is configured in `server.toml` alone, the environment of
-   this ADR counts as `server.toml`: `FLEET_SERVER__BLOBS__S3__ENDPOINT` sets the endpoint, and
-   `AWS_ENDPOINT` still does not.
+   [ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
+   clauses 17 and 18 say: for credentials only, never for an endpoint or an option. `FLEET_TEST_*`
+   variables are read by tests alone. Where ADR-0023 says the S3 connection is configured in
+   `server.toml` alone, the environment of this ADR counts as `server.toml`:
+   `FLEET_SERVER__BLOBS__S3__ENDPOINT` sets the endpoint, and `AWS_ENDPOINT` still does not.
 
 9. **The merge is the Server's own.** `config.rs` builds a `toml::Table` from the file, overlays a
    table built from the environment, and deserializes the result once. No dependency is added.
@@ -130,9 +131,9 @@ since only secrets need one and every secret is already a file.
   dependency with its own provider stack, for a merge of two tables and a parse of each value
   that `toml` already does. Rejected.
 - **The `config` crate.** Layered sources and environment overrides, but a larger surface —
-  several formats, its own value type, a builder — and it loses `serde`'s field names in some
-  error messages, which the loud validation of
-  [ADR-0008](0008-five-crates-on-tokio-and-axum.md) relies on. Rejected.
+  several formats, its own value type, a builder — and it loses `serde`'s field names in some error
+  messages, which the loud validation of [ADR-0008](0008-five-crates-on-tokio-and-axum.md) relies
+  on. Rejected.
 - **A fixed list of documented variables.** Each needs code and documentation, and a key added
   later is out of reach of a container until someone adds its variable. Rejected.
 - **Secrets as plain variables beside their `…_file` keys** (`…_PASSWORD` as well as
@@ -191,7 +192,7 @@ since only secrets need one and every secret is already a file.
 
 ## Enforcement
 
-Tests that carry `Verifies: ADR-0030`:
+Tests that carry `Verifies: ADR-0024`:
 
 - [`crates/fleet-server/src/config.rs`](../../crates/fleet-server/src/config.rs):
   `the_environment_overrides_the_files_keys_and_keeps_the_rest`,

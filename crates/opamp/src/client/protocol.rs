@@ -69,7 +69,7 @@ pub struct AgentProtocol {
     settings_offered: bool,
     remote_config_status: Option<RemoteConfigStatus>,
     connection_settings_status: Option<ConnectionSettingsStatus>,
-    /// A certificate signing request to send once (ADR-0038).
+    /// A certificate signing request to send once (ADR-0026).
     pending_csr: Option<Vec<u8>>,
     // What the next report owes: a full snapshot, or each part that changed.
     send_full: bool,
@@ -174,7 +174,7 @@ impl AgentProtocol {
         self.send_components_full = true;
     }
 
-    /// Queues a certificate signing request for the next report (ADR-0038).
+    /// Queues a certificate signing request for the next report (ADR-0026).
     pub fn request_certificate(&mut self, csr: Vec<u8>) {
         self.pending_csr = Some(csr);
     }

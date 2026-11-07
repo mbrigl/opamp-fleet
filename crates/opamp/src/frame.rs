@@ -1,4 +1,4 @@
-//! OpAMP WebSocket message framing (ADR-0011, ADR-0045).
+//! OpAMP WebSocket message framing (ADR-0011, ADR-0012).
 //!
 //! The OpAMP specification defines every WebSocket message as a *header* — a varint-encoded
 //! unsigned 64-bit integer, 1–10 bytes long — followed by the protobuf-encoded message. In this

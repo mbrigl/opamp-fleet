@@ -1,4 +1,4 @@
-//! The host's own description, read from the platform (ADR-0016): the adapter behind
+//! The host's own description, read from the platform (ADR-0017): the adapter behind
 //! [`HostFacts`]. Every fact that cannot change under a running process is read once; the network
 //! addresses are read live.
 
@@ -39,10 +39,10 @@ impl HostFacts for SystemHost {
     }
 }
 
-/// The host's network addresses, enumerated live from the platform (ADR-0016).
+/// The host's network addresses, enumerated live from the platform (ADR-0017).
 fn host_addresses() -> (Vec<String>, Vec<String>) {
     // An error is `sysinfo` unable to enumerate interfaces at all: what the platform cannot answer
-    // is left out (ADR-0016 clause 5), so both lists stay empty.
+    // is left out (ADR-0017 clause 5), so both lists stay empty.
     let Ok(networks) = sysinfo::Networks::new_with_refreshed_list() else {
         return (Vec::new(), Vec::new());
     };
@@ -193,7 +193,7 @@ fn read_os_info() -> OsInfo {
 }
 
 /// The processor's model designation (`host.cpu.model.name`) — read once, hardware does not
-/// change under a running process. From the same `sysinfo` the addresses come from (ADR-0016);
+/// change under a running process. From the same `sysinfo` the addresses come from (ADR-0017);
 /// one CPU answers for all of them, which is what the convention's singular key asks for.
 fn cpu_model() -> Option<&'static str> {
     static MODEL: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
@@ -211,7 +211,7 @@ fn cpu_model() -> Option<&'static str> {
         .as_deref()
 }
 
-/// The host's name (`host.name`) — read once. ADR-0027 twice offers a Selector on this attribute
+/// The host's name (`host.name`) — read once. ADR-0034 twice offers a Selector on this attribute
 /// as the way to pin one host to one artifact, so a fleet that does not report it cannot be aimed
 /// at a machine at all.
 pub(crate) fn host_name() -> Option<&'static str> {
@@ -319,11 +319,11 @@ fn read_host_id() -> Option<String> {
 mod tests {
     use super::*;
 
-    /// `host.ip` and `host.mac` as the conventions define them (ADR-0016): loopback interfaces
+    /// `host.ip` and `host.mac` as the conventions define them (ADR-0017): loopback interfaces
     /// excluded whole — the MAC of one too — an unspecified MAC not an answer, everything
     /// deduplicated and sorted so the description is stable across enumeration order, IPv6 in
     /// RFC 5952 form and the MAC in IEEE RA hyphenated uppercase.
-    // Verifies: ADR-0016
+    // Verifies: ADR-0017
     #[test]
     fn host_addresses_follow_the_conventions() {
         use std::ffi::OsStr;
@@ -368,7 +368,7 @@ mod tests {
     }
 
     /// An interface whose name is not UTF-8 reports neither its addresses nor its MAC.
-    // Verifies: ADR-0016
+    // Verifies: ADR-0017
     #[test]
     fn an_interface_whose_name_is_not_utf8_is_skipped() {
         use std::net::Ipv4Addr;
@@ -392,7 +392,7 @@ mod tests {
         assert!(macs.is_empty(), "{macs:?}");
     }
 
-    /// The os-release parser behind `os.*`, now including `os.build_id` (ADR-0016): quotes
+    /// The os-release parser behind `os.*`, now including `os.build_id` (ADR-0017): quotes
     /// stripped, an absent or empty field absent rather than blank.
     #[cfg(target_os = "linux")]
     #[test]

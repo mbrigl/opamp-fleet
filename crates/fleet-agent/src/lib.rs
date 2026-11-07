@@ -6,11 +6,11 @@
 //! **library** — so the supervision code and the cross-platform stub it needs to spawn could not be
 //! in the same test as long as this crate was a binary alone. What that cost was 22 tests gated to
 //! Unix, covering the operations that write to a host: the binary swap, the health gate, the
-//! rollback, and the ADR-0027 tree install.
+//! rollback, and the ADR-0034 tree install.
 //!
 //! Nothing here is a published interface — the package is `publish = false`, and `pub` means
 //! "another target in this workspace has to reach it" rather than "this is the shape of the
-//! Client". The seam that *is* designed is ADR-0017's: the Ports and the plugin registry in
+//! Client". The seam that *is* designed is ADR-0018's: the Ports and the plugin registry in
 //! [`supervisor`].
 
 pub mod archive;

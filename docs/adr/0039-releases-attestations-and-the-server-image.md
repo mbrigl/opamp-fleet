@@ -1,6 +1,6 @@
-# ADR-0034: Releases, attestations and the Server's image
+# ADR-0039: Releases, attestations and the Server's image
 
-- **Status:** ⚪ superseded by [ADR-0040](0040-releases-attestations-and-the-server-image.md)
+- **Status:** 🟢 accepted
 - **Date:** 2026-11-02
 - **Deciders:** Markus Brigl
 - **Applies to:** `.github/workflows/release.yml` (the `version`, `build`, `sbom`, `image` and `publish` jobs, their permissions, the assets published and the release notes), `packaging/container/Containerfile`, the image `ghcr.io/mbrigl/opamp-fleet-server`, `.github/dependabot.yml`, `crates/fleet-tools/tests/release_workflow.rs`, the names of every release asset, the fleet view's reading of an artifact's file name, and every document that tells an operator how to download, check or run a release asset or the Server's image (`README.md`, `docs/manual/`, `CHANGELOG.md`)
@@ -9,9 +9,9 @@
 
 An operator needs something to install, and a fleet needs something to hand its Server. They are
 different questions. The fleet needs one artifact per platform that the Client itself can open and
-install as a self-update ([ADR-0018](0018-the-client-updates-itself-from-a-signed-package.md)). A
+install as a self-update ([ADR-0019](0019-the-client-updates-itself-from-a-signed-package.md)). A
 host needs what its platform expects: native packages, which
-[ADR-0019](0019-the-installed-service-and-its-state.md) decides.
+[ADR-0020](0020-the-installed-service-and-its-state.md) decides.
 `opentelemetry-collector-releases` and Elastic Agent both publish native packages *beside* their
 archives, for exactly that reason. Artifact names are a public contract: operators script against
 them.
@@ -19,9 +19,9 @@ them.
 `SHA256SUMS` proves only that a download matches the file next to it on the same release page.
 Anyone who can replace one asset can replace both. Two assets carry more weight than the rest: the
 Client's archive, which a Server hands to a whole fleet as a self-update, where the fleet's package
-signature ([ADR-0027](0027-packages-signatures-and-delivery.md)) is made over whatever the operator
+signature ([ADR-0034](0034-packages-signatures-and-delivery.md)) is made over whatever the operator
 downloaded; and the operator tool, which makes the fleet's certificate authorities and its signing
-key ([ADR-0032](0032-the-operator-program-opamp-fleetctl.md)). An operator who wants to know that a
+key ([ADR-0037](0037-the-operator-program-opamp-fleetctl.md)). An operator who wants to know that a
 file came from this repository's release workflow, at a known commit, needs a way to check it.
 
 GitHub artifact attestations answer that question. A workflow job with `id-token: write` gets a
@@ -40,16 +40,15 @@ Linux and macOS. A scanner fed with crates that are not in the binary reports fi
 apply.
 
 The Server runs in a container. Its whole configuration may come from the environment, with every
-secret a file whose path the environment names
-([ADR-0030](0030-the-servers-configuration.md)). It has no health endpoint; its two planes listen
-on `127.0.0.1:4320` and `127.0.0.1:4321` by default, and off the loopback both require TLS and the
-Operator plane requires `[rest.auth]` ([ADR-0012](0012-tls-1-3-two-planes-and-bounded-input.md)).
-The release workflow builds Linux binaries for `x86_64-unknown-linux-gnu` and
-`aarch64-unknown-linux-gnu` on GitHub-hosted runners with the pinned toolchain
-(`rust-toolchain.toml`), from the committed lockfile, without a cache; a binary for the GNU targets
-links glibc and `libgcc_s` dynamically. A reader without this conversation would expect a
-multi-stage `Dockerfile` that compiles the Server inside the image build, a `latest` tag, and a
-`HEALTHCHECK`; this record decides against all three.
+secret a file whose path the environment names ([ADR-0024](0024-the-servers-configuration.md)). It
+has no health endpoint; its two planes listen on `127.0.0.1:4320` and `127.0.0.1:4321` by default,
+and off the loopback both require TLS and the Operator plane requires `[rest.auth]`
+([ADR-0012](0012-tls-1-3-two-planes-and-bounded-input.md)). The release workflow builds Linux
+binaries for `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu` on GitHub-hosted runners
+with the pinned toolchain (`rust-toolchain.toml`), from the committed lockfile, without a cache; a
+binary for the GNU targets links glibc and `libgcc_s` dynamically. A reader without this
+conversation would expect a multi-stage `Dockerfile` that compiles the Server inside the image
+build, a `latest` tag, and a `HEALTHCHECK`; this record decides against all three.
 
 Constraints from other decisions:
 
@@ -78,7 +77,7 @@ provenance of every asset and of the image, publishing nothing that does not ver
 ### The release and its assets
 
 1. **A release is one workflow run that builds five targets from one version.** The version and its
-   `version/*` tag are decided as [ADR-0033](0033-the-products-version.md) states. A first job
+   `version/*` tag are decided as [ADR-0038](0038-the-products-version.md) states. A first job
    decides the number, builds the Client and asks it `--version`; every artifact is named from that
    one answer, and each target's build asserts its own binary reports the same full version (except
    the cross-compiled macOS x86_64 build, which the runner cannot execute). Every job checks out
@@ -100,22 +99,22 @@ provenance of every asset and of the image, publishing nothing that does not ver
 
 2. **Every archive is a `.tar.gz` written by `opamp-fleetctl package pack --format tar.gz`,** the
    operator tool the same run builds and publishes
-   ([ADR-0032](0032-the-operator-program-opamp-fleetctl.md)). The packer names the single member
+   ([ADR-0037](0037-the-operator-program-opamp-fleetctl.md)). The packer names the single member
    after the program, with its executable mode, so **the Client's release archive is a valid
    package artifact unmodified**: the operator uploads the file they downloaded, and the SHA-256
    the packer prints is both the published checksum and the hash an Agent verifies
-   ([ADR-0027](0027-packages-signatures-and-delivery.md)). `.tar.gz` because it is the container
+   ([ADR-0034](0034-packages-signatures-and-delivery.md)). `.tar.gz` because it is the container
    every other agent's package ships as and the one that carries the executable bit and unpacks the
    same way on every platform. `.7z` remains a package container the Client opens and the packer
-   writes, including encrypted ([ADR-0027](0027-packages-signatures-and-delivery.md)); a release
+   writes, including encrypted ([ADR-0034](0034-packages-signatures-and-delivery.md)); a release
    has no use for encryption.
 
 3. **Every asset of the Client is named `supervisor_<version>_<os>_<arch>.<ext>`,** and the
    operator tool's by the same grammar under its own name
-   ([ADR-0032](0032-the-operator-program-opamp-fleetctl.md)). Four fields separated by `_`: the
+   ([ADR-0037](0037-the-operator-program-opamp-fleetctl.md)). Four fields separated by `_`: the
    package name, the base version `MAJOR.MINOR.PATCH` without build metadata, and the platform in
    the vocabulary an Agent reports as `os.type` and `host.arch`
-   ([ADR-0027](0027-packages-signatures-and-delivery.md)). **All artifacts of a target share the
+   ([ADR-0034](0034-packages-signatures-and-delivery.md)). **All artifacts of a target share the
    stem** and differ in extension alone:
 
    | | artifact |
@@ -149,7 +148,7 @@ provenance of every asset and of the image, publishing nothing that does not ver
 5. **What is published.** A GitHub release named after the version holds:
    - the Client's five archives, the two `.deb`, the two `.rpm` and the `.msi`;
    - the four archives of the operator tool
-     ([ADR-0032](0032-the-operator-program-opamp-fleetctl.md));
+     ([ADR-0037](0037-the-operator-program-opamp-fleetctl.md));
    - the eleven SBOMs (clause 7);
    - one `SHA256SUMS` covering every asset.
 
@@ -167,7 +166,7 @@ provenance of every asset and of the image, publishing nothing that does not ver
    - the procedure that uploads the Client's archives, selected by their `supervisor_` stem, as one
      package for Agent type `supervisor`;
    - the full baked version string, as provenance. The upload uses the release number, since
-     versions are compared without build metadata ([ADR-0033](0033-the-products-version.md)).
+     versions are compared without build metadata ([ADR-0038](0038-the-products-version.md)).
 
 6. **The operator tool's archives are attested, as the Client's artifacts are.** They carry what
    every asset of a release carries: their entry in `SHA256SUMS`, and the release's
@@ -258,17 +257,26 @@ provenance of every asset and of the image, publishing nothing that does not ver
 16. **The image runs unprivileged, and configures nothing that holds a secret.**
     - It runs as UID and GID `65532`, set numerically with `USER 65532:65532`. It needs no
       capability: both planes listen on ports above 1024.
-    - It sets `FLEET_SERVER__DATA_DIR=/var/lib/opamp-fleet`, `FLEET_SERVER__LISTEN=0.0.0.0:4320`
-      and `FLEET_SERVER__REST__LISTEN=0.0.0.0:4321`, declares `/var/lib/opamp-fleet` a volume
-      owned by `65532`, and exposes `4320` and `4321`. Its working directory is `/`, which that
-      account cannot write, so the `server.toml` the Server reads by default is never a file it
-      could have written to its own volume. It sets nothing else.
+    - It sets `FLEET_SERVER__LISTEN=0.0.0.0:4320` and `FLEET_SERVER__REST__LISTEN=0.0.0.0:4321`,
+      declares `/var/lib/opamp-fleet` a volume owned by `65532`, and exposes `4320` and `4321`.
+      Its working directory is `/`, which that account cannot write, so the `server.toml` the
+      Server reads by default is never a file it could have written to its own volume. It sets
+      nothing else.
+    - It names no data directory. A Server that keeps state on its own disk — on the filesystem
+      record store, or with the filesystem blob store — is given `data_dir = "/var/lib/opamp-fleet"`
+      by its operator, in `server.toml` or as `FLEET_SERVER__DATA_DIR`, and the declared volume is
+      that place. A Server that is given none falls back to the default `fleet-data`, which
+      resolves under `/`, where `65532` cannot write, and fails startup naming `data_dir`; it never
+      writes outside the volume. A Server on PostgreSQL and S3 is given none, and the volume stays
+      unused
+      ([ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
+      clause 1).
     - It contains no `server.toml`, no certificate, no key and no credential. Off the loopback the
       Server refuses to start without TLS and without `[rest.auth]`, so an image started with
       nothing mounted fails, naming the missing key, rather than serving in the clear or without
       authentication (Q-1).
     - Certificates, keys, the PIN, password and credential files are mounted as files, and their
-      paths are given through the environment ([ADR-0030](0030-the-servers-configuration.md)). The
+      paths are given through the environment ([ADR-0024](0024-the-servers-configuration.md)). The
       image works with a read-only root filesystem.
 
 17. **No `HEALTHCHECK`; an orchestrator probes TCP.** The image has no shell and the Server has no
@@ -308,14 +316,14 @@ provenance of every asset and of the image, publishing nothing that does not ver
 - code signatures inside an asset or on the image: Authenticode on the `.msi`, `rpm` and `dpkg`
   signatures, Apple notarization, a cosign signature;
 - the Client verifying an attestation before a self-update; the fleet's package signature
-  ([ADR-0027](0027-packages-signatures-and-delivery.md)) stays the only check on that path;
+  ([ADR-0034](0034-packages-signatures-and-delivery.md)) stays the only check on that path;
 - an SBOM-predicate attestation that binds each archive to its SBOM (`actions/attest` with
   `sbom-path`);
 - SLSA Build Level 3 and an isolated builder;
 - reproducible builds;
 - a VEX document;
 - an image of the Client, which stays an operating-system service
-  ([ADR-0019](0019-the-installed-service-and-its-state.md));
+  ([ADR-0020](0020-the-installed-service-and-its-state.md));
 - a Helm chart, Compose file or Kubernetes manifest for production; a health endpoint; a PKCS#11
   module or other library in the image; images for any target but `linux/amd64` and
   `linux/arm64`; a published Server binary outside the image.
@@ -410,6 +418,11 @@ provenance of every asset and of the image, publishing nothing that does not ver
   from their own scripts, and such a change breaks them on the update that takes it. A release that
   changes them names the old and the new form in `CHANGELOG.md` and in its notes (clause 3).
   Rejected.
+- **The image sets `FLEET_SERVER__DATA_DIR=/var/lib/opamp-fleet`.** A Server on PostgreSQL and S3
+  keeps nothing on its disk and refuses a data directory its configuration names
+  ([ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
+  clause 1), so the image could not run it. Rejected; clause 16 names none, and the operator gives
+  one to a Server that keeps state on its disk.
 
 ## Sources / Prior art
 
@@ -467,9 +480,8 @@ provenance of every asset and of the image, publishing nothing that does not ver
   Debian 13 images `static-debian13`, `base-debian13` and `cc-debian13`, the `nonroot` and `debug`
   tags, no shell, keyless cosign signatures;
   [cc](https://github.com/GoogleContainerTools/distroless/blob/main/cc/README.md) (base plus
-  `libgcc1`) and
-  [base](https://github.com/GoogleContainerTools/distroless/blob/main/base/README.md) (glibc,
-  libssl, CA certificates, tzdata, `/tmp`).
+  `libgcc1`) and [base](https://github.com/GoogleContainerTools/distroless/blob/main/base/README.md)
+  (glibc, libssl, CA certificates, tzdata, `/tmp`).
 - OCI Image Format,
   [Pre-Defined Annotation Keys](https://github.com/opencontainers/image-spec/blob/main/annotations.md).
 - [dependabot-core issue 6067](https://github.com/dependabot/dependabot-core/issues/6067) and
@@ -505,7 +517,7 @@ provenance of every asset and of the image, publishing nothing that does not ver
   already shows. No asset carries a code signature: Windows shows an unknown publisher and `rpm`
   reports no signature.
 - Negative / trade-offs: the `version` job pushes the tag before anything is built
-  ([ADR-0033](0033-the-products-version.md)). An attestation or verification failure in `publish`
+  ([ADR-0038](0038-the-products-version.md)). An attestation or verification failure in `publish`
   leaves a pushed tag without a release. Re-running the failed job publishes it. A new run refuses
   the spent number, as it does for any `publish` failure.
 - Negative / trade-offs: a script that downloads `supervisor_<version>_*` without an extension also
@@ -553,7 +565,7 @@ provenance of every asset and of the image, publishing nothing that does not ver
   - **The Containerfile.** `packaging/container/Containerfile` has exactly one `FROM`, naming
     `gcr.io/distroless/cc-debian13:nonroot@sha256:`, no `RUN`, `USER 65532:65532`, no
     `HEALTHCHECK`, a last `WORKDIR` of `/`, and sets no `FLEET_SERVER__` variable beyond
-    `DATA_DIR`, `LISTEN` and `REST__LISTEN` (clauses 13, 15, 16, 17).
+    `LISTEN` and `REST__LISTEN` (clauses 13, 15, 16, 17).
   - **The build rows.** Both Linux rows build `-p fleet-server --bin server` with `--locked` and
     assert its version (clause 14).
   - **The `image` job.** Its permissions are `contents: read` and `packages: write` alone, it has
@@ -562,6 +574,10 @@ provenance of every asset and of the image, publishing nothing that does not ver
 - [`scripts/check-build-hardening.sh`](../../scripts/check-build-hardening.sh) check 3 fails on a
   `cargo install` in `release.yml` without an exact version, which covers the tool of clause 8.
   Its check 2 fails on a cache in `release.yml`.
+- A test that carries `Verifies: ADR-0039`, for clause 16:
+  [`config.rs`](../../crates/fleet-server/src/config.rs)
+  `a_data_dir_the_account_cannot_write_fails_startup_naming_it`. The check of the Containerfile
+  above allows no `FLEET_SERVER__DATA_DIR`.
 
 **Not mechanically decidable:** that a real release's assets and the published image's digest
 verify on GitHub, that each SBOM is complete for its binary, and that the image runs on both

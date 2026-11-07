@@ -1,4 +1,4 @@
-//! The OpAMP Fleet Server (ADR-0008, ADR-0045): the control plane that tells Agents which
+//! The OpAMP Fleet Server (ADR-0008, ADR-0012): the control plane that tells Agents which
 //! configuration they should run and records what they report back.
 //!
 //! A library crate so integration tests can assemble the exact router the binary serves.
@@ -49,7 +49,7 @@ use fs::{FsAgentStore, FsBlobStore, FsConfigBackend, FsDeploymentBackend, FsPack
 
 /// Whether an instance on PostgreSQL must be alone on its database, and the key that makes it so:
 /// blobs kept as files, or a CA key in a file
-/// (ADR-0048
+/// (ADR-0025
 /// clause 2).
 #[must_use]
 pub fn exclusive(config: &config::ServerConfig) -> postgres::Exclusive {
@@ -74,13 +74,13 @@ fn named(error: String) -> String {
     format!("data_dir: {error}")
 }
 
-/// Where the Server keeps its records (ADR-0050 clause 1): files under `data_dir`, or one
+/// Where the Server keeps its records (ADR-0023 clause 1): files under `data_dir`, or one
 /// PostgreSQL database. The composition root asks it for each port's adapter, so the rest of the
 /// Server names the ports alone.
 pub enum Records {
-    /// One file per record under this `data_dir` (ADR-0050).
+    /// One file per record under this `data_dir` (ADR-0023).
     Files(std::path::PathBuf),
-    /// One PostgreSQL database, shared by the instances on it (ADR-0050).
+    /// One PostgreSQL database, shared by the instances on it (ADR-0023).
     Postgres(Arc<postgres::Database>),
 }
 
@@ -100,7 +100,7 @@ impl Records {
             (None, None) => Err("the filesystem record store needs data_dir".to_string()),
             (Some(database), data_dir) => {
                 // With S3 too the Server keeps nothing on its disk and has no data directory
-                // (ADR-0050 clause 1).
+                // (ADR-0023 clause 1).
                 if let Some(data_dir) = data_dir {
                     fs::open_data_dir_beside_database(data_dir).map_err(named)?;
                 }
@@ -184,7 +184,7 @@ impl Records {
         }
     }
 
-    /// The floor of each Agent type (ADR-0028 clause 15).
+    /// The floor of each Agent type (ADR-0035 clause 15).
     #[must_use]
     pub fn floors(&self) -> Box<dyn floors::FloorStore> {
         match self {
@@ -210,7 +210,7 @@ impl Records {
 /// — and never the filesystem behind it.
 impl AppState {
     /// Builds the state on the default storage adapters in the data directory `data_dir`
-    /// (ADR-0050) — one JSON file per Agent, its labels inside, under `agents/`, and one per
+    /// (ADR-0023) — one JSON file per Agent, its labels inside, under `agents/`, and one per
     /// Configuration under `configurations/` — restoring every persisted Configuration and Agent
     /// record. A store that cannot be opened (or holds an unparsable file) fails startup loudly.
     ///
@@ -226,7 +226,7 @@ impl AppState {
         )
     }
 
-    /// Builds the state on the adapters of `records` (ADR-0050), restoring every persisted
+    /// Builds the state on the adapters of `records` (ADR-0023), restoring every persisted
     /// Configuration and Agent record.
     ///
     /// # Errors
@@ -243,7 +243,7 @@ impl AppState {
 /// The default wiring of the package store to its filesystem adapter (ADR-0009).
 impl packages::PackageStore {
     /// Opens the store in the data directory `data_dir`, loading every persisted Package
-    /// (ADR-0027, ADR-0050).
+    /// (ADR-0034, ADR-0023).
     ///
     /// # Errors
     /// Returns an error when the store cannot be opened, or a Package in it cannot be read, does
@@ -257,9 +257,9 @@ impl packages::PackageStore {
     }
 
     /// Opens the store in the data directory `data_dir` with the artifacts in the store `[blobs]`
-    /// chooses (ADR-0050 clause 14): the filesystem as [`open`](Self::open) does, or the bucket of
+    /// chooses (ADR-0023 clause 14): the filesystem as [`open`](Self::open) does, or the bucket of
     /// `[blobs.s3]`. On the bucket, a referenced artifact it lacks and `data_dir/blobs/` holds is
-    /// copied into it first (ADR-0050 clause 19).
+    /// copied into it first (ADR-0023 clause 19).
     ///
     /// # Errors
     /// Returns an error when the store cannot be opened, as [`open`](Self::open) does, when the
@@ -277,9 +277,9 @@ impl packages::PackageStore {
         .map(|(store, _)| store)
     }
 
-    /// [`open_with`](Self::open_with), the Package records in `records` (ADR-0050) and the bytes
+    /// [`open_with`](Self::open_with), the Package records in `records` (ADR-0023) and the bytes
     /// in the store `[blobs]` chooses, the filesystem's under `data_dir`, which is `None` only
-    /// with PostgreSQL and S3 (ADR-0050 clause 1).
+    /// with PostgreSQL and S3 (ADR-0023 clause 1).
     ///
     /// On the bucket the staging objects of every lease that is not live are deleted (clause 16),
     /// with PostgreSQL under the blob store's lock (clause 14) and by every sweep, and the cleanup
@@ -289,7 +289,7 @@ impl packages::PackageStore {
     /// that a bucket that fails leaves no lease behind, and it takes no upload until
     /// [`StagingCleanup::stage_under`](s3::StagingCleanup::stage_under) names that lease. A sweep
     /// measures the time between the renewal of a mark and its deletion on `elapsed`
-    /// (ADR-0050 clause 14).
+    /// (ADR-0023 clause 14).
     ///
     /// # Errors
     /// As [`open_with`](Self::open_with), and when the filesystem blob store has no `data_dir`.
@@ -352,7 +352,7 @@ impl packages::PackageStore {
 /// The default wiring of the package offering to the Deployments' filesystem adapter (ADR-0009).
 impl PackageOffering {
     /// Arms the **Deployments** beside the package store, from `deployments/` in the data
-    /// directory `data_dir` (ADR-0027, ADR-0050).
+    /// directory `data_dir` (ADR-0034, ADR-0023).
     ///
     /// # Errors
     /// Returns an error when the Deployments cannot be opened or one of them cannot be read.
@@ -362,7 +362,7 @@ impl PackageOffering {
         Ok(Self::with_deployments(store, deployments))
     }
 
-    /// Arms the Deployments of `records` beside the package store (ADR-0050).
+    /// Arms the Deployments of `records` beside the package store (ADR-0023).
     ///
     /// # Errors
     /// Returns an error when the Deployments cannot be opened or one of them does not decode.
@@ -372,10 +372,10 @@ impl PackageOffering {
     }
 }
 
-/// The default wiring of the bootstrap record to its filesystem adapter (ADR-0009, ADR-0050).
+/// The default wiring of the bootstrap record to its filesystem adapter (ADR-0009, ADR-0023).
 impl bootstrap::BootstrapCertificates {
     /// Opens the record in the data directory `data_dir`, one file per certificate under
-    /// `bootstrap/` (ADR-0050), forgetting what has ended.
+    /// `bootstrap/` (ADR-0023), forgetting what has ended.
     ///
     /// # Errors
     /// Returns an error when the directory cannot be opened or a file in it cannot be read.
@@ -391,7 +391,7 @@ impl bootstrap::BootstrapCertificates {
         )
     }
 
-    /// Opens the record in `records` (ADR-0050), forgetting what has ended.
+    /// Opens the record in `records` (ADR-0023), forgetting what has ended.
     ///
     /// # Errors
     /// Returns an error when the store cannot be opened or read.
@@ -404,9 +404,9 @@ impl bootstrap::BootstrapCertificates {
     }
 }
 
-/// The **Agent plane** (ADR-0045): the OpAMP endpoint, guarded by Admission (ADR-0038), and the
+/// The **Agent plane** (ADR-0012): the OpAMP endpoint, guarded by Admission (ADR-0026), and the
 /// package download route beside it — behind the same handshake, and reached only with a
-/// certificate of the fleet (ADR-0038 clause 18).
+/// certificate of the fleet (ADR-0026 clause 18).
 ///
 /// The download lives here rather than with the rest of `/api/v1` because the split between the
 /// two planes is by *audience*, not by path: this route is the one an Agent calls, and its
@@ -421,9 +421,9 @@ pub fn agent_app(state: Arc<AppState>, admission: transport::Admission) -> Route
     ))
 }
 
-/// The **Operator plane** (ADR-0045): the REST API, its OpenAPI document and docs page, and the
+/// The **Operator plane** (ADR-0012): the REST API, its OpenAPI document and docs page, and the
 /// bundled UI — on their own listener, guarded as a whole by `[rest.auth]` when one is configured
-/// (ADR-0038). Without it the plane is open, which is what its loopback default is for.
+/// (ADR-0026). Without it the plane is open, which is what its loopback default is for.
 pub fn operator_app(state: Arc<AppState>, auth: Option<api::OperatorAuth>) -> Router {
     api::router(state, auth)
 }

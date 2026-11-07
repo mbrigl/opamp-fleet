@@ -1,9 +1,9 @@
 //! The filesystem adapters of the Server's stores (ADR-0009), the one data directory they share
-//! (ADR-0050), and the moves every one of them makes: a directory only its owner can enter, a file
+//! (ADR-0023), and the moves every one of them makes: a directory only its owner can enter, a file
 //! only its owner can read, replaced in one step, so a crash mid-write leaves the old document
 //! rather than half a new one.
 //!
-//! The layout under `data_dir` is fixed (ADR-0028 clause 23), and no other is read: a file or
+//! The layout under `data_dir` is fixed (ADR-0035 clause 23), and no other is read: a file or
 //! directory it does not name fails startup naming the path.
 
 mod agents;
@@ -34,7 +34,7 @@ pub use revocation::FsLedgerStore;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-/// One Configuration per file, its retained revisions inside (ADR-0028 clause 23).
+/// One Configuration per file, its retained revisions inside (ADR-0035 clause 23).
 pub const CONFIGURATIONS: &str = "configurations";
 /// One Deployment per file.
 pub const DEPLOYMENTS: &str = "deployments";
@@ -56,13 +56,13 @@ pub const AUDIT: &str = "audit";
 pub const REVOCATIONS: &str = "revocations.json";
 /// The enrolment window, its pending requests and the rejected keys.
 pub const ENROLMENT: &str = "enrolment.json";
-/// The floor of each Agent type (ADR-0028 clause 15).
+/// The floor of each Agent type (ADR-0035 clause 15).
 pub const PACKAGE_FLOORS: &str = "package-floors.json";
 
 /// Every file the layout names.
 const FILES: [&str; 3] = [REVOCATIONS, ENROLMENT, PACKAGE_FLOORS];
 
-/// Every directory the layout names, in the order the table of ADR-0028 clause 23 lists them.
+/// Every directory the layout names, in the order the table of ADR-0035 clause 23 lists them.
 pub const DIRECTORIES: [&str; 9] = [
     CONFIGURATIONS,
     DEPLOYMENTS,
@@ -75,9 +75,9 @@ pub const DIRECTORIES: [&str; 9] = [
     AUDIT,
 ];
 
-/// Opens the data directory (ADR-0050): creates it and every directory of the layout owner-only —
+/// Opens the data directory (ADR-0023): creates it and every directory of the layout owner-only —
 /// `blobs/` only with the filesystem blob store, `filesystem_blobs`: beside a bucket it is the
-/// place artifacts are copied from, never written to (ADR-0050 clause 19) — and refuses one that
+/// place artifacts are copied from, never written to (ADR-0023 clause 19) — and refuses one that
 /// holds anything the layout does not name. What lies inside each directory is its store's to
 /// check, when the store opens.
 ///
@@ -115,7 +115,7 @@ pub fn check_layout(root: &Path) -> Result<(), String> {
 }
 
 /// Opens the data directory of a Server whose records live in PostgreSQL and whose blobs are files
-/// (ADR-0050 clause 1): it holds `blobs/`, and nothing else
+/// (ADR-0023 clause 1): it holds `blobs/`, and nothing else
 /// but `audit/`, the record of files kept before the record moved into the database, which stays
 /// as its archive and is not created. A path of the filesystem layout fails naming it and
 /// `server migrate-to-postgres` — those records would otherwise be silently left behind.
@@ -151,7 +151,7 @@ thread_local! {
 /// missing directory is read as empty rather than created, no mode is set, a temporary file a crash
 /// left is passed over rather than removed, and every write fails. What `server
 /// migrate-to-postgres` reads the old `data_dir` with, so that nothing in it changes and no record
-/// is copied elsewhere to be read (ADR-0050 clause 27).
+/// is copied elsewhere to be read (ADR-0023 clause 27).
 pub(crate) fn reading_only<T>(read: impl FnOnce() -> T) -> T {
     struct Restore(bool);
     impl Drop for Restore {
@@ -175,7 +175,7 @@ fn written_while_reading(path: &Path) -> String {
     )
 }
 
-/// The refusal for a path the layout does not name (ADR-0028 clause 23). Skipping it would open a
+/// The refusal for a path the layout does not name (ADR-0035 clause 23). Skipping it would open a
 /// store that merely looks complete.
 pub(crate) fn unknown(path: &Path) -> String {
     format!(
@@ -250,7 +250,7 @@ pub(crate) fn remove_file(path: &Path) -> Result<(), String> {
     }
 }
 
-/// The refusal for a file whose name disagrees with what it holds (ADR-0028 clause 23): a write
+/// The refusal for a file whose name disagrees with what it holds (ADR-0035 clause 23): a write
 /// would land somewhere else, so it is named rather than silently corrected.
 pub(crate) fn misnamed(path: &Path, holds: &str) -> String {
     format!(
@@ -277,7 +277,7 @@ pub fn create_private_dir(dir: &Path) -> Result<(), String> {
 }
 
 /// Replaces `path` with `bytes` by writing `<path>.tmp` beside it, owner-only (`0600`) on Unix, and
-/// renaming it into place (ADR-0050 clause 1). The mode is set in the open call rather than after
+/// renaming it into place (ADR-0023 clause 1). The mode is set in the open call rather than after
 /// the write, so the content is never briefly readable by another local user, and the rename
 /// carries the mode with it.
 pub fn replace(path: &Path, bytes: &[u8]) -> Result<(), String> {
@@ -288,7 +288,7 @@ pub fn replace(path: &Path, bytes: &[u8]) -> Result<(), String> {
 /// [`replace`], and durable: the content reaches the disk before the rename makes it the document,
 /// and on Unix the rename reaches it before this returns, so a power loss leaves the old document
 /// or the new one, never an empty file or a revocation lost after it was answered. For a record
-/// that answers a security decision (ADR-0050 clause 1).
+/// that answers a security decision (ADR-0023 clause 1).
 pub fn replace_owner_only(path: &Path, bytes: &[u8]) -> Result<(), String> {
     write_temp(path, bytes, true)?;
     rename_into_place(&temp_of(path), path)?;
@@ -381,8 +381,8 @@ mod tests {
     /// Read in place, a data directory changes in no way: a missing directory is read as empty
     /// and not created, a leftover temporary file stays, and a write fails naming its path;
     /// outside, the same calls repair and write as before
-    /// (ADR-0050 clause 27).
-    /// Verifies: ADR-0050
+    /// (ADR-0023 clause 27).
+    /// Verifies: ADR-0023
     #[test]
     fn a_data_directory_read_in_place_is_not_written() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -407,10 +407,10 @@ mod tests {
         assert!(missing.is_dir());
     }
 
-    /// A Server on an empty `data_dir` lays out every directory of ADR-0028 clause 23, each
+    /// A Server on an empty `data_dir` lays out every directory of ADR-0035 clause 23, each
     /// owner-only; a file or directory the layout does not name fails the open naming its path,
     /// and a temporary file a crash left beside a document is removed instead.
-    /// Verifies: ADR-0050
+    /// Verifies: ADR-0023
     #[test]
     fn the_data_directory_has_one_layout_and_no_other() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -464,9 +464,9 @@ mod tests {
         assert!(open_data_dir(&root, true).is_err());
     }
 
-    /// The floors' file is part of the layout (ADR-0028 clause 23): a `data_dir` that holds it
+    /// The floors' file is part of the layout (ADR-0035 clause 23): a `data_dir` that holds it
     /// opens.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0035
     #[test]
     fn the_floors_file_is_part_of_the_layout() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -480,7 +480,7 @@ mod tests {
     /// `audit/` only where an older Server left it as the archive; a record of the filesystem
     /// store found there fails the open naming it and `server migrate-to-postgres`, and anything
     /// else fails as a stray entry.
-    /// Verifies: ADR-0050, ADR-0028
+    /// Verifies: ADR-0023, ADR-0035
     #[test]
     fn a_data_dir_beside_the_database_holds_the_blobs_alone() {
         let dir = tempfile::tempdir().expect("tempdir");

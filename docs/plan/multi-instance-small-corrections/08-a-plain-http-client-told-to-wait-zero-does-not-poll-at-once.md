@@ -16,7 +16,7 @@ a row grow along the backoff until a connection handles a reply. The plain-HTTP 
 that change and has no backoff on this path at all.
 
 A plain-HTTP Client told to wait zero, or less than a backoff step, waits at least the step, and
-consecutive refusals grow along the backoff of ADR-0045 clause 4 until an exchange is answered.
+consecutive refusals grow along the backoff of ADR-0012 clause 4 until an exchange is answered.
 
 ## Acceptance criteria
 
@@ -28,7 +28,7 @@ consecutive refusals grow along the backoff of ADR-0045 clause 4 until an exchan
 
 ## Read first
 
-- ADR-0045 clause 4 and its *Context* on the Client honouring `Unavailable`
+- ADR-0012 clause 4 and its *Context* on the Client honouring `Unavailable`
 - `crates/opamp/src/client/http.rs` `run`, `exchange`, `retry_after`; `client/backoff.rs`;
   `client/ws.rs` `run_from` and `next_delay`, which do this for the WebSocket
 

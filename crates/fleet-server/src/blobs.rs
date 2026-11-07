@@ -1,4 +1,4 @@
-//! Artifact bytes, kept by their SHA-256 (ADR-0050 clause 13): the blob port.
+//! Artifact bytes, kept by their SHA-256 (ADR-0023 clause 13): the blob port.
 //!
 //! A Package entry names its artifact by the hash of its bytes and nothing else, so bytes held by
 //! two entries are stored once, and a blob's name is its own integrity check. Which blobs are still
@@ -11,7 +11,7 @@
 
 use std::io::Read;
 
-/// The blob port (ADR-0050 clause 13). A hash is the lowercase hex SHA-256 of the bytes.
+/// The blob port (ADR-0023 clause 13). A hash is the lowercase hex SHA-256 of the bytes.
 pub trait BlobStore: Send + Sync {
     /// Stores the bytes `bytes` yields, hashing them on the way, and answers their hash and size.
     /// Bytes already stored are stored once. A stream that fails stores nothing.
@@ -47,7 +47,7 @@ pub trait BlobStore: Send + Sync {
     fn list(&self) -> Result<Vec<(String, u64)>, String>;
 
     /// Deletes what uploads that were cut off left behind, of every writer that is no longer live
-    /// (ADR-0050 clause 16), and answers how many objects it
+    /// (ADR-0023 clause 16), and answers how many objects it
     /// deleted: what every sweep runs, under the blob store's lock. A store that stages no upload
     /// apart from its blobs, or whose one Server cleans up only at startup, deletes nothing here,
     /// which the default does.
@@ -60,7 +60,7 @@ pub trait BlobStore: Send + Sync {
 }
 
 /// A hold on the blob store's lock
-/// (ADR-0050 clause 14), released when it is dropped. A store
+/// (ADR-0023 clause 14), released when it is dropped. A store
 /// that is its one Server's alone holds nothing.
 pub struct BlobHold {
     held: Option<Box<dyn std::any::Any + Send>>,

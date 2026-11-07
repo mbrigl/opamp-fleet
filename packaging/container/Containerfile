@@ -1,4 +1,4 @@
-# The Server's image (ADR-0040): the binary the
+# The Server's image (ADR-0039): the binary the
 # release built and checked, on a distroless glibc base, and nothing else.
 #
 # No `RUN`: the image copies a binary that already exists, so a multi-architecture build needs no
@@ -49,7 +49,7 @@ VOLUME /var/lib/opamp-fleet
 WORKDIR /
 
 # Everything else, certificates, keys and every secret included, is mounted as a file and named
-# through the environment (ADR-0030). Off the loopback the Server refuses to start without TLS and
+# through the environment (ADR-0024). Off the loopback the Server refuses to start without TLS and
 # without `[rest.auth]`, so this image started with nothing mounted names what is missing and stops.
 ENV FLEET_SERVER__LISTEN=0.0.0.0:4320 \
     FLEET_SERVER__REST__LISTEN=0.0.0.0:4321

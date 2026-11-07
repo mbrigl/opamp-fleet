@@ -16,7 +16,7 @@ standby to side by side, land with it.
   signature is audited
 - [ ] Given two instances whose `[audit] key_label` differ, when the second starts, then it fails
   naming the key
-- [ ] Given a file CA key and a second instance, when it starts, then it still fails as ADR-0048
+- [ ] Given a file CA key and a second instance, when it starts, then it still fails as ADR-0025
   clause 2 decides (`an_instance_that_must_be_alone_is_alone`, which stays)
 - [ ] Given a fleet on a file CA key, when the key moves to the token, then each host moves at its
   ordinary renewal
@@ -38,9 +38,9 @@ standby to side by side, land with it.
   `draft-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md`
   clauses 8 and 17; `draft-the-operator-program-opamp-fleetctl.md` clauses 5 to 8, 12, 13 and 16
   to 18;
-  ADR-0048
+  ADR-0025
   clauses 2 and 16 (the lease's audit key label is a migration that follows it);
-  ADR-0050 clause 22
+  ADR-0023 clause 22
 - Golden path: the local CA and its renewal tests, and `pki init` in the operator tool
 - Seam: the signer port, against SoftHSM2 in the test
 

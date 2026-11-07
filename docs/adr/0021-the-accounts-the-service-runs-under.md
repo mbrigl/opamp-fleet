@@ -1,24 +1,23 @@
-# ADR-0020: The accounts the service runs under
+# ADR-0021: The accounts the service runs under
 
-- **Status:** ⚪ superseded by [ADR-0037](0037-the-accounts-the-service-runs-under.md)
+- **Status:** 🟢 accepted
 - **Date:** 2026-10-27
 - **Deciders:** Markus Brigl
-- **Applies to:** the account a `service install` chooses, accepts, sets and hands the roots to, `--run-as`, `--process-account` and `--no-process-account`, and the second service in `crates/fleet-agent/src/main.rs`, `crates/fleet-agent/src/service/run_as.rs`, `crates/fleet-agent/src/service/manager.rs`, `crates/fleet-agent/src/service/layout.rs`, `crates/fleet-agent/src/service/windows_config.rs`, `crates/fleet-agent/src/service/windows_rights.rs` and `crates/fleet-agent/src/service/withdrawal.rs`, the systemd units, launchd plists and SCM entries the install registers, `service start`, `service stop` and `service uninstall` on Windows, the install lock, the pipe, the job objects and the handle-based walks in `crates/fleet-agent/src/win32.rs` and `crates/fleet-agent/src/win32/`, the no-follow adapter `crates/fleet-agent/src/nofollow.rs` and the state the Client keeps through it in `crates/fleet-agent/src/storage.rs`, `crates/fleet-agent/src/csr.rs`, `crates/fleet-agent/src/connection.rs` and `crates/fleet-agent/src/tls.rs`, every place a Supervisor starts a program in `crates/fleet-agent/src/supervisor/process.rs`, the channel in `crates/fleet-agent/src/supervisor/channel.rs` and `crates/fleet-agent/src/supervisor/channel/windows.rs`, `supervisor_dir` and the Supervisors' directories with their modes, owners and ACLs, the modes a package archive gives a program, `packaging/linux/postinst` and `packaging/linux/postrm`, the `[package.metadata.deb]` and `[package.metadata.generate-rpm]` tables of `crates/fleet-agent/Cargo.toml`, `packaging/windows/supervisor.wxs`, and every document that tells an operator which account the Client or a Managed Process runs as
+- **Applies to:** the account a `service install` chooses, accepts, sets and hands the roots to, `--run-as`, `--process-account` and `--no-process-account`, and the second service in `crates/fleet-agent/src/main.rs`, `crates/fleet-agent/src/service/run_as.rs`, `crates/fleet-agent/src/service/manager.rs`, `crates/fleet-agent/src/service/runtime.rs`, `crates/fleet-agent/src/service/windows.rs`, `crates/fleet-agent/src/service/layout.rs`, `crates/fleet-agent/src/service/windows_config.rs`, `crates/fleet-agent/src/service/windows_rights.rs` and `crates/fleet-agent/src/service/withdrawal.rs`, the systemd units, launchd plists and SCM entries the install registers, `service start`, `service stop` and `service uninstall` on Windows, the install lock, the pipe, the job objects, the security of the second service's process and threads and the handle-based walks in `crates/fleet-agent/src/win32.rs` and `crates/fleet-agent/src/win32/`, the no-follow adapter `crates/fleet-agent/src/nofollow.rs` and the state the Client keeps through it in `crates/fleet-agent/src/storage.rs`, `crates/fleet-agent/src/csr.rs`, `crates/fleet-agent/src/connection.rs` and `crates/fleet-agent/src/tls.rs`, every place a Supervisor starts a program in `crates/fleet-agent/src/supervisor/process.rs`, the channel in `crates/fleet-agent/src/supervisor/channel.rs` and `crates/fleet-agent/src/supervisor/channel/windows.rs`, `supervisor_dir` and the Supervisors' directories with their modes, owners and ACLs, the modes a package archive gives a program, `packaging/linux/postinst` and `packaging/linux/postrm`, the `[package.metadata.deb]` and `[package.metadata.generate-rpm]` tables of `crates/fleet-agent/Cargo.toml`, `packaging/windows/supervisor.wxs`, the Windows service smoke in `crates/fleet-agent/tests/service_smoke.rs`, and every document that tells an operator which account the Client or a Managed Process runs as or what the separation by a process account holds against a Managed Process on Windows
 
 ## Context
 
 The Client runs as a system service. Every program its Supervisors start runs under the account
-that starts it, and so does every command their configuration language can name: a Telegraf
-`inputs.exec`, an Icinga 2 `CheckCommand`, a GLPI deploy task
-([ADR-0017](0017-supervisor-mode-and-its-kinds.md)). The Server sends those configurations. The
-account that starts a program is therefore the most a compromised or misconfigured Server reaches
-on a host. A Managed Process is code the Supervisor does not vouch for
-([ADR-0016](0016-what-an-agent-reports-about-itself.md)). Under the Client's own account it can
-read everything the Client can: the whole `state_dir` with the Client's private key
-`client-key.pem`, the `config/` of every other Supervisor, and the Client's environment through
-`/proc`. It can rewrite its own `program/` and so outlast the next package, and with the Client's
-key it can present itself to the Server for any `instance_uid` of its host
-([ADR-0021](0021-admission-by-client-certificate-and-revocation.md)).
+that starts it, and so does every command their configuration language can name: an exec input,
+a check command, a deploy task ([ADR-0018](0018-supervisor-mode-and-its-kinds.md)). The Server sends
+those configurations. The account that starts a program is therefore the most a compromised or
+misconfigured Server reaches on a host. A Managed Process is code the Supervisor does not vouch for
+([ADR-0017](0017-what-an-agent-reports-about-itself.md)). Under the Client's own account it can read
+everything the Client can: the whole `state_dir` with the Client's private key `client-key.pem`, the
+`config/` of every other Supervisor, and the Client's environment through `/proc`. It can rewrite
+its own `program/` and so outlast the next package, and with the Client's key it can present itself
+to the Server for any `instance_uid` of its host
+([ADR-0026](0026-admission-by-client-certificate-and-revocation.md)).
 
 The specification places a Managed Process and its account below the Client's account on its
 host: it must not gain the Client's key, program, or configuration. Its Strategy puts security
@@ -30,10 +29,10 @@ Forces:
 
 - **Least privilege by default.** A packaged Linux host and a fresh Windows host must not hand a
   Server-delivered command root or `LocalSystem` unless an operator chose it.
-- **Some agents need root.** GLPI Agent reads the DMI tables (`dmidecode`), and its Deploy task
-  installs operating-system packages. Telegraf's `smart` and `ipmi` inputs and many Icinga plugins
-  run through `sudo` or a setuid helper (`check_icmp`, `check_dhcp`). A listener on a port below
-  1024 needs `CAP_NET_BIND_SERVICE`. On Windows a full inventory, an agent that installs a
+- **Some agents need root.** An inventory agent reads the DMI tables (`dmidecode`), and a deploy
+  task installs operating-system packages. Inputs that read SMART or IPMI data and many monitoring
+  plugins run through `sudo` or a setuid helper (`check_icmp`, `check_dhcp`). A listener on a port
+  below 1024 needs `CAP_NET_BIND_SERVICE`. On Windows a full inventory, an agent that installs a
   service, or a reader of the Security event log needs `LocalSystem` or a group. A host with such
   an agent must be able to keep the privileged account, by a choice the operator makes
   explicitly, and that choice must survive an upgrade.
@@ -52,8 +51,8 @@ Forces:
 - **The Client writes the places it needs.** It writes its data root (`supervisor.toml`, `state/`)
   and its layout root (`/opt/<PRODUCT_NAME>`, where the self-update stages versions and switches
   `current`). It writes each Supervisor's directory, and it starts Managed Processes that may
-  write anywhere their kind keeps state: Icinga 2 under `/etc/icinga2` and `/var/lib/icinga2`, and
-  a GLPI Deploy anywhere a package installs.
+  write anywhere their kind keeps state: a monitoring agent under its own directories in `/etc` and
+  `/var/lib`, and a deploy task anywhere a package installs.
 - **Upgrades run unattended.** The Linux post-install runs inside `apt upgrade` and `dnf upgrade`,
   and the MSI inside a major upgrade, often on hosts nobody watches. An upgrade must not change
   which account runs a configured host.
@@ -81,6 +80,18 @@ Forces:
   connection. A process id can be reused (polkit, CVE-2013-4288), and a process of the same
   account can reach into the real second service by `ptrace`, `/proc/<pid>/mem` or
   `pidfd_getfd` where Yama permits it, unless that process is not dumpable.
+- **On Windows a process is open to its own account by default.** A process or thread whose
+  creator names no security descriptor gets one from the creator's token, and that default lets
+  every process of the same account open it with the rights the account holds, among them
+  `PROCESS_VM_READ`, `PROCESS_VM_WRITE`, `PROCESS_CREATE_THREAD` and `PROCESS_DUP_HANDLE`. A
+  Managed Process could so read what the Client sends the second service, the Supervisor
+  Endpoint's token among it, run code in it, or duplicate its pipe handle and answer the Client in
+  its place. Windows checks every `OpenProcess` and `OpenThread` against the object's DACL, and a
+  caller without `SeDebugPrivilege`, which the process account does not hold (clause 2), gets only
+  what the DACL grants. A process's owner keeps `READ_CONTROL` and `WRITE_DAC` implicitly unless an
+  `OWNER RIGHTS` entry says otherwise. A thread is an object of its own, with a DACL of its own,
+  and `THREAD_SET_CONTEXT` on one is enough to run code in its process. Changing the token's
+  default DACL would reach every program the second service starts.
 
 ## Decision
 
@@ -174,15 +185,14 @@ either account placed.
    registration.** Before `service install`, the post-install checks for the account with
    `getent passwd`. When it is missing, it creates the account with
    `useradd --system --user-group --no-create-home --home-dir /var/lib/<PRODUCT_NAME> --shell
-   /usr/sbin/nologin <PRODUCT_NAME>`,
-   or, where a group of that name already exists without the account, with `--gid <PRODUCT_NAME>`
-   in place of `--user-group`, which would refuse it. The account gets no password. Its home is
-   the data root, so a Managed Process that writes under `$HOME` writes into a directory the
-   account owns. An existing account of that name is used as it is, and never modified. The
-   account is created on every run, also on a host whose registration stays root, so that moving
-   such a host to the account is one command. The post-install then passes
-   `--run-as <PRODUCT_NAME>` only when `/etc/systemd/system/<PRODUCT_NAME>.service` is absent, and
-   otherwise runs `service install` without it, which keeps the account the unit names
+   /usr/sbin/nologin <PRODUCT_NAME>`, or, where a group of that name already exists without the
+   account, with `--gid <PRODUCT_NAME>` in place of `--user-group`, which would refuse it. The
+   account gets no password. Its home is the data root, so a Managed Process that writes under
+   `$HOME` writes into a directory the account owns. An existing account of that name is used as it
+   is, and never modified. The account is created on every run, also on a host whose registration
+   stays root, so that moving such a host to the account is one command. The post-install then
+   passes `--run-as <PRODUCT_NAME>` only when `/etc/systemd/system/<PRODUCT_NAME>.service` is
+   absent, and otherwise runs `service install` without it, which keeps the account the unit names
    (clause 1). A host that chose root with `--run-as root` therefore stays root through every
    upgrade. A variant build creates the account of its own `PRODUCT_NAME`, so two variants never
    share one. The `.deb` declares a dependency on the package that ships `useradd`, and the `.rpm`
@@ -227,7 +237,7 @@ either account placed.
     nothing"; rpm has none. **No hook removes the account or its group, on removal or on purge.**
     Files the account owns outside the two roots, such as a Managed Process's output, would pass
     to whichever account is later given the same uid. `service uninstall` itself deletes nothing
-    ([ADR-0019](0019-the-installed-service-and-its-state.md), the lifecycle over
+    ([ADR-0020](0020-the-installed-service-and-its-state.md), the lifecycle over
     `service-manager`); this cleanup is the package's. Re-staging **skips the write when the
     staged binary already holds the running bytes**, because `service install` invoked through the
     symlink runs from the very file it would overwrite, and Linux refuses that (`ETXTBSY`).
@@ -244,7 +254,7 @@ either account placed.
    ```
 
    - **Directory name.** It is the bare base and the commit short-hash of the version
-     [ADR-0033](0033-the-products-version.md) resolves, never the pre-release. The release `1.2.3`
+     [ADR-0038](0038-the-products-version.md) resolves, never the pre-release. The release `1.2.3`
      and a development build heading for it are told apart by their commit, and the manifest's
      full string answers release-or-dev.
    - **The program.** The service's program is `<layout root>/current/supervisor`, so a version
@@ -256,7 +266,7 @@ either account placed.
    - **Restaging.** Staging a version already present replaces its contents and rewrites its
      manifest. It skips the write when the staged binary already holds the same bytes, because an
      install arriving through the `PATH` symlink runs from that file.
-   - **The state directory** is the one [ADR-0019](0019-the-installed-service-and-its-state.md)
+   - **The state directory** is the one [ADR-0020](0020-the-installed-service-and-its-state.md)
      decides in its order of the state directory.
    - **Absolute paths.** Every path is absolute at install time, and the registered command line
      is `run --service --config <abs> --state-dir <abs>`, followed, where a process account is
@@ -269,15 +279,14 @@ either account placed.
    `service-manager` still writes the file (mode `0644`), enables it, which reloads the manager's
    configuration, and uninstalls it. The unit holds:
    - `[Unit]`: `Description=<PRODUCT_NAME>`. The display name stays where
-     [ADR-0019](0019-the-installed-service-and-its-state.md) puts prose. Where a process account
+     [ADR-0020](0020-the-installed-service-and-its-state.md) puts prose. Where a process account
      is registered, also `Wants=<PRODUCT_NAME>-agents.service` and
      `After=<PRODUCT_NAME>-agents.service` (clause 17).
    - `[Service]`: `ExecStart=` with the program and every argument in double quotes. A `\` and a
      `"` are escaped, a `%` is written `%%` and a `$` is written `$$`, so any absolute path reaches
      the program as it was given. Then `Restart=on-failure`, `RestartSec=` set to the restart
-     delay the SCM's recovery actions use
-     ([ADR-0019](0019-the-installed-service-and-its-state.md)), `User=` set to the account of
-     clause 1, and the directives of clause 8.
+     delay the SCM's recovery actions use ([ADR-0020](0020-the-installed-service-and-its-state.md)),
+     `User=` set to the account of clause 1, and the directives of clause 8.
    - `[Install]`: `WantedBy=multi-user.target`.
 
    The user scope and the launchd plist stay as `service-manager` renders them. `service install`
@@ -303,7 +312,7 @@ either account placed.
    `NT SERVICE\<PRODUCT_NAME>-agents` or the account clause 16 names, set without a password. Its
    command line is `run --agents \\.\pipe\<PRODUCT_NAME>-agents --client-sid <SID>`, the Client
    account's SID, and it starts automatically. As the Client's own entry, it carries the recovery
-   actions of [ADR-0019](0019-the-installed-service-and-its-state.md): one restart after the
+   actions of [ADR-0020](0020-the-installed-service-and-its-state.md): one restart after the
    restart delay, repeated for every failure, and run on a reported failure too. It carries its
    display name and a Description. Its required privileges are `SeChangeNotifyPrivilege` alone
    (SERVICE_REQUIRED_PRIVILEGES_INFO): the SCM removes every other privilege from its token, and
@@ -314,9 +323,8 @@ either account placed.
 8. **A system unit carries only directives that neither set `no_new_privs` nor take away what a
    supported agent needs, and the account decides the set.**
    - **Every system unit** carries `ProtectControlGroups=yes`. Through it `/sys/fs/cgroup` becomes
-     read-only. It does not imply `NoNewPrivileges=`, and none of the supported agents,
-     OpenTelemetry Collector, Telegraf, Icinga 2 with its plugins and GLPI Agent with its tasks,
-     writes the cgroup tree itself.
+     read-only. It does not imply `NoNewPrivileges=`, and none of the agents the core's kinds
+     start writes the cgroup tree itself; a kind of its own states the same of its agent in its ADR.
    - **A unit that runs as root** (`User=root`) also carries `ProtectKernelTunables=yes`,
      `LockPersonality=yes` and `RestrictRealtime=yes`. Under root they imply nothing, because the
      unit holds `CAP_SYS_ADMIN`. They make `/proc/sys` and `/sys` read-only, fix the execution
@@ -324,12 +332,13 @@ either account placed.
    - **Under any other account these three are left out**, because each would set `no_new_privs`
      and break `sudo` and the setuid helpers the agents use.
    - **Left out everywhere:** `NoNewPrivileges=`, for the same reason. `ProtectSystem=` (`yes`,
-     `full` or `strict`) and `RestrictSUIDSGID=`, because a GLPI Deploy task or a
+     `full` or `strict`) and `RestrictSUIDSGID=`, because a deploy task or a
      configuration-management run under the `command` kind installs operating-system packages
-     under root, and Icinga 2 writes `/etc/icinga2`. `ProtectHome=`, because a root service's home
-     is `/root` and a log receiver may read under `/home`. `PrivateTmp=`, because a Managed
-     Process may reach a local daemon through a socket under `/tmp`. `MemoryDenyWriteExecute=`,
-     because it breaks every JIT a check or exec script may run (Java, Node.js, .NET, LuaJIT).
+     under root, and a monitoring agent writes its own directory under `/etc`. `ProtectHome=`,
+     because a root service's home is `/root` and a log receiver may read under `/home`.
+     `PrivateTmp=`, because a Managed Process may reach a local daemon through a socket under
+     `/tmp`. `MemoryDenyWriteExecute=`, because it breaks every JIT a check or exec script may run
+     (Java, Node.js, .NET, LuaJIT).
      `RestrictNamespaces=`, because it breaks `ip netns exec` around a check and any sandboxing
      helper. `CapabilityBoundingSet=`, because it takes from root what root was chosen for, and
      from a setuid helper what it grants. `ProtectKernelModules=`, because it hides
@@ -337,7 +346,7 @@ either account placed.
      sensor inputs read `/dev`. `ProtectKernelLogs=`, because of `dmesg` readers. `ProtectClock=`,
      because it implies a device allow-list. `ProtectHostname=`, because a UTS namespace would
      freeze the host name the Client reports
-     ([ADR-0016](0016-what-an-agent-reports-about-itself.md)). `ProtectProc=`, because process
+     ([ADR-0017](0017-what-an-agent-reports-about-itself.md)). `ProtectProc=`, because process
      inputs read other users' `/proc` entries. `RestrictAddressFamilies=` and `SystemCallFilter=`,
      because Managed Processes use netlink, raw and packet sockets and arbitrary system calls.
 
@@ -366,16 +375,16 @@ either account placed.
     The second `service install` is a re-install, which is idempotent and writes the configuration
     that `service install` refuses to overwrite once it exists. The first step is `--interactive`,
     which asks for the client identity, the bootstrap identity found beside the program
-    ([ADR-0022](0022-bootstrap-certificates-and-enrolment.md)), and not `--endpoint` alone: a
-    configuration holding only an endpoint is one the Client refuses at startup, so printing it as
-    the whole first step would present an unauthenticated Client as the default. After the two
-    steps it prints the scripted form of a packaged host's enrolment
-    ([ADR-0022](0022-bootstrap-certificates-and-enrolment.md)), `--endpoint` with `--fleet-files`
-    and, for a `bootstrap.p12`, `--bootstrap-password-file`, as the way to enrol without a
-    terminal. The alternative it prints for writing the file by hand names the endpoint together
-    with `[tls] cert_file` and `key_file`, the identity the operator adds before the start, and
-    names no credential and no `[auth]` section, because the Client reads none
-    ([ADR-0021](0021-admission-by-client-certificate-and-revocation.md)).
+    ([ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)),
+    and not `--endpoint` alone: a configuration holding only an endpoint is one the Client refuses
+    at startup, so printing it as the whole first step would present an unauthenticated Client as
+    the default. After the two steps it prints the scripted form of a packaged host's enrolment
+    ([ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)),
+    `--endpoint` with `--fleet-files` and, for a `bootstrap.p12`, `--bootstrap-password-file`, as
+    the way to enrol without a terminal. The alternative it prints for writing the file by hand
+    names the endpoint together with `[tls] cert_file` and `key_file`, the identity the operator
+    adds before the start, and names no credential and no `[auth]` section, because the Client reads
+    none ([ADR-0026](0026-admission-by-client-certificate-and-revocation.md)).
 
     On Windows the stop and the start go as follows, so that nothing runs under an account whose
     rights the install changes or takes away, nor under a registration it rewrites:
@@ -424,11 +433,11 @@ either account placed.
     |---|---|---|
     | `INSTALLFOLDER` | `InstallDirDlg`, via `WIXUI_INSTALLDIR` | where the payload goes; default `C:\Program Files\<PRODUCT_NAME>` |
     | `ENDPOINT` | `EndpointDlg`, an `Edit` control | `service install --endpoint`; empty means none |
-    | `SELFUPDATE` | `EndpointDlg`, a checkbox, default `1` | the self-update consent of [ADR-0018](0018-the-client-updates-itself-from-a-signed-package.md) |
+    | `SELFUPDATE` | `EndpointDlg`, a checkbox, default `1` | the self-update consent of [ADR-0019](0019-the-client-updates-itself-from-a-signed-package.md) |
 
     `INSTALLFOLDER` is **one directory the operator configures**, holding only the delivered
     payload. The layout and the state directory go to `%ProgramData%\<PRODUCT_NAME>` and no root
-    reaches the command line ([ADR-0019](0019-the-installed-service-and-its-state.md), where
+    reaches the command line ([ADR-0020](0020-the-installed-service-and-its-state.md), where
     program and data split), so an uninstall empties the folder and the configuration survives
     where Windows expects data to. All names are upper-case and listed `Secure`: Windows Installer
     resets private properties between the UI and execute sequences, and `Secure` lets the same
@@ -456,7 +465,7 @@ either account placed.
     its key are files the operator puts on the host, and `EndpointDlg` says that they are added to
     `supervisor.toml` afterwards, or through `service install --interactive` from an elevated
     prompt. It mentions no credential, because the Client reads none
-    ([ADR-0021](0021-admission-by-client-certificate-and-revocation.md)).
+    ([ADR-0026](0026-admission-by-client-certificate-and-revocation.md)).
 
 11. **No privileged step goes through a link the account could have placed.** This covers every
     read, write, rename, removal, mode change and ownership change `service install` and
@@ -486,7 +495,7 @@ either account placed.
     directly in a root, the default `<data root>/state`, that path is the root's own, which
     clause 13 settles. For one deeper beneath a root, the components between the root and its
     parent are those the check of what lies beneath a root
-    ([ADR-0019](0019-the-installed-service-and-its-state.md)) inspects before the install writes
+    ([ADR-0020](0020-the-installed-service-and-its-state.md)) inspects before the install writes
     anything.
 
 13. **On Windows, a data root or layout root that is a reparse point is refused, and the data root
@@ -495,7 +504,7 @@ either account placed.
     `FILE_SHARE_DELETE` from their first write to their last. On Linux and macOS a root's name
     lies in a directory only root writes, and it is followed. This refusal is a check of its own
     beside the check of what lies beneath a root
-    ([ADR-0019](0019-the-installed-service-and-its-state.md)), which does not inspect the roots.
+    ([ADR-0020](0020-the-installed-service-and-its-state.md)), which does not inspect the roots.
 
 14. **A file with a second hard link is skipped and named.** Another name for it may stand
     anywhere, and re-owning it would re-own that file too. The hand-over and `service config` each
@@ -570,7 +579,7 @@ either account placed.
       goes back to a program that ran. A delivered Configuration is written as usual, and its
       acknowledgement is given by the first start of an apply or of the retry that reaches the
       second service and survives the apply grace; a restart command's start acknowledges nothing
-      and swaps nothing in ([ADR-0017](0017-supervisor-mode-and-its-kinds.md), the closed
+      and swaps nothing in ([ADR-0018](0018-supervisor-mode-and-its-kinds.md), the closed
       lifecycle vocabulary), and the retry follows it at once. A Supervisor held after a package
       that failed leaves no Configuration waiting: it is reported `FAILED`. Until then the package
       stays `Installing` and the Configuration `APPLYING`, each naming the second service as the
@@ -618,26 +627,52 @@ either account placed.
       that cannot be read; on macOS `LOCAL_PEERPID`; on Windows `GetNamedPipeServerProcessId`. It
       then asks the service manager for the process it runs as the second service: systemd the
       unit's `MainPID`, launchd the job's `pid`, the SCM the service's process id from
-      `QueryServiceStatusEx`. It accepts the connection only where both name the same process.
-      With a pidfd it also requires that the process the pidfd refers to is still running once
-      the service manager has answered, so the id cannot have passed to another process in
-      between. The account is still read as the bullet above says, from the peer's uid or the
-      pipe's owner. A connection whose process cannot be read, or that the service manager names
-      no process for, is refused as one whose process differs.
+      `QueryServiceStatusEx`. It accepts the connection only where both name the same process. With
+      a pidfd it also requires that the process the pidfd refers to is still running once the
+      service manager has answered, so the id cannot have passed to another process in between. On
+      Windows the Client opens the process `GetNamedPipeServerProcessId` names with
+      `SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION` before it asks the SCM, holds that handle
+      until it has decided, and requires that the process has not ended once the SCM has answered:
+      while the handle is open the id cannot pass to another process. A process it cannot open is
+      one that cannot be read. The account is still read as the bullet above says, from the peer's
+      uid or the pipe's owner. A connection whose process cannot be read, or that the service
+      manager names no process for, is refused as one whose process differs.
     - **A refused peer learns nothing.** The Client closes a connection it refuses before it sends
       the handshake or any request. It logs an error naming the socket or pipe and the peer's
       process id, and treats the second service as away: it tries again with the backoff it uses
       for a second service that is not running, each time on a new connection checked anew, and
       the Supervisors report the second service unreachable as they do then (clause 17).
     - **The second service closes its process to the Managed Processes where it can.** On Linux it
-      marks itself not dumpable (`PR_SET_DUMPABLE` 0) as the first thing its program does, before
-      it reads its configuration or sets up its log, and does not listen while
-      `/proc/self/status` names a tracer (`TracerPid` other than 0), so from then on no process of
-      its own account without `CAP_SYS_PTRACE` can attach to it, read or write its memory, or take
-      its file descriptors, whatever `kernel.yama.ptrace_scope` says; the programs it starts are
-      dumpable as usual, since `execve` resets the mark. On macOS the platform already refuses
-      `task_for_pid` to a caller of the same user without the debugging entitlement. On Windows
-      the process keeps the default security its account gives it.
+      marks itself not dumpable (`PR_SET_DUMPABLE` 0) as the first thing its program does, before it
+      reads its configuration or sets up its log, and does not listen while `/proc/self/status`
+      names a tracer (`TracerPid` other than 0), so from then on no process of its own account
+      without `CAP_SYS_PTRACE` can attach to it, read or write its memory, or take its file
+      descriptors, whatever `kernel.yama.ptrace_scope` says; the programs it starts are dumpable as
+      usual, since `execve` resets the mark. On macOS the platform already refuses `task_for_pid` to
+      a caller of the same user without the debugging entitlement. On Windows it gives its process
+      and every one of its threads a protected DACL as the first thing each does, before the program
+      reads its configuration or sets up its log (below).
+    - **On Windows the process account may only ask about and wait for the second service.** The
+      process carries
+      `D:P(A;;0x101000;;;<process-account>)(A;;0x101000;;;<Client>)(A;;RC;;;OW)(A;;GA;;;SY)(A;;GA;;;BA)`:
+      `SYNCHRONIZE` and `PROCESS_QUERY_LIMITED_INFORMATION` for the process account and for the
+      Client's account, `READ_CONTROL` alone for its owner (`OWNER RIGHTS`), so the owner holds no
+      implicit `WRITE_DAC`, and full access for `LocalSystem` and the Administrators. Each thread
+      carries `D:P(A;;0x100800;;;<process-account>)(A;;RC;;;OW)(A;;GA;;;SY)(A;;GA;;;BA)`,
+      `SYNCHRONIZE` and `THREAD_QUERY_LIMITED_INFORMATION` for the process account. So a Managed
+      Process, which holds no `SeDebugPrivilege`, can neither read nor write the second service's
+      memory, start or steer a thread in it, take its handles, suspend it nor end it. The DACLs are
+      set through `SetSecurityInfo` on the process's and each thread's own handle: the main thread
+      sets the process's and its own and, from a snapshot, those of the threads that exist by then;
+      the thread the SCM starts for the service and every thread of the runtime set their own as
+      their first act. Threads the system starts in the process, such as those of its thread pool,
+      are set from a snapshot of every thread, taken again once a second while the second service
+      serves. Before it listens, the second service sets them so once more, then reads back the DACL
+      of its process and of every thread it has, compared by what they say as clause 21 compares an
+      ACL, and does not listen, ending with an error, while one differs. `GA` stands for the access
+      it maps to on a process and on a thread, `0x1fffff`, which is what is written, so that what is
+      read back compares equal. The token's default DACL is left as it is, so the programs it
+      starts, which are created with the security their own account gives them, are not touched.
     - **Each program runs in a job of its own.** On Windows the second service starts every
       program suspended, assigns it to a new job object with
       `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, and only then lets it run, so everything it starts is
@@ -716,12 +751,12 @@ either account placed.
 
     An install grants and withdraws the process account's rights in the data root, the layout
     root and the state directory alone: a Supervisors' root outside them is the operator's
-    ([ADR-0019](0019-the-installed-service-and-its-state.md)), left as it is and named in a
+    ([ADR-0020](0020-the-installed-service-and-its-state.md)), left as it is and named in a
     warning.
 
 22. **A program inherits nothing of the Client's.** Its environment is the second service's own,
     then the block's `env` laid over it, then the Supervisor Endpoint's token, last
-    ([ADR-0015](0015-client-modes-and-the-gateway.md), the token handed to the process). On Linux
+    ([ADR-0016](0016-client-modes-and-the-gateway.md), the token handed to the process). On Linux
     and macOS the second service's own has `HOME`, `USER` and `LOGNAME` set to the process
     account's. On Windows it is the environment the SCM gives the second service under the process
     account, unchanged.
@@ -752,16 +787,15 @@ either account placed.
 
     One knob moves state and program together. Staging beside `program/` makes a raw artifact's
     install a rename on one filesystem. The directory is `program/`, not `bin/`, because it holds
-    a whole tree for a multi-file package
-    ([ADR-0027](0027-packages-signatures-and-delivery.md)). Moving `supervisor_dir` on a running
-    host leaves the old tree behind and migrates nothing; each Supervisor then registers as a new
-    Agent.
+    a whole tree for a multi-file package ([ADR-0034](0034-packages-signatures-and-delivery.md)).
+    Moving `supervisor_dir` on a running host leaves the old tree behind and migrates nothing; each
+    Supervisor then registers as a new Agent.
 
     Where `supervisor_dir` is `state_dir`, a Supervisor is never named after an entry the Client
     keeps there itself (`instance-uid`, `config`, `packages`, `logs`, `gateway-packages`,
     `supervisors`), and `supervisor_dir` never is, or holds, `state_dir` otherwise: a block that
     would is refused at startup, and an offered set that carries one fails as a whole
-    ([ADR-0017](0017-supervisor-mode-and-its-kinds.md), the validation of an offered set). This
+    ([ADR-0018](0018-supervisor-mode-and-its-kinds.md), the validation of an offered set). This
     holds on every host, with a process account or without one, because a purge of such a
     Supervisor would delete the Client's own entry and its share would expose it to the process
     account's group. The changelog names the rename this asks of a host that has such a
@@ -854,28 +888,31 @@ either account placed.
 - macOS sandboxing, and an account of the macOS Client's own: its first registration stays root,
   since macOS has no virtual account and an account there would have to be created by a package.
 - Account creation by the binary; a `sysusers.d` entry; directives for user-scope units; a
-  confined SELinux policy module ([ADR-0019](0019-the-installed-service-and-its-state.md)).
+  confined SELinux policy module ([ADR-0020](0020-the-installed-service-and-its-state.md)).
 - Moving a host that runs as root or `LocalSystem` to the unprivileged account automatically; an
   operator does that with `--run-as`. The MSI's command lines, which name no account and so take
   the default of clause 1.
 - The trust boundary an administrator crosses when running the account-owned binary through the
   `PATH` symlink (see *Consequences*).
 - Which directory is the state directory, and whether `supervisor.toml` may name it
-  ([ADR-0019](0019-the-installed-service-and-its-state.md)); the `[tls]` files and the CA an
+  ([ADR-0020](0020-the-installed-service-and-its-state.md)); the `[tls]` files and the CA an
   operator names, read where their paths point; `[logging] dir`, which only the service's own run
   uses.
 - An account per Supervisor; making a process account the default where none is named; job
   objects for a host without a process account, the Client's own Managed Processes among them;
   what the Managed Processes can read of one another, which they share by this decision; a
   compromised Client, which can place any program under `program/`.
-- On Windows, a Managed Process that opens the second service's process with the rights its own
-  account holds on it, to duplicate its pipe handle or run code in it, which no check of the peer
-  can tell. On Linux where Yama is absent or `ptrace_scope` is 0, a Managed Process that attaches
-  to the second service between its `execve` and the mark, after killing it so that its service
-  manager starts it again, and that, as a tracer, can also make the second service read a
-  `TracerPid` of 0.
-- A process id reused on Linux before 6.5, on macOS and on Windows, where the platform gives the
-  Client no handle that pins the peer's process; the second service noticing that its socket was
+- On Windows, the second service's process from its creation until its program's first act, and a
+  thread its runtime or the system starts from its creation until it is closed: one the runtime
+  creates until its own first act, one the system starts until the next snapshot, at most a second
+  later; a broker outside the job, such as a WMI process creation or a scheduled task, through
+  which a Managed Process outlives its job. On Linux where Yama is absent or `ptrace_scope` is 0, a
+  Managed Process that attaches to the second service between its `execve` and the mark, after
+  killing it so that its service manager starts it again, and that, as a tracer, can also make the
+  second service read a `TracerPid` of 0.
+- A process id reused on Linux before 6.5 and on macOS, where the platform gives the Client no
+  handle that pins the peer's process, and on Windows before the Client opens the process the
+  pipe names; the second service noticing that its socket was
   replaced; a socket the service manager creates and owns (socket activation); a peer that is the
   second service's process but runs a build other than the Client's, which the handshake already
   refuses (clause 20).
@@ -904,7 +941,7 @@ either account placed.
   Client meant to remove it, and a purge cut short would leave it for the operator to remove.
   Rejected for clause 25.
 - **Keep root as the packaged Linux default.** This is the smallest change, and every agent works.
-  But every packaged host then hands a Server-delivered `inputs.exec` root, and least privilege
+  But every packaged host then hands a Server-delivered command root, and least privilege
   stays something an operator must know to ask for. Rejected.
 - **Keep `LocalSystem` as the Windows default and rely on the process account.** The process
   account needs the second service, is opt-in, and is refused under a `LocalSystem` Client. A
@@ -930,7 +967,7 @@ either account placed.
   not persist, so the self-update would end. `NoNewPrivileges=` and `RestrictSUIDSGID=` are
   implied and cannot be turned off, which breaks `sudo` and setuid plugins. The persistent
   identity of the installed service rules it out too
-  ([ADR-0019](0019-the-installed-service-and-its-state.md)). Rejected.
+  ([ADR-0020](0020-the-installed-service-and-its-state.md)). Rejected.
 - **Only sandbox, and keep root.** This confines a root service a little. Under root the
   directives that would matter (`ProtectSystem=`, `NoNewPrivileges=`, `CapabilityBoundingSet=`)
   are the ones that break the agents root was kept for. The account is what bounds a
@@ -1027,11 +1064,6 @@ either account placed.
   second service, and Windows has no such mechanism for a named pipe, so the Client would need the
   process check there anyway; two mechanisms, and a change to the units, the plist, the socket's
   place and the command line. Not taken.
-- **Close the Windows process too.** A security descriptor on the second service's process that
-  denies its own account, through `OWNER RIGHTS`, the rights to write its memory, create threads
-  in it and duplicate its handles, and a handle the Client holds on the peer's process to pin its
-  id. More Windows code that only CI exercises, for a case of low severity. Not taken now; it
-  stays a follow-up.
 - **The second service checks that its socket is still its own** and binds it again where it was
   replaced. It narrows the window but does not close it, since the impostor can replace the socket
   again between two checks, and does nothing on Windows. Rejected; the Client's check closes the
@@ -1039,14 +1071,34 @@ either account placed.
 - **A secret only the Client and the second service share**, a token the second service proves at
   the handshake. The second service would have to keep it where its own Managed Processes, running
   under its account, cannot read it. On Linux a process that is not dumpable would keep it so, but
-  the process check needs nothing kept, and on Windows the secret would be as open as the process.
-  Rejected.
+  the process check needs nothing kept. Rejected.
 - **Report a refused peer to the Server too.** The Server would see it in the fleet view. The
   Client's health already shows the second service unreachable, and the log names the impostor; a
   new health detail is a protocol matter of its own. Not taken now.
 - **Keep the replacement of the second service as a residual.** The separation holds everywhere
   else; leaving this case means a Managed Process can lie about what runs and keep what it starts
   alive past the Client's connection. Rejected; what remains is named under *Out of scope*.
+- **Leave the second service's process on Windows with the default security its account gives
+  it, and check the peer's process there by its id alone.** Every process of the process account,
+  each Managed Process among them, could open the second service with the rights that account
+  holds: read the Supervisor Endpoint's token from its memory, run code in it, or duplicate its
+  pipe handle and answer the Client in its place, which no check of the peer can tell. An id read
+  from the pipe can pass to another process before the SCM answers. Rejected; clause 19 closes the
+  process and its threads and holds the peer's process by a handle.
+- **Change the token's default DACL instead of each thread's.** Every later thread would be covered
+  from its creation, but every Managed Process would inherit the DACL and be closed to its own
+  account too, which may break an agent that inspects its own processes. Starting each program
+  under a token of its own instead brings back the token handling of `CreateProcessAsUserW` that
+  this decision keeps out of the second service. Rejected.
+- **Leave `PROCESS_TERMINATE` to the process account.** A Managed Process could end the second
+  service, which the service manager restarts; that is a denial and no takeover, and the shared
+  account allows other denials anyway. Not taken: the rule is the narrowest grant that still lets
+  the Client check the process.
+- **Set the DACL only when the second service starts to listen.** Robust in operation, but not fail
+  closed, and the memory read before that holds the configuration. Rejected.
+- **A protected process (PPL).** It needs a signing level the product does not have. Rejected.
+- **Only a unit test of the DACL.** It would not show that a process of the same account is
+  refused. Rejected in favour of the smoke under *Enforcement*.
 
 ## Sources / Prior art
 
@@ -1076,8 +1128,8 @@ either account placed.
   and the main process of a service: recalled, not re-read. `org.freedesktop.systemd1(5)`
   (`MainPID`); `launchctl(1)` (`print`, whose output it does not promise as an interface).
 - `docs/manual/client.md` and `docs/manual/setup.md`: what operators are told.
-- Telegraf's `use_sudo` inputs, Icinga's setuid plugins, and GLPI Agent's root inventory and
-  Deploy task: recalled from their documentation, not re-read.
+- Agents' inputs that run through `sudo`, setuid monitoring plugins, and an inventory agent's root
+  inventory and deploy task: recalled from their documentation, not re-read.
 - Debian Policy and `dh_installsystemd`, from which the installers knowingly depart (clause 9).
 - WiX's customization guide for the stock dialog sets; Windows Installer's `REMOVE`,
   `UPGRADINGPRODUCTCODE`, `MajorUpgrade` and `Secure` properties.
@@ -1118,10 +1170,10 @@ either account placed.
   accounts: a managed local account per service, named `NT SERVICE\<service name>`, with no
   password to manage, that acts as the computer account on the network.
 - Microsoft, the built-in local groups *Event Log Readers* and *Performance Monitor Users*.
-- The OpenTelemetry Collector's and Telegraf's Windows services, which register as `LocalSystem`
-  unless their installer is told otherwise: the common default this decision departs from.
+- The OpenTelemetry Collector's Windows service, which registers as `LocalSystem` unless its
+  installer is told otherwise: the common default this decision departs from.
 - Recalled, not re-read for this record: the Microsoft pages on `LocalSystem`, virtual accounts
-  and the built-in groups, and the two projects' defaults above, cited for their shape, not for
+  and the built-in groups, and the project's default above, cited for their shape, not for
   detail; and that `SeImpersonatePrivilege` opens paths to `SYSTEM`.
 -
   [SERVICE_REQUIRED_PRIVILEGES_INFO](https://learn.microsoft.com/en-us/windows/win32/api/winsvc/ns-winsvc-service_required_privileges_infow):
@@ -1184,6 +1236,18 @@ either account placed.
   hand-over's descriptor-based walk that clause 11 extends to every other privileged step;
   `crates/fleet-agent/src/service/windows_config.rs`; `packaging/linux/postinst`;
   `packaging/windows/supervisor.wxs`; `docs/HARDENING.md`.
+- Microsoft Learn, *Process Security and Access Rights*: the default security descriptor comes
+  from the creator's token, `OpenProcess` is checked against the process's DACL, `SeDebugPrivilege`
+  overrides it, and `PROCESS_DUP_HANDLE` alone yields a handle with full access; *Thread Security
+  and Access Rights*; *SID Strings*: `OW` (`OWNER RIGHTS`), `SY`, `BA`; `SetSecurityInfo`,
+  `OpenProcess`, `CreateToolhelp32Snapshot`.
+- Recalled, not re-read for this record: that an object's owner holds `READ_CONTROL` and
+  `WRITE_DAC` implicitly unless an `OWNER RIGHTS` entry names what it holds, and that
+  `THREAD_SET_CONTEXT` is enough to run code in a thread's process. The Windows service smoke under
+  *Enforcement* decides both on a real host.
+- The code: `crates/fleet-agent/src/supervisor/channel/windows.rs` and
+  `crates/fleet-agent/src/win32.rs`, the DACLs of the second service's process and threads and the
+  Client's hold on the peer's process.
 
 ## Consequences
 
@@ -1210,13 +1274,14 @@ either account placed.
   without the separation, and on Windows no Managed Process holds `SeImpersonatePrivilege`. A
   Managed Process cannot take the second service's place by replacing its socket or making an
   instance of its pipe, so the Client does not tell it a program, an environment or the Supervisor
-  Endpoint's token, and the programs the Client knows of end with its connection. On Linux, the
-  Managed Processes cannot read the second service's memory either.
+  Endpoint's token, and the programs the Client knows of end with its connection. On Linux and
+  Windows, the Managed Processes cannot read or write the second service's memory either, run code
+  in it or take its handles.
 - Negative / trade-offs: on a fresh host, agents that need root or `LocalSystem` fail under the
-  account. These include GLPI Agent's full inventory and Deploy, Telegraf inputs without a `sudo`
-  rule, any listener on a port below 1024, a file log receiver reading `root:adm` files, and on
-  Windows a full inventory, an agent that installs a service, or a reader of the Security log. The
-  operator either grants what is missing (a `sudoers` entry, a drop-in with
+  account. These include an inventory agent's full inventory and deploy task, inputs without a
+  `sudo` rule, any listener on a port below 1024, a file log receiver reading `root:adm` files, and
+  on Windows a full inventory, an agent that installs a service, or a reader of the Security log.
+  The operator either grants what is missing (a `sudoers` entry, a drop-in with
   `AmbientCapabilities=` or `SupplementaryGroups=`, `usermod -aG adm`, `net localgroup`) or
   chooses root or `LocalSystem` with `--run-as`. The manual and the post-install text say so.
 - Negative / trade-offs: the sandbox is thin under the account. The account is the confinement,
@@ -1253,10 +1318,10 @@ either account placed.
 - Negative / trade-offs: a second service and a private protocol between two processes of one
   build. A restart of the second service stops every Managed Process. The Managed Processes still
   share one account, so they read one another's `config/` and environment. Grants that name the
-  Client's account for an agent, such as a sudoers rule for Telegraf's `use_sudo` or the rights
-  Icinga 2 needs on its directories, must name the process account instead; the manual and the
-  changelog say so. The separation is opt-in, so a host gains it only once its operator creates
-  the account and names it.
+  Client's account for an agent, such as a sudoers rule for an input that runs through `sudo` or
+  the rights an agent needs on its directories, must name the process account instead; the manual
+  and the changelog say so. The separation is opt-in, so a host gains it only once its operator
+  creates the account and names it.
 - Negative, on Windows: a job holds what a program starts itself, not what it has an
   out-of-process broker start for it, such as a WMI process creation or a scheduled task, as a
   process that leaves its process group outlives the stop on Unix. `LocalService` and
@@ -1267,17 +1332,20 @@ either account placed.
   `service start`. On Linux and macOS an install that changes or drops an account stops them too,
   and one that fails after that stop leaves the services stopped until the operator's
   `service start`, since no record names what ran.
-- Negative, of the check of the process: on Windows a Managed Process can still take the second
-  service's place by opening its process, and on Linux before 6.5, on macOS and on Windows by
-  waiting for a process id to come round again; both are named, not closed. Every new connection
-  asks the service manager once, by a `systemctl` or `launchctl` run or an SCM query, which adds a
-  few milliseconds at the Client's start and after the second service restarts. On Linux that
-  needs systemd's system bus, and on macOS it reads `launchctl print`, whose output is not a
-  promised interface; where either fails, every connection is refused and no Managed Process
-  starts until it answers again, which is logged. The second service writes no core dump on
-  Linux. A Managed Process can still remove or replace the socket, and while it does the Client
-  finds the second service away; that is a denial of what the process account's own programs run,
-  which the shared account already allows.
+- Negative, of the check of the process: on Linux before 6.5 and on macOS a Managed Process can
+  still take the second service's place by waiting for a process id to come round again, and on
+  Windows only before the Client opens the process the pipe names; that is named, not closed. On
+  Windows the second service's process is open from its creation until its program's first act,
+  and a thread the runtime starts for the instant before it sets its own DACL. An administrator's
+  tool that opens the second service on Windows needs to run elevated.
+  Every new connection asks the service manager once, by a `systemctl` or `launchctl` run or an SCM
+  query, which adds a few milliseconds at the Client's start and after the second service restarts.
+  On Linux that needs systemd's system bus, and on macOS it reads `launchctl print`, whose output is
+  not a promised interface; where either fails, every connection is refused and no Managed Process
+  starts until it answers again, which is logged. The second service writes no core dump on Linux. A
+  Managed Process can still remove or replace the socket, and while it does the Client finds the
+  second service away; that is a denial of what the process account's own programs run, which the
+  shared account already allows.
 - Follow-ups: a way for an administrator to run the installed CLI without executing account-owned
   code; an account of its own for the macOS Client; a `sysusers.d` entry; whether the unit should
   order itself after `network-online.target`; the groups each Supervisor kind needs on Windows,
@@ -1286,13 +1354,12 @@ either account placed.
   last, as the data root is held; reaching a state directory deeper beneath a root one held name
   at a time from the root, which closes the window between the check of what lies beneath a root
   and the open; an account per Supervisor; making the separation the default; job objects for the
-  process tree on a host without a process account; closing the second service's process on
-  Windows and pinning the peer's process there and on macOS; a socket the service manager owns on
-  Linux and macOS; a health detail that names a refused peer.
+  process tree on a host without a process account; pinning the peer's process on macOS; a socket
+  the service manager owns on Linux and macOS; a health detail that names a refused peer.
 
 ## Enforcement
 
-Tests that carry `Verifies: ADR-0020`:
+Tests that carry `Verifies: ADR-0021`:
 
 - `crates/fleet-agent/src/service/manager.rs` (clauses 7, 8, 17):
   - `the_system_unit_is_the_clients_own_text`: the rendered unit holds `Description=<PRODUCT_NAME>`,
@@ -1313,9 +1380,9 @@ Tests that carry `Verifies: ADR-0020`:
   - `a_user_unit_is_left_to_service_manager`: the user scope passes `contents: None`.
   - `every_backend_renders_the_same_name`, `the_service_is_named_after_the_product_not_the_program`
     and `the_service_name_carries_no_suffix` (clause 17).
-- `crates/fleet-agent/src/service/run_as.rs`, or the module that decides the account (clause 1):
+- `crates/fleet-agent/src/service/run_as.rs`, and `manager.rs` for the plist (clause 1):
   - `a_reregistration_without_run_as_keeps_the_units_account`: a unit fixture with
-    `User=telegraf` yields `telegraf`, from the unit.
+    `User=otelcol-contrib` yields `otelcol-contrib`, from the unit.
   - `a_plists_user_name_is_kept`.
   - `run_as_root_is_written_as_user_root`.
   - `a_unit_without_an_account_on_an_account_owned_data_root_takes_the_owner`.
@@ -1331,7 +1398,8 @@ Tests that carry `Verifies: ADR-0020`:
     `NT SERVICE\<PRODUCT_NAME>` from the default; an SCM entry naming `LocalSystem` is kept as the
     registration's; `LocalSystem` and `NT AUTHORITY\SYSTEM` pass the passwordless-form check; the
     message for a `LocalSystem` account, named or kept, carries the warning and names the virtual
-    account.
+    account (`on_windows_a_first_registration_runs_as_the_services_virtual_account`,
+    `windows_forms_are_the_passwordless_ones`, `local_system_is_named_and_warned_about`).
 - `crates/fleet-agent/tests/linux_post_install.rs` (clauses 3, 5, 9):
   - `the_post_install_creates_the_account_before_it_registers`: `getent passwd` and the `useradd`
     line appear before every `service install`. The line is `--system`, without a password and
@@ -1362,10 +1430,10 @@ Tests that carry `Verifies: ADR-0020`:
     `systemctl show -p User` still names the account; `/proc/<MainPID>/status` shows
     `NoNewPrivs: 0`; `/proc/<MainPID>/mountinfo` shows `/` without `nosuid`;
     `systemd-analyze verify` accepts the unit.
-  - On Windows in CI: a first install without `--run-as` registers the virtual account with the
-    SCM and grants it both roots; a re-install without the flag keeps it; `--run-as LocalSystem`
-    registers `LocalSystem` and withdraws the virtual account's grants; a re-install without the
-    flag keeps `LocalSystem`.
+  - `on_windows_a_first_install_runs_as_the_virtual_account_and_local_system_is_named`: a first
+    install without `--run-as` registers the virtual account with the SCM and grants it both
+    roots; a re-install without the flag keeps it; `--run-as LocalSystem` registers `LocalSystem`
+    and withdraws the virtual account's grants; a re-install without the flag keeps `LocalSystem`.
 - `crates/fleet-agent/tests/install_follows_no_link.rs` (clauses 11 to 15), unless named otherwise:
   - Unix: a link at the pending key or the request is replaced by the request, and the file behind
     it keeps its bytes and its mode. A link at the staged certificate, its temporary names, the
@@ -1376,29 +1444,55 @@ Tests that carry `Verifies: ADR-0020`:
     refused by staging. A link at the program or its manifest is replaced, and the file behind it
     is neither written nor made executable. `service config` refuses to re-own through a linked
     state directory, re-owns through a data root reached as clause 13 says, and names a file with
-    a second hard link.
+    a second hard link. The tests are `a_certificate_request_writes_through_no_link`,
+    `an_issued_certificate_is_stored_through_no_link`,
+    `the_identity_and_the_connection_settings_are_written_through_no_link`,
+    `a_state_directory_that_is_a_link_is_refused`, `staging_the_program_writes_through_no_link`,
+    `handing_the_written_files_over_follows_no_link`,
+    `the_configuration_is_written_through_no_link` and
+    `the_state_directory_is_created_through_no_link`.
   - Windows: a state directory that is a junction is refused. A `versions/` that is a junction is
     refused, and so is a layout root that is one; the data root is opened by the same call, so
     this test decides its refusal too. A file symbolic link at the connection settings is replaced;
-    the test fails when the run cannot create one.
-  - `crates/fleet-agent/src/storage.rs`: no entry is lost to another entry's temporary name; a
-    replaced entry is the runtime's own and owner-only.
+    the test fails when the run cannot create one. The tests are
+    `a_state_directory_that_is_a_junction_is_refused`, `staging_refuses_a_versions_junction`,
+    `staging_refuses_a_layout_root_that_is_a_junction`,
+    `a_file_symbolic_link_in_the_state_directory_is_replaced`,
+    `the_configuration_is_not_written_through_a_data_root_junction`,
+    `the_state_directory_is_created_through_no_junction` and
+    `the_current_pointer_is_not_switched_through_a_layout_root_junction`.
+  - `crates/fleet-agent/src/storage.rs`: `no_entry_is_lost_to_another_entrys_temporary_name`,
+    `a_replaced_entry_is_the_runtimes_own_and_owner_only`.
 - The process account and the second service (clauses 16 to 27):
-  - In `crates/fleet-agent/src/service/`: `--process-account` with `--user`, with `root`,
-    `LocalSystem` or the Client's account, and with an account that does not exist is refused
-    before anything is written; a re-registration without the flag keeps the account the second
-    service names; the rendered unit and plist of the second service carry its account and the
-    directives of clause 8; on Windows its required privileges are `SeChangeNotifyPrivilege`
-    alone.
-  - In `crates/fleet-agent/src/supervisor/`: with a process account registered, the Managed
-    Process, the version probe and the preflight are started through the second service and none
-    by the Client; a connection whose peer is not the Client's account is refused; closing the
-    Client's connection stops every program the second service started.
-  - In `crates/fleet-agent/src/storage.rs`: the modes and owners of clause 21, and that the
-    Client's key stays `0600` and owned by the Client.
-  - A Linux integration test in `.github/workflows/service-smoke.yml`, run under `sudo`, in which
-    a Managed Process under the process account fails to read `client-key.pem` and to write its
-    `program/`.
+  - In `crates/fleet-agent/src/`: `--process-account` with `--user`, with `root`, `LocalSystem`
+    or the Client's account, and with an account that does not exist is refused before anything
+    is written (`cli.rs` `the_process_account_conflicts_with_user`; `service/run_as.rs`
+    `the_process_account_is_never_root_and_the_client_never_is`,
+    `the_process_account_is_never_the_clients`,
+    `a_missing_process_account_is_refused_with_the_way_out`); a re-registration without the flag
+    keeps the account the second service names
+    (`a_process_account_is_named_or_kept_from_the_second_services_unit`); the rendered unit and
+    plist of the second service carry its account and the directives of clause 8
+    (`service/manager.rs` `the_second_services_unit_runs_the_program_under_the_process_account`,
+    `the_second_services_plist_is_the_one_service_manager_renders`). The Windows service smoke
+    below decides that its required privileges are `SeChangeNotifyPrivilege` alone.
+  - In `crates/fleet-agent/src/supervisor/` and `tests/supervisor.rs`: with a process account
+    registered, the Managed Process, the version probe and the preflight are started through the
+    second service and none by the Client
+    (`a_client_told_of_the_second_service_starts_its_program_through_it`,
+    `the_version_probe_runs_through_the_second_service`,
+    `the_preflight_runs_through_the_second_service`); a connection whose peer is not the Client's
+    account is refused (`a_peer_of_another_uid_is_refused`); closing the Client's connection stops
+    every program the second service started
+    (`closing_the_connection_stops_the_whole_process_group`).
+  - In `crates/fleet-agent/src/storage.rs` and `csr.rs`: the modes and owners of clause 21, and
+    that the Client's key stays `0600` and owned by the Client
+    (`with_a_process_account_its_group_reads_only_what_it_runs_on`,
+    `with_a_process_account_the_request_and_the_certificate_are_owner_only`).
+  - `tests/service_smoke.rs`
+    `a_managed_process_runs_under_the_process_account_and_reaches_only_what_it_runs`, run under
+    `sudo` by `.github/workflows/service-smoke.yml` on Linux, in which a Managed Process under the
+    process account fails to read `client-key.pem` and to write its `program/`.
   - The Windows service smoke in the same workflow,
     `on_windows_a_managed_process_runs_under_the_process_account_and_reaches_only_what_it_runs`,
     run elevated on `windows-latest`: the second service's required privileges are
@@ -1442,7 +1536,9 @@ Tests that carry `Verifies: ADR-0020`:
     or drops the process account, or changes `--run-as`, stops both services and waits for their
     processes before it re-owns anything, and starts again what ran once it has succeeded; a stop
     that fails, a wait that runs out among them, changes nothing more; an install that changes no
-    account, or adds a process account where none was, stops nothing.
+    account, or adds a process account where none was, stops nothing
+    (`an_account_change_is_a_former_account_named_no_more`,
+    `what_ran_is_what_the_manager_reports_running`, `a_halt_that_fails_changes_nothing`).
   - The check of the process (clause 19): with a fake service manager that names one process as
     the second service, the Client accepts a peer of that process and the process account, and
     refuses one of the process account whose process differs, one whose process cannot be read,
@@ -1455,26 +1551,51 @@ Tests that carry `Verifies: ADR-0020`:
     the second service, once listening, reports itself not dumpable (`PR_GET_DUMPABLE`), and the
     test, as its parent and without `CAP_SYS_PTRACE`, so that Yama permits it, is refused
     `PTRACE_ATTACH`, `/proc/<pid>/mem` and `pidfd_getfd`; a program it starts is dumpable. The
-    second service does not listen while it is traced.
-  - The service smoke test: on Linux and macOS a Managed Process the second service started leaves
-    its process group and replaces the socket, and the Client, restarted, refuses it, writes it
-    nothing, logs it, and starts no Managed Process until the second service is restarted. On
-    Windows, with `NT AUTHORITY\LocalService` as the process account and the second service
-    stopped, a task scheduled under that account creates the pipe; the Client, restarted, refuses
-    it as a peer the SCM names no process for, writes it nothing and logs it, and once the task has
-    ended and the second service runs again, reaches the second service. Which instance of a pipe
-    a client opens while the second service holds one too is not determined, so the case of a
-    differing process is decided on Windows by the test with a fake service manager.
+    second service does not listen while it is traced. The tests are
+    `the_client_speaks_only_to_the_process_the_manager_names`, on Windows
+    `the_client_talks_only_to_the_process_the_scm_names`,
+    `a_peer_that_is_not_the_second_service_is_away_and_tried_anew`,
+    `a_listener_that_ended_is_refused_though_its_id_is_named`,
+    `an_error_of_so_peerpidfd_falls_back_to_nothing`,
+    `a_second_service_that_is_dumpable_does_not_listen`,
+    `the_second_service_closes_its_process_to_its_own_account` and
+    `the_second_service_does_not_listen_while_it_is_traced`.
+  - The service smoke tests `a_managed_process_in_the_second_services_place_is_refused` and
+    `on_windows_a_pipe_the_scm_names_no_process_for_is_refused`: on Linux and macOS a Managed
+    Process the second service started leaves its process group and replaces the socket, and the
+    Client, restarted, refuses it, writes it nothing, logs it, and starts no Managed Process until
+    the second service is restarted. On Windows, with `NT AUTHORITY\LocalService` as the process
+    account and the second service stopped, a task scheduled under that account creates the pipe;
+    the Client, restarted, refuses it as a peer the SCM names no process for, writes it nothing and
+    logs it, and once the task has ended and the second service runs again, reaches the second
+    service. Which instance of a pipe a client opens while the second service holds one too is not
+    determined, so the case of a differing process is decided on Windows by the test with a fake
+    service manager.
+  - The DACLs of the second service on Windows (clause 19), in `crates/fleet-agent/src/`: the
+    process and thread DACLs are the ones clause 19 names and read back as such; a second service
+    whose process or a thread carries another DACL does not listen; the Client refuses a peer whose
+    process it cannot open, and one whose process has ended once the SCM has answered
+    (`win32.rs` `the_second_services_process_and_threads_leave_its_account_only_asking_and_waiting`;
+    `supervisor/channel/windows.rs`
+    `a_second_service_listens_only_once_closed_to_the_process_account`,
+    `the_client_refuses_a_peer_whose_process_it_cannot_open`,
+    `the_client_refuses_a_peer_whose_process_ended_once_the_scm_answered`). The Windows service
+    smoke `on_windows_the_second_services_process_and_threads_are_closed_to_the_process_account`:
+    a task scheduled under `NT AUTHORITY\LocalService`, the smoke's process account,
+    opens the second service's process with `PROCESS_VM_READ`, `PROCESS_DUP_HANDLE` and
+    `PROCESS_CREATE_THREAD`, and one of its threads with `THREAD_SET_CONTEXT`, and is refused
+    `ERROR_ACCESS_DENIED` each time, while a Managed Process still runs.
 - `crates/fleet-agent/tests/msi_exe_command.rs`, which reads `packaging/windows/supervisor.wxs`
   and `packaging/windows/EndpointDlg.wxs` as text (clause 10): the stop and unregister actions run
-  under the condition `REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE` and no other;
+  under the condition `REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE` and no other
+  (`the_msi_stops_and_unregisters_only_on_a_real_removal`);
   `register_service_with_endpoint_survives_the_crt`, `register_service_survives_the_crt`,
   `stop_and_unregister_survive_the_crt`,
   `the_msi_names_no_root_so_no_directory_property_reaches_a_command_line`, and
   `the_endpoint_dialog_names_the_identity_and_no_credential`.
 - `crates/fleet-agent/src/supervisor/mod.rs`:
   `an_orphaned_supervisor_directory_is_not_reaped_at_startup` (clause 25). The archive tests of
-  [ADR-0027](0027-packages-signatures-and-delivery.md), `a_tree_keeps_the_modes_the_archive_carried`
+  [ADR-0034](0034-packages-signatures-and-delivery.md), `a_tree_keeps_the_modes_the_archive_carried`
   among them, cover the modes of clause 23.
 
 **Not mechanically decidable:** that every supported agent works under the account and under root

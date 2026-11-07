@@ -1,9 +1,9 @@
-# ADR-0024: The fleet record of Agents and Hosts
+# ADR-0030: The fleet record of Agents and Hosts
 
-- **Status:** ⚪ superseded by [ADR-0043](0043-the-fleet-record-of-agents-and-hosts.md)
+- **Status:** 🟢 accepted
 - **Date:** 2026-11-02
 - **Deciders:** Markus Brigl
-- **Applies to:** crates/fleet-server/src/fleet.rs, crates/fleet-server/src/agent_store.rs and its adapters, crates/fleet-server/src/labels.rs, the host register in crates/fleet-server/src/revocation.rs and its adapters, the /api/v1/agents and /api/v1/hosts routes of crates/fleet-server/src/api.rs, stale_after_secs in server.toml, the Hosts and Agents tabs of the bundled UI in crates/fleet-server/static/index.html, and every document that tells an operator what a Host is, when it ends, or how labels and Selectors work
+- **Applies to:** crates/fleet-server/src/fleet.rs, crates/fleet-server/src/agent_store.rs and its adapters, crates/fleet-server/src/labels.rs, the host register in crates/fleet-server/src/revocation.rs and its adapters, the /api/v1/agents and /api/v1/hosts routes of crates/fleet-server/src/api.rs, stale_after_secs and [database] presence_interval_secs in server.toml, the Hosts and Agents tabs of the bundled UI in crates/fleet-server/static/index.html, and every document that tells an operator what a Host is, when it ends, or how labels and Selectors work
 
 ## Context
 
@@ -12,38 +12,40 @@ from re-offering what already runs (`sequence_num`, remote-config, connection-se
 package statuses — G-3), and what an operator queued or decided for it. Several questions shape
 that record.
 
-**What survives a restart.** A fleet held only in memory starts empty after every restart: an
-Agent that is not reporting at that moment — a laptop that is off, a host under investigation
-precisely because it went quiet — vanishes, and every other Agent is demanded `ReportFullState`
-at once. The Server's state survives a restart with only each Agent's status determined
-dynamically, and the storage is **replaceable**
-([ADR-0029](0029-the-servers-state-and-its-stores.md)). The record's access pattern is narrow —
-loaded whole at startup, then single-Agent writes and deletions — and its report-derived fields
-are prost-generated protobuf messages without serde. Write frequency is the known scale trap:
-Elastic Fleet persists every check-in and documents the load as a problem.
+**What survives a restart.** A fleet held only in memory starts empty after every restart: an Agent
+that is not reporting at that moment — a laptop that is off, a host under investigation precisely
+because it went quiet — vanishes, and every other Agent is demanded `ReportFullState` at once. The
+Server's state survives a restart with only each Agent's status determined dynamically, and the
+storage is **replaceable**
+([ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)).
+The record's access pattern is narrow — loaded whole at startup where one Server holds the fleet in
+memory, read from the store, one Agent or the list the Operator plane shows, where it does not, and
+written and deleted one Agent at a time — and its report-derived fields are prost-generated protobuf
+messages without serde. Write frequency is the known scale trap: Elastic Fleet persists every
+check-in and documents the load as a problem.
 
 **What the Server knows about liveness.** `connected` is a fact about a connection, and behind a
 Gateway it is the Gateway's. A plain-HTTP Agent has no socket to close. Silence means something
 only from an Agent that promised to report periodically, which is what `ReportsHeartbeat` is.
 
 **What "forget" can mean.** A client certificate is issued to a Host, never to an Agent
-([ADR-0021](0021-admission-by-client-certificate-and-revocation.md)); nothing the Server holds
-can stop one Agent from connecting again. And a re-offered configuration is not free: the
-Collector plugin restarts its Managed Process when a configuration arrives, so dropping the gates
-of a live Agent bounces its process.
+([ADR-0026](0026-admission-by-client-certificate-and-revocation.md));
+nothing the Server holds can stop one Agent from connecting again. And a re-offered configuration is
+not free: the Collector plugin restarts its Managed Process when a configuration arrives, so
+dropping the gates of a live Agent bounces its process.
 
 **What a Host is.** The specification names the **Host**: what a client certificate the Server
-issued identifies, one Client installation that connects directly, a Gateway included. Its id is
-the SAN URI `urn:opamp-fleet:host:<id>` of its client certificate, and every renewal carries it
-on ([ADR-0022](0022-bootstrap-certificates-and-enrolment.md)). Every Agent reaching the Server
-over that certificate belongs to it. The Agents behind a Gateway belong to the Gateway's Host,
-because the Server sees only the Gateway's certificate. A binding guards against one thing:
-another host taking over an Agent that a Host still speaks for. Once no certificate naming a host
-is valid, nobody can speak as that host again — renewal needs a valid certificate, and a host
-that enrols again gets a new host id. The Server cannot always tell from its register alone
-whether a host still holds a valid certificate: a certificate an operator provisioned with a host
-id is valid without ever having been registered. What the Server does see is every certificate a
-host presents. Q-2 asks that what untrusted input makes the Server hold be bounded.
+issued identifies, one Client installation that connects directly, a Gateway included. Its id is the
+SAN URI `urn:opamp-fleet:host:<id>` of its client certificate, and every renewal carries it on
+([ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)).
+Every Agent reaching the Server over that certificate belongs to it. The Agents behind a Gateway
+belong to the Gateway's Host, because the Server sees only the Gateway's certificate. A binding
+guards against one thing: another host taking over an Agent that a Host still speaks for. Once no
+certificate naming a host is valid, nobody can speak as that host again — renewal needs a valid
+certificate, and a host that enrols again gets a new host id. The Server cannot always tell from its
+register alone whether a host still holds a valid certificate: a certificate an operator provisioned
+with a host id is valid without ever having been registered. What the Server does see is every
+certificate a host presents. Q-2 asks that what untrusted input makes the Server hold be bounded.
 
 **Where rollout rings live.** A staged rollout wants an attribute an operator invents —
 `rollout = "canary"`. On the host, moving between rings is a file edit plus a restart per host,
@@ -70,36 +72,103 @@ report, its own labels and its Client Agent's labels, in that order of precedenc
    (`sequence_num`, capabilities, description, health, effective configuration, remote-config,
    connection-settings, and package statuses, available components), the transport of the last
    report, `last_seen_ms`, a queued restart (`restart_pending`), the assignments rollout acts
-   wrote ([ADR-0026](0026-deployments-and-rollouts.md)), its labels and the Host it last arrived
+   wrote ([ADR-0033](0033-deployments-and-rollouts.md)), its labels and the Host it last arrived
    over (clauses 16 and 21), and the runtime facts `connected` and the owning connection.
-   `GET /api/v1/agents` returns every record as an `AgentView`.
+   `GET /api/v1/agents` returns the records as `AgentView`s.
 
 2. **Records persist behind a port.** The trait `AgentStore: Send + Sync` is the only thing the
    fleet logic knows about persistence, and its surface is the access pattern:
-   - `load()` — every record, once, at startup;
-   - `put(uid, &PersistedAgent)` — create or replace one record;
+   - `load()` — every record, once, at startup, for a Server that holds the fleet in memory;
+   - `get(uid)` — one record, for an instance that holds only the Agents it carries;
+   - `get_many(uids)` — the records of several Agents in one read, for an instance that reads
+     again under its fleet lock what another instance changed, so the lock waits for one round
+     trip however many records changed;
+   - `query(only)` — every stored record with its presence, or the records of the uids `only`
+     names, in the order of their `instance_uid`: what the Operator plane reads where the fleet is
+     not in memory;
+   - `put(uid, &PersistedAgent)` — create one record, or replace the part of it a report decides
+     (clause 3: what the Agent reported, the transport, `last_seen_ms` and the Host it arrived
+     over), leaving the labels, the assignments and `restart_pending` as they are: what setup and
+     an import write; the fleet writes through `create_within` and `write_report`;
+   - `create_within(uid, &PersistedAgent, max_records)` — create the record of an Agent first heard
+     of unless the store holds `max_records` already, counted where the records are stored in the
+     step that creates it, so the Agent-record ceiling `max_agents`, which
+     [ADR-0012](0012-tls-1-3-two-planes-and-bounded-input.md) clause 19 counts for the whole fleet,
+     holds for every instance; a record stored already is answered as it is stored, and passes no
+     bound;
+   - `write_report(uid, &PersistedAgent)` — write the part of a stored record a report decides, as
+     `put` does, and create none; it answers whether there was a record, and on a shared store
+     none means the Agent was forgotten through another instance, which the fleet then drops
+     rather than create it again (clause 14);
+   - `write_report_unless_held_elsewhere(uid, &PersistedAgent, holder, take)` — `write_report` at
+     the graceful-shutdown flush: on a shared store only of a record whose stored holder is
+     `holder`, or is none and whose stored count of takes is still `take`, the count this instance
+     was last answered, so an Agent that moved to another instance keeps what that instance wrote
+     of it, also once it disconnected there;
+   - `write_presence(holder, presences)` — one batch of the presence of the Agents `holder`
+     carries (clauses 3 and 4), in the order of their `instance_uid`, each with the count of
+     takes `holder` was last answered for it; a connected Agent names `holder` only where the
+     stored holder is `holder`, none, or an instance without a live lease, so a batch never undoes
+     another instance's take, and naming `holder` anew counts as a take, whose count the batch
+     answers; a disconnect is written only of a record whose stored holder is `holder` and whose
+     stored count of takes is still the one it comes with, so it never undoes a take made since,
+     by this instance or another;
+   - `take(uid, holder, last_seen_ms)` — the take at a connecting report of
+     [ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+     clause 8: names `holder`, raises the record's count of takes by one and answers it, answers
+     the holder it replaced and whether this change of holder is the eleventh within a minute,
+     counted on the database's clock, and announces the take where it replaced another instance,
+     whether or not its lease is live; the take that commits last holds the record;
+   - `holders(uids)` — the stored holder of each, which an instance that heard of a take reads
+     before it stops carrying the Agent;
+   - `remove_if_silent(uid, silent_before_ms)` — forget one record of a shared store when its
+     stored presence lets it go, read and removed in one step (clause 11);
+   - `set_labels(uid, labels)` and `set_restart_pending(uid, pending)` — the acts that decide them,
+     each writing what it names alone; the assignments are written by the rollout operation of
+     [ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
+     clause 2. The instance that delivers a restart clears `restart_pending` only while no later
+     request set it again;
    - `remove(uid)` — forget one record; removing what is absent is not an error;
    - `rekey(old, new, &PersistedAgent)` — an identity reassignment, one operation so an adapter
      with atomic rename or transactions can make it one step.
 
    The port speaks the **typed** record (`PersistedAgent`: scalars plus the prost message types),
-   never an encoding. `AppState` takes a `Box<dyn AgentStore>`; the binary wires the adapter, and
-   another backend is a new adapter plus one wiring line.
+   never an encoding. On PostgreSQL each call writes the columns it names and no other, so a write
+   of the instance that carries an Agent never undoes an act committed through another instance;
+   the filesystem adapter, whose one Server is its only writer, may write the whole file for each.
+   `AppState` takes a `Box<dyn AgentStore>`; the binary wires the adapter, and
+   another backend is a new adapter plus one wiring line. Which reads a Server makes follows its
+   store, by the one rule of
+   [ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
+   clause 3: on the filesystem store `load()` and the memory it fills, on PostgreSQL `get` and
+   `query`.
 
-3. **What a report or an operator decided persists; what a connection knows does not.**
+3. **What a report or an operator decided persists; so does where an Agent is connected.**
    Persisted: `sequence_num`, `capabilities`, `description`, `health`, `effective_config`,
    `remote_config_status`, `connection_settings_status`, `package_statuses`,
    `available_components`, `transport` (informational), `last_seen_ms`, `restart_pending`, the
-   assignments, the labels, and the Host the Agent last arrived over. Not persisted: `connected`
-   and the owning connection.
+   assignments, the labels, and the Host the Agent last arrived over. On PostgreSQL the Agent's
+   presence is persisted beside them: `connected` and the id of the instance that holds its
+   connection. Not persisted: the owning connection, and on the filesystem `connected`.
 
-4. **The write discipline lives above the port, so no backend can get it wrong.** The fleet keeps
-   a digest of each record's durable content as last written and calls `put` only when it
-   changed. `last_seen_ms` and `sequence_num` are outside the digest and ride along with whatever
-   write happens, so a heartbeat, which changes nothing else, reaches no adapter. On graceful
-   shutdown every record is flushed, so an ordinary restart restores current values; after a
-   crash a record's last-seen dates from its last durable change. A failed write is logged, never
-   fatal.
+4. **The write discipline lives above the port, so no backend can get it wrong.** The fleet keeps a
+   digest of each record's durable content as last written and calls `write_report` only when it
+   changed. `last_seen_ms` and `sequence_num` are outside the digest. On the filesystem they ride
+   along with whatever write happens, so a heartbeat, which changes nothing else, reaches no
+   adapter, and after a crash a record's last-seen dates from its last durable change. On PostgreSQL
+   each instance writes the presence of the Agents it carries — `connected`, `last_seen_ms`, the
+   holding instance — in one batch every `[database] presence_interval_secs` (default 30, from 10 to
+   60), so a heartbeat reaches the database at most once per interval and Agent. A change of the
+   holding instance and a disconnect are written in the next batch, except as
+   [ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+   clause 8 says. On graceful shutdown every record and every presence is flushed, so an ordinary
+   restart restores current values; on PostgreSQL the flush writes only the records of the Agents
+   this instance heard report, and of those only the ones whose stored holder is this instance, or
+   is none and whose stored count of takes is still the one this instance was last answered, and the
+   presence in a last batch. Whether a disconnect or a flush is written is decided by that count,
+   which only the database raises, and never by comparing `last_seen_ms`, which each instance writes
+   by its own clock. A failed write is logged, never fatal; on PostgreSQL a presence batch that
+   fails is retried with the next one.
 
 5. **Stored records are secret-bearing, whatever the backend.** A reported effective
    configuration carries whatever the Managed Process runs, credentials included, and package
@@ -109,8 +178,9 @@ report, its own labels and its Client Agent's labels, in that order of precedenc
 6. **`connected` says a connection carrying the Agent is open — nothing more.** Every report sets
    it; only the owning WebSocket closing, or the Agent's `agent_disconnect`, clears it. Behind a
    Gateway it is the Gateway's connection; an Agent that stops polling plain HTTP without saying
-   goodbye stays connected. A restored record is disconnected with no owning connection until
-   live evidence says otherwise.
+   goodbye stays connected. On PostgreSQL, an Agent whose presence names an instance without a live
+   lease reads as disconnected, whatever its row says. A restored record is disconnected with no
+   owning connection until live evidence says otherwise.
 
 7. **`stale` is derived on read, and only an Agent that promised a heartbeat can be stale.** An
    Agent is stale when `now - last_seen_ms` exceeds its budget **and** it declares
@@ -119,12 +189,13 @@ report, its own labels and its Client Agent's labels, in that order of precedenc
    place of it: `connected: true, stale: true` is precisely the gatewayed Agent that stopped
    talking.
 
-8. **The budget is three heartbeat intervals.** When the Server offers a heartbeat interval
-   (`[connection_offer] heartbeat_interval_secs`,
-   [ADR-0013](0013-connection-settings-that-never-lead-to-plaintext.md)), the budget is three
-   times it; otherwise `stale_after_secs` in `server.toml`, default **90** — three times the
-   Baseline's default heartbeat of 30 seconds — and never zero. One missed heartbeat is a lost
-   packet; a view that flickers on every hiccup is one nobody trusts.
+8. **The budget is three heartbeat intervals, and on PostgreSQL the presence interval besides.**
+   When the Server offers a heartbeat interval (`[connection_offer] heartbeat_interval_secs`,
+   [ADR-0013](0013-connection-settings-that-never-lead-to-plaintext.md)), the budget is three times
+   it; otherwise `stale_after_secs` in `server.toml`, default **90** — three times the Baseline's
+   default heartbeat of 30 seconds — and never zero. On PostgreSQL the budget is that plus
+   `presence_interval_secs`, since `last_seen_ms` in the database may be one interval old. One
+   missed heartbeat is a lost packet; a view that flickers on every hiccup is one nobody trusts.
 
 9. **Staleness changes nothing about how the Server treats an Agent.** A stale Agent keeps its
    configuration, its package state, and its identity, is offered what it always would be, and
@@ -165,8 +236,9 @@ report, its own labels and its Client Agent's labels, in that order of precedenc
     - The approval that mints a host id writes the Host. Its record holds:
       - the subject values of the client certificate it was issued: country, state, locality,
         organization, organizational unit, organization identifier. Which of them a certificate
-        carries is [ADR-0022](0022-bootstrap-certificates-and-enrolment.md)'s decision on
-        carrying the bootstrap certificate's subject over; without it, none.
+        carries is
+        [ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)'s
+        decision on carrying the bootstrap certificate's subject over; without it, none.
       - its Gateway mark;
       - the `instance_uid`s bound to it;
       - the time of the approval;
@@ -192,8 +264,8 @@ report, its own labels and its Client Agent's labels, in that order of precedenc
       fetch what is offered to any Agent.
     - A certificate that names no host speaks for no Agent and fetches nothing.
     - A Client whose Server signs CSRs holds a host certificate after its first connection
-      ([ADR-0021](0021-admission-by-client-certificate-and-revocation.md)). An operator who
-      provisions certificates by hand names the host with that SAN URI.
+      ([ADR-0026](0026-admission-by-client-certificate-and-revocation.md)).
+      An operator who provisions certificates by hand names the host with that SAN URI.
     - In addition, each Agent record names the Host it last arrived over: its own Host on a
       direct connection, the Gateway's Host behind a Gateway. This is for the fleet view and for
       clause 19, and it grants nothing. A Server without `[client_ca]` has no Hosts, and its Agent
@@ -202,8 +274,8 @@ report, its own labels and its Client Agent's labels, in that order of precedenc
       only hosts whose certificate names a host (`urn:opamp-fleet:host:<id>`).
     - A request that presents no certificate at all exists only behind `Admission::open`, which
       serves tests and loopback development and which no Server configuration serves
-      ([ADR-0021](0021-admission-by-client-certificate-and-revocation.md)). Such a request is not
-      tested for an offer, just as it is not tested at admission.
+      ([ADR-0026](0026-admission-by-client-certificate-and-revocation.md)).
+      Such a request is not tested for an offer, just as it is not tested at admission.
 
 17. **`PUT /api/v1/agents/{instance_uid}/labels` sets an Agent's labels, whole.** Body
     `{"labels": {…}}`, string to string, replacing what was there; an empty map clears them. An
@@ -225,7 +297,7 @@ report, its own labels and its Client Agent's labels, in that order of precedenc
 19. **An Agent inherits the labels of its Client Agent.**
     - The Client Agent is the Agent a Client presents for itself, recognised by the
       `supervisor.kind.*` attributes it alone reports
-      ([ADR-0017](0017-supervisor-mode-and-its-kinds.md)).
+      ([ADR-0018](0018-supervisor-mode-and-its-kinds.md)).
     - Its labels hold for the other Agents of the same Client:
       - on a direct connection, the Agents bound to the same Host;
       - behind a Gateway, the Agents arriving over the same Gateway Host that report the same
@@ -253,7 +325,7 @@ report, its own labels and its Client Agent's labels, in that order of precedenc
 
 22. **A label change moves what is proposed, never what is offered.** Setting labels changes
     which Configurations and Deployments are candidates for the Agent; nothing reaches it until a
-    rollout act ([ADR-0026](0026-deployments-and-rollouts.md)).
+    rollout act ([ADR-0033](0033-deployments-and-rollouts.md)).
 
 23. **The bundled UI puts each remedy beside its diagnosis.** A stale Agent shows a *Stale* pill
     beside its connection pill. The forget action is offered on every row, not pre-filtered by
@@ -277,21 +349,22 @@ report, its own labels and its Client Agent's labels, in that order of precedenc
     - `GET /api/v1/hosts` lists each Host with its subject values and its Agents beside what
       else it lists.
 
-**Out of scope:** a configuration surface for choosing a storage backend and where Agent records
-and Hosts are stored ([ADR-0029](0029-the-servers-state-and-its-stores.md)); a retention policy
-for Agents nobody claims; acting on staleness (alerts, webhooks, filters); bulk labelling; the
-exact topology behind a Gateway; a Host for a machine the Server sees no certificate of; labels
-or editable fields on a Host itself; which subject values a certificate carries
-([ADR-0022](0022-bootstrap-certificates-and-enrolment.md)); writing the host register
-incrementally instead of whole; a global bound on the number of Hosts, which approvals and
-provisioned certificates already limit.
+**Out of scope:** a configuration surface for choosing a storage backend and where Agent records and
+Hosts are stored
+([ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md));
+a retention policy for Agents nobody claims; acting on staleness (alerts, webhooks, filters); bulk
+labelling; the exact topology behind a Gateway; a Host for a machine the Server sees no certificate
+of; labels or editable fields on a Host itself; which subject values a certificate carries
+([ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md));
+writing the host register incrementally instead of whole; a global bound on the number of Hosts,
+which approvals and provisioned certificates already limit.
 
 ## Alternatives considered
 
 - **Keep the fleet in memory.** Loses the inventory exactly when a host cannot repeat it, and
   turns every restart into a fleet-wide `ReportFullState` stampede.
 - **A concrete filesystem store, no port.** The simplest thing that persists, but the storage is
-  to be replaceable, and retrofitting a port rewrites the call sites it protects; four operations
+  to be replaceable, and retrofitting a port rewrites the call sites it protects; a few operations
   keep the abstraction cheap.
 - **A generic key-value port (`uid → bytes`).** Decides the encoding above the port, so a database
   adapter degenerates into a blob table.
@@ -343,7 +416,7 @@ provisioned certificates already limit.
 - **The Gateway adds the downstream host's id to what it forwards**, or **Gateway-set
   attributes.** This gives an exact, verified topology. But the Gateway would process instead of
   forward, which costs efficiency and the Gateway's simplicity
-  ([ADR-0015](0015-client-modes-and-the-gateway.md)). Rejected by the human.
+  ([ADR-0016](0016-client-modes-and-the-gateway.md)). Rejected by the human.
 - **Virtual hosts behind a Gateway, keyed by Gateway and `host.id`.** They would give an
   approximate host list. Label inheritance covers the need without a second kind of Host, so the
   human dropped them.
@@ -371,6 +444,14 @@ provisioned certificates already limit.
   fact, while the Server already keeps the labels in the record (clause 21). The record carries the
   labels and the Host the Agent last arrived over, and no separate label store exists (clauses 1, 3
   and 21).
+- **Every record loaded at startup and answered from memory with any store, connectedness never
+  persisted, and the port's writes whole records.** It holds while one Server is the store's only
+  writer. Where several instances serve one fleet
+  ([ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)),
+  an instance would answer from a copy another instance has changed, would not know which instance
+  carries an Agent, and a whole-record write would undo an act committed through another instance.
+  Rejected; clauses 2, 3, 4, 6 and 8 read and write per call on PostgreSQL and persist an Agent's
+  presence there.
 
 ## Sources / Prior art
 
@@ -401,26 +482,23 @@ provisioned certificates already limit.
   update](https://www.elastic.co/docs/api/doc/kibana/operation/operation-post-fleet-agents-bulk-update-agent-tags)
   — flat tags, added and removed in bulk.
 - [Hexagonal architecture](https://alistair.cockburn.us/hexagonal-architecture/) (Cockburn) — the
-  ports-and-adapters pattern behind clause 2
-  ([ADR-0009](0009-ports-and-adapters.md)).
+  ports-and-adapters pattern behind clause 2 ([ADR-0009](0009-ports-and-adapters.md)).
 - [opamp-go](https://github.com/open-telemetry/opamp-go) example server — keeps its agent map in
   memory and offers no persistence design to follow.
-- [ADR-0021](0021-admission-by-client-certificate-and-revocation.md) on the host a certificate
-  names, renewal, and that a Gateway hides its downstream certificates;
-  [ADR-0017](0017-supervisor-mode-and-its-kinds.md) on `supervisor.kind.*`;
-  [ADR-0016](0016-what-an-agent-reports-about-itself.md): `host.name`, `host.id`, `host.ip` and
+- On the host a certificate names, renewal, and that a Gateway hides its downstream certificates:
+  [ADR-0026](0026-admission-by-client-certificate-and-revocation.md);
+  [ADR-0018](0018-supervisor-mode-and-its-kinds.md) on `supervisor.kind.*`;
+  [ADR-0017](0017-what-an-agent-reports-about-itself.md): `host.name`, `host.id`, `host.ip` and
   `host.mac` are reported attributes.
 - The code: `check_report` and `prune` in `crates/fleet-server/src/revocation.rs`, the host minted
   at approval and `forget_agent` in `crates/fleet-server/src/fleet.rs`. Read in the source.
-- The working note on the Server's data model, in which the human chose each point of the Host
-  model.
 
 ## Consequences
 
 - Positive: the fleet view survives a restart, including the Agents not reporting, shown honestly
   as disconnected; restored gates mean a reconnecting Agent's compressed report is accepted and
   nothing that already runs is re-offered; a queued restart survives.
-- Positive: storage is a deployment choice behind a four-operation trait, and tests get an
+- Positive: storage is a deployment choice behind a trait of six operations, and tests get an
   in-memory fake for free.
 - Positive: the fleet view stops asserting what it does not know — gatewayed, polling, and wedged
   Agents become visible by one rule — and a decommissioned host's row can be removed.
@@ -456,8 +534,7 @@ provisioned certificates already limit.
 
 - [`fleet.rs`](../../crates/fleet-server/src/fleet.rs) unit tests:
   `an_agent_that_stopped_reporting_is_stale_while_its_connection_is_up`,
-  `an_agent_inside_its_budget_is_not_stale`,
-  `an_agent_that_promised_no_heartbeat_never_goes_stale`,
+  `an_agent_inside_its_budget_is_not_stale`, `an_agent_that_promised_no_heartbeat_never_goes_stale`,
   `an_offered_heartbeat_interval_sets_the_budget`, `a_disconnected_agent_is_forgotten`,
   `an_agent_that_is_still_reporting_is_refused`, `a_connected_agent_that_went_quiet_is_forgotten`,
   `a_silent_agent_is_forgotten_although_it_can_never_be_stale`,
@@ -478,8 +555,7 @@ provisioned certificates already limit.
   `a_corrupt_record_fails_the_load_by_name`,
   `labels_and_host_live_in_the_record_and_an_older_envelope_is_refused`.
 - [`labels.rs`](../../crates/fleet-server/src/labels.rs) unit tests:
-  `a_label_is_matched_like_a_reported_attribute`,
-  `a_label_never_overrides_what_the_agent_reports`,
+  `a_label_is_matched_like_a_reported_attribute`, `a_label_never_overrides_what_the_agent_reports`,
   `an_agent_that_reported_nothing_can_still_be_labelled`,
   `empty_keys_and_values_and_fleet_keys_are_refused`,
   `the_effective_description_takes_each_key_from_the_first_source_that_has_it`.
@@ -492,8 +568,7 @@ provisioned certificates already limit.
   `a_host_written_before_its_valid_until_takes_the_registers`,
   `a_hosts_valid_until_only_moves_forward`, `a_released_instance_uid_can_be_bound_by_another_host`;
   [`fs/revocation.rs`](../../crates/fleet-server/src/fs/revocation.rs):
-  `a_host_file_without_a_valid_until_still_loads`;
-  [`ca.rs`](../../crates/fleet-server/src/ca.rs):
+  `a_host_file_without_a_valid_until_still_loads`; [`ca.rs`](../../crates/fleet-server/src/ca.rs):
   `a_certificates_subject_values_are_read_by_attribute`.
 - [`rest_api.rs`](../../crates/fleet-server/tests/rest_api.rs):
   `forgetting_an_agent_that_is_still_reporting_is_refused`,
@@ -506,3 +581,30 @@ provisioned certificates already limit.
   `the_hosts_list_carries_subject_values_and_the_agents_behind_a_gateway`;
   [`packages.rs`](../../crates/fleet-server/tests/packages.rs)
   `a_label_aims_a_set_at_part_of_the_fleet`.
+- `get` and `query` of clause 2 and clauses 3, 4, 6 and 8 as they stand here are verified by the
+  tests
+  [ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+  names, and `query` on PostgreSQL by
+  [`postgres/agents.rs`](../../crates/fleet-server/src/postgres/agents.rs)
+  `the_query_reads_the_stored_presence_and_opening_reads_the_assignments_alone`.
+- Clause 2's writes that leave the rest of a record:
+  - That `put` and `write_report` leave the labels, the assignment and a pending restart as they
+    are stored is decided on PostgreSQL by
+    [`postgres/agents.rs`](../../crates/fleet-server/src/postgres/agents.rs)
+    `a_report_written_on_postgres_keeps_what_the_acts_wrote`; `put` writes a stored record
+    through the same statement as `write_report`.
+  - That `set_labels` and `set_restart_pending` write what they name alone is decided on both
+    stores by [`postgres/agents.rs`](../../crates/fleet-server/src/postgres/agents.rs)
+    `the_agent_port_contract_holds_on_the_filesystem` and
+    `the_agent_port_contract_holds_on_postgres`, which carry the marker of
+    [ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md).
+  - That a restart requested while another is delivered stays pending is decided on the filesystem
+    store by [`fleet.rs`](../../crates/fleet-server/src/fleet.rs)
+    `a_restart_requested_while_a_delivery_clears_one_stays_queued`, which carries the marker of
+    [ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md).
+    Across two instances on PostgreSQL,
+    [`tests/instances.rs`](../../crates/fleet-server/tests/instances.rs)
+    `a_restart_requested_through_one_instance_stays_until_the_carrying_instance_sends_it` decides
+    that a request stays queued until the carrying instance sends it, and that one made after the
+    send is queued again. No test races a request through one instance against a delivery through
+    another.

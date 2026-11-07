@@ -1,11 +1,11 @@
 //! The list of Agents on PostgreSQL
-//! (ADR-0049
+//! (ADR-0031
 //! clauses 5, 6, 8 and 9): the columns the core derives from each record and writes with it, the
 //! rows written without them derived again, and the one query that filters, sorts and cuts a page.
 //!
 //! The labels an Agent inherits and its Host's values are joined at read time, from the row of
 //! its Client Agent and from its Host, so the query places each Agent as the core places it in
-//! memory (ADR-0043 clauses 18 and 19), and its search text is the one
+//! memory (ADR-0030 clauses 18 and 19), and its search text is the one
 //! [`crate::listing::haystack`] builds.
 
 use std::collections::BTreeMap;
@@ -185,7 +185,7 @@ pub(super) fn derive_missing(database: &Database) -> Result<(), String> {
 
 /// Every row of `agents` with what is joined at read time: whether a connection carries it, its
 /// holder under a live lease, its Host, and the Client Agent of its group with the labels it
-/// passes on (ADR-0043 clause 19). A group is a Host the Agent arrived over directly, or a
+/// passes on (ADR-0030 clause 19). A group is a Host the Agent arrived over directly, or a
 /// Gateway's Host and the machine the Agent reports.
 const PLACED: &str = r#"
 WITH g AS (
@@ -218,7 +218,7 @@ v AS (
 )
 "#;
 
-/// The `fleet.host.*` keys and the field of a Host's subject values each is (ADR-0043 clause 18),
+/// The `fleet.host.*` keys and the field of a Host's subject values each is (ADR-0030 clause 18),
 /// in the order of their keys.
 const HOST_KEYS: [(&str, &str); 6] = [
     ("fleet.host.country", "country"),

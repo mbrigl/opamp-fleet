@@ -61,17 +61,17 @@ pub fn load(state_dir: &Path) -> Option<ConnectionSettingsOffers> {
 /// The file outranks `supervisor.toml` (ADR-0013 clause 9) — it decides where this Client connects
 /// and which certificate it presents — so it is written no wider than its owner, and the state
 /// directory holding it no wider than `0700`. On Windows the directory ACL under `%ProgramData%`
-/// protects it (ADR-0019); there is no mode to set.
+/// protects it (ADR-0020); there is no mode to set.
 ///
 /// `group` is the process account's group where a process account is registered: the state
-/// directory stays passed through by it (ADR-0037 clause 21).
+/// directory stays passed through by it (ADR-0021 clause 21).
 pub fn store(
     state_dir: &Path,
     group: Option<crate::storage::ProcessAccountGroup>,
     settings: &ConnectionSettingsOffers,
 ) -> std::io::Result<()> {
     // Never through a link at the directory's name or the file's: an install enrols as root in a
-    // directory that belongs to the service's account (ADR-0037).
+    // directory that belongs to the service's account (ADR-0021).
     crate::storage::create_shared_dir(
         state_dir,
         state_dir,
@@ -90,7 +90,7 @@ pub fn store(
 /// The **OpAMP** settings carry only what changes — a heartbeat-only offer must not erase a
 /// previously offered endpoint, and vice versa. Offered `headers` are never folded in: this Client
 /// applies none (ADR-0013 clause 8). The **own-telemetry** destinations do not: an offer
-/// that names any of them states all three (ADR-0016). The two rules live in one function because
+/// that names any of them states all three (ADR-0017). The two rules live in one function because
 /// one message carries both, and the difference between them is the whole of what this fold does.
 pub fn merge(
     stored: Option<&ConnectionSettingsOffers>,
@@ -101,7 +101,7 @@ pub fn merge(
     let pick = |field: fn(&OpAmpConnectionSettings) -> bool| -> Option<OpAmpConnectionSettings> {
         offered.filter(|s| field(s)).or(previous).cloned()
     };
-    // The own-telemetry destinations do not fold per signal (ADR-0016). An offer that names any of
+    // The own-telemetry destinations do not fold per signal (ADR-0017). An offer that names any of
     // the three states all three: a signal it leaves out is *stopped*, and a signal whose endpoint
     // it offers empty is withdrawn. An offer that names none of them says nothing about telemetry
     // — an OpAMP endpoint move, a heartbeat, a certificate — and leaves all three alone.
@@ -145,7 +145,7 @@ pub fn merge(
             destination_endpoint: pick(|s| !s.destination_endpoint.is_empty())
                 .map(|s| s.destination_endpoint)
                 .unwrap_or_default(),
-            // The issued client identity (ADR-0038). Folded like every other field: a later offer
+            // The issued client identity (ADR-0026). Folded like every other field: a later offer
             // that says nothing about the certificate leaves the one in force alone, which is what
             // makes an endpoint move safe for a fleet already on mutual TLS.
             certificate: pick(|s| s.certificate.is_some()).and_then(|s| s.certificate),
@@ -168,9 +168,9 @@ pub fn merge(
 ///
 /// None of the three is honoured, on purpose. `TLSConnectionSettings` is mostly a way to weaken
 /// verification — `insecure_skip_verify` would let a Server switch off the check that proves it is
-/// the Server — and trust here is an operator's file (ADR-0045). `ProxyConnectionSettings` has
+/// the Server — and trust here is an operator's file (ADR-0012). `ProxyConnectionSettings` has
 /// nothing on this Client to configure. Offered `headers` have no reader on the Agent plane, which
-/// admits by client certificate alone (ADR-0038): an applied one would be a value the Server plants
+/// admits by client certificate alone (ADR-0026): an applied one would be a value the Server plants
 /// on every connection of the fleet. They are named by their keys, never their values — the
 /// message travels to the Server and into the log file.
 pub fn unhonoured(settings: &OpAmpConnectionSettings) -> Result<(), String> {
@@ -341,10 +341,10 @@ mod tests {
         assert_eq!(merged.hash, b"t1");
     }
 
-    /// ADR-0016 rule 17: an offer that names any telemetry destination states all three. The
+    /// ADR-0017 rule 17: an offer that names any telemetry destination states all three. The
     /// traces endpoint in force is *stopped* by a metrics-only offer, not carried forward — which
     /// is the whole difference between a fleet that can turn a signal off and one that cannot.
-    /// Verifies: ADR-0016
+    /// Verifies: ADR-0017
     #[test]
     fn an_offer_naming_one_signal_stops_the_others() {
         let mut stored = telemetry_only(b"t1", "https://x/v1/metrics");
@@ -373,7 +373,7 @@ mod tests {
     /// certificate must not take the exporters down with it — that is what keeps the classes of
     /// ADR-0013 independent, and it is the schema's own "not set means unchanged", held at the
     /// level it still holds at.
-    /// Verifies: ADR-0016
+    /// Verifies: ADR-0017
     #[test]
     fn an_offer_silent_about_telemetry_leaves_all_three_alone() {
         let mut stored = telemetry_only(b"t1", "https://x/v1/metrics");
@@ -397,7 +397,7 @@ mod tests {
     /// Rule 3: an endpoint offered empty withdraws that signal — the only way to say "all three
     /// off", since by rule 2 an offer that names nothing means "unchanged". The withdrawal leaves
     /// the persisted state, so a restart does not bring the destination back.
-    /// Verifies: ADR-0016
+    /// Verifies: ADR-0017
     #[test]
     fn an_empty_endpoint_withdraws_the_signal() {
         let stored = telemetry_only(b"t1", "https://x/v1/metrics");
@@ -660,7 +660,7 @@ mod tests {
 
     /// The verification connect carries no `Authorization` on either transport — not one an offer
     /// planted in its `headers`, and not one a leftover `[auth]` in the file still names.
-    /// Verifies: ADR-0013, ADR-0038
+    /// Verifies: ADR-0013, ADR-0026
     #[tokio::test]
     async fn verify_sends_no_authorization_even_when_one_is_offered() {
         // The `http` probe builds a reqwest client, which needs a process-wide provider.

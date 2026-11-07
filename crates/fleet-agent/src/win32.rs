@@ -1,5 +1,5 @@
 //! What the second service and its registration need of Windows that neither the standard library,
-//! `tokio` nor `windows-service` offers (ADR-0037): security identifiers, the security descriptor
+//! `tokio` nor `windows-service` offers (ADR-0021): security identifiers, the security descriptor
 //! of the named pipe, the identity of a pipe's client and of its server, and job objects.
 //!
 //! The SID text and the pipe's SDDL are plain string logic, compiled on every platform so that
@@ -8,7 +8,7 @@
 //! build, and enabling them is a dependency decision (ADR-0008) this module does not take.
 
 /// The SID of `LocalSystem`, which never runs the second service and is never the Client's account
-/// where a process account is registered (ADR-0037 clause 16).
+/// where a process account is registered (ADR-0021 clause 16).
 pub const LOCAL_SYSTEM: &str = "S-1-5-18";
 
 /// `NT AUTHORITY\LocalService`.
@@ -112,7 +112,7 @@ pub fn virtual_account_sid(service: &str) -> Option<Sid> {
 }
 
 /// The SID of an account named in one of the passwordless forms a service may run under
-/// (ADR-0037 clauses 1 and 16), where it can be known without asking the system: a
+/// (ADR-0021 clauses 1 and 16), where it can be known without asking the system: a
 /// virtual account `NT SERVICE\<name>`, `LocalSystem`, and the two built-in service accounts. A
 /// group-managed service account (`name$`) is the domain's and is looked up instead; `None` for it
 /// and for every other name.
@@ -144,7 +144,7 @@ pub fn known_account_sid(account: &str) -> Option<Sid> {
 /// would let the Client's account serve the pipe itself (Named Pipe Security and Access Rights).
 pub const PIPE_CLIENT_ACCESS: u32 = 0x0012_0089 | 0x0000_0002;
 
-/// The security descriptor of the second service's named pipe, in SDDL (ADR-0037 clause 19): owned
+/// The security descriptor of the second service's named pipe, in SDDL (ADR-0021 clause 19): owned
 /// by the account the second service runs as, which the Client checks it for, and a protected DACL
 /// that grants the Client's account [`PIPE_CLIENT_ACCESS`] — nothing to create an instance — and
 /// the second service's own account all access, which it needs to create the pipe's next instance
@@ -158,11 +158,11 @@ pub fn pipe_sddl(own: &Sid, client: &Sid) -> String {
 
 /// What the process account and the Client's account may do with the second service's process:
 /// `SYNCHRONIZE` and `PROCESS_QUERY_LIMITED_INFORMATION`, to wait for it and ask about it, and
-/// nothing else (ADR-0036).
+/// nothing else (ADR-0021).
 pub const PROCESS_ASK_AND_WAIT: u32 = 0x0010_0000 | 0x0000_1000;
 
 /// What the process account may do with a thread of the second service: `SYNCHRONIZE` and
-/// `THREAD_QUERY_LIMITED_INFORMATION` (ADR-0036).
+/// `THREAD_QUERY_LIMITED_INFORMATION` (ADR-0021).
 pub const THREAD_ASK_AND_WAIT: u32 = 0x0010_0000 | 0x0000_0800;
 
 /// `PROCESS_ALL_ACCESS` and `THREAD_ALL_ACCESS`, which are the same mask: what `GA` maps to on a
@@ -170,7 +170,7 @@ pub const THREAD_ASK_AND_WAIT: u32 = 0x0010_0000 | 0x0000_0800;
 /// object says what was set, however the system stores a generic right.
 const ALL_ACCESS: u32 = 0x001f_ffff;
 
-/// The protected DACL of the second service's process, in SDDL (ADR-0036): the process account
+/// The protected DACL of the second service's process, in SDDL (ADR-0021): the process account
 /// `own` and the Client's account `client` may ask about it and wait for it, its owner may read its
 /// security descriptor and nothing more (`OWNER RIGHTS`, which takes the owner's implicit
 /// `WRITE_DAC`), and `LocalSystem` and the Administrators hold full access.
@@ -182,7 +182,7 @@ pub fn process_sddl(own: &Sid, client: &Sid) -> String {
     )
 }
 
-/// The protected DACL of each thread of the second service, in SDDL (ADR-0036): the process
+/// The protected DACL of each thread of the second service, in SDDL (ADR-0021): the process
 /// account `own` may ask about it and wait for it, its owner may read its security descriptor, and
 /// `LocalSystem` and the Administrators hold full access.
 #[must_use]
@@ -497,7 +497,7 @@ mod system {
     }
 
     /// The owner of the named pipe `handle` names: the account of the server that created it
-    /// (ADR-0037 clause 19). The handle must carry `READ_CONTROL` (GetSecurityInfo), which a client
+    /// (ADR-0021 clause 19). The handle must carry `READ_CONTROL` (GetSecurityInfo), which a client
     /// that opened the pipe for reading holds.
     ///
     /// # Errors
@@ -957,7 +957,7 @@ mod system {
     }
 
     /// The process that serves the named pipe the client end `pipe` is connected to
-    /// (GetNamedPipeServerProcessId; ADR-0037 clause 19).
+    /// (GetNamedPipeServerProcessId; ADR-0021 clause 19).
     ///
     /// # Errors
     /// Returns why it could not be read.
@@ -1659,7 +1659,7 @@ mod system {
     }
 
     /// A job object whose processes all end when its last handle closes
-    /// (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`): one per program the second service starts (ADR-0037
+    /// (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`): one per program the second service starts (ADR-0021
     /// clause 19). Every process the program starts belongs to it too, unless it breaks away, which
     /// the job does not allow.
     pub struct Job(OwnedHandle);
@@ -1794,7 +1794,7 @@ mod system {
     const GONE: i32 = 87;
 
     /// Sets the DACL of the kernel object `handle` names to the one `sddl` describes, protected,
-    /// on the object's own handle (SetSecurityInfo, ADR-0036).
+    /// on the object's own handle (SetSecurityInfo, ADR-0021).
     ///
     /// # Errors
     /// Returns why `sddl` carries no DACL, or why it could not be set.
@@ -1925,7 +1925,7 @@ mod system {
 
     /// The process `pid` opened to ask about it and wait for it (`SYNCHRONIZE |
     /// PROCESS_QUERY_LIMITED_INFORMATION`): while the handle is open, the id names that process
-    /// and no other (ADR-0036).
+    /// and no other (ADR-0021).
     ///
     /// # Errors
     /// Returns why it could not be opened: one that has ended among them.
@@ -1940,7 +1940,7 @@ mod tests {
     use super::*;
 
     /// A SID is read as the system writes it, and anything else is refused.
-    /// Verifies: ADR-0037
+    /// Verifies: ADR-0021
     #[test]
     fn a_sid_is_read_canonically() {
         assert_eq!(Sid::parse("S-1-5-18").expect("sid").as_str(), "S-1-5-18");
@@ -1968,7 +1968,7 @@ mod tests {
     /// The virtual account of a service has the SID the system gives it, which no service of that
     /// name needs to exist for: the well-known SID of `NT SERVICE\TrustedInstaller`, whatever case
     /// the name is written in.
-    /// Verifies: ADR-0037
+    /// Verifies: ADR-0021
     #[test]
     fn a_virtual_accounts_sid_is_derived_from_its_services_name() {
         const TRUSTED_INSTALLER: &str =
@@ -2003,8 +2003,8 @@ mod tests {
     }
 
     /// The pipe is owned by the second service's account and grants the Client's account reading
-    /// and writing, the service's own everything, and nobody else anything (ADR-0037 clause 19).
-    /// Verifies: ADR-0037
+    /// and writing, the service's own everything, and nobody else anything (ADR-0021 clause 19).
+    /// Verifies: ADR-0021
     #[test]
     fn the_pipe_admits_the_clients_account_alone() {
         let own = Sid::parse("S-1-5-80-1-2-3-4-5").expect("sid");
@@ -2028,8 +2028,8 @@ mod tests {
     /// The second service's process leaves the process account and the Client's account the right
     /// to ask about it and wait for it, its owner the right to read its DACL, and `LocalSystem` and
     /// the Administrators everything; each thread the same, without the Client's account
-    /// (ADR-0036).
-    /// Verifies: ADR-0036
+    /// (ADR-0021).
+    /// Verifies: ADR-0021
     #[test]
     fn the_second_services_process_and_threads_leave_its_account_only_asking_and_waiting() {
         let own = Sid::parse("S-1-5-80-1-2-3-4-5").expect("sid");
@@ -2055,7 +2055,7 @@ mod tests {
     }
 
     /// On Windows the derivation agrees with the system's own answer for an account that exists.
-    /// Verifies: ADR-0037
+    /// Verifies: ADR-0021
     #[cfg(windows)]
     #[test]
     fn the_derived_sid_is_the_one_the_system_looks_up() {
@@ -2069,7 +2069,7 @@ mod tests {
     /// Two DACLs that say the same are the same however they are written — an alias or its SID,
     /// a mask's alias or its number, with or without automatic inheritance — and two that differ
     /// in a SID, a right, a flag, the order of their ACEs or their protection are not.
-    /// Verifies: ADR-0037
+    /// Verifies: ADR-0021
     #[cfg(windows)]
     #[test]
     fn a_dacl_is_compared_by_what_it_says() {
@@ -2109,7 +2109,7 @@ mod tests {
     }
 
     /// A job ends what it holds; the SDDL of the pipe is one the system reads.
-    /// Verifies: ADR-0037
+    /// Verifies: ADR-0021
     #[cfg(windows)]
     #[test]
     fn a_job_ends_the_process_it_holds() {
@@ -2219,10 +2219,10 @@ mod lock_tests {
     /// The install lock a `LocalSystem` process holds — in session 0, under a logon session of
     /// its own, as an MSI's custom action runs — keeps out this elevated process in another, and
     /// is taken once it is let go: a private namespace bounded by the Administrators excludes
-    /// across logon sessions (ADR-0037 clauses 16 and 17). The `LocalSystem` process is a scheduled
+    /// across logon sessions (ADR-0021 clauses 16 and 17). The `LocalSystem` process is a scheduled
     /// task running this test binary's helper above; the test fails where the task cannot be
     /// created or run.
-    /// Verifies: ADR-0037
+    /// Verifies: ADR-0021
     #[test]
     fn the_install_lock_excludes_across_logon_sessions() {
         let dir = tempfile::tempdir().expect("tempdir");

@@ -1,28 +1,26 @@
-# ADR-0039: The Server keeps an append-only audit record of every security decision, each entry chained to the one before by its hash
+# ADR-0028: The Server keeps an append-only audit record of every security decision, each entry chained to the one before by its hash, and on PostgreSQL a failed write is kept and tried again
 
-- **Status:** ⚪ superseded by [ADR-0046](0046-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again.md)
+- **Status:** 🟢 accepted
 - **Date:** 2026-11-07
 - **Deciders:** Markus Brigl
-- **Applies to:** the audit port in `crates/fleet-server/src/audit.rs`, its writer in `crates/fleet-server/src/audit_log.rs`, its filesystem adapter in `crates/fleet-server/src/fs/audit.rs` and every database adapter beside it, every place in `crates/fleet-server/src/` that admits or refuses a peer, issues or revokes a certificate, takes an operator's act or records a package outcome, the `server audit-verify` command, and the `[audit]` section of `server.toml`
-- **Supersedes:** [ADR-0023](0023-an-append-only-audit-record.md)
+- **Applies to:** the audit port in `crates/fleet-server/src/audit.rs`, its writer in `crates/fleet-server/src/audit_log.rs`, its filesystem adapter in `crates/fleet-server/src/fs/audit.rs` and every database adapter beside it, every place in `crates/fleet-server/src/` that admits or refuses a peer, issues or revokes a certificate, takes an operator's act or records a package outcome, the `server audit-verify` command and the shutdown in `crates/fleet-server/src/main.rs`, the take of a lease in `crates/fleet-server/src/postgres/lease.rs` where it opens and closes chains, and the `[audit]` section of `server.toml`
 
 ## Context
 
-Every security measure of the Server decides something about a peer: admission and its refusal,
-the throttle, an enrolment request and its approval, a certificate issued or renewed, a
-revocation and the sessions it ended
-([ADR-0038](0038-admission-by-client-certificate-and-revocation.md),
-[ADR-0022](0022-bootstrap-certificates-and-enrolment.md)), a rollout
-([ADR-0026](0026-deployments-and-rollouts.md)) and a package outcome an Agent reports
-([ADR-0027](0027-packages-signatures-and-delivery.md)). Without a record of their own these
-leave log lines at best, mixed with everything else, kept as long as whatever collects the log
-keeps it, and changeable by whoever can write the log. None of them is demonstrable afterwards:
-an investigation cannot say who was admitted when, who approved a host, or whether a record was
-removed. Measure H15 of [`HARDENING.md`](../HARDENING.md) asks for exactly one record per
-decision, refusals included: the half that is easy to omit and the half an investigation needs.
+Every security measure of the Server decides something about a peer: admission and its refusal, the
+throttle, an enrolment request and its approval, a certificate issued or renewed, a revocation and
+the sessions it ended ([ADR-0026](0026-admission-by-client-certificate-and-revocation.md),
+[ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)),
+a rollout ([ADR-0033](0033-deployments-and-rollouts.md)) and a package outcome an Agent reports
+([ADR-0034](0034-packages-signatures-and-delivery.md)). Without a record of their own these leave
+log lines at best, mixed with everything else, kept as long as whatever collects the log keeps it,
+and changeable by whoever can write the log. None of them is demonstrable afterwards: an
+investigation cannot say who was admitted when, who approved a host, or whether a record was
+removed. An investigation needs exactly one record per decision, refusals included, and the refusals
+are the half that is easy to omit.
 
 The Agent plane admits by client certificate alone
-([ADR-0038](0038-admission-by-client-certificate-and-revocation.md)),
+([ADR-0026](0026-admission-by-client-certificate-and-revocation.md)),
 so there is no fleet credential to offer, rotate or revoke and none for the record to cover.
 Certificate issuance is a security decision like any other and waits for its record as admission
 does.
@@ -41,16 +39,13 @@ password; neither may reach the record.
 
 Where the record is kept, in files or in PostgreSQL, its permissions, how it is written and how
 long it goes back are part of the Server's state and its stores
-([ADR-0044](0044-the-servers-state-and-its-stores.md)).
+([ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)).
 
-This ADR restates [ADR-0023](0023-an-append-only-audit-record.md) in full. Its clauses 2, 3 and
-6 take up the chains per lease of
-[ADR-0042](0042-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance.md),
-and its clause 3 the lease of
-[ADR-0041](0041-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md).
-Its clause 3 also changes the recovery from a torn line: the repair records the hash of the last
-whole entry before the torn line, and the verifier checks it, so the anchor at the end of a record
-binds every entry before a linked repair as well.
+On PostgreSQL a write is a transaction, and the answer to its commit can be lost while the
+commit holds. The writer cannot tell such a write from one that failed; it asks the chain what it
+holds. A chain of a lease opens and ends with the lease: an instance that takes a lease without
+its chain open, or removes a lapsed lease and leaves its chain open, leaves a record that
+contradicts the leases.
 
 ## Decision
 
@@ -71,7 +66,10 @@ the SHA-256 of the entry before it, emit the same entry as a `tracing` event wit
      the Gateways' revocation list because its host is not marked as a Gateway, with that host;
    - operator acts: every mutating route of the REST API, with the operator's user name and the
      route, once before it runs and once with its status after; what a revocation, an approval,
-     a rejection or a window act did; and every refused or throttled operator sign-in;
+     a rejection, a window act, a Gateway mark or a floor did, a revocation's entry naming its
+     certificate by `authority` and `serial`, a Gateway mark's its host and whether the mark is
+     set, and a floor's its Agent type and version; and every refused or throttled operator
+     sign-in;
    - packages: a rollout, and each package outcome an Agent reports, installed or failed.
 
 2. **What an entry holds.** `seq` (a counter from 1 within its chain that never repeats there),
@@ -86,10 +84,16 @@ the SHA-256 of the entry before it, emit the same entry as a `tracing` event wit
    must not be able to fill the record.
 
 3. **The chains.**
-   - Each Server process writes its entries through one writer thread of its own, which takes
-     them from the channel of clause 5 in the order the decisions were taken.
-     [ADR-0044](0044-the-servers-state-and-its-stores.md)
+   - Each Server process writes the entries of its decisions through one writer thread of its
+     own, which takes them from the channel of clause 5 in the order the decisions were taken.
+     [ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
      clause 12 says where the entries are kept.
+   - On the PostgreSQL store two entries are written in the transaction of a lease instead: a
+     chain's `audit.chain_opened` in the one that takes its lease, and the `audit.chain_closed` of
+     a lease another instance takes over in the one that removes that lease
+     ([ADR-0029](0029-the-audit-record-is-one-hash-chain-per-lease-and-names-the-lease-each-decision-was-taken-under.md)
+     clause 3). No lease is then held without its chain open, and none is removed with its chain
+     left open.
    - On the filesystem store the record is one chain. The first entry of a file carries the hash
      of the last entry of the file before it, or 64 zeros for the first file ever. At startup the
      Server reads the end of the newest file that holds a line, takes `seq` from the last whole
@@ -115,16 +119,16 @@ the SHA-256 of the entry before it, emit the same entry as a `tracing` event wit
      closed by an `audit.chain_broken` that names no `last_whole`, or a run nothing closes, fails.
    - On the PostgreSQL store a Server instance draws a random chain identifier with each lease it
      takes and opens a chain of its own: a chain record with the identifier, the host name and the
-     time it was opened, and a first entry `audit.chain_opened` whose `prev` is 64 zeros. The
-     first chain the store ever opens names, as its `predecessor`, the last entry of the file
-     chain a migration left as an archive
-     ([ADR-0042](0042-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance.md)
-     clause 6). Every
-     entry the instance writes under that lease belongs to that chain, and the lease names it
-     ([ADR-0041](0041-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md)
-     clauses 1 and 3). How a chain ends, and how one that ended is told apart from one that was
-     cut, is clause 3 of
-     [ADR-0042](0042-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance.md).
+     time it was opened, and a first entry `audit.chain_opened` whose `prev` is 64 zeros. The first
+     chain the store ever opens names, as its `predecessor`, the last entry of the file chain a
+     migration left as an archive
+     ([ADR-0029](0029-the-audit-record-is-one-hash-chain-per-lease-and-names-the-lease-each-decision-was-taken-under.md)
+     clause 6). Every entry the instance writes under that lease belongs to that chain, and the
+     lease names it
+     ([ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+     clauses 1 and 3). How a chain ends, and how one that ended is told apart from one that was cut,
+     is clause 3 of
+     [ADR-0029](0029-the-audit-record-is-one-hash-chain-per-lease-and-names-the-lease-each-decision-was-taken-under.md).
    - On the PostgreSQL store an entry is written when the transaction that inserts it commits. A
      transaction that does not commit is a failed write (clause 5).
 
@@ -134,17 +138,37 @@ the SHA-256 of the entry before it, emit the same entry as a `tracing` event wit
    when the second ends. A flood of refusals therefore costs at most ten lines and a count per
    address and second, and every refusal is still accounted for.
 
-5. **Writing never blocks admission on a slow disk, and never silently fails.** Entries go
-   through a bounded channel of 10 000 to the writer thread, and a decision goes ahead once its
-   entry is queued. When the channel is full, admission and every operator act are refused with
-   `503` and no certificate is issued until it drains. When a write fails, the error is logged
-   at `error`, and from then on nothing is admitted, no certificate is issued and no operator
-   act runs until a write succeeds; the writer retries every second. A CSR held back for want of
-   a record is answered `ServerErrorResponse` `Unavailable` with `retry_info`, since the Server,
-   not the request, is at fault and the Agent asks again. Decisions that were queued when the
-   write failed, or refused for want of a record, are counted, and the next entry that lands
-   carries the count as `unrecorded_before`. A security decision is never taken without its
-   record queued, and a record that is lost is never lost silently.
+5. **Writing never blocks admission on a slow disk, and never silently fails.** Entries go through a
+   bounded channel of 10 000 to the writer thread, and a decision goes ahead once its entry is
+   queued. When the channel is full, admission and every operator act are refused with `503` and no
+   certificate is issued until it drains. The acts a restore repeats by their entries, which
+   withdraw trust, are made only with a place in the channel held for the entry that says what they
+   did: a revocation, a Gateway mark set or cleared, a floor set, a request rejected, and the window
+   closed by an operator. Such an act takes the place before it runs, is refused with `503` when
+   none is free, and writes into it what it did once it has run. An act whose store answered with an
+   error may have been made all the same, so it writes its place too, with the outcome `unknown` and
+   what it was asked to do; only an act known to have failed gives its place back unwritten. A
+   window closed by an operator is closed on the instance whatever its store answers, so its entry
+   says `closed`. The places held count against the 10 000. Once an orderly shutdown begins to close
+   the record, no place is given, and the close waits within its bound for the places held to be
+   written; with one still held when the bound ends, the close fails as it does when something
+   queued was not written. When a write fails, the error is logged at `error`, and from then on
+   nothing is admitted, no certificate is issued and no operator act runs until a write succeeds;
+   the writer retries every second. A CSR held back for want of a record is answered
+   `ServerErrorResponse` `Unavailable` with `retry_info`, since the Server, not the request, is at
+   fault and the Agent asks again. On the filesystem store the entries of a write that failed are
+   lost. On the PostgreSQL store the writer keeps them and writes them with its next attempt, in the
+   chain of the lease held then: a write whose answer was lost may have committed, so each attempt
+   writes only what the chain does not hold yet, and none of them is counted as lost. Decisions
+   whose entries a failed write lost, or that were refused for want of a record, are counted, and
+   the next entry that lands carries the count as `unrecorded_before`. Once an orderly shutdown has
+   closed the chain on PostgreSQL, a decision is refused for want of a record, and the count of
+   those is logged at `error` before the process exits. One remainder is counted and may not be
+   logged: refusals aggregated (clause 4) after the close's last flush of the aggregates and before
+   the chain counts as closed are counted when the writer flushes the aggregates next, at its next
+   tick once their second has passed or as it ends, which may come after the count was logged. A
+   security decision is never taken without its record queued, and, but for those refusals, a record
+   that is lost is never lost silently.
 
 6. **The log carries it too.** Every entry is also emitted as a `tracing` event with the target
    `audit`, the same fields, at `info`, so a log collector receives it without reading the store.
@@ -154,10 +178,16 @@ the SHA-256 of the entry before it, emit the same entry as a `tracing` event wit
 **Out of scope:** an audit record on the Client; shipping the record to a remote store or
 signing entries with a key; a REST route to read the record; retention by age on the filesystem
 store. Where the record is kept, its permissions, its writing and how long it goes back are
-[ADR-0044](0044-the-servers-state-and-its-stores.md)'s.
+[ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)'s.
 
 ## Alternatives considered
 
+- **Counting the entries of a failed write as lost on PostgreSQL too** — one rule for both
+  stores, but a write whose answer was lost may have landed, and the count would name as lost
+  what the record holds.
+- **Writing `audit.chain_opened` and the close of a lapsed lease through the writer thread** —
+  one writer for every entry, but a lease would be held, or removed, for as long as the writer
+  takes, without its chain opened or closed.
 - **Only the normal log, under a target of its own** — retention and integrity would depend on
   whatever collects the log, and a host without a collector keeps nothing an investigation can
   rely on.
@@ -171,10 +201,24 @@ store. Where the record is kept, its permissions, its writing and how long it go
   aggregation keeps the count.
 - **An audit record on the Client as well** — a second format to maintain; the Client reports
   its package outcomes to the Server, which records them.
+- **One chain for the whole record, whatever the store.** Two writers cannot extend one chain
+  without serialising every security decision of the fleet on one lock across processes.
+  Rejected; on PostgreSQL each lease writes a chain of its own
+  ([ADR-0029](0029-the-audit-record-is-one-hash-chain-per-lease-and-names-the-lease-each-decision-was-taken-under.md)),
+  and the filesystem store keeps one.
+- **A repair of a torn line that chains on it and links to nothing before it.** The anchor at the
+  end of a record would bind the entries after a repair, not those before it, and a repair could
+  restart the chain anywhere. Rejected; clause 3 has the repair name `last_whole`, which the
+  verifier checks.
+- **A failed write on PostgreSQL loses its entries, which the next entry counts as
+  `unrecorded_before`, as on the filesystem store.** A commit whose answer was lost may hold all
+  the same, so the writer cannot tell a lost entry from one written, and the count would be wrong
+  either way; a database that is briefly away would cost entries that could still be written.
+  Rejected; clause 5 keeps them and writes what the chain does not hold yet.
 
 ## Sources / Prior art
 
-- [`HARDENING.md`](../HARDENING.md), measure H15 and the observable it names.
+- [`HARDENING.md`](../HARDENING.md), the entry *An audit record of every security decision*.
 - [OWASP Logging Cheat
   Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html)
   — which events to record, and never to record secrets.
@@ -201,10 +245,15 @@ store. Where the record is kept, its permissions, its writing and how long it go
 - `crates/fleet-server/src/audit_log.rs` tests: `each_entry_carries_the_hash_of_the_one_before`,
   `the_chain_survives_a_restart_and_a_rotation`, `a_truncated_file_is_recorded_as_a_broken_chain`,
   `refusals_beyond_ten_a_second_are_aggregated_with_their_count` (clauses 2, 3, 4),
-  `a_write_that_fails_refuses_until_one_succeeds` (clause 5).
+  `a_write_that_fails_refuses_until_one_succeeds`,
+  `a_held_place_counts_against_the_channel_until_it_is_written_or_given_back`,
+  `the_close_waits_for_the_places_held_and_gives_none_once_it_began` (clause 5);
+  `crates/fleet-server/src/api.rs` tests
+  `a_revocation_whose_store_answer_was_lost_is_recorded_as_unknown` and
+  `an_act_withdrawing_trust_whose_store_answered_an_error_is_recorded_all_the_same` (clause 5).
 - `crates/fleet-server/src/fs/audit.rs` test:
   `the_record_is_owner_only_and_continues_where_it_ended` (clause 3; the file's permissions are
-  [ADR-0044](0044-the-servers-state-and-its-stores.md)'s).
+  [ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)'s).
 - The repair's link (clause 3): `crates/fleet-server/src/audit_log.rs` tests
   `a_truncated_file_is_recorded_as_a_broken_chain`,
   `a_torn_line_holds_only_when_the_next_entry_records_it_as_broken` and
@@ -220,8 +269,13 @@ store. Where the record is kept, its permissions, its writing and how long it go
   `an_admission_and_its_refusal_each_leave_one_entry`, which refuses a revoked certificate,
   `an_issued_certificate_is_recorded_with_its_predecessor`,
   `a_revocation_records_the_sessions_it_ended`, `an_operator_act_names_the_operator`,
-  `an_audit_that_cannot_write_refuses_admission` (clauses 1, 5). That no entry holds the
-  operator's password is asserted by `an_operator_act_names_the_operator`.
+  `an_audit_that_cannot_write_refuses_admission`,
+  `a_revocation_whose_entry_cannot_be_queued_is_not_made`,
+  `a_revocation_is_recorded_with_its_certificate`,
+  `an_act_withdrawing_trust_whose_entry_cannot_be_queued_is_not_made`,
+  `an_act_withdrawing_trust_is_recorded_with_what_a_restore_needs` (clauses 1, 5), on PostgreSQL
+  also `crates/fleet-server/src/postgres/audit.rs` `a_revocation_is_recorded_with_its_certificate`.
+  That no entry holds the operator's password is asserted by `an_operator_act_names_the_operator`.
 - `crates/fleet-server/tests/mutual_tls.rs`:
   `an_authorization_an_older_client_sends_is_never_written`: an Agent admitted on its
   certificate while sending an `Authorization` header leaves an admission entry that holds
@@ -230,7 +284,15 @@ store. Where the record is kept, its permissions, its writing and how long it go
   member connection gets no certificate and is answered `Unavailable` with `retry_info`
   (clause 5); `an_unmarked_member_asking_for_the_list_leaves_a_refusal` (clause 1).
 - `crates/fleet-server/src/fleet.rs`: `unavailable_tells_the_agent_when_to_retry` (clause 5).
+- A failed write on PostgreSQL is kept and written once, whether or not its answer was lost:
+  `crates/fleet-server/src/postgres/audit.rs` tests
+  `a_write_whose_answer_was_lost_is_not_written_again` and
+  `a_landed_write_is_not_written_again_into_the_next_chain` (clause 5); a decision after the
+  shutdown's close is refused and counted, and an aggregate that falls due after it is counted:
+  `a_decision_after_the_shutdowns_close_is_refused_and_counted`,
+  `an_aggregate_past_the_shutdowns_close_is_counted_and_keeps_the_count` (clause 5). No test reads
+  the count from the log line the process writes before it exits.
 - Clauses 2 and 3 as they stand here, the chains per lease on the PostgreSQL store included, are
   verified by the tests
-  [ADR-0042](0042-the-audit-record-is-one-hash-chain-per-lease-of-a-server-instance.md)
+  [ADR-0029](0029-the-audit-record-is-one-hash-chain-per-lease-and-names-the-lease-each-decision-was-taken-under.md)
   names.

@@ -100,7 +100,7 @@ The checks beyond these, each for what the plain build cannot show:
 | Check | Command | When, and what it needs |
 |---|---|---|
 | `opamp` per feature | `for f in "" client server; do cargo clippy -p opamp --all-targets --no-default-features --features "$f" -- -D warnings; done` | each feature stands alone (ADR-0008); run by `check-rust.sh` |
-| fewer Supervisor kinds | `cargo clippy -p fleet-agent --all-targets --no-default-features -- -D warnings && cargo test -p fleet-agent --no-default-features` | a build leaving a wrapped kind out compiles and refuses its `type` (ADR-0017); run by `check-rust.sh` |
+| fewer Supervisor kinds | `cargo clippy -p fleet-agent --all-targets --no-default-features -- -D warnings && cargo test -p fleet-agent --no-default-features` | a build leaving a wrapped kind out compiles and refuses its `type` (ADR-0018); run by `check-rust.sh` |
 | Windows build | `cargo xwin clippy -p fleet-agent --all-targets --target x86_64-pc-windows-msvc -- -D warnings` | on a change to platform-gated code; needs `cargo install cargo-xwin` and `rustup target add x86_64-pc-windows-msvc`; CI builds the Client on Windows |
 | supply chain | `cargo deny check` | as [`deny.toml`](deny.toml) sets it; needs `cargo install cargo-deny`; the `Security audit` workflow runs it weekly and on lockfile changes |
 | fuzzing | `cargo +nightly fuzz run <target> fuzz/corpus/<target> fuzz/seeds/<target>` | the targets are in [`fuzz/Cargo.toml`](fuzz/Cargo.toml); needs `cargo install cargo-fuzz` and nightly; the `Fuzz` workflow runs them daily |
@@ -117,7 +117,7 @@ The version is `[workspace.package] version` in [`Cargo.toml`](Cargo.toml), so b
 reviewed commit. The `Release` workflow makes the `version/*` tag from it, then builds and publishes
 the Client's archive and native packages per platform, the operator tool, an SBOM beside each,
 `SHA256SUMS`, and the Server's image `ghcr.io/mbrigl/opamp-fleet-server:<version>`, every one
-attested (ADR-0033, ADR-0040). Started with `dry_run`, the default, it builds everything and
+attested (ADR-0038, ADR-0039). Started with `dry_run`, the default, it builds everything and
 publishes nothing. How an operator checks a download is in
 [the manual](docs/manual/tools.md#getting-it), and the image in
 [the Server's manual](docs/manual/server.md#in-a-container).
@@ -134,9 +134,9 @@ What still needs a human, per platform:
 - starting at **boot**, the service's [log](docs/manual/client.md#where-the-services-logs-are), and
   the Agent in the fleet UI;
 - an **SELinux-enforcing host**: the `.rpm` install must start, and a service dying with
-  `status=203/EXEC` and an AVC denial is the failure ADR-0019 clause 12 prevents;
+  `status=203/EXEC` and an AVC denial is the failure ADR-0020 clause 12 prevents;
 - each wrapped kind under the packaged account `opamp-fleet` and under `--run-as root`: it starts,
-  reports, and its `sudo` or setuid helpers still work (ADR-0037).
+  reports, and its `sudo` or setuid helpers still work (ADR-0021).
 
 ## Usage
 
@@ -151,11 +151,6 @@ Deployment, and the Agent reporting it applied. From there:
   the records moved by `server migrate-to-postgres` and the artifacts by `server blobs-to-s3`;
 - [the REST API](docs/manual/server.md#the-rest-api), whose contract is the OpenAPI document at
   `/api/v1/openapi.json`.
-
-## Repository settings
-
-The repository settings are listed under
-[Repository settings](CONTRIBUTING.md#repository-settings) in the contributing guide.
 
 ## Template
 

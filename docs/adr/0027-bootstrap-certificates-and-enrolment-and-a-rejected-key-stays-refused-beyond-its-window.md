@@ -1,16 +1,15 @@
-# ADR-0052: Bootstrap certificates and enrolment, and a rejected key stays refused beyond its window
+# ADR-0027: Bootstrap certificates and enrolment, and a rejected key stays refused beyond its window
 
 - **Status:** 🟢 accepted
 - **Date:** 2026-11-07
 - **Deciders:** Markus Brigl
 - **Applies to:** the bootstrap-certificate and enrolment routes of the Operator plane in `crates/fleet-server/src/api.rs`, the issuing and recording of bootstrap certificates in `crates/fleet-server/src/bootstrap.rs`, the signing of host certificates in `crates/fleet-server/src/ca.rs`, the approval and renewal paths in `crates/fleet-server/src/fleet.rs`, the pending queue and the rejected keys in `crates/fleet-server/src/enrolment.rs`, their filesystem adapter in `crates/fleet-server/src/fs/enrolment.rs`, their PostgreSQL adapter in `crates/fleet-server/src/postgres/enrolment.rs` and its table in the schema, and the queue's answer in `crates/fleet-server/src/transport.rs`, the `[enrolment]` section of `server.toml` in `crates/fleet-server/src/config.rs`, the password rule in `crates/fleet-core/src/pkcs12.rs`, the Enrolments tab in `crates/fleet-server/static/index.html`, `service install`, its flags and the questionnaire in `crates/fleet-agent/src/cli.rs`, `crates/fleet-agent/src/main.rs` and `crates/fleet-agent/src/config_init.rs`, the enrolment in `crates/fleet-agent/src/service/enrol.rs`, the steps `packaging/linux/postinst` prints, the `p12-keystore` crate in `Cargo.toml`, and every document that tells an operator how to issue, hand out, revoke, list or delete a bootstrap certificate, approve an enrolment, or install a Client
-- **Supersedes:** [ADR-0022](0022-bootstrap-certificates-and-enrolment.md)
 
 ## Context
 
 A host becomes a Host by enrolment: it presents a bootstrap certificate, files a CSR, and waits
 until an operator approves it. Admission itself is by the client certificate the Server issues
-then ([ADR-0038](0038-admission-by-client-certificate-and-revocation.md)). This ADR governs the
+then ([ADR-0026](0026-admission-by-client-certificate-and-revocation.md)). This ADR governs the
 bootstrap certificate from its issue to the host certificate it leads to, and the install that
 carries it onto a host.
 
@@ -26,7 +25,7 @@ The forces:
   password": OpenSSL, Windows, macOS Keychain and Java import it. OpenSSL 3 writes it by default
   with AES-256-CBC under PBKDF2 and an HMAC-SHA-256 MAC. `rustls` and `rcgen` read PEM and DER
   only, and OpenSSL is banned from the build (`deny.toml`,
-  [ADR-0045](0045-tls-1-3-two-planes-and-bounded-input.md)).
+  [ADR-0012](0012-tls-1-3-two-planes-and-bounded-input.md)).
 - **The password protects one thing:** the bootstrap key inside `bootstrap.p12`. That key does not
   admit a host; it lets a host file an enrolment request while a window is open, and every request
   waits for an operator. A leaked file is attacked offline, where no rate limit applies, and the
@@ -85,34 +84,35 @@ find the bootstrap identity beside its program and enrol with it.
    `400`, naming it, so every Host has a customer and a site its Selectors can rely on. The other
    four are optional. Each may appear at most once. A key outside this set is answered `400`. The
    Server sets the common name by the rule of the fleet's certificate names
-   ([ADR-0032](0032-the-operator-program-opamp-fleetctl.md)), and the operator never does. The
+   ([ADR-0037](0037-the-operator-program-opamp-fleetctl.md)), and the operator never does. The
    order in the subject is C, ST, L, O, OU, organizationIdentifier, CN. The values describe and
    select through the effective description; they authorize nothing.
 
 2. **A bootstrap certificate's subject is the operator's choice per issue, and the host certificate
    carries it.** The common name of a bootstrap certificate follows the rule of the fleet's
-   certificate names ([ADR-0032](0032-the-operator-program-opamp-fleetctl.md)). Its other
+   certificate names ([ADR-0037](0037-the-operator-program-opamp-fleetctl.md)). Its other
    attributes are what the issuing request names (clause 1), not the bootstrap CA's; the
    organization behind the CA is read from its issuer. A host certificate carries the bootstrap
    certificate's values (clause 12, and the approval's copy of them in
-   [ADR-0015](0015-client-modes-and-the-gateway.md)) and its own common name under that rule.
+   [ADR-0016](0016-client-modes-and-the-gateway.md)) and its own common name under that rule.
 
 3. **The Server issues a bootstrap certificate on request, always as a PKCS#12 file.**
    `POST /api/v1/bootstrap-certificates` with a JSON body
    `{"subject": {…}, "validity_days": n, "password": "…"}` (`Content-Type: application/json`, as
    `POST /api/v1/revocations`; `validity_days` as
-   [ADR-0032](0032-the-operator-program-opamp-fleetctl.md) clause 14 bounds it), `password`
-   required — a request without it is answered `400`, naming it — makes a fresh ECDSA P-256 key
-   and signs a certificate with the bootstrap CA's key.
-   The certificate is `CA:FALSE`, `digitalSignature`, `clientAuth`, with a 16-byte random serial
-   ([ADR-0038](0038-admission-by-client-certificate-and-revocation.md)) and no subject alternative
-   name. The Server makes the PKCS#12 file of clause 4, records and keeps it as the record of
-   issued bootstrap certificates states
-   ([ADR-0044](0044-the-servers-state-and-its-stores.md)), and answers `201` with `serial`,
-   `subject`, `not_before`, `not_after` and `certificate_pem`, and no `private_key_pem`. The key
-   exists in plaintext only in the Server's memory while it issues; it leaves the Server only
-   inside that file. A host that needs the pair as PEM takes it out of the file with
-   `opamp-fleetctl pki p12-extract` ([ADR-0032](0032-the-operator-program-opamp-fleetctl.md)).
+   [ADR-0037](0037-the-operator-program-opamp-fleetctl.md) clause 14 bounds it), `password` required
+   — a request without it is answered `400`, naming it — makes a fresh ECDSA P-256 key and signs a
+   certificate with the bootstrap CA's key. The certificate is `CA:FALSE`, `digitalSignature`,
+   `clientAuth`, with a 16-byte random serial
+   ([ADR-0026](0026-admission-by-client-certificate-and-revocation.md)) and no subject alternative
+   name. The Server makes the PKCS#12 file of clause 4, records and keeps it as the record of issued
+   bootstrap certificates states
+   ([ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)),
+   and answers `201` with `serial`, `subject`, `not_before`, `not_after` and `certificate_pem`, and
+   no `private_key_pem`. The key exists in plaintext only in the Server's memory while it issues; it
+   leaves the Server only inside that file. A host that needs the pair as PEM takes it out of the
+   file with `opamp-fleetctl pki p12-extract`
+   ([ADR-0037](0037-the-operator-program-opamp-fleetctl.md)).
 
 4. **The file.** A `bootstrap.p12` holds one private key and the one bootstrap certificate it
    belongs to, and nothing else: neither the bootstrap CA, nor the server CA, nor any other
@@ -125,11 +125,11 @@ find the bootstrap identity beside its program and enrol with it.
    issued; a file issued before opens with the password it was issued under. The password is not
    stored, logged or audited anywhere, on the Server or on the host. It reaches the Server on the
    Operator plane, which beyond the loopback serves TLS only
-   ([ADR-0038](0038-admission-by-client-certificate-and-revocation.md)).
+   ([ADR-0026](0026-admission-by-client-certificate-and-revocation.md)).
 
 6. **The server CA stays a file of its own.** `server-ca.pem` is the trust anchor written as
    `[tls] ca_file` and kept for every later connection and renewal, while the bootstrap identity
-   serves once and is removed ([ADR-0019](0019-the-installed-service-and-its-state.md)). It comes
+   serves once and is removed ([ADR-0020](0020-the-installed-service-and-its-state.md)). It comes
    from the operator's offline directory, not from the Server it is meant to verify, and the Server
    never puts it into a PKCS#12 file.
 
@@ -138,12 +138,12 @@ find the bootstrap identity beside its program and enrol with it.
    certificate whose revocation is on the list, and answers `204`. It answers `409` for a
    certificate that is not revoked — revoke it first — and `404` for a serial the record does not
    hold. It touches the revocation list not at all: the certificate stays refused at the handshake
-   for as long as it is valid ([ADR-0038](0038-admission-by-client-certificate-and-revocation.md)).
+   for as long as it is valid ([ADR-0026](0026-admission-by-client-certificate-and-revocation.md)).
    A request that still carries it is shown as *not issued here*, as one with a certificate made
    elsewhere is. Lifting the revocation of a deleted certificate is still possible through
    `DELETE /api/v1/revocations/{id}` and lets it enrol again; the record does not list it again.
    The route is cross-site protected as every changing route of the plane is
-   ([ADR-0038](0038-admission-by-client-certificate-and-revocation.md)).
+   ([ADR-0026](0026-admission-by-client-certificate-and-revocation.md)).
 
 8. **The Enrolments tab issues, lists, revokes and deletes bootstrap certificates.**
    - The tab issues one through the route of clause 3, with clause 1's six fields, the validity and
@@ -154,8 +154,8 @@ find the bootstrap identity beside its program and enrol with it.
      PKCS#12 file.
    - The row of each certificate whose entry says `p12` offers **Save bootstrap.p12**, in any page
      and at any time, through the download route of the record of issued bootstrap certificates
-     ([ADR-0044](0044-the-servers-state-and-its-stores.md)). A certificate issued elsewhere offers
-     nothing to save.
+     ([ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)).
+     A certificate issued elsewhere offers nothing to save.
    - The tab lists the certificates of `GET /api/v1/bootstrap-certificates`, each with its subject
      values. A valid one has a press that revokes it by its serial with the authority `bootstrap`.
      A revoked one has a **Delete** press that asks first and then deletes its entry through the
@@ -167,7 +167,7 @@ find the bootstrap identity beside its program and enrol with it.
 9. **An enrolment connection may only send a CSR, the CSR waits for an operator, and one bootstrap
    certificate holds at most a share of the queue.** It is admitted only while the window is open;
    outside a window it is answered `503`, which the throttle of failed handshakes per address
-   ([ADR-0038](0038-admission-by-client-certificate-and-revocation.md)) does not count, so hosts
+   ([ADR-0026](0026-admission-by-client-certificate-and-revocation.md)) does not count, so hosts
    waiting for an operator cannot throttle the members behind the same address. The Server reads
    nothing from its messages but `connection_settings_request.opamp.certificate_request`: it
    creates no Agent record, assigns nothing and makes no offer but the issued certificate. A
@@ -181,7 +181,7 @@ find the bootstrap identity beside its program and enrol with it.
    beyond the share of its bootstrap certificate is audited once per certificate and window as
    `enrolment.refused` with the reason. A re-sent CSR that already has its entry is never refused
    by either bound. On approval the Server signs it
-   ([ADR-0038](0038-admission-by-client-certificate-and-revocation.md)) and offers the certificate
+   ([ADR-0026](0026-admission-by-client-certificate-and-revocation.md)) and offers the certificate
    on that connection the way it offers any certificate; the Agent then reconnects with it. On
    rejection the CSR is answered `BadRequest`, and the connection is closed.
 
@@ -193,7 +193,7 @@ find the bootstrap identity beside its program and enrol with it.
       - the bootstrap certificate's fingerprint and serial (`bootstrap_serial`), in the lowercase
         hex without leading zeros that `GET /api/v1/bootstrap-certificates` lists;
       - the six subject values an approval would carry, read under the approval's rules
-        ([ADR-0015](0015-client-modes-and-the-gateway.md)), or, where those rules refuse them,
+        ([ADR-0016](0016-client-modes-and-the-gateway.md)), or, where those rules refuse them,
         `subject_refusal`: the reason, naming the attribute. The operator sees before pressing
         Approve what it will carry or why it will be refused.
     - The CSR's subject is not listed, because it is neither trusted nor carried.
@@ -201,7 +201,7 @@ find the bootstrap identity beside its program and enrol with it.
       issued names that entry.
     - `POST /api/v1/enrolments/{id}/approve` and `POST /api/v1/enrolments/{id}/reject` decide one
       request. Both are body-less `POST` acts under the Operator plane's cross-site rule
-      ([ADR-0038](0038-admission-by-client-certificate-and-revocation.md)).
+      ([ADR-0026](0026-admission-by-client-certificate-and-revocation.md)).
       - An approval of an id no request waits under, unknown, decided or expired, is answered
         `404`.
       - A rejection of an id the queue does not hold is answered `204`, with the window open or
@@ -213,7 +213,7 @@ find the bootstrap identity beside its program and enrol with it.
     - The Client logs its request's public-key fingerprint, so an operator can match a pending
       request to a host.
     - Renewal by an Agent that holds a certificate from the client CA stays automatic
-      ([ADR-0038](0038-admission-by-client-certificate-and-revocation.md)) and never enters the
+      ([ADR-0026](0026-admission-by-client-certificate-and-revocation.md)) and never enters the
       queue.
 
 11. **A certificate proves membership and its host, and carries its bootstrap certificate's
@@ -223,17 +223,17 @@ find the bootstrap identity beside its program and enrol with it.
     - The request dictates neither the certificate's subject nor its powers. The Server sets the
       subject to:
       - the six attributes of clause 1, copied from the bootstrap certificate an approval reads
-        ([ADR-0015](0015-client-modes-and-the-gateway.md)) or from the certificate a renewal
+        ([ADR-0016](0016-client-modes-and-the-gateway.md)) or from the certificate a renewal
         renews (clause 12);
       - the common name the rule of the fleet's certificate names derives
-        ([ADR-0032](0032-the-operator-program-opamp-fleetctl.md)).
+        ([ADR-0037](0037-the-operator-program-opamp-fleetctl.md)).
     - The Server signs a client-authentication leaf only — `CA:FALSE`, `digitalSignature`,
       `clientAuth`. It drops every requested SAN and puts in one of its own, the URI
       `urn:opamp-fleet:host:<id>`.
     - The CSR's subject is still searched for claims
-      ([ADR-0038](0038-admission-by-client-certificate-and-revocation.md)) and is never copied.
+      ([ADR-0026](0026-admission-by-client-certificate-and-revocation.md)) and is never copied.
     - The host is minted when an operator approves an enrolment and carried on by every renewal
-      ([ADR-0015](0015-client-modes-and-the-gateway.md)). A certificate an operator provisioned
+      ([ADR-0016](0016-client-modes-and-the-gateway.md)). A certificate an operator provisioned
       without one is given a host derived from its issuer and serial when it is first renewed.
     - An `instance_uid` is spoken for by the host whose certificate first reported it:
       - A connection that presents another host's certificate and reports for it is re-keyed
@@ -248,7 +248,7 @@ find the bootstrap identity beside its program and enrol with it.
       what it speaks for and how many valid certificates it holds.
 
 12. **A renewal carries the predecessor's values unchanged.** A renewal
-    ([ADR-0015](0015-client-modes-and-the-gateway.md)) copies the six attributes from the
+    ([ADR-0016](0016-client-modes-and-the-gateway.md)) copies the six attributes from the
     certificate it renews, and only from it, without applying clause 1's rules again: a host whose
     certificate was provisioned before them still renews. A value its encoding cannot hold fails
     the renewal. The Server checks that the new certificate carries exactly those values. A Host's
@@ -258,7 +258,7 @@ find the bootstrap identity beside its program and enrol with it.
     dependency.** `rcgen` (features stated: `crypto`, `ring`, `pem`, `x509-parser`) generates the
     CSR and signs it; `time` expresses validity; `x509-parser` reads a certificate's validity for
     the renewal window. The `ring` backend is the provider
-    [ADR-0045](0045-tls-1-3-two-planes-and-bounded-input.md) already installs, so no OpenSSL and no
+    [ADR-0012](0012-tls-1-3-two-planes-and-bounded-input.md) already installs, so no OpenSSL and no
     cmake enter the build. `ring` compiles C and assembly in its build script, so a C compiler is
     needed either way; what this keeps is the absence of system libraries. `p12-keystore` (pinned
     exactly, `default-features = false`, so its `pbes1` feature with `rc2` and `des` is not linked)
@@ -272,7 +272,7 @@ find the bootstrap identity beside its program and enrol with it.
     the program is staged, so it is where the operator ran the program from.
     `service install --fleet-files <dir>` names the directory the install looks in instead, for all
     of the fleet's files, with or without `--interactive`; wherever this ADR or
-    [ADR-0019](0019-the-installed-service-and-its-state.md) says "beside the program", that
+    [ADR-0020](0020-the-installed-service-and-its-state.md) says "beside the program", that
     directory is meant when the flag is given. A `<dir>` that is not a readable directory fails the
     install before anything is written, naming the flag. The install never looks in both. A file
     counts only when it is a readable regular file under its exact name. **A bootstrap identity**
@@ -327,10 +327,10 @@ find the bootstrap identity beside its program and enrol with it.
     **The answered CA is copied beside the written file**, as `server-ca.pem`, owner-only on Unix,
     and the file names the copy. A copy left by an earlier answer is replaced. The copy is handed
     over to the service account with the file, as the install hands over the configuration
-    ([ADR-0037](0037-the-accounts-the-service-runs-under.md)). The questionnaire asks nothing about
+    ([ADR-0021](0021-the-accounts-the-service-runs-under.md)). The questionnaire asks nothing about
     the self-update: the file carries `[packages] self_update = true`, and the verification key
     decides whether that takes effect
-    ([ADR-0018](0018-the-client-updates-itself-from-a-signed-package.md)). Everything else
+    ([ADR-0019](0019-the-client-updates-itself-from-a-signed-package.md)). Everything else
     is written as commented defaults. No question asks for a credential, and no written file
     has an `[auth]` section; a leftover `[auth]` section is kept and ignored. The
     bootstrap password is not a credential of either plane: it opens a file on the host and is
@@ -350,7 +350,7 @@ find the bootstrap identity beside its program and enrol with it.
     startup before anything is written — a `ws://` or `http://` endpoint whose host is not
     `127.0.0.1` or `::1` is refused, naming the setting, and `localhost` is no exception. It
     conflicts with `--interactive` and carries the self-update answer
-    ([ADR-0018](0018-the-client-updates-itself-from-a-signed-package.md)). For a `wss://` or
+    ([ADR-0019](0019-the-client-updates-itself-from-a-signed-package.md)). For a `wss://` or
     `https://` endpoint, a `server-ca.pem` beside the program — in the directory `--fleet-files`
     names, when given (clause 14) — is copied and written as `[tls] ca_file` as the questionnaire's
     answer would be, and a `package-signing-key.pub` beside it is written as
@@ -363,25 +363,24 @@ find the bootstrap identity beside its program and enrol with it.
     a setting that stands in for a client certificate.
 
 18. **A non-interactive install enrols with a bootstrap identity it finds.** When the configuration
-    — written by `--endpoint` or already on disk — has a `wss://` or `https://` endpoint, the
-    Client is not enrolled, and a bootstrap identity lies beside the program, the install enrols
-    with it as the questionnaire does (clause 16): it prints the request's key fingerprint, waits
-    until an operator approves it or the wait is interrupted, and stores the issued certificate. It
-    needs no terminal. An installer that runs the program from a directory holding a bootstrap
-    identity therefore waits for an approval; one that runs it from where none lies does not.
-    **For `bootstrap.p12` the password comes from
-    `service install --bootstrap-password-file <path>`:** the file's first line, a trailing `\n`
-    or `\r\n` removed. The file is read once and neither copied, changed nor removed. A
-    `bootstrap.p12` taken without the flag, or a file it does not open under, fails the install
-    before anything is written, naming the flag; the flag with no `bootstrap.p12` to open fails the
-    same way. The flag names a password, not an identity or a credential. There is no environment
-    variable and no command-line value for the password.
+    — written by `--endpoint` or already on disk — has a `wss://` or `https://` endpoint, the Client
+    is not enrolled, and a bootstrap identity lies beside the program, the install enrols with it as
+    the questionnaire does (clause 16): it prints the request's key fingerprint, waits until an
+    operator approves it or the wait is interrupted, and stores the issued certificate. It needs no
+    terminal. An installer that runs the program from a directory holding a bootstrap identity
+    therefore waits for an approval; one that runs it from where none lies does not. **For
+    `bootstrap.p12` the password comes from `service install --bootstrap-password-file <path>`:**
+    the file's first line, a trailing `\n` or `\r\n` removed. The file is read once and neither
+    copied, changed nor removed. A `bootstrap.p12` taken without the flag, or a file it does not
+    open under, fails the install before anything is written, naming the flag; the flag with no
+    `bootstrap.p12` to open fails the same way. The flag names a password, not an identity or a
+    credential. There is no environment variable and no command-line value for the password.
 
 19. **A packaged host enrols in a step after the package.** The post-install of the `.deb` and the
     `.rpm` runs `service install` from the payload path as the Linux packages' install states
-    ([ADR-0037](0037-the-accounts-the-service-runs-under.md)): it finds no fleet files and enrols
+    ([ADR-0021](0021-the-accounts-the-service-runs-under.md)): it finds no fleet files and enrols
     nothing, so `apt` and `dnf` never wait for an approval. The host is enrolled by the step the
-    post-install prints ([ADR-0037](0037-the-accounts-the-service-runs-under.md)), interactively,
+    post-install prints ([ADR-0021](0021-the-accounts-the-service-runs-under.md)), interactively,
     or by a script that puts the fleet's files in a directory, names it with `--fleet-files`, and
     runs the non-interactive install of clause 18:
 
@@ -402,7 +401,7 @@ find the bootstrap identity beside its program and enrol with it.
   password; the operator issues a new certificate.
 - A strength rule for the password beyond its length, and a password the Server generates.
 - Removing `bootstrap.p12` or the password file from the host after enrolment, as
-  [ADR-0019](0019-the-installed-service-and-its-state.md) leaves it for the pair.
+  [ADR-0020](0020-the-installed-service-and-its-state.md) leaves it for the pair.
 - Reading a PKCS#12 file made by another tool beyond what clause 15 accepts.
 - A `bootstrap.p12` named in `supervisor.toml`, so that the service enrols with it when it starts.
 - Asking anything in a package's post-install, or preseeding answers through debconf or RPM
@@ -410,7 +409,7 @@ find the bootstrap identity beside its program and enrol with it.
 - Deleting host certificates or their register entries; deleting a valid, unrevoked bootstrap
   certificate; removing revocation-list entries automatically once the certificate has ended,
   which the revocation list's own rules govern
-  ([ADR-0044](0044-the-servers-state-and-its-stores.md)).
+  ([ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)).
 - Subject attributes beyond the six; per-host values (an asset number, a hostname), which a
   bootstrap certificate shared by many hosts cannot carry; changing a Host's values without a new
   enrolment; authorization by subject values; the ETSI EN 319 412-1 semantics of
@@ -436,7 +435,7 @@ find the bootstrap identity beside its program and enrol with it.
 - **The `p12` crate.** It reads and writes only the legacy schemes (RC2, 3DES, SHA-1 MAC), which
   OpenSSL 3 no longer writes by default.
 - **OpenSSL's PKCS#12 support.** OpenSSL is banned from the build
-  ([ADR-0045](0045-tls-1-3-two-planes-and-bounded-input.md), `deny.toml`).
+  ([ADR-0012](0012-tls-1-3-two-planes-and-bounded-input.md), `deny.toml`).
 - **The Server keeps the PEM key and hands it out again.** It would hold plaintext keys of every
   valid bootstrap certificate; the kept PKCS#12 file is useless without a password the Server
   never stores.
@@ -528,23 +527,32 @@ find the bootstrap identity beside its program and enrol with it.
 - **The CSR's subject in the host certificate, or the client CA's O and OU in every host
   certificate.** The first shows the Agent's name in the register, but that name is self-asserted,
   and the register already lists the host and the `instance_uid` of each certificate
-  ([ADR-0044](0044-the-servers-state-and-its-stores.md) clause 9); the second repeats the issuer in
-  the subject and takes the place the bootstrap certificate's subject is carried into.
+  ([ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
+  clause 9); the second repeats the issuer in the subject and takes the place the bootstrap
+  certificate's subject is carried into.
 - **An enrolment request matched to its bootstrap certificate by the certificate's
   fingerprint.** The record would keep the SHA-256 of the whole certificate as well, but the
   operator revokes and reads the audit by serial, so the fingerprint is a second name for the same
   entry (clause 10).
+- **A rejection held by the queue alone, forgotten when its window closes, and a rejection of an
+  id the queue does not hold answered `404`.** The same key could wait again in the next window,
+  and a database restored from before an approval would let the host's repeated request be signed
+  anew; the operator could not refuse a key before its request arrives. Rejected; clause 16 keeps
+  the rejected keys durably, and clause 10 rejects a key the queue does not hold.
 
 ## Sources / Prior art
 
-- [ADR-0038](0038-admission-by-client-certificate-and-revocation.md) (admission, the Operator
-  plane, revocation), [ADR-0015](0015-client-modes-and-the-gateway.md) (approval through a proved
-  bootstrap certificate, renewal, enrolment through a Gateway),
-  [ADR-0019](0019-the-installed-service-and-its-state.md) and
-  [ADR-0037](0037-the-accounts-the-service-runs-under.md) (the installed service and the Linux
-  packages), [ADR-0044](0044-the-servers-state-and-its-stores.md) (the record of issued bootstrap
-  certificates), [ADR-0032](0032-the-operator-program-opamp-fleetctl.md) (certificate names,
-  `pki p12-extract`), [ADR-0039](0039-an-append-only-audit-record.md) (the audit record).
+- [ADR-0026](0026-admission-by-client-certificate-and-revocation.md) (admission, the Operator plane,
+  revocation), [ADR-0016](0016-client-modes-and-the-gateway.md) (approval through a proved bootstrap
+  certificate, renewal, enrolment through a Gateway),
+  [ADR-0020](0020-the-installed-service-and-its-state.md) and
+  [ADR-0021](0021-the-accounts-the-service-runs-under.md) (the installed service and the Linux
+  packages),
+  [ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
+  (the record of issued bootstrap certificates),
+  [ADR-0037](0037-the-operator-program-opamp-fleetctl.md) (certificate names, `pki p12-extract`),
+  [ADR-0028](0028-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again.md)
+  (the audit record).
 - RFC 7292, PKCS #12 v1.1: <https://www.rfc-editor.org/rfc/rfc7292>. RFC 8018, PKCS #5 v2.1
   (PBES2, PBKDF2): <https://www.rfc-editor.org/rfc/rfc8018>.
 - RFC 9579, PBMAC1 in PKCS #12, obsoleted by RFC 9879 — the MAC this ADR does not use, since
@@ -621,15 +629,13 @@ find the bootstrap identity beside its program and enrol with it.
 - Negative / trade-offs: a deleted entry's revocation lives on in the revocation list, where only
   `GET /api/v1/revocations` shows it; a pending request that still carries the certificate reads
   *not issued here*, which hides that this Server once issued it.
-- Follow-ups: a view of the revocation list in the UI; the operator manual's installation and
-  enrolment pages and the OpenAPI document of the routes; a fuzz target for the Client's PKCS#12
-  reader; a rate per bootstrap certificate, which enrolment through a Gateway needs, since all of
-  its requests arrive from one address; a password the Server generates.
+- Follow-ups: a view of the revocation list in the UI; a rate per bootstrap certificate, which
+  enrolment through a Gateway needs, since all of its requests arrive from one address; a password
+  the Server generates.
 
 ## Enforcement
 
-Tests that carry `Verifies:
-ADR-0052`:
+Tests that carry `Verifies: ADR-0027`:
 
 - Issuing without `organization`, without `organizational_unit` or without `password` is `400`,
   naming the field; the answer to an issue never carries `private_key_pem` (clauses 1 and 3).
@@ -639,8 +645,8 @@ ADR-0052`:
   character with its `400` text. The Server's issuing route answers `400` for a password of 7
   characters and issues one of 8 (clause 5).
 - Issuance and download write their audit entries
-  ([ADR-0044](0044-the-servers-state-and-its-stores.md) clause 11), and neither entry nor any log
-  line holds the password (clause 5).
+  ([ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
+  clause 11), and neither entry nor any log line holds the password (clause 5).
 - Issuing with all six attributes yields a bootstrap certificate whose subject holds them in the
   order of clause 1, with `country` as a `PrintableString`. A lower-case or three-letter country,
   an empty or 65-character value, a control character and an unknown key are each `400`
@@ -648,7 +654,7 @@ ADR-0052`:
 - A foreign bootstrap certificate without OU is refused at approval with `409` naming
   `organizational_unit`; one from another CA with OU twice is refused at approval with `409`
   naming the attribute, and nothing is signed (clause 10, and the approval's rules of
-  [ADR-0015](0015-client-modes-and-the-gateway.md)).
+  [ADR-0016](0016-client-modes-and-the-gateway.md)).
 - Approving a request copies the bootstrap certificate's values into the host certificate and
   ignores the CSR's subject (clause 11).
 - A renewal carries the predecessor's values unchanged (clause 12).
@@ -662,7 +668,8 @@ ADR-0052`:
   `enrolment.bootstrap_deleted`, and leaves the revocation on the list: the certificate is still
   refused at the handshake. Deleting a valid entry answers `409` and an unknown serial `404`
   (clause 7); a refused audit answers `503` with the entry kept
-  ([ADR-0044](0044-the-servers-state-and-its-stores.md) clause 11).
+  ([ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
+  clause 11).
 - `bootstrap.p12` is found beside the program; lying beside a file of the pair, neither is taken.
   With `--fleet-files <dir>` the files are found in `<dir>` and not beside the program, and
   `--endpoint` copies `server-ca.pem` from it; a `<dir>` that is no readable directory fails the
@@ -673,18 +680,15 @@ ADR-0052`:
   the flag, or with the flag and no file, it fails before writing anything (clause 18).
 - A fuzz target for the Client's PKCS#12 reader runs in CI (Q-2).
 - `cargo deny` keeps `rc2` and `des` out of the graph: a `[bans]` entry names them (clause 13).
-- Tests that carry `Verifies:
-  ADR-0052`,
-  for clauses 10 and 16: a request rejected in one window and sent again after the window closed
-  or ran out is answered as rejected and not listed, on the filesystem store, on PostgreSQL, on a
-  second instance on the database and after a restart; a rejection of an id the queue does not
-  hold answers `204` with the window closed, and its request is then refused; a malformed id
-  answers `400`; an approval of a rejected key signs nothing, where its request still waits; a
-  rejection of a request an approval holds answers at once that it is being decided —
-  [`enrolment.rs`](../../crates/fleet-server/src/enrolment.rs)
+- Tests that carry `Verifies: ADR-0027`, for clauses 10 and 16: a request rejected in one window and
+  sent again after the window closed or ran out is answered as rejected and not listed, on the
+  filesystem store, on PostgreSQL, on a second instance on the database and after a restart; a
+  rejection of an id the queue does not hold answers `204` with the window closed, and its request
+  is then refused; a malformed id answers `400`; an approval of a rejected key signs nothing, where
+  its request still waits; a rejection of a request an approval holds answers at once that it is
+  being decided — [`enrolment.rs`](../../crates/fleet-server/src/enrolment.rs)
   `a_rejected_key_stays_refused_on_one_store_in_memory`,
-  `a_rejected_key_stays_refused_on_the_filesystem`,
-  `a_rejected_key_stays_refused_without_a_store`,
+  `a_rejected_key_stays_refused_on_the_filesystem`, `a_rejected_key_stays_refused_without_a_store`,
   `an_approval_signs_no_rejected_key`;
   [`postgres/enrolment.rs`](../../crates/fleet-server/src/postgres/enrolment.rs)
   `a_rejected_key_stays_refused_on_postgres`,

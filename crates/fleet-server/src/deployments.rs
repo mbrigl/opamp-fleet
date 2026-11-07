@@ -1,7 +1,7 @@
-//! Deployments (ADR-0027, ADR-0026): what reaches a channel of hosts, and the only thing rolled out.
+//! Deployments (ADR-0034, ADR-0033): what reaches a channel of hosts, and the only thing rolled out.
 //!
 //! A Package is what an Agent type runs at a version, with each artifact's signature on its entry
-//! (ADR-0027), and a Configuration is content (ADR-0026) — neither has an aim or an act of its
+//! (ADR-0034), and a Configuration is content (ADR-0033) — neither has an aim or an act of its
 //! own. A Deployment carries a **name**, a **Selector** over the channel it addresses, **one
 //! Package per Agent type**, and **any number of Configurations**. The Selector matching lives
 //! here, because a Deployment is the one thing a Selector aims.
@@ -9,15 +9,15 @@
 //! Two rules give the object its shape, and both are refusals:
 //!
 //! **An Agent belongs to at most one Deployment.** Where two match, that is a conflict and the
-//! Agent is offered nothing new — not the most specific, not the newest, none. ADR-0027's
+//! Agent is offered nothing new — not the most specific, not the newest, none. ADR-0034's
 //! specificity ranking is withdrawn with no successor: it decided "which artifact does this host
 //! get" by a computation across every stored object, which is an answer no operator could read off
 //! anything. A refusal that names both Deployments is worse for nobody and legible to everyone.
 //!
 //! **A Selector is never empty.** An empty one is the channel that collides with every other, and a
 //! forgotten field would quietly become the base for the whole fleet — the class of accident
-//! ADR-0026 exists to prevent. Channels are therefore a *partition*: a Selector cannot express
-//! "not", so disjoint channels come from membership, which is what ADR-0043's labels already are.
+//! ADR-0033 exists to prevent. Channels are therefore a *partition*: a Selector cannot express
+//! "not", so disjoint channels come from membership, which is what ADR-0030's labels already are.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::RwLock;
@@ -28,7 +28,7 @@ use opamp::proto::AgentDescription;
 use crate::configs::validate_name;
 use crate::packages::PackageId;
 
-/// Does this Selector match this Agent (ADR-0026 clause 3)? Equality, AND, over every string
+/// Does this Selector match this Agent (ADR-0033 clause 3)? Equality, AND, over every string
 /// attribute of the effective description — identifying and non-identifying alike. An array-valued
 /// attribute never matches, and an Agent that has not described itself yet matches only the empty
 /// Selector, which no Deployment carries.
@@ -53,16 +53,16 @@ pub fn matches(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Deployment {
     /// The operator's name for this channel. The one human-chosen label in the model, which is why
-    /// it keeps the ADR-0019 grammar a Package gave up (ADR-0027).
+    /// it keeps the ADR-0020 grammar a Package gave up (ADR-0034).
     pub name: String,
     /// Equality pairs that must all match an attribute the Agent reported, labels included
-    /// (ADR-0026 clause 3). **Never empty** — see the module note.
+    /// (ADR-0033 clause 3). **Never empty** — see the module note.
     pub selector: BTreeMap<String, String>,
     /// At most one Package per Agent type, keyed by that type. Two of one type would collide on
     /// the wire map key *and* fit the same Agent, so the second is refused at the moment it is
     /// written rather than puzzled over at resolution.
     pub packages: BTreeMap<String, PackageId>,
-    /// The Configurations it holds, by name, in any number (ADR-0026 clause 5). A Configuration
+    /// The Configurations it holds, by name, in any number (ADR-0033 clause 5). A Configuration
     /// may sit in several Deployments, as a Package may; each fits the Agents of its type.
     pub configurations: BTreeSet<String>,
 }
@@ -74,7 +74,7 @@ impl Deployment {
     }
 
     /// Whether it holds nothing to release — no Package and no Configuration — which a rollout
-    /// act refuses (ADR-0026 clause 9).
+    /// act refuses (ADR-0033 clause 9).
     pub fn holds_nothing(&self) -> bool {
         self.packages.is_empty() && self.configurations.is_empty()
     }
@@ -170,12 +170,12 @@ pub fn deployment_for<'a>(
     }
 }
 
-/// One change to the members of one Deployment (ADR-0050 clause 2): it names the member it adds
+/// One change to the members of one Deployment (ADR-0023 clause 2): it names the member it adds
 /// or removes, and no other member is written.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Change {
     /// Adds a Package, or replaces the one held for its Agent type when `replace` is set; without
-    /// it a type already held by another Package is refused (ADR-0027 clause 25).
+    /// it a type already held by another Package is refused (ADR-0034 clause 25).
     PutPackage { id: PackageId, replace: bool },
     /// Removes a Package the Deployment holds; one it does not hold is `NotFound`.
     RemovePackage(PackageId),
@@ -248,7 +248,7 @@ pub(crate) fn not_held(name: &str, configuration: &str) -> DeploymentError {
     ))
 }
 
-/// A member that every Deployment holding it gives up, because it was deleted (ADR-0026
+/// A member that every Deployment holding it gives up, because it was deleted (ADR-0033
 /// clause 12).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Member {
@@ -273,7 +273,7 @@ impl Member {
     }
 }
 
-/// The Deployment store's port (ADR-0009, ADR-0050 clause 2): where Deployments persist. It speaks
+/// The Deployment store's port (ADR-0009, ADR-0023 clause 2): where Deployments persist. It speaks
 /// in parts: the Selector is written on its own, and a member is added or removed by its name — a
 /// Package by its Agent type, a Configuration by its name — with no other member written. Each
 /// call answers the Deployment as the store holds it afterwards. The filesystem adapter
@@ -300,7 +300,7 @@ pub trait DeploymentBackend: Send + Sync {
     /// are stored afterwards.
     fn drop_member(&self, member: &Member) -> Result<Vec<Deployment>, String>;
 
-    /// Deletes one Deployment, its members with it, unless a stored assignment names it (ADR-0026
+    /// Deletes one Deployment, its members with it, unless a stored assignment names it (ADR-0033
     /// clause 12); removing what is already absent is not an error. A database adapter counts the
     /// assignments in the transaction that deletes, holding the Deployment's row against every
     /// rollout through it, and refuses with a `Conflict` naming [`pinned`]; the filesystem
@@ -311,7 +311,7 @@ pub trait DeploymentBackend: Send + Sync {
     fn remove(&self, name: &str) -> Result<(), DeploymentError>;
 }
 
-/// The refusal of the deletion of a Deployment the assignments of `pinning` Agents name (ADR-0026
+/// The refusal of the deletion of a Deployment the assignments of `pinning` Agents name (ADR-0033
 /// clause 12).
 #[must_use]
 pub fn pinned(name: &str, pinning: usize) -> String {
@@ -321,7 +321,7 @@ pub fn pinned(name: &str, pinning: usize) -> String {
     )
 }
 
-/// The Deployments (ADR-0027), held in memory and persisted through a [`DeploymentBackend`].
+/// The Deployments (ADR-0034), held in memory and persisted through a [`DeploymentBackend`].
 pub struct DeploymentStore {
     backend: Box<dyn DeploymentBackend>,
     deployments: RwLock<BTreeMap<String, Deployment>>,
@@ -362,7 +362,7 @@ impl DeploymentStore {
 
     /// Reads every Deployment again from the backend, as another instance wrote one or changed its
     /// members
-    /// (ADR-0048
+    /// (ADR-0025
     /// clause 12): what is held is dropped and what is stored taken in its place. It reads under
     /// the lock, so no write of this instance's own lands between the read and the swap.
     ///
@@ -392,7 +392,7 @@ impl DeploymentStore {
     }
 
     /// Creates a Deployment or replaces its Selector. Distributes nothing: a Deployment reaches an
-    /// Agent only through a rollout act (ADR-0026), and this is the save. Its members are the
+    /// Agent only through a rollout act (ADR-0033), and this is the save. Its members are the
     /// store's, as it holds them.
     pub fn put(
         &self,
@@ -412,7 +412,7 @@ impl DeploymentStore {
     }
 
     /// Adds a Package to a Deployment, or replaces the one held for its Agent type when `replace`
-    /// is set. Without `replace`, a type already held is refused by name (ADR-0027 clause 25),
+    /// is set. Without `replace`, a type already held is refused by name (ADR-0034 clause 25),
     /// decided from what the store holds.
     pub fn put_package(
         &self,
@@ -461,13 +461,13 @@ impl DeploymentStore {
         )
     }
 
-    /// Takes a deleted Configuration out of every Deployment that held it (ADR-0026 clause 12),
+    /// Takes a deleted Configuration out of every Deployment that held it (ADR-0033 clause 12),
     /// and answers which those were.
     pub fn drop_configuration(&self, configuration: &str) -> Result<Vec<String>, DeploymentError> {
         self.drop_everywhere(&Member::Configuration(configuration.to_string()))
     }
 
-    /// Takes a deleted Package out of every Deployment that held it (ADR-0026 clause 12), and
+    /// Takes a deleted Package out of every Deployment that held it (ADR-0033 clause 12), and
     /// answers which those were.
     pub fn drop_package(&self, id: &PackageId) -> Result<Vec<String>, DeploymentError> {
         self.drop_everywhere(&Member::Package(id.clone()))
@@ -607,8 +607,8 @@ pub(crate) mod tests {
 
     /// An Agent belongs to at most one Deployment. Two claiming it is the conflict, and the
     /// message names **both** — a rollout that silently never starts is worse than one that says
-    /// why (ADR-0027 clause 28).
-    /// Verifies: ADR-0027
+    /// why (ADR-0034 clause 28).
+    /// Verifies: ADR-0034
     #[test]
     fn two_deployments_matching_one_agent_are_a_conflict_that_names_them() {
         let memory = Memory::default();
@@ -634,8 +634,8 @@ pub(crate) mod tests {
     }
 
     /// Specificity does not break the tie, and that is the decision — not an oversight: neither
-    /// Selector wins by being narrower (ADR-0027 clause 28).
-    /// Verifies: ADR-0027
+    /// Selector wins by being narrower (ADR-0034 clause 28).
+    /// Verifies: ADR-0034
     #[test]
     fn a_narrower_selector_does_not_win_over_a_wider_one() {
         let memory = Memory::default();
@@ -655,8 +655,8 @@ pub(crate) mod tests {
     }
 
     /// An Agent no channel claims waits, and that is not an error: after a fresh enrolment it is the
-    /// ordinary state (ADR-0027 clause 27).
-    /// Verifies: ADR-0027
+    /// ordinary state (ADR-0034 clause 27).
+    /// Verifies: ADR-0034
     #[test]
     fn an_agent_no_ring_claims_is_not_a_conflict() {
         let memory = Memory::default();
@@ -675,7 +675,7 @@ pub(crate) mod tests {
 
     /// An empty Selector is refused, and the message says what to write instead. It is the channel
     /// that collides with every other, and it is what a forgotten field looks like.
-    /// Verifies: ADR-0027
+    /// Verifies: ADR-0034
     #[test]
     fn a_deployment_must_name_the_ring_it_aims_at() {
         let memory = Memory::default();
@@ -701,7 +701,7 @@ pub(crate) mod tests {
 
     /// One Package per Agent type, refused at the write rather than puzzled over at resolution —
     /// and the refusal names what is already held.
-    /// Verifies: ADR-0027
+    /// Verifies: ADR-0034
     #[test]
     fn a_deployment_holds_one_package_per_agent_type() {
         let memory = Memory::default();
@@ -737,8 +737,8 @@ pub(crate) mod tests {
     }
 
     /// Removing a Package takes it out of the channel, and only that: the Deployment holds no
-    /// signature of its own to leave behind (ADR-0027). A Package it does not hold is `NotFound`.
-    /// Verifies: ADR-0027
+    /// signature of its own to leave behind (ADR-0034). A Package it does not hold is `NotFound`.
+    /// Verifies: ADR-0034
     #[test]
     fn removing_a_package_takes_it_out_of_the_channel() {
         let memory = Memory::default();
@@ -761,7 +761,7 @@ pub(crate) mod tests {
 
     /// Editing the Selector is not editing the bytes: a Deployment's aim stays writable, and
     /// changing it keeps everything the channel holds.
-    /// Verifies: ADR-0027
+    /// Verifies: ADR-0034
     #[test]
     fn the_selector_stays_editable_and_keeps_what_the_ring_holds() {
         let memory = Memory::default();
@@ -800,8 +800,8 @@ pub(crate) mod tests {
         assert!(matches(&BTreeMap::new(), Some(&described(&[]))));
     }
 
-    /// ADR-0026 clause 3: equality, AND, over the effective description.
-    /// Verifies: ADR-0026
+    /// ADR-0033 clause 3: equality, AND, over the effective description.
+    /// Verifies: ADR-0033
     #[test]
     fn every_selector_pair_must_equal_a_reported_attribute() {
         let desc = described(&[("service.name", "otelcol"), ("os.type", "linux")]);
@@ -832,10 +832,10 @@ pub(crate) mod tests {
     }
 
     /// A Deployment holds Configurations by name beside its Packages, in any number, and one
-    /// Configuration may sit in several Deployments (ADR-0026 clause 5). Taking out one it does not
+    /// Configuration may sit in several Deployments (ADR-0033 clause 5). Taking out one it does not
     /// hold says so; a deleted Configuration or Package leaves every Deployment that held it
-    /// (ADR-0026 clause 12).
-    /// Verifies: ADR-0026
+    /// (ADR-0033 clause 12).
+    /// Verifies: ADR-0033
     #[test]
     fn a_deployment_holds_configurations_beside_its_packages() {
         let memory = Memory::default();

@@ -3,7 +3,7 @@
 //!
 //! There are two OpAMP server endpoints in this project: the Server's, and the Client's own when it
 //! runs as a Gateway — downstream, a Gateway *is* an OpAMP server
-//! ([ADR-0015](../../../docs/adr/0015-client-modes-and-the-gateway.md)). Both accept the same path, the same media
+//! ([ADR-0016](../../../docs/adr/0016-client-modes-and-the-gateway.md)). Both accept the same path, the same media
 //! type and the same bodies, and both were written separately. The Baseline's gzip MUST, and with
 //! it the rule that the size limit applies *after* decompression, ended up in exactly one of them.
 //!
@@ -233,7 +233,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0008, ADR-0045
+    /// Verifies: ADR-0008, ADR-0012
     #[test]
     fn only_the_loopback_literals_are_loopback() {
         for host in ["127.0.0.1", "::1", "[::1]"] {

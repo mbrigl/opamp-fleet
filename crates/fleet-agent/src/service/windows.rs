@@ -1,4 +1,4 @@
-//! The Windows Service Control Manager (SCM) runtime shim (ADR-0019), compiled only on Windows.
+//! The Windows Service Control Manager (SCM) runtime shim (ADR-0020), compiled only on Windows.
 //!
 //! Unlike systemd and launchd — which supervise an ordinary foreground process — the Windows SCM
 //! launches the service and then expects it to register a control handler and report `Running`
@@ -9,7 +9,7 @@
 //! (`StartServiceCtrlDispatcher` fails with error 1063 when the process was *not* SCM-launched,
 //! which is why the path is a marker, not auto-detection).
 //!
-//! The second service (ADR-0037) enters the same shim through `run --agents`, which only its
+//! The second service (ADR-0021) enters the same shim through `run --agents`, which only its
 //! registration writes: it serves the Client on its named pipe until the SCM stops it.
 
 use std::ffi::OsString;
@@ -29,7 +29,7 @@ use super::runtime::{self, RunSpec};
 
 /// The own-process service name handed to the dispatcher. For an `OWN_PROCESS` service the SCM
 /// does not match on this string — the installed service is registered under the product's name
-/// (ADR-0037 clause 17) — so it only needs to be stable.
+/// (ADR-0021 clause 17) — so it only needs to be stable.
 const SERVICE_NAME: &str = "supervisor";
 const SERVICE_TYPE: ServiceType = ServiceType::OWN_PROCESS;
 
@@ -58,7 +58,7 @@ pub fn run_agents_as_service(pipe: &Path, client: crate::win32::Sid) -> Result<(
 /// The second service's SCM entry point.
 fn agents_main(_arguments: Vec<OsString>) {
     // The thread the SCM starts for the service closes itself to the process account first, as
-    // every thread of its runtime does (ADR-0036).
+    // every thread of its runtime does (ADR-0021).
     crate::supervisor::channel::windows::close_this_thread();
     let served = under_the_scm(|mut shutdown| {
         let (pipe, client) = AGENTS
@@ -123,7 +123,7 @@ fn under_the_scm(
     let (shutdown_tx, shutdown) = crate::shutdown::shutdown_channel();
 
     // `ServiceStatusHandle` is `Copy`; the handler uses its own copy to report `StopPending`
-    // (with a wait hint) the moment a stop arrives, per ADR-0019.
+    // (with a wait hint) the moment a stop arrives, per ADR-0020.
     let handle_cell: &'static OnceLock<service_control_handler::ServiceStatusHandle> =
         Box::leak(Box::new(OnceLock::new()));
     let event_handler = move |control_event| -> ServiceControlHandlerResult {
@@ -168,7 +168,7 @@ fn under_the_scm(
     // Report the *outcome*, not a blanket success. The SCM decides whether to run the recovery
     // actions from the exit code in this final status: a `Stopped` carrying `Win32(0)` is a clean
     // stop and is never retried, whatever went wrong. Reporting zero here is what made the
-    // `RestartPolicy::OnFailure` of ADR-0019 unreachable on Windows even once failure actions
+    // `RestartPolicy::OnFailure` of ADR-0020 unreachable on Windows even once failure actions
     // exist, and it is what a self-update — which ends its run deliberately — depends on.
     if let Err(e) = &result {
         error!(error = %e, "the daemon exited with an error; reporting it to the SCM");
@@ -176,7 +176,7 @@ fn under_the_scm(
     let exit_code = match &result {
         Ok(runtime::Exit::Normal) => ServiceExitCode::Win32(0),
         // A self-update is not a failure, but the SCM's recovery actions are the only way to be
-        // restarted, and they run on a failure (ADR-0018).
+        // restarted, and they run on a failure (ADR-0019).
         Ok(runtime::Exit::RestartForUpdate) => {
             error!("exiting so the SCM starts the newly installed version");
             ServiceExitCode::ServiceSpecific(

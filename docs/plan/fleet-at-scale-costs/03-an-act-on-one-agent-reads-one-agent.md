@@ -23,7 +23,7 @@ under it (`client_agents_elsewhere`). It blocks no stage: the G-20 load test met
 
 ## Read first
 
-- ADR-0048 clause 13; ADR-0043 clauses 16 and 19
+- ADR-0025 clause 13; ADR-0030 clauses 16 and 19
 - `fleet.rs` `deployment_reach`, `host_agents`, and `arrived_over`,
   the read of the Agents behind a Gateway through the port's `query_page`, which `stored_agent`
   and a Gateway's download already use

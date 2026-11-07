@@ -29,7 +29,7 @@ What the repository shows:
 - `AGENTS.md` is the rule file, written for no vendor. The only agent configuration in the tree is
   Claude Code's under `.claude/`, whose `CLAUDE.md` points to `AGENTS.md` and whose `skills/` holds
   one pointer per skill into `.agents/skills/`.
-- The `Deciders` lines of ADR-0007 to ADR-0040 name Markus Brigl. Those of the template ADRs
+- The `Deciders` lines of ADR-0007 to ADR-0039 name Markus Brigl. Those of the template ADRs
   ADR-0001 to ADR-0006 name the NUC maintainer and Markus Brigl, who took them up for the project.
 - [`AGENTS.md` §5](../../AGENTS.md#5-quality-bar--definition-of-done) requires a review in a fresh
   context before a change is handed off, through the `review` skill, and never by the session that
@@ -37,10 +37,8 @@ What the repository shows:
 - Changes reach `main` only through a pull request
   ([`AGENTS.md` §6](../../AGENTS.md#6-project-rules)).
   [`.github/CODEOWNERS`](../../.github/CODEOWNERS) names the maintainer for
-  `docs/SPECIFICATION.md` and `docs/adr/`. The one ruleset on `main` requires the checks, requires
-  no pull request and no approval, and lets the admin role bypass it always, a direct push
-  included.
-- No ticket is dispatched, and `docs/plan/` holds no feature spec or ticket.
+  `docs/SPECIFICATION.md` and `docs/adr/`.
+- No ticket is dispatched.
 
 ## Decision
 
@@ -85,8 +83,8 @@ which a ticket is claimed, which matter only once work runs unattended.
 - **Parallel tickets under a cap.** The form a complex project starts from: tickets whose *Mode*
   allows it run without the human, several at once, each claimed by a dispatching session in a
   worktree of its own and worked through the `work-tickets` skill, with the open agent work capped
-  at what the humans can review. Not taken: no work runs unattended here, and no plan is kept under
-  `docs/plan/`. Taking it up changes this decision.
+  at what the humans can review. Not taken: no work runs unattended here. Taking it up changes
+  this decision.
 - **A second account for the agents.** A machine user or a GitHub App would open the agents' pull
   requests, so the maintainer could approve them and the approval could be required of everyone.
   Not taken: it is one more identity with write access, its token one more secret to keep and to
@@ -136,7 +134,7 @@ which a ticket is claimed, which matter only once work runs unattended.
 decided outside the tree. What the harness relies on mechanically is checked elsewhere: the git
 hooks under [`.githooks/`](../../.githooks/), and the two rulesets of clause 4 with their required
 checks and Code Owners review, listed under
-[Repository settings](../../README.md#repository-settings), which
+[Repository settings](../../CONTRIBUTING.md#repository-settings), which
 [`scripts/sensor-repo-settings.sh`](../../scripts/sensor-repo-settings.sh) compares with the
 repository on a human's instruction. Who may bypass a ruleset the sensor does not read; it stands
 in the repository's settings.

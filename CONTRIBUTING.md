@@ -233,7 +233,7 @@ configured once by a maintainer and worth re-checking after a repository move or
 - after the first release that pushes the Server's image, set the package
   **`opamp-fleet-server`** on `ghcr.io` to **public** and linked to this repository: a package a
   workflow publishes for the first time is private, and operators pull the image without an account
-  ([ADR-0040](docs/adr/0040-releases-attestations-and-the-server-image.md)).
+  ([ADR-0039](docs/adr/0039-releases-attestations-and-the-server-image.md)).
 
 [`scripts/sensor-repo-settings.sh`](scripts/sensor-repo-settings.sh) reads these settings
 through `gh` and reports each one that differs from this list. It runs on a human's

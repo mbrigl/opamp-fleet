@@ -37,8 +37,9 @@ from, and `unreleased` before the first.
   tagged.
 - **Major, minor, patch:** a major is a change an existing derived project must act on, such as
   a check that would fail on its tree, an inherited ADR superseded, or the record normalized; a
-  minor adds a check, an ADR, a skill, a catalogue entry, or a document; a patch changes wording.
-  Before `v1.0.0` a minor may break, per SemVer item 4.
+  minor adds a check, an ADR, a skill, a catalogue entry, or a document; a patch changes wording,
+  or fixes a script without changing what it decides. Before `v1.0.0` a minor may break, per
+  SemVer item 4.
 - **A derived project moves the line** when it takes up a later release, and only then; a line
   never moved still tells the truth.
 - **The template corrects its own ADRs in place.** A derived project takes them up by release,

@@ -1,4 +1,4 @@
-//! No privileged step goes through a link the account could have placed (ADR-0037 clause 11).
+//! No privileged step goes through a link the account could have placed (ADR-0021 clause 11).
 //!
 //! `service install`, `service config` and `service uninstall` run as root or as an
 //! Administrator, and they write into the data root, the state directory and the layout root,
@@ -15,7 +15,7 @@
 //! `#[cfg(test)]` is not checked.
 //!
 //! The run-time Client, the second service and the Gateway are not here: each writes only in
-//! directories its own account owns and no other account may write to (ADR-0037 clause 21).
+//! directories its own account owns and no other account may write to (ADR-0021 clause 21).
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -92,7 +92,7 @@ const ALLOWED: &[(&str, &str, &str, &str)] = &[
         "install",
         "fs::create_dir_all(",
         "the data root itself: its name is the administrator's, in a directory only root writes \
-         on Unix, and on Windows the hold right after it refuses a reparse point (ADR-0037 \
+         on Unix, and on Windows the hold right after it refuses a reparse point (ADR-0021 \
          clause 13)",
     ),
     (
@@ -228,7 +228,7 @@ fn calls(text: &str) -> Vec<(String, &'static str, usize)> {
     found
 }
 
-/// Verifies: ADR-0037
+/// Verifies: ADR-0021
 #[test]
 fn privileged_modules_change_the_account_s_directories_through_held_directories_only() {
     let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR"));

@@ -1,7 +1,7 @@
-//! Taking a version string apart (ADR-0033).
+//! Taking a version string apart (ADR-0038).
 //!
 //! A version this project produces looks like `1.2.3`, `1.2.3+a1b2c3d`, or `1.2.3-dev+a1b2c3d`
-//! (ADR-0033). Three different questions get asked of that one string, and they do not want the
+//! (ADR-0038). Three different questions get asked of that one string, and they do not want the
 //! same answer:
 //!
 //! - *Which release is this?* — the base and, when present, the pre-release. A `-dev` build is not
@@ -24,11 +24,11 @@
 
 /// The version this build reports, e.g. `1.2.3+a1b2c3d` or `1.2.3-dev+b4e5f6a`.
 ///
-/// The one place either binary states its version (ADR-0033): the OpAMP `service.version`
-/// attribute, both CLIs' `--version` output, and the install layout of ADR-0037 all call this.
+/// The one place either binary states its version (ADR-0038): the OpAMP `service.version`
+/// attribute, both CLIs' `--version` output, and the install layout of ADR-0021 all call this.
 ///
 /// It is resolved at compile time by this crate's `build.rs` — the base from `Cargo.toml`
-/// (ADR-0033), the `-dev` marker and the commit short-hash from git — so a binary carries the
+/// (ADR-0038), the `-dev` marker and the commit short-hash from git — so a binary carries the
 /// answer rather than looking for a repository that is not there when it runs.
 #[must_use]
 pub fn current() -> &'static str {
@@ -67,7 +67,7 @@ impl<'a> Version<'a> {
 ///
 /// The pre-release and build metadata are held to the SemVer character set — dot-separated,
 /// non-empty identifiers of `[0-9A-Za-z-]`. That is not pedantry: this string becomes a directory
-/// name in the self-update layout (ADR-0037), so a value carrying `/`, `\`, or a bare `..` is both
+/// name in the self-update layout (ADR-0021), so a value carrying `/`, `\`, or a bare `..` is both
 /// not a version *and* a path-traversal waiting to happen. Refusing it here is the single gate the
 /// rest of the project trusts.
 #[must_use]
@@ -121,15 +121,15 @@ fn is_dot_identifiers(field: &str) -> bool {
 }
 
 /// The longest version [`is_semver`] takes: the bound a Package's identity tokens carry
-/// (ADR-0028 clause 1), so a version that passes here also fits a Package.
+/// (ADR-0035 clause 1), so a version that passes here also fits a Package.
 pub const MAX_SEMVER_LEN: usize = 64;
 
 /// Whether `raw` is a SemVer 2.0.0 version — the one predicate the Server, `opamp-fleetctl` and the
-/// Client ask of a Package version (ADR-0028 clause 2).
+/// Client ask of a Package version (ADR-0035 clause 2).
 ///
 /// [`parse`] already holds the core and both identifier sets to SemVer. The one rule it does not
 /// check is added here: a numeric pre-release identifier has no leading zero (SemVer 2.0.0 §9).
-/// `parse` itself keeps its shape, because ADR-0033 defines it. A value longer than
+/// `parse` itself keeps its shape, because ADR-0038 defines it. A value longer than
 /// [`MAX_SEMVER_LEN`] is not taken either.
 #[must_use]
 pub fn is_semver(raw: &str) -> bool {
@@ -144,7 +144,7 @@ pub fn is_semver(raw: &str) -> bool {
 }
 
 /// The identifying part of a version string — everything except the build metadata — or `None`
-/// when the value is not a version (ADR-0033).
+/// when the value is not a version (ADR-0038).
 ///
 /// `1.2.3+a1b2c3d` yields `1.2.3`; `1.2.3-dev+a1b2c3d` yields `1.2.3-dev`.
 #[must_use]
@@ -261,7 +261,7 @@ mod tests {
         assert_eq!(dev.identity(), "0.1.1-dev");
     }
 
-    /// The failure that prompted ADR-0033: a package uploaded as the release number against a
+    /// The failure that prompted ADR-0038: a package uploaded as the release number against a
     /// binary that reports the commit it was built from.
     #[test]
     fn a_release_matches_the_build_that_carries_it() {
@@ -307,8 +307,8 @@ mod tests {
         assert_eq!(precedence("", "1.0.0"), None);
     }
 
-    /// The distinction the pre-release exists for (ADR-0033), kept at the gate that can enforce it.
-    // Verifies: ADR-0033
+    /// The distinction the pre-release exists for (ADR-0038), kept at the gate that can enforce it.
+    // Verifies: ADR-0038
     #[test]
     fn a_development_build_is_not_the_release_it_heads_for() {
         assert!(!same_release("0.1.1", "0.1.1-dev+799e36a"));
@@ -348,7 +348,7 @@ mod tests {
         assert!(!same_release("latest", "latest"));
     }
 
-    /// The self-update turns this string into a directory name (ADR-0037), so a pre-release or
+    /// The self-update turns this string into a directory name (ADR-0021), so a pre-release or
     /// build metadata that smuggles a path separator or `..` is not a version. Parsing it away is
     /// the gate that stops a crafted Server offer from escaping `versions/`.
     #[test]
@@ -376,9 +376,9 @@ mod tests {
         assert!(parse("1.2.3-rc.1+build.7").is_some());
     }
 
-    /// The baked string has the shape ADR-0033 prescribes — and, since both live here, it is
+    /// The baked string has the shape ADR-0038 prescribes — and, since both live here, it is
     /// checked with the parser the rest of the project judges it by rather than a second grammar.
-    // Verifies: ADR-0033
+    // Verifies: ADR-0038
     #[test]
     fn the_baked_version_has_the_prescribed_shape() {
         let full = current();
@@ -394,8 +394,8 @@ mod tests {
         }
     }
 
-    /// The one predicate every end asks of a Package version (ADR-0028 clause 2).
-    /// Verifies: ADR-0028
+    /// The one predicate every end asks of a Package version (ADR-0035 clause 2).
+    /// Verifies: ADR-0035
     #[test]
     fn a_package_version_is_semver() {
         for semver in ["1.2.3", "1.19.0", "1.2.3-rc.1+abc", "0.110.0", "1.0.0-0"] {

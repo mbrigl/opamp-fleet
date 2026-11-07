@@ -8,10 +8,10 @@ Client twice. The Client applies every offer it receives: the second apply waits
 and restarts the Managed Process once more after the first has reported `APPLIED`. A production
 host suffers the same needless restart. The Client, for a Supervisor's Agent and for its own,
 ignores an offer whose hash it is applying or has applied, and reports its status again, as
-[ADR-0027](../../adr/0027-packages-signatures-and-delivery.md) clause 49 does for packages; a
+[ADR-0034](../../adr/0034-packages-signatures-and-delivery.md) clause 49 does for packages; a
 deliberate restart stays the `Restart` command. The clause is drafted through `propose-adr` as a
 restatement superseding
-[ADR-0017](../../adr/0017-supervisor-mode-and-its-kinds.md) before the code lands, and the human
+[ADR-0018](../../adr/0018-supervisor-mode-and-its-kinds.md) before the code lands, and the human
 accepts it.
 
 ## Acceptance criteria
@@ -28,8 +28,8 @@ accepts it.
 
 ## Read first
 
-- [ADR-0017](../../adr/0017-supervisor-mode-and-its-kinds.md) for the handling of a received remote
-  configuration; [ADR-0027](../../adr/0027-packages-signatures-and-delivery.md) clause 49 for the
+- [ADR-0018](../../adr/0018-supervisor-mode-and-its-kinds.md) for the handling of a received remote
+  configuration; [ADR-0034](../../adr/0034-packages-signatures-and-delivery.md) clause 49 for the
   pattern
 - The hand-off of the timing-tests ticket, `tests-wait-for-an-event`, for the proof with a delayed
   push

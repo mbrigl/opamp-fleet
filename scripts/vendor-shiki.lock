@@ -1,4 +1,4 @@
-# The vendored crates/fleet-server/static/shiki.js (ADR-0031 clause 2), written by
+# The vendored crates/fleet-server/static/shiki.js (ADR-0036 clause 2), written by
 # scripts/vendor-shiki.sh. A test fails while the file's SHA-256 differs from the one here.
 shiki 4.5.0
-sha256 c9b60cfabbfaf098983cb8994d3d5e8d7c1d06abca7a8c18cfa3819796fd56c1
+sha256 d25136c6da0209cfbd97a3f134253967f7b10f6d12164eb12efb805db34c2455

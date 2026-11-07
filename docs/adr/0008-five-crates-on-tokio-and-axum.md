@@ -9,14 +9,14 @@
 
 The [specification](../SPECIFICATION.md) fixes the language (both ends in Rust) and the
 deployables: one Server (Linux only, API-first, with a rudimentary bundled UI, G-5) and one Client
-binary covering every Client Mode ([ADR-0015](0015-client-modes-and-the-gateway.md)). Everything
+binary covering every Client Mode ([ADR-0016](0016-client-modes-and-the-gateway.md)). Everything
 is async I/O: the Server holds many long-lived connections, the Client a Connection Pool and
 supervised processes. The Server serves protobuf bodies and WebSocket upgrades on one route set.
 The Dev Container is lean ([ADR-0004](0004-dev-container-runtime.md)), so a choice that needs
 OpenSSL headers, cmake or node carries a real cost, and the UI is explicitly not the product.
 
 The floor on the pace of every request body and every WebSocket message
-([ADR-0045](0045-tls-1-3-two-planes-and-bounded-input.md), its pace floor) has to see a message's
+([ADR-0012](0012-tls-1-3-two-planes-and-bounded-input.md), its pace floor) has to see a message's
 data frames. Judged by the bytes a connection reads, a message that has begun stays open for ever
 while its peer sends a Ping between its fragments, which RFC 6455 allows, and every Ping looks like
 progress. axum's WebSocket hands over whole messages only.
@@ -49,14 +49,14 @@ grammar, the platform aliases) is this project's own, and lives in an internal c
 a test reach the Client?** Cargo hands a test a helper binary's path
 (`CARGO_BIN_EXE_<name>`) only in an integration test, and an integration test links only a
 package's library. **Where do operator tools live?** `opamp-fleetctl`, the operator tool
-([ADR-0032](0032-the-operator-program-opamp-fleetctl.md)), runs on an operator's machine and uses a
+([ADR-0037](0037-the-operator-program-opamp-fleetctl.md)), runs on an operator's machine and uses a
 few Client items: the 7z Unix-mode convention, the unpackers, and the TLS provider helper.
 
 Operators hand-edit both configuration files, often over SSH; a format's failure modes matter more
 than its expressiveness. YAML's indentation and implicit typing (`no` → `false`) are classic sources
 of silent fleet misconfiguration. The payloads the Server distributes are the Managed Process's own
 format and are not affected. How each binary finds and layers its configuration is
-[ADR-0030](0030-the-servers-configuration.md)'s.
+[ADR-0024](0024-the-servers-configuration.md)'s.
 
 ## Decision
 
@@ -81,13 +81,14 @@ configuration to a strict parse.
 
 3. **Two features, neither on by default, each linted alone.** `client` adds `tokio`, `tracing`,
    `ring`, `tokio-tungstenite`, `futures-util`, `reqwest`, `rustls` and `webpki-roots`. `server`
-   adds `tokio`, `tracing`, `axum`, `axum-server`, `hyper`, `hyper-util`, `tokio-tungstenite`,
-   `futures-util` and `rustls`. `hyper` is named for its upgrade, which axum carries anyway;
-   `tokio-tungstenite` is the client's own WebSocket library, so both sides frame alike. The lint
-   runs with no feature, with `client` and with `server`. docs.rs builds with all features.
+   adds `tokio`, `tracing`, `ring`, `axum`, `axum-server`, `hyper`, `hyper-util`,
+   `tokio-tungstenite`, `futures-util` and `rustls`. `hyper` is named for its upgrade, which axum
+   carries anyway; `tokio-tungstenite` is the client's own WebSocket library, so both sides frame
+   alike. The lint runs with no feature, with `client` and with `server`. docs.rs builds with all
+   features.
 
 4. **`opamp::tls` is the TLS both sides share,** compiled with either feature. It installs the
-   ring provider, never a system library ([ADR-0045](0045-tls-1-3-two-planes-and-bounded-input.md)).
+   ring provider, never a system library ([ADR-0012](0012-tls-1-3-two-planes-and-bounded-input.md)).
    It reads certificates and a private key from PEM bytes, and an empty result is an error. It
    carries an `Identity`, a certificate chain and its key as PEM. It opens no file. Every rustls
    configuration either side builds speaks TLS 1.3 alone, with the three TLS 1.3 suites of the ring
@@ -99,17 +100,18 @@ configuration to a strict parse.
 
 5. **The server endpoint.** `opamp::server` serves both transports on one path, with the media
    type, gzip, the limit in both directions, framing, the 1009 close and the per-connection loop.
-   The application implements `Handler`: `on_connecting`, `on_message`, `outbound`, `on_outbound`,
-   `on_unreadable` and `on_closed`. `router` returns an axum `Router`. The application may add
+   The application implements `Handler`: its `Outbound`, the side that sends a WebSocket messages
+   unasked, and `on_connecting`, `on_message`, `on_outbound`, `on_unreadable`, `closing`,
+   `on_closed` and `on_unsent`. `router` returns an axum `Router`. The application may add
    routes and admission layers to it. The WebSocket upgrade is an axum route that answers the
    handshake and takes the connection through hyper's upgrade; `opamp` frames it with
    `tokio-tungstenite` over a reader that follows the frame headers as they arrive, so it knows
    whether a data message has begun and how much of it has come, apart from the control frames
-   between its fragments (the pace floor of ADR-0045).
+   between its fragments (the pace floor of ADR-0012).
 
 6. **The server listener.** `opamp::server::listen` builds the rustls `ServerConfig` from a
    certificate, a key and a client-certificate rule: none, optional or required against a CA. It
-   sets the ALPN protocols. `serve` runs a router on a bound listener with the bounds of ADR-0045:
+   sets the ALPN protocols. `serve` runs a router on a bound listener with the bounds of ADR-0012:
    a 30-second header read with the timer it needs, and a 10-second TLS handshake. It puts the
    verified peer certificate and the peer address into every request, on every listener it serves.
    A handle shuts listeners down, and one handle may drain several. How long a drain may take is
@@ -141,10 +143,10 @@ configuration to a strict parse.
    which files hold the material, which identity is in force, which credential is sent and when it
    rotates. It parses `server.toml` and `supervisor.toml`. It persists and merges connection
    settings (ADR-0013). It runs the CSR flow and the CA, and it decides admission
-   ([ADR-0038](0038-admission-by-client-certificate-and-revocation.md)). Its `AgentState` keeps the
+   ([ADR-0026](0026-admission-by-client-certificate-and-revocation.md)). Its `AgentState` keeps the
    Client's decisions over one protocol state machine. Its flows after a reply run in one order:
    connection settings, certificate, packages, the self-update restart, the Supervisor set
-   ([ADR-0018](0018-the-client-updates-itself-from-a-signed-package.md)). Connection settings come
+   ([ADR-0019](0019-the-client-updates-itself-from-a-signed-package.md)). Connection settings come
    before the certificate because an offer may carry the certificate a request asked for, and a
    request queued before it is taken in would ride the next connection and be signed again.
 
@@ -177,7 +179,7 @@ configuration to a strict parse.
     whose connection `opamp` takes over through hyper (clause 5), so axum's `ws` feature is off;
     the OpAMP endpoint of the Server, the Gateway and the Supervisor Endpoint is `opamp::server`'s,
     and so is the listener it is served on (clauses 5 and 6). Which listeners exist is
-    [ADR-0045](0045-tls-1-3-two-planes-and-bounded-input.md)'s.
+    [ADR-0012](0012-tls-1-3-two-planes-and-bounded-input.md)'s.
 
 14. **The bundled UI is static assets embedded in the Server binary.** Plain HTML, CSS and JS under
     `crates/fleet-server/static/`, embedded with `include_str!`; no frontend toolchain. The REST
@@ -210,13 +212,22 @@ configuration to a strict parse.
       protocol state machine and connection, and `tls` with the PEM readers `certificates` and
       `private_key`. Their path-based wrappers and error wording stay in each end, where what the
       file means is known.
-    - `fleet-core`: `version`, the version helper
-      ([ADR-0033](0033-the-products-version.md)); `platform`, the platform alias table
-      ([ADR-0027](0027-packages-signatures-and-delivery.md)); `package`, the statement a package
-      signature covers, which the operator tool signs and the Client verifies; `pki`, the rule that
-      says when a certificate is ending, which the Server and the operator tool apply alike
-      ([ADR-0032](0032-the-operator-program-opamp-fleetctl.md)), as plain date arithmetic without a
-      dependency.
+    - `fleet-core`: `version`, the version helper ([ADR-0038](0038-the-products-version.md));
+      `platform`, the platform alias table ([ADR-0034](0034-packages-signatures-and-delivery.md));
+      `package`, the statements a package signature and a floor signature cover, which the operator
+      tool signs and the Client verifies
+      ([ADR-0035](0035-package-versions-high-water-mark-and-floor.md)); `ending`, the rule that says
+      when a certificate is ending, as plain date arithmetic without a dependency, and `naming`,
+      what a certificate is called, which the Server and the operator tool apply alike
+      ([ADR-0037](0037-the-operator-program-opamp-fleetctl.md)); `pkcs12`, the bootstrap
+      certificate's file
+      ([ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md));
+      `host`, `x509`, `csr`, `renewal` and `bootstrap_proof`, what a client certificate is known by
+      and the proofs a renewal and an enrolment request carry in their CSR, which the Server and a
+      Gateway read alike ([ADR-0016](0016-client-modes-and-the-gateway.md)); and `rate`, the token
+      buckets a sender is counted in on the Server and on a Gateway
+      ([ADR-0012](0012-tls-1-3-two-planes-and-bounded-input.md),
+      [ADR-0022](0022-a-gateway-rate-limits-each-downstream-host-as-the-server-limits-a-host.md)).
 
 18. **What the measurement leaves where it is.** The Server's router and admission, the Server's
     CA, the Client's CSR flow, the persistence of its connection settings, the choice of which TLS
@@ -241,7 +252,7 @@ configuration to a strict parse.
     only inside the crate that declares them.
 
 22. **The operator tool is its own crate, depending on the Client.** `crates/fleet-tools`
-    produces `opamp-fleetctl` (ADR-0032) and has no library. The arrow points one way:
+    produces `opamp-fleetctl` (ADR-0037) and has no library. The arrow points one way:
     `fleet-tools` uses `fleet_agent::archive`, `opamp::tls` and the items of `fleet-core` clause 17
     names rather than restating them, and its tests open what the tool produces with the Client's
     own unpacker. Nothing in `fleet-agent`, `fleet-server` or `opamp` depends on `fleet-tools`.
@@ -255,14 +266,13 @@ configuration to a strict parse.
     an error naming it. The same holds for files a binary reads at startup to restore its state:
     one that does not parse fails startup rather than being skipped or silently defaulted.
 
-**Out of scope:** the CSR flow and the Server's CA, which stay in the application with ADR-0038;
+**Out of scope:** the CSR flow and the Server's CA, which stay in the application with ADR-0026;
 finer features, such as one per transport; a release routine for the crate; where the PEM material
 comes from on disk; how each binary finds its configuration file and whether its environment adds
-to it ([ADR-0030](0030-the-servers-configuration.md)); where an installed service looks for its
-configuration file on each OS
-([ADR-0019](0019-the-installed-service-and-its-state.md)); the listener layout
-([ADR-0045](0045-tls-1-3-two-planes-and-bounded-input.md)); whether a release ships the operator
-tools.
+to it ([ADR-0024](0024-the-servers-configuration.md)); where an installed service looks for its
+configuration file on each OS ([ADR-0020](0020-the-installed-service-and-its-state.md)); the
+listener layout ([ADR-0012](0012-tls-1-3-two-planes-and-bounded-input.md)); whether a release ships
+the operator tools.
 
 ## Alternatives considered
 
@@ -332,7 +342,7 @@ tools.
   `tls_certs_only`, `identity` and `tls_backend_preconfigured`, with the stability warning on the
   last. Read 2026-10-03 in the vendored 0.13.5 source.
 - [`axum-server`](https://docs.rs/axum-server/0.7) `RustlsAcceptor::handshake_timeout` and
-  [`hyper-util`](https://docs.rs/hyper-util/0.1) `TokioTimer`, as ADR-0045 cites them.
+  [`hyper-util`](https://docs.rs/hyper-util/0.1) `TokioTimer`, as ADR-0012 cites them.
 - [`rustls-pki-types`](https://docs.rs/rustls-pki-types) `PemObject`, the PEM reader rustls
   itself uses.
 - hyper and tonic features, the sans-IO pattern, `quinn` over `quinn-proto`, and the Cargo book on
@@ -362,7 +372,7 @@ tools.
 - Positive: a Rust OpAMP implementer gets a working client or server, TLS included, from one
   dependency and a few values. This project's three surfaces share the connect, the listener and
   the bounds, so a fix lands once.
-- Positive: `fleet-core` does not link `rustls`; it holds the version and the platform aliases.
+- Positive: `fleet-core` does not link `rustls`; it holds what clause 17 lists.
 - Positive: one lockfile and one toolchain, and both ends share `opamp`, so they cannot drift on
   the wire types, the Baseline's fixed strings, the gzip rule, or the communication around them. A
   misspelt attribute key is a compile error rather than a silent mis-targeting.

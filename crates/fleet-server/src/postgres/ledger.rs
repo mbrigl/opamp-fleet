@@ -1,4 +1,4 @@
-//! The register, the revocation list and the Hosts in PostgreSQL (ADR-0050 clauses 9 and 10): the
+//! The register, the revocation list and the Hosts in PostgreSQL (ADR-0023 clauses 9 and 10): the
 //! PostgreSQL adapter behind [`LedgerStore`](crate::revocation::LedgerStore) — one row per
 //! certificate the Server signed, one per revocation, one per Host. Every call is one transaction,
 //! committed before the decision it answers is.
@@ -47,8 +47,8 @@ impl PgLedgerStore {
 }
 
 /// Moves the list's version on, inside the caller's transaction, and answers the new one
-/// (ADR-0050 clause 10). A revocation added or widened and a lift move it, the prune's removal of
-/// a revocation among them, and so does every change to the register: what ADR-0038 clause 28
+/// (ADR-0023 clause 10). A revocation added or widened and a lift move it, the prune's removal of
+/// a revocation among them, and so does every change to the register: what ADR-0026 clause 28
 /// revokes depends on the register too, so an instance that missed an entry's notification finds
 /// the version moved, and never takes its own next write of the list as naming a register it does
 /// not hold.
@@ -307,7 +307,7 @@ impl LedgerStore for PgLedgerStore {
     /// `row` holds it, when the store has none, so no binding stands without its Host's row, and
     /// that row is held for the
     /// transaction: a Gateway mark committed before it is seen, and one that waits for it releases
-    /// what it bound. A Host whose row is marked as a Gateway is bound none (ADR-0043 clause 16).
+    /// what it bound. A Host whose row is marked as a Gateway is bound none (ADR-0030 clause 16).
     /// The hold is one that conflicts with itself, so two binders of one Host wait for each other
     /// rather than both holding a share of the row they then write. The Hosts' arrays are neither
     /// read nor added to (see `unbind_in`). What it binds or makes is announced after the commit
@@ -589,7 +589,7 @@ impl LedgerStore for PgLedgerStore {
 /// them and reads them no more, but a Server of 0.8.0 beside it reads an array for an
 /// `instance_uid` no binding holds, and must not find a released one held there. The release after
 /// this one stops this, and the release after that removes the arrays
-/// (ADR-0050
+/// (ADR-0023
 /// clause 22).
 async fn unbind_in(
     client: &impl GenericClient,
@@ -662,7 +662,7 @@ async fn write_seen(client: &impl GenericClient, host: &str, entry: &Host) -> Re
 
 /// Binds every `instance_uid` `entry` speaks for to `host`, in a database that holds no binding of
 /// them yet: what an import of a data directory writes. A Gateway's Host is bound none
-/// (ADR-0043 clause 16), whatever its file lists.
+/// (ADR-0030 clause 16), whatever its file lists.
 pub(crate) async fn write_bindings(
     client: &impl GenericClient,
     host: &str,
@@ -909,10 +909,10 @@ async fn decide_renewal(
 /// Registers `issued`, deciding from what is stored, with the Host an approval mints, `mint`,
 /// written when the store has no row of it and else its valid until moved forward, inside the
 /// caller's transaction, which commits it or not: the register's own transaction, or the one that
-/// decides an approval's request (ADR-0050 clause 9). The table is held against every other
+/// decides an approval's request (ADR-0023 clause 9). The table is held against every other
 /// adder while the bounds are counted, and an approval's bootstrap certificate, `bootstrap`, is
 /// looked up in the list the transaction holds, so a revocation another instance committed first
-/// refuses it. An entry written moves the list's version (ADR-0050 clause 10), which the caller
+/// refuses it. An entry written moves the list's version (ADR-0023 clause 10), which the caller
 /// reads in the transaction to take up. Anything but [`Registered::Registered`] leaves the
 /// transaction to be rolled back.
 ///
@@ -1213,7 +1213,7 @@ mod tests {
         );
         assert_eq!(ledger.hosts, fewer);
 
-        // A Gateway's Host is bound none, whatever its record lists (ADR-0043 clause 16): the next
+        // A Gateway's Host is bound none, whatever its record lists (ADR-0030 clause 16): the next
         // Host that reports an instance_uid it lists binds it. A Host that is gone takes its
         // bindings with it.
         let store = open();
@@ -1237,14 +1237,14 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0050
+    /// Verifies: ADR-0023
     #[test]
     fn the_ledger_port_contract_holds_on_the_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
         contract(&|| Box::new(FsLedgerStore::open(dir.path()).expect("open")));
     }
 
-    /// Verifies: ADR-0050
+    /// Verifies: ADR-0023
     #[test]
     fn the_ledger_port_contract_holds_on_postgres() {
         let Some(test) = TestDatabase::named() else {
@@ -1324,14 +1324,14 @@ mod tests {
         assert_eq!(ids, expected, "nothing refused was written");
     }
 
-    /// Verifies: ADR-0048
+    /// Verifies: ADR-0025
     #[test]
     fn the_register_write_decides_from_the_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
         register_contract(&|| Box::new(FsLedgerStore::open(dir.path()).expect("open")));
     }
 
-    /// Verifies: ADR-0048
+    /// Verifies: ADR-0025
     #[test]
     fn the_register_write_decides_from_postgres() {
         let Some(test) = TestDatabase::named() else {
@@ -1344,7 +1344,7 @@ mod tests {
     /// Two instances registering at once count the register's size together: in every round two
     /// writers race for the one place left, behind a barrier, and exactly one is written while the
     /// other finds the register full.
-    /// Verifies: ADR-0048
+    /// Verifies: ADR-0025
     #[test]
     fn two_writers_at_the_registers_bound_write_one_entry_between_them() {
         let Some(test) = TestDatabase::named() else {
@@ -1392,7 +1392,7 @@ mod tests {
     /// An instance whose view of the list is stale cannot register the renewal of a certificate
     /// another instance revoked: B never hears of the revocation through A, and the register write
     /// refuses the renewal from what the database holds.
-    /// Verifies: ADR-0048
+    /// Verifies: ADR-0025
     #[test]
     fn a_stale_instance_cannot_register_the_renewal_of_a_revoked_certificate() {
         use crate::revocation::{Authority, Revocations, RENEWS_REVOKED};
@@ -1443,7 +1443,7 @@ mod tests {
     /// Two instances adding at once count the bound together: in every round two adders race for
     /// the one place left, behind a barrier, and exactly one is added while the other finds the
     /// list full, so the list never grows past its bound and no two entries share a place.
-    /// Verifies: ADR-0048
+    /// Verifies: ADR-0025
     #[test]
     fn two_adders_at_the_bound_add_one_entry_between_them() {
         let Some(test) = TestDatabase::named() else {
@@ -1521,7 +1521,7 @@ mod tests {
     /// The bindings move out of the Hosts' arrays of a database a release before them wrote: each
     /// `instance_uid` an array holds is bound to its Host. An `instance_uid` two Hosts' arrays hold
     /// fails the migration, naming it, and changes nothing.
-    /// Verifies: ADR-0048
+    /// Verifies: ADR-0025
     #[test]
     fn the_bindings_move_out_of_the_hosts_arrays() {
         use crate::postgres::schema::{MIGRATIONS, SCHEMA_TABLE};
@@ -1582,7 +1582,7 @@ mod tests {
     /// Two instances binding one `instance_uid` at once, each to a Host of its own, bind it once:
     /// in every round two binders race behind a barrier, and exactly one binds while the other is
     /// answered with the Host that holds it.
-    /// Verifies: ADR-0048
+    /// Verifies: ADR-0025
     #[test]
     fn two_binders_of_one_instance_uid_bind_it_once() {
         let Some(test) = TestDatabase::named() else {
@@ -1624,9 +1624,9 @@ mod tests {
     /// Two instances binding two `instance_uid`s to one Host at once both bind theirs: the row
     /// each holds while it binds is a hold that waits for the other, not a share both take and
     /// then write, which the database would break as a deadlock
-    /// (ADR-0048
+    /// (ADR-0025
     /// clause 19).
-    /// Verifies: ADR-0048
+    /// Verifies: ADR-0025
     #[test]
     fn two_binders_of_one_host_bind_both_without_a_deadlock() {
         let Some(test) = TestDatabase::named() else {
@@ -1669,9 +1669,9 @@ mod tests {
 
     /// A Gateway's mark and a binding to its Host made at once never leave a binding to it: the
     /// binding waits for the mark and sees it, or the mark waits for the binding and releases it
-    /// (ADR-0043 clause 16). The Host has no row before either; a register entry names it, so the
+    /// (ADR-0030 clause 16). The Host has no row before either; a register entry names it, so the
     /// mark knows it.
-    /// Verifies: ADR-0043
+    /// Verifies: ADR-0030
     #[test]
     fn a_gateway_mark_and_a_binding_at_once_leave_the_gateway_bound_none() {
         let Some(test) = TestDatabase::named() else {
@@ -1725,9 +1725,9 @@ mod tests {
 
     /// A binding is made with its Host's row, in one write, so no binding stands without the Host
     /// it binds to; one another Host holds writes nothing, the row it would have made included
-    /// (ADR-0048
+    /// (ADR-0025
     /// clause 19).
-    /// Verifies: ADR-0048
+    /// Verifies: ADR-0025
     #[test]
     fn a_binding_is_made_with_its_hosts_row() {
         let Some(test) = TestDatabase::named() else {
@@ -1759,8 +1759,8 @@ mod tests {
 
     /// A certificate an approval mints a Host for is registered with the Host's row or not at all:
     /// the row is made in the register's own write, with the approval, and a refused write makes
-    /// neither (ADR-0043 clause 15).
-    /// Verifies: ADR-0043
+    /// neither (ADR-0030 clause 15).
+    /// Verifies: ADR-0030
     #[test]
     fn an_approvals_host_is_written_with_its_register_entry_or_not_at_all() {
         let Some(test) = TestDatabase::named() else {
@@ -1803,8 +1803,8 @@ mod tests {
 
     /// An approval whose bootstrap certificate the list names registers nothing, and neither
     /// does its Host: the register's write reads the list it holds, so a revocation another
-    /// instance committed first wins (ADR-0038 clause 28).
-    /// Verifies: ADR-0038
+    /// instance committed first wins (ADR-0026 clause 28).
+    /// Verifies: ADR-0026
     #[test]
     fn an_approval_of_a_revoked_bootstrap_certificate_registers_nothing() {
         let Some(test) = TestDatabase::named() else {
@@ -1855,7 +1855,7 @@ mod tests {
     /// An instance whose view of the Hosts is stale cannot bind an `instance_uid` another
     /// instance bound to another Host: B never hears of A's binding, and its report is refused
     /// naming the Host that holds the Agent, by which B decides from then on.
-    /// Verifies: ADR-0048
+    /// Verifies: ADR-0025
     #[test]
     fn a_stale_instance_cannot_bind_an_agent_another_host_holds() {
         use crate::revocation::{bound_elsewhere, Revocations};
@@ -1914,8 +1914,8 @@ mod tests {
     /// register entry, in their transactions, and with nothing else; an instance holds the
     /// version its own write left only when no other instance wrote between, and none until it
     /// reads the list again otherwise, so the version it serves never names a list it does not
-    /// hold (ADR-0050 clause 10).
-    /// Verifies: ADR-0050
+    /// hold (ADR-0023 clause 10).
+    /// Verifies: ADR-0023
     #[test]
     fn the_list_version_moves_with_each_revocation_and_lift_and_names_only_the_list_held() {
         let Some(test) = TestDatabase::named() else {
@@ -2005,8 +2005,8 @@ mod tests {
     /// renewal. A holds the same version before it reads the ledger again and after, and its
     /// `ETag`s still differ by the body's hash, so a Gateway that fetched the first is answered in
     /// full by either instance once both hold the renewal
-    /// (ADR-0038 clauses 28 and 34, ADR-0050 clause 10).
-    /// Verifies: ADR-0038, ADR-0050
+    /// (ADR-0026 clauses 28 and 34, ADR-0023 clause 10).
+    /// Verifies: ADR-0026, ADR-0023
     #[test]
     fn one_list_version_never_names_two_gateway_bodies() {
         let Some(test) = TestDatabase::named() else {
@@ -2096,8 +2096,8 @@ mod tests {
 
     /// Every change to the register moves the list's version in its own transaction: an entry
     /// written, and one removed; a removal the store refuses moves nothing. The adapter holds the
-    /// version its own write left (ADR-0050 clause 10).
-    /// Verifies: ADR-0050
+    /// version its own write left (ADR-0023 clause 10).
+    /// Verifies: ADR-0023
     #[test]
     fn a_register_change_moves_the_list_version() {
         let Some(test) = TestDatabase::named() else {
@@ -2150,8 +2150,8 @@ mod tests {
     /// version. A prunes X once it expired, X' expired too and X'' still valid, and X stays, so a
     /// revocation of X still revokes X'', and A holds no version until it reads the ledger again.
     /// Once X'' has expired too, all three go, and A holds the version its removals left
-    /// (ADR-0050 clause 10, ADR-0038 clause 28).
-    /// Verifies: ADR-0050, ADR-0038
+    /// (ADR-0023 clause 10, ADR-0026 clause 28).
+    /// Verifies: ADR-0023, ADR-0026
     #[test]
     fn the_prune_keeps_an_entry_a_valid_renewal_in_the_database_descends_from() {
         let Some(test) = TestDatabase::named() else {
@@ -2258,8 +2258,8 @@ mod tests {
     /// A release and a re-key hold for every instance, whatever the instance that makes them holds
     /// in memory: B never heard of A's bindings, and what it releases and moves is what a third
     /// instance finds stored; a Gateway's mark leaves its Host bound none in the store
-    /// (ADR-0043 clauses 10 and 16).
-    /// Verifies: ADR-0043
+    /// (ADR-0030 clauses 10 and 16).
+    /// Verifies: ADR-0030
     #[test]
     fn a_release_a_rekey_and_a_gateway_mark_hold_for_every_instance() {
         let Some(test) = TestDatabase::named() else {
@@ -2299,8 +2299,8 @@ mod tests {
 
     /// A stale instance re-keys only what the store binds: after another instance released the
     /// old `instance_uid`, a re-key on an instance that never heard of the release binds nothing,
-    /// and the new `instance_uid` is bound by the next Host that reports it (ADR-0043 clause 10).
-    /// Verifies: ADR-0043
+    /// and the new `instance_uid` is bound by the next Host that reports it (ADR-0030 clause 10).
+    /// Verifies: ADR-0030
     #[test]
     fn a_stale_rekey_binds_nothing_another_instance_released() {
         let Some(test) = TestDatabase::named() else {
@@ -2322,9 +2322,9 @@ mod tests {
 
     /// What one instance binds, releases and moves reaches every other that follows the
     /// notifications, without a restart: B admits by A's release, A's re-key and A's binding once
-    /// it hears of them (ADR-0048
+    /// it hears of them (ADR-0025
     /// clause 19).
-    /// Verifies: ADR-0048
+    /// Verifies: ADR-0025
     #[test]
     fn a_binding_another_instance_changes_reaches_an_instance_that_follows() {
         let Some(test) = TestDatabase::named() else {
@@ -2413,8 +2413,8 @@ mod tests {
     /// are announced after their commit, in a transaction of their own: where that notice is lost,
     /// as when the instance ends between the commit and the `NOTIFY`, the other instance does not
     /// hear of them, and the next notice it hears has it read them all
-    /// (ADR-0048 clause 9).
-    /// Verifies: ADR-0048
+    /// (ADR-0025 clause 9).
+    /// Verifies: ADR-0025
     #[test]
     fn a_binding_and_a_host_a_report_writes_are_announced_after_their_commit() {
         let Some(test) = TestDatabase::named() else {
@@ -2460,7 +2460,7 @@ mod tests {
 
     /// A notice after its commit that fails is sent again, and the write it follows answers as
     /// made.
-    /// Verifies: ADR-0048
+    /// Verifies: ADR-0025
     #[test]
     fn a_notice_after_its_commit_that_fails_is_sent_again_and_the_write_answers_as_made() {
         let Some(test) = TestDatabase::named() else {
@@ -2478,8 +2478,8 @@ mod tests {
 
     /// Every write that narrows trust, and a register entry, keeps its notification in its
     /// transaction: B hears of each although every notice sent after a commit is lost
-    /// (ADR-0048 clause 9).
-    /// Verifies: ADR-0048
+    /// (ADR-0025 clause 9).
+    /// Verifies: ADR-0025
     #[test]
     fn the_writes_that_narrow_trust_are_heard_although_every_notice_after_a_commit_is_lost() {
         let Some(test) = TestDatabase::named() else {
@@ -2567,7 +2567,7 @@ mod tests {
 
     /// A save of the Hosts that fails part-way leaves them as they were, and the next save still
     /// writes what changed: the adapter's memory follows only what committed.
-    /// Verifies: ADR-0050
+    /// Verifies: ADR-0023
     #[test]
     fn a_save_that_fails_part_way_leaves_nothing_of_itself() {
         let Some(test) = TestDatabase::named() else {
@@ -2594,9 +2594,9 @@ mod tests {
     /// still takes an `instance_uid` out of them once its binding is released, so a Server of
     /// 0.8.0 beside it, which reads an array for an `instance_uid` no binding holds, never takes
     /// a released binding for one that is held
-    /// (ADR-0050
+    /// (ADR-0023
     /// clause 22).
-    /// Verifies: ADR-0050
+    /// Verifies: ADR-0023
     #[test]
     fn the_hosts_arrays_are_added_to_no_more_and_lose_what_is_released() {
         let Some(test) = TestDatabase::named() else {
@@ -2665,8 +2665,8 @@ mod tests {
 
     /// A Gateway's Host is bound none when the bindings leave the arrays: an `instance_uid` a
     /// Gateway's array and a Host's array both list moves to the Host, and the migration passes
-    /// (ADR-0043 clause 16).
-    /// Verifies: ADR-0043
+    /// (ADR-0030 clause 16).
+    /// Verifies: ADR-0030
     #[test]
     fn the_bindings_leave_a_gateways_array_behind() {
         use crate::postgres::schema::{MIGRATIONS, SCHEMA_TABLE};
@@ -2696,8 +2696,8 @@ mod tests {
         );
     }
 
-    /// An import binds none of the `instance_uid`s a Gateway's file lists (ADR-0043 clause 16).
-    /// Verifies: ADR-0043
+    /// An import binds none of the `instance_uid`s a Gateway's file lists (ADR-0030 clause 16).
+    /// Verifies: ADR-0030
     #[test]
     fn an_import_binds_nothing_to_a_gateways_host() {
         let Some(test) = TestDatabase::named() else {
@@ -2720,8 +2720,8 @@ mod tests {
     /// A register entry another instance writes reaches an instance that follows, without a
     /// restart, and a revocation of its chain's root revokes it there: B learns of A's renewal from
     /// its notification alone, and then refuses it once the root is revoked
-    /// (ADR-0038 clause 28).
-    /// Verifies: ADR-0048
+    /// (ADR-0026 clause 28).
+    /// Verifies: ADR-0025
     #[test]
     fn a_renewal_another_instance_registers_is_revoked_with_its_root_on_an_instance_that_follows() {
         use crate::revocation::Revoked;
@@ -2777,7 +2777,7 @@ mod tests {
     /// An approval's fields survive a first report another instance makes from a stale view: B
     /// never heard of A's approval, makes the Host at its first report, and what is stored is
     /// still the approved Host, its valid until moved forward.
-    /// Verifies: ADR-0048
+    /// Verifies: ADR-0025
     #[test]
     fn an_approval_survives_a_first_report_on_an_instance_that_never_heard_of_it() {
         let Some(test) = TestDatabase::named() else {
@@ -2813,8 +2813,8 @@ mod tests {
 
     /// No instance writes a Host's mark back from a stale copy: B takes the Gateway mark away, A
     /// never heard of it and moves the Host's valid until forward at its next report, and the
-    /// Host stays unmarked (ADR-0043 clause 16).
-    /// Verifies: ADR-0043
+    /// Host stays unmarked (ADR-0030 clause 16).
+    /// Verifies: ADR-0030
     #[test]
     fn a_stale_instance_does_not_write_a_gateways_mark_back() {
         let Some(test) = TestDatabase::named() else {
@@ -2836,8 +2836,8 @@ mod tests {
 
     /// A Host the store holds marked as a Gateway is bound none, however stale the binder's view:
     /// B never heard of A's mark, its report from the Gateway binds nothing, and the
-    /// `instance_uid` stays free for the Host that carries it (ADR-0043 clause 16).
-    /// Verifies: ADR-0043
+    /// `instance_uid` stays free for the Host that carries it (ADR-0030 clause 16).
+    /// Verifies: ADR-0030
     #[test]
     fn a_stale_instance_binds_nothing_to_a_gateways_host() {
         let Some(test) = TestDatabase::named() else {
@@ -2863,9 +2863,9 @@ mod tests {
     /// A Gateway's mark through an instance that has not taken up a Host another instance wrote is
     /// decided by the database, in the transaction that writes it: B's report wrote the Host, A,
     /// which hears nothing, marks it and holds it as stored, and B holds the mark once it hears of
-    /// it; a host only a register entry names is marked too (ADR-0048 clause 19;
-    /// ADR-0043 clause 16).
-    /// Verifies: ADR-0048
+    /// it; a host only a register entry names is marked too (ADR-0025 clause 19;
+    /// ADR-0030 clause 16).
+    /// Verifies: ADR-0025
     #[test]
     fn a_gateway_mark_finds_a_host_another_instance_wrote() {
         let Some(test) = TestDatabase::named() else {
@@ -2938,9 +2938,9 @@ mod tests {
 
     /// A Gateway's mark of a host neither the Hosts nor the register names is refused through any
     /// instance and writes nothing, in either direction, though the instance still holds the Host
-    /// in memory after another instance forgot it (ADR-0048 clause 19; ADR-0043
+    /// in memory after another instance forgot it (ADR-0025 clause 19; ADR-0030
     /// clause 16).
-    /// Verifies: ADR-0048
+    /// Verifies: ADR-0025
     #[test]
     fn a_gateway_mark_of_a_host_the_database_does_not_know_writes_nothing() {
         let Some(test) = TestDatabase::named() else {
@@ -3023,8 +3023,8 @@ mod tests {
 
     /// A Gateway's mark made while another instance forgets the Host waits for the forget and
     /// finds the Host gone: it is refused and writes no row back, where no register entry names
-    /// the host (ADR-0048 clause 19; ADR-0043 clauses 15 and 16).
-    /// Verifies: ADR-0048
+    /// the host (ADR-0025 clause 19; ADR-0030 clauses 15 and 16).
+    /// Verifies: ADR-0025
     #[test]
     fn a_gateway_mark_made_while_its_host_is_forgotten_writes_no_row_back() {
         let Some(test) = TestDatabase::named() else {
@@ -3058,8 +3058,8 @@ mod tests {
 
     /// A Gateway's mark made while another instance removes the last register entry naming a host
     /// without a row waits for the removal and finds the entry gone: it is refused and makes no
-    /// row (ADR-0048 clause 19).
-    /// Verifies: ADR-0048
+    /// row (ADR-0025 clause 19).
+    /// Verifies: ADR-0025
     #[test]
     fn a_gateway_mark_made_while_its_last_register_entry_is_removed_makes_no_row() {
         let Some(test) = TestDatabase::named() else {

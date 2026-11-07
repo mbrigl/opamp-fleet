@@ -8,7 +8,7 @@
 ## Context
 
 The Agent plane admits by client certificate alone
-([ADR-0038](0038-admission-by-client-certificate-and-revocation.md)), as the
+([ADR-0026](0026-admission-by-client-certificate-and-revocation.md)), as the
 [specification](../SPECIFICATION.md) asks. There is no fleet credential for the Server to offer or
 for the Client to send: an offered credential, or an offered header on the OpAMP connection, has
 nothing on the Server that reads it.
@@ -16,7 +16,7 @@ nothing on the Server that reads it.
 The specification puts security before convenience (Strategy *Security before convenience*, Q-1
 *Secure by default*). An offered endpoint is a connection that leaves the host, so it is TLS 1.3.
 A Server could move the fleet to any host a public CA certified, since a Client without its own CA
-file trusts the public roots (measure H24 of [`HARDENING.md`](../HARDENING.md)).
+file trusts the public roots ([`HARDENING.md`](../HARDENING.md), *What already holds*).
 
 An offered endpoint on the loopback stays within Q-1's wording, which forbids sending a
 configuration or a package unencrypted beyond the loopback, but it leaves the Server's identity
@@ -25,7 +25,7 @@ Client's host then speaks to the Client as its Server. Any local account can ope
 can send Supervisor sets and configurations whose language runs commands, such as an entry that
 runs a program, or whatever the configuration a `command` kind's program reads makes it run, and
 these run with the rights of the account the Client's service runs under
-([ADR-0037](0037-the-accounts-the-service-runs-under.md)). A Server needs to send only one such
+([ADR-0021](0021-the-accounts-the-service-runs-under.md)). A Server needs to send only one such
 offer, whether it is compromised or misconfigured. The real Server cannot undo the move, because
 the Client never connects to it again, and the persisted endpoint outranks `supervisor.toml`.
 Plaintext on the loopback exists for development and tests, where an operator writes the endpoint
@@ -84,7 +84,7 @@ message would be an error.
    section fails at startup. A credential key (`bearer_token_file`, `username`, `password_file`,
    or the inline `bearer_token` or `password`) is refused at startup with a message naming the
    key: the Agent plane admits by client certificate alone
-   ([ADR-0038](0038-admission-by-client-certificate-and-revocation.md)), so an offered credential
+   ([ADR-0026](0026-admission-by-client-certificate-and-revocation.md)), so an offered credential
    would be one nothing reads. The OpAMP settings the Server offers carry no `headers`.
 
 2. **One message, one SHA-256 hash, offered on mismatch.** The Server composes the OpAMP settings
@@ -92,9 +92,9 @@ message would be an error.
    message, and includes it whenever an Agent's reported `last_connection_settings_hash` differs.
    The OpAMP half goes only to Agents declaring `AcceptsOpAMPConnectionSettings`; each telemetry
    destination only to an Agent declaring the matching signal
-   ([ADR-0016](0016-what-an-agent-reports-about-itself.md)). With only telemetry to offer, that is
+   ([ADR-0017](0017-what-an-agent-reports-about-itself.md)). With only telemetry to offer, that is
    the whole offer, with no `opamp` block. A certificate issued in answer to a CSR
-   ([ADR-0038](0038-admission-by-client-certificate-and-revocation.md)) travels as the standing
+   ([ADR-0026](0026-admission-by-client-certificate-and-revocation.md)) travels as the standing
    OpAMP settings plus that certificate, under a hash of its own.
 
 3. **The Server declares `OffersConnectionSettings` whenever it can offer anything:** a
@@ -130,11 +130,11 @@ message would be an error.
    connection.** Reachability of an OTLP receiver is not this Client's to establish at offer time;
    a receiver that is down is not an offer that is wrong. What is checked before it is put in
    force is what the Client can decide alone (the cleartext rule and the unhonoured fields of
-   [ADR-0016](0016-what-an-agent-reports-about-itself.md)), and a refusal is reported, not
+   [ADR-0017](0017-what-an-agent-reports-about-itself.md)), and a refusal is reported, not
    swallowed. A telemetry-only offer is applied in place; its acknowledgement rides the reports
    already owed, and the transport loop carries on. The headers of a telemetry destination are an
-   OTLP receiver's, not admission: they stay as ADR-0016 has them, still offered only on member
-   connections ([ADR-0038](0038-admission-by-client-certificate-and-revocation.md)), and clause 8
+   OTLP receiver's, not admission: they stay as ADR-0017 has them, still offered only on member
+   connections ([ADR-0026](0026-admission-by-client-certificate-and-revocation.md)), and clause 8
    does not reach them.
 
 7. **One offer, one acknowledgement.** A single `connection_settings_status` answers each offer,
@@ -149,11 +149,11 @@ message would be an error.
    never their values. The hash is echoed either way, so the Server does not re-offer in a loop.
    `TLSConnectionSettings` is refused on merit: a Server able to command `insecure_skip_verify`
    could switch off the check that proves it is the Server, and trust is an operator's file
-   ([ADR-0045](0045-tls-1-3-two-planes-and-bounded-input.md) clause 5).
+   ([ADR-0012](0012-tls-1-3-two-planes-and-bounded-input.md) clause 5).
    `ProxyConnectionSettings` has nothing on this Client to configure. Both are Development
    upstream. Offered `headers` on the OpAMP connection are refused on merit too: the Agent plane
    reads no `Authorization` and admits by client certificate alone
-   ([ADR-0038](0038-admission-by-client-certificate-and-revocation.md)), so an applied header would
+   ([ADR-0026](0026-admission-by-client-certificate-and-revocation.md)), so an applied header would
    be a value the Server plants on every connection of the fleet, persisted and sent upstream with
    no reader on this Server, and carried to whatever endpoint a later offer moves the fleet to.
    [`CONFORMANCE.md`](../CONFORMANCE.md) records the three refusals.
@@ -163,7 +163,7 @@ message would be an error.
    the merged settings in force plus the hash that reports them `APPLIED`, written owner-only.
    OpAMP fields fold (an offer that omits a field leaves the one in force), and the file carries
    an `opamp` block only when an offer or the state it folds into had one. How the telemetry
-   destinations fold is [ADR-0016](0016-what-an-agent-reports-about-itself.md)'s. At startup the
+   destinations fold is [ADR-0017](0017-what-an-agent-reports-about-itself.md)'s. At startup the
    persisted settings override `supervisor.toml`'s `endpoint` and heartbeat and poll intervals, and
    the persisted hash restores the status to report. A persisted `ws://` or `http://` endpoint
    that differs from `supervisor.toml`'s is the exception: it is not applied, and
@@ -175,10 +175,10 @@ message would be an error.
 10. **An offered heartbeat replaces the configured interval.** A non-zero
     `heartbeat_interval_seconds` becomes the heartbeat period on WebSocket and the polling interval
     on plain HTTP. The Server judges staleness by the heartbeat it offered
-    ([ADR-0043](0043-the-fleet-record-of-agents-and-hosts.md)).
+    ([ADR-0030](0030-the-fleet-record-of-agents-and-hosts.md)).
 
 11. **Settings are connection-scoped; offers are per Agent.** Over one connection carrying n Agents
-    ([ADR-0015](0015-client-modes-and-the-gateway.md)), the Server offers to each, and the Client
+    ([ADR-0016](0016-client-modes-and-the-gateway.md)), the Server offers to each, and the Client
     keeps one pending offer, verifies and switches once per hash, and reports status for every
     Agent it carries.
 
@@ -220,20 +220,20 @@ message would be an error.
 **Out of scope:**
 
 - How the Agent plane admits, and how it treats a Client of an older version that still sends
-  `Authorization` ([ADR-0038](0038-admission-by-client-certificate-and-revocation.md)).
+  `Authorization` ([ADR-0026](0026-admission-by-client-certificate-and-revocation.md)).
 - Plaintext that an operator writes into `supervisor.toml` themselves. It stays allowed on a
-  loopback IP literal ([ADR-0045](0045-tls-1-3-two-planes-and-bounded-input.md)).
+  loopback IP literal ([ADR-0012](0012-tls-1-3-two-planes-and-bounded-input.md)).
 - The audit entries an offer leaves.
 - `AcceptsOtherConnectionSettings`.
 - What own telemetry is, which destinations an offer sets, and how they and their headers fold
-  ([ADR-0016](0016-what-an-agent-reports-about-itself.md)).
+  ([ADR-0017](0017-what-an-agent-reports-about-itself.md)).
 - `connection_settings_status` in the fleet view and the REST API.
 - An audit of the Server's own use of Agent capabilities under the same rule.
 
 ## Alternatives considered
 
 - **Keeping an optional offered credential.** The Agent plane reads none
-  ([ADR-0038](0038-admission-by-client-certificate-and-revocation.md)); an offered credential
+  ([ADR-0026](0026-admission-by-client-certificate-and-revocation.md)); an offered credential
   would be a secret the Server keeps, sends and the fleet persists, for no check anywhere.
 - **Honouring offered `headers` other than `Authorization`.** No header has a reader on this
   Server, and a generic pass-through would let a Server, or whoever can make one send an offer,
@@ -312,9 +312,10 @@ message would be an error.
   specification rather than checked against it.
 - The code: `verify` in `crates/fleet-agent/src/connection.rs` applies the `ca_file` condition to
   a move over TLS, `check_url` in `crates/opamp/src/endpoint.rs` admits `ws://` and `http://` on a
-  loopback IP literal, and `apply` in
-  `crates/fleet-agent/src/connection.rs` lets a persisted endpoint outrank `supervisor.toml`.
-- [`HARDENING.md`](../HARDENING.md), measure H24.
+  loopback IP literal, and `apply` in `crates/fleet-agent/src/connection.rs` lets a persisted
+  endpoint outrank `supervisor.toml`.
+- [`HARDENING.md`](../HARDENING.md), *What already holds*: an offered move to another TLS endpoint
+  needs the Client's own CA file.
 
 ## Consequences
 
@@ -398,7 +399,7 @@ message would be an error.
 - TLS 1.3 is the provider's: `the_provider_offers_tls_1_3_suites_alone` in
   [`crates/opamp/src/tls.rs`](../../crates/opamp/src/tls.rs) (clause 5).
 
-These tests carry `Verifies: ADR-0013`:
+The refusals of a credential, of offered headers and of plaintext on the loopback:
 
 - [`crates/fleet-server/src/config.rs`](../../crates/fleet-server/src/config.rs):
   `a_connection_offer_refuses_a_credential_key_naming_it`, for each of `bearer_token_file`,

@@ -13,15 +13,16 @@ out. Both ends hold secrets in memory:
 - the Client's private key as PEM, read from `client_key_file` or the pending and issued key files
   under `state_dir`, and the key `csr.rs` reads to sign a renewal or a bootstrap proof;
 - the bootstrap identity a `bootstrap.p12` opens to, held in `ClientConfig` until the Client is
-  enrolled ([ADR-0022](0022-bootstrap-certificates-and-enrolment.md)), the file's bytes while it
-  is read, and its password from the questionnaire or a password file;
+  enrolled
+  ([ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)),
+  the file's bytes while it is read, and its password from the questionnaire or a password file;
 - the Server's client-CA and bootstrap-CA keys as PEM while they are loaded, the DER of every key
   it seals into a PKCS#12 file, the bootstrap password of an issuing request, the password of an
   Operator plane Basic login before it is verified, and the PostgreSQL password and the S3 secret
   access key `read_secret_file` reads from `[database.postgres] password_file` and
   `[blobs.s3] secret_access_key_file`
-  ([ADR-0044](0044-the-servers-state-and-its-stores.md));
-- the Supervisor Endpoint token ([ADR-0015](0015-client-modes-and-the-gateway.md));
+  ([ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md));
+- the Supervisor Endpoint token ([ADR-0016](0016-client-modes-and-the-gateway.md));
 - the passwords and keys `opamp-fleetctl` reads and writes.
 
 Memory that is freed keeps its bytes until it is reused. A core dump, a swapped page, a heap read
@@ -64,7 +65,7 @@ buffer from the moment it is read or made until it is dropped.
    ([ADR-0008](0008-five-crates-on-tokio-and-axum.md) clause 11) with its default `alloc` feature
    and no derive, and named by `fleet-core`, `fleet-agent`, `fleet-server` and `fleet-tools` where
    they hold a secret. It pulls no TLS or crypto backend, so the rule of
-   [ADR-0045](0045-tls-1-3-two-planes-and-bounded-input.md) on the TLS and crypto backend holds.
+   [ADR-0012](0012-tls-1-3-two-planes-and-bounded-input.md) on the TLS and crypto backend holds.
 2. **`Zeroizing` is the whole mechanism.** A secret is a `Zeroizing<Vec<u8>>` or a
    `Zeroizing<String>`, or a struct field of that type; no type of this project's own wraps it. A
    function that hands a secret on returns it so, and a borrow (`&[u8]`, `&str`) passes it to a

@@ -3,7 +3,7 @@
 ## What to build
 
 Every mutating act on the Operator plane is recorded before it runs, and an act that cannot be
-recorded answers `503` (`record_act` in `crates/fleet-server/src/api.rs`, ADR-0046 clauses 1 and
+recorded answers `503` (`record_act` in `crates/fleet-server/src/api.rs`, ADR-0028 clauses 1 and
 5). Five acts also hold a place in the audit channel first and answer `503` without one
 (`hold_place`: a revocation, a Gateway mark, a floor set, a rejection, the window closed). The
 OpenAPI document names a `503` on three routes only, so a client generated from it does not know
@@ -20,7 +20,7 @@ generated document keeps it so.
 
 ## Read first
 
-- ADR-0025 (the REST API and its OpenAPI document); ADR-0046 clauses 1 and 5.
+- ADR-0032 (the REST API and its OpenAPI document); ADR-0028 clauses 1 and 5.
 - `api.rs` `record_act`, `hold_place`, `ApiDoc`; `crates/fleet-server/tests/rest_api.rs`.
 
 ## Blocked by

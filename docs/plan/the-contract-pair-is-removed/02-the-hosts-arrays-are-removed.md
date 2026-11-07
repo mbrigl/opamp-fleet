@@ -5,7 +5,7 @@
 Once ticket 01's release writes the Hosts' `instance_uids` arrays no more, the release after it
 removes them by a migration, together with the code and the comments that keep them. That is the
 third release after 0.8.0. It cannot come earlier, because the release after 0.8.0 still takes
-`instance_uid`s out of the arrays while it runs beside ticket 01's (ADR-0050 clause 22).
+`instance_uid`s out of the arrays while it runs beside ticket 01's (ADR-0023 clause 22).
 
 ## Acceptance criteria
 
@@ -15,7 +15,7 @@ third release after 0.8.0. It cannot come earlier, because the release after 0.8
 
 ## Read first
 
-- ADR-0050 clause 22
+- ADR-0023 clause 22
 - `postgres/schema.rs`, `postgres/ledger.rs`
 
 ## Blocked by

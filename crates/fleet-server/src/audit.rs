@@ -1,4 +1,4 @@
-//! The audit record's port (ADR-0046): what a security decision records, and the trait it is
+//! The audit record's port (ADR-0028): what a security decision records, and the trait it is
 //! recorded through. The record itself — the hash chain, the file, the writer — is the adapter
 //! [`crate::audit_log::AuditLog`].
 
@@ -128,7 +128,7 @@ pub struct Unavailable;
 /// A place held in the record for the entry of one act, whose fields are known only once the act
 /// has run: the act runs only with the place held, and writes into it what it did. Dropped
 /// unwritten, as by an act that failed, it gives the place back
-/// (ADR-0046
+/// (ADR-0028
 /// clause 5).
 pub struct Permit(Box<dyn FnOnce(Entry) + Send>);
 
@@ -145,7 +145,7 @@ impl Permit {
     }
 }
 
-/// The record every security decision goes to (ADR-0046 clause 5).
+/// The record every security decision goes to (ADR-0028 clause 5).
 pub trait Audit: Send + Sync {
     /// Records one decision; without a record the caller does not take it.
     ///

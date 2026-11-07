@@ -40,8 +40,8 @@ G-20: the fleet view, the reach counts and what a rollout releases read the data
 
 ## Read first
 
-- ADR-0048
-  clauses 8 and 9; ADR-0043 clauses 18 and 19
+- ADR-0025
+  clauses 8 and 9; ADR-0030 clauses 18 and 19
 - `fleet.rs` (`place`, `inherit_held`, `client_agents_elsewhere`), `revocation.rs` (how a register
   notification is read again)
 - The manual's "Labels on several instances"
