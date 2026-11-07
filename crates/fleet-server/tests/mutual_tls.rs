@@ -6287,3 +6287,71 @@ fn a_handshake_completes_and_a_report_is_answered_while_another_reports_store_ca
     });
     drop(served);
 }
+
+/// An Agent whose report waits for its store call is answered a WebSocket ping on the same
+/// connection meanwhile, so a stall of the Server's handling ends no live connection for silence;
+/// its reply follows once the call is let go.
+/// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+#[test]
+fn a_ping_is_answered_on_a_connection_whose_report_waits_for_its_store_call() {
+    let pki = Pki::new();
+    let held = InstanceUid([0x53; 16]);
+    let (entered, entering) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let setup = Setup {
+        agents: Some(Box::new(move |data_dir: &std::path::Path| {
+            Box::new(HeldWrite {
+                inner: fleet_server::fs::FsAgentStore::open(data_dir).expect("agents"),
+                held,
+                entered: std::sync::Mutex::new(entered),
+                released: std::sync::Mutex::new(released),
+            }) as Box<dyn fleet_server::agent_store::AgentStore>
+        })),
+        ..Setup::default()
+    };
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("the runtime");
+    runtime.block_on(async {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message as Ws;
+        let served = serve(&pki, setup).await;
+        let (cert, key) = pki.issue("edge-pinged");
+        let mut socket = websocket(&served, &cert, &key, None)
+            .await
+            .expect("the session");
+        let framed = opamp::frame::encode_within(&report(&held), usize::MAX).expect("frame");
+        socket.send(Ws::Binary(framed.into())).await.expect("send");
+        tokio::task::spawn_blocking(move || {
+            entering
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("the Agent's write is under way");
+        })
+        .await
+        .expect("waited");
+
+        socket
+            .send(Ws::Ping(b"alive".to_vec().into()))
+            .await
+            .expect("ping");
+        let ponged = tokio::time::timeout(std::time::Duration::from_secs(10), socket.next()).await;
+        let _ = release.send(());
+        match ponged.expect("the ping is answered while the write waits") {
+            Some(Ok(Ws::Pong(payload))) => assert_eq!(&payload[..], b"alive"),
+            other => panic!("expected the pong first, got {other:?}"),
+        }
+        loop {
+            match tokio::time::timeout(std::time::Duration::from_secs(10), socket.next())
+                .await
+                .expect("the Agent is answered once its write is let go")
+            {
+                Some(Ok(Ws::Binary(_))) => break,
+                Some(Ok(_)) => continue,
+                other => panic!("the session ended early: {other:?}"),
+            }
+        }
+        drop(served);
+    });
+}

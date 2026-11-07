@@ -153,7 +153,8 @@ impl Outbound for NoOutbound {
 }
 
 /// The application's half of an endpoint. The endpoint never calls two of these concurrently for
-/// the same connection; it may for different connections.
+/// the same connection; it may for different connections. A WebSocket's messages are handed over
+/// one at a time in the order they arrived, while the socket is read on and its pings answered.
 pub trait Handler: Send + Sync + 'static {
     /// The application's own state for one connection — one plain-HTTP exchange, or one socket.
     type Connection: Send + 'static;
@@ -226,6 +227,12 @@ impl Closing {
         }
     }
 }
+
+/// How many messages of one WebSocket may wait behind the one being handled. With them, or with
+/// as many bytes as the message limit waiting, the socket is read no further until one is handled:
+/// what a slow handler buffers per connection stays bounded, at most two messages' limit beyond
+/// the one in hand.
+const WAITING_MESSAGES: usize = 8;
 
 struct Endpoint<H> {
     handler: Arc<H>,
@@ -363,18 +370,35 @@ async fn upgrade<H: Handler>(
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
+/// What was read from a WebSocket and waits for its turn: messages are handled in the order they
+/// arrived, and the end of what the peer sends comes after them.
+enum Incoming {
+    Data(Bytes),
+    /// The peer closed, or its side of the connection ended.
+    Closed,
+    /// A receive error, such as a message past the limit the transport refused.
+    Failed,
+}
+
+/// A message being handled, and the connection it is handled on.
+type Handling<'a, C> = std::pin::Pin<Box<dyn Future<Output = (C, Reply)> + Send + 'a>>;
+
 /// One WebSocket connection, until the peer closes it, it fails, or its outbound side ends.
+///
+/// The socket is read on while a message is handled, so a ping is answered even then: the
+/// messages read meanwhile wait, at most [`WAITING_MESSAGES`] of them and no more bytes than the
+/// message limit, and are handed to the handler one at a time in the order they arrived.
 async fn serve_socket<H: Handler, S>(
     mut socket: WebSocketStream<pace::FrameMeter<S>>,
     endpoint: Arc<Endpoint<H>>,
-    mut connection: H::Connection,
+    connection: H::Connection,
     mut outbound: Option<H::Outbound>,
     mut messages: Option<pace::Messages>,
     mut sessions: Option<listen::Sessions>,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    let handler = &endpoint.handler;
+    let handler: &H = &endpoint.handler;
     let limit = endpoint.limit;
     // A listener that holds its connections to a floor (ADR-0045 clause 18) is judged once a window.
     let mut check = messages.as_ref().map(|messages| {
@@ -387,13 +411,25 @@ async fn serve_socket<H: Handler, S>(
         check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         check
     });
+    // The connection is here while no message is being handled, and inside `handling` while one is.
+    let mut connection = Some(connection);
+    let mut handling: Option<Handling<'_, H::Connection>> = None;
+    let mut waiting: std::collections::VecDeque<Incoming> = std::collections::VecDeque::new();
+    let mut waiting_bytes = 0usize;
+    // The peer's end has been read: nothing more is read. After its close no reply can go out.
+    let mut ended = false;
+    let mut closed = false;
     loop {
+        let reading = !ended && waiting.len() < WAITING_MESSAGES && waiting_bytes < limit;
+        let idle = handling.is_none();
         tokio::select! {
-            // A shutdown comes first, so a peer that keeps sending cannot hold its session past it.
-            // Then what has arrived is read before a check judges it, so bytes that waited on this
-            // side while the loop was busy count for the peer.
+            // A shutdown comes first, so a peer that keeps sending cannot hold its session past it,
+            // but after the message in hand, whose reply still goes out. Then a handled message's
+            // reply, then the next message waiting, then what has arrived is read before a check
+            // judges it, so bytes that waited on this side while the loop was busy count for the
+            // peer.
             biased;
-            () = next_closing(&mut sessions) => {
+            () = next_closing(&mut sessions), if idle => {
                 // The listener is shutting down: the peer is told so, and reconnects to whatever
                 // serves this endpoint next.
                 let _ = socket
@@ -404,53 +440,81 @@ async fn serve_socket<H: Handler, S>(
                     .await;
                 break;
             }
-            incoming = socket.next() => {
-                let message = match incoming {
-                    Some(Ok(message)) => message,
-                    // The upgrade capped what this socket will buffer, so a peer past the limit
-                    // surfaces here as a receive error rather than as a frame. Answer it with the
-                    // 1009 close, and let the send fail harmlessly when the connection is simply
-                    // gone or already closing.
-                    Some(Err(e)) => {
-                        warn!(error = %e, "closing the WebSocket after a receive error");
+            (handled, reply) = next_handled(&mut handling) => {
+                handling = None;
+                connection = Some(handled);
+                if answer(&mut socket, handler, reply, limit, closed).await == Sending::Gone {
+                    break;
+                }
+            }
+            () = std::future::ready(()), if idle && !waiting.is_empty() => {
+                let Some(mut current) = connection.take() else { break };
+                let data = match waiting.pop_front() {
+                    Some(Incoming::Data(data)) => data,
+                    Some(Incoming::Failed) => {
+                        connection = Some(current);
                         let _ = socket.send(too_big_close()).await;
                         break;
                     }
-                    None => break,
+                    Some(Incoming::Closed) | None => {
+                        connection = Some(current);
+                        break;
+                    }
                 };
-                let data = match message {
-                    Message::Binary(data) => data,
-                    Message::Close(_) => break,
-                    // The library answers pings itself; pongs and text need nothing from us.
-                    _ => continue,
-                };
-                let reply = match frame::decode::<AgentToServer>(&data, limit) {
-                    Ok(report) => handler.on_message(&mut connection, report).await,
+                waiting_bytes -= data.len();
+                match frame::decode::<AgentToServer>(&data, limit) {
+                    Ok(report) => {
+                        handling = Some(Box::pin(async move {
+                            let reply = handler.on_message(&mut current, report).await;
+                            (current, reply)
+                        }));
+                    }
                     // An oversized frame is malformed, and the specification's answer to it is
                     // not an error message but the 1009 close.
                     Err(e @ FrameError::TooLarge(..)) => {
+                        connection = Some(current);
                         warn!(error = %e, "closing the WebSocket: the peer sent an oversized message");
                         let _ = socket.send(too_big_close()).await;
                         break;
                     }
                     Err(e) => {
                         warn!(error = %e, "undecodable frame on the WebSocket transport");
-                        handler.on_unreadable(&mut connection, &Unreadable::Frame(e))
-                    }
-                };
-                if let Reply::Send(reply) = reply {
-                    let sent = send_framed(&mut socket, &reply, limit).await;
-                    if sent != Sending::Sent {
-                        handler.on_unsent(&reply);
-                    }
-                    if sent == Sending::Gone {
-                        break;
+                        let reply = handler.on_unreadable(&mut current, &Unreadable::Frame(e));
+                        connection = Some(current);
+                        if answer(&mut socket, handler, reply, limit, closed).await == Sending::Gone {
+                            break;
+                        }
                     }
                 }
             }
-            item = next_outbound(&mut outbound) => {
+            incoming = socket.next(), if reading => {
+                match incoming {
+                    Some(Ok(Message::Binary(data))) => {
+                        waiting_bytes += data.len();
+                        waiting.push_back(Incoming::Data(data));
+                    }
+                    // The upgrade capped what this socket will buffer, so a peer past the limit
+                    // surfaces here as a receive error rather than as a frame. It is answered with
+                    // the 1009 close once the messages before it are handled; the send fails
+                    // harmlessly when the connection is simply gone or already closing.
+                    Some(Err(e)) => {
+                        warn!(error = %e, "closing the WebSocket after a receive error");
+                        waiting.push_back(Incoming::Failed);
+                        ended = true;
+                    }
+                    Some(Ok(Message::Close(_))) | None => {
+                        waiting.push_back(Incoming::Closed);
+                        ended = true;
+                        closed = true;
+                    }
+                    // The library answers pings itself; pongs and text need nothing from us.
+                    Some(Ok(_)) => {}
+                }
+            }
+            item = next_outbound(&mut outbound), if idle && waiting.is_empty() => {
+                let Some(current) = connection.as_mut() else { break };
                 let Some(item) = item else {
-                    let frame = handler.closing(&connection).map(|closing| CloseFrame {
+                    let frame = handler.closing(current).map(|closing| CloseFrame {
                         code: CloseCode::from(closing.code),
                         reason: closing.reason.into(),
                     });
@@ -458,7 +522,7 @@ async fn serve_socket<H: Handler, S>(
                     break;
                 };
                 let mut gone = false;
-                for message in handler.on_outbound(&mut connection, item) {
+                for message in handler.on_outbound(current, item) {
                     // What follows a failed send is not tried on a connection that is gone.
                     let sent = if gone {
                         Sending::Gone
@@ -477,9 +541,10 @@ async fn serve_socket<H: Handler, S>(
             scheduled = next_check(&mut check) => {
                 let Some(messages) = messages.as_mut() else { continue };
                 let now = socket.get_ref().progress();
-                // A check this late means the loop was busy and read nothing meanwhile: the peer is
-                // judged from here, not by what waited on this side.
-                if scheduled.elapsed() > messages.window() / 4 {
+                // A check this late means the loop was busy and read nothing meanwhile, and one
+                // while the socket is not read finds no progress the peer could have made: the
+                // peer is judged from here, not by what waited on this side.
+                if !reading || scheduled.elapsed() > messages.window() / 4 {
                     messages.rebase(now);
                     continue;
                 }
@@ -496,7 +561,52 @@ async fn serve_socket<H: Handler, S>(
             }
         }
     }
-    handler.on_closed(connection);
+    // A message still in hand when the connection ends is handled to its end, not cut off; its
+    // reply can no longer go out.
+    if let Some(handling) = handling {
+        let (handled, reply) = handling.await;
+        connection = Some(handled);
+        if let Reply::Send(reply) = reply {
+            handler.on_unsent(&reply);
+        }
+    }
+    if let Some(connection) = connection {
+        handler.on_closed(connection);
+    }
+}
+
+/// The reply of the message being handled, once it is; never, while none is.
+async fn next_handled<C>(handling: &mut Option<Handling<'_, C>>) -> (C, Reply) {
+    match handling {
+        Some(handling) => handling.await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Puts a reply on the wire; after the peer's close, when it can no longer go out, it is reported
+/// unsent instead.
+async fn answer<H: Handler, S>(
+    socket: &mut WebSocketStream<S>,
+    handler: &H,
+    reply: Reply,
+    limit: usize,
+    closed: bool,
+) -> Sending
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let Reply::Send(reply) = reply else {
+        return Sending::Sent;
+    };
+    if closed {
+        handler.on_unsent(&reply);
+        return Sending::Discarded;
+    }
+    let sent = send_framed(socket, &reply, limit).await;
+    if sent != Sending::Sent {
+        handler.on_unsent(&reply);
+    }
+    sent
 }
 
 /// Resolves when the listener asks its sessions to close; never, for a session without one.
@@ -881,5 +991,421 @@ mod tests {
             *handler.unsent.lock().expect("unsent"),
             [named(b"first"), named(b"second")]
         );
+    }
+
+    /// Holds every message whose `instance_uid` begins with `held` until the test lets one go,
+    /// answers each with its `instance_uid`, and records the order and the overlap of its calls.
+    struct Gated {
+        gate: tokio::sync::Semaphore,
+        entered: tokio::sync::Notify,
+        handling: std::sync::atomic::AtomicUsize,
+        most: std::sync::atomic::AtomicUsize,
+        handled: Mutex<Vec<Vec<u8>>>,
+        unsent: Mutex<Vec<ServerToAgent>>,
+        /// How many messages were handled to their end when the connection was closed.
+        closed: Mutex<Option<usize>>,
+    }
+
+    impl Default for Gated {
+        fn default() -> Self {
+            Gated {
+                gate: tokio::sync::Semaphore::new(0),
+                entered: tokio::sync::Notify::new(),
+                handling: std::sync::atomic::AtomicUsize::new(0),
+                most: std::sync::atomic::AtomicUsize::new(0),
+                handled: Mutex::default(),
+                unsent: Mutex::default(),
+                closed: Mutex::default(),
+            }
+        }
+    }
+
+    impl Handler for Gated {
+        type Connection = ();
+        type Outbound = Pushes;
+
+        fn on_connecting(&self, _: &RequestInfo<'_>) -> Result<((), Option<Pushes>), Rejection> {
+            unreachable!("the tests serve the socket directly")
+        }
+
+        async fn on_message(&self, _: &mut (), message: AgentToServer) -> Reply {
+            let now = self.handling.fetch_add(1, Ordering::SeqCst) + 1;
+            self.most.fetch_max(now, Ordering::SeqCst);
+            self.handled
+                .lock()
+                .expect("handled")
+                .push(message.instance_uid.clone());
+            if message.instance_uid.starts_with(b"held") {
+                self.entered.notify_one();
+                self.gate.acquire().await.expect("the gate").forget();
+            }
+            self.handling.fetch_sub(1, Ordering::SeqCst);
+            Reply::Send(named(&message.instance_uid))
+        }
+
+        fn on_outbound(&self, _: &mut (), (): ()) -> Vec<ServerToAgent> {
+            Vec::new()
+        }
+
+        fn on_closed(&self, (): ()) {
+            let handled = self.handled.lock().expect("handled").len();
+            let unfinished = self.handling.load(Ordering::SeqCst);
+            *self.closed.lock().expect("closed") = Some(handled - unfinished);
+        }
+
+        fn on_unsent(&self, message: &ServerToAgent) {
+            self.unsent.lock().expect("unsent").push(message.clone());
+        }
+    }
+
+    /// The server's half of a socket, counting the reads that brought bytes.
+    struct Watched {
+        inner: DuplexStream,
+        reads: tokio::sync::watch::Sender<usize>,
+    }
+
+    impl AsyncRead for Watched {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            let before = buf.filled().len();
+            let polled = Pin::new(&mut self.inner).poll_read(cx, buf);
+            if buf.filled().len() > before {
+                self.reads.send_modify(|reads| *reads += 1);
+            }
+            polled
+        }
+    }
+
+    impl AsyncWrite for Watched {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            Pin::new(&mut self.inner).poll_write(cx, buf)
+        }
+
+        fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.inner).poll_flush(cx)
+        }
+
+        fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.inner).poll_shutdown(cx)
+        }
+    }
+
+    /// A session of [`Gated`]: the handler, the client's end, the server's reads, the session.
+    async fn gated() -> (
+        Arc<Gated>,
+        WebSocketStream<DuplexStream>,
+        tokio::sync::watch::Receiver<usize>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        gated_with(None).await
+    }
+
+    /// [`gated`], held to a floor on its messages' pace.
+    async fn gated_with(
+        floor: Option<pace::Messages>,
+    ) -> (
+        Arc<Gated>,
+        WebSocketStream<DuplexStream>,
+        tokio::sync::watch::Receiver<usize>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let handler = Arc::new(Gated::default());
+        let endpoint = Arc::new(Endpoint {
+            handler: handler.clone(),
+            limit: LIMIT,
+        });
+        let (ours, theirs) = tokio::io::duplex(256 * 1024);
+        let (reads, read) = tokio::sync::watch::channel(0);
+        let stream = pace::FrameMeter::new(Watched { inner: ours, reads });
+        let socket = WebSocketStream::from_raw_socket(stream, Role::Server, None).await;
+        let client = WebSocketStream::from_raw_socket(theirs, Role::Client, None).await;
+        let served = tokio::spawn(serve_socket(socket, endpoint, (), None, floor, None));
+        (handler, client, read, served)
+    }
+
+    async fn send_report(client: &mut WebSocketStream<DuplexStream>, uid: &[u8]) {
+        let report = AgentToServer {
+            instance_uid: uid.to_vec(),
+            ..Default::default()
+        };
+        let framed = frame::encode_within(&report, LIMIT).expect("framed");
+        client
+            .send(Message::Binary(framed.into()))
+            .await
+            .expect("sent to the server");
+    }
+
+    /// The next frame the client reads: a reply as `Ok(instance_uid)`, anything else as itself.
+    async fn next_frame(client: &mut WebSocketStream<DuplexStream>) -> Result<Vec<u8>, Message> {
+        let message = tokio::time::timeout(Duration::from_secs(5), client.next())
+            .await
+            .expect("a frame in time")
+            .expect("an open socket")
+            .expect("a frame");
+        match message {
+            Message::Binary(data) => {
+                let reply: ServerToAgent = frame::decode(&data, LIMIT).expect("framed");
+                Ok(reply.instance_uid)
+            }
+            other => Err(other),
+        }
+    }
+
+    /// Nothing reaches the client for a second: the ping sent last is not answered meanwhile.
+    async fn nothing_within_a_second(client: &mut WebSocketStream<DuplexStream>) {
+        if let Ok(frame) = tokio::time::timeout(Duration::from_secs(1), client.next()).await {
+            panic!("expected nothing yet, got {frame:?}");
+        }
+    }
+
+    async fn entered(handler: &Gated) {
+        tokio::time::timeout(Duration::from_secs(5), handler.entered.notified())
+            .await
+            .expect("the held message is being handled");
+    }
+
+    fn pong(payload: &'static [u8]) -> Result<Vec<u8>, Message> {
+        Err(Message::Pong(payload.into()))
+    }
+
+    /// A ping that arrives while a message of the same connection is being handled is answered
+    /// at once, before the message's reply.
+    #[tokio::test]
+    async fn a_ping_is_answered_while_a_message_is_handled() {
+        let (handler, mut client, _read, _served) = gated().await;
+        send_report(&mut client, b"held").await;
+        entered(&handler).await;
+        client
+            .send(Message::Ping(b"alive".as_slice().into()))
+            .await
+            .expect("ping");
+        assert_eq!(next_frame(&mut client).await, pong(b"alive"));
+        handler.gate.add_permits(1);
+        assert_eq!(next_frame(&mut client).await, Ok(b"held".to_vec()));
+    }
+
+    /// Messages read while one is handled wait for it: one call at a time, in the order they
+    /// arrived, and their replies in that order.
+    #[tokio::test]
+    async fn the_messages_of_one_connection_are_handled_one_at_a_time_and_answered_in_order() {
+        let (handler, mut client, _read, _served) = gated().await;
+        send_report(&mut client, b"held").await;
+        entered(&handler).await;
+        for uid in [b"a".as_slice(), b"held-b", b"c"] {
+            send_report(&mut client, uid).await;
+        }
+        client
+            .send(Message::Ping(b"read".as_slice().into()))
+            .await
+            .expect("ping");
+        assert_eq!(next_frame(&mut client).await, pong(b"read"));
+        handler.gate.add_permits(2);
+        let mut replies = Vec::new();
+        for _ in 0..4 {
+            replies.push(next_frame(&mut client).await.expect("a reply"));
+        }
+        let order = [
+            b"held".to_vec(),
+            b"a".to_vec(),
+            b"held-b".to_vec(),
+            b"c".to_vec(),
+        ];
+        assert_eq!(replies, order);
+        assert_eq!(*handler.handled.lock().expect("handled"), order);
+        assert_eq!(handler.most.load(Ordering::SeqCst), 1, "one call at a time");
+    }
+
+    /// Behind the message being handled, the connection is read until eight more wait; then not
+    /// again until one is handled, so a ping after the eighth is answered only after a reply.
+    #[tokio::test]
+    async fn a_connection_with_eight_messages_waiting_is_read_no_further_until_one_is_handled() {
+        let (handler, mut client, _read, _served) = gated().await;
+        send_report(&mut client, b"held").await;
+        entered(&handler).await;
+        for n in 0..WAITING_MESSAGES - 1 {
+            send_report(&mut client, format!("m{n}").as_bytes()).await;
+        }
+        client
+            .send(Message::Ping(b"seven".as_slice().into()))
+            .await
+            .expect("ping");
+        assert_eq!(
+            next_frame(&mut client).await,
+            pong(b"seven"),
+            "seven waiting: read on"
+        );
+
+        send_report(&mut client, b"m7").await;
+        client
+            .send(Message::Ping(b"eight".as_slice().into()))
+            .await
+            .expect("ping");
+        nothing_within_a_second(&mut client).await;
+        handler.gate.add_permits(1);
+        assert_eq!(
+            next_frame(&mut client).await,
+            Ok(b"held".to_vec()),
+            "eight waiting: the ping is read only once one is handled"
+        );
+        let mut frames = Vec::new();
+        for _ in 0..WAITING_MESSAGES + 1 {
+            frames.push(next_frame(&mut client).await);
+        }
+        assert!(frames.contains(&pong(b"eight")), "{frames:?}");
+    }
+
+    /// Messages waiting behind the one handled hold no more bytes than the message limit: once
+    /// they reach it the connection is read no further until one is handled.
+    #[tokio::test]
+    async fn a_connection_with_the_limit_in_bytes_waiting_is_read_no_further_until_one_is_handled()
+    {
+        let (handler, mut client, _read, _served) = gated().await;
+        send_report(&mut client, b"held").await;
+        entered(&handler).await;
+        let large = vec![b'x'; LIMIT - 200];
+        send_report(&mut client, &large).await;
+        client
+            .send(Message::Ping(b"under".as_slice().into()))
+            .await
+            .expect("ping");
+        assert_eq!(
+            next_frame(&mut client).await,
+            pong(b"under"),
+            "under the limit: read on"
+        );
+
+        send_report(&mut client, &[b'y'; 300]).await;
+        client
+            .send(Message::Ping(b"over".as_slice().into()))
+            .await
+            .expect("ping");
+        nothing_within_a_second(&mut client).await;
+        handler.gate.add_permits(1);
+        assert_eq!(
+            next_frame(&mut client).await,
+            Ok(b"held".to_vec()),
+            "at the limit: the ping is read only once one is handled"
+        );
+        let mut frames = Vec::new();
+        for _ in 0..3 {
+            frames.push(next_frame(&mut client).await);
+        }
+        assert!(frames.contains(&pong(b"over")));
+    }
+
+    /// The peer closes while a message is handled: that message and the ones it sent before the
+    /// close are still handled in order, and their replies, which can no longer go out, are
+    /// reported unsent before the session ends.
+    #[tokio::test]
+    async fn messages_before_a_peers_close_are_handled_and_their_replies_reported_unsent() {
+        let (handler, mut client, mut read, served) = gated().await;
+        send_report(&mut client, b"held").await;
+        entered(&handler).await;
+        send_report(&mut client, b"after").await;
+        client
+            .send(Message::Ping(b"read".as_slice().into()))
+            .await
+            .expect("ping");
+        assert_eq!(next_frame(&mut client).await, pong(b"read"));
+        let before = *read.borrow();
+        client.send(Message::Close(None)).await.expect("close");
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            read.wait_for(|reads| *reads > before),
+        )
+        .await
+        .expect("the close is read in time")
+        .expect("the session");
+        handler.gate.add_permits(1);
+        ended(served).await;
+        assert_eq!(
+            *handler.handled.lock().expect("handled"),
+            [b"held".to_vec(), b"after".to_vec()]
+        );
+        assert_eq!(
+            *handler.unsent.lock().expect("unsent"),
+            [named(b"held"), named(b"after")]
+        );
+    }
+
+    /// A socket that is not read because messages wait is not judged by the floor on its pace:
+    /// the peer could make no progress meanwhile. Here a message that has begun when reading
+    /// stops is not cut off while the held one is handled for several windows.
+    #[tokio::test]
+    async fn a_socket_not_read_while_messages_wait_is_not_judged_by_its_pace() {
+        let window = Duration::from_millis(300);
+        let floor = pace::Messages::new(pace::Pace {
+            window,
+            min_bytes: 64 * 1024,
+        });
+        let (handler, mut client, _read, _served) = gated_with(Some(floor)).await;
+        send_report(&mut client, b"held").await;
+        entered(&handler).await;
+        for n in 0..WAITING_MESSAGES {
+            send_report(&mut client, format!("m{n}").as_bytes()).await;
+        }
+        // The head of a masked binary frame of 200 bytes, and nothing of its payload: a message
+        // that has begun.
+        tokio::io::AsyncWriteExt::write_all(
+            client.get_mut(),
+            &[0x82, 0x80 | 126, 0, 200, 1, 2, 3, 4],
+        )
+        .await
+        .expect("the head of a frame");
+        // Several windows pass while the held message is handled and nothing is read.
+        tokio::time::sleep(window * 4).await;
+        handler.gate.add_permits(1);
+        assert_eq!(
+            next_frame(&mut client).await,
+            Ok(b"held".to_vec()),
+            "still open"
+        );
+        for n in 0..WAITING_MESSAGES {
+            assert_eq!(
+                next_frame(&mut client).await,
+                Ok(format!("m{n}").into_bytes())
+            );
+        }
+    }
+
+    /// A message that trickles while another is handled is cut off by the floor all the same; the
+    /// message in hand is handled to its end, its reply reported unsent, and only then is the
+    /// connection closed.
+    #[tokio::test]
+    async fn a_connection_cut_off_while_a_message_is_handled_closes_after_it() {
+        let window = Duration::from_millis(300);
+        let floor = pace::Messages::new(pace::Pace {
+            window,
+            min_bytes: 64 * 1024,
+        });
+        let (handler, mut client, _read, served) = gated_with(Some(floor)).await;
+        send_report(&mut client, b"held").await;
+        entered(&handler).await;
+        tokio::io::AsyncWriteExt::write_all(
+            client.get_mut(),
+            &[0x82, 0x80 | 126, 0, 200, 1, 2, 3, 4],
+        )
+        .await
+        .expect("the head of a frame");
+        match next_frame(&mut client).await {
+            Err(Message::Close(Some(close))) => assert_eq!(close.code, CloseCode::Policy),
+            other => panic!("expected the 1008 close, got {other:?}"),
+        }
+        assert_eq!(
+            *handler.closed.lock().expect("closed"),
+            None,
+            "not closed yet"
+        );
+        handler.gate.add_permits(1);
+        ended(served).await;
+        assert_eq!(*handler.unsent.lock().expect("unsent"), [named(b"held")]);
+        assert_eq!(*handler.closed.lock().expect("closed"), Some(1));
     }
 }

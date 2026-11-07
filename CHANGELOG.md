@@ -89,6 +89,11 @@ once its tag exists.
   answered `Unavailable` after three such rounds.
   An instance's pool holds `[database] pool_size` connections, 16 by default (it held 8), and at
   most half of them create new Agents' records at once.
+  The Server and a Gateway now read an Agent's WebSocket on while they handle one of its
+  messages and answer its pings meanwhile, so a slow database ends no Agent's connection for
+  silence; the messages read meanwhile are handled in the order they arrived, at most eight, or
+  the message limit in bytes, waiting behind the one in hand before the connection is read no
+  further.
   **What to do:** the database role needs the right to create functions in its schema as well as
   tables; PostgreSQL's `CREATE` right on the schema gives both. Allow the database's
   `max_connections` for `pool_size` connections of each instance.
