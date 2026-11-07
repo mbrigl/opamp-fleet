@@ -13333,7 +13333,7 @@ mod tests {
         fn writes_hosts_by_act(&self) -> bool {
             self.inner.writes_hosts_by_act()
         }
-        fn write_host_act(&self, act: &crate::revocation::HostAct) -> Result<(), String> {
+        fn write_host_act(&self, act: &crate::revocation::HostAct) -> Result<bool, String> {
             (self.probe)("write_host_act", None);
             self.inner.write_host_act(act)
         }

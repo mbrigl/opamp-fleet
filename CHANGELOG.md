@@ -78,6 +78,18 @@ once its tag exists.
   before.
   **What to do:** nothing.
 
+- **A Gateway's mark finds a Host another instance wrote**
+  ([ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side](docs/adr/draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+  clause 19). On PostgreSQL `PUT /api/v1/hosts/{host}/gateway` decided whether the host is known
+  from the instance's copy of the Hosts and the register, so a Host whose first report reached
+  another instance was answered `404` until this instance had heard of it, and a Host the database
+  had forgotten could be marked from a stale copy. The database now decides it in the transaction
+  that writes the mark: a Host row or a register entry naming the host makes it known, and any
+  other host is answered `404` with nothing written. On files the Server decides from what it
+  holds, as before.
+  **What to do:** while instances of 0.8.0 run beside this release, make marks through an
+  instance of this release: 0.8.0 still decides from its copy.
+
 - **A new Agent is not sent away while a connecting fleet holds the database's pool**
   ([ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision](docs/adr/draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
   clause 24). On PostgreSQL, a new Agent's first report gave up after 5 s without a pooled

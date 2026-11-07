@@ -437,8 +437,10 @@ impl LedgerStore for PgLedgerStore {
     /// instance writes back another instance's change from a stale copy. A Host row made or whose
     /// valid until moves forward (`Seen`, `Extended`), by a report, an issuance or a prune, is
     /// announced after the commit ([`follow_commit`]); a Gateway's mark and a Host forgotten narrow
-    /// what a Host speaks for, and are announced in their transaction.
-    fn write_host_act(&self, act: &HostAct) -> Result<(), String> {
+    /// what a Host speaks for, and are announced in their transaction. A Gateway's mark is written
+    /// only where the transaction finds the host's row or a register entry naming it, whatever
+    /// the instance holds, and answers `false` with nothing written otherwise.
+    fn write_host_act(&self, act: &HostAct) -> Result<bool, String> {
         let act = act.clone();
         self.database.run(move |pool| async move {
             let mut client = client(&pool).await?;
@@ -464,15 +466,34 @@ impl LedgerStore for PgLedgerStore {
                 HostAct::Gateway { host, gateway } => {
                     let subject = serde_json::to_value(crate::revocation::SubjectValues::default())
                         .expect("subject values serialize");
-                    transaction
+                    // A host is known by its row, which the update holds, so a Host forgotten
+                    // meanwhile is waited for and found gone, or by a register entry naming it,
+                    // held the same way so an entry removed meanwhile is found gone, which makes
+                    // the row; a row another transaction makes meanwhile is waited for and
+                    // updated.
+                    let known = transaction
                         .execute(
-                            "INSERT INTO hosts (host, gateway, instance_uids, subject) \
-                             VALUES ($1, $2, '{}', $3) \
-                             ON CONFLICT (host) DO UPDATE SET gateway = EXCLUDED.gateway",
-                            &[host, gateway, &subject],
+                            "UPDATE hosts SET gateway = $2 WHERE host = $1",
+                            &[host, gateway],
                         )
                         .await
-                        .map_err(sql)?;
+                        .map_err(sql)?
+                        > 0
+                        || transaction
+                            .execute(
+                                "INSERT INTO hosts (host, gateway, instance_uids, subject) \
+                                 SELECT $1, $2, '{}', $3 \
+                                 WHERE EXISTS (SELECT 1 FROM certificates WHERE host = $1 FOR KEY SHARE) \
+                                 ON CONFLICT (host) DO UPDATE SET gateway = EXCLUDED.gateway",
+                                &[host, gateway, &subject],
+                            )
+                            .await
+                            .map_err(sql)?
+                            > 0;
+                    if !known {
+                        // Nothing was written; the transaction is dropped unannounced.
+                        return Ok(false);
+                    }
                     if *gateway {
                         transaction
                             .execute("DELETE FROM host_bindings WHERE host = $1", &[host])
@@ -519,7 +540,7 @@ impl LedgerStore for PgLedgerStore {
             if changed && follows {
                 follow_commit(client, &pool);
             }
-            Ok(())
+            Ok(true)
         })
     }
 
@@ -1648,7 +1669,8 @@ mod tests {
 
     /// A Gateway's mark and a binding to its Host made at once never leave a binding to it: the
     /// binding waits for the mark and sees it, or the mark waits for the binding and releases it
-    /// (ADR-0043 clause 16). The Host has no row before either.
+    /// (ADR-0043 clause 16). The Host has no row before either; a register entry names it, so the
+    /// mark knows it.
     /// Verifies: ADR-0043
     #[test]
     fn a_gateway_mark_and_a_binding_at_once_leave_the_gateway_bound_none() {
@@ -1662,16 +1684,27 @@ mod tests {
         );
         for round in 0..20 {
             let gateway = format!("gateway/{round}");
+            let mut entry = issued(&format!("{round:02x}"), None);
+            entry.facts.host = Some(gateway.clone());
+            marker
+                .register_issued(
+                    &entry,
+                    &RegisterBounds {
+                        size: 100,
+                        per_root: 10,
+                    },
+                )
+                .expect("register");
             let barrier = std::sync::Barrier::new(2);
             std::thread::scope(|scope| {
                 scope.spawn(|| {
                     barrier.wait();
-                    marker
+                    assert!(marker
                         .write_host_act(&HostAct::Gateway {
                             host: gateway.clone(),
                             gateway: true,
                         })
-                        .expect("mark");
+                        .expect("mark"));
                 });
                 scope.spawn(|| {
                     barrier.wait();
@@ -2825,5 +2858,237 @@ mod tests {
         instance()
             .check_report("h", &subject, 10, b"\x02")
             .expect("the instance_uid is free");
+    }
+
+    /// A Gateway's mark through an instance that has not taken up a Host another instance wrote is
+    /// decided by the database, in the transaction that writes it: B's report wrote the Host, A,
+    /// which hears nothing, marks it and holds it as stored, and B holds the mark once it hears of
+    /// it; a host only a register entry names is marked too (the instances draft, clause 19;
+    /// ADR-0043 clause 16).
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    #[test]
+    fn a_gateway_mark_finds_a_host_another_instance_wrote() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = Database::open_in(&test.config(), Exclusive::Shared, Some(&test.schema))
+            .expect("A's database");
+        let instance = instances_on(&database);
+        let a = instance();
+        let (b, _runtime) = follower(&test);
+        let subject = SubjectValues {
+            organization: "Kunde".into(),
+            ..SubjectValues::default()
+        };
+        b.check_report("g", &subject, 1_000, b"\x01")
+            .expect("B writes the Host");
+        let registered = issued("0a", None);
+        PgLedgerStore::new(database.clone())
+            .register_issued(
+                &registered,
+                &RegisterBounds {
+                    size: 10,
+                    per_root: 10,
+                },
+            )
+            .expect("a register entry without a Host row");
+        let register_host = registered.facts.host.clone().expect("it names a host");
+        let held = |name: &str| {
+            a.hosts()
+                .into_iter()
+                .find(|(host, _, _)| host == name)
+                .map(|(_, host, _)| host)
+        };
+        assert_eq!(held("g"), None, "A has not taken up B's Host");
+
+        assert!(
+            a.set_gateway("g", true).expect("mark"),
+            "A marks the Host B wrote"
+        );
+        let stored = held("g").expect("A holds the Host it marked");
+        assert!(stored.gateway);
+        assert_eq!(stored.subject, subject, "A holds the Host as stored");
+        assert_eq!(
+            stored.valid_until_ms,
+            Some(1_000),
+            "A holds the Host as stored"
+        );
+        assert!(
+            test.rows("SELECT 1 FROM host_bindings WHERE host = 'g'")
+                .is_empty(),
+            "the mark released B's binding"
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !b.is_gateway("g") && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(b.is_gateway("g"), "B holds the mark once it hears of it");
+
+        assert!(
+            a.set_gateway(&register_host, true).expect("mark"),
+            "a register entry names the host"
+        );
+        assert_eq!(
+            test.rows(&format!(
+                "SELECT gateway FROM hosts WHERE host = '{register_host}'"
+            )),
+            vec![vec![Some("t".to_string())]]
+        );
+    }
+
+    /// A Gateway's mark of a host neither the Hosts nor the register names is refused through any
+    /// instance and writes nothing, in either direction, though the instance still holds the Host
+    /// in memory after another instance forgot it (the instances draft, clause 19; ADR-0043
+    /// clause 16).
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    #[test]
+    fn a_gateway_mark_of_a_host_the_database_does_not_know_writes_nothing() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let instance = instances_on(&database);
+        let a = instance();
+        let subject = SubjectValues::default();
+        a.check_report("old", &subject, 1_000, b"\x01")
+            .expect("A writes the Host");
+        test.rows(
+            "DELETE FROM host_bindings WHERE host = 'old'; DELETE FROM hosts WHERE host = 'old'",
+        );
+        let b = instance();
+        for (on, name) in [(&a, "nobody"), (&b, "nobody"), (&a, "old"), (&b, "old")] {
+            for gateway in [true, false] {
+                assert!(
+                    !on.set_gateway(name, gateway).expect("asked"),
+                    "{name} marked {gateway}"
+                );
+            }
+        }
+        assert!(
+            test.rows("SELECT host FROM hosts WHERE host IN ('nobody', 'old')")
+                .is_empty(),
+            "nothing is written"
+        );
+        assert!(!a.is_gateway("old") && !b.is_gateway("nobody"));
+    }
+
+    /// Marks `host` as a Gateway through `store` while `held`, another instance's writes, stands
+    /// uncommitted, and commits them once the mark waits on one of their locks, within ten
+    /// seconds: what the mark answered.
+    fn marked_while_held(
+        test: &TestDatabase,
+        database: &Arc<Database>,
+        store: &PgLedgerStore,
+        held: &'static str,
+        host: &str,
+    ) -> Result<bool, String> {
+        let (holding, pid) = database
+            .run(move |pool| async move {
+                let holding = client(&pool).await?;
+                holding.batch_execute(held).await.map_err(sql)?;
+                let pid: i32 = holding
+                    .query_one("SELECT pg_backend_pid()", &[])
+                    .await
+                    .map_err(sql)?
+                    .get(0);
+                Ok((holding, pid))
+            })
+            .expect("held");
+        std::thread::scope(|scope| {
+            let marker = scope.spawn(|| {
+                store.write_host_act(&HostAct::Gateway {
+                    host: host.to_string(),
+                    gateway: true,
+                })
+            });
+            let waiting =
+                format!("SELECT 1 FROM pg_stat_activity WHERE {pid} = ANY(pg_blocking_pids(pid))");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while test.rows(&waiting).is_empty() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the mark never waited on the held writes"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            database
+                .run(move |_| async move {
+                    holding.batch_execute("COMMIT").await.map_err(sql)?;
+                    Ok(())
+                })
+                .expect("commit the held writes");
+            marker.join().expect("marker")
+        })
+    }
+
+    /// A Gateway's mark made while another instance forgets the Host waits for the forget and
+    /// finds the Host gone: it is refused and writes no row back, where no register entry names
+    /// the host (the instances draft, clause 19; ADR-0043 clauses 15 and 16).
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    #[test]
+    fn a_gateway_mark_made_while_its_host_is_forgotten_writes_no_row_back() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let store = PgLedgerStore::new(database.clone());
+        store
+            .write_host_act(&HostAct::Seen {
+                host: "ended".into(),
+                entry: Host {
+                    valid_until_ms: Some(10),
+                    ..Host::default()
+                },
+            })
+            .expect("the Host");
+        // Another instance's forget, held open after its delete.
+        let marked = marked_while_held(
+            &test,
+            &database,
+            &store,
+            "BEGIN; DELETE FROM hosts WHERE host = 'ended' AND NOT gateway \
+             AND valid_until_ms <= 20",
+            "ended",
+        );
+        assert_eq!(marked, Ok(false), "the mark found the Host gone");
+        assert!(test
+            .rows("SELECT 1 FROM hosts WHERE host = 'ended'")
+            .is_empty());
+    }
+
+    /// A Gateway's mark made while another instance removes the last register entry naming a host
+    /// without a row waits for the removal and finds the entry gone: it is refused and makes no
+    /// row (the instances draft, clause 19).
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    #[test]
+    fn a_gateway_mark_made_while_its_last_register_entry_is_removed_makes_no_row() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let store = PgLedgerStore::new(database.clone());
+        let mut entry = issued("0a", None);
+        entry.facts.host = Some("leaving".into());
+        store
+            .register_issued(
+                &entry,
+                &RegisterBounds {
+                    size: 10,
+                    per_root: 10,
+                },
+            )
+            .expect("the register entry");
+        // Another instance's removal of the entry, held open after its delete.
+        let marked = marked_while_held(
+            &test,
+            &database,
+            &store,
+            "BEGIN; DELETE FROM certificates WHERE host = 'leaving'",
+            "leaving",
+        );
+        assert_eq!(marked, Ok(false), "the mark found the entry gone");
+        assert!(test
+            .rows("SELECT 1 FROM hosts WHERE host = 'leaving'")
+            .is_empty());
     }
 }

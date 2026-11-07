@@ -451,15 +451,18 @@ pub trait LedgerStore: Send + Sync {
 
     /// Writes one act on the Hosts, deciding each field from what is stored: a valid until only
     /// moves forward, an approval and a subject are written only into a Host that has no row yet,
-    /// and a Host is forgotten only while what is stored says it has ended
+    /// a Host is forgotten only while what is stored says it has ended, and a Gateway's mark is
+    /// written only for a host that a Host row or a register entry names
     /// (ADR-0041
-    /// clause 19). A store that writes the Hosts whole writes nothing here.
+    /// clause 19). Answers whether the store knows the host a Gateway's mark names: `false` when
+    /// it knows neither, and nothing is then written; every other act answers `true`. A store that
+    /// writes the Hosts whole writes nothing here and answers `true`.
     ///
     /// # Errors
     /// Returns an error when it cannot be written; the Hosts are then as they were.
-    fn write_host_act(&self, act: &HostAct) -> Result<(), String> {
+    fn write_host_act(&self, act: &HostAct) -> Result<bool, String> {
         let _ = act;
-        Ok(())
+        Ok(true)
     }
 
     /// Writes the Hosts as `hosts` holds them, each one that changed since the last write and each
@@ -495,7 +498,8 @@ pub enum HostAct {
     /// Valid untils moved forward, each never back.
     Extended(Vec<(String, u64)>),
     /// A Host marked as a Gateway, or no longer; marking it releases every `instance_uid` bound to
-    /// it in the same write.
+    /// it in the same write. Written only for a host the store knows by its row or a register
+    /// entry.
     Gateway { host: String, gateway: bool },
     /// Hosts whose valid until had passed at `now_ms`, forgotten with their bindings, each only
     /// while what is stored still says so.
@@ -1336,10 +1340,13 @@ impl Revocations {
             let Some(entry) = state.hosts.get(host).cloned() else {
                 return Ok(());
             };
-            return self.store.write_host_act(&HostAct::Seen {
-                host: host.to_string(),
-                entry,
-            });
+            return self
+                .store
+                .write_host_act(&HostAct::Seen {
+                    host: host.to_string(),
+                    entry,
+                })
+                .map(drop);
         }
         self.save_hosts(state)
     }
@@ -1584,27 +1591,38 @@ impl Revocations {
         self.save_hosts(state)
     }
 
-    /// Marks `host` as a Gateway, or not; answers whether this Server knows the host.
+    /// Marks `host` as a Gateway, or not; answers whether this Server knows the host. A store that
+    /// writes the Hosts by act decides that in the write, from what it holds, so a Host another
+    /// instance wrote is known before this one hears of it, and one it no longer holds is not
+    /// marked from this instance's copy; this instance then reads the ledger again where it held
+    /// no copy of the Host, so it holds the Host as stored. A store that is its only writer is
+    /// decided by what this instance holds.
     ///
     /// # Errors
     /// Returns an error when the change cannot be written.
     pub fn set_gateway(&self, host: &str, gateway: bool) -> Result<bool, String> {
+        let by_act = self.store.writes_hosts_by_act();
         let mut state = self.state.lock().expect("revocation lock");
-        let known = state.hosts.contains_key(host)
+        let held = state.hosts.contains_key(host);
+        let known = held
             || state
                 .issued
                 .values()
                 .any(|issued| issued.facts.host.as_deref() == Some(host));
-        if !known {
+        if !by_act && !known {
             return Ok(false);
         }
         state.acted();
-        if self.store.writes_hosts_by_act() {
-            // The mark and the release of every binding it ends are one write.
-            self.store.write_host_act(&HostAct::Gateway {
+        if by_act {
+            // The mark and the release of every binding it ends are one write, made only for a
+            // host the store knows (the instances draft, clause 19).
+            let known = self.store.write_host_act(&HostAct::Gateway {
                 host: host.to_string(),
                 gateway,
             })?;
+            if !known {
+                return Ok(false);
+            }
         } else if gateway {
             self.store.unbind_host(host)?;
         }
@@ -1623,8 +1641,15 @@ impl Revocations {
         if !gateway {
             state.earliest_expiry_ms = state.earliest_expiry_ms.min(until);
         }
-        if !self.store.writes_hosts_by_act() {
+        if !by_act {
             self.save_hosts(state)?;
+        } else if !held {
+            drop(state);
+            // The copy holds the mark alone; the Host's other fields, its subject that places
+            // its Agents among them, are read now, or at the next lease renewal where this fails.
+            if let Err(e) = self.reload_ledger() {
+                tracing::warn!(error = %e, %host, "cannot read the Host a Gateway's mark wrote");
+            }
         }
         Ok(true)
     }
@@ -3389,8 +3414,20 @@ mod tests {
         fn writes_hosts_by_act(&self) -> bool {
             true
         }
-        fn write_host_act(&self, act: &HostAct) -> Result<(), String> {
-            let hosts = &mut self.0 .0.lock().expect("lock").hosts;
+        fn write_host_act(&self, act: &HostAct) -> Result<bool, String> {
+            let ledger = &mut *self.0 .0.lock().expect("lock");
+            let named = |host: &str| {
+                ledger
+                    .issued
+                    .iter()
+                    .any(|issued| issued.facts.host.as_deref() == Some(host))
+            };
+            if let HostAct::Gateway { host, .. } = act {
+                if !ledger.hosts.contains_key(host) && !named(host) {
+                    return Ok(false);
+                }
+            }
+            let hosts = &mut ledger.hosts;
             match act {
                 HostAct::Seen { host, entry } => match hosts.get_mut(host) {
                     Some(held) => {
@@ -3423,7 +3460,7 @@ mod tests {
                         || held.valid_until_ms.is_none_or(|t| t > *now_ms)
                 }),
             }
-            Ok(())
+            Ok(true)
         }
         fn save_hosts(&self, hosts: &BTreeMap<String, Host>) -> Result<(), String> {
             self.0.save_hosts(hosts)
@@ -3533,7 +3570,7 @@ mod tests {
         fn writes_hosts_by_act(&self) -> bool {
             self.inner.writes_hosts_by_act()
         }
-        fn write_host_act(&self, act: &HostAct) -> Result<(), String> {
+        fn write_host_act(&self, act: &HostAct) -> Result<bool, String> {
             self.inner.write_host_act(act)
         }
         fn save_hosts(&self, hosts: &BTreeMap<String, Host>) -> Result<(), String> {
@@ -3862,14 +3899,14 @@ mod tests {
         fn writes_hosts_by_act(&self) -> bool {
             true
         }
-        fn write_host_act(&self, act: &HostAct) -> Result<(), String> {
+        fn write_host_act(&self, act: &HostAct) -> Result<bool, String> {
             run(&self.before_host);
             if self.failing_host.load(Ordering::SeqCst) {
                 return Err("the Host is not written".to_string());
             }
-            self.inner.write_host_act(act)?;
+            let known = self.inner.write_host_act(act)?;
             run(&self.after_host);
-            Ok(())
+            Ok(known)
         }
         fn save_hosts(&self, hosts: &BTreeMap<String, Host>) -> Result<(), String> {
             self.inner.save_hosts(hosts)
