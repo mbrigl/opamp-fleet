@@ -435,6 +435,8 @@ pub trait PackageBackend: Send + Sync {
     fn remove_entry(&self, id: &PackageId, platform: &Platform) -> Result<(), String>;
 
     /// Deletes one Package's metadata, its entries with it; its blobs are the store's to collect.
+    /// A database adapter takes the Package out of every Deployment that holds it in the same
+    /// transaction; on the filesystem the fleet takes it out of the Deployments after.
     fn remove(&self, id: &PackageId) -> Result<(), String>;
 
     /// Holds the blob store's lock alone (ADR-0044 clause 14)

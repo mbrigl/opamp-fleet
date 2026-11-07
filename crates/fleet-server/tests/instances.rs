@@ -1042,6 +1042,19 @@ fn two_members_added_at_once_on_two_instances_are_both_kept() {
             )
         })
         .collect();
+    // An add refuses a member that is not stored: every one this test adds is.
+    for side in ["a", "b"] {
+        schema.query(&format!(
+            "INSERT INTO configurations (name, body, role, service_name) \
+             SELECT '{side}-' || round, '', '', 'otelcol' FROM generate_series(0, 7) AS round; \
+             INSERT INTO packages (agent_type, version) \
+             SELECT '{side}-type-' || round, '1.0.0' FROM generate_series(0, 7) AS round"
+        ));
+    }
+    schema.query(
+        "INSERT INTO packages (agent_type, version) VALUES ('otelcol', '1.0.0'), \
+         ('otelcol', '2.0.0')",
+    );
     let channel = std::collections::BTreeMap::from([("channel".to_string(), "stable".to_string())]);
     instances[0].put("stable", channel.clone()).expect("save");
     instances[1]
@@ -1866,6 +1879,94 @@ async fn a_package_published_on_one_instance_is_listed_by_the_other() {
     assert!(
         eventually(Duration::from_secs(10), || !listed_by_b(&id)).await,
         "B still lists the Package A deleted"
+    );
+}
+
+/// A Configuration and a Package deleted through B leave the Deployment that held them in A's
+/// memory too: the transaction that deletes them announces each Deployment it took them out of,
+/// and A reads the Deployments again for it.
+/// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side, ADR-0026
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_member_deleted_through_one_instance_leaves_the_deployments_the_other_holds() {
+    use fleet_server::packages::PackageId;
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let a = Instance::start(&pki, &schema, schema.config_on(schema.config.port)).await;
+    let b = Instance::start(&pki, &schema, schema.config_on(schema.config.port)).await;
+    assert!(a.has_read(1).await, "A never listened");
+    assert!(b.has_read(1).await, "B never listened");
+    let id = PackageId::new("otelcol", "1.0.0").expect("id");
+    let on_a = a.state.clone();
+    let held = id.clone();
+    tokio::task::spawn_blocking(move || {
+        on_a.save_configuration(
+            "base",
+            fleet_server::configs::Revision {
+                body: "receivers: {}\n".to_string(),
+                role: String::new(),
+                service_name: "otelcol".to_string(),
+            },
+        )?;
+        on_a.create_package_set(&held)?;
+        on_a.deployment_store()
+            .expect("deployments")
+            .put(
+                "canary",
+                std::collections::BTreeMap::from([("ring".to_string(), "canary".to_string())]),
+            )
+            .map_err(|e| format!("{e:?}"))?;
+        on_a.put_deployment_configuration("canary", "base")
+            .map_err(|e| format!("{e:?}"))?;
+        on_a.put_deployment_package("canary", &held, false)
+            .map_err(|e| format!("{e:?}"))
+    })
+    .await
+    .expect("hold them")
+    .expect("A puts both into canary");
+    let members = |instance: &Instance| {
+        instance
+            .state
+            .deployment_store()
+            .expect("deployments")
+            .get("canary")
+            .map(|canary| (canary.configurations.len(), canary.packages.len()))
+    };
+    assert!(
+        eventually(Duration::from_secs(10), || members(&b) == Some((1, 1))).await,
+        "B never held canary with both"
+    );
+    assert!(
+        eventually(Duration::from_secs(10), || b
+            .state
+            .packages()
+            .expect("packages")
+            .list()
+            .iter()
+            .any(|package| package.id == id))
+        .await,
+        "B never listed the Package"
+    );
+    let on_b = b.state.clone();
+    let deleted = id.clone();
+    tokio::task::spawn_blocking(move || {
+        assert!(
+            on_b.delete_configuration("base").expect("B deletes it"),
+            "B deletes the Configuration"
+        );
+        assert_eq!(
+            on_b.delete_package_set(&deleted),
+            Ok(true),
+            "B deletes the Package"
+        );
+    })
+    .await
+    .expect("delete");
+    assert!(
+        eventually(Duration::from_secs(10), || members(&a) == Some((0, 0))).await,
+        "A's canary still holds what B deleted: {:?}",
+        members(&a)
     );
 }
 

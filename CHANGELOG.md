@@ -79,6 +79,18 @@ once its tag exists.
   Agent's goodbye is now written with the next batch. An Agent that disconnected under a lease the
   instance later lost is flushed at shutdown again.
   **What to do:** nothing.
+- **A Deployment keeps no deleted member**
+  ([ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side](docs/adr/draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+  clause 19). On PostgreSQL a Deployment could keep naming a Configuration or a Package that was
+  deleted: when an instance that had not yet heard of the deletion added it, when an add met the
+  deletion, or when a crash cut the deletion off before it took the member out of the
+  Deployments. The deletion now takes the member out of every Deployment in the transaction that
+  deletes it, and an add reads the member it adds in its own transaction and answers `404` when it
+  is gone. An instance of 0.8.0 beside this release still adds and deletes as before.
+  **What to do:** nothing. A member a Deployment named before the update, or one an add through an
+  instance of 0.8.0 left while both releases ran, stays until it is taken out of the Deployment,
+  by `DELETE /api/v1/deployments/{name}/configurations/{configuration}` or
+  `DELETE /api/v1/deployments/{name}/packages/{agent_type}/{version}`.
 
 ## [0.8.0]
 
