@@ -28,7 +28,7 @@ them:
 
 ## Read first
 
-- ADR-0044 clauses 1 and 12; ADR-0042 clause 5
+- ADR-0050 clauses 1 and 12; ADR-0047 clause 5
 - Golden path: `tests/stateless_instance.rs`; the service smoke test for running an image
 - `main.rs`, the commands and the prune's schedule; `postgres/audit_prune.rs`
 

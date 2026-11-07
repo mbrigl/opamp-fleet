@@ -29,7 +29,7 @@ Small corrections in the code of several instances, none of which changes an ans
 
 ## Read first
 
-- ADR-0044 clauses 12 to 14
+- ADR-0050 clauses 12 to 14
 - The files named above; the store checks for PostgreSQL and S3
 
 ## Blocked by

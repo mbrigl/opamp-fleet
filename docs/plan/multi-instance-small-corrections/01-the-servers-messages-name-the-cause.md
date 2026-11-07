@@ -37,7 +37,7 @@ Each names what it found and what the operator does about it.
 
 ## Read first
 
-- ADR-0044 clauses 1, 13 and 22; the manual's pages on moving to PostgreSQL and S3
+- ADR-0050 clauses 1, 13 and 22; the manual's pages on moving to PostgreSQL and S3
 - `postgres/mod.rs`, `postgres/lease.rs`, `postgres/import.rs`, `postgres/schema.rs`,
   `main.rs`
 

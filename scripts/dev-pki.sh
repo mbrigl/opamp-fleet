@@ -21,7 +21,7 @@
 #                  telemetry to the observability stack in observability/ commented out
 #
 # The development Client enrols like any other host, with a bootstrap certificate the Server issues
-# (ADR-0022): start the Server, run `scripts/seed_test_configs.sh --enrol`, which issues it,
+# (ADR-0052): start the Server, run `scripts/seed_test_configs.sh --enrol`, which issues it,
 # extracts its pair from the bootstrap.p12 into offline/ and approves the request, and start the
 # Client while it waits.
 # Trust the server CA, offline/server-ca.pem, in curl and in the browser.

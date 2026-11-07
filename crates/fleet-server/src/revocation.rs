@@ -16,10 +16,10 @@ use tokio::sync::watch;
 
 use crate::fleet::Clock;
 
-/// The revocations one list holds at most (ADR-0044 clause 10).
+/// The revocations one list holds at most (ADR-0050 clause 10).
 pub const MAX_REVOCATIONS: usize = 100_000;
 
-/// The certificates the register holds at most (ADR-0044 clause 9).
+/// The certificates the register holds at most (ADR-0050 clause 9).
 pub const MAX_ISSUED: usize = 100_000;
 
 /// The reads of a reload swapped in no more, as an act of this instance's own committed while
@@ -29,11 +29,11 @@ pub const RELOAD_SWAPS_REFUSED: usize = 3;
 
 /// The certificates the register holds at most in one chain — below one root, the first
 /// certificate a chain renews from: enough for a Gateway's downstream Agents, few enough that one
-/// member cannot fill the register (ADR-0044 clause 9).
+/// member cannot fill the register (ADR-0050 clause 9).
 pub const MAX_DESCENDANTS_PER_ROOT: usize = 10_000;
 
 /// The room the register keeps for enrolments: a renewal is refused once fewer are left, so
-/// renewals alone cannot shut out a new host (ADR-0044 clause 9).
+/// renewals alone cannot shut out a new host (ADR-0050 clause 9).
 pub const ENROLMENT_RESERVE: usize = 1_000;
 
 /// A certificate by its issuer and serial: the issuer as the SHA-256 of its DER-encoded name, hex,
@@ -79,7 +79,7 @@ pub struct Facts {
     pub key_fingerprint: String,
     /// Milliseconds since the Unix epoch.
     pub not_after_ms: u64,
-    /// The host the certificate was issued to (ADR-0022 clause 11) — the stable identity a host
+    /// The host the certificate was issued to (ADR-0052 clause 11) — the stable identity a host
     /// keeps across renewals and re-keys; `None` for a certificate an operator provisioned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,
@@ -150,7 +150,7 @@ pub struct Presented {
     pub not_after_ms: u64,
 }
 
-/// A Host: what a client certificate's host id names (ADR-0022 clause 11, ADR-0043 clause 15).
+/// A Host: what a client certificate's host id names (ADR-0052 clause 11, ADR-0043 clause 15).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Host {
     /// A Gateway carries other hosts' Agents, so its certificate binds none of them.
@@ -199,7 +199,7 @@ pub enum SpeaksFor {
 /// A version of the hosts, numbered so no older one is written over a newer.
 type HostsVersion = (u64, BTreeMap<String, Host>);
 
-/// The certificates one host may hold at once (ADR-0022 clause 11): the one in force, its renewal,
+/// The certificates one host may hold at once (ADR-0052 clause 11): the one in force, its renewal,
 /// and one more for a renewal whose answer was lost.
 pub const MAX_PER_HOST: usize = 3;
 
@@ -215,7 +215,7 @@ pub struct Signed {
 
 /// The register entry of a certificate an approval signed and the Host it mints, prepared and not
 /// yet written: written with the decision on its request, and taken up in memory once that decision
-/// is written (ADR-0044 clause 9).
+/// is written (ADR-0050 clause 9).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Approved {
     pub(crate) issued: Issued,
@@ -249,7 +249,7 @@ pub(crate) fn refusal(registered: Registered) -> Result<(), String> {
     }
 }
 
-/// One certificate the Server signed (ADR-0044 clause 9).
+/// One certificate the Server signed (ADR-0050 clause 9).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Issued {
     #[serde(flatten)]
@@ -290,7 +290,7 @@ pub struct Ledger {
     pub revocations: Vec<Revocation>,
     pub hosts: BTreeMap<String, Host>,
     /// The list's one version, as the store holds it, where the store keeps one: PostgreSQL does
-    /// (ADR-0044 clause 10), the filesystem does not.
+    /// (ADR-0050 clause 10), the filesystem does not.
     pub version: Option<u64>,
 }
 
@@ -313,7 +313,7 @@ pub trait LedgerStore: Send + Sync {
     /// it, and answers whether it removed it. A store other instances share removes it only while
     /// it holds no certificate renewed from it that is valid at `now_ms`, whatever the instance
     /// that prunes holds, so a renewal it never took up keeps its chain
-    /// (ADR-0044 clause 10).
+    /// (ADR-0050 clause 10).
     ///
     /// # Errors
     /// Returns an error when it cannot be removed.
@@ -323,7 +323,7 @@ pub trait LedgerStore: Send + Sync {
     /// counted, and a renewal whose chain holds a revoked certificate is refused, in the write
     /// itself, so both hold for every instance on one store together and no instance with a stale
     /// view can pass them
-    /// (ADR-0041
+    /// (ADR-0048
     /// clause 19). A store that is its only writer decides as [`register_into`] does; the one
     /// that only puts what the Server decided in memory is answered `Registered`.
     ///
@@ -366,7 +366,7 @@ pub trait LedgerStore: Send + Sync {
     /// issuers widened by those `entry` names beside them ([`widened`]), and a list already
     /// holding `bound` entries takes no more. The bound is counted
     /// in the write itself, so it holds for every instance on one store together
-    /// (ADR-0041
+    /// (ADR-0048
     /// clause 19).
     ///
     /// # Errors
@@ -387,7 +387,7 @@ pub trait LedgerStore: Send + Sync {
 
     /// Binds `instance_uid` to `host`, unless another Host holds it: the binding is one row the
     /// store holds once for every instance
-    /// (ADR-0041
+    /// (ADR-0048
     /// clause 19). A store that is its only writer binds what the Server decided in memory.
     ///
     /// # Errors
@@ -453,7 +453,7 @@ pub trait LedgerStore: Send + Sync {
     /// moves forward, an approval and a subject are written only into a Host that has no row yet,
     /// a Host is forgotten only while what is stored says it has ended, and a Gateway's mark is
     /// written only for a host that a Host row or a register entry names
-    /// (ADR-0041
+    /// (ADR-0048
     /// clause 19). Answers whether the store knows the host a Gateway's mark names: `false` when
     /// it knows neither, and nothing is then written; every other act answers `true`. A store that
     /// writes the Hosts whole writes nothing here and answers `true`.
@@ -512,7 +512,7 @@ pub fn bound_elsewhere(instance_uid: &str, host: &str) -> String {
     format!("the Agent {instance_uid} is bound to the host {host}")
 }
 
-/// The bounds a register write counts (ADR-0044 clause 9).
+/// The bounds a register write counts (ADR-0050 clause 9).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RegisterBounds {
     /// The entries the register may hold before this one: [`MAX_ISSUED`], and for a renewal
@@ -1015,7 +1015,7 @@ impl Revocations {
             .cloned()
     }
 
-    /// Records a certificate the client CA signed, before it is handed out (ADR-0044 clause 9).
+    /// Records a certificate the client CA signed, before it is handed out (ADR-0050 clause 9).
     ///
     /// # Errors
     /// Returns an error when the register is full — for a renewal, [`ENROLMENT_RESERVE`] short of
@@ -1034,7 +1034,7 @@ impl Revocations {
     /// without writing either: they are written with the decision on its request
     /// ([`register_approved`](Self::register_approved), or the enrolment store's own transaction
     /// and then [`took_up_approved`](Self::took_up_approved)), so a decision that is not written
-    /// leaves neither (ADR-0044 clause 9). The bounds are checked against what this instance
+    /// leaves neither (ADR-0050 clause 9). The bounds are checked against what this instance
     /// holds; the write counts them again. The bootstrap certificate the request came with,
     /// `bootstrap`, is checked against the list: a revoked one is refused with
     /// [`BOOTSTRAP_REVOKED`], here and in the write (ADR-0038 clause 28).
@@ -1084,7 +1084,7 @@ impl Revocations {
 
     /// Writes what [`prepare_approved`](Self::prepare_approved) prepared through this register's
     /// own store, and takes it up: what an approval does once its decision is written to a store
-    /// that does not write the register in the decision's own transaction (ADR-0044 clause 9).
+    /// that does not write the register in the decision's own transaction (ADR-0050 clause 9).
     ///
     /// # Errors
     /// Returns an error when the write refuses it, as [`record`](Self::record) does and with
@@ -1107,9 +1107,9 @@ impl Revocations {
     }
 
     /// Takes up what an enrolment store wrote of `approved` in the transaction that decided its
-    /// request, once that transaction committed (ADR-0044 clause 9): the register entry and the
+    /// request, once that transaction committed (ADR-0050 clause 9): the register entry and the
     /// Host, which the store wrote by act, in memory alone, and the list's version that
-    /// transaction left, `written`, where it is known (ADR-0044 clause 10). An approval whose
+    /// transaction left, `written`, where it is known (ADR-0050 clause 10). An approval whose
     /// commit was read back names none, and the list is then read again before a version is held.
     pub fn took_up_approved(&self, approved: &Approved, written: Option<u64>) {
         let mut state = self.state.lock().expect("revocation lock");
@@ -1276,7 +1276,7 @@ impl Revocations {
     }
 
     /// Whether a connection presenting a certificate of `host` may report for `instance_uid`
-    /// (ADR-0022 clause 11), binding nothing: [`check_report`](Self::check_report) binds it once
+    /// (ADR-0052 clause 11), binding nothing: [`check_report`](Self::check_report) binds it once
     /// the report is admitted.
     ///
     /// # Errors
@@ -1287,7 +1287,7 @@ impl Revocations {
     }
 
     /// Whether a connection presenting a certificate of `host` may report for `instance_uid`
-    /// (ADR-0022 clause 11). An `instance_uid` first heard from a host is bound to it; one bound to
+    /// (ADR-0052 clause 11). An `instance_uid` first heard from a host is bound to it; one bound to
     /// another host is refused. A Gateway's certificate binds nothing — it carries other hosts'
     /// Agents. A certificate an operator provisioned with a host id makes its Host here, at its
     /// first report, with `subject` — the values of the certificate it presented (ADR-0043
@@ -1550,7 +1550,7 @@ impl Revocations {
     }
 
     /// Moves a binding to the `instance_uid` the Server re-keyed an Agent to — a re-key never
-    /// orphans a host's certificate (ADR-0022 clause 11).
+    /// orphans a host's certificate (ADR-0052 clause 11).
     ///
     /// # Errors
     /// Returns an error when the binding cannot be written.
@@ -1615,7 +1615,7 @@ impl Revocations {
         state.acted();
         if by_act {
             // The mark and the release of every binding it ends are one write, made only for a
-            // host the store knows (the instances draft, clause 19).
+            // host the store knows (ADR-0048 clause 19).
             let known = self.store.write_host_act(&HostAct::Gateway {
                 host: host.to_string(),
                 gateway,
@@ -1939,7 +1939,7 @@ impl Revocations {
     /// Reads the register and the Hosts again from the store, as another instance may have changed
     /// them, so what this instance admits follows what is stored: an `instance_uid` another instance
     /// bound, released or moved, a Host it marked, and the entries it registered
-    /// (ADR-0041
+    /// (ADR-0048
     /// clause 19). The revocation list is read again too, and announced when it changed, so every
     /// open session checks itself against what is stored
     /// (ADR-0038 clause 32).
@@ -2015,7 +2015,7 @@ impl Revocations {
     }
 
     /// Drops the register entries that have expired and from which no valid certificate descends,
-    /// and the revocations of certificates those entries held (ADR-0044 clause 10). A revoked
+    /// and the revocations of certificates those entries held (ADR-0050 clause 10). A revoked
     /// ancestor of a valid renewal stays, so the renewal stays revoked.
     ///
     /// A Host not marked as a Gateway whose valid until has passed is forgotten, and every
@@ -3613,7 +3613,7 @@ mod tests {
     /// A revocation check, `speaks_for` and a report's check wait for a reload's swap only, not
     /// for its read of the store, and a reload no act of this instance's own crossed is swapped in
     /// after one read.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0048
     #[test]
     fn a_check_does_not_wait_for_a_reloads_read() {
         let store = ReadHeld::default();
@@ -3706,7 +3706,7 @@ mod tests {
         hex::encode([n; 16])
     }
 
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0048
     #[test]
     fn a_revocation_made_during_a_reload_holds() {
         an_own_act_outlives_a_reload(
@@ -3718,7 +3718,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0048
     #[test]
     fn a_lift_made_during_a_reload_holds() {
         an_own_act_outlives_a_reload(
@@ -3734,7 +3734,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0048
     #[test]
     fn a_binding_made_during_a_reload_holds() {
         an_own_act_outlives_a_reload(
@@ -3752,7 +3752,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0048
     #[test]
     fn a_valid_until_moved_during_a_reload_holds() {
         let until = |r: &Revocations| {
@@ -3774,7 +3774,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0048
     #[test]
     fn a_register_write_made_during_a_reload_holds() {
         an_own_act_outlives_a_reload(
@@ -3787,7 +3787,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0048
     #[test]
     fn a_release_made_during_a_reload_holds() {
         an_own_act_outlives_a_reload(
@@ -3800,7 +3800,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0048
     #[test]
     fn a_rekey_made_during_a_reload_holds() {
         an_own_act_outlives_a_reload(
@@ -3813,7 +3813,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0048
     #[test]
     fn a_gateway_mark_made_during_a_reload_holds() {
         an_own_act_outlives_a_reload(
@@ -3924,7 +3924,7 @@ mod tests {
     /// A reload whose read began after a report's binding was decided, and read the store before
     /// the binding was written, is not swapped in once the binding is taken up: taking it up is an
     /// act of this instance's own, and the store is read again.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0048
     #[test]
     fn a_reload_that_read_before_a_binding_was_written_does_not_undo_it() {
         let (revocations, store, hooked) = hooked_register();
@@ -3983,7 +3983,7 @@ mod tests {
 
     /// A reload that read the store before a Host's valid until was written does not leave it
     /// moved back, whether it is swapped in before the write is taken up or would be after it.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0048
     #[test]
     fn a_reload_that_read_before_a_valid_until_was_written_does_not_move_it_back() {
         let until = |r: &Revocations| {
@@ -4186,7 +4186,7 @@ mod tests {
     /// Own acts that keep crossing a reload's reads do not keep it from ending: after
     /// `RELOAD_SWAPS_REFUSED` refused swaps it reads once under the lock and swaps that in, with
     /// another instance's act and every own act held.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0048
     #[test]
     fn a_reload_crossed_by_own_acts_ends_after_its_bounded_reads() {
         let store = Acting::default();
@@ -4243,7 +4243,7 @@ mod tests {
 
     /// Two reloads at once never swap an older read over a newer one: the second reads once the
     /// first has swapped.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0048
     #[test]
     fn a_reload_never_swaps_an_older_read_over_a_newer_one() {
         let store = ReadHeld::default();
@@ -4323,7 +4323,7 @@ mod tests {
 
     /// A reload whose read panicked does not end the reloads after it: the next one reads and
     /// swaps, and takes up what another instance committed.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0048
     #[test]
     fn a_reload_after_one_that_panicked_still_swaps() {
         let store = PanicsOnce::default();

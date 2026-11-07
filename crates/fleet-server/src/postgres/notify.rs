@@ -1,5 +1,5 @@
 //! The notifications the instances on one database share
-//! (ADR-0041
+//! (ADR-0048
 //! clause 9): one channel per schema, a `NOTIFY` that names a kind of change, the identifier it
 //! concerns and the instance that sent it, and nothing else, sent in the transaction that commits
 //! the change, and a connection of each instance's own that listens. A channel is the database's,
@@ -18,7 +18,7 @@
 //! their own that does not wait for its flush ([`will_follow`], [`follow_commit`]): PostgreSQL
 //! commits one transaction that sent a `NOTIFY` at a time, database-wide, across its flush, so
 //! announcing each new Agent's binding in its commit would let a connecting fleet in no faster than
-//! one flush apiece (the several-instances draft, clause 9). Such a notice may be lost; every lease
+//! one flush apiece (ADR-0048 clause 9). Such a notice may be lost; every lease
 //! renewal reads the ledger again for it (clause 10).
 
 use std::collections::VecDeque;
@@ -85,7 +85,7 @@ pub const FORGOTTEN: &str = "forgotten";
 
 /// The kind an Agent taken from another instance with a live lease is announced as, by its
 /// `instance_uid`: the instance it was taken from reads its holder again and stops carrying it
-/// (ADR-0041
+/// (ADR-0048
 /// clause 8).
 pub const TAKEN: &str = "taken";
 
@@ -340,7 +340,7 @@ pub(crate) fn will_follow(kind: &str, id: &str) {
 /// Announces what [`will_follow`] counted in this call to every other instance, now that the call
 /// committed it: on `client`, the connection that committed it, in a transaction of its own that
 /// does not wait for its WAL flush, so it holds PostgreSQL's turn for announcing commits only for a
-/// moment (the several-instances draft, clause 9). It is sent apart from the call, which answers
+/// moment (ADR-0048 clause 9). It is sent apart from the call, which answers
 /// at once: a sending that fails is logged and tried again on another connection of `pool`, and
 /// after the last try the other instances take the change up at their next lease renewal.
 pub(crate) fn follow_commit(client: deadpool_postgres::Object, pool: &deadpool_postgres::Pool) {
@@ -599,7 +599,7 @@ mod tests {
     /// committed, with the identifier it names, and not when it is rolled back, nor by the instance
     /// that announced it, nor when it is announced in another schema of the same database; each
     /// listener hears that it listens first.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0048
     #[test]
     fn a_committed_change_is_heard_by_every_other_instance() {
         let Some(test) = TestDatabase::named() else {
@@ -652,7 +652,7 @@ mod tests {
 
     /// A payload names its sender; one this instance sent is not handed on, and one that does not
     /// read is a notice of a kind nobody knows.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0048
     #[test]
     fn a_notice_from_this_instance_is_passed_over_and_an_unreadable_one_is_unknown() {
         let sent = r#"{"kind":"floor","id":"otelcol","from":"a"}"#;

@@ -30,7 +30,7 @@ already treats the subject:
 ## Read first
 
 - The manual's conventions: no ADR cited, every configuration key in its table
-- `docs/manual/server.md`, the sections named above; ADR-0044 clauses 12 and 13
+- `docs/manual/server.md`, the sections named above; ADR-0050 clauses 12 and 13
 
 ## Blocked by
 

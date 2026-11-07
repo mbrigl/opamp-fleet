@@ -1,7 +1,7 @@
 # ADR-0046: The Server keeps an append-only audit record of every security decision, each entry chained to the one before by its hash, and on PostgreSQL a failed write is kept and tried again
 
-- **Status:** 🟡 proposed
-- **Date:** 2026-11-04
+- **Status:** 🟢 accepted
+- **Date:** 2026-11-07
 - **Deciders:** Markus Brigl
 - **Applies to:** the audit port in `crates/fleet-server/src/audit.rs`, its writer in `crates/fleet-server/src/audit_log.rs`, its filesystem adapter in `crates/fleet-server/src/fs/audit.rs` and every database adapter beside it, every place in `crates/fleet-server/src/` that admits or refuses a peer, issues or revokes a certificate, takes an operator's act or records a package outcome, the `server audit-verify` command and the shutdown in `crates/fleet-server/src/main.rs`, the take of a lease in `crates/fleet-server/src/postgres/lease.rs` where it opens and closes chains, and the `[audit]` section of `server.toml`
 - **Supersedes:** [ADR-0039](0039-an-append-only-audit-record.md)

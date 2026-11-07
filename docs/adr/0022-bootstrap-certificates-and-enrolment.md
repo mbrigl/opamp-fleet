@@ -1,7 +1,7 @@
 # ADR-0022: Bootstrap certificates and enrolment
 
-- **Status:** 🟢 accepted
-- **Date:** 2026-10-19
+- **Status:** ⚪ superseded by [ADR-0052](0052-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)
+- **Date:** 2026-11-07
 - **Deciders:** Markus Brigl
 - **Applies to:** the bootstrap-certificate and enrolment routes of the Operator plane in `crates/fleet-server/src/api.rs`, the issuing and recording of bootstrap certificates in `crates/fleet-server/src/bootstrap.rs`, the signing of host certificates in `crates/fleet-server/src/ca.rs`, the approval and renewal paths in `crates/fleet-server/src/fleet.rs`, the pending queue in `crates/fleet-server/src/enrolment.rs` and its answer in `crates/fleet-server/src/transport.rs`, the `[enrolment]` section of `server.toml` in `crates/fleet-server/src/config.rs`, the password rule in `crates/fleet-core/src/pkcs12.rs`, the Enrolments tab in `crates/fleet-server/static/index.html`, `service install`, its flags and the questionnaire in `crates/fleet-agent/src/cli.rs`, `crates/fleet-agent/src/main.rs` and `crates/fleet-agent/src/config_init.rs`, the enrolment in `crates/fleet-agent/src/service/enrol.rs`, the steps `packaging/linux/postinst` prints, the `p12-keystore` crate in `Cargo.toml`, and every document that tells an operator how to issue, hand out, revoke, list or delete a bootstrap certificate, approve an enrolment, or install a Client
 

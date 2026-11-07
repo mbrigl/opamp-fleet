@@ -1,5 +1,5 @@
 //! The register, the revocation list and the Hosts on the filesystem (ADR-0038, ADR-0043,
-//! ADR-0044): the default adapter behind [`LedgerStore`](crate::revocation::LedgerStore).
+//! ADR-0050): the default adapter behind [`LedgerStore`](crate::revocation::LedgerStore).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -335,7 +335,7 @@ mod tests {
     /// Each Host is a file of its own, written when it changes and removed when it goes; a name
     /// no Host maps to is escaped, and a file whose name disagrees with what it holds — or one
     /// the layout does not name — fails the load naming it.
-    /// Verifies: ADR-0044
+    /// Verifies: ADR-0050
     #[test]
     fn each_host_is_a_file_of_its_own_and_its_name_must_match() {
         let dir = tempfile::tempdir().expect("tempdir");

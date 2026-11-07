@@ -1,4 +1,4 @@
-//! The Server's schema (ADR-0044 clause 22): embedded as numbered migrations, applied by the Server
+//! The Server's schema (ADR-0050 clause 22): embedded as numbered migrations, applied by the Server
 //! itself at startup, each recorded in `fleet_schema` with the oldest Server version that
 //! understands the schema it leaves.
 //!
@@ -76,7 +76,7 @@ pub const MIGRATIONS: &[Migration] = &[
     // a database, and name it. A Server of 0.7.1 holds no lease, keeps its audit record in files
     // and leaves the revocation list's version where it was, so it refuses the schema they leave
     // rather than serve beside the instances of 0.8.0
-    // (ADR-0044 clause 22).
+    // (ADR-0050 clause 22).
     //
     // A table only added.
     Migration {
@@ -149,7 +149,7 @@ pub const MIGRATIONS: &[Migration] = &[
     },
     // A table only added. A Server of 0.8.0 reads and writes none of it, so its sweeps and uploads
     // are as before, beside the instances that mark
-    // (ADR-0044 clause 14).
+    // (ADR-0050 clause 14).
     Migration {
         version: 13,
         oldest_server: "0.8.0",
@@ -157,7 +157,7 @@ pub const MIGRATIONS: &[Migration] = &[
     },
     // A table, its row and the triggers that keep it only added. A Server of 0.8.0 reads none of
     // it, and what it adds and removes is counted all the same
-    // (ADR-0044 clause 22).
+    // (ADR-0050 clause 22).
     Migration {
         version: 14,
         oldest_server: "0.8.0",
@@ -186,7 +186,7 @@ CREATE TABLE enrolment_rejected (
 );
 ";
 
-/// The count of the Agents' records (ADR-0044 clause 22): one row, raised and lowered by the
+/// The count of the Agents' records (ADR-0050 clause 22): one row, raised and lowered by the
 /// triggers on `agents` in the statement that adds or removes rows, so the Agent-record ceiling is
 /// decided from it and not from a count of every row. The triggers exist before the row is
 /// filled, and creating them locks `agents` against every addition and removal until the
@@ -232,7 +232,7 @@ CREATE TRIGGER agents_removed AFTER DELETE ON agents
 INSERT INTO agent_count (agents) SELECT count(*) FROM agents;
 ";
 
-/// The blobs a sweep marked before it deletes them (ADR-0044 clause 14): written on the session
+/// The blobs a sweep marked before it deletes them (ADR-0050 clause 14): written on the session
 /// that holds the blob store's lock, read by every upload in the transaction that checks its blob,
 /// and taken away by the sweep that wrote them, `sweep`, or by any sweep once their `lease` is
 /// not live.
@@ -258,7 +258,7 @@ ALTER TABLE leases ADD COLUMN release text NOT NULL DEFAULT '0.8.0';
 pub const RELEASE_BEFORE_THE_RECORD: &str = "0.8.0";
 
 /// The first schema: one table per kind of record, the parts of a record that are many in tables of
-/// their own (ADR-0044 clauses 4 to 6, 9 to 11 and 21). Unsigned integers are kept as `bigint` with
+/// their own (ADR-0050 clauses 4 to 6, 9 to 11 and 21). Unsigned integers are kept as `bigint` with
 /// their bits unchanged, so every value round-trips.
 ///
 /// PostgreSQL's `text` and `jsonb` refuse a NUL character, which a file keeps. Text an Agent or a
@@ -395,7 +395,7 @@ CREATE TABLE package_floors (
 ";
 
 /// The lease of every instance on this database
-/// (ADR-0041
+/// (ADR-0048
 /// clauses 1 to 3). The times are the database's own, so every instance reads the same clock. A
 /// lease whose `expires_at` has passed is lapsed, whatever its row still says.
 const LEASES: &str = r"
@@ -411,7 +411,7 @@ CREATE TABLE leases (
 
 /// Which Host each `instance_uid` is bound to: one row per binding, the `instance_uid` its key, so
 /// no two Hosts hold one
-/// (ADR-0041
+/// (ADR-0048
 /// clause 19). It is filled from the arrays of the Hosts not marked as Gateways, as a Gateway's
 /// Host is bound none (ADR-0043 clause 16); an `instance_uid` two such Hosts' arrays hold fails the
 /// migration, naming it and the Hosts, and changes nothing, for the operator to decide. A renewal's
@@ -439,7 +439,7 @@ CREATE INDEX certificates_predecessor ON certificates (predecessor_issuer, prede
 ";
 
 /// The members of each Deployment, one row each
-/// (ADR-0041
+/// (ADR-0048
 /// clause 19): its Packages keyed by Agent type, so it holds at most one of each, and its
 /// Configurations by name. They are filled from the `packages` and `configurations` columns of
 /// `deployments`, which stay and are written from these rows.
@@ -463,7 +463,7 @@ INSERT INTO deployment_configurations (deployment, configuration)
 ";
 
 /// The revocation list's one version
-/// (ADR-0044 clause 10): a counter in one row that the
+/// (ADR-0050 clause 10): a counter in one row that the
 /// transaction of every revocation added or widened and every lift increments. It is the `ETag`
 /// of the Gateways' list on every instance, and what each lease renewal compares.
 const REVOCATION_LIST_VERSION: &str = r"
@@ -475,7 +475,7 @@ INSERT INTO revocation_list_version (singleton, version) VALUES (true, 0);
 ";
 
 /// The audit record, one hash chain per lease
-/// (ADR-0042): a record per
+/// (ADR-0047): a record per
 /// chain, named by the instance id of the lease that opened it, with the hash of its closing entry
 /// once it is closed; each entry as the line it was hashed as; and the end of the file record a
 /// move from files left as the archive, which the first chain names as its predecessor.
@@ -511,7 +511,7 @@ ALTER TABLE agents ADD COLUMN holder uuid;
 ";
 
 /// How each Agent was taken
-/// (ADR-0041
+/// (ADR-0048
 /// clause 8): `takes` counts every take and every batch that names a holder anew, so an instance
 /// writes a disconnect only where the row still holds the count it was answered, with no clock
 /// compared; `holder_changes` holds when the holder changed, the latest eleven times, by the
@@ -522,7 +522,7 @@ ALTER TABLE agents ADD COLUMN holder_changes timestamptz[] NOT NULL DEFAULT '{}'
 ";
 
 /// When each audit entry was stored, by the database's clock: what its age is reckoned from when the
-/// record is pruned (ADR-0044 clause 12). Entries stored before
+/// record is pruned (ADR-0050 clause 12). Entries stored before
 /// take the time their line carries, read as text so that a line that is no entry keeps the time of
 /// the migration rather than stopping it.
 const AUDIT_RECORDED_AT: &str = r#"
@@ -823,7 +823,7 @@ mod tests {
 
     /// The migrations are numbered from 1 without a gap, and none names a Server newer than this
     /// one — a build that refused its own schema would never start. This release's own name 0.8.0.
-    /// Verifies: ADR-0044
+    /// Verifies: ADR-0050
     /// Verifies: ADR-0048
     #[test]
     fn the_migrations_are_numbered_and_this_server_understands_them() {
@@ -869,9 +869,9 @@ mod tests {
         assert_eq!(compare("not-a-version", "99.0.0"), Ordering::Greater);
     }
 
-    /// A migration only adds (ADR-0044 clause 22): nothing in the embedded schema drops, renames or
+    /// A migration only adds (ADR-0050 clause 22): nothing in the embedded schema drops, renames or
     /// alters a column away, and every table it creates is one [`TABLES`] knows.
-    /// Verifies: ADR-0044
+    /// Verifies: ADR-0050
     #[test]
     fn a_migration_only_adds() {
         for migration in MIGRATIONS {

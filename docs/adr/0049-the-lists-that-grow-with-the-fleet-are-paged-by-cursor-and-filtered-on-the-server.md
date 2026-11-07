@@ -1,7 +1,7 @@
 # ADR-0049: The lists that grow with the fleet are paged by cursor and filtered on the Server
 
-- **Status:** 🟡 proposed
-- **Date:** 2026-10-22
+- **Status:** 🟢 accepted
+- **Date:** 2026-11-07
 - **Deciders:** Markus Brigl
 - **Applies to:** the list routes `GET /api/v1/agents`, `GET /api/v1/hosts`, `GET /api/v1/certificates` and `GET /api/v1/revocations` in `crates/fleet-server/src/api.rs` and the OpenAPI document generated from them, the queries the fleet and the revocation register answer for them in `crates/fleet-server/src/fleet.rs`, `crates/fleet-server/src/revocation.rs` and every store adapter behind them, the Agents and Hosts tabs of the bundled UI in `crates/fleet-server/static/index.html`, and the reads `query_page` and `reported_values` of the `AgentStore` port in `crates/fleet-server/src/agent_store.rs` and its PostgreSQL adapter with the columns it reads, and every document or script that reads one of these lists
 

@@ -72,7 +72,7 @@ impl ClientCa {
     ///
     /// The subject is the Server's, not the request's: the six values `subject` names — copied by
     /// the caller from the bootstrap certificate an approval reads or the certificate a renewal
-    /// renews (ADR-0015 clause 23 and ADR-0022 clause 12) — and the common name derived from the CA's (ADR-0022
+    /// renews (ADR-0015 clause 23 and ADR-0052 clause 12) — and the common name derived from the CA's (ADR-0052
     /// clause 11), so no self-asserted text reaches a signed certificate. The signed certificate
     /// must carry exactly those values, or nothing is handed out.
     /// Nor is it bound to anything the Agent reports. Binding a certificate to an `instance_uid`
@@ -124,7 +124,7 @@ impl ClientCa {
         request.params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
         request.params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
         // None of the request's names — one could name another host. The one name this Server
-        // puts in is the host the certificate is issued to (ADR-0022 clause 11), which a renewal
+        // puts in is the host the certificate is issued to (ADR-0052 clause 11), which a renewal
         // carries on.
         request.params.subject_alt_names.clear();
         request.params.subject_alt_names.push(SanType::URI(
@@ -139,7 +139,7 @@ impl ClientCa {
             .signed_by(&self.issuer)
             .map_err(|e| format!("cannot sign the certificate signing request: {e}"))?;
         let facts = facts(certificate.der())?;
-        // Exactly the values carried over, and no others (ADR-0022 clause 12).
+        // Exactly the values carried over, and no others (ADR-0052 clause 12).
         if facts.subject_values != *subject {
             return Err(
                 "the signed certificate does not carry the subject values it was \
@@ -353,7 +353,7 @@ pub(crate) fn subject_values(name: &x509_parser::x509::X509Name<'_>) -> SubjectV
 }
 
 /// The six values a bootstrap certificate's subject carries into a host certificate, read under
-/// the rules they were issued by (ADR-0022 clause 1 and ADR-0015 clause 23): each attribute at most once, a
+/// the rules they were issued by (ADR-0052 clause 1 and ADR-0015 clause 23): each attribute at most once, a
 /// country of two upper-case letters as a `PrintableString`, every other value of 1 to 64
 /// characters without a control character as a `UTF8String` or a `PrintableString`, and an
 /// organization and an organizational unit present. Every other attribute, the common name
@@ -403,7 +403,7 @@ pub(crate) fn carried_subject(
         attribute.check(value)?;
         attribute.set(&mut values, value.to_string());
     }
-    // Every Host names a customer and a site its Selectors can rely on (ADR-0022 clause 1).
+    // Every Host names a customer and a site its Selectors can rely on (ADR-0052 clause 1).
     for attribute in [Attribute::Organization, Attribute::OrganizationalUnit] {
         if attribute.of(&values).is_empty() {
             return Err(format!("{} is missing", attribute.key()));
@@ -412,7 +412,7 @@ pub(crate) fn carried_subject(
     Ok(values)
 }
 
-/// A subject of `attributes` in their order, each in the encoding ADR-0022 clause 1 gives it.
+/// A subject of `attributes` in their order, each in the encoding ADR-0052 clause 1 gives it.
 ///
 /// # Errors
 /// Returns an error for a country that a `PrintableString` cannot hold.
@@ -583,7 +583,7 @@ fn not_after(validity_days: u32) -> Result<time::OffsetDateTime, String> {
         .ok_or_else(|| format!("validity_days = {validity_days} is out of range"))
 }
 
-/// What an enrolment request says about itself (ADR-0022 clause 10): its subject and the SHA-256
+/// What an enrolment request says about itself (ADR-0052 clause 10): its subject and the SHA-256
 /// fingerprint of the public key it asks to be certified, by which the queue knows a re-sent
 /// request.
 ///
@@ -662,7 +662,7 @@ impl crate::fleet::CertificateSigner for ClientCa {
 }
 
 /// The bootstrap CA with its key, which signs the bootstrap certificates an operator asks for
-/// (ADR-0022). Loaded once at startup from `[enrolment]`.
+/// (ADR-0052). Loaded once at startup from `[enrolment]`.
 pub struct BootstrapCa {
     issuer: Issuer<'static, KeyPair>,
     /// The common name every bootstrap certificate carries (ADR-0032 clause 19).
@@ -763,7 +763,7 @@ impl crate::bootstrap::BootstrapSigner for BootstrapCa {
         let key = KeyPair::generate().map_err(|e| format!("cannot make a key: {e}"))?;
         let mut params = rcgen::CertificateParams::default();
         params.distinguished_name = distinguished_name(subject)?;
-        // A client-authentication leaf and nothing more (ADR-0022 clause 3).
+        // A client-authentication leaf and nothing more (ADR-0052 clause 3).
         params.is_ca = IsCa::ExplicitNoCa;
         params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
         params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
@@ -776,7 +776,7 @@ impl crate::bootstrap::BootstrapSigner for BootstrapCa {
         let (_, parsed) = X509Certificate::from_der(certificate.der())
             .map_err(|e| format!("the bootstrap certificate does not parse: {e}"))?;
         let facts = facts(certificate.der())?;
-        // The key leaves only sealed with its certificate (ADR-0022 clause 3); its DER is wiped
+        // The key leaves only sealed with its certificate (ADR-0052 clause 3); its DER is wiped
         // once it is sealed (ADR-0014).
         let key_der = Zeroizing::new(key.serialize_der());
         let pkcs12 = fleet_core::pkcs12::file::seal(certificate.der(), &key_der, password)?;
@@ -964,7 +964,7 @@ mod tests {
     }
 
     /// A host certificate's subject is the Server's: the common name derived from the client CA's
-    /// and nothing of the request's (ADR-0022 clause 11 and ADR-0032 clause 19).
+    /// and nothing of the request's (ADR-0052 clause 11 and ADR-0032 clause 19).
     /// Verifies: ADR-0032
     #[test]
     fn a_host_certificate_is_named_by_its_ca_not_by_its_request() {
@@ -1500,7 +1500,7 @@ mod tests {
 
     /// The Server refuses a bootstrap CA key that is not the certificate's, or that is the client
     /// CA's; without a key it issues nothing (ADR-0038 clause 17).
-    /// Verifies: ADR-0022
+    /// Verifies: ADR-0052
     #[test]
     fn a_bootstrap_ca_key_must_be_its_own_and_its_certificates() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1541,8 +1541,8 @@ mod tests {
     }
 
     /// What the bootstrap CA signs is a client-authentication leaf of the subject asked for, with
-    /// a key of its own (ADR-0022 clause 3).
-    /// Verifies: ADR-0022
+    /// a key of its own (ADR-0052 clause 3).
+    /// Verifies: ADR-0052
     #[test]
     fn a_bootstrap_certificate_is_a_client_leaf_of_the_named_subject() {
         use crate::bootstrap::{Attribute, BootstrapSigner as _};
@@ -1591,8 +1591,8 @@ mod tests {
     }
 
     /// The key is not handed back in PEM: it is in a PKCS#12 file with its certificate, which
-    /// opens under the password to exactly the two (ADR-0022 clause 3).
-    /// Verifies: ADR-0022
+    /// opens under the password to exactly the two (ADR-0052 clause 3).
+    /// Verifies: ADR-0052
     #[test]
     fn a_password_seals_the_key_with_its_certificate() {
         use crate::bootstrap::{Attribute, BootstrapSigner as _};
@@ -1668,7 +1668,7 @@ mod tests {
     /// Issued with all six attributes, a bootstrap certificate's subject holds them in the order
     /// C, ST, L, O, OU, organizationIdentifier, CN, the country as a `PrintableString` and every
     /// other value as a `UTF8String`.
-    /// Verifies: ADR-0022
+    /// Verifies: ADR-0052
     #[test]
     fn a_bootstrap_certificate_holds_the_six_attributes_in_order_and_encoding() {
         use crate::bootstrap::{BootstrapSigner as _, Subject};
@@ -1732,7 +1732,7 @@ mod tests {
 
     /// The host certificate carries the values it is signed with — the bootstrap certificate's
     /// — in the same order and encoding, and nothing of the request's subject.
-    /// Verifies: ADR-0022
+    /// Verifies: ADR-0052
     #[test]
     fn a_host_certificate_carries_the_values_and_ignores_the_requests_subject() {
         use x509_parser::der_parser::asn1_rs::Tag;
@@ -1778,7 +1778,7 @@ mod tests {
     /// issued by: an attribute twice, a wrong string type, a malformed country, a value out of
     /// bounds and a missing organization or organizational unit are refused, naming the
     /// attribute; other attributes and the common name are passed over.
-    /// Verifies: ADR-0022
+    /// Verifies: ADR-0052
     #[test]
     fn a_bootstrap_subject_is_carried_only_when_well_formed() {
         let read = |entries: Vec<(rcgen::DnType, rcgen::DnValue)>| {

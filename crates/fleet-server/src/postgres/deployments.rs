@@ -1,7 +1,7 @@
-//! Deployments in PostgreSQL (ADR-0044 clause 6): the PostgreSQL adapter behind
+//! Deployments in PostgreSQL (ADR-0050 clause 6): the PostgreSQL adapter behind
 //! [`DeploymentBackend`](crate::deployments::DeploymentBackend) — one row per Deployment and one
 //! per member, each call one transaction on the rows it names
-//! (ADR-0041
+//! (ADR-0048
 //! clause 19).
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -627,14 +627,14 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0044
+    /// Verifies: ADR-0050
     #[test]
     fn the_deployment_port_contract_holds_on_the_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
         contract(&|| Box::new(FsDeploymentBackend::open(dir.path()).expect("open")));
     }
 
-    /// Verifies: ADR-0044, ADR-0041
+    /// Verifies: ADR-0050, ADR-0048
     #[test]
     fn the_deployment_port_contract_holds_on_postgres() {
         let Some(test) = TestDatabase::named() else {
@@ -670,7 +670,7 @@ mod tests {
         assert_eq!(store.load().expect("load"), [before]);
     }
 
-    /// Verifies: ADR-0044
+    /// Verifies: ADR-0050
     #[test]
     fn a_write_that_fails_leaves_the_deployment_as_it_was_on_the_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -684,7 +684,7 @@ mod tests {
 
     /// Each write of `canary`'s row and of its member rows is refused: a replacing Package
     /// removes the old row before its insert is refused, and the whole change is refused with it.
-    /// Verifies: ADR-0044
+    /// Verifies: ADR-0050
     #[test]
     fn a_write_that_fails_leaves_the_deployment_as_it_was_on_postgres() {
         let Some(test) = TestDatabase::named() else {
@@ -760,7 +760,7 @@ mod tests {
 
     /// Migration 5 moves the members out of the Deployments' columns into rows of their own, and
     /// the Deployments load as the release before left them.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0048
     #[test]
     fn the_members_move_out_of_the_deployments_columns() {
         use crate::postgres::schema::{MIGRATIONS, SCHEMA_TABLE};
@@ -798,7 +798,7 @@ mod tests {
     /// write, so the second runs exactly then; the gate opens once the second waits for the
     /// Deployment's row, or has reached the gate itself, which only an amendment that took no hold
     /// does.
-    /// Verifies: ADR-0041, ADR-0027
+    /// Verifies: ADR-0048, ADR-0027
     #[test]
     fn two_packages_of_one_type_added_at_once_add_one() {
         let Some(test) = TestDatabase::named() else {
@@ -903,8 +903,8 @@ mod tests {
         );
     }
 
-    /// A row that does not decode fails the load naming it (ADR-0044 clause 6).
-    /// Verifies: ADR-0044
+    /// A row that does not decode fails the load naming it (ADR-0050 clause 6).
+    /// Verifies: ADR-0050
     #[test]
     fn a_deployment_row_that_does_not_decode_fails_the_load_naming_it() {
         let Some(test) = TestDatabase::named() else {
@@ -926,7 +926,7 @@ mod tests {
     /// A deletion of a Deployment through B while a rollout through A that releases through it
     /// has not yet committed waits for the rollout, and then refuses it from the assignment the
     /// rollout stored: the rollout holds the Deployment's row until it commits.
-    /// Verifies: ADR-0041, ADR-0026
+    /// Verifies: ADR-0048, ADR-0026
     #[test]
     fn a_deletion_waits_for_a_rollout_through_the_deployment_and_is_refused() {
         use crate::agent_store::{tests::record, AgentStore as _};

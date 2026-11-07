@@ -313,7 +313,7 @@
       </section>
       </div>
 
-      <!-- Enrolments (ADR-0022 clause 10): the hosts that asked for a certificate with the fleet's
+      <!-- Enrolments (ADR-0052 clause 10): the hosts that asked for a certificate with the fleet's
            bootstrap certificate, waiting for an operator. The key fingerprint is shown whole so it
            can be matched against the `key_fingerprint` the Client logs on the host it came from;
            approving and rejecting are per-row presses, never part of a form. -->
@@ -352,11 +352,11 @@
         <div id="enrolments-empty" class="empty">No host is waiting.</div>
       </div>
 
-      <!-- Bootstrap certificates (ADR-0022): issued by this Server with the subject values
+      <!-- Bootstrap certificates (ADR-0052): issued by this Server with the subject values
            an operator names, which every host certificate issued from one carries. The Server keeps
            a PKCS#12 file of the pair under the password the operator types, which any page offers
            for download; the page never holds a private key, and the typed password is sent once
-           and kept nowhere (ADR-0022 clause 8). -->
+           and kept nowhere (ADR-0052 clause 8). -->
       <section id="boot-section" class="card config" style="display: none">
         <h2>Bootstrap certificates — one per customer, site or batch; each opens nothing without an open window and an approval</h2>
         <div class="config-fields">
@@ -586,8 +586,7 @@
       window.addEventListener("hashchange", () => showTab(location.hash.slice(1)));
       showTab(location.hash.slice(1));
 
-      // One page of the fleet at a time, as the paging draft's clause 7 says
-      // (ADR-0049):
+      // One page of the fleet at a time, as ADR-0049 clause 7 says:
       // the Server filters by the field, sorts by the column, counts what matches and links the
       // next page. `pageCursors` holds the cursor each page on the way here began at, the first
       // page's none, so Previous goes back without a link the Server does not give.
@@ -2174,12 +2173,12 @@
         if (currentDep || creatingDep) renderDepConfigs(currentDepView());
       }
 
-      // Enrolments (ADR-0022 clause 10; the UI as a client of the API, ADR-0025). A Server without
+      // Enrolments (ADR-0052 clause 10; the UI as a client of the API, ADR-0025). A Server without
       // [enrolment] answers 404 on both routes, and the tab says so instead of showing an empty
       // queue that could never fill.
       let enrolments = [];
       let enrolmentsShown = null;
-      // The bootstrap certificates on record (ADR-0044 clause 11). A request names the one it carries
+      // The bootstrap certificates on record (ADR-0050 clause 11). A request names the one it carries
       // by serial, since the record keeps the key's fingerprint and the request the certificate's.
       let boots = [];
       let bootsShown = null;
@@ -2197,7 +2196,7 @@
         const b = boots.find((b) => b.serial === e.bootstrap_serial);
         const tip = (lines) => esc(lines.join("\n"));
         // The values the approval carries into the host certificate, or why it will be refused
-        // (ADR-0022 clause 10) — shown before the operator presses Approve.
+        // (ADR-0052 clause 10) — shown before the operator presses Approve.
         const values = e.subject_refusal
           ? `<span class="pill red" title="Approving this request is refused, and nothing is signed: ${esc(e.subject_refusal)}. Reject it, and give the host a bootstrap certificate whose subject follows the rules.">subject cannot be carried: ${esc(e.subject_refusal)}</span>`
           : SUBJECT_FIELDS.filter(([field]) => e.bootstrap_subject && e.bootstrap_subject[field])
@@ -2343,7 +2342,7 @@
         const btn = e.target.closest(".enrolment-act");
         if (!btn) return;
         e.preventDefault();
-        // The id is the requested key's fingerprint (ADR-0022 clause 10).
+        // The id is the requested key's fingerprint (ADR-0052 clause 10).
         const fingerprint = btn.dataset.id;
         const approve = btn.dataset.act === "approve";
         const question = approve
@@ -2359,7 +2358,7 @@
         await refreshEnrolments();
       });
 
-      // The ISO 3166-1 alpha-2 codes a bootstrap certificate's country is chosen from (ADR-0022
+      // The ISO 3166-1 alpha-2 codes a bootstrap certificate's country is chosen from (ADR-0052
       // clause 8), each named in the browser's language where it knows the name.
       const COUNTRIES = ("AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ BA BB BD BE BF BG BH BI BJ BL BM BN BO BQ BR BS "
         + "BT BV BW BY BZ CA CC CD CF CG CH CI CK CL CM CN CO CR CU CV CW CX CY CZ DE DJ DK DM DO DZ EC EE EG EH ER ES ET "
@@ -2409,7 +2408,7 @@
           $("boot-error").textContent = body.error || (res ? `HTTP ${res.status}` : "the Server could not be reached");
           return;
         }
-        // The page keeps no password once it is sent (ADR-0022 clause 8).
+        // The page keeps no password once it is sent (ADR-0052 clause 8).
         $("boot-pass").value = "";
         $("boot-pass2").value = "";
         $("boot-result").textContent = `Issued ${body.subject}, serial ${body.serial}: save bootstrap.p12 from its row, now or later.`;

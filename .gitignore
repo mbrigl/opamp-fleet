@@ -15,7 +15,7 @@
 # with its package directory as the working directory, which puts `crates/fleet-agent/client-state/` in
 # the tree. Anchored patterns left those untracked and waiting to be committed by accident.
 # The Server's data directory holds the package artifacts too — programs of hundreds of megabytes
-# each; they belong in a store, never in the repository (ADR-0027, ADR-0044).
+# each; they belong in a store, never in the repository (ADR-0027, ADR-0050).
 fleet-data/
 client-state/
 

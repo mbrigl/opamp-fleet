@@ -9,7 +9,7 @@ tries it again. A re-key through this instance moves the kept put-back to the ne
 `instance_uid` (`rekey_held`). A re-key through another instance while this one tries does not:
 the next try calls `set_restart_pending` on the old `instance_uid`, whose row is gone, the store
 answers `Ok(None)` (`postgres/agents.rs`), and `put_back` drops the entry with a warning naming
-the Agent. The Operator's restart is lost, and draft clause 8 names this as the third case not
+the Agent. The Operator's restart is lost, and ADR-0048 clause 8 names this as the third case not
 seen.
 
 A kept put-back reaches the Agent's row after a re-key through another instance too, so the
@@ -25,7 +25,7 @@ Either may need a migration, which takes the next free number and names its olde
   `instance_uid` and the Agent is sent it at its next report there.
 - [ ] Given the same kept put-back, when the Agent is forgotten through another instance before
   the retry, then no restart is queued and the warning is written as now.
-- [ ] Given draft clause 8's third case not seen and the manual's restart route, when the change
+- [ ] Given ADR-0048 clause 8's third case not seen and the manual's restart route, when the change
   lands, then both no longer name it.
 - [ ] Given the existing restart and re-key tests in `fleet.rs` and the store checks, when the
   change lands, then they pass unchanged.
@@ -51,6 +51,6 @@ open unattended work at zero.
 It does not block G-20 or the pull request of stage 2 of
 docs/plan/several-server-instances/spec.md. The loss needs a put-back the store refused, a
 reconnect to another instance and a re-key there while the put-back is still kept; it is written
-to the log naming the Agent and named in the draft and the manual, so the Operator
+to the log naming the Agent and named in ADR-0048 and the manual, so the Operator
 sees it and requests the restart again. Closing it likely needs a migration, which stage 2 does
 not need otherwise.
