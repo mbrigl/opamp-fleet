@@ -523,6 +523,7 @@ mod tests {
             Limits::default(),
             Arc::new(crate::clock::SystemClock),
             watched,
+            None,
         )
         .expect("start");
         Writing {

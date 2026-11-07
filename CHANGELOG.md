@@ -167,6 +167,21 @@ once its tag exists.
   requested and delivered through another instance before this one heard of the request. A frame
   lost after the connection took it, and on plain HTTP a lost answer to a poll, is still not seen.
   **What to do:** nothing. Request a restart that did not happen again.
+- **The audit record names the lease of each decision**
+  ([ADR-draft-the-audit-record-is-one-hash-chain-per-lease-and-names-the-lease-each-decision-was-taken-under](docs/adr/draft-the-audit-record-is-one-hash-chain-per-lease-and-names-the-lease-each-decision-was-taken-under.md)
+  clause 3,
+  [ADR-draft-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again](docs/adr/draft-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again.md)
+  clause 5). On PostgreSQL a decision an instance took while it held no lease, such as an
+  enrolment window running out after its lease lapsed, was written into the chain of its next
+  lease as if taken under that lease. It now carries `taken_under` `none`, as does one taken while
+  the lease is lapsed by the instance's clock. The chain of a lease that an instance which must be
+  alone takes over before it lapses, its holder gone, is closed with `reason` `holder_gone`
+  instead of `lease_lapsed`. A shutdown whose closing write landed while its answer was lost read
+  as failed and left its lease to lapse; it now reads the chain back, and releases the lease when
+  the chain holds its closing entry. After the close a decision is refused, and the shutdown logs
+  at `error` how many went unrecorded.
+  **What to do:** nothing. A tool that reads `taken_under` as a chain identifier treats `none` as
+  no lease, and one that reads `reason` knows `holder_gone`.
 
 ## [0.8.0]
 
