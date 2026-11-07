@@ -11,6 +11,11 @@
 //!
 //! A request is keyed by the fingerprint of its public key: a Client re-sends the same request
 //! until it is answered, and a re-sent request joins its own entry rather than queueing again.
+//!
+//! A rejected key outlives the window
+//! (ADR-draft-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window
+//! clause 16): the store keeps it, a request for it is answered as rejected and not listed, and
+//! no approval signs it. An operator may reject a key before its request arrives.
 
 use std::collections::BTreeMap;
 use std::net::IpAddr;
@@ -171,6 +176,8 @@ pub enum Approval {
 pub enum Decided {
     /// The request waited and is decided now.
     Written,
+    /// The store held no request with that id; its key is rejected before the request arrives.
+    Listed,
     /// The store holds the request no longer waiting, or not at all.
     NotWaiting,
     /// Another instance holds the request while it decides it, for longer than a wait for a lock
@@ -195,6 +202,23 @@ pub enum Submitted {
     OverShare { first: bool },
     /// No window is open.
     Closed,
+}
+
+/// Whether `id` has the form of a request's id, the SHA-256 fingerprint of its key: 64 lowercase
+/// hexadecimal digits. A rejection of any other id is refused, since no request can carry it.
+#[must_use]
+pub fn is_key_id(id: &str) -> bool {
+    id.len() == 64 && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// What an operator's rejection came to: whether the queue held the request, or only its key is
+/// rejected, before its request arrives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Rejection {
+    /// The request waited in the queue and is rejected.
+    Queued,
+    /// The queue did not hold the request; its key is rejected when it arrives.
+    NotQueued,
 }
 
 /// Why an operator's decision could not be applied.
@@ -244,6 +268,20 @@ pub struct Persisted {
     pub(crate) window_until_ms: Option<u64>,
     #[serde(default)]
     pub(crate) requests: Vec<PersistedRequest>,
+    /// The rejected keys, each with when it was rejected: kept beyond the window, by a close and an
+    /// end alike.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) rejected: BTreeMap<String, u64>,
+}
+
+impl Persisted {
+    /// The window closed with its requests: what a close and an end leave, the rejected keys kept.
+    fn closed(self) -> Persisted {
+        Persisted {
+            rejected: self.rejected,
+            ..Persisted::default()
+        }
+    }
 }
 
 /// One request as it persists.
@@ -274,6 +312,8 @@ pub enum Took {
     OverShare,
     /// No window is open.
     Closed,
+    /// The request's key is rejected.
+    Rejected,
 }
 
 /// The enrolment's port (ADR-0009, ADR-0044): where the window and its queue persist. The
@@ -296,9 +336,10 @@ pub trait EnrolmentStore: Send + Sync {
     /// Returns an error when it cannot be written.
     fn save(&self, persisted: &Persisted) -> Result<(), String>;
 
-    /// Takes `request` into the queue while a window is open at `now_ms`, unless the queue holds
-    /// `max` requests or `max_per_bootstrap` of its bootstrap certificate, both counted in what is
-    /// stored. A request held already is answered as it stands, and counts nothing.
+    /// Takes `request` into the queue while a window is open at `now_ms`, unless its key is
+    /// rejected, or the queue holds `max` requests or `max_per_bootstrap` of its bootstrap
+    /// certificate, both counted in what is stored. A request held already is answered as it
+    /// stands, and counts nothing.
     ///
     /// # Errors
     /// Returns an error when the store cannot be read or written; nothing is then taken in.
@@ -315,6 +356,9 @@ pub trait EnrolmentStore: Send + Sync {
             .is_none_or(|until| now_ms >= until)
         {
             return Ok(Took::Closed);
+        }
+        if persisted.rejected.contains_key(&request.id) {
+            return Ok(Took::Rejected);
         }
         if let Some(held) = persisted.requests.iter().find(|r| r.id == request.id) {
             return Ok(Took::Held(Box::new(held.clone())));
@@ -356,10 +400,37 @@ pub trait EnrolmentStore: Send + Sync {
         Ok(Decided::Written)
     }
 
+    /// Rejects the key `id` at `rejected_ms`, kept beyond the window, and decides its request
+    /// while it waits: [`Decided::Written`]. A request the store holds decided is left as it is,
+    /// its key not rejected: [`Decided::NotWaiting`]. A key the queue does not hold is rejected
+    /// before its request arrives: [`Decided::Listed`]. A store other instances share writes it
+    /// under the hold [`take`](Self::take) takes, and answers [`Decided::Deciding`] for a request
+    /// another instance holds while it decides it.
+    ///
+    /// # Errors
+    /// Returns an error when the store cannot be read or written; nothing is then rejected.
+    fn reject(&self, id: &str, rejected_ms: u64) -> Result<Decided, String> {
+        let mut persisted = self.load()?.unwrap_or_default();
+        let decided = match persisted.requests.iter_mut().find(|r| r.id == id) {
+            Some(request) if request.decision.is_some() => return Ok(Decided::NotWaiting),
+            Some(request) => {
+                request.decision = Some(Decision::Rejected);
+                Decided::Written
+            }
+            None => Decided::Listed,
+        };
+        persisted
+            .rejected
+            .entry(id.to_string())
+            .or_insert(rejected_ms);
+        self.save(&persisted)?;
+        Ok(decided)
+    }
+
     /// Approves the waiting request `id`: `sign` signs it while the request is held, and its
     /// answer is written as the request's decision, with the register entry and the Host it
-    /// prepared (ADR-0044 clause 9). A request the store holds no longer waiting is answered
-    /// [`Approval::NotWaiting`] before anything is signed, so of two instances approving one
+    /// prepared (ADR-0044 clause 9). A request the store holds no longer waiting, or whose key it
+    /// holds rejected, is answered [`Approval::NotWaiting`] before anything is signed, so of two instances approving one
     /// request one signs and records it and the other nothing
     /// (ADR-0041
     /// clause 19). A store other instances share also refuses a request whose bootstrap
@@ -388,6 +459,9 @@ pub trait EnrolmentStore: Send + Sync {
     ) -> Result<Approval, String> {
         let _ = bootstrap;
         let mut persisted = self.load()?.unwrap_or_default();
+        if persisted.rejected.contains_key(id) {
+            return Ok(Approval::NotWaiting);
+        }
         let Some(request) = persisted
             .requests
             .iter_mut()
@@ -509,16 +583,18 @@ pub trait EnrolmentStore: Send + Sync {
         self.save(&persisted)
     }
 
-    /// Closes the window, and every request expires with it.
+    /// Closes the window, and every request expires with it; the rejected keys stay.
     ///
     /// # Errors
-    /// Returns an error when the store cannot be written.
+    /// Returns an error when the store cannot be read or written.
     fn close_window(&self) -> Result<(), String> {
-        self.save(&Persisted::default())
+        let persisted = self.load()?.unwrap_or_default();
+        self.save(&persisted.closed())
     }
 
     /// Closes the window that ends at `until_ms`, its requests with it, and answers whether it did:
-    /// a window stored with another end was moved by another act and stays open.
+    /// a window stored with another end was moved by another act and stays open. The rejected
+    /// keys stay.
     ///
     /// # Errors
     /// Returns an error when the store cannot be read or written.
@@ -527,7 +603,7 @@ pub trait EnrolmentStore: Send + Sync {
         if persisted.window_until_ms != Some(until_ms) {
             return Ok(false);
         }
-        self.save(&Persisted::default())?;
+        self.save(&persisted.closed())?;
         Ok(true)
     }
 }
@@ -548,6 +624,8 @@ struct State {
     /// The bootstrap certificates refused for their share in this window, each audited once
     /// (ADR-0022). Not persisted: a restart may audit a certificate once more.
     over_share: std::collections::BTreeSet<CertId>,
+    /// The rejected keys, as the store keeps them: beyond the window.
+    rejected: BTreeMap<String, u64>,
 }
 
 impl Entry {
@@ -611,7 +689,15 @@ impl State {
             window_until_ms: persisted.window_until_ms,
             entries,
             over_share: std::collections::BTreeSet::new(),
+            rejected: persisted.rejected,
         })
+    }
+
+    /// The window closed with its requests: the rejected keys stay.
+    fn close(&mut self) {
+        self.window_until_ms = None;
+        self.entries.clear();
+        self.over_share.clear();
     }
 }
 
@@ -668,10 +754,10 @@ impl Enrolment {
             .filter(|until| clock.now_ms() >= *until);
         if let Some(until) = ended {
             // Only the window that ended: another instance may have opened it again meanwhile.
-            state = State::default();
+            state.close();
             store.end_window(until)?;
         } else if state.window_until_ms.is_none() && !state.entries.is_empty() {
-            state = State::default();
+            state.close();
             store.close_window()?;
         }
         Ok(Enrolment {
@@ -737,17 +823,15 @@ impl Enrolment {
         Ok(until)
     }
 
-    /// Closes the window now; every pending request expires. It is closed in memory whatever
-    /// happens to the write, the safe direction.
+    /// Closes the window now; every pending request expires, and the rejected keys stay. It is
+    /// closed in memory whatever happens to the write, the safe direction.
     ///
     /// # Errors
     /// Returns an error when the closed window cannot be persisted: a restart may then find it
     /// open until its end.
     pub fn close(&self) -> Result<(), String> {
         let mut state = self.state.lock().expect("enrolment lock");
-        state.window_until_ms = None;
-        state.entries.clear();
-        state.over_share.clear();
+        state.close();
         let saved = self.on_store(|store| store.close_window());
         drop(state);
         self.changed();
@@ -765,13 +849,17 @@ impl Enrolment {
         self.window().is_some()
     }
 
-    /// Takes in a request, or answers it once it has been decided. With a store armed the queue's
+    /// Takes in a request, or answers it once it has been decided; a request whose key is rejected
+    /// is answered so, beyond the window it was rejected in. With a store armed the queue's
     /// bounds are counted in what is stored, so they hold for every instance on one database; a
     /// request another instance took in is answered as the store holds it.
     pub fn submit(&self, request: Request, requester: Requester) -> Submitted {
         let mut state = self.state.lock().expect("enrolment lock");
         if self.expire(&mut state).is_none() {
             return Submitted::Closed;
+        }
+        if state.rejected.contains_key(&request.key_fingerprint) {
+            return Submitted::Rejected;
         }
         if let Some(entry) = state.entries.get(&request.key_fingerprint) {
             return answer(entry.decision.as_ref());
@@ -829,17 +917,21 @@ impl Enrolment {
                 first: state.over_share.insert(bootstrap),
             },
             Took::Closed => Submitted::Closed,
+            Took::Rejected => Submitted::Rejected,
         }
     }
 
-    /// The requests waiting for an operator, oldest first.
+    /// The requests waiting for an operator, oldest first; one whose key is rejected waits for
+    /// none.
     pub fn pending(&self) -> Vec<Pending> {
         let mut state = self.state.lock().expect("enrolment lock");
         self.expire(&mut state);
         let mut pending: Vec<Pending> = state
             .entries
             .values()
-            .filter(|entry| entry.decision.is_none())
+            .filter(|entry| {
+                entry.decision.is_none() && !state.rejected.contains_key(&entry.pending.id)
+            })
             .map(|entry| entry.pending.clone())
             .collect();
         pending.sort_by_key(|p| p.arrived_ms);
@@ -850,8 +942,8 @@ impl Enrolment {
     /// Answers the serial of the certificate signed.
     ///
     /// # Errors
-    /// Returns [`DecisionError::NotFound`] for an unknown, decided or expired id,
-    /// [`DecisionError::Revoked`] when the request's bootstrap certificate is revoked,
+    /// Returns [`DecisionError::NotFound`] for an unknown, decided or expired id, and for a key
+    /// that is rejected, here or in the store, [`DecisionError::Revoked`] when the request's bootstrap certificate is revoked,
     /// [`DecisionError::Subject`] when its subject cannot be carried into the host certificate
     /// (ADR-0015 clause 23), [`DecisionError::Sign`] when the CA or the register refuses the
     /// request, and [`DecisionError::Store`] when the decision could not be written; the request
@@ -879,7 +971,7 @@ impl Enrolment {
         let entry = state
             .entries
             .get(id)
-            .filter(|entry| entry.decision.is_none())
+            .filter(|entry| entry.decision.is_none() && !state.rejected.contains_key(id))
             .ok_or(DecisionError::NotFound)?;
         let bootstrap = entry.pending.requester.bootstrap.clone();
         if revoked(&bootstrap) {
@@ -1063,50 +1155,47 @@ impl Enrolment {
         DecisionError::Revoked
     }
 
-    /// Writes `decision` on the waiting request `id`, then holds it in memory. A request the store
-    /// no longer holds waiting is dropped from memory and answered [`DecisionError::NotFound`].
-    fn decided(
-        &self,
-        state: &mut State,
-        id: &str,
-        decision: Decision,
-    ) -> Result<(), DecisionError> {
+    /// Rejects the key `id`, beyond the window: its request is decided while it waits, and a
+    /// request for it is refused when it arrives, with the window open or closed then. Answers
+    /// whether the queue held the request.
+    ///
+    /// # Errors
+    /// Returns [`DecisionError::NotFound`] for a request the queue holds decided, here or in the
+    /// store, [`DecisionError::Deciding`] for one another instance is deciding, and
+    /// [`DecisionError::Store`] when the rejection could not be written; nothing is then
+    /// rejected.
+    pub fn reject(&self, id: &str) -> Result<Rejection, DecisionError> {
+        let mut state = self.state.lock().expect("enrolment lock");
+        self.expire(&mut state);
+        if state
+            .entries
+            .get(id)
+            .is_some_and(|entry| entry.decision.is_some())
+        {
+            return Err(DecisionError::NotFound);
+        }
+        let now = self.clock.now_ms();
         let decided = match &self.store {
-            Some(store) => store.decide(id, &decision).map_err(DecisionError::Store)?,
-            None => Decided::Written,
+            Some(store) => store.reject(id, now).map_err(DecisionError::Store)?,
+            None if state.entries.contains_key(id) => Decided::Written,
+            None => Decided::Listed,
         };
-        match decided {
-            Decided::Written => {}
+        let rejection = match decided {
+            Decided::Written => Rejection::Queued,
+            Decided::Listed => Rejection::NotQueued,
             Decided::NotWaiting => {
                 state.entries.remove(id);
                 return Err(DecisionError::NotFound);
             }
             Decided::Deciding => return Err(DecisionError::Deciding),
-        }
+        };
         if let Some(entry) = state.entries.get_mut(id) {
-            entry.decision = Some(decision);
+            entry.decision = Some(Decision::Rejected);
         }
-        Ok(())
-    }
-
-    /// Rejects one request.
-    ///
-    /// # Errors
-    /// Returns [`DecisionError::NotFound`] for an unknown, decided or expired id.
-    pub fn reject(&self, id: &str) -> Result<(), DecisionError> {
-        let mut state = self.state.lock().expect("enrolment lock");
-        self.expire(&mut state);
-        if !state
-            .entries
-            .get(id)
-            .is_some_and(|entry| entry.decision.is_none())
-        {
-            return Err(DecisionError::NotFound);
-        }
-        self.decided(&mut state, id, Decision::Rejected)?;
+        state.rejected.entry(id.to_string()).or_insert(now);
         drop(state);
         self.changed();
-        Ok(())
+        Ok(rejection)
     }
 
     /// Withdraws every waiting request whose bootstrap certificate `revoked` names, and answers how
@@ -1171,13 +1260,14 @@ impl Enrolment {
     /// Whether the request for `key` was rejected — its connection then ends.
     pub fn is_rejected(&self, key: &str) -> bool {
         let state = self.state.lock().expect("enrolment lock");
-        matches!(
-            state
-                .entries
-                .get(key)
-                .and_then(|entry| entry.decision.as_ref()),
-            Some(Decision::Rejected)
-        )
+        state.rejected.contains_key(key)
+            || matches!(
+                state
+                    .entries
+                    .get(key)
+                    .and_then(|entry| entry.decision.as_ref()),
+                Some(Decision::Rejected)
+            )
     }
 
     /// Reads the window and its queue again from the store, as another instance changed them
@@ -1213,20 +1303,18 @@ impl Enrolment {
     }
 
     /// The window's end if it is still open; a window that has run out is closed here, and its
-    /// requests expire with it.
+    /// requests expire with it. The rejected keys stay.
     fn expire(&self, state: &mut State) -> Option<u64> {
         let until = state.window_until_ms?;
         if self.clock.now_ms() < until {
             return Some(until);
         }
-        state.window_until_ms = None;
-        state.over_share.clear();
         let expired = state
             .entries
             .values()
             .filter(|entry| entry.decision.is_none())
             .count();
-        state.entries.clear();
+        state.close();
         // Another instance may have moved the window's end meanwhile: then it did not run out,
         // and nothing expired with it.
         let ended = match &self.store {
@@ -1522,7 +1610,9 @@ pub(crate) mod tests {
                 "B holds {key} waiting, as the store has it"
             );
             match decide {
-                "reject" => a.reject(key).expect("reject on A"),
+                "reject" => {
+                    a.reject(key).expect("reject on A");
+                }
                 "approve" => {
                     a.approve(key, &Echo, "host", &Recording::new(&record), &|_| false)
                         .expect("approve on A");
@@ -1536,17 +1626,23 @@ pub(crate) mod tests {
                 }
             }
             let before = recorded.get();
-            assert_eq!(
-                b.reject(key),
-                Err(DecisionError::NotFound),
-                "{key}: {decide}"
-            );
+            // A request the store holds decided is not found; one it no longer holds is rejected
+            // before it arrives again.
+            let rejected = b.reject(key);
+            if decide == "withdraw" {
+                assert!(rejected.is_ok(), "{key}: {rejected:?}");
+            } else {
+                assert_eq!(
+                    rejected.err(),
+                    Some(DecisionError::NotFound),
+                    "{key}: {decide}"
+                );
+            }
             assert_eq!(
                 b.submit(request(key), requester()),
                 match decide {
-                    "reject" => Submitted::Rejected,
                     "approve" => Submitted::Issued(format!("issued for csr-{key}")),
-                    _ => Submitted::Waiting,
+                    _ => Submitted::Rejected,
                 },
                 "{key}: B answers as the store holds it"
             );
@@ -1715,7 +1811,7 @@ pub(crate) mod tests {
             fn save(&self, persisted: &Persisted) -> Result<(), String> {
                 self.0.save(persisted)
             }
-            fn decide(&self, _: &str, _: &Decision) -> Result<Decided, String> {
+            fn reject(&self, _: &str, _: u64) -> Result<Decided, String> {
                 Ok(Decided::Deciding)
             }
             fn approve(
@@ -1795,7 +1891,14 @@ pub(crate) mod tests {
             enrolment.submit(request("b"), requester()),
             Submitted::Rejected
         );
-        assert_eq!(enrolment.reject("unknown"), Err(DecisionError::NotFound));
+        enrolment
+            .reject("unknown")
+            .expect("an id the queue does not hold is rejected");
+        assert_eq!(
+            enrolment.submit(request("unknown"), requester()),
+            Submitted::Rejected,
+            "and its request is refused when it arrives"
+        );
     }
 
     /// Verifies: ADR-0038
@@ -2238,5 +2341,202 @@ pub(crate) mod tests {
         );
         assert!(register.issued().is_empty());
         assert_eq!(enrolment.pending().len(), 1, "the request still waits");
+    }
+
+    /// A key as a request's id is one: 64 lowercase hexadecimal digits.
+    pub(crate) fn key(n: u8) -> String {
+        format!("{n:02x}").repeat(32)
+    }
+
+    /// The ids `enrolment` lists as pending.
+    fn pending_ids(enrolment: &Enrolment) -> Vec<String> {
+        enrolment.pending().into_iter().map(|p| p.id).collect()
+    }
+
+    /// A rejected key stays refused beyond its window, on every instance `open` opens on one
+    /// store, and across a restart: rejected in one window and sent again after the window closed
+    /// or ran out, a request is answered as rejected and not listed; an id the queue does not hold
+    /// is rejected with the window closed, and its request is refused when it arrives. Another key
+    /// still enrols. `clock` is the clock the instances share.
+    pub(crate) fn a_rejected_key_stays_refused(open: &dyn Fn() -> Enrolment, clock: &Manual) {
+        let a = open();
+        a.open(600).expect("window");
+        let b = open();
+        let (k1, k2, k3, k4) = (key(1), key(2), key(3), key(4));
+
+        assert_eq!(a.submit(request(&k1), requester()), Submitted::Waiting);
+        a.reject(&k1).expect("reject");
+        a.close().expect("close");
+        a.open(600).expect("the next window");
+        assert_eq!(
+            a.submit(request(&k1), requester()),
+            Submitted::Rejected,
+            "rejected in the window before, which was closed"
+        );
+        assert!(pending_ids(&a).is_empty(), "{:?}", pending_ids(&a));
+        assert!(a.is_rejected(&k1));
+        assert_eq!(
+            b.submit(request(&k1), requester()),
+            Submitted::Rejected,
+            "the other instance refuses it too"
+        );
+        b.reload().expect("reload");
+        assert!(pending_ids(&b).is_empty(), "{:?}", pending_ids(&b));
+        assert!(b.is_rejected(&k1));
+
+        assert_eq!(a.submit(request(&k2), requester()), Submitted::Waiting);
+        a.reject(&k2).expect("reject");
+        clock.0.fetch_add(601_000, Ordering::SeqCst);
+        assert_eq!(a.window(), None, "the window ran out");
+        a.open(600).expect("the next window");
+        assert_eq!(
+            a.submit(request(&k2), requester()),
+            Submitted::Rejected,
+            "rejected in the window before, which ran out"
+        );
+
+        a.close().expect("close");
+        a.reject(&k3)
+            .expect("an id the queue does not hold is rejected with the window closed");
+        a.open(600).expect("open");
+        assert_eq!(
+            a.submit(request(&k3), requester()),
+            Submitted::Rejected,
+            "rejected before it arrived"
+        );
+        b.reload().expect("reload");
+        assert_eq!(b.submit(request(&k3), requester()), Submitted::Rejected);
+        assert!(pending_ids(&a).is_empty(), "{:?}", pending_ids(&a));
+
+        let restarted = open();
+        for key in [&k1, &k2, &k3] {
+            assert_eq!(
+                restarted.submit(request(key), requester()),
+                Submitted::Rejected,
+                "{key} after a restart"
+            );
+        }
+        assert_eq!(
+            restarted.submit(request(&k4), requester()),
+            Submitted::Waiting,
+            "another key still enrols"
+        );
+        assert_eq!(pending_ids(&restarted), [k4]);
+    }
+
+    /// Verifies: ADR-draft-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window
+    #[test]
+    fn a_rejected_key_stays_refused_on_one_store_in_memory() {
+        let clock = Arc::new(Manual(AtomicU64::new(1_000_000)));
+        let store = Memory::default();
+        a_rejected_key_stays_refused(
+            &|| Enrolment::open_on(clock.clone(), Box::new(store.clone())).expect("open"),
+            &clock,
+        );
+    }
+
+    /// Verifies: ADR-draft-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window
+    #[test]
+    fn a_rejected_key_stays_refused_on_the_filesystem() {
+        let clock = Arc::new(Manual(AtomicU64::new(1_000_000)));
+        let dir = tempfile::tempdir().expect("tempdir");
+        a_rejected_key_stays_refused(
+            &|| {
+                Enrolment::open_on(
+                    clock.clone(),
+                    Box::new(crate::fs::FsEnrolmentStore::open(dir.path())),
+                )
+                .expect("open")
+            },
+            &clock,
+        );
+    }
+
+    /// An approval signs no rejected key whose request still waits, as an instance of 0.8.0 may
+    /// have queued it: the store refuses it, where this instance does not hold the key rejected
+    /// yet, and this instance refuses it, where its store would sign it.
+    /// Verifies: ADR-draft-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window
+    #[test]
+    fn an_approval_signs_no_rejected_key() {
+        // A store that signs whatever waits, as one of 0.8.0 does.
+        #[derive(Clone, Default)]
+        struct Unchecking(Memory);
+        impl EnrolmentStore for Unchecking {
+            fn load(&self) -> Result<Option<Persisted>, String> {
+                self.0.load()
+            }
+            fn save(&self, persisted: &Persisted) -> Result<(), String> {
+                self.0.save(persisted)
+            }
+            fn approve(
+                &self,
+                _: &str,
+                _: &CertId,
+                sign: &mut dyn FnMut() -> Result<Signing, DecisionError>,
+                _: &dyn Registrar,
+            ) -> Result<Approval, String> {
+                Ok(match sign() {
+                    Ok((decision, _)) => Approval::Approved(decision),
+                    Err(e) => Approval::Refused(e),
+                })
+            }
+        }
+        let reject_in_the_store = |store: &dyn EnrolmentStore| {
+            let mut persisted = store.load().expect("load").expect("saved");
+            persisted.rejected.insert(key(1), 1);
+            store.save(&persisted).expect("save");
+        };
+        let clock = Arc::new(Manual(AtomicU64::new(1_000_000)));
+        let recorded = std::cell::Cell::new(0);
+        let record = |_: &Signed, _: &[u8], _: &CertId| {
+            recorded.set(recorded.get() + 1);
+            Ok(())
+        };
+
+        let store = Memory::default();
+        let a = Enrolment::open_on(clock.clone(), Box::new(store.clone())).expect("open");
+        a.open(600).expect("window");
+        assert_eq!(a.submit(request(&key(1)), requester()), Submitted::Waiting);
+        reject_in_the_store(&store);
+        assert_eq!(
+            a.approve(&key(1), &Echo, "host", &Recording::new(&record), &|_| false),
+            Err(DecisionError::NotFound),
+            "the store refuses it"
+        );
+
+        let store = Unchecking::default();
+        let a = Enrolment::open_on(clock.clone(), Box::new(store.clone())).expect("open");
+        a.open(600).expect("window");
+        assert_eq!(a.submit(request(&key(1)), requester()), Submitted::Waiting);
+        reject_in_the_store(&store);
+        let b = Enrolment::open_on(clock.clone(), Box::new(store.clone())).expect("open");
+        assert!(b.pending().is_empty(), "not listed");
+        assert_eq!(
+            b.approve(&key(1), &Echo, "host", &Recording::new(&record), &|_| false),
+            Err(DecisionError::NotFound),
+            "the instance refuses it"
+        );
+        assert_eq!(recorded.get(), 0, "nothing signed");
+    }
+
+    /// Without a store, as a test holds it, a rejected key stays refused beyond its window, and an
+    /// id not queued is rejected before its request arrives.
+    /// Verifies: ADR-draft-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window
+    #[test]
+    fn a_rejected_key_stays_refused_without_a_store() {
+        let (enrolment, clock) = enrolment();
+        enrolment.open(60).expect("open");
+        enrolment.submit(request(&key(1)), requester());
+        enrolment.reject(&key(1)).expect("reject");
+        clock.0.fetch_add(61_000, Ordering::SeqCst);
+        enrolment.reject(&key(2)).expect("reject an id not queued");
+        enrolment.open(60).expect("open again");
+        for n in [1, 2] {
+            assert_eq!(
+                enrolment.submit(request(&key(n)), requester()),
+                Submitted::Rejected
+            );
+        }
+        assert!(enrolment.pending().is_empty());
     }
 }

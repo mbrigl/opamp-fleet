@@ -54,7 +54,7 @@ pub const BOOTSTRAP: &str = "bootstrap";
 pub const AUDIT: &str = "audit";
 /// The revocation list.
 pub const REVOCATIONS: &str = "revocations.json";
-/// The enrolment window and its pending requests.
+/// The enrolment window, its pending requests and the rejected keys.
 pub const ENROLMENT: &str = "enrolment.json";
 /// The floor of each Agent type (ADR-0028 clause 15).
 pub const PACKAGE_FLOORS: &str = "package-floors.json";

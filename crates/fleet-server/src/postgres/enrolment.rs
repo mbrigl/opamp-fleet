@@ -113,7 +113,8 @@ fn refused_by_the_server(error: tokio_postgres::Error, at: At) -> Result<Ended, 
     }
 }
 
-/// The window in `enrolment_window`, its requests in `enrolment_requests`.
+/// The window in `enrolment_window`, its requests in `enrolment_requests`, the rejected keys in
+/// `enrolment_rejected`.
 pub struct PgEnrolmentStore {
     database: Arc<Database>,
 }
@@ -145,8 +146,9 @@ impl EnrolmentStore for PgEnrolmentStore {
         })
     }
 
-    /// The window's row is held for share and the queue against every other taker while the
-    /// request is counted and written; a decision or a withdrawal waits, and a reader does not.
+    /// The window's row is held for share and the queue against every other taker and every
+    /// rejection while the key is looked up among the rejected and the request is counted and
+    /// written; a decision or a withdrawal waits, and a reader does not.
     fn take(
         &self,
         request: &PersistedRequest,
@@ -173,6 +175,14 @@ impl EnrolmentStore for PgEnrolmentStore {
                 .batch_execute("LOCK TABLE enrolment_requests IN SHARE ROW EXCLUSIVE MODE")
                 .await
                 .map_err(sql)?;
+            if transaction
+                .query_opt("SELECT 1 FROM enrolment_rejected WHERE key = $1", &[&id])
+                .await
+                .map_err(sql)?
+                .is_some()
+            {
+                return Ok(Took::Rejected);
+            }
             if let Some(row) = transaction
                 .query_opt(
                     "SELECT request FROM enrolment_requests WHERE id = $1",
@@ -256,10 +266,74 @@ impl EnrolmentStore for PgEnrolmentStore {
         })
     }
 
+    /// The queue is locked as [`take`](EnrolmentStore::take) locks it, so every take after the
+    /// commit finds the key rejected and none lands between the look and the write. The request's
+    /// row is then held without a wait: an approval holding it would need the queue's lock for its
+    /// own update, so a wait here would deadlock with it, and such a request is answered
+    /// [`Decided::Deciding`] at once. A wait for the queue's lock past the session's
+    /// `lock_timeout` is answered so too.
+    fn reject(&self, id: &str, rejected_ms: u64) -> Result<Decided, String> {
+        let id = id.to_string();
+        let rejected = serde_json::to_value(Decision::Rejected).expect("a decision serializes");
+        self.database.run(move |pool| async move {
+            let mut client = client(&pool).await?;
+            let transaction = client.transaction().await.map_err(sql)?;
+            match transaction
+                .batch_execute("LOCK TABLE enrolment_requests IN SHARE ROW EXCLUSIVE MODE")
+                .await
+            {
+                Ok(()) => {}
+                Err(e) if held_elsewhere(&e) => return Ok(Decided::Deciding),
+                Err(e) => return Err(sql(e)),
+            }
+            let row = match transaction
+                .query_opt(
+                    "SELECT request FROM enrolment_requests WHERE id = $1 FOR UPDATE NOWAIT",
+                    &[&id],
+                )
+                .await
+            {
+                Ok(row) => row,
+                Err(e) if held_elsewhere(&e) => return Ok(Decided::Deciding),
+                Err(e) => return Err(sql(e)),
+            };
+            let decided = match row.map(|row| row.get::<_, Value>(0)) {
+                Some(request) if request.get("decision").is_some_and(|d| !d.is_null()) => {
+                    return Ok(Decided::NotWaiting);
+                }
+                Some(mut request) => {
+                    request["decision"] = rejected;
+                    transaction
+                        .execute(
+                            "UPDATE enrolment_requests SET request = $2 WHERE id = $1",
+                            &[&id, &request],
+                        )
+                        .await
+                        .map_err(sql)?;
+                    Decided::Written
+                }
+                None => Decided::Listed,
+            };
+            transaction
+                .execute(
+                    "INSERT INTO enrolment_rejected (key, rejected_ms) VALUES ($1, $2) \
+                     ON CONFLICT (key) DO NOTHING",
+                    &[&id, &signed(rejected_ms)],
+                )
+                .await
+                .map_err(sql)?;
+            notify(&transaction, ENROLMENT, &id).await?;
+            transaction.commit().await.map_err(sql)?;
+            Ok(decided)
+        })
+    }
+
     /// The request's row is held from before it is signed until its decision is written: of two
     /// instances approving one request, the second waits for the first and then finds it decided,
     /// signing nothing. A wait for the row that outlasts the session's `lock_timeout` is answered
-    /// [`Approval::Deciding`], signing nothing. The bootstrap certificate is looked up in the list
+    /// [`Approval::Deciding`], signing nothing. A key found rejected once the row is held is
+    /// answered [`Approval::NotWaiting`], signing nothing: a rejection holds the row before it
+    /// writes the key, so none lands while the approval holds it. The bootstrap certificate is looked up in the list
     /// once the row is held; the register's write looks again, under its hold of the list. The
     /// register entry and the Host the signature prepared are written in the same transaction as
     /// the decision, and handed to `registrar` once it committed (ADR-0044 clause 9): a commit
@@ -288,7 +362,18 @@ impl EnrolmentStore for PgEnrolmentStore {
                 Err(e) if held_elsewhere(&e) => return Ok((held, Found::Deciding)),
                 Err(e) => return Err(sql(e)),
             };
+            let rejected = held
+                .client()
+                .query_opt(
+                    "SELECT 1 FROM enrolment_rejected WHERE key = $1",
+                    &[&request_id],
+                )
+                .await
+                .map_err(sql)?
+                .is_some();
             let found = match row.map(|row| row.get::<_, Value>(0)) {
+                // A rejected key is never signed, though an instance of 0.8.0 queued it.
+                _ if rejected => Found::NotWaiting,
                 Some(request) if request.get("decision").is_none_or(Value::is_null) => {
                     if super::ledger::names(&***held.client(), &bootstrap).await? {
                         held.client()
@@ -540,14 +625,30 @@ impl EnrolmentStore for PgEnrolmentStore {
     }
 }
 
-/// What was saved last, `None` when nothing was. A request that does not decode fails, naming it.
+/// What was saved last, `None` when nothing was: neither a window nor a rejected key. A request
+/// that does not decode fails, naming it.
 pub(crate) async fn read(client: &impl GenericClient) -> Result<Option<Persisted>, String> {
-    let Some(window) = client
+    let window = client
         .query_opt("SELECT until_ms FROM enrolment_window", &[])
         .await
+        .map_err(sql)?;
+    let mut rejected = serde_json::Map::new();
+    for row in client
+        .query("SELECT key, rejected_ms FROM enrolment_rejected", &[])
+        .await
         .map_err(sql)?
-    else {
-        return Ok(None);
+    {
+        rejected.insert(row.get(0), unsigned(row.get(1)).into());
+    }
+    let Some(window) = window else {
+        if rejected.is_empty() {
+            return Ok(None);
+        }
+        return serde_json::from_value(serde_json::json!({ "rejected": rejected }))
+            .map(Some)
+            .map_err(|e| {
+                format!("the rejected enrolment keys in the database do not decode: {e}")
+            });
     };
     let mut requests = Vec::new();
     for row in client
@@ -565,12 +666,15 @@ pub(crate) async fn read(client: &impl GenericClient) -> Result<Option<Persisted
         document.insert("window_until_ms".to_string(), unsigned(until).into());
     }
     document.insert("requests".to_string(), Value::Array(requests));
+    if !rejected.is_empty() {
+        document.insert("rejected".to_string(), Value::Object(rejected));
+    }
     serde_json::from_value(Value::Object(document))
         .map(Some)
         .map_err(|e| format!("the enrolment queue in the database does not decode: {e}"))
 }
 
-/// Replaces the window and its requests inside the caller's transaction.
+/// Replaces the window, its requests and the rejected keys inside the caller's transaction.
 pub(crate) async fn write(
     client: &impl GenericClient,
     persisted: &Persisted,
@@ -611,6 +715,19 @@ pub(crate) async fn write(
                     &i32::try_from(position).expect("the queue is bounded"),
                     request,
                 ],
+            )
+            .await
+            .map_err(sql)?;
+    }
+    client
+        .execute("DELETE FROM enrolment_rejected", &[])
+        .await
+        .map_err(sql)?;
+    for (key, rejected_ms) in &persisted.rejected {
+        client
+            .execute(
+                "INSERT INTO enrolment_rejected (key, rejected_ms) VALUES ($1, $2)",
+                &[key, &signed(*rejected_ms)],
             )
             .await
             .map_err(sql)?;
@@ -1405,7 +1522,7 @@ mod tests {
         a.take(&request("p", "1"), 1_000, 100, 100).expect("take");
         let (signing, signs) = std::sync::mpsc::channel::<()>();
         let (answered, answers) = std::sync::mpsc::channel();
-        let (b_approved, b_decided) = std::thread::scope(|scope| {
+        let (b_approved, b_decided, b_rejected, b_listed) = std::thread::scope(|scope| {
             // A signs until B has answered, however long B waits.
             let first = scope.spawn(move || {
                 a.approve(
@@ -1428,6 +1545,9 @@ mod tests {
                     &crate::enrolment::tests::kept(),
                 ),
                 b.decide("p", &Decision::Rejected),
+                b.reject("p", 1),
+                // A key the queue does not hold is rejected beside the approval, without a wait.
+                b.reject("q", 1),
             );
             answered.send(()).expect("A waits");
             assert_eq!(
@@ -1438,6 +1558,8 @@ mod tests {
         });
         assert_eq!(b_approved, Ok(Approval::Deciding));
         assert_eq!(b_decided, Ok(Decided::Deciding));
+        assert_eq!(b_rejected, Ok(Decided::Deciding));
+        assert_eq!(b_listed, Ok(Decided::Listed));
         assert_eq!(
             b.approve(
                 "p",
@@ -1448,6 +1570,176 @@ mod tests {
             Ok(Approval::NotWaiting)
         );
         assert_eq!(b.decide("p", &Decision::Rejected), Ok(Decided::NotWaiting));
+        assert_eq!(
+            b.reject("p", 1),
+            Ok(Decided::NotWaiting),
+            "the approval stands"
+        );
+    }
+
+    /// The rejected keys' contract on either store: a key is rejected with or without a window and
+    /// whether the queue holds its request or not, a decided request is left as it is, a take of
+    /// a rejected key is refused beyond a close and an end of the window, each key keeps when it
+    /// was first rejected, and an approval of a rejected key whose request still waits, as an
+    /// instance of 0.8.0 may have queued it, signs nothing.
+    fn rejections(open: &dyn Fn() -> Box<dyn EnrolmentStore>) {
+        let store = open();
+        let now = 1_000;
+        let rejected = |store: &dyn EnrolmentStore| {
+            store
+                .load()
+                .expect("load")
+                .expect("saved")
+                .rejected
+                .into_iter()
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(store.reject("z", 3), Ok(Decided::Listed), "with no window");
+        assert_eq!(rejected(&*open()), [("z".to_string(), 3)]);
+        store.open_window(now + 100).expect("open");
+        assert_eq!(store.take(&request("a", "1"), now, 3, 3), Ok(Took::Added));
+        assert_eq!(store.take(&request("b", "1"), now, 3, 3), Ok(Took::Added));
+        let approved = Decision::Approved("-----BEGIN CERTIFICATE-----".to_string());
+        assert_eq!(store.decide("b", &approved), Ok(Decided::Written));
+        assert_eq!(store.reject("a", 7), Ok(Decided::Written));
+        assert_eq!(
+            store.reject("a", 8),
+            Ok(Decided::NotWaiting),
+            "decided once"
+        );
+        assert_eq!(
+            store.reject("b", 9),
+            Ok(Decided::NotWaiting),
+            "an approval stands"
+        );
+        assert_eq!(store.reject("z", 10), Ok(Decided::Listed), "rejected again");
+        let mut decided = request("a", "1");
+        decided.decision = Some(Decision::Rejected);
+        assert_eq!(
+            open().read_back("a"),
+            Ok(Some(decided)),
+            "its request is decided"
+        );
+        for id in ["a", "z"] {
+            assert_eq!(
+                store.take(&request(id, "1"), now, 3, 3),
+                Ok(Took::Rejected),
+                "{id}"
+            );
+        }
+        store.close_window().expect("close");
+        store.open_window(now + 100).expect("open");
+        assert_eq!(
+            store.take(&request("a", "1"), now, 3, 3),
+            Ok(Took::Rejected),
+            "beyond a close"
+        );
+        assert_eq!(store.end_window(now + 100), Ok(true));
+        assert_eq!(
+            rejected(&*open()),
+            [("a".to_string(), 7), ("z".to_string(), 3)],
+            "beyond an end"
+        );
+
+        store.open_window(now + 100).expect("open");
+        assert_eq!(store.take(&request("c", "1"), now, 3, 3), Ok(Took::Added));
+        let mut persisted = store.load().expect("load").expect("saved");
+        persisted.rejected.insert("c".to_string(), 11);
+        store.save(&persisted).expect("save");
+        let signed = std::cell::Cell::new(false);
+        assert_eq!(
+            store.approve(
+                "c",
+                &bootstrap("1"),
+                &mut || {
+                    signed.set(true);
+                    Ok((approved.clone(), None))
+                },
+                &crate::enrolment::tests::kept()
+            ),
+            Ok(Approval::NotWaiting)
+        );
+        assert!(!signed.get(), "a rejected key is signed by no approval");
+    }
+
+    /// Verifies: ADR-draft-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window
+    #[test]
+    fn the_rejected_keys_hold_at_the_store_on_the_filesystem() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        rejections(&|| Box::new(FsEnrolmentStore::open(dir.path())));
+    }
+
+    /// Verifies: ADR-draft-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window
+    #[test]
+    fn the_rejected_keys_hold_at_the_store_on_postgres() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        rejections(&|| Box::new(PgEnrolmentStore::new(database.clone())));
+    }
+
+    /// An approval of a key another instance rejected, whose request still waits in the database
+    /// as an instance of 0.8.0 queued it, signs nothing, records nothing, and is answered as not
+    /// found; an instance that reads the queue lists the request as pending no longer.
+    /// Verifies: ADR-draft-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window
+    #[test]
+    fn an_approval_signs_no_rejected_key_on_postgres() {
+        use crate::enrolment::tests::{
+            key, request as submitted, requester, Counting, Registering,
+        };
+        use crate::enrolment::{DecisionError, Submitted};
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let register = register_on(&database);
+        let a = enrolment_on(&database);
+        a.open(600).expect("open the window");
+        assert_eq!(
+            a.submit(submitted(&key(1)), requester()),
+            Submitted::Waiting
+        );
+        test.sql(&format!(
+            "INSERT INTO enrolment_rejected (key, rejected_ms) VALUES ('{}', 1)",
+            key(1)
+        ));
+        let recorder = Registering::on(&register);
+        assert_eq!(
+            a.approve(&key(1), &Counting::default(), "host-1", &recorder, &|_| {
+                false
+            }),
+            Err(DecisionError::NotFound)
+        );
+        assert!(recorder.signed.lock().expect("signed").is_empty());
+        assert_eq!(count(&test, "certificates"), 0);
+        let b = enrolment_on(&database);
+        assert!(b.pending().is_empty(), "{:?}", b.pending());
+        assert!(b.is_rejected(&key(1)));
+    }
+
+    /// A rejected key stays refused beyond its window on PostgreSQL, on every instance on the
+    /// database.
+    /// Verifies: ADR-draft-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window
+    #[test]
+    fn a_rejected_key_stays_refused_on_postgres() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let clock = Arc::new(crate::enrolment::tests::Manual(
+            std::sync::atomic::AtomicU64::new(1_000_000),
+        ));
+        crate::enrolment::tests::a_rejected_key_stays_refused(
+            &|| {
+                crate::enrolment::Enrolment::open_on(
+                    clock.clone(),
+                    Box::new(PgEnrolmentStore::new(database.clone())),
+                )
+                .expect("open")
+            },
+            &clock,
+        );
     }
 
     /// The register on `database`, as an instance opens it.

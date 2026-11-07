@@ -715,7 +715,7 @@ an archived `audit/`, left under `data_dir`. With the filesystem store the layou
 | `certificates/<issuer>-<serial>.json` | certificate | The register of what the client CA signed |
 | `revocations.json` | — | The revocation list |
 | `bootstrap/<issuer>-<serial>.json`, `.p12` | bootstrap certificate | Its record, and its PKCS#12 file when one was made |
-| `enrolment.json` | — | The enrolment window and its pending requests |
+| `enrolment.json` | — | The enrolment window, its pending requests and the rejected keys |
 | `package-floors.json` | — | The floor the operator signed for each Agent type, with its signature |
 | `audit/audit-<first seq>.jsonl` | audit file | The audit record |
 
@@ -988,13 +988,12 @@ instance's Operator plane:
      `rejected` or `unknown`, or an `issuance.signed` names as its `request`. A request's `id`
      stands for its key, so one approved since the backup comes back pending when its host sends
      it again, and approved again it would sign a certificate for that key that no revocation
-     names. Reject each with `POST /api/v1/enrolments/{id}/reject` in every window that is open
-     while its host can still send it: now where `GET /api/v1/enrolments` lists it, and in each
-     later window as it arrives. A rejection lasts only as long as its window: a window that is
-     closed or runs out drops every request it holds, the rejected ones included, and the same
-     request sent in the next window waits again. An `id` the queue does not hold is answered
-     `404`, so no request is rejected before it arrives. Keep these ids with the restore's notes
-     for the later windows.
+     names. Keep the enrolment window closed, close it with `DELETE /api/v1/enrolment/window`
+     where the restored database holds it open, and reject each `id` with
+     `POST /api/v1/enrolments/{id}/reject` before you open the window again. A rejection is
+     answered `204` whether the queue holds the request or not, and it lasts: the request is
+     refused whenever its host sends it again, in every later window and on every instance, and no
+     approval signs its key.
 
 The enrolment requests queued and not yet decided since the backup are gone, so such a host
 enrols again. Then put the instance into the balancer's pool and start the others.
@@ -1201,14 +1200,16 @@ start.
   themselves.
 - **From 0.7.1** every Server stops first. An instance that shares the database starts, and
   migrates, only once no Server holds the database alone, as a Server of 0.7.1 does while it runs.
-- **Beside 0.8.0** three things differ from a fleet of one release. `max_agents` may be passed by
+- **Beside 0.8.0** four things differ from a fleet of one release. `max_agents` may be passed by
   the records the two releases create at the same moment, since 0.8.0 counts under a lock the newer
   release does not take. When both create the record of the same new Agent at the same moment, the
   database ends one of the two as a deadlock after its `deadlock_timeout` (one second by default);
   that report is answered `Unavailable`, and the Agent reports again. And a Gateway's mark through
   an instance of 0.8.0 may be refused for a Host it has not heard of yet, or written for a host the
-  database has forgotten; make marks through an instance of this release. All three end with the
-  last instance of 0.8.0.
+  database has forgotten; make marks through an instance of this release. And an instance of 0.8.0
+  reads no rejected key: through it a key rejected in an earlier window waits again, is listed and
+  may be approved, so approve through an instance of this release, which refuses it. All four end
+  with the last instance of 0.8.0.
 
 The first start of this release on a database migrates it to the schema of the paged lists: it
 adds columns to the Agents' table and builds three indexes over it, one of them over a digest of
@@ -1570,8 +1571,9 @@ act that changes them is answered, so a Server restart keeps an open window open
 keeps its requests: a host whose approval it had not collected yet is handed its certificate after
 the restart. A window whose end passed while the Server was down is closed when it starts. When it
 closes, every enrolling connection is closed and every request expires, an approved one whose
-certificate its host has not collected and a rejected one included; in the next window the same
-request waits again.
+certificate its host has not collected included; in the next window the same request waits again.
+A rejected key does not expire: it is kept in `enrolment.json`, or in the database on PostgreSQL,
+and its request is refused in every later window.
 
 **While it is open, an enrolling host may send a certificate request and nothing else.** The
 Server creates no Agent record for it and offers it nothing but the issued certificate. The request
@@ -1622,9 +1624,16 @@ the attribute, nothing is signed, and the request waits. Issue the host a bootst
 that fits, and reject the request. The host stores it as `client-cert.pem` in its state directory
 and reconnects with it
 as a member; from then on it renews by itself. Rejecting answers the request `BadRequest` and
-closes the connection, and so is the same request answered when it is sent again until the window
-closes. An unknown or expired id is answered `404`, and every enrolment route
-answers `404` while `[enrolment]` is not configured. A bootstrap certificate that arrives while
+closes the connection, and so is the same request answered whenever it is sent again, beyond the
+window and on every instance: the rejection is of the key, it is kept, and no approval signs that
+key. Nothing lifts it; a host rejected by mistake enrols with a new key, once its pending key and
+request are deleted from its state directory
+([the Client](client.md#enrolment-the-first-certificate)).
+An `id` the queue does not hold is rejected all the same, answered `204`, with the window open or
+closed, and its request is refused when it arrives; an `id` that is not 64 lowercase hexadecimal
+digits is answered `400`. Approving an unknown or expired id, or deciding a request already
+decided, is answered `404`, and every enrolment route answers `404` while `[enrolment]` is not
+configured. A bootstrap certificate that arrives while
 the window is closed is answered `503`, and does not count toward the throttle.
 
 A request whose subject or SANs name an `instance_uid` other than the host's own is answered
@@ -2376,7 +2385,7 @@ when [`[rest.auth]`](#the-operator-plane-restauth) is configured, needs Basic cr
 | `GET` / `POST` / `DELETE /api/v1/enrolment/window` | Read, open or close the enrolment window — see [Enrolment](#enrolment-a-new-host-approved-by-an-operator). `POST` body: `{"open_for_secs": n}`, 1 to 86400. `404` while `[enrolment]` is not configured. |
 | `GET /api/v1/enrolments` | The pending enrolment requests, oldest first, each with its `id` — the fingerprint the enrolling Client logs. |
 | `POST /api/v1/enrolments/{id}/approve` | Sign that request and hand the host its certificate. `404` for an unknown or expired id. `409` while another instance is deciding that request; asked again once it is decided, `404`. |
-| `POST /api/v1/enrolments/{id}/reject` | Refuse that request and close its connection. `404` for an unknown or expired id. `409` while another instance is deciding that request; asked again once it is decided, `404`. |
+| `POST /api/v1/enrolments/{id}/reject` | Refuse that request's key for good and close its connection. An `id` the queue does not hold is rejected before its request arrives, `204` as well. `400` for an `id` that is not 64 lowercase hexadecimal digits, `404` for a request already decided. `409` while another instance is deciding that request; asked again once it is decided, `404`. |
 | `GET` / `POST /api/v1/bootstrap-certificates` | List the valid bootstrap certificates the Server issued, or issue one — see [Bootstrap certificates](#bootstrap-certificates-issued-by-the-server). `POST` body: `{"subject": {…}, "validity_days": n, "password": "…"}`, `subject.organization`, `subject.organizational_unit` and `password` required (`400` naming the one missing); the answer carries the certificate and never its key, which is in the PKCS#12 file. `409` without `[enrolment] bootstrap_ca_key_file`. |
 
 The package routes answer `404` while package delivery is not configured on this Server.

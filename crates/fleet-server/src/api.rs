@@ -3456,16 +3456,19 @@ fn deciding(id: &str) -> Response {
     )
 }
 
-/// Rejects one enrolment request; its connection is closed.
+/// Rejects the key of one enrolment request, beyond its window: a request waiting for it is
+/// decided and its connection closed, and a request for it is refused whenever it arrives. An id
+/// the queue does not hold is rejected before its request arrives, with the window open or closed.
 #[utoipa::path(
     post,
     path = "/api/v1/enrolments/{id}/reject",
     tag = "enrolment",
-    params(("id" = String, Path, description = "the request's id")),
+    params(("id" = String, Path, description = "the request's id, the SHA-256 fingerprint of its key: 64 lowercase hexadecimal digits")),
     responses(
-        (status = 204, description = "Rejected"),
+        (status = 204, description = "Rejected, whether the queue held the request or not; a request for the key is refused from now on"),
+        (status = 400, description = "The id is not 64 lowercase hexadecimal digits", body = ErrorBody),
         (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
-        (status = 404, description = "No such pending request, or enrolment is not configured", body = ErrorBody),
+        (status = 404, description = "The queue holds the request decided already, or enrolment is not configured", body = ErrorBody),
         (status = 409, description = "Another Server instance is deciding the request at this moment; nothing is decided", body = ErrorBody),
         (status = 500, description = "The rejection could not be persisted; the request still waits", body = ErrorBody)
     )
@@ -3478,6 +3481,15 @@ async fn reject_enrolment(
     let Some(enrolment) = state.enrolment() else {
         return enrolment_off();
     };
+    if !crate::enrolment::is_key_id(&id) {
+        return error(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "{id:?} is not an enrolment request's id: the SHA-256 fingerprint of its key, 64 \
+                 lowercase hexadecimal digits"
+            ),
+        );
+    }
     let gateway = through_gateway(&state, &id);
     // A request is rejected only with its entry's place held, so a restore rejects it again; only
     // a rejection known to have failed gives the place back unwritten.
@@ -3490,9 +3502,10 @@ async fn reject_enrolment(
             .with("gateway", gateway.clone())
     };
     match enrolment.reject(&id) {
-        Ok(()) => {
-            info!(request = %id, "enrolment request rejected");
-            fill_place(place, rejection("rejected"));
+        Ok(rejected) => {
+            let queued = rejected == crate::enrolment::Rejection::Queued;
+            info!(request = %id, queued, "enrolment request rejected");
+            fill_place(place, rejection("rejected").with("queued", queued));
             StatusCode::NO_CONTENT.into_response()
         }
         Err(crate::enrolment::DecisionError::Deciding) => deciding(&id),
@@ -3507,7 +3520,7 @@ async fn reject_enrolment(
         }
         Err(_) => error(
             StatusCode::NOT_FOUND,
-            format!("no pending enrolment request {id:?}"),
+            format!("enrolment request {id:?} is decided already"),
         ),
     }
 }
@@ -4353,8 +4366,9 @@ mod tests {
         )
         .expect("enrolment");
         enrolment.open(600).expect("open the window");
+        // A request's id is its key's fingerprint, which the rejection checks.
         enrolment.submit(
-            crate::enrolment::tests::request("a"),
+            crate::enrolment::tests::request(&crate::enrolment::tests::key(1)),
             crate::enrolment::tests::requester(),
         );
         let id = enrolment.pending()[0].id.clone();
@@ -4417,6 +4431,79 @@ mod tests {
         assert_eq!(rejected.outcome, "unknown");
         assert_eq!(rejected.fields.get("id").cloned(), text(&id));
         assert_eq!(only("enrolment.window").outcome, "closed");
+    }
+
+    /// A rejection of an id the queue does not hold, with the window closed, is answered `204`,
+    /// recorded as `enrolment.rejected` with `queued` false, and refuses that request when it
+    /// arrives in a window; one queued is recorded with `queued` true. An id that is not 64
+    /// lowercase hexadecimal digits is answered `400` and recorded nowhere.
+    /// Verifies: ADR-draft-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window
+    #[tokio::test]
+    async fn an_id_not_queued_is_rejected_and_a_malformed_one_is_refused() {
+        use crate::enrolment::tests::{key, request, requester};
+        use crate::enrolment::Submitted;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let enrolment = Arc::new(crate::enrolment::Enrolment::new(Arc::new(
+            crate::clock::SystemClock,
+        )));
+        let audit = Recorded::default();
+        let entries = audit.0.clone();
+        let state = Arc::new(
+            AppState::new(dir.path().to_path_buf())
+                .expect("state")
+                .with_enrolment(Some(enrolment.clone()))
+                .with_audit(Some(Arc::new(audit) as Arc<dyn crate::audit::Audit>)),
+        );
+        let reject = |id: String| reject_enrolment(State(state.clone()), SameOrigin, Path(id));
+
+        for malformed in [
+            "no-such-request".to_string(),
+            key(0xab).to_uppercase(),
+            key(1)[1..].to_string(),
+            format!("{}0", key(1)),
+        ] {
+            let response = reject(malformed.clone()).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{malformed}");
+        }
+        assert!(entries.lock().expect("lock").is_empty(), "nothing recorded");
+
+        assert!(!enrolment.is_open());
+        let response = reject(key(1)).await;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        enrolment.open(600).expect("open the window");
+        assert_eq!(
+            enrolment.submit(request(&key(1)), requester()),
+            Submitted::Rejected
+        );
+        assert!(enrolment.pending().is_empty());
+        assert_eq!(
+            enrolment.submit(request(&key(2)), requester()),
+            Submitted::Waiting
+        );
+        let response = reject(key(2)).await;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        let entries = entries.lock().expect("lock");
+        let rejected: Vec<_> = entries
+            .iter()
+            .filter(|entry| entry.event == "enrolment.rejected")
+            .map(|entry| {
+                (
+                    entry.outcome.clone(),
+                    entry.fields.get("id").cloned(),
+                    entry.fields.get("queued").cloned(),
+                )
+            })
+            .collect();
+        let text = |value: String| Some(crate::audit::Field::Text(value));
+        let flag = |value: bool| Some(crate::audit::Field::Flag(value));
+        assert_eq!(
+            rejected,
+            [
+                ("rejected".to_string(), text(key(1)), flag(false)),
+                ("rejected".to_string(), text(key(2)), flag(true)),
+            ]
+        );
     }
 
     /// A store refusal of the Package routes is answered with the status the REST contract names

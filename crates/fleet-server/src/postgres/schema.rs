@@ -29,7 +29,7 @@ pub const SCHEMA_TABLE: &str = "fleet_schema";
 
 /// Every table the migrations create, so that a database holding any of them is recognised as one
 /// the Server already wrote ([`super::Database::server_tables`]).
-pub const TABLES: [&str; 25] = [
+pub const TABLES: [&str; 26] = [
     "configurations",
     "configuration_revisions",
     "deployments",
@@ -54,6 +54,7 @@ pub const TABLES: [&str; 25] = [
     "audit_archive",
     "blob_deletions",
     "agent_count",
+    "enrolment_rejected",
     // Not tables of the records, but the Server's all the same.
     SCHEMA_TABLE,
 ];
@@ -162,7 +163,28 @@ pub const MIGRATIONS: &[Migration] = &[
         oldest_server: "0.8.0",
         sql: AGENT_COUNT,
     },
+    // A table only added. A Server of 0.8.0 reads and writes none of it: it neither refuses nor
+    // drops a rejected key, so beside the instances of this release a rejected key may wait again
+    // through it in a later window
+    // (ADR-draft-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window
+    // clause 16).
+    Migration {
+        version: 15,
+        oldest_server: "0.8.0",
+        sql: ENROLMENT_REJECTED,
+    },
 ];
+
+/// The rejected keys, each the id of the request it refuses, with when it was rejected
+/// (ADR-draft-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window
+/// clause 16): written by a rejection under the queue's lock, read by every take under it and by
+/// every approval, and deleted by no close or end of the window.
+const ENROLMENT_REJECTED: &str = "
+CREATE TABLE enrolment_rejected (
+    key text PRIMARY KEY,
+    rejected_ms bigint NOT NULL
+);
+";
 
 /// The count of the Agents' records (ADR-0044 clause 22): one row, raised and lowered by the
 /// triggers on `agents` in the statement that adds or removes rows, so the Agent-record ceiling is
@@ -836,8 +858,8 @@ mod tests {
         }
         assert_eq!(
             MIGRATIONS.len(),
-            14,
-            "migrations 11 to 14 are this release's"
+            15,
+            "migrations 11 to 15 are this release's"
         );
         assert!(
             LEASE_RELEASE.contains(&format!("DEFAULT '{RELEASE_BEFORE_THE_RECORD}'")),
