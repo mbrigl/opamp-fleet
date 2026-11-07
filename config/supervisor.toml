@@ -346,3 +346,17 @@ state_dir = "client-state"
 # labels): keyed by that Agent's uid, matched by the same Selectors, and effective at once. The
 # [attributes] table at the top of this file still describes the *host*, and every Agent on it
 # carries those.
+
+# 5. The GLPI Agent, under a kind of its own — and the same two lines on Linux and on Windows,
+# which is the point. Its two platform invocations differ in nearly everything (the program's name
+# and place in the tree, four Perl -I paths on Windows, the script named by path rather than by
+# --script), and none of those differences is anybody's decision: they follow from the artifact
+# this project itself packs. The kind also holds --daemon --no-fork, which are supervision
+# requirements rather than preferences, and points --vardir outside program/, which a package swap
+# replaces whole.
+#
+# The recipe, the enrolment-free setup and what the agent needs before it reports anything are in
+# docs/manual/glpi-agent.md; the artifact itself in docs/artifacts/glpi-agent.md.
+# [[supervisor]]
+# type = "glpi"
+# name = "glpi"
