@@ -980,20 +980,18 @@ instance's Operator plane:
      or absent. The line names the version but not the signature; `opamp-fleetctl package floor`
      signs the same version with the same key into the same signature again
      ([the tools](tools.md#keeping-old-builds-off-the-fleet));
-   - the enrolment window, by the last `enrolment.window`: where it is `closed` or `expired` and
-     `GET /api/v1/enrolment/window` shows the window open, close it with
-     `DELETE /api/v1/enrolment/window`; where it is `opened` and the window shows a later end
-     than the line's `until_ms`, close it, or open it again for the time left to that end;
    - the requests decided since the backup, each whose `id` an `enrolment.rejected` names,
      `rejected` or `unknown`, or an `issuance.signed` names as its `request`. A request's `id`
      stands for its key, so one approved since the backup comes back pending when its host sends
      it again, and approved again it would sign a certificate for that key that no revocation
-     names. Keep the enrolment window closed, close it with `DELETE /api/v1/enrolment/window`
-     where the restored database holds it open, and reject each `id` with
-     `POST /api/v1/enrolments/{id}/reject` before you open the window again. A rejection is
-     answered `204` whether the queue holds the request or not, and it lasts: the request is
-     refused whenever its host sends it again, in every later window and on every instance, and no
-     approval signs its key.
+     names. Close the enrolment window first with `DELETE /api/v1/enrolment/window`, whatever the
+     restored database holds, and reject each `id` with `POST /api/v1/enrolments/{id}/reject`. A
+     rejection is answered `204` whether the queue holds the request or not, and it lasts: the
+     request is refused whenever its host sends it again, in every later window and on every
+     instance, and no approval signs its key;
+   - the enrolment window, once those requests are rejected and not before: where the last
+     `enrolment.window` is `opened` and its `until_ms` is still ahead, open it again for the time
+     left to that end; otherwise leave it closed.
 
 The enrolment requests queued and not yet decided since the backup are gone, so such a host
 enrols again. Then put the instance into the balancer's pool and start the others.
