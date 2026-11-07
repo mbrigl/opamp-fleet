@@ -229,8 +229,6 @@ The plan lands on `main` in three stages, each a release of its own.
     deleted members, the sweep, the lease across a suspend, a commit whose answer is lost, one
     snapshot per read, a queued restart, the audit record's leases and the revocation list's
     version. They block G-20. The other findings are tickets in plan directories of their own.
-- **Once stage 1 is on `main`,** this branch takes `main` up, and its drafts cite the numbers the
-  stage-1 drafts got.
 - **Beside `feat/core-repack`.** That branch carries the `supervisor.*` label rule of the fleet
   record's clause 20 and the operator program's kept-link rule, both left out of the drafts here.
   Whichever of the two reaches `main` second takes the other's rule into its restatement.
