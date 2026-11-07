@@ -8,7 +8,7 @@ The release after 0.8.0 no longer writes the mirror columns and adds nothing to 
 still takes a released `instance_uid` out of the arrays, because a Server of 0.8.0 reads them for
 an `instance_uid` that has no binding. The release after it removes the mirror columns by a
 migration, together with the comments that keep them, and stops taking `instance_uid`s out of
-the arrays. The arrays themselves go with ticket 02. This follows the stores draft's clause 22.
+the arrays. The arrays themselves go with ticket 02. This follows ADR-0050 clause 22.
 
 ## Acceptance criteria
 
@@ -23,9 +23,7 @@ the arrays. The arrays themselves go with ticket 02. This follows the stores dra
 
 ## Read first
 
-- The stores draft,
-  ADR-0050
-  clause 22;
+- ADR-0050 clause 22;
   ADR-0048
   clause 16
 - `postgres/schema.rs`, `postgres/ledger.rs`, `postgres/deployments.rs`

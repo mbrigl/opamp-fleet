@@ -2,7 +2,7 @@
 #
 # Installs, starts, kills, restarts, stops, and uninstalls the Client as a real service on the
 # platform it runs on, with the process account of ADR-0037 and the enrolment of the install
-# (ADR-0022 clause 19); .github/workflows/service-smoke.yml says per platform what that asserts.
+# (ADR-0052 clause 19); .github/workflows/service-smoke.yml says per platform what that asserts.
 # The 'smoke' job runs it on Windows, Linux, and macOS. It registers services and accounts on the
 # machine, so it runs on a throwaway one only: in a CI run (CI=true), or where
 # FLEET_SMOKE_THROWAWAY=1 says the machine is one. Elsewhere it says so and skips.

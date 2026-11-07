@@ -12,7 +12,7 @@ use crate::deployments::{
 };
 use crate::packages::PackageId;
 
-/// One JSON file per Deployment under `<data_dir>/deployments/`, owner-only (ADR-0044).
+/// One JSON file per Deployment under `<data_dir>/deployments/`, owner-only (ADR-0050).
 pub struct FsDeploymentBackend {
     dir: PathBuf,
 }
@@ -121,7 +121,7 @@ impl DeploymentBackend for FsDeploymentBackend {
 
 /// A Deployment as persisted: `<data_dir>/deployments/<name>.json`. Unknown fields are refused, so a
 /// file an older Server wrote — with `signatures` beside its Packages — is named rather than read
-/// as something it is not: `server migrate` moves it (ADR-0044).
+/// as something it is not: `server migrate` moves it (ADR-0050).
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DeploymentMeta {

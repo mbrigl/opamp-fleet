@@ -31,8 +31,8 @@ pub const REVOCATION_MAX_AGE: Duration = Duration::from_secs(300);
 pub const REVOCATION_FIRST_WAIT: Duration = Duration::from_secs(5);
 
 /// The largest list body the Gateway reads. The Server names the revoked certificates of its
-/// register, at most 100 000 (ADR-0044 clause 9), and every entry of its list, at most 100 000
-/// (ADR-0044 clause 10), once per subject in its client CA file. An entry is at most 130 bytes of
+/// register, at most 100 000 (ADR-0050 clause 9), and every entry of its list, at most 100 000
+/// (ADR-0050 clause 10), once per subject in its client CA file. An entry is at most 130 bytes of
 /// JSON with a 64-character issuer hash and the 40 hex digits of the longest serial RFC 5280
 /// allows. This is room for all of them with up to eight client CA subjects: 900 000 entries,
 /// 117 MB.

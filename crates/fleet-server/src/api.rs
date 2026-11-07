@@ -79,7 +79,7 @@ impl OperatorAuth {
         Ok(OperatorAuth(Arc::new(auth.credentials()?), None, None))
     }
 
-    /// Records refused sign-ins in `audit` (ADR-0039 clause 1).
+    /// Records refused sign-ins in `audit` (ADR-0046 clause 1).
     #[must_use]
     pub fn with_audit(mut self, audit: Option<Arc<dyn crate::audit::Audit>>) -> Self {
         self.2 = audit;
@@ -95,7 +95,7 @@ impl OperatorAuth {
 }
 
 /// Records every mutating act on the Operator plane, before it runs and once it has run; an act
-/// that cannot be recorded is not run (ADR-0039 clauses 1 and 5).
+/// that cannot be recorded is not run (ADR-0046 clauses 1 and 5).
 async fn record_act(
     State(audit): State<Arc<dyn crate::audit::Audit>>,
     request: Request,
@@ -281,7 +281,7 @@ pub fn router(state: Arc<AppState>, auth: Option<OperatorAuth>) -> Router {
         .route("/shiki.js", get(shiki_js))
         .with_state(state.clone());
     // Inside the guard, so an act is recorded only once it is authenticated, and named by the
-    // operator who made it (ADR-0039 clause 1).
+    // operator who made it (ADR-0046 clause 1).
     let router = match state.audit().cloned() {
         Some(audit) => router.layer(middleware::from_fn_with_state(audit, record_act)),
         None => router,
@@ -1723,7 +1723,7 @@ async fn delete_package_set(
         Err(e) => return error(StatusCode::BAD_REQUEST, e),
     };
     // Off the async threads: the deletion's sweep may wait up to a minute for the blob store's lock
-    // (ADR-0044 clause 14).
+    // (ADR-0050 clause 14).
     let deleted = tokio::task::spawn_blocking({
         let id = id.clone();
         move || state.delete_package_set(&id)
@@ -1872,7 +1872,7 @@ async fn delete_package_entry(
         Err((status, why)) => return error(status, why),
     };
     // Off the async threads: the deletion's sweep may wait up to a minute for the blob store's lock
-    // (ADR-0044 clause 14).
+    // (ADR-0050 clause 14).
     let deleted = tokio::task::spawn_blocking({
         let (id, platform) = (id.clone(), platform.clone());
         move || state.delete_package_entry(&id, &platform)
@@ -2286,7 +2286,7 @@ enum Chunk {
     End,
 }
 
-/// The upload as the blob store reads it (ADR-0044 clause 13): the request's chunks, handed over a
+/// The upload as the blob store reads it (ADR-0050 clause 13): the request's chunks, handed over a
 /// channel to the thread the store reads on. A channel that closes before [`Chunk::End`] is a
 /// failed stream — a refused, cut-off or cancelled upload — so the store keeps nothing of it.
 struct ChunkReader {
@@ -2850,7 +2850,7 @@ fn deployment_response(state: &AppState, deployment: Deployment) -> Response {
     Json(DeploymentView::of(deployment, reach)).into_response()
 }
 
-/// The enrolment window as the API answers with it (ADR-0044 clause 8).
+/// The enrolment window as the API answers with it (ADR-0050 clause 8).
 #[derive(Serialize, ToSchema)]
 struct EnrolmentWindow {
     /// Whether a host with a bootstrap certificate may enrol now.
@@ -2867,7 +2867,7 @@ struct OpenWindow {
     open_for_secs: u64,
 }
 
-/// One enrolment request waiting for an operator (ADR-0022 clause 10).
+/// One enrolment request waiting for an operator (ADR-0052 clause 10).
 #[derive(Serialize, ToSchema)]
 struct PendingEnrolment {
     /// What `approve` and `reject` name: the SHA-256 fingerprint of the requested public key.
@@ -2884,12 +2884,12 @@ struct PendingEnrolment {
     /// so an operator can match a request to a host.
     key_fingerprint: String,
     /// The six subject values of the bootstrap certificate the request proves: what an
-    /// approval carries into the host certificate (ADR-0022 clause 10). The request's own subject
+    /// approval carries into the host certificate (ADR-0052 clause 10). The request's own subject
     /// is not listed, because it is neither trusted nor carried. Absent when that certificate's
     /// subject cannot be carried — `subject_refusal` then says why.
     #[serde(skip_serializing_if = "Option::is_none")]
     bootstrap_subject: Option<HostSubject>,
-    /// Why the bootstrap certificate's subject breaks the rules of ADR-0022 clause 1, naming the
+    /// Why the bootstrap certificate's subject breaks the rules of ADR-0052 clause 1, naming the
     /// attribute: an approval is refused `409` with this reason, and nothing is signed. Absent
     /// when the values can be carried.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2901,7 +2901,7 @@ struct PendingEnrolment {
     bootstrap_serial: String,
 }
 
-/// What an operator asks a bootstrap certificate for (ADR-0022 clauses 1 and 3 and
+/// What an operator asks a bootstrap certificate for (ADR-0052 clauses 1 and 3 and
 /// ADR-0032 clause 14).
 #[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
@@ -2913,7 +2913,7 @@ struct IssueBootstrapRequest {
     /// 1 to 90; 10 when absent. Cut to the bootstrap CA's end.
     #[serde(default)]
     validity_days: Option<u32>,
-    /// 8 to 128 characters without a control character (ADR-0022). Required: the Server keeps a PKCS#12
+    /// 8 to 128 characters without a control character (ADR-0052). Required: the Server keeps a PKCS#12
     /// file of the certificate and its key under this password, to be downloaded until the
     /// certificate ends or is revoked; the key is never answered in PEM. The password is kept
     /// nowhere. Read as absent when it is missing, so the refusal names it.
@@ -2926,7 +2926,7 @@ struct IssueBootstrapRequest {
 /// The subject of a bootstrap certificate: these attributes only, `organization` and
 /// `organizational_unit` required and the others optional; the Server sets the common name. Every
 /// host certificate issued from it carries them, and they describe and select the Host through
-/// `fleet.host.*`; they authorize nothing (ADR-0022 clause 1).
+/// `fleet.host.*`; they authorize nothing (ADR-0052 clause 1).
 #[derive(Default, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 struct BootstrapSubject {
@@ -2947,7 +2947,7 @@ struct BootstrapSubject {
 }
 
 /// An issued bootstrap certificate, never with its private key: the key is in the PKCS#12 file of
-/// `GET /api/v1/bootstrap-certificates/{serial}/p12` (ADR-0022 clause 3).
+/// `GET /api/v1/bootstrap-certificates/{serial}/p12` (ADR-0052 clause 3).
 #[derive(Serialize, ToSchema)]
 struct IssuedBootstrap {
     /// What a revocation names, with the authority `bootstrap`.
@@ -2958,7 +2958,7 @@ struct IssuedBootstrap {
     certificate_pem: String,
 }
 
-/// A bootstrap certificate on record (ADR-0044 clause 11).
+/// A bootstrap certificate on record (ADR-0050 clause 11).
 #[derive(Serialize, ToSchema)]
 struct BootstrapView {
     serial: String,
@@ -2968,7 +2968,7 @@ struct BootstrapView {
     issued_ms: u64,
     not_after_ms: u64,
     revoked: bool,
-    /// Whether its PKCS#12 file can be downloaded (ADR-0044 clause 11).
+    /// Whether its PKCS#12 file can be downloaded (ADR-0050 clause 11).
     p12: bool,
 }
 
@@ -3010,8 +3010,8 @@ async fn list_bootstrap_certificates(State(state): State<Arc<AppState>>) -> Resp
 /// Issues a bootstrap certificate with the subject an operator names, which holds at least an
 /// organization and an organizational unit, under the password the request names. The key is in no
 /// answer: the Server keeps it, encrypted under that password in a PKCS#12 file, for download
-/// (ADR-0022 clause 3). A host with it may only ask to enrol, inside an open window, and
-/// an operator approves (ADR-0022 clauses 9 and 10).
+/// (ADR-0052 clause 3). A host with it may only ask to enrol, inside an open window, and
+/// an operator approves (ADR-0052 clauses 9 and 10).
 #[utoipa::path(
     post,
     path = "/api/v1/bootstrap-certificates",
@@ -3054,7 +3054,7 @@ async fn issue_bootstrap_certificate(
         Err(e) => return error(StatusCode::BAD_REQUEST, e.to_string()),
     };
     // Off the async workers: sealing a PKCS#12 file takes the better part of a second, as
-    // password hashing does (ADR-0022).
+    // password hashing does (ADR-0052).
     let issuer = bootstrap.clone();
     let issued = match tokio::task::spawn_blocking(move || issuer.issue(&request)).await {
         Ok(issued) => issued,
@@ -3062,7 +3062,7 @@ async fn issue_bootstrap_certificate(
     };
     match issued {
         Ok(pair) => {
-            // The key leaves only once the issuance is on the record (ADR-0039): a refused record
+            // The key leaves only once the issuance is on the record (ADR-0046): a refused record
             // leaves a listed, revocable entry and no key in anyone's hands.
             if let Some(audit) = state.audit() {
                 let recorded = audit.record(
@@ -3117,7 +3117,7 @@ async fn issue_bootstrap_certificate(
 }
 
 /// The PKCS#12 file of a bootstrap certificate, as often as it is asked,
-/// until the certificate ends or is revoked (ADR-0044 clause 11). Each download is on the record.
+/// until the certificate ends or is revoked (ADR-0050 clause 11). Each download is on the record.
 #[utoipa::path(
     get,
     path = "/api/v1/bootstrap-certificates/{serial}/p12",
@@ -3185,7 +3185,7 @@ async fn download_bootstrap_p12(
 }
 
 /// Deletes a revoked bootstrap certificate's entry, and any PKCS#12 file of it, from the record.
-/// Its revocation stays on the list, so it stays refused for as long as it is valid (ADR-0022 clause 7).
+/// Its revocation stays on the list, so it stays refused for as long as it is valid (ADR-0052 clause 7).
 #[utoipa::path(
     delete,
     path = "/api/v1/bootstrap-certificates/{serial}",
@@ -3278,7 +3278,7 @@ async fn get_enrolment_window(State(state): State<Arc<AppState>>) -> Response {
 }
 
 /// Opens the enrolment window for a bounded time, or moves its end. It is closed by default, and
-/// persisted before this answers, so a Server restart keeps it open until its end (ADR-0044).
+/// persisted before this answers, so a Server restart keeps it open until its end (ADR-0050).
 #[utoipa::path(
     post,
     path = "/api/v1/enrolment/window",
@@ -3409,7 +3409,7 @@ fn through_gateway(state: &AppState, id: &str) -> Option<String> {
         (status = 204, description = "Approved and signed"),
         (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
         (status = 404, description = "No such pending request, or enrolment is not configured", body = ErrorBody),
-        (status = 409, description = "The CA could not sign the request, its bootstrap certificate is revoked, that certificate's subject breaks the rules of ADR-0022 clause 1 — the message names the attribute —, or another Server instance is deciding the request at this moment; nothing is signed", body = ErrorBody),
+        (status = 409, description = "The CA could not sign the request, its bootstrap certificate is revoked, that certificate's subject breaks the rules of ADR-0052 clause 1 — the message names the attribute —, or another Server instance is deciding the request at this moment; nothing is signed", body = ErrorBody),
         (status = 500, description = "The approval could not be persisted; the request still waits", body = ErrorBody)
     )
 )]
@@ -3525,7 +3525,7 @@ async fn reject_enrolment(
     }
 }
 
-/// One certificate the client CA signed (ADR-0044 clause 9).
+/// One certificate the client CA signed (ADR-0050 clause 9).
 #[derive(Serialize, ToSchema)]
 struct CertificateView {
     /// `client` — the CA that signed it, as a revocation names it.
@@ -3544,12 +3544,12 @@ struct CertificateView {
     /// On a renewal, the certificate it renewed.
     #[serde(skip_serializing_if = "Option::is_none")]
     predecessor: Option<CertificateRef>,
-    /// The host it was issued to (ADR-0022 clause 11); absent on one an operator provisioned.
+    /// The host it was issued to (ADR-0052 clause 11); absent on one an operator provisioned.
     #[serde(skip_serializing_if = "Option::is_none")]
     host: Option<String>,
 }
 
-/// A Host: what a client certificate's host id names (ADR-0022 clause 11, ADR-0043).
+/// A Host: what a client certificate's host id names (ADR-0052 clause 11, ADR-0043).
 #[derive(Serialize, ToSchema)]
 struct HostView {
     host: String,
@@ -3677,7 +3677,7 @@ impl RevocationView {
     }
 }
 
-/// Records what an operator act did, beside the act itself (ADR-0039 clause 1), and drops it where
+/// Records what an operator act did, beside the act itself (ADR-0046 clause 1), and drops it where
 /// the record cannot take it by then: the act was recorded before it ran. What it still records
 /// grants trust, so a restore that misses it errs toward withdrawing. The acts a restore repeats,
 /// which withdraw trust, hold their entry's place before they run instead ([`hold_place`]).
@@ -4079,7 +4079,7 @@ async fn revoke(
     match outcome {
         Ok(entry) => {
             info!(revocation = %entry.id, "revoked");
-            // A revoked bootstrap certificate's PKCS#12 file goes before the answer (ADR-0044
+            // A revoked bootstrap certificate's PKCS#12 file goes before the answer (ADR-0050
             // clause 11); the download refuses it either way.
             let crate::revocation::Revoked::Certificate {
                 authority,

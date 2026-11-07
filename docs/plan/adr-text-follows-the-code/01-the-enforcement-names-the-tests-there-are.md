@@ -13,7 +13,7 @@ names no test has, and `scripts/check-traceability.sh` does not read those names
 
 Most of the behaviours are tested under other names. A behaviour no test decides gets its test
 now, under the name the ADR gives. One more has no test of its own: that an instance takes its
-lease before it first opens a listener, which the stores draft's Enforcement says no test
+lease before it first opens a listener, which ADR-0050's Enforcement says no test
 decides alone (clause 23). The rest of the list is a correction of accepted text, which waits
 for the next normalization, together with ADR-0045 clause 21's "Today those are its two
 stores", which the audit export of stage 3 makes stale. The traceability check reads the names
@@ -33,7 +33,7 @@ an Enforcement section lists, so the gap cannot open again.
 ## Read first
 
 - ADR-0002 and `scripts/check-traceability.sh`; the Enforcement sections of ADR-0043 and
-  ADR-0045 and of the stores draft that supersedes ADR-0044
+  ADR-0045 and of ADR-0050, which supersedes ADR-0044
 - [`AGENTS.md` §3](../../../AGENTS.md#3-adr-rules), rule 5, on changing accepted text only by a
   normalization
 

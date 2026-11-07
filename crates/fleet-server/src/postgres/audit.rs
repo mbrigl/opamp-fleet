@@ -1,5 +1,5 @@
 //! The audit record on PostgreSQL, one hash chain per lease
-//! (ADR-0042): the adapter
+//! (ADR-0047): the adapter
 //! behind [`AuditStore`], the opening and closing of chains that a lease's take and renewal do in
 //! their own transactions, and `server audit-verify --config`.
 //!
@@ -225,7 +225,7 @@ pub(crate) struct Written {
 }
 
 impl Written {
-    /// Emits the `tracing` copy of the line (ADR-0039 clause 6).
+    /// Emits the `tracing` copy of the line (ADR-0046 clause 6).
     pub(crate) fn emit(&self) {
         crate::audit_log::emit(self.seq, self.event, "recorded", &self.line);
     }
@@ -327,7 +327,7 @@ impl Ended {
 
 /// Closes the chain of the lease `chain` taken over, for the instance whose own chain is
 /// `closed_by`
-/// (ADR-0041
+/// (ADR-0048
 /// clause 18): `audit.chain_closed` with the `reason` `ended` names after its last entry, and that
 /// entry's hash and the time in its record
 /// (ADR-0047
@@ -396,7 +396,7 @@ pub struct Verified {
 
 /// Walks every chain of the record on the database `config` names, with the Server's own
 /// credentials and without changing anything
-/// (ADR-0042 clauses 5 and 6),
+/// (ADR-0047 clauses 5 and 6),
 /// and, with `archive`, checks that the file record there ends on the entry the first chain names
 /// as its predecessor.
 ///
@@ -718,7 +718,7 @@ async fn walk(
 
 /// Offers the file record in `dir`, a Server's `data_dir/audit/` from before its record moved into
 /// the database, as the archive the first chain names
-/// (ADR-0042 clause 6), while
+/// (ADR-0047 clause 6), while
 /// the database holds no chain; once it holds one, the offer would be moot, and `dir` is not read.
 ///
 /// # Errors
@@ -882,7 +882,7 @@ mod tests {
 
     /// Two instances on one database each write their own chain, every entry naming it, and
     /// `audit-verify` passes over both and lists both as open.
-    /// Verifies: ADR-0042
+    /// Verifies: ADR-0047
     #[test]
     fn two_instances_each_write_their_own_chain_and_both_verify() {
         let Some(test) = TestDatabase::named() else {
@@ -994,7 +994,7 @@ mod tests {
 
     /// An orderly shutdown closes the chain with `audit.chain_closed`, `reason` `shutdown`, and
     /// its record holds that entry's hash.
-    /// Verifies: ADR-0042
+    /// Verifies: ADR-0047
     #[test]
     fn an_orderly_shutdown_closes_the_chain() {
         let Some(test) = TestDatabase::named() else {
@@ -1033,7 +1033,7 @@ mod tests {
     /// its lapsed lease, at a take or at a renewal, closes it with `audit.chain_closed`, `reason`
     /// `lease_lapsed` and `closed_by` its own chain, and from then on the store refuses the dead
     /// chain an entry. Two instances that try at once take it over once.
-    /// Verifies: ADR-0042, ADR-0041
+    /// Verifies: ADR-0047, ADR-0048
     #[test]
     fn the_instance_that_takes_over_a_lapsed_lease_closes_its_chain() {
         let Some(test) = TestDatabase::named() else {
@@ -1110,7 +1110,7 @@ mod tests {
     /// Entries queued under a lease that lapses before they are written go into the chain of the
     /// instance's next lease, after its `audit.chain_opened`, each marked `taken_under` the old
     /// chain; the old chain, closed by the take, holds none of them, and both chains verify.
-    /// Verifies: ADR-0042
+    /// Verifies: ADR-0047
     #[test]
     fn entries_queued_when_a_lease_lapses_land_in_the_next_chain_marked_with_the_old() {
         let Some(test) = TestDatabase::named() else {
@@ -1275,7 +1275,7 @@ mod tests {
 
     /// An entry removed from the middle of a chain fails `audit-verify`, which names the chain and
     /// the entry that no longer follows; the other chains are still walked.
-    /// Verifies: ADR-0042
+    /// Verifies: ADR-0047
     #[test]
     fn an_entry_removed_from_the_middle_of_a_chain_fails_naming_it() {
         let Some(test) = TestDatabase::named() else {
@@ -1330,7 +1330,7 @@ mod tests {
     /// files' last entry as the archive and names it as the predecessor, so `audit-verify
     /// --archive` checks the link. A later chain names none, and an archive recorded already is
     /// kept.
-    /// Verifies: ADR-0042
+    /// Verifies: ADR-0047
     #[test]
     fn the_first_chain_names_the_files_a_server_on_postgresql_wrote_before() {
         let Some(test) = TestDatabase::named() else {
@@ -1368,7 +1368,7 @@ mod tests {
 
     /// A first start with an empty or no `data_dir/audit/` records no archive and names no
     /// predecessor.
-    /// Verifies: ADR-0042
+    /// Verifies: ADR-0047
     #[test]
     fn a_first_start_without_audit_files_records_no_archive() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1592,7 +1592,7 @@ mod tests {
     /// A write that landed although its answer was lost is recognised as landed: alone, it is not
     /// written again, and with an entry queued while the answer was awaited, only that entry is
     /// written after it. The writer recovers, and each decision is in the chain once.
-    /// Verifies: ADR-0042
+    /// Verifies: ADR-0047
     #[test]
     fn a_write_whose_answer_was_lost_is_not_written_again() {
         let Some(test) = TestDatabase::named() else {
@@ -1636,7 +1636,7 @@ mod tests {
     /// A write into a chain whose answer was lost, and then a new lease: the lines that landed in
     /// the old chain stay there alone, and only the rest is written into the new one, so no
     /// decision is recorded twice.
-    /// Verifies: ADR-0042
+    /// Verifies: ADR-0047
     #[test]
     fn a_landed_write_is_not_written_again_into_the_next_chain() {
         let Some(test) = TestDatabase::named() else {
@@ -1673,7 +1673,7 @@ mod tests {
     /// transaction, on the chain's row, and then finds the chain closed: it never writes past the
     /// closing entry. The take's transaction is held open by the test until the writer is seen
     /// waiting.
-    /// Verifies: ADR-0042
+    /// Verifies: ADR-0047
     #[test]
     fn a_writer_waits_for_a_closing_take_and_then_finds_the_chain_closed() {
         let Some(test) = TestDatabase::named() else {
@@ -1743,7 +1743,7 @@ mod tests {
 
     /// An archive that ends in a torn line, a crash mid-write, is refused, naming the file, rather
     /// than recorded as an end that could never verify; one whose chain breaks is refused too.
-    /// Verifies: ADR-0042
+    /// Verifies: ADR-0047
     #[test]
     fn an_archive_that_ends_in_a_torn_line_is_refused_naming_the_file() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1773,7 +1773,7 @@ mod tests {
     /// An archive the file store repaired after a crash (the torn line kept, then
     /// `audit.chain_broken` chained on it) is taken as the archive and its link verifies; only a
     /// torn line still at the end is refused.
-    /// Verifies: ADR-0042
+    /// Verifies: ADR-0047
     #[test]
     fn an_archive_the_file_store_repaired_after_a_crash_is_linked() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1836,7 +1836,7 @@ mod tests {
     /// Lines before a genuine repair replaced by a chain of their own from 64 zeros: the repair
     /// still chains on the torn line and the archive still ends where the predecessor names, but
     /// the repair's `last_whole` names an entry that is gone, so `audit-verify --archive` fails.
-    /// Verifies: ADR-0039
+    /// Verifies: ADR-0046
     #[test]
     fn an_archive_whose_entries_before_a_repair_were_replaced_fails_audit_verify() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1877,7 +1877,7 @@ mod tests {
 
     /// An archive whose repair names no `last_whole` holds, and `audit-verify --archive` names it
     /// as a repair without a link.
-    /// Verifies: ADR-0039
+    /// Verifies: ADR-0046
     #[test]
     fn an_archive_with_a_repair_without_a_link_holds_and_names_it() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1927,7 +1927,7 @@ mod tests {
     /// A batch whose first lines are stored, but stored differently than this instance wrote
     /// them, is refused, and the refusal says what to do: check the record, and restart onto a
     /// new lease.
-    /// Verifies: ADR-0042
+    /// Verifies: ADR-0047
     #[test]
     fn a_line_stored_where_this_instance_wrote_another_is_refused_naming_the_next_step() {
         let Some(test) = TestDatabase::named() else {
@@ -1955,7 +1955,7 @@ mod tests {
 
     /// The archive is read and offered only while the database holds no chain: a later start
     /// neither reads `data_dir/audit/` nor stops on it, and the first chain names nothing new.
-    /// Verifies: ADR-0042
+    /// Verifies: ADR-0047
     #[test]
     fn the_archive_is_offered_only_before_the_first_chain() {
         let Some(test) = TestDatabase::named() else {
@@ -1987,7 +1987,7 @@ mod tests {
 
     /// A chain that names a predecessor while the database records no archive fails
     /// `audit-verify`, with or without `--archive`: the archive's row is gone.
-    /// Verifies: ADR-0042
+    /// Verifies: ADR-0047
     #[test]
     fn a_predecessor_whose_archive_row_is_gone_fails_verification() {
         let Some(test) = TestDatabase::named() else {
@@ -2016,7 +2016,7 @@ mod tests {
 
     /// An archive the database records that no chain names as its predecessor fails
     /// `audit-verify`, with or without `--archive`: the first chain is gone.
-    /// Verifies: ADR-0042
+    /// Verifies: ADR-0047
     #[test]
     fn an_archive_no_chain_names_fails_verification() {
         let Some(test) = TestDatabase::named() else {

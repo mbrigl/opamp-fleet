@@ -432,7 +432,7 @@ fn install(
     };
 
     // The fleet's files the operator put beside this program, before it is staged anywhere else,
-    // or in the directory `--fleet-files` names (ADR-0022 clause 14).
+    // or in the directory `--fleet-files` names (ADR-0052 clause 14).
     let beside = match &args.fleet_files {
         Some(dir) => config_init::Beside::in_named_dir(&absolute(dir)?)?,
         None => config_init::Beside::the_program(),
@@ -443,7 +443,7 @@ fn install(
         .map(|path| config_init::read_password_file(path, "--bootstrap-password-file"))
         .transpose()?;
     // Not asked, the bootstrap identity found enrols a Client that holds no issued certificate,
-    // over TLS (ADR-0022 clause 18) — decided, and a `bootstrap.p12` opened, before anything is
+    // over TLS (ADR-0052 clause 18) — decided, and a `bootstrap.p12` opened, before anything is
     // written, against the file this install is about to write or keep.
     let unasked = if args.interactive {
         None
@@ -469,10 +469,10 @@ fn install(
             password.as_deref().map(String::as_str),
         )?;
     } else if let Some(endpoint) = &args.endpoint {
-        // The same file, from an answer given rather than asked for (ADR-0022): this is the branch
+        // The same file, from an answer given rather than asked for (ADR-0052): this is the branch
         // the MSI's custom action and a `%post` script take. The self-update consent travels with
         // it — standing unless this install was told to withdraw it (ADR-0018) — and so do the CA
-        // and the verification key beside the program (ADR-0022 clause 17).
+        // and the verification key beside the program (ADR-0052 clause 17).
         let self_update = !args.no_self_update;
         written.copies =
             config_init::run_with_endpoint(&config_path, endpoint, self_update, &beside)?;
@@ -898,7 +898,7 @@ fn configure(
 
 /// The questionnaire against the file at `config_path`, offering what it holds and asking for the
 /// bootstrap identity only while the service's state directory holds no issued certificate
-/// (ADR-0019 clause 24 and ADR-0022 clause 16). That directory is decided, and refused, before anything is asked.
+/// (ADR-0019 clause 24 and ADR-0052 clause 16). That directory is decided, and refused, before anything is asked.
 fn ask(
     config_path: &Path,
     roots: &layout::Roots,

@@ -32,7 +32,7 @@ const RENEW_AFTER: f64 = 2.0 / 3.0;
 /// right now.
 ///
 /// A request in flight is re-sent unchanged until it is answered: an enrolment waits for an
-/// operator, and the Server's queue knows a request by its public key (ADR-0022 clause 9).
+/// operator, and the Server's queue knows a request by its public key (ADR-0052 clause 9).
 /// Generating one **writes the private key** to the state directory before the request goes out,
 /// as a pending key beside the one in force, so an answer arriving after a restart is still usable
 /// and the certificate in force keeps its own key until the new one is proved.
@@ -157,7 +157,7 @@ fn certifies(dir: &HeldDir, cert_pem: &[u8], key_name: &str) -> bool {
 }
 
 /// The SHA-256 fingerprint of the key a request in flight asks to be certified — the one logged
-/// when the request was generated, and the `id` the Server's queue lists it under (ADR-0022
+/// when the request was generated, and the `id` the Server's queue lists it under (ADR-0052
 /// clause 10). `None` when no request is in flight or its key cannot be read.
 #[must_use]
 pub fn pending_fingerprint(state_dir: &Path) -> Option<String> {
@@ -226,7 +226,7 @@ fn generate(config: &ClientConfig) -> Result<Vec<u8>, String> {
     // Server to match on (ADR-0038): identity is `instance_uid`, and the Server may re-key it.
     let mut params = CertificateParams::new(vec![config.name.clone()])
         .map_err(|e| format!("cannot build a certificate request: {e}"))?;
-    // The subject an operator reads in the enrolment queue (ADR-0022 clause 10); rcgen's default
+    // The subject an operator reads in the enrolment queue (ADR-0052 clause 10); rcgen's default
     // names every host alike.
     params
         .distinguished_name
@@ -276,7 +276,7 @@ fn generate(config: &ClientConfig) -> Result<Vec<u8>, String> {
     // may pass through (ADR-0037 clause 21).
     dir.write(PENDING_CSR_FILE, csr.as_bytes(), 0o600)
         .map_err(|e| format!("cannot store the certificate request: {e}"))?;
-    // What the operator matches in the enrolment queue (ADR-0022 clause 10): the same SHA-256 the
+    // What the operator matches in the enrolment queue (ADR-0052 clause 10): the same SHA-256 the
     // Server lists as the request's key fingerprint.
     {
         use sha2::{Digest, Sha256};

@@ -58,7 +58,7 @@ pub struct Admission {
 }
 
 /// How often a plain-HTTP peer's admission is recorded: once per address and certificate per
-/// hour, so a poll every few seconds does not crowd the record (ADR-0039 clause 1).
+/// hour, so a poll every few seconds does not crowd the record (ADR-0046 clause 1).
 const ADMITTED_EVERY: Duration = Duration::from_secs(3600);
 
 /// The plain-HTTP peers remembered as recorded at most.
@@ -72,7 +72,7 @@ pub struct Proofs {
     /// The certificate itself (DER), which a bootstrap proof naming it must embed byte for byte
     /// (ADR-0015 clause 25).
     pub der: Option<Arc<[u8]>>,
-    /// The host the certificate was issued to, when it names one (ADR-0022 clause 11).
+    /// The host the certificate was issued to, when it names one (ADR-0052 clause 11).
     pub host: Option<String>,
     /// The certificate's subject values, which a Host made at its first report carries
     /// (ADR-0043 clause 15).
@@ -165,7 +165,7 @@ impl Admission {
         self
     }
 
-    /// Records every decision in `audit` (ADR-0039).
+    /// Records every decision in `audit` (ADR-0046).
     #[must_use]
     pub fn with_audit(mut self, audit: Option<Arc<dyn Audit>>) -> Self {
         self.audit = audit;
@@ -432,7 +432,7 @@ async fn gateway_revocations(State(state): State<Arc<AppState>>, request: Reques
                 .is_some_and(|host| revocations.is_gateway(host))
             {
                 // A member asking for what only a Gateway is handed is a refusal like any other
-                // (ADR-0039 clause 1).
+                // (ADR-0046 clause 1).
                 state.audit_refusal(
                     Entry::new("gateway_list.refused", "refused")
                         .peer(peer_ip(&request))
@@ -464,10 +464,10 @@ async fn gateway_revocations(State(state): State<Arc<AppState>>, request: Reques
 
 /// The Gateways' list as its body and its `ETag`. The `ETag` is the SHA-256 of the body, and where
 /// the store keeps the list's one version, as PostgreSQL does, `list-<version>-` before it
-/// (ADR-0044 clause 10). Every instance that holds the same list
+/// (ADR-0050 clause 10). Every instance that holds the same list
 /// at the same version answers the same `ETag`; the hash keeps one version from naming two bodies,
 /// as it would when a Server of 0.8.0 beside this one registered a renewal, which moves no version
-/// (ADR-0044 clause 10). Either way it changes with the list and survives a restart.
+/// (ADR-0050 clause 10). Either way it changes with the list and survives a restart.
 #[must_use]
 pub fn gateway_list(certificates: &[serde_json::Value], version: Option<u64>) -> (String, String) {
     use sha2::Digest as _;
@@ -579,7 +579,7 @@ async fn admit(
     next: Next,
 ) -> Response {
     // What this gate proves is *fleet membership* and the host, not which Agent is speaking:
-    // `instance_uid` stays self-asserted behind the certificate (ADR-0022 clause 11 and ADR-0038 clause 12). Admission
+    // `instance_uid` stays self-asserted behind the certificate (ADR-0052 clause 11 and ADR-0038 clause 12). Admission
     // is the trust boundary; the host is the only bound between admitted Agents. An
     // `Authorization` header is not read here or anywhere behind it (ADR-0038 clause 1).
     let peer = peer_ip(&request);
@@ -685,7 +685,7 @@ async fn admit(
         .map(|cert| admission.issuers.classify(cert.as_ref()))
         .unwrap_or(Peer::Member);
     if let Peer::Enrolling { .. } = &classified {
-        // A bootstrap certificate opens nothing outside an enrolment window (ADR-0022 clause 9).
+        // A bootstrap certificate opens nothing outside an enrolment window (ADR-0052 clause 9).
         // The handshake proved the certificate, so this is no guess and counts as no failure:
         // hosts that wait for an operator must not throttle the members behind the same address.
         if !admission.enrolment.as_ref().is_some_and(|e| e.is_open()) {
@@ -719,7 +719,7 @@ async fn admit(
                         .and_then(|facts| admission.issuers_role(&facts.id.issuer)),
                 )
                 .with("serial", serial.map(str::to_string));
-            // Not admitted without its record (ADR-0039 clause 5).
+            // Not admitted without its record (ADR-0046 clause 5).
             if audit.record(entry).is_err() {
                 return busy();
             }
@@ -749,7 +749,7 @@ struct Fleet(Arc<AppState>, Issuers);
 /// One connection as the fleet sees it.
 struct Carrier {
     transport: Transport,
-    /// Set on an enrolment connection (ADR-0022 clause 9): the bootstrap certificate it carried,
+    /// Set on an enrolment connection (ADR-0052 clause 9): the bootstrap certificate it carried,
     /// where from, and the key its request asks to be certified, once it has sent one.
     enrolling: Option<Enrolling>,
     /// This connection's identity — what the duplicate detection tells connections apart by. Plain
@@ -759,7 +759,7 @@ struct Carrier {
     /// (ADR-0015), so all of them are marked unreachable when it goes.
     seen: Vec<InstanceUid>,
     /// What admitted the connection: re-checked before a CSR is signed, and the presented
-    /// certificate is the predecessor of one it renews (ADR-0044 clause 9 and ADR-0038 clause 28).
+    /// certificate is the predecessor of one it renews (ADR-0050 clause 9 and ADR-0038 clause 28).
     proofs: Proofs,
     /// Where the connection comes from.
     peer: Option<IpAddr>,
@@ -1258,7 +1258,7 @@ impl Fleet {
         true
     }
 
-    /// One message on an enrolment connection (ADR-0022 clause 9). Nothing in it is read but the
+    /// One message on an enrolment connection (ADR-0052 clause 9). Nothing in it is read but the
     /// certificate signing request: no Agent record is created and nothing is offered but the
     /// issued certificate.
     fn enrol(&self, enrolling: &Enrolling, report: &AgentToServer) -> ServerToAgent {
@@ -1431,7 +1431,7 @@ impl Fleet {
         }
     }
 
-    /// Takes in an enrolment request, or answers it once it has been decided (ADR-0022 clauses 9 and 10): what both an enrolment connection and a Gateway's relay are answered.
+    /// Takes in an enrolment request, or answers it once it has been decided (ADR-0052 clauses 9 and 10): what both an enrolment connection and a Gateway's relay are answered.
     fn file(
         &self,
         enrolment: &Enrolment,
@@ -1467,7 +1467,7 @@ impl Fleet {
                 unavailable(instance_uid, "the enrolment queue is full — retry later")
             }
             Submitted::OverShare { first } => {
-                // Audited once per certificate and window (ADR-0022): a host re-sending its
+                // Audited once per certificate and window (ADR-0052): a host re-sending its
                 // refused request does not flood the record.
                 if let (true, Some(audit)) = (first, self.0.audit()) {
                     audit.refusal(
