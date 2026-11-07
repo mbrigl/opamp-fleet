@@ -974,7 +974,8 @@ monitors a production store or database.
 
 ## Enforcement
 
-Tests that carry `Verifies: ADR-0044`:
+Tests that carry `Verifies:
+ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision`:
 
 - Layout, ports and migration of the old layout:
   [`fs/mod.rs`](../../crates/fleet-server/src/fs/mod.rs)
@@ -1070,7 +1071,9 @@ Tests that carry `Verifies: ADR-0044`:
 - The S3 and PostgreSQL tests run in CI jobs with a rustfs and a PostgreSQL service, and are
   reported skipped where no store is named. `cargo tree` of the Server contains neither
   `aws-lc-rs` nor `openssl`; `cargo-deny` fails on a licence or source outside the allow list.
-- Tests that carry `Verifies: ADR-0044`, for clauses 2, 10, 21 and 22:
+- Tests that carry `Verifies:
+  ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision`,
+  for clauses 2, 10, 21 and 22:
   [`postgres/ledger.rs`](../../crates/fleet-server/src/postgres/ledger.rs)
   `the_list_version_moves_with_each_revocation_and_lift_and_names_only_the_list_held`,
   `a_register_change_moves_the_list_version`,
@@ -1107,8 +1110,6 @@ Tests that carry `Verifies: ADR-0044`:
 - That two writers on the database keep both of what they write, or count both writes against a
   bound, and that the migrations are applied once while instances start together, is decided by
   tests that carry the marker of
-  [ADR-0041](0041-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md)
-  or of
   [ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side](draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md):
   [`tests/instances.rs`](../../crates/fleet-server/tests/instances.rs)
   `two_revocations_committed_at_once_on_two_instances_are_both_kept`,
@@ -1123,11 +1124,13 @@ Tests that carry `Verifies: ADR-0044`:
   `a_gateway_mark_finds_a_host_another_instance_wrote`;
   [`postgres/enrolment.rs`](../../crates/fleet-server/src/postgres/enrolment.rs)
   `two_takers_at_the_queues_bound_take_one_request_between_them`.
-- Tests that carry `Verifies: ADR-0044`, for clause 23:
+- Tests that carry `Verifies:
+  ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision`,
+  for clause 23:
   [`postgres/mod.rs`](../../crates/fleet-server/src/postgres/mod.rs)
   `a_second_instance_that_must_be_alone_fails_startup_naming_it`,
   `a_server_that_loses_its_lock_logs_it_and_writes_nothing_more`. Beside them, with the marker of
-  [ADR-0041](0041-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md):
+  [ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side](draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md):
   [`postgres/lease.rs`](../../crates/fleet-server/src/postgres/lease.rs)
   `instances_that_share_the_database_each_hold_a_lease`,
   `an_instance_that_must_be_alone_is_alone`;
@@ -1135,7 +1138,9 @@ Tests that carry `Verifies: ADR-0044`:
   `an_instance_without_a_lease_closes_its_listeners_until_it_holds_a_new_one`, which opens the
   listeners again only once the instance holds a new lease. No test of its own decides that an
   instance takes its lease before it first opens a listener.
-- Tests that carry `Verifies: ADR-0044`, for clause 22:
+- Tests that carry `Verifies:
+  ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision`,
+  for clause 22:
   [`postgres/mod.rs`](../../crates/fleet-server/src/postgres/mod.rs)
   `a_server_of_0_7_1_refuses_the_schema_once_a_migration_of_0_8_0_is_applied`: the schema of
   migrations 1 and 2 is taken by 0.7.1, and after each of migrations 3 to 10 it is refused, naming
@@ -1144,7 +1149,9 @@ Tests that carry `Verifies: ADR-0044`:
   lock held on the schema of migrations 1 and 2, as a running Server of 0.7.1 holds it, an
   instance that shares the database fails startup and the schema is left as it was, and once the
   lock is free the instance migrates and starts.
-- Tests that carry `Verifies: ADR-0044`, for clauses 1, 16 and 27:
+- Tests that carry `Verifies:
+  ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision`,
+  for clauses 1, 16 and 27:
   [`fs/mod.rs`](../../crates/fleet-server/src/fs/mod.rs)
   `a_data_dir_beside_the_database_holds_the_blobs_alone`, that the Server makes `blobs/` in a
   `data_dir` beside the database with the filesystem blob store and keeps `audit/` there only as

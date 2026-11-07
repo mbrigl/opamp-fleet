@@ -627,9 +627,7 @@ the database cluster, which the operator runs.
 Tests that carry `Verifies:
 ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side`,
 run against the PostgreSQL that `FLEET_TEST_POSTGRES_URL` names, with two instances in one test
-process, or three where a bullet says so. The tests that carry `Verifies:
-ADR-0041` are
-among them and move to this ADR when it is accepted:
+process, or three where a bullet says so. They decide:
 
 - A rollout on instance A reaches an Agent connected to instance B, and a revocation on A closes
   B's session of that certificate with `1008` and `revoked`.

@@ -221,7 +221,7 @@ shell access on a Server host.
 ## Enforcement
 
 Tests that carry `Verifies:
-ADR-0042`:
+ADR-draft-the-audit-record-is-one-hash-chain-per-lease-and-names-the-lease-each-decision-was-taken-under`:
 
 - On the filesystem store, the existing tests of the chain, the rotation and `audit-verify` stay
   unchanged and green.

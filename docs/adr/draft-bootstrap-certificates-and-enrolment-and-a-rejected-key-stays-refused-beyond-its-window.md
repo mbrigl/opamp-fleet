@@ -628,7 +628,8 @@ find the bootstrap identity beside its program and enrol with it.
 
 ## Enforcement
 
-Tests that will carry `Verifies: ADR-0022`:
+Tests that carry `Verifies:
+ADR-draft-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window`:
 
 - Issuing without `organization`, without `organizational_unit` or without `password` is `400`,
   naming the field; the answer to an issue never carries `private_key_pem` (clauses 1 and 3).
