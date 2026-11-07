@@ -55,10 +55,15 @@ ping while it handles a message.
 2. **The bound is the heartbeat interval.** Without a heartbeat (`heartbeat_interval_secs = 0`, or
    no heartbeat in the driver's settings) it is 30 seconds, the default interval. No key sets it
    apart from the heartbeat.
-3. **Opening is bounded too.** The TCP connection, the TLS handshake and the upgrade together get
-   one interval, wherever a WebSocket is opened: by the driver, by the Gateway's pool, and by the
-   probe of an offered endpoint. One that takes longer is a failed attempt, retried with the next
-   backoff step.
+3. **Opening is bounded too, address by address.** Resolving the endpoint's name gets one
+   interval. Each address the name resolves to is then tried in turn, in the resolver's order, and
+   the TCP connection, the TLS handshake and the upgrade to it together get one interval; the TLS
+   server name and the `Host` header stay the name. An address not reached within its interval, or
+   whose TCP connection, TLS handshake or I/O fails, gives way to the next. An HTTP answer to the
+   upgrade ends the attempt as it is, and the first address that opens a WebSocket ends it too.
+   This holds wherever a WebSocket is opened: by the driver, by the Gateway's pool, and by the
+   probe of an offered endpoint. An attempt that reaches no address fails with the last address's
+   failure and is retried with the next backoff step.
 4. **An ended connection is a lost one.** The driver logs that nothing arrived, with the bound,
    and reconnects after the delay ADR-0045 clause 4 draws over `[0, 30 s)`. The Gateway's pool
    marks the connection gone, and its Agents are placed anew at their next report (ADR-0015
@@ -70,7 +75,7 @@ ping while it handles a message.
    connection opened from a local address the caller names
    ([ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side](draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
    clause 20); additions, not breaks under ADR-0008 clause 2. `Connection::connect_websocket`
-   keeps its signature and now fails once an interval has passed.
+   keeps its signature and now fails once the bounds of clause 3 have passed.
 7. **The end that listens answers a ping while it handles a message.** The endpoint of
    `crates/opamp`, which the Server, the Supervisor Endpoint and the Gateway's endpoint share,
    reads a WebSocket on while it handles one of its messages, so a stall of the handling, on the
@@ -102,6 +107,12 @@ says.
   acknowledging. Keepalive's interval needs `socket2`, a dependency this would add for nothing the
   ping does not do; the user timeout is Linux's alone; and the connect path of
   `tokio-tungstenite` does not hand out the socket before it is connected.
+- **One interval for the whole opening.** A name whose first address is not reached never
+  connects at a short interval: on Windows a refused connection to `::1` takes about two seconds,
+  so at a heartbeat of one second every attempt ends before `127.0.0.1` is tried.
+- **The addresses raced, as Happy Eyeballs does (RFC 8305).** A dead first address costs less
+  than an interval, but each attempt opens several connections at once and needs a staggering of
+  its own. Trying the addresses in turn is simpler and bounded too.
 - **A new field on the driver's settings.** It would break the `opamp` crate's interface
   (ADR-0008 clause 2) and gives nothing the heartbeat does not.
 
@@ -116,6 +127,8 @@ says.
   `flush`; a server that keeps reading therefore answers without code of its own.
 - Linux `tcp(7)`: `tcp_retries2` (default 15) bounds retransmission of unacknowledged data, about
   924 seconds; `TCP_USER_TIMEOUT` (RFC 5482) shortens it per socket, on Linux.
+- RFC 8305 *Happy Eyeballs Version 2: Better Connectivity Using Concurrency*: the addresses of a
+  name tried with staggered parallel attempts, the alternative to trying them in turn.
 - gRPC keepalive (`GRPC_ARG_KEEPALIVE_TIME_MS`, `GRPC_ARG_KEEPALIVE_TIMEOUT_MS`): a ping after a
   quiet time and the connection closed when no answer comes within a timeout, the same shape.
 
@@ -139,9 +152,11 @@ says.
   unless they send more than the eight messages the Gateway lets wait.
 - Negative / trade-offs: a heartbeat interval set very short makes the bound as short; one second
   means a connection that is silent for a second ends.
-- Negative / trade-offs: opening gets one interval and no more. At a heartbeat of one second, a
-  link whose round trip is above about 300 milliseconds cannot finish the TCP connection, the TLS
-  handshake and the upgrade in time, and no connection comes up.
+- Negative / trade-offs: opening gets one interval per address and no more. At a heartbeat of one
+  second, a link whose round trip is above about 300 milliseconds cannot finish the TCP
+  connection, the TLS handshake and the upgrade in time, and no connection comes up. Each address
+  not reached delays the connection by an interval, and an attempt that reaches none takes one
+  interval for the resolution and one per address before it fails.
 - Negative / trade-offs: a connection that is quiet in both directions now carries a ping and a
   pong every half interval, a few bytes each.
 - Follow-ups: whether a send blocked on a full buffer needs a bound of its own, when a measurement
@@ -156,7 +171,9 @@ says.
   `the_bounds_follow_the_heartbeat_and_are_thirty_seconds_without_one` (clause 2),
   `a_session_busy_for_longer_than_an_interval_keeps_a_live_connection` (clause 1),
   `the_pong_is_given_the_rest_of_the_interval_from_its_ping` (clause 1),
-  `an_upgrade_that_is_never_answered_fails_within_the_bound` (clause 3).
+  `an_upgrade_that_is_never_answered_fails_within_the_bound`,
+  `an_address_not_reached_within_its_interval_gives_way_to_the_next`,
+  `an_http_answer_on_the_first_address_ends_the_attempt` (clause 3).
 - [`crates/opamp/src/client/connection.rs`](../../crates/opamp/src/client/connection.rs):
   `a_probe_of_an_endpoint_that_never_answers_fails_within_the_bound` (clause 3).
 - [`crates/fleet-agent/src/gateway/mod.rs`](../../crates/fleet-agent/src/gateway/mod.rs):
