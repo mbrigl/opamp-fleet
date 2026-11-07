@@ -1,4 +1,4 @@
-# ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server: The lists that grow with the fleet are paged by cursor and filtered on the Server
+# ADR-0049: The lists that grow with the fleet are paged by cursor and filtered on the Server
 
 - **Status:** 🟡 proposed
 - **Date:** 2026-10-22
@@ -101,7 +101,7 @@ answered with the whole array up to a bound.
      clause 18 builds it from the Agent's record; `connected` and `stale`, `true` or `false`;
      `service_name`; and on PostgreSQL `holder`, an instance id, or `none` for the Agents no
      instance with a live lease holds
-     ([ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side](draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+     ([ADR-0048](0048-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
      clause 13). On the filesystem store there is no holder, and `holder` is answered `400`.
    - Hosts take `q` over the host id and its subject values, and `gateway`, `true` or `false`.
      Certificates and revocations take `q` over subject, serial and host.
@@ -130,7 +130,7 @@ answered with the whole array up to a bound.
    - Each row also keeps a SHA-256 digest over the columns its derived ones come from. A row
      whose digest does not match them was written without its derived columns: before they
      existed, or by the release before, which serves on the same schema
-     ([ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side](draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+     ([ADR-0048](0048-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
      clause 16) and does not write them. Before `query_page` reads, the instance derives such
      rows again from their records, in batches, and writes them, so the answer is the same while
      two releases share the database, but for a small window. The deriving commits each batch in
@@ -155,7 +155,7 @@ answered with the whole array up to a bound.
      REST API does not offer: the Host an Agent last arrived over (that ADR's clause 1). Through it
      an instance reads the Agents behind a Gateway, among them the Client Agent whose labels an
      Agent behind it inherits
-     ([ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side](draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+     ([ADR-0048](0048-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
      clause 8), and the check of a Gateway's package download reads the Agents that arrived over
      the Gateway's Host rather than the whole fleet.
    - On PostgreSQL it is a read beside `get` and `query`, the reads
@@ -225,7 +225,7 @@ an export of the whole fleet; the audit record, which the REST API does not serv
 ## Enforcement
 
 Tests that carry `Verifies:
-ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server`:
+ADR-0049`:
 
 - Three Agents read with `limit=2` arrive as two pages that together hold each exactly once, the
   first with `Link: …; rel="next"` and the second without, both with `X-Total-Count: 3`.

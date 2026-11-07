@@ -1,4 +1,4 @@
-# ADR-draft-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window: Bootstrap certificates and enrolment, and a rejected key stays refused beyond its window
+# ADR-0052: Bootstrap certificates and enrolment, and a rejected key stays refused beyond its window
 
 - **Status:** 🟡 proposed
 - **Date:** 2026-11-07
@@ -629,7 +629,7 @@ find the bootstrap identity beside its program and enrol with it.
 ## Enforcement
 
 Tests that carry `Verifies:
-ADR-draft-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window`:
+ADR-0052`:
 
 - Issuing without `organization`, without `organizational_unit` or without `password` is `400`,
   naming the field; the answer to an issue never carries `private_key_pem` (clauses 1 and 3).
@@ -674,7 +674,7 @@ ADR-draft-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-
 - A fuzz target for the Client's PKCS#12 reader runs in CI (Q-2).
 - `cargo deny` keeps `rc2` and `des` out of the graph: a `[bans]` entry names them (clause 13).
 - Tests that carry `Verifies:
-  ADR-draft-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window`,
+  ADR-0052`,
   for clauses 10 and 16: a request rejected in one window and sent again after the window closed
   or ran out is answered as rejected and not listed, on the filesystem store, on PostgreSQL, on a
   second instance on the database and after a restart; a rejection of an id the queue does not

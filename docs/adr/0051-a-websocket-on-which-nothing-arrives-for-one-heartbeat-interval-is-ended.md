@@ -1,4 +1,4 @@
-# ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended: A WebSocket on which nothing arrives for one heartbeat interval is ended by the end that opened it
+# ADR-0051: A WebSocket on which nothing arrives for one heartbeat interval is ended by the end that opened it
 
 - **Status:** 🟡 proposed
 - **Date:** 2026-11-05
@@ -73,7 +73,7 @@ ping while it handles a message.
    the bounds come from the heartbeat already in the settings. `ws::Silence` is added, so that
    the Gateway's pool derives the same bounds, and so is `ws::run_from`, `run` with every
    connection opened from a local address the caller names
-   ([ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side](draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+   ([ADR-0048](0048-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
    clause 20); additions, not breaks under ADR-0008 clause 2. `Connection::connect_websocket`
    keeps its signature and now fails once the bounds of clause 3 have passed.
 7. **The end that listens answers a ping while it handles a message.** The endpoint of
