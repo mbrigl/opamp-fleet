@@ -616,8 +616,8 @@ find the bootstrap identity beside its program and enrol with it.
   one window waits for the operator to approve some, or raises the key.
 - Negative / trade-offs: a host rejected by mistake enrols only with a new key, and the rejected
   keys are never pruned. Instances of 0.8.0 beside a newer release do not read them: through
-  one of them a rejected key waits again in a later window and may be approved, until the last
-  of them is replaced.
+  one of them a rejected key waits again and may be approved, until the last of them is
+  replaced.
 - Negative / trade-offs: a deleted entry's revocation lives on in the revocation list, where only
   `GET /api/v1/revocations` shows it; a pending request that still carries the certificate reads
   *not issued here*, which hides that this Server once issued it.
