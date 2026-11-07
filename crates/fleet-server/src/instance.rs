@@ -550,9 +550,13 @@ fn lock_lost(lease: &Renewing, instance_id: &str) {
 /// was committed before it was not heard, and for a kind this instance does not know, everything is
 /// read again. What this instance announced itself is never heard: it holds what it committed.
 /// What is heard while a read runs is taken up by one read after it, and a read that fails is tried
-/// again until one holds. With `renewals`, the revocation list's version each lease renewal reads
-/// is compared with the one held, and the ledger read again when it has moved, so a notification
-/// that was missed without the connection ending is caught within one renewal.
+/// again until one holds. With `renewals`, the ledger is read again at each lease renewal, so a
+/// notification that was missed without the connection ending, and a notice that was to follow a
+/// commit but was never sent, as when its instance ended between the two, are caught within one
+/// renewal
+/// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+/// clauses 9 and 10). The revocation list's version the renewal read is compared with the one
+/// held, and a version that moved is logged.
 pub fn follow(
     database: &Database,
     state: Arc<AppState>,
@@ -569,15 +573,16 @@ pub fn follow(
                 if revocations.list_version().is_none_or(|held| held < stored) {
                     debug!(
                         stored,
-                        "the revocation list's version moved without a notification heard; \
-                         reading the ledger again"
+                        "the revocation list's version moved without a notification heard"
                     );
-                    if heard
-                        .send(Heard::Notified(Notice::new(REVOCATION, "")))
-                        .is_err()
-                    {
-                        return;
-                    }
+                }
+                // The ledger at every renewal: the Hosts and their bindings carry no version, and
+                // their notice after a commit may never have been sent.
+                if heard
+                    .send(Heard::Notified(Notice::new(REVOCATION, "")))
+                    .is_err()
+                {
+                    return;
                 }
             }
         });

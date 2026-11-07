@@ -12,8 +12,18 @@
 //! already. A call whose answer is lost is the exception: the instance cannot tell whether it
 //! committed, so it is handed the call's notifications at once, and hears its own notification of
 //! each once more ([`Unsure`]).
+//!
+//! A binding a report makes, and a Host row made or whose valid until moves forward, by a report,
+//! an issuance or a prune, are announced right after their commit instead, in a transaction of
+//! their own that does not wait for its flush ([`will_follow`], [`follow_commit`]): PostgreSQL
+//! commits one transaction that sent a `NOTIFY` at a time, database-wide, across its flush, so
+//! announcing each new Agent's binding in its commit would let a connecting fleet in no faster than
+//! one flush apiece (the several-instances draft, clause 9). Such a notice may be lost; every lease
+//! renewal reads the ledger again for it (clause 10).
 
 use std::collections::VecDeque;
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -135,24 +145,39 @@ tokio::task_local! {
 /// The calls of this process so far, which mark each call apart.
 static CALLS: AtomicU64 = AtomicU64::new(0);
 
-/// One call to the database: the mark its notifications carry, and those it has sent so far.
+/// One call to the database: the mark its notifications carry, those it has sent so far, and those
+/// that follow its commit.
 pub(crate) struct Call {
     mark: String,
     sent: Mutex<Vec<Notice>>,
+    following: Mutex<Vec<Notice>>,
+    afterwards: Arc<Afterwards>,
 }
 
 impl Call {
-    /// A call with a mark of its own.
-    pub(crate) fn new() -> Arc<Call> {
+    /// A call with a mark of its own, whose notices after its commit go through `afterwards`.
+    pub(crate) fn new(afterwards: Arc<Afterwards>) -> Arc<Call> {
         Arc::new(Call {
             mark: CALLS.fetch_add(1, Ordering::Relaxed).to_string(),
             sent: Mutex::new(Vec::new()),
+            following: Mutex::new(Vec::new()),
+            afterwards,
         })
     }
 
     /// The notifications it has sent, taken.
     pub(crate) fn take(&self) -> Vec<Notice> {
         std::mem::take(&mut *self.sent.lock().unwrap_or_else(PoisonError::into_inner))
+    }
+
+    /// The notices that were to follow its commit, taken.
+    pub(crate) fn take_following(&self) -> Vec<Notice> {
+        std::mem::take(
+            &mut *self
+                .following
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        )
     }
 
     /// The mark its notifications carry.
@@ -239,8 +264,170 @@ impl Unsure {
         }
     }
 
+    /// The notices that were to follow the commit of a call whose answer was lost: handed on at
+    /// once, each once, and not awaited, as none may be sent (clause 10). A commit of them that
+    /// lands later is read at the next report that meets it, and at the next lease renewal.
+    pub(crate) fn reread(&self, following: Vec<Notice>) {
+        let mut handed: Vec<Notice> = Vec::new();
+        for notice in following {
+            if !handed.contains(&notice) {
+                handed.push(notice);
+            }
+        }
+        let on = self
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .on
+            .clone();
+        if let Some(on) = on {
+            for notice in handed {
+                on(Heard::Notified(notice));
+            }
+        }
+    }
+
     fn listen(&self, on: Arc<dyn Fn(Heard) + Send + Sync>) {
         self.state.lock().unwrap_or_else(PoisonError::into_inner).on = Some(on);
+    }
+}
+
+/// How many times a notice after its commit is sent at most.
+const FOLLOW_ATTEMPTS: u32 = 4;
+
+/// The wait before a notice after its commit that failed is sent again; each next one doubles.
+const FOLLOW_RETRY_FIRST: Duration = Duration::from_millis(250);
+
+/// How long one sending of the notices after a commit may take.
+const FOLLOW_BOUND: Duration = Duration::from_secs(5);
+
+/// What the notices after a commit of one database's calls go through: nothing but in a test,
+/// which drops them, as an instance that ends between the commit and the `NOTIFY` does, or has
+/// the next sendings fail.
+#[derive(Default)]
+pub(crate) struct Afterwards {
+    #[cfg(test)]
+    dropped: AtomicBool,
+    #[cfg(test)]
+    failing: AtomicUsize,
+}
+
+#[cfg(test)]
+impl Afterwards {
+    /// Whether every notice after a commit is dropped unsent from now on.
+    pub(crate) fn drop_all(&self, dropped: bool) {
+        self.dropped.store(dropped, Ordering::SeqCst);
+    }
+
+    /// Has the next `times` sendings of notices after a commit fail.
+    pub(crate) fn fail_next(&self, times: usize) {
+        self.failing.store(times, Ordering::SeqCst);
+    }
+}
+
+/// Counts a notice of `kind` concerning `id` to follow the commit of the call it runs in, which
+/// [`follow_commit`] sends once the call committed. Counted before the commit, so a call whose
+/// answer is lost has its instance read again what it names ([`Unsure::reread`]).
+pub(crate) fn will_follow(kind: &str, id: &str) {
+    let _ = CALL.try_with(|call| {
+        call.following
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(Notice::new(kind, id));
+    });
+}
+
+/// Announces what [`will_follow`] counted in this call to every other instance, now that the call
+/// committed it: on `client`, the connection that committed it, in a transaction of its own that
+/// does not wait for its WAL flush, so it holds PostgreSQL's turn for announcing commits only for a
+/// moment (the several-instances draft, clause 9). It is sent apart from the call, which answers
+/// at once: a sending that fails is logged and tried again on another connection of `pool`, and
+/// after the last try the other instances take the change up at their next lease renewal.
+pub(crate) fn follow_commit(client: deadpool_postgres::Object, pool: &deadpool_postgres::Pool) {
+    let Ok((notices, mark, afterwards)) = CALL.try_with(|call| {
+        (
+            call.following
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone(),
+            call.mark.clone(),
+            call.afterwards.clone(),
+        )
+    }) else {
+        return;
+    };
+    if notices.is_empty() {
+        return;
+    }
+    tokio::spawn(send_following(
+        client,
+        pool.clone(),
+        notices,
+        mark,
+        afterwards,
+    ));
+}
+
+/// Sends `notices` as [`follow_commit`] says.
+async fn send_following(
+    client: deadpool_postgres::Object,
+    pool: deadpool_postgres::Pool,
+    notices: Vec<Notice>,
+    mark: String,
+    afterwards: Arc<Afterwards>,
+) {
+    #[cfg(test)]
+    if afterwards.dropped.load(Ordering::SeqCst) {
+        return;
+    }
+    #[cfg(not(test))]
+    let _ = &afterwards;
+    let mut client = Some(client);
+    let mut wait = FOLLOW_RETRY_FIRST;
+    for attempt in 1..=FOLLOW_ATTEMPTS {
+        let sending = async {
+            let mut client = match client.take() {
+                Some(client) => client,
+                None => super::client(&pool).await?,
+            };
+            #[cfg(test)]
+            if afterwards
+                .failing
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .is_ok()
+            {
+                return Err("a sending made to fail".to_string());
+            }
+            let transaction = client.transaction().await.map_err(sql)?;
+            transaction
+                .batch_execute("SET LOCAL synchronous_commit TO OFF")
+                .await
+                .map_err(sql)?;
+            for notice in &notices {
+                announce(&transaction, &notice.kind, &notice.id, Some(&mark)).await?;
+            }
+            transaction.commit().await.map_err(sql)
+        };
+        let error = match tokio::time::timeout(FOLLOW_BOUND, sending).await {
+            Ok(Ok(())) => return,
+            Ok(Err(e)) => e,
+            Err(_) => format!("no answer within {} ms", FOLLOW_BOUND.as_millis()),
+        };
+        if attempt == FOLLOW_ATTEMPTS {
+            tracing::warn!(
+                error = %error,
+                "could not announce a change after its commit; the other instances take it up at \
+                 their next lease renewal"
+            );
+            return;
+        }
+        tracing::warn!(
+            error = %error,
+            attempt,
+            "could not announce a change after its commit; sending it again"
+        );
+        tokio::time::sleep(wait).await;
+        wait *= 2;
     }
 }
 
@@ -265,6 +452,17 @@ pub(crate) async fn notify(
             call.mark.clone()
         })
         .ok();
+    announce(client, kind, id, call.as_deref()).await
+}
+
+/// Sends one `NOTIFY` of `kind` concerning `id` in the transaction `client` is in, naming the
+/// origin the connection carries and the mark `call`.
+async fn announce(
+    client: &impl GenericClient,
+    kind: &str,
+    id: &str,
+    call: Option<&str>,
+) -> Result<(), String> {
     client
         .execute(
             &format!(
@@ -519,6 +717,74 @@ mod tests {
         }
         let awaited = unsure.state.lock().expect("state").awaited.len();
         assert_eq!(awaited, AWAITED_AT_MOST, "bounded");
+    }
+
+    /// The notices that were to follow the commit of a call whose answer was lost are handed on at
+    /// once, each once, and not awaited: this instance's own notice of the same kind and
+    /// identifier, should one come, is passed over (clause 10).
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    #[test]
+    fn the_notices_to_follow_a_commit_whose_answer_was_lost_are_read_again_and_not_awaited() {
+        let unsure = Unsure::default();
+        let handed = Arc::new(Mutex::new(Vec::new()));
+        unsure.listen({
+            let handed = handed.clone();
+            Arc::new(move |what| handed.lock().expect("handed").push(what))
+        });
+        unsure.reread(vec![Notice::new(HOST, "h"), Notice::new(HOST, "h")]);
+        assert_eq!(
+            *handed.lock().expect("handed"),
+            [Heard::Notified(Notice::new(HOST, "h"))],
+            "handed on at once, once"
+        );
+        assert!(
+            unsure.state.lock().expect("state").awaited.is_empty(),
+            "nothing awaited"
+        );
+        let own = r#"{"kind":"host","id":"h","from":"a","call":"5"}"#;
+        assert_eq!(heard(own, "a", &unsure), None, "its own notice passed over");
+    }
+
+    /// A call that fails after it committed a change whose notice was to follow the commit has its
+    /// instance read what the notice names at once, as on hearing it (clause 10).
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    #[test]
+    fn a_call_that_fails_after_its_commit_has_the_notice_to_follow_it_read_at_once() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database =
+            Database::open_in(&test.config(), Exclusive::Shared, Some(&test.schema)).expect("open");
+        let (heard, hearing) = std::sync::mpsc::channel();
+        database.listen(move |what| {
+            let _ = heard.send(what);
+        });
+        assert_eq!(
+            hearing.recv_timeout(Duration::from_secs(10)),
+            Ok(Heard::Listening)
+        );
+        let failed = database.run(|pool| async move {
+            let mut client = client(&pool).await?;
+            let transaction = client.transaction().await.map_err(sql)?;
+            will_follow(HOST, "h");
+            transaction.commit().await.map_err(sql)?;
+            Err::<(), String>("the answer was lost".to_string())
+        });
+        assert!(failed.is_err());
+        assert_eq!(
+            hearing.recv_timeout(Duration::from_secs(1)),
+            Ok(Heard::Notified(Notice::new(HOST, "h")))
+        );
+        assert!(
+            database
+                .unsure
+                .state
+                .lock()
+                .expect("state")
+                .awaited
+                .is_empty(),
+            "nothing awaited"
+        );
     }
 
     /// A notification that names the call that sent it is read by a Server of 0.8.0 as one without:

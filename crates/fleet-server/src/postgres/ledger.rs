@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use super::Cached as GenericClient;
 
-use super::notify::{notify, CERTIFICATE, HOST};
+use super::notify::{follow_commit, notify, will_follow, CERTIFICATE, HOST};
 use super::{client, signed, sql, unsigned, Database};
 use crate::revocation::{
     register_full, Added, Bound, CertId, Facts, Host, HostAct, Issued, Ledger, LedgerStore,
@@ -310,7 +310,9 @@ impl LedgerStore for PgLedgerStore {
     /// what it bound. A Host whose row is marked as a Gateway is bound none (ADR-0043 clause 16).
     /// The hold is one that conflicts with itself, so two binders of one Host wait for each other
     /// rather than both holding a share of the row they then write. The Hosts' arrays are neither
-    /// read nor added to (see `unbind_in`).
+    /// read nor added to (see `unbind_in`). What it binds or makes is announced after the commit
+    /// ([`follow_commit`]): it widens what the Host speaks for, which every binding decides here
+    /// again, so no announcing commit waits for the flush of another's.
     fn bind_seen(&self, instance_uid: &str, host: &str, row: &Host) -> Result<Bound, String> {
         let (instance_uid, host, row) = (instance_uid.to_string(), host.to_string(), row.clone());
         self.database.run(move |pool| async move {
@@ -348,10 +350,14 @@ impl LedgerStore for PgLedgerStore {
                 // Refused: the transaction is dropped, so the row made for it is not kept either.
                 return Ok(Bound::Taken(holder));
             }
-            if made || inserted > 0 {
-                notify(&transaction, HOST, &host).await?;
+            let announced = made || inserted > 0;
+            if announced {
+                will_follow(HOST, &host);
             }
             transaction.commit().await.map_err(sql)?;
+            if announced {
+                follow_commit(client, &pool);
+            }
             Ok(Bound::Bound)
         })
     }
@@ -428,7 +434,10 @@ impl LedgerStore for PgLedgerStore {
     }
 
     /// One transaction on the rows the act names, each field decided from what is stored, so no
-    /// instance writes back another instance's change from a stale copy.
+    /// instance writes back another instance's change from a stale copy. A Host row made or whose
+    /// valid until moves forward (`Seen`, `Extended`), by a report, an issuance or a prune, is
+    /// announced after the commit ([`follow_commit`]); a Gateway's mark and a Host forgotten narrow
+    /// what a Host speaks for, and are announced in their transaction.
     fn write_host_act(&self, act: &HostAct) -> Result<(), String> {
         let act = act.clone();
         self.database.run(move |pool| async move {
@@ -498,10 +507,19 @@ impl LedgerStore for PgLedgerStore {
                     !gone.is_empty()
                 }
             };
+            let follows = matches!(act, HostAct::Seen { .. } | HostAct::Extended(_));
             if changed {
-                notify(&transaction, HOST, "").await?;
+                if follows {
+                    will_follow(HOST, "");
+                } else {
+                    notify(&transaction, HOST, "").await?;
+                }
             }
-            transaction.commit().await.map_err(sql)
+            transaction.commit().await.map_err(sql)?;
+            if changed && follows {
+                follow_commit(client, &pool);
+            }
+            Ok(())
         })
     }
 
@@ -2320,6 +2338,197 @@ mod tests {
         assert!(
             eventually(&|| b.may_report("h2", b"\x04").is_err()),
             "B hears of the binding"
+        );
+    }
+
+    /// Waits up to ten seconds for `condition`.
+    fn within_ten_seconds(condition: &dyn Fn() -> bool) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            if condition() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        condition()
+    }
+
+    /// A's database, shared as two instances beside each other share it, and B following it,
+    /// once B has heard of a binding A made: B listens.
+    fn a_and_listening_b(
+        test: &TestDatabase,
+    ) -> (
+        Arc<Database>,
+        crate::revocation::Revocations,
+        Arc<crate::revocation::Revocations>,
+        tokio::runtime::Runtime,
+    ) {
+        let database = Database::open_in(&test.config(), Exclusive::Shared, Some(&test.schema))
+            .expect("A's database");
+        let a = instances_on(&database)();
+        let (b, runtime) = follower(test);
+        a.check_report("h0", &SubjectValues::default(), 1_000, b"\x10")
+            .expect("bind");
+        assert!(
+            within_ten_seconds(&|| b.may_report("other", b"\x10").is_err()),
+            "B never heard of A's first binding"
+        );
+        (database, a, b, runtime)
+    }
+
+    /// A binding a report makes, and the Host row it makes or whose valid until it moves forward,
+    /// are announced after their commit, in a transaction of their own: where that notice is lost,
+    /// as when the instance ends between the commit and the `NOTIFY`, the other instance does not
+    /// hear of them, and the next notice it hears has it read them all
+    /// (the several-instances draft, clause 9).
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    #[test]
+    fn a_binding_and_a_host_a_report_writes_are_announced_after_their_commit() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let (database, a, b, _runtime) = a_and_listening_b(&test);
+        let subject = SubjectValues::default();
+        database.afterwards().drop_all(true);
+        a.check_report("h1", &subject, 1_000, b"\x01")
+            .expect("the binding is made, its notice lost");
+        a.check_report("h0", &subject, 2_000, b"\x10")
+            .expect("the valid until moves forward, its notice lost");
+        let until = |host: &str| {
+            b.hosts()
+                .into_iter()
+                .find(|(name, _, _)| name == host)
+                .and_then(|(_, entry, _)| entry.valid_until_ms)
+        };
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        assert!(
+            b.may_report("h2", b"\x01").is_ok(),
+            "B heard of a binding whose notice after the commit was lost"
+        );
+        assert_eq!(
+            until("h0"),
+            Some(1_000),
+            "B heard of a valid until whose notice after the commit was lost"
+        );
+
+        database.afterwards().drop_all(false);
+        a.check_report("h3", &subject, 1_000, b"\x03")
+            .expect("bind");
+        assert!(
+            within_ten_seconds(&|| b.may_report("h2", b"\x03").is_err()),
+            "B hears of the binding announced after its commit"
+        );
+        assert!(
+            b.may_report("h2", b"\x01").is_err(),
+            "and holds the one whose notice was lost"
+        );
+        assert_eq!(until("h0"), Some(2_000), "and the valid until moved");
+    }
+
+    /// A notice after its commit that fails is sent again, and the write it follows answers as
+    /// made.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    #[test]
+    fn a_notice_after_its_commit_that_fails_is_sent_again_and_the_write_answers_as_made() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let (database, a, b, _runtime) = a_and_listening_b(&test);
+        database.afterwards().fail_next(2);
+        a.check_report("h1", &SubjectValues::default(), 1_000, b"\x01")
+            .expect("the write answers as made");
+        assert!(
+            within_ten_seconds(&|| b.may_report("h2", b"\x01").is_err()),
+            "B hears of the binding once its notice is sent again"
+        );
+    }
+
+    /// Every write that narrows trust, and a register entry, keeps its notification in its
+    /// transaction: B hears of each although every notice sent after a commit is lost
+    /// (the several-instances draft, clause 9).
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    #[test]
+    fn the_writes_that_narrow_trust_are_heard_although_every_notice_after_a_commit_is_lost() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let (database, a, b, _runtime) = a_and_listening_b(&test);
+        let subject = SubjectValues::default();
+        let store = PgLedgerStore::new(database.clone());
+        for (host, uid) in [("h1", b"\x01"), ("h1", b"\x02"), ("g", b"\x04")] {
+            a.check_report(host, &subject, 1_000, uid).expect("bind");
+        }
+        a.check_report("old", &subject, 5, b"\x06").expect("bind");
+        assert!(
+            within_ten_seconds(&|| [b"\x01", b"\x02", b"\x04", b"\x06"]
+                .iter()
+                .all(|uid| b.may_report("h2", *uid).is_err())),
+            "B never heard of A's bindings"
+        );
+        database.afterwards().drop_all(true);
+
+        a.release(b"\x01").expect("release");
+        assert!(
+            within_ten_seconds(&|| b.may_report("h2", b"\x01").is_ok()),
+            "B hears of the release"
+        );
+        a.rebind(b"\x02", b"\x03").expect("re-key");
+        assert!(
+            within_ten_seconds(
+                &|| b.may_report("h2", b"\x02").is_ok() && b.may_report("h2", b"\x03").is_err()
+            ),
+            "B hears of the re-key"
+        );
+        store
+            .unbind_host("h1")
+            .expect("release every binding of h1");
+        assert!(
+            within_ten_seconds(&|| b.may_report("h2", b"\x03").is_ok()),
+            "B hears of the release of every binding of a Host"
+        );
+        assert!(a.set_gateway("g", true).expect("mark"));
+        assert!(
+            within_ten_seconds(&|| b.is_gateway("g")),
+            "B hears of the Gateway's mark"
+        );
+        assert!(a.set_gateway("g", false).expect("unmark"));
+        assert!(
+            within_ten_seconds(&|| !b.is_gateway("g")),
+            "B hears of the mark taken away"
+        );
+        store
+            .write_host_act(&HostAct::Forgotten {
+                hosts: vec!["old".to_string()],
+                now_ms: 10,
+            })
+            .expect("forget");
+        assert!(
+            within_ten_seconds(&|| !b.hosts().iter().any(|(host, _, _)| host == "old")),
+            "B hears of the Host forgotten"
+        );
+        let root = issued("0a", None).facts;
+        a.record(root.clone(), b"\x01", None).expect("register");
+        assert!(
+            within_ten_seconds(&|| b.issued_entry(&root.id).is_some()),
+            "B hears of the register entry"
+        );
+        store
+            .add_revocation(
+                &Revocation {
+                    id: "r".into(),
+                    revoked: Revoked::Certificate {
+                        authority: "client".into(),
+                        issuers: vec![root.id.issuer.clone()],
+                        serial: root.id.serial.clone(),
+                    },
+                    revoked_ms: 1,
+                },
+                10,
+            )
+            .expect("revoke");
+        assert!(
+            within_ten_seconds(&|| b.is_certificate_revoked(&root.id)),
+            "B hears of the revocation"
         );
     }
 

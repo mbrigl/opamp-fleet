@@ -1022,6 +1022,22 @@ instance that carries an Agent, two cases do not inherit yet:
   has missed a notification and reads again. Once the group is placed under it, a change of the
   Client Agent's labels on any instance reaches it.
 
+### A new binding on several instances
+
+A host's first report on one instance binds its Agent to the Host and writes the Host, and the
+instance announces both right after the commit rather than in it, so a fleet that connects at once
+is not let in one commit at a time across the database. Another instance holds the binding and the
+Host once the announcement arrives, a moment later, and, where it never arrives because the instance
+that wrote them ended in between, at its next lease renewal (`lease_renew_secs`). Admission does not
+wait for it: every instance asks the database at each binding, so no host is let speak for an Agent
+another host holds. A Host's valid until moved forward by an issuance or a prune is announced after
+the commit too. A revocation, a release, a re-key, a Gateway's mark, a Host forgotten and a
+certificate registered or removed are announced in their commit. Every lease renewal reads the
+certificate register, the revocation list and the Hosts again, which takes about a fifth of a second
+for 10 000 Hosts with a certificate each. A first report whose call loses its answer has its
+instance read the Hosts again at once; a binding that lands after that read is taken up at the
+Agent's next report or the next renewal.
+
 ### An approval whose commit fails
 
 An approval writes the certificate it signed into the register, with the Host it mints, in the

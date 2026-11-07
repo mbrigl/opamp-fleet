@@ -65,6 +65,19 @@ once its tag exists.
 
 ### Fixed
 
+- **A connecting fleet's new Agents no longer commit one at a time across the database**
+  ([ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side](docs/adr/draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+  clauses 9 and 10). On PostgreSQL each new Agent's binding to its Host announced itself in its
+  commit, and PostgreSQL lets such commits through one at a time, each waiting for the flush of the
+  one ahead: a fleet of 10 000 connected at about 120 to 210 new Agents a second, and other calls
+  gave up on the pool meanwhile. A binding a report makes, and a Host a report, an issuance or a
+  prune makes or moves forward, are now announced right after the commit, and every lease renewal
+  reads the register, the revocation list and the Hosts again, so another instance holds them within
+  one renewal even where the announcement was lost. Revocations, releases, re-keys, a Gateway's
+  mark, a Host forgotten and certificates registered or removed are announced in their commit as
+  before.
+  **What to do:** nothing.
+
 - **A new Agent is not sent away while a connecting fleet holds the database's pool**
   ([ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision](docs/adr/draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
   clause 24). On PostgreSQL, a new Agent's first report gave up after 5 s without a pooled

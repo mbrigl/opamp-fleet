@@ -166,6 +166,8 @@ pub struct Database {
     /// The notifications of the calls whose answer was lost, which the listener hands on
     /// ([`notify::Unsure`]).
     unsure: Arc<notify::Unsure>,
+    /// What the notices after a commit of its calls go through ([`notify::follow_commit`]).
+    afterwards: Arc<notify::Afterwards>,
     /// Dropped last: the connections' tasks run on it.
     bridge: Bridge,
 }
@@ -377,6 +379,7 @@ impl Database {
             release: schema::server_version(),
             outdated: std::sync::Mutex::new(None),
             unsure: Arc::default(),
+            afterwards: Arc::default(),
             bridge,
         })
     }
@@ -586,7 +589,7 @@ impl Database {
         // What the call announced is counted as it is sent: where its answer is lost, it may have
         // committed, and the instance reads again what it names (the several-instances draft,
         // clause 10).
-        let call = notify::Call::new();
+        let call = notify::Call::new(self.afterwards.clone());
         let answer = self.bridge.run(notify::sending(
             call.clone(),
             bounded(bound, work(self.pool.clone())),
@@ -595,6 +598,12 @@ impl Database {
             let sent = call.take();
             if !sent.is_empty() {
                 self.unsure.lost(sent, call.mark());
+            }
+            // What was to follow its commit is read again at once, and not awaited: no notice of
+            // it may come.
+            let following = call.take_following();
+            if !following.is_empty() {
+                self.unsure.reread(following);
             }
         }
         answer.map_err(|e| format!("{}: {e}", self.name))
@@ -632,6 +641,12 @@ impl Database {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    /// What the notices after a commit of its calls go through, which a test drops or fails.
+    #[cfg(test)]
+    pub(crate) fn afterwards(&self) -> &notify::Afterwards {
+        &self.afterwards
     }
 
     /// How many holds on the blob store's lock lost it with their session, and how many sessions
