@@ -165,7 +165,7 @@ pub const MIGRATIONS: &[Migration] = &[
     },
     // A table only added. A Server of 0.8.0 reads and writes none of it: it neither refuses nor
     // drops a rejected key, so beside the instances of this release a rejected key may wait again
-    // through it in a later window
+    // through it and be approved
     // (ADR-draft-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window
     // clause 16).
     Migration {

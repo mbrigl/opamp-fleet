@@ -81,7 +81,7 @@ once its tag exists.
   `client-key.pending.pem` and `client-csr.pending.pem` from its state directory. A script that
   took `404` from a rejection to mean that the request is gone now gets `204`. While instances of
   0.8.0 still run, approve through instances of this release: one of 0.8.0 reads no rejected key,
-  so through it a key rejected in an earlier window waits again and may be approved. After a
+  so through it a rejected key waits again and may be approved. After a
   database restore, keep the window closed and reject the ids decided since the backup before
   opening it, as the manual's restore now says. A Server of 0.8.0 on files does not start on an
   `enrolment.json` that holds a rejected key; to go back to 0.8.0, delete its `rejected` field,
