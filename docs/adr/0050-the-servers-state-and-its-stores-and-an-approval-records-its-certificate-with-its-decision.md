@@ -1,4 +1,4 @@
-# ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision: The Server's state lives under one data directory or in PostgreSQL and S3, one store per domain, and an approval records its certificate with its decision
+# ADR-0050: The Server's state lives under one data directory or in PostgreSQL and S3, one store per domain, and an approval records its certificate with its decision
 
 - **Status:** 🟡 proposed
 - **Date:** 2026-11-03
@@ -156,7 +156,7 @@ that decides its request, and move an old layout by an offline command.
      clauses 8 and 13), through the port's `get` and `query`
      ([ADR-0043](0043-the-fleet-record-of-agents-and-hosts.md)
      clause 2) and its `query_page` and `reported_values`
-     ([ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server](draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server.md)
+     ([ADR-0049](0049-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server.md)
      clause 9). An instance, too, writes through the port before an act is answered.
 
 4. **The filesystem adapter keeps one JSON file per Agent, `data_dir/agents/<instance_uid>.json`;
@@ -210,7 +210,7 @@ that decides its request, and move an old layout by an offline command.
      expires, an approved one whose certificate the host has not yet collected included. That
      host enrols again in the next window. The rejected keys outlive the window, persisted
      through the same port
-     ([ADR-draft-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window](draft-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)
+     ([ADR-0052](0052-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)
      clause 16).
 
 9. **The Server keeps a register of what it signed.**
@@ -433,7 +433,7 @@ that decides its request, and move an old layout by an offline command.
       time of that blob's mark and finds it still there. Then, before it calls the blob store, it
       finds that no more than 15 seconds have passed since it sent that renewal, on the clock that
       counts a suspend which the lease of
-      [ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side](draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+      [ADR-0048](0048-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
       clause 3 is measured on. Once any of these fails it deletes nothing more and says so in the
       log; a blob whose mark another sweep took away it passes over. An upload
       whose blob is marked is refused, to be uploaded again, in the transaction that checks that the
@@ -458,7 +458,7 @@ that decides its request, and move an old layout by an offline command.
       the marks had not reached, under asynchronous replication, leaves the new primary without them
       while the old sweep may still be deleting, so the exclusion holds across a failover only with
       the synchronous replication that clause 17 of
-      [ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side](draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+      [ADR-0048](0048-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
       requires. And an instance of 0.8.0
       beside the instances of this release neither marks nor reads a mark, so until the last one is
       replaced a sweep through it may still delete a blob that an entry written meanwhile names. In
@@ -779,7 +779,7 @@ that decides its request, and move an old layout by an offline command.
 ([ADR-0041](0041-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md));
 copying the archived filesystem audit record into the database, which clause 27 links instead;
 paging and filtering in the database, which
-[ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server](draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server.md)
+[ADR-0049](0049-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server.md)
 decides; moving records from PostgreSQL back to files or blobs from S3 back to the filesystem;
 Object Lock and bucket versioning, which the operator may enable but the Server neither needs nor
 checks; server-side encryption beyond what the bucket's own default applies; keeping the
@@ -975,7 +975,7 @@ monitors a production store or database.
 ## Enforcement
 
 Tests that carry `Verifies:
-ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision`:
+ADR-0050`:
 
 - Layout, ports and migration of the old layout:
   [`fs/mod.rs`](../../crates/fleet-server/src/fs/mod.rs)
@@ -1072,7 +1072,7 @@ ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certifica
   reported skipped where no store is named. `cargo tree` of the Server contains neither
   `aws-lc-rs` nor `openssl`; `cargo-deny` fails on a licence or source outside the allow list.
 - Tests that carry `Verifies:
-  ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision`,
+  ADR-0050`,
   for clauses 2, 10, 21 and 22:
   [`postgres/ledger.rs`](../../crates/fleet-server/src/postgres/ledger.rs)
   `the_list_version_moves_with_each_revocation_and_lift_and_names_only_the_list_held`,
@@ -1110,7 +1110,7 @@ ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certifica
 - That two writers on the database keep both of what they write, or count both writes against a
   bound, and that the migrations are applied once while instances start together, is decided by
   tests that carry the marker of
-  [ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side](draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md):
+  [ADR-0048](0048-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md):
   [`tests/instances.rs`](../../crates/fleet-server/tests/instances.rs)
   `two_revocations_committed_at_once_on_two_instances_are_both_kept`,
   `an_instance_with_an_older_floor_in_memory_cannot_lower_the_stored_one`,
@@ -1125,12 +1125,12 @@ ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certifica
   [`postgres/enrolment.rs`](../../crates/fleet-server/src/postgres/enrolment.rs)
   `two_takers_at_the_queues_bound_take_one_request_between_them`.
 - Tests that carry `Verifies:
-  ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision`,
+  ADR-0050`,
   for clause 23:
   [`postgres/mod.rs`](../../crates/fleet-server/src/postgres/mod.rs)
   `a_second_instance_that_must_be_alone_fails_startup_naming_it`,
   `a_server_that_loses_its_lock_logs_it_and_writes_nothing_more`. Beside them, with the marker of
-  [ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side](draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md):
+  [ADR-0048](0048-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md):
   [`postgres/lease.rs`](../../crates/fleet-server/src/postgres/lease.rs)
   `instances_that_share_the_database_each_hold_a_lease`,
   `an_instance_that_must_be_alone_is_alone`;
@@ -1139,7 +1139,7 @@ ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certifica
   listeners again only once the instance holds a new lease. No test of its own decides that an
   instance takes its lease before it first opens a listener.
 - Tests that carry `Verifies:
-  ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision`,
+  ADR-0050`,
   for clause 22:
   [`postgres/mod.rs`](../../crates/fleet-server/src/postgres/mod.rs)
   `a_server_of_0_7_1_refuses_the_schema_once_a_migration_of_0_8_0_is_applied`: the schema of
@@ -1150,7 +1150,7 @@ ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certifica
   instance that shares the database fails startup and the schema is left as it was, and once the
   lock is free the instance migrates and starts.
 - Tests that carry `Verifies:
-  ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision`,
+  ADR-0050`,
   for clauses 1, 16 and 27:
   [`fs/mod.rs`](../../crates/fleet-server/src/fs/mod.rs)
   `a_data_dir_beside_the_database_holds_the_blobs_alone`, that the Server makes `blobs/` in a
@@ -1165,7 +1165,7 @@ ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certifica
   [`tests/stateless_instance.rs`](../../crates/fleet-server/tests/stateless_instance.rs)
   `a_bucket_that_fails_startup_leaves_no_lease_behind`.
 - Tests that carry `Verifies:
-  ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision`,
+  ADR-0050`,
   for clauses 2, 9 and 21:
   [`postgres/enrolment.rs`](../../crates/fleet-server/src/postgres/enrolment.rs)
   `an_approval_whose_commit_fails_records_nothing_and_a_second_records_one_certificate`,

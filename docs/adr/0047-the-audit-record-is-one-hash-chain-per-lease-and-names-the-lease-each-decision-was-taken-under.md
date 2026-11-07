@@ -1,4 +1,4 @@
-# ADR-draft-the-audit-record-is-one-hash-chain-per-lease-and-names-the-lease-each-decision-was-taken-under: The audit record is one hash chain per lease of a Server instance, and each entry names the lease its decision was taken under
+# ADR-0047: The audit record is one hash chain per lease of a Server instance, and each entry names the lease its decision was taken under
 
 - **Status:** 🟡 proposed
 - **Date:** 2026-11-04
@@ -8,7 +8,7 @@
 
 ## Context
 The Server keeps an append-only audit record of every security decision, as
-[ADR-draft-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again](draft-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again.md)
+[ADR-0046](0046-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again.md)
 decides. Each entry carries `seq`, a counter that never repeats, and `prev`, the SHA-256 of the
 entry before it, so the record is one chain. One writer thread appends to it in the order the
 decisions were taken, and at startup the Server reads the tail of the newest file and chains on
@@ -62,11 +62,11 @@ own with each lease it takes, named by an identifier it draws with the lease, on
 store the record stays one chain, and `server audit-verify` walks every chain the store holds.
 
 1. **The record's own ADR,
-   [ADR-draft-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again](draft-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again.md)
+   [ADR-0046](0046-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again.md)
    clause 2, decides it: What an entry holds.**
 
 2. **The record's own ADR,
-   [ADR-draft-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again](draft-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again.md)
+   [ADR-0046](0046-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again.md)
    clause 3, decides it: The chains.** On the PostgreSQL store each lease (the instances ADR,
    clauses 1 and 3) opens a chain of its own, which ends with the lease.
 
@@ -221,7 +221,7 @@ shell access on a Server host.
 ## Enforcement
 
 Tests that carry `Verifies:
-ADR-draft-the-audit-record-is-one-hash-chain-per-lease-and-names-the-lease-each-decision-was-taken-under`:
+ADR-0047`:
 
 - On the filesystem store, the existing tests of the chain, the rotation and `audit-verify` stay
   unchanged and green.
@@ -252,7 +252,7 @@ ADR-draft-the-audit-record-is-one-hash-chain-per-lease-and-names-the-lease-each-
   predecessor, when the archive's last entry was changed or removed.
 
 Tests that carry `Verifies:
-ADR-draft-the-audit-record-is-one-hash-chain-per-lease-and-names-the-lease-each-decision-was-taken-under`:
+ADR-0047`:
 
 - A decision recorded while the instance holds no lease, by `held` or by its clock, is written
   into the next chain with `taken_under` `none`, and `audit-verify` passes over the record.
