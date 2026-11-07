@@ -18,8 +18,9 @@ the chains are the record. It does not block G-20.
 
 ## Read first
 
-- ADR-draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token clauses 1 to 5;
-  ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one
+- The drafts of stage 3, on the branch `feat/multi-instance-stage-3`:
+  `draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token.md` clauses 1 to 5;
+  `draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one.md`
   clauses 8 and 14
 - Golden path: the chains of
   ADR-0042 and `audit-verify`

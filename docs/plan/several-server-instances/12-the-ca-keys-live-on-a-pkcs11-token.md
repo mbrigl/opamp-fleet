@@ -32,11 +32,12 @@ standby to side by side, land with it.
 
 ## Read first
 
-- ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one
+- The drafts of stage 3, on the branch `feat/multi-instance-stage-3` (the spec's stage 3):
+  `draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one.md`
   clauses 1 to 7, 10 to 14;
-  ADR-draft-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token
-  clauses 8 and 17; ADR-draft-the-operator-program-opamp-fleetctl clauses 5 to 8, 12, 13 and 16 to
-  18;
+  `draft-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md`
+  clauses 8 and 17; `draft-the-operator-program-opamp-fleetctl.md` clauses 5 to 8, 12, 13 and 16
+  to 18;
   ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
   clauses 2 and 16 (the lease's audit key label is a migration that follows it);
   ADR-0044 clause 22

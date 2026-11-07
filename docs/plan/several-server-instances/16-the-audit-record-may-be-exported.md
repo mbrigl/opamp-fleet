@@ -13,9 +13,9 @@ it as a log record, over TLS 1.3 beyond the loopback. It does not block G-20.
 
 ## Read first
 
-- ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one
-  clause 9; ADR-0045 clause 21, the open rule the export
-  joins
+- `draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one.md`
+  clause 9, on the branch `feat/multi-instance-stage-3`; ADR-0045 clause 21, the open rule the
+  export joins
 - Golden path: the OTLP export of the Client's own telemetry
 
 ## Blocked by

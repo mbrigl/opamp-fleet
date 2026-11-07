@@ -202,11 +202,12 @@ The plan lands on `main` in three stages, each a release of its own.
    which supersedes ADR-0042.
 3. **The keys on a token.** Tickets 12, 16 and 17. The CA keys live on a PKCS#11 token, so
    instances holding a CA run side by side, the heads of the audit chains are signed, and the
-   record may be exported. Its drafts are
-   ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one,
-   ADR-draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token,
-   ADR-draft-the-operator-program-opamp-fleetctl, which supersedes ADR-0032, and
-   ADR-draft-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token,
+   record may be exported. Its four drafts are on the local branch `feat/multi-instance-stage-3`,
+   not on this one, so that the pull request of stage 2 numbers only its own:
+   `draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one.md`,
+   `draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token.md`,
+   `draft-the-operator-program-opamp-fleetctl.md`, which supersedes ADR-0032, and
+   `draft-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md`,
    which supersedes ADR-0038. They are accepted together.
 
 ## How the remaining work runs
