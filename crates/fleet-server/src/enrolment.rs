@@ -430,8 +430,8 @@ pub trait EnrolmentStore: Send + Sync {
     /// Approves the waiting request `id`: `sign` signs it while the request is held, and its
     /// answer is written as the request's decision, with the register entry and the Host it
     /// prepared (ADR-0044 clause 9). A request the store holds no longer waiting, or whose key it
-    /// holds rejected, is answered [`Approval::NotWaiting`] before anything is signed, so of two instances approving one
-    /// request one signs and records it and the other nothing
+    /// holds rejected, is answered [`Approval::NotWaiting`] before anything is signed, so of two
+    /// instances approving one request one signs and records it and the other nothing
     /// (ADR-0041
     /// clause 19). A store other instances share also refuses a request whose bootstrap
     /// certificate, `bootstrap`, the list names, and withdraws it; a store that is its only writer
@@ -943,11 +943,11 @@ impl Enrolment {
     ///
     /// # Errors
     /// Returns [`DecisionError::NotFound`] for an unknown, decided or expired id, and for a key
-    /// that is rejected, here or in the store, [`DecisionError::Revoked`] when the request's bootstrap certificate is revoked,
-    /// [`DecisionError::Subject`] when its subject cannot be carried into the host certificate
-    /// (ADR-0015 clause 23), [`DecisionError::Sign`] when the CA or the register refuses the
-    /// request, and [`DecisionError::Store`] when the decision could not be written; the request
-    /// then still waits.
+    /// that is rejected, here or in the store, [`DecisionError::Revoked`] when the request's
+    /// bootstrap certificate is revoked, [`DecisionError::Subject`] when its subject cannot be
+    /// carried into the host certificate (ADR-0015 clause 23), [`DecisionError::Sign`] when the CA
+    /// or the register refuses the request, and [`DecisionError::Store`] when the decision could
+    /// not be written; the request then still waits.
     ///
     /// `recorder` records the signature and prepares its register entry and Host, which are
     /// written with the decision (ADR-0044 clause 9): a decision that is not written leaves

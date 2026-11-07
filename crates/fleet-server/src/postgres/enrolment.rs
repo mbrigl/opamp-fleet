@@ -333,11 +333,12 @@ impl EnrolmentStore for PgEnrolmentStore {
     /// signing nothing. A wait for the row that outlasts the session's `lock_timeout` is answered
     /// [`Approval::Deciding`], signing nothing. A key found rejected once the row is held is
     /// answered [`Approval::NotWaiting`], signing nothing: a rejection holds the row before it
-    /// writes the key, so none lands while the approval holds it. The bootstrap certificate is looked up in the list
-    /// once the row is held; the register's write looks again, under its hold of the list. The
-    /// register entry and the Host the signature prepared are written in the same transaction as
-    /// the decision, and handed to `registrar` once it committed (ADR-0044 clause 9): a commit
-    /// that fails leaves neither, and a refusal of the register rolls the decision back.
+    /// writes the key, so none lands while the approval holds it. The bootstrap certificate is
+    /// looked up in the list once the row is held; the register's write looks again, under its hold
+    /// of the list. The register entry and the Host the signature prepared are written in the same
+    /// transaction as the decision, and handed to `registrar` once it committed
+    /// (ADR-0044 clause 9): a commit that fails leaves neither, and a refusal of the register rolls
+    /// the decision back.
     fn approve(
         &self,
         id: &str,
@@ -1570,6 +1571,70 @@ mod tests {
             Ok(Approval::NotWaiting)
         );
         assert_eq!(b.decide("p", &Decision::Rejected), Ok(Decided::NotWaiting));
+        assert_eq!(
+            b.reject("p", 1),
+            Ok(Decided::NotWaiting),
+            "the approval stands"
+        );
+    }
+
+    /// A rejection of a request another instance holds while it signs it answers at once that the
+    /// request is being decided, rather than wait for the row behind the queue's lock: the
+    /// approval's update needs that lock, so a wait would deadlock the two, and the database would
+    /// end one of them. The approval is let go once the rejection answered or waits for the row,
+    /// and it stands.
+    /// Verifies: ADR-draft-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window
+    #[test]
+    fn a_rejection_of_a_request_held_by_an_approval_does_not_wait_for_it() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let (a, b) = (
+            &PgEnrolmentStore::new(database.clone()),
+            &PgEnrolmentStore::new(database.clone()),
+        );
+        a.open_window(u64::MAX / 4).expect("open");
+        a.take(&request("p", "1"), 1_000, 100, 100).expect("take");
+        let tuple_waits = format!(
+            "SELECT count(*) FROM pg_locks WHERE locktype = 'tuple' \
+             AND relation = '{}.enrolment_requests'::regclass",
+            test.schema
+        );
+        let (signing, signs) = std::sync::mpsc::channel::<()>();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let (approved, rejected) = std::thread::scope(|scope| {
+            let first = scope.spawn(move || {
+                a.approve(
+                    "p",
+                    &bootstrap("1"),
+                    &mut || {
+                        signing.send(()).expect("signing");
+                        released.recv().expect("let go");
+                        Ok((Decision::Approved("pem a".to_string()), None))
+                    },
+                    &crate::enrolment::tests::kept(),
+                )
+            });
+            signs.recv().expect("A signs while it holds the request");
+            let second = scope.spawn(move || b.reject("p", 1));
+            // B has answered, or waits for the row A holds.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
+            while !second.is_finished() && test.rows(&tuple_waits)[0][0].as_deref() != Some("1") {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the rejection neither answered nor waited"
+                );
+                std::thread::yield_now();
+            }
+            release.send(()).expect("A waits");
+            (first.join().expect("A"), second.join().expect("B"))
+        });
+        assert_eq!(
+            approved,
+            Ok(Approval::Approved(Decision::Approved("pem a".to_string())))
+        );
+        assert_eq!(rejected, Ok(Decided::Deciding));
         assert_eq!(
             b.reject("p", 1),
             Ok(Decided::NotWaiting),
