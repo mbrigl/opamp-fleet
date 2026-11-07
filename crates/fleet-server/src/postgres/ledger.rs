@@ -589,7 +589,7 @@ impl LedgerStore for PgLedgerStore {
 /// them and reads them no more, but a Server of 0.8.0 beside it reads an array for an
 /// `instance_uid` no binding holds, and must not find a released one held there. The release after
 /// this one stops this, and the release after that removes the arrays
-/// (ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision
+/// (ADR-0050
 /// clause 22).
 async fn unbind_in(
     client: &impl GenericClient,
@@ -2414,7 +2414,7 @@ mod tests {
     /// as when the instance ends between the commit and the `NOTIFY`, the other instance does not
     /// hear of them, and the next notice it hears has it read them all
     /// (the several-instances draft, clause 9).
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn a_binding_and_a_host_a_report_writes_are_announced_after_their_commit() {
         let Some(test) = TestDatabase::named() else {
@@ -2460,7 +2460,7 @@ mod tests {
 
     /// A notice after its commit that fails is sent again, and the write it follows answers as
     /// made.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn a_notice_after_its_commit_that_fails_is_sent_again_and_the_write_answers_as_made() {
         let Some(test) = TestDatabase::named() else {
@@ -2479,7 +2479,7 @@ mod tests {
     /// Every write that narrows trust, and a register entry, keeps its notification in its
     /// transaction: B hears of each although every notice sent after a commit is lost
     /// (the several-instances draft, clause 9).
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn the_writes_that_narrow_trust_are_heard_although_every_notice_after_a_commit_is_lost() {
         let Some(test) = TestDatabase::named() else {
@@ -2594,9 +2594,9 @@ mod tests {
     /// still takes an `instance_uid` out of them once its binding is released, so a Server of
     /// 0.8.0 beside it, which reads an array for an `instance_uid` no binding holds, never takes
     /// a released binding for one that is held
-    /// (ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision
+    /// (ADR-0050
     /// clause 22).
-    /// Verifies: ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision
+    /// Verifies: ADR-0050
     #[test]
     fn the_hosts_arrays_are_added_to_no_more_and_lose_what_is_released() {
         let Some(test) = TestDatabase::named() else {
@@ -2865,7 +2865,7 @@ mod tests {
     /// which hears nothing, marks it and holds it as stored, and B holds the mark once it hears of
     /// it; a host only a register entry names is marked too (the instances draft, clause 19;
     /// ADR-0043 clause 16).
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn a_gateway_mark_finds_a_host_another_instance_wrote() {
         let Some(test) = TestDatabase::named() else {
@@ -2940,7 +2940,7 @@ mod tests {
     /// instance and writes nothing, in either direction, though the instance still holds the Host
     /// in memory after another instance forgot it (the instances draft, clause 19; ADR-0043
     /// clause 16).
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn a_gateway_mark_of_a_host_the_database_does_not_know_writes_nothing() {
         let Some(test) = TestDatabase::named() else {
@@ -3024,7 +3024,7 @@ mod tests {
     /// A Gateway's mark made while another instance forgets the Host waits for the forget and
     /// finds the Host gone: it is refused and writes no row back, where no register entry names
     /// the host (the instances draft, clause 19; ADR-0043 clauses 15 and 16).
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn a_gateway_mark_made_while_its_host_is_forgotten_writes_no_row_back() {
         let Some(test) = TestDatabase::named() else {
@@ -3059,7 +3059,7 @@ mod tests {
     /// A Gateway's mark made while another instance removes the last register entry naming a host
     /// without a row waits for the removal and finds the entry gone: it is refused and makes no
     /// row (the instances draft, clause 19).
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[test]
     fn a_gateway_mark_made_while_its_last_register_entry_is_removed_makes_no_row() {
         let Some(test) = TestDatabase::named() else {

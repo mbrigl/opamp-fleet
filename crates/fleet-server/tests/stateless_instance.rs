@@ -568,9 +568,9 @@ fn a_bucket_that_fails_startup_leaves_no_lease_behind() {
 /// An instance whose lease lapsed while a newer Server migrated the schema stops at its new lease
 /// as at a failed start: it prints the refusal, naming the version the schema needs and its own,
 /// and exits with status 1
-/// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+/// (ADR-0048
 /// clause 16).
-// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+// Verifies: ADR-0048
 #[test]
 fn an_instance_whose_lease_lapsed_on_a_newer_schema_exits_naming_both_versions() {
     opamp::tls::install_ring_provider();

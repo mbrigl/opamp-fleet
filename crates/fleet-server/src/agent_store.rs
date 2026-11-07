@@ -36,7 +36,7 @@ use crate::listing::{AgentFilter, AgentSort, Candidate, Position};
 use crate::packages::PackageId;
 
 /// What the derived values of `record` come from
-/// (ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server
+/// (ADR-0049
 /// clause 8).
 #[must_use]
 pub fn source_of<'a>(
@@ -183,7 +183,7 @@ pub struct StoredAgent {
     /// `false` on a store that keeps no presence.
     pub connected: bool,
     /// The instance its presence names, while that instance has a live lease
-    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// (ADR-0048
     /// clause 13); `None` on a store that keeps no presence.
     pub holder: Option<Holder>,
 }
@@ -196,7 +196,7 @@ pub struct Holder {
 }
 
 /// What [`AgentStore::query_page`] is asked
-/// (ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server
+/// (ADR-0049
 /// clause 9).
 pub struct PageQuery<'a> {
     pub filter: &'a AgentFilter,
@@ -228,7 +228,7 @@ pub struct PagedAgent {
 }
 
 /// What [`AgentStore::reported_values`] answers
-/// (ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server
+/// (ADR-0049
 /// clause 9): the distinct reported `key=value` pairs and `service_name` values, each sorted.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ReportedValues {
@@ -391,7 +391,7 @@ pub trait AgentStore: Send + Sync {
 
     /// The records that match `query.filter`, with their presence, in the order of its sort after
     /// the position it names, at most `query.limit` of them, and the number that match
-    /// (ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server
+    /// (ADR-0049
     /// clause 9). The default answers from every record [`load`](Self::load) reads, each
     /// disconnected and held by none, as a store that keeps no presence may. It knows no host
     /// register, so it places no Agent under a Client Agent and matches no Host value: a Server
@@ -464,7 +464,7 @@ pub trait AgentStore: Send + Sync {
 
     /// The distinct reported `key=value` pairs and `service_name` values of every record, each
     /// sorted, at most `limit` of each: what the UI suggests
-    /// (ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server
+    /// (ADR-0049
     /// clause 9). The default answers from every record [`load`](Self::load) reads; a shared store,
     /// and a wrapper of one, overrides it.
     ///
@@ -515,7 +515,7 @@ pub trait AgentStore: Send + Sync {
     /// Servers' clocks differ (ADR-0043 clause 2), and only where the stored sequence number is not
     /// higher than the record's, so a Server that still holds the row as it stops leaves a newer
     /// report another Server wrote meanwhile
-    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// (ADR-0048
     /// clause 8). `holder`
     /// is the instance id of this Server's lease, `None` without one, and `take` is `None` where
     /// this Server was answered none. Answers whether it wrote the record. A store whose one
@@ -648,7 +648,7 @@ pub trait AgentStore: Send + Sync {
     /// not know whether its take was written, since its answer was lost, reads before it writes the
     /// Agent's disconnect under the count it read. A database adapter reads them under a share
     /// lock, which waits for a take still in flight
-    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// (ADR-0048
     /// clause 8).
     ///
     /// # Errors
@@ -701,7 +701,7 @@ pub trait AgentStore: Send + Sync {
     /// same: the record is stored under `new` and no longer under `old`. What an instance whose
     /// re-key lost its answer reads back before it answers the Agent; a database adapter waits for
     /// a move of the record still in flight
-    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// (ADR-0048
     /// clause 10).
     ///
     /// # Errors

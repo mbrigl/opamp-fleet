@@ -1393,7 +1393,7 @@ async fn write_reported(
 
 /// The values of the columns the list of Agents reads, derived from `record`, which every write
 /// of it writes in the same statement
-/// (ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server
+/// (ADR-0049
 /// clause 8).
 fn derived_of(
     uid: &InstanceUid,
@@ -1719,7 +1719,7 @@ mod tests {
         assert_eq!(store.set_restart_pending(&three, false), Ok(Some(false)));
         assert_eq!(store.set_restart_pending(&three, true), Ok(Some(false)));
         // A restart taken for a send that failed is put back, and the next take finds it queued
-        // (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+        // (ADR-0048
         // clause 8).
         assert_eq!(store.set_restart_pending(&three, false), Ok(Some(true)));
         assert_eq!(store.set_restart_pending(&three, true), Ok(Some(false)));
@@ -1999,7 +1999,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0044, ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server
+    /// Verifies: ADR-0044, ADR-0049
     #[test]
     fn the_agent_port_contract_holds_on_the_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2014,7 +2014,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0044, ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server
+    /// Verifies: ADR-0044, ADR-0049
     #[test]
     fn the_agent_port_contract_holds_on_postgres() {
         let Some(test) = TestDatabase::named() else {
@@ -2729,7 +2729,7 @@ mod tests {
     /// A record created, a report written and a record imported each carry their derived columns
     /// and the digest of what they derive from, written in the statement that writes the record,
     /// so no row a Server of this release writes needs deriving again.
-    /// Verifies: ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server
+    /// Verifies: ADR-0049
     #[test]
     fn every_write_of_a_record_writes_its_derived_columns_with_it() {
         let Some(test) = TestDatabase::named() else {
@@ -2783,7 +2783,7 @@ mod tests {
     /// Agent and `holder=none` does not, `connected=true` lists it; once the lease has lapsed,
     /// without being released, `holder=none` lists it, and neither `holder=<id>` nor
     /// `connected=true` does. The read of the Agents behind a Gateway's Host says the same.
-    /// Verifies: ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server
+    /// Verifies: ADR-0049
     #[test]
     fn a_page_names_a_holder_only_while_its_lease_is_live() {
         use crate::listing::{AgentFilter, AgentSort, HolderFilter};

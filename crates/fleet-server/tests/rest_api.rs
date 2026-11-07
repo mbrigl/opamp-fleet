@@ -2273,7 +2273,7 @@ fn uids_of(body: &serde_json::Value) -> Vec<String> {
 /// 2 500 Agents read with `limit=1000` arrive as three pages, each followed by its `Link`, the
 /// last with none, every one counting all, no Agent twice and none missing, in the order of their
 /// names.
-/// Verifies: ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server, G-5
+/// Verifies: ADR-0049, G-5
 #[tokio::test]
 async fn the_fleet_pages_by_cursor_with_no_agent_twice_and_none_missing() {
     let server = spawn().await;
@@ -2313,7 +2313,7 @@ async fn the_fleet_pages_by_cursor_with_no_agent_twice_and_none_missing() {
 /// Without `limit` the list is the whole array, as it always was, counted; a list longer than the
 /// bound is refused naming `limit`, never cut short. An Agent's view on the filesystem store names
 /// no holder.
-/// Verifies: ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server, G-5
+/// Verifies: ADR-0049, G-5
 #[tokio::test]
 async fn without_limit_the_whole_fleet_comes_back_up_to_the_bound() {
     let server = spawn().await;
@@ -2344,7 +2344,7 @@ async fn without_limit_the_whole_fleet_comes_back_up_to_the_bound() {
 
 /// What a request may not ask is answered `400` naming it; a `limit` above the most a page holds
 /// is answered as that most.
-/// Verifies: ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server
+/// Verifies: ADR-0049
 #[tokio::test]
 async fn a_list_request_it_cannot_answer_is_refused_naming_what() {
     let server = spawn().await;
@@ -2407,7 +2407,7 @@ async fn a_list_request_it_cannot_answer_is_refused_naming_what() {
 
 /// What the forms suggest, the Server answers: the distinct pairs the fleet reports and the
 /// distinct types, each sorted.
-/// Verifies: ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server
+/// Verifies: ADR-0049
 #[tokio::test]
 async fn the_attributes_the_fleet_reports_are_answered_for_the_forms() {
     let server = spawn().await;
@@ -2442,7 +2442,7 @@ fn forged_cursor(key: &str, tiebreak: &str) -> String {
 /// A NUL, which no store can hold in a text it searches, is refused where it arrives: in a list's
 /// parameter or cursor with a `400` naming it, and in a label. A cursor made by hand without one
 /// is a position and nothing more.
-/// Verifies: ADR-draft-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server, ADR-0043
+/// Verifies: ADR-0049, ADR-0043
 #[tokio::test]
 async fn a_nul_is_refused_in_a_list_parameter_a_cursor_and_a_label() {
     let server = spawn().await;

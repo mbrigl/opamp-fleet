@@ -552,7 +552,7 @@ async fn serve() {
     opamp::tls::install_ring_provider();
 
     // The clock a lease and a sweep measure on counts a suspend of the host
-    // (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    // (ADR-0048
     // clause 3), handed to the package store and the lease.
     let elapsed = since_boot().unwrap_or_else(fleet_server::clock::Elapsed::monotonic);
 
@@ -1026,7 +1026,7 @@ async fn serve() {
     };
     // A restart whose command was not sent and whose put-back failed is tried again until it
     // holds, on every store
-    // (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    // (ADR-0048
     // clause 8).
     fleet_server::instance::retry_restarts(state.clone());
     // The handlers are installed before either plane is bound and logged as served, so a stop
@@ -1060,7 +1060,7 @@ async fn serve() {
     }
     // A new lease that found a schema a newer Server migrated stops the instance as a failed
     // start does, naming both versions
-    // (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    // (ADR-0048
     // clause 16).
     if let fleet_server::Records::Postgres(database) = &records {
         if let Some(refusal) = database.outdated() {
@@ -1105,7 +1105,7 @@ async fn serve() {
         );
     }
     // Nothing is recorded after the close: a decision taken since is refused, and counted here
-    // (ADR-draft-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again
+    // (ADR-0046
     // clause 5).
     let unrecorded = audit_log.unrecorded_count();
     if unrecorded > 0 {
@@ -1290,7 +1290,7 @@ mod tests {
 
     /// On Linux the lease's clock is `CLOCK_BOOTTIME`: it reads, it moves on as time passes, and it
     /// counts at least as much as the monotonic clock, which a suspend would leave behind.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[cfg(target_os = "linux")]
     #[test]
     fn the_leases_clock_is_the_one_that_counts_a_suspend() {

@@ -13,7 +13,7 @@
 //! until it is answered, and a re-sent request joins its own entry rather than queueing again.
 //!
 //! A rejected key outlives the window
-//! (ADR-draft-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window
+//! (ADR-0052
 //! clause 16): the store keeps it, a request for it is answered as rejected and not listed, and
 //! no approval signs it. An operator may reject a key before its request arrives.
 
@@ -2223,7 +2223,7 @@ pub(crate) mod tests {
     /// An approval whose commit landed but whose answer was lost is read back: decided with the
     /// certificate signed here, it stands, its register entry is taken up, and nothing is recorded
     /// as undecided (ADR-0044 clause 9).
-    /// Verifies: ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision
+    /// Verifies: ADR-0050
     #[test]
     fn a_commit_that_landed_and_whose_answer_was_lost_is_read_back_as_approved() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2247,7 +2247,7 @@ pub(crate) mod tests {
     /// store refused the register's write or the request is read back waiting, unknown when it
     /// cannot be read back. The request still waits, and nothing is taken up. A signature the
     /// audit record did not take is not recorded as undecided either (ADR-0044 clause 9).
-    /// Verifies: ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision
+    /// Verifies: ADR-0050
     #[test]
     fn a_signature_whose_decision_was_not_written_is_recorded_undecided() {
         for (commit, outcome, error) in [
@@ -2301,7 +2301,7 @@ pub(crate) mod tests {
     /// An approval whose answer was lost while another instance decided the request with a
     /// certificate of its own is not taken for its own: the read back finds another certificate,
     /// so the signature is rolled back and nothing is taken up (ADR-0044 clause 9).
-    /// Verifies: ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision
+    /// Verifies: ADR-0050
     #[test]
     fn a_read_back_that_finds_another_certificate_rolls_the_signature_back() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2324,7 +2324,7 @@ pub(crate) mod tests {
 
     /// A commit the database server itself refused is rolled back as it stands: no read back is
     /// asked, so one that would fail cannot leave it unknown (ADR-0044 clause 9).
-    /// Verifies: ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision
+    /// Verifies: ADR-0050
     #[test]
     fn a_refusal_the_database_answers_is_rolled_back_without_a_read_back() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2424,7 +2424,7 @@ pub(crate) mod tests {
         assert_eq!(pending_ids(&restarted), [k4]);
     }
 
-    /// Verifies: ADR-draft-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window
+    /// Verifies: ADR-0052
     #[test]
     fn a_rejected_key_stays_refused_on_one_store_in_memory() {
         let clock = Arc::new(Manual(AtomicU64::new(1_000_000)));
@@ -2435,7 +2435,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// Verifies: ADR-draft-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window
+    /// Verifies: ADR-0052
     #[test]
     fn a_rejected_key_stays_refused_on_the_filesystem() {
         let clock = Arc::new(Manual(AtomicU64::new(1_000_000)));
@@ -2455,7 +2455,7 @@ pub(crate) mod tests {
     /// An approval signs no rejected key whose request still waits, as an instance of 0.8.0 may
     /// have queued it: the store refuses it, where this instance does not hold the key rejected
     /// yet, and this instance refuses it, where its store would sign it.
-    /// Verifies: ADR-draft-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window
+    /// Verifies: ADR-0052
     #[test]
     fn an_approval_signs_no_rejected_key() {
         // A store that signs whatever waits, as one of 0.8.0 does.
@@ -2521,7 +2521,7 @@ pub(crate) mod tests {
 
     /// Without a store, as a test holds it, a rejected key stays refused beyond its window, and an
     /// id not queued is rejected before its request arrives.
-    /// Verifies: ADR-draft-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window
+    /// Verifies: ADR-0052
     #[test]
     fn a_rejected_key_stays_refused_without_a_store() {
         let (enrolment, clock) = enrolment();

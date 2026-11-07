@@ -71,7 +71,7 @@ impl Database {
     ///
     /// The lease is taken under the migrations' lock and refused, naming both versions, on a
     /// schema that needs a newer Server than this instance's release, which it records
-    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// (ADR-0048
     /// clause 16). Such a refusal is kept: [`Database::outdated`] answers it from then on.
     ///
     /// # Errors
@@ -106,7 +106,7 @@ impl Database {
             // The schema again, under the migrations' lock: of this lease and a migration that
             // runs at once, the one later sees the other, so no instance serves on a schema it
             // does not understand
-            // (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+            // (ADR-0048
             // clause 16).
             transaction
                 .execute(
@@ -482,7 +482,7 @@ mod tests {
     /// The live lease of an instance that had to be alone and whose process is gone is taken over
     /// before it lapses, and its chain closed with `reason` `holder_gone` and `closed_by` the
     /// chain of the instance that took it over; the record verifies.
-    /// Verifies: ADR-draft-the-audit-record-is-one-hash-chain-per-lease-and-names-the-lease-each-decision-was-taken-under
+    /// Verifies: ADR-0047
     #[test]
     fn the_chain_of_a_gone_holders_live_lease_is_closed_as_holder_gone() {
         let Some(test) = TestDatabase::named() else {

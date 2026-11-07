@@ -42,7 +42,7 @@ pub struct Settings {
 
 /// How long a connection may stay silent: a WebSocket ping goes out once nothing has arrived for
 /// `ping_after`, and the connection ends once nothing has arrived for `end_after`
-/// (ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended).
+/// (ADR-0051).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Silence {
     pub ping_after: Duration,
@@ -224,7 +224,7 @@ pub async fn run_from<S: Session, X: StopSignal>(
 /// the endpoint's name is resolved within one silence bound, and its addresses are tried in turn
 /// by [`open_each`], so an endpoint that accepts and never answers is a failed attempt rather than
 /// a wait without end, and one dead address does not hide the next
-/// (ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended clause 3).
+/// (ADR-0051 clause 3).
 pub(crate) async fn open(settings: &Settings, local: Option<IpAddr>) -> Result<Socket, Connect> {
     let bound = Silence::of(settings.heartbeat).end_after;
     let (_, host, port) = target(&settings.endpoint, &settings.headers)?;
@@ -485,7 +485,7 @@ async fn serve<S: Session, X: StopSignal>(
     // A Server that sends nothing for a heartbeat interval, not even the pong to a ping sent
     // half-way, is taken for lost: frozen, without power or cut off, it closes nothing, and TCP
     // would hold the connection for many minutes
-    // (ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended).
+    // (ADR-0051).
     let silence = Silence::of(settings.heartbeat);
     let mut heard = tokio::time::Instant::now();
     let mut pinged = None;
@@ -730,9 +730,9 @@ mod tests {
     }
 
     /// A connection opened from a named local address reaches the server from that address
-    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// (ADR-0048
     /// clause 20).
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[tokio::test]
     async fn a_connection_from_a_named_address_reaches_the_server_from_it() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -776,9 +776,9 @@ mod tests {
     }
 
     /// A lost connection logs the delay it drew, and the next connection comes no earlier
-    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// (ADR-0048
     /// clause 20).
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// Verifies: ADR-0048
     #[tokio::test]
     async fn a_lost_connection_logs_the_delay_it_drew_and_waits_it() {
         let written = Written::default();
@@ -1042,8 +1042,8 @@ mod tests {
 
     /// The bounds follow the heartbeat: a ping after half an interval of silence, the end after a
     /// whole one; without a heartbeat, the default interval of 30 seconds
-    /// (ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended clause 2).
-    /// Verifies: ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended
+    /// (ADR-0051 clause 2).
+    /// Verifies: ADR-0051
     #[test]
     fn the_bounds_follow_the_heartbeat_and_are_thirty_seconds_without_one() {
         let thirty = Silence {
@@ -1108,8 +1108,8 @@ mod tests {
 
     /// A session busy with each reply for longer than an interval keeps a connection to a server
     /// that answers everything: its own delay is not the server's silence
-    /// (ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended clause 1).
-    /// Verifies: ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended
+    /// (ADR-0051 clause 1).
+    /// Verifies: ADR-0051
     #[tokio::test]
     async fn a_session_busy_for_longer_than_an_interval_keeps_a_live_connection() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -1164,8 +1164,8 @@ mod tests {
     /// The exact window: without a ping the next act is the ping, half an interval after the last
     /// sign of life; with one, the end comes a whole interval after the last sign of life, or the
     /// rest of the interval after the ping when the ping went out late
-    /// (ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended clause 1).
-    /// Verifies: ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended
+    /// (ADR-0051 clause 1).
+    /// Verifies: ADR-0051
     #[test]
     fn the_pong_is_given_the_rest_of_the_interval_from_its_ping() {
         let silence = Silence::of(Some(Duration::from_secs(30)));
@@ -1218,9 +1218,9 @@ mod tests {
 
     /// A connection on which nothing arrives for one heartbeat interval is ended as a lost one,
     /// with a log line naming the bound, and no sooner than the bound
-    /// (ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended clauses 1,
+    /// (ADR-0051 clauses 1,
     /// 4).
-    /// Verifies: ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended
+    /// Verifies: ADR-0051
     #[tokio::test]
     async fn a_connection_on_which_nothing_arrives_for_a_heartbeat_interval_is_ended() {
         let written = Written::default();
@@ -1261,9 +1261,9 @@ mod tests {
 
     /// A server that answers pings and sends nothing else keeps the connection over many bounds:
     /// the pongs are signs of life
-    /// (ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended clauses 1,
+    /// (ADR-0051 clauses 1,
     /// 2).
-    /// Verifies: ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended
+    /// Verifies: ADR-0051
     #[tokio::test]
     async fn a_server_that_answers_only_pings_keeps_the_connection() {
         const PINGS: usize = 8;
@@ -1313,8 +1313,8 @@ mod tests {
 
     /// An upgrade that is never answered — a TCP connection accepted by a kernel whose process
     /// is frozen — fails once the bound has passed
-    /// (ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended clause 3).
-    /// Verifies: ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended
+    /// (ADR-0051 clause 3).
+    /// Verifies: ADR-0051
     #[tokio::test]
     async fn an_upgrade_that_is_never_answered_fails_within_the_bound() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -1343,9 +1343,9 @@ mod tests {
     /// A name whose first address accepts a TCP connection and never answers, as a frozen
     /// process's kernel does, still connects: that address gives way to the next once its own
     /// interval has passed, and the upgrade to the next carries the name, not the address
-    /// (ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended
+    /// (ADR-0051
     /// clause 3).
-    /// Verifies: ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended
+    /// Verifies: ADR-0051
     #[tokio::test]
     async fn an_address_not_reached_within_its_interval_gives_way_to_the_next() {
         // The kernel completes the TCP connection into the backlog; nothing ever answers it.
@@ -1407,9 +1407,9 @@ mod tests {
     /// An HTTP answer to the upgrade is the Server's verdict, not an address that was not
     /// reached: a refusal on the first address ends the attempt as it is, and the next address is
     /// not tried
-    /// (ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended
+    /// (ADR-0051
     /// clause 3).
-    /// Verifies: ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended
+    /// Verifies: ADR-0051
     #[tokio::test]
     async fn an_http_answer_on_the_first_address_ends_the_attempt() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};

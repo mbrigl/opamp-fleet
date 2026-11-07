@@ -75,8 +75,8 @@ async fn a_framed_report_is_answered() {
 
 /// The Server answers a WebSocket ping with a pong carrying its payload, on a session that has
 /// sent nothing yet and after a report: the sign of life an Agent waits for
-/// (ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended clause 1).
-/// Verifies: ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended
+/// (ADR-0051 clause 1).
+/// Verifies: ADR-0051
 #[tokio::test]
 async fn the_server_answers_a_ping_with_a_pong() {
     async fn pong(socket: &mut Socket, payload: &'static [u8]) {
@@ -619,7 +619,7 @@ async fn forgetting_an_agent_ends_its_session() {
 
 /// A message that arrives while the instance's lease is lapsed by its clock — after a suspend of
 /// its host, before it has closed its listeners — is not answered; the one before was.
-/// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+/// Verifies: ADR-0048
 #[tokio::test]
 async fn a_message_is_not_answered_while_the_lease_is_lapsed_by_its_clock() {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -658,7 +658,7 @@ async fn a_message_is_not_answered_while_the_lease_is_lapsed_by_its_clock() {
 
 /// A push that falls due while the instance's lease is lapsed by its clock is not sent: a restart
 /// requested then stays queued for an instance that holds a lease.
-/// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+/// Verifies: ADR-0048
 #[tokio::test]
 async fn nothing_is_pushed_while_the_lease_is_lapsed_by_its_clock() {
     use std::sync::atomic::{AtomicU64, Ordering};

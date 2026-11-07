@@ -16,7 +16,7 @@ third release after 0.8.0. It cannot come earlier, because the release after 0.8
 ## Read first
 
 - The stores draft,
-  ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision
+  ADR-0050
   clause 22
 - `postgres/schema.rs`, `postgres/ledger.rs`
 
