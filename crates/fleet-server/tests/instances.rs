@@ -2197,6 +2197,42 @@ async fn a_revocation_whose_notification_is_missed_is_caught_at_the_next_renewal
     );
 }
 
+/// A binding and its Host committed by another instance that ended before it sent the notice
+/// that follows the commit are taken up by the next lease renewal, which reads the ledger again
+/// (the several-instances draft, clauses 9 and 10).
+/// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_binding_whose_notice_after_its_commit_is_lost_is_taken_up_at_the_next_renewal() {
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let b = Instance::start(&pki, &schema, schema.config_on(schema.config.port)).await;
+    assert!(b.has_read(1).await, "B never listened");
+    // Committed as an instance commits a first report's binding, its notice never sent.
+    schema.sql(
+        "INSERT INTO hosts (host, gateway, instance_uids, subject, valid_until_ms) \
+         VALUES ('edge-missed', false, '{}', '{}', 9000000000000); \
+         INSERT INTO host_bindings (instance_uid, host) VALUES ('0a', 'edge-missed')",
+    );
+    assert!(
+        eventually(TIMES.renew * 3, || b
+            .revocations
+            .bound_host(&[0x0a])
+            .as_deref()
+            == Some("edge-missed"))
+        .await,
+        "B did not take up the binding at a renewal"
+    );
+    assert!(
+        b.revocations
+            .hosts()
+            .iter()
+            .any(|(host, _, _)| host == "edge-missed"),
+        "nor its Host"
+    );
+}
+
 /// A renewal registered by another writer, whose notification never arrives while the listening
 /// connection stays up, is taken up by the next lease renewal: so a revocation of the certificate
 /// it renewed, committed by this instance afterwards, refuses the renewal too (ADR-0038 clause 28,
