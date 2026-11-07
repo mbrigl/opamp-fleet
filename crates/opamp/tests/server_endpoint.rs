@@ -34,6 +34,8 @@ struct Echo {
     /// Hands each WebSocket connection's push sender to the test.
     pushers: Mutex<Vec<mpsc::Sender<ServerToAgent>>>,
     closed: Mutex<Vec<Transport>>,
+    /// What the endpoint reported as not put on the wire.
+    unsent: Mutex<Vec<ServerToAgent>>,
 }
 
 struct Conn {
@@ -78,6 +80,17 @@ impl Handler for Echo {
         if message.sequence_num == 7 {
             return Reply::Nothing;
         }
+        if message.sequence_num == 50 {
+            // A reply past the limit, which the endpoint never puts on the wire.
+            return Reply::Send(ServerToAgent {
+                instance_uid: message.instance_uid,
+                error_response: Some(opamp::proto::ServerErrorResponse {
+                    error_message: "x".repeat(LIMIT),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+        }
         Reply::Send(ServerToAgent {
             instance_uid: message.instance_uid,
             ..Default::default()
@@ -97,6 +110,10 @@ impl Handler for Echo {
 
     fn on_closed(&self, connection: Conn) {
         self.closed.lock().unwrap().push(connection.transport);
+    }
+
+    fn on_unsent(&self, message: &ServerToAgent) {
+        self.unsent.lock().unwrap().push(message.clone());
     }
 }
 
@@ -161,9 +178,29 @@ async fn a_plain_http_exchange_is_answered_by_the_handler() {
     let response = post(addr, "/v1/opamp", report(b"agent-a", 1).encode_to_vec()).await;
     assert_eq!(response.status(), 200);
     assert_eq!(response.headers()["content-type"], "application/x-protobuf");
-    let reply = ServerToAgent::decode(response.bytes().await.expect("body")).expect("protobuf");
+    let length = response.headers()["content-length"].clone();
+    let body = response.bytes().await.expect("body");
+    assert_eq!(length, body.len().to_string(), "the length is announced");
+    let reply = ServerToAgent::decode(body).expect("protobuf");
     assert_eq!(reply.instance_uid, b"agent-a");
     assert_eq!(*handler.closed.lock().unwrap(), [Transport::Http]);
+    assert!(
+        handler.unsent.lock().unwrap().is_empty(),
+        "the reply was sent"
+    );
+}
+
+/// A reply past the limit is answered `500` and never put on the wire, and the handler is told it
+/// was not sent, so what it carried can wait for the next exchange.
+// Verifies: ADR-0048
+#[tokio::test]
+async fn a_plain_http_reply_past_the_limit_is_reported_unsent() {
+    let (addr, handler) = serve(Settings::new(LIMIT)).await;
+    let response = post(addr, "/v1/opamp", report(b"agent-a", 50).encode_to_vec()).await;
+    assert_eq!(response.status(), 500);
+    let unsent = handler.unsent.lock().unwrap().clone();
+    assert_eq!(unsent.len(), 1, "the oversized reply is reported");
+    assert_eq!(unsent[0].instance_uid, b"agent-a");
 }
 
 // Verifies: ADR-0008

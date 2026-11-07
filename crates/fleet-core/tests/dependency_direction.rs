@@ -60,7 +60,7 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             ("host", Core),
             ("naming", Core),
             ("package", Core),
-            // The bootstrap PKCS#12 file (ADR-0022): its rule, and its binding to `p12-keystore`.
+            // The bootstrap PKCS#12 file (ADR-0052): its rule, and its binding to `p12-keystore`.
             ("pkcs12", Core),
             ("pkcs12::file", Adapter),
             ("platform", Core),
@@ -93,10 +93,12 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             ("fleet", Core),
             ("floors", Core),
             ("labels", Core),
+            ("listing", Core),
             ("packages", Core),
             ("revocation", Core),
             ("throttle", Core),
             ("api", Adapter),
+            ("api::paging", Adapter),
             ("audit_log", Adapter),
             ("bridge", Adapter),
             ("ca", Adapter),
@@ -118,6 +120,7 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             ("migrate", Adapter),
             ("pki", Adapter),
             ("postgres", Adapter),
+            ("postgres::agent_page", Adapter),
             ("postgres::agents", Adapter),
             ("postgres::bootstrap", Adapter),
             ("postgres::configs", Adapter),
@@ -133,6 +136,8 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             ("postgres::packages", Adapter),
             ("postgres::schema", Adapter),
             ("s3", Adapter),
+            // Test-only: the log capture the unit tests share, bound to `tracing_subscriber`.
+            ("test_support", Adapter),
             ("tls", Adapter),
             ("transport", Adapter),
         ],

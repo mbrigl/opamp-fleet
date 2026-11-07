@@ -104,7 +104,7 @@ pub struct ClientConfig {
     #[serde(skip)]
     pub state_dir_as_written: PathBuf,
     /// The bootstrap identity a `bootstrap.p12` opened to, held in memory for the enrolment and
-    /// never written to disk (ADR-0022 clause 15). Presented while the Client holds no issued
+    /// never written to disk (ADR-0052 clause 15). Presented while the Client holds no issued
     /// certificate; set by the install, never by the file.
     #[serde(skip)]
     pub bootstrap_identity: Option<BootstrapIdentity>,
@@ -132,7 +132,7 @@ pub struct ClientConfig {
     pub supervisors: Vec<SupervisorBlock>,
 }
 
-/// A bootstrap certificate and its key as PEM, held in memory (ADR-0022 clause 15), the key in a
+/// A bootstrap certificate and its key as PEM, held in memory (ADR-0052 clause 15), the key in a
 /// buffer wiped when it is dropped (ADR-0014). Its `Debug` names neither.
 #[derive(Clone, PartialEq, Eq)]
 pub struct BootstrapIdentity {
@@ -923,7 +923,7 @@ fn default_name() -> String {
     // type would put the same word in both columns of the fleet view — the collapse ADR-0016 ended.
     // Spelled as a person would write it, spaces and capitals included: nothing resolves a path or
     // a service from it, the grammar of ADR-0019 governs the `--instance` and the `[[supervisor]]`
-    // block names instead, and the questionnaire asks for this one first (ADR-0022) so that a fleet
+    // block names instead, and the questionnaire asks for this one first (ADR-0052) so that a fleet
     // is told apart by names somebody chose.
     "Supervisor Agent".to_string()
 }
@@ -2235,7 +2235,7 @@ mod tests {
     /// took then. It loads — a Client the Server updated must keep connecting — the notice names
     /// the section, and nothing from it reaches the connection: no `Authorization` value, and the
     /// effective configuration reported upstream carries none of its secrets.
-    /// Verifies: ADR-0038, ADR-0019, ADR-0022
+    /// Verifies: ADR-0038, ADR-0019, ADR-0052
     #[test]
     fn a_leftover_auth_section_is_ignored_with_a_notice() {
         let dir = tempfile::tempdir().expect("tempdir");

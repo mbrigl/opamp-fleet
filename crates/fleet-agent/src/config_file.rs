@@ -134,7 +134,7 @@ impl ClientConfig {
 
     /// Whether the state directory holds a certificate the Server issued, with its key — what
     /// makes this Client a member of the fleet rather than a host still to enrol (ADR-0038). The
-    /// questionnaire asks for a bootstrap pair only while this is `false` (ADR-0022 clause 16).
+    /// questionnaire asks for a bootstrap pair only while this is `false` (ADR-0052 clause 16).
     #[must_use]
     pub fn is_enrolled(&self) -> bool {
         self.state_dir.join(crate::tls::ISSUED_CERT_FILE).exists()

@@ -26,12 +26,15 @@ pub mod fs;
 pub mod instance;
 pub mod labels;
 pub mod listen;
+pub mod listing;
 pub mod migrate;
 pub mod packages;
 pub mod pki;
 pub mod postgres;
 pub mod revocation;
 pub mod s3;
+#[cfg(test)]
+mod test_support;
 pub mod throttle;
 pub mod tls;
 pub mod transport;
@@ -46,7 +49,7 @@ use fs::{FsAgentStore, FsBlobStore, FsConfigBackend, FsDeploymentBackend, FsPack
 
 /// Whether an instance on PostgreSQL must be alone on its database, and the key that makes it so:
 /// blobs kept as files, or a CA key in a file
-/// (ADR-0041
+/// (ADR-0048
 /// clause 2).
 #[must_use]
 pub fn exclusive(config: &config::ServerConfig) -> postgres::Exclusive {
@@ -71,13 +74,13 @@ fn named(error: String) -> String {
     format!("data_dir: {error}")
 }
 
-/// Where the Server keeps its records (ADR-0044 clause 1): files under `data_dir`, or one
+/// Where the Server keeps its records (ADR-0050 clause 1): files under `data_dir`, or one
 /// PostgreSQL database. The composition root asks it for each port's adapter, so the rest of the
 /// Server names the ports alone.
 pub enum Records {
-    /// One file per record under this `data_dir` (ADR-0044).
+    /// One file per record under this `data_dir` (ADR-0050).
     Files(std::path::PathBuf),
-    /// One PostgreSQL database, shared by the instances on it (ADR-0044).
+    /// One PostgreSQL database, shared by the instances on it (ADR-0050).
     Postgres(Arc<postgres::Database>),
 }
 
@@ -97,7 +100,7 @@ impl Records {
             (None, None) => Err("the filesystem record store needs data_dir".to_string()),
             (Some(database), data_dir) => {
                 // With S3 too the Server keeps nothing on its disk and has no data directory
-                // (ADR-0044 clause 1).
+                // (ADR-0050 clause 1).
                 if let Some(data_dir) = data_dir {
                     fs::open_data_dir_beside_database(data_dir).map_err(named)?;
                 }
@@ -207,7 +210,7 @@ impl Records {
 /// — and never the filesystem behind it.
 impl AppState {
     /// Builds the state on the default storage adapters in the data directory `data_dir`
-    /// (ADR-0044) — one JSON file per Agent, its labels inside, under `agents/`, and one per
+    /// (ADR-0050) — one JSON file per Agent, its labels inside, under `agents/`, and one per
     /// Configuration under `configurations/` — restoring every persisted Configuration and Agent
     /// record. A store that cannot be opened (or holds an unparsable file) fails startup loudly.
     ///
@@ -223,7 +226,7 @@ impl AppState {
         )
     }
 
-    /// Builds the state on the adapters of `records` (ADR-0044), restoring every persisted
+    /// Builds the state on the adapters of `records` (ADR-0050), restoring every persisted
     /// Configuration and Agent record.
     ///
     /// # Errors
@@ -240,7 +243,7 @@ impl AppState {
 /// The default wiring of the package store to its filesystem adapter (ADR-0009).
 impl packages::PackageStore {
     /// Opens the store in the data directory `data_dir`, loading every persisted Package
-    /// (ADR-0027, ADR-0044).
+    /// (ADR-0027, ADR-0050).
     ///
     /// # Errors
     /// Returns an error when the store cannot be opened, or a Package in it cannot be read, does
@@ -249,13 +252,14 @@ impl packages::PackageStore {
         Self::with_backend(
             Box::new(FsPackageBackend::open(&data_dir)?),
             Box::new(FsBlobStore::open(&data_dir)?),
+            clock::Elapsed::monotonic(),
         )
     }
 
     /// Opens the store in the data directory `data_dir` with the artifacts in the store `[blobs]`
-    /// chooses (ADR-0044 clause 14): the filesystem as [`open`](Self::open) does, or the bucket of
+    /// chooses (ADR-0050 clause 14): the filesystem as [`open`](Self::open) does, or the bucket of
     /// `[blobs.s3]`. On the bucket, a referenced artifact it lacks and `data_dir/blobs/` holds is
-    /// copied into it first (ADR-0044 clause 19).
+    /// copied into it first (ADR-0050 clause 19).
     ///
     /// # Errors
     /// Returns an error when the store cannot be opened, as [`open`](Self::open) does, when the
@@ -264,13 +268,18 @@ impl packages::PackageStore {
         data_dir: std::path::PathBuf,
         blobs: &config::BlobsConfig,
     ) -> Result<Self, String> {
-        Self::open_on(&Records::Files(data_dir.clone()), Some(&data_dir), blobs)
-            .map(|(store, _)| store)
+        Self::open_on(
+            &Records::Files(data_dir.clone()),
+            Some(&data_dir),
+            blobs,
+            clock::Elapsed::monotonic(),
+        )
+        .map(|(store, _)| store)
     }
 
-    /// [`open_with`](Self::open_with), the Package records in `records` (ADR-0044) and the bytes
+    /// [`open_with`](Self::open_with), the Package records in `records` (ADR-0050) and the bytes
     /// in the store `[blobs]` chooses, the filesystem's under `data_dir`, which is `None` only
-    /// with PostgreSQL and S3 (ADR-0044 clause 1).
+    /// with PostgreSQL and S3 (ADR-0050 clause 1).
     ///
     /// On the bucket the staging objects of every lease that is not live are deleted (clause 16),
     /// with PostgreSQL under the blob store's lock (clause 14) and by every sweep, and the cleanup
@@ -278,7 +287,9 @@ impl packages::PackageStore {
     /// filesystem record store an upload is staged under `fs`, and everything staged is deleted
     /// at startup alone. On PostgreSQL the store is opened before the instance takes its lease, so
     /// that a bucket that fails leaves no lease behind, and it takes no upload until
-    /// [`StagingCleanup::stage_under`](s3::StagingCleanup::stage_under) names that lease.
+    /// [`StagingCleanup::stage_under`](s3::StagingCleanup::stage_under) names that lease. A sweep
+    /// measures the time between the renewal of a mark and its deletion on `elapsed`
+    /// (ADR-0050 clause 14).
     ///
     /// # Errors
     /// As [`open_with`](Self::open_with), and when the filesystem blob store has no `data_dir`.
@@ -286,12 +297,13 @@ impl packages::PackageStore {
         records: &Records,
         data_dir: Option<&std::path::Path>,
         blobs: &config::BlobsConfig,
+        elapsed: clock::Elapsed,
     ) -> Result<(Self, Option<s3::StagingCleanup>), String> {
         let backend = records.packages()?;
         let Some(bucket) = blobs.s3() else {
             let data_dir =
                 data_dir.ok_or_else(|| "the filesystem blob store needs data_dir".to_string())?;
-            return Self::with_backend(backend, Box::new(FsBlobStore::open(data_dir)?))
+            return Self::with_backend(backend, Box::new(FsBlobStore::open(data_dir)?), elapsed)
                 .map(|store| (store, None));
         };
         let (store, live, hold): (_, s3::LiveLeases, s3::HoldBlobs) = match records {
@@ -333,14 +345,14 @@ impl packages::PackageStore {
                 &store,
             )?;
         }
-        Self::with_backend(backend, Box::new(store)).map(|store| (store, Some(cleanup)))
+        Self::with_backend(backend, Box::new(store), elapsed).map(|store| (store, Some(cleanup)))
     }
 }
 
 /// The default wiring of the package offering to the Deployments' filesystem adapter (ADR-0009).
 impl PackageOffering {
     /// Arms the **Deployments** beside the package store, from `deployments/` in the data
-    /// directory `data_dir` (ADR-0027, ADR-0044).
+    /// directory `data_dir` (ADR-0027, ADR-0050).
     ///
     /// # Errors
     /// Returns an error when the Deployments cannot be opened or one of them cannot be read.
@@ -350,7 +362,7 @@ impl PackageOffering {
         Ok(Self::with_deployments(store, deployments))
     }
 
-    /// Arms the Deployments of `records` beside the package store (ADR-0044).
+    /// Arms the Deployments of `records` beside the package store (ADR-0050).
     ///
     /// # Errors
     /// Returns an error when the Deployments cannot be opened or one of them does not decode.
@@ -360,10 +372,10 @@ impl PackageOffering {
     }
 }
 
-/// The default wiring of the bootstrap record to its filesystem adapter (ADR-0009, ADR-0044).
+/// The default wiring of the bootstrap record to its filesystem adapter (ADR-0009, ADR-0050).
 impl bootstrap::BootstrapCertificates {
     /// Opens the record in the data directory `data_dir`, one file per certificate under
-    /// `bootstrap/` (ADR-0044), forgetting what has ended.
+    /// `bootstrap/` (ADR-0050), forgetting what has ended.
     ///
     /// # Errors
     /// Returns an error when the directory cannot be opened or a file in it cannot be read.
@@ -379,7 +391,7 @@ impl bootstrap::BootstrapCertificates {
         )
     }
 
-    /// Opens the record in `records` (ADR-0044), forgetting what has ended.
+    /// Opens the record in `records` (ADR-0050), forgetting what has ended.
     ///
     /// # Errors
     /// Returns an error when the store cannot be opened or read.

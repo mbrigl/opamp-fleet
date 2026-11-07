@@ -1,5 +1,5 @@
 //! The lease every instance on one database holds while it serves
-//! (ADR-0041
+//! (ADR-0048
 //! clauses 1 to 3).
 //!
 //! A lease is a row of `leases` whose `expires_at` the database sets from its own clock, so every
@@ -9,9 +9,9 @@
 //! the other's.
 
 use std::collections::HashSet;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use super::{client, sql, Database, Exclusive, EXCLUSIVE_LOCK};
+use super::{client, schema, sql, Database, Exclusive, EXCLUSIVE_LOCK, MIGRATION_LOCK};
 
 /// The lock a lease is taken under.
 const LEASES_LOCK: &str = "hashtextextended('opamp-fleet-server-leases:' || \
@@ -22,9 +22,6 @@ const LEASES_LOCK: &str = "hashtextextended('opamp-fleet-server-leases:' || \
 pub struct Taken {
     /// The instance id the lease is held under: a random UUID, not persisted.
     pub instance_id: String,
-    /// When the request that took it was sent: the instance measures its lease from here, which is
-    /// no later than the database's own time of it.
-    pub sent: Instant,
     /// The leases of instances that were gone, which this one took over: every lease that had
     /// lapsed, and the live lease of an instance that had to be alone and whose lock is free.
     pub taken_over: Vec<String>,
@@ -33,10 +30,8 @@ pub struct Taken {
 /// A lease this instance renewed.
 #[derive(Clone, Copy, Debug)]
 pub struct Renewal {
-    /// When the request that renewed it was sent.
-    pub sent: Instant,
     /// The revocation list's version as the database held it at the renewal
-    /// (ADR-0041
+    /// (ADR-0048
     /// clause 10).
     pub list_version: u64,
 }
@@ -74,6 +69,11 @@ impl Database {
     /// alone; a live lease of one that had to be alone and whose lock is free it takes over too.
     /// A lapsed lease it takes over as well, removing it; [`Taken::taken_over`] names each.
     ///
+    /// The lease is taken under the migrations' lock and refused, naming both versions, on a
+    /// schema that needs a newer Server than this instance's release, which it records
+    /// (ADR-0048
+    /// clause 16). Such a refusal is kept: [`Database::outdated`] answers it from then on.
+    ///
     /// # Errors
     /// Returns an error naming the database when it cannot be reached, and the refusals above.
     pub fn take_lease(&self, host: &str, lapse: Duration) -> Result<Taken, String> {
@@ -95,14 +95,29 @@ impl Database {
         let exclusive = self.exclusive().clone();
         let files = self.archive_offered();
         let host = host.to_string();
-        let sent = Instant::now();
-        let (id, taken_over) = self.run_within(bound, move |pool| async move {
+        let release = self.release();
+        let taking = self.run_within(bound, move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
             transaction
                 .execute(&format!("SELECT pg_advisory_xact_lock({LEASES_LOCK})"), &[])
                 .await
                 .map_err(sql)?;
+            // The schema again, under the migrations' lock: of this lease and a migration that
+            // runs at once, the one later sees the other, so no instance serves on a schema it
+            // does not understand
+            // (ADR-0048
+            // clause 16).
+            transaction
+                .execute(
+                    &format!("SELECT pg_advisory_xact_lock({MIGRATION_LOCK})"),
+                    &[],
+                )
+                .await
+                .map_err(sql)?;
+            if let Err(refusal) = schema::check(&*transaction, release).await {
+                return Ok(Err(refusal));
+            }
             let live = transaction
                 .query(
                     "SELECT instance_id::text, must_be_alone FROM leases WHERE expires_at > now()",
@@ -149,40 +164,49 @@ impl Database {
                     }
                 }
             }
-            let taken_over: Vec<String> = transaction
+            // A lease that has not lapsed is taken over only as that of a holder that had to be
+            // alone and whose process is gone.
+            let removed: Vec<(String, bool)> = transaction
                 .query(
                     "DELETE FROM leases WHERE expires_at <= now() OR instance_id::text = ANY($1) \
-                     RETURNING instance_id::text",
+                     RETURNING instance_id::text, expires_at <= now()",
                     &[&alone],
                 )
                 .await
                 .map_err(sql)?
                 .iter()
-                .map(|row| row.get(0))
+                .map(|row| (row.get(0), row.get(1)))
                 .collect();
             // Each removed lease's chain is closed for it, and this lease's chain opened, in the
             // same transaction (clause 3 of
-            // ADR-0042).
+            // ADR-0047).
             let mut written = Vec::new();
-            for lapsed in &taken_over {
-                written
-                    .extend(super::audit::close_lapsed(&*transaction, lapsed, &instance_id).await?);
+            for (lapsed, by_time) in &removed {
+                let ended = if *by_time {
+                    super::audit::Ended::Lapsed
+                } else {
+                    super::audit::Ended::HolderGone
+                };
+                written.extend(
+                    super::audit::close_lapsed(&transaction, lapsed, &instance_id, ended).await?,
+                );
             }
+            let taken_over: Vec<String> = removed.into_iter().map(|(id, _)| id).collect();
             written.push(
-                super::audit::open_chain(&*transaction, &instance_id, &host, files.as_ref())
-                    .await?,
+                super::audit::open_chain(&transaction, &instance_id, &host, files.as_ref()).await?,
             );
             transaction
                 .execute(
                     "INSERT INTO leases \
-                     (instance_id, host, must_be_alone, taken_at, renewed_at, expires_at) \
+                     (instance_id, host, must_be_alone, taken_at, renewed_at, expires_at, release) \
                      VALUES ($1::text::uuid, $2, $3, now(), now(), \
-                     now() + make_interval(secs => $4))",
+                     now() + make_interval(secs => $4), $5)",
                     &[
                         &instance_id,
                         &host,
                         &exclusive.alone(),
                         &lapse.as_secs_f64(),
+                        &release,
                     ],
                 )
                 .await
@@ -191,18 +215,26 @@ impl Database {
             for line in &written {
                 line.emit();
             }
-            Ok((instance_id, taken_over))
+            Ok(Ok((instance_id, taken_over)))
         })?;
+        let (id, taken_over) = taking.map_err(|refusal| {
+            let refusal = format!("{}: {refusal}", self.name());
+            self.set_outdated(&refusal);
+            refusal
+        })?;
+        // From now on this instance's sweeps mark under the lease, so that a sweep of another
+        // instance leaves their marks while it lives (ADR-0050 clause 14).
+        self.sweep_under(&id);
         Ok(Taken {
             instance_id: id,
-            sent,
             taken_over,
         })
     }
 
     /// Renews the lease of `instance_id` to lapse `lapse` after now, waiting at most `bound` for
-    /// the answer. Answers when the request was sent and the revocation list's version, read in the
-    /// same statement, or `None` when the lease is no longer live, lapsed or taken over.
+    /// the answer. Answers the revocation list's version, read in the same statement, or `None`
+    /// when the lease is no longer live, lapsed or taken over. The instance measures its lease from
+    /// before it asked.
     ///
     /// # Errors
     /// Returns an error naming the database when it does not answer within `bound`.
@@ -213,7 +245,6 @@ impl Database {
         bound: Duration,
     ) -> Result<Option<Renewal>, String> {
         let id = instance_id.to_string();
-        let sent = Instant::now();
         let (renewed, version) = self.run_within(bound, move |pool| async move {
             let client = client(&pool).await?;
             let row = client
@@ -230,14 +261,13 @@ impl Database {
             Ok((row.get::<_, i64>(0), row.get::<_, i64>(1)))
         })?;
         Ok((renewed == 1).then_some(Renewal {
-            sent,
             list_version: super::unsigned(version),
         }))
     }
 
     /// Takes over every lease other than `instance_id`'s that has lapsed, waiting at most `bound`
     /// for the answer: what an instance does after each renewal
-    /// (ADR-0041
+    /// (ADR-0048
     /// clause 18). Each lease is removed in one transaction with the closing of its audit chain,
     /// `closed_by` the chain of `instance_id`; the removal locks the lease, so one instance alone
     /// takes it. Answers the leases taken over.
@@ -266,7 +296,15 @@ impl Database {
                 .collect();
             let mut written = Vec::new();
             for chain in &lapsed {
-                written.extend(super::audit::close_lapsed(&*transaction, chain, &id).await?);
+                written.extend(
+                    super::audit::close_lapsed(
+                        &transaction,
+                        chain,
+                        &id,
+                        super::audit::Ended::Lapsed,
+                    )
+                    .await?,
+                );
             }
             transaction.commit().await.map_err(sql)?;
             for line in &written {
@@ -277,7 +315,7 @@ impl Database {
     }
 
     /// The instance ids of the leases that are live: what the cleanup of the staging objects in
-    /// the bucket keeps (ADR-0044 clause 16).
+    /// the bucket keeps (ADR-0050 clause 16).
     ///
     /// # Errors
     /// Returns an error naming the database when it cannot be reached.
@@ -343,7 +381,7 @@ mod tests {
 
     /// Two instances that share the database each take a lease of their own and renew it; a lease
     /// that lapsed is renewed no more, and a released one is gone.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0048
     #[test]
     fn instances_that_share_the_database_each_hold_a_lease() {
         let Some(test) = TestDatabase::named() else {
@@ -378,7 +416,7 @@ mod tests {
 
     /// The leases that are live are those not lapsed and not released: what the cleanup of the
     /// staging objects keeps.
-    /// Verifies: ADR-0044
+    /// Verifies: ADR-0050
     #[test]
     fn the_live_leases_are_those_neither_lapsed_nor_released() {
         let Some(test) = TestDatabase::named() else {
@@ -404,7 +442,7 @@ mod tests {
     /// An instance that must be alone fails startup while another live lease exists, naming the
     /// key and the number of leases; an instance that shares the database fails while one holds it
     /// alone; one that had to be alone and is gone has its lease taken over.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0048
     #[test]
     fn an_instance_that_must_be_alone_is_alone() {
         let Some(test) = TestDatabase::named() else {
@@ -441,9 +479,41 @@ mod tests {
         assert_eq!(taken.taken_over, [held.instance_id]);
     }
 
+    /// The live lease of an instance that had to be alone and whose process is gone is taken over
+    /// before it lapses, and its chain closed with `reason` `holder_gone` and `closed_by` the
+    /// chain of the instance that took it over; the record verifies.
+    /// Verifies: ADR-0047
+    #[test]
+    fn the_chain_of_a_gone_holders_live_lease_is_closed_as_holder_gone() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let lonely = alone(&test, "[blobs] store = \"fs\"").expect("the lock is free");
+        let held = lonely.take_lease("host-a", LAPSE).expect("alone");
+        drop(lonely);
+        let taker = test.shared();
+        let taken = taker
+            .take_lease("host-b", LAPSE)
+            .expect("the lock went with its session");
+        assert_eq!(taken.taken_over, std::slice::from_ref(&held.instance_id));
+        let closing = test.rows(&format!(
+            "SELECT line FROM audit_entries WHERE chain = '{}' ORDER BY seq DESC LIMIT 1",
+            held.instance_id
+        ));
+        let closing = closing[0][0].clone().expect("line");
+        assert!(
+            closing.contains("audit.chain_closed")
+                && closing.contains("\"reason\":\"holder_gone\"")
+                && closing.contains(&format!("\"closed_by\":\"{}\"", taken.instance_id)),
+            "{closing}"
+        );
+        let verified = super::super::audit::verify(&taker, None).expect("verify");
+        assert!(!verified.failed, "{:?}", verified.lines);
+    }
+
     /// A lease that lapsed is taken over by the next instance that takes one, which names it; a
     /// live lease of an instance that shares the database is not.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0048
     #[test]
     fn a_lapsed_lease_is_taken_over_and_named() {
         let Some(test) = TestDatabase::named() else {
@@ -476,7 +546,7 @@ mod tests {
     }
 
     /// The lines `take` logs.
-    fn logged(take: impl FnOnce() -> Taken) -> (Taken, Vec<String>) {
+    fn logged<T>(take: impl FnOnce() -> T) -> (T, Vec<String>) {
         let collected = Collected::default();
         let writer = collected.clone();
         let subscriber = tracing_subscriber::fmt()
@@ -496,9 +566,9 @@ mod tests {
     /// An instance that takes over the lapsed lease of another logs its own instance id and the
     /// lapsed one as a takeover; one that takes a new lease after losing its own logs the lapsed
     /// one as its own, never as an instance that is gone
-    /// (ADR-0041
+    /// (ADR-0048
     /// clauses 1 and 3).
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0048
     #[test]
     fn a_take_names_a_lapsed_lease_as_a_takeover_or_as_its_own() {
         let Some(test) = TestDatabase::named() else {
@@ -517,8 +587,15 @@ mod tests {
         let gone = a.take_lease("host-a", LAPSE).expect("a's lease");
         lapse(&gone.instance_id);
         let (taken, lines) = logged(|| {
-            crate::instance::take_in_time(&b, times, "host-b", new_instance_id().expect("id"), None)
-                .expect("b's lease")
+            crate::instance::take_in_time(
+                &b,
+                &crate::clock::Elapsed::monotonic(),
+                times,
+                "host-b",
+                new_instance_id().expect("id"),
+                None,
+            )
+            .expect("b's lease")
         });
         let takeover = lines
             .iter()
@@ -538,6 +615,7 @@ mod tests {
         let (again, lines) = logged(|| {
             crate::instance::take_in_time(
                 &b,
+                &crate::clock::Elapsed::monotonic(),
                 times,
                 "host-b",
                 new_instance_id().expect("id"),

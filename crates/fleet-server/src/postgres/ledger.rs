@@ -1,4 +1,4 @@
-//! The register, the revocation list and the Hosts in PostgreSQL (ADR-0044 clauses 9 and 10): the
+//! The register, the revocation list and the Hosts in PostgreSQL (ADR-0050 clauses 9 and 10): the
 //! PostgreSQL adapter behind [`LedgerStore`](crate::revocation::LedgerStore) — one row per
 //! certificate the Server signed, one per revocation, one per Host. Every call is one transaction,
 //! committed before the decision it answers is.
@@ -6,9 +6,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
-use tokio_postgres::GenericClient;
+use super::Cached as GenericClient;
 
-use super::notify::{notify, CERTIFICATE, HOST};
+use super::notify::{follow_commit, notify, will_follow, CERTIFICATE, HOST};
 use super::{client, signed, sql, unsigned, Database};
 use crate::revocation::{
     register_full, Added, Bound, CertId, Facts, Host, HostAct, Issued, Ledger, LedgerStore,
@@ -47,11 +47,11 @@ impl PgLedgerStore {
 }
 
 /// Moves the list's version on, inside the caller's transaction, and answers the new one
-/// (ADR-0044 clause 10). A revocation added or widened and a lift
-/// move it, the prune's removal of a revocation among them. A register entry the prune removes does
-/// not: it only takes expired certificates out of what the list resolves, and a Gateway that keeps
-/// refusing an expired certificate loses nothing. A register entry another instance adds is covered
-/// by the body's hash in the Gateways' `ETag`, not by the version.
+/// (ADR-0050 clause 10). A revocation added or widened and a lift move it, the prune's removal of
+/// a revocation among them, and so does every change to the register: what ADR-0038 clause 28
+/// revokes depends on the register too, so an instance that missed an entry's notification finds
+/// the version moved, and never takes its own next write of the list as naming a register it does
+/// not hold.
 async fn bump_list_version(client: &impl GenericClient) -> Result<u64, String> {
     let row = client
         .query_one(
@@ -84,7 +84,7 @@ impl LedgerStore for PgLedgerStore {
                 .start()
                 .await
                 .map_err(sql)?;
-            let ledger = read_all(&*transaction).await?;
+            let ledger = read_all(&transaction).await?;
             transaction.commit().await.map_err(sql)?;
             Ok(ledger)
         })?;
@@ -96,30 +96,63 @@ impl LedgerStore for PgLedgerStore {
 
     fn put_issued(&self, issued: &Issued) -> Result<(), String> {
         let issued = issued.clone();
-        self.database.run(move |pool| async move {
+        let version = self.database.run(move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
-            write_issued(&*transaction, &issued).await?;
-            notify(&*transaction, CERTIFICATE, &issued.facts.id.serial).await?;
-            transaction.commit().await.map_err(sql)
-        })
+            write_issued(&transaction, &issued).await?;
+            notify(&transaction, CERTIFICATE, &issued.facts.id.serial).await?;
+            let version = bump_list_version(&transaction).await?;
+            transaction.commit().await.map_err(sql)?;
+            Ok(version)
+        })?;
+        self.wrote_list(Some(version));
+        Ok(())
     }
 
-    fn remove_issued(&self, id: &CertId) -> Result<(), String> {
+    /// One transaction that holds the register against every adder, so no renewal lands between
+    /// the check and the removal, and removes the entry only while it has expired and no
+    /// certificate the table holds below it, walked down by one recursive query, is still valid:
+    /// a renewal the pruning instance never took up keeps its chain.
+    fn remove_issued(&self, id: &CertId, now_ms: u64) -> Result<bool, String> {
         let id = id.clone();
-        self.database.run(move |pool| async move {
+        let version = self.database.run(move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
             transaction
+                .execute("LOCK TABLE certificates IN SHARE ROW EXCLUSIVE MODE", &[])
+                .await
+                .map_err(sql)?;
+            let removed = transaction
                 .execute(
-                    "DELETE FROM certificates WHERE issuer = $1 AND serial = $2",
-                    &[&id.issuer, &id.serial],
+                    "WITH RECURSIVE down (issuer, serial) AS ( \
+                         SELECT issuer, serial FROM certificates \
+                         WHERE predecessor_issuer = $1 AND predecessor_serial = $2 \
+                         UNION \
+                         SELECT c.issuer, c.serial \
+                         FROM certificates c JOIN down \
+                           ON c.predecessor_issuer = down.issuer \
+                          AND c.predecessor_serial = down.serial \
+                     ) \
+                     DELETE FROM certificates \
+                     WHERE issuer = $1 AND serial = $2 AND not_after_ms <= $3 \
+                       AND NOT EXISTS ( \
+                           SELECT 1 FROM down JOIN certificates c USING (issuer, serial) \
+                           WHERE c.not_after_ms > $3 \
+                       )",
+                    &[&id.issuer, &id.serial, &signed(now_ms)],
                 )
                 .await
                 .map_err(sql)?;
-            notify(&*transaction, CERTIFICATE, &id.serial).await?;
-            transaction.commit().await.map_err(sql)
-        })
+            if removed == 0 {
+                return Ok(None);
+            }
+            notify(&transaction, CERTIFICATE, &id.serial).await?;
+            let version = bump_list_version(&transaction).await?;
+            transaction.commit().await.map_err(sql)?;
+            Ok(Some(version))
+        })?;
+        self.wrote_list(version);
+        Ok(version.is_some())
     }
 
     /// One transaction that holds the register against every other writer and the list against
@@ -150,50 +183,26 @@ impl LedgerStore for PgLedgerStore {
         let bounds = *bounds;
         let mint = mint.map(|(host, entry)| (host.to_string(), entry.clone()));
         let bootstrap = bootstrap.cloned();
-        self.database.run(move |pool| async move {
+        let (registered, version) = self.database.run(move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
-            transaction
-                .batch_execute(
-                    "LOCK TABLE certificates IN SHARE ROW EXCLUSIVE MODE; \
-                     LOCK TABLE revocations IN SHARE MODE",
-                )
-                .await
-                .map_err(sql)?;
-            let id = &issued.facts.id;
-            let held: i64 = transaction
-                .query_one(
-                    "SELECT count(*) FROM certificates WHERE NOT (issuer = $1 AND serial = $2)",
-                    &[&id.issuer, &id.serial],
-                )
-                .await
-                .map_err(sql)?
-                .get(0);
-            let held = usize::try_from(held).unwrap_or(usize::MAX);
-            if held >= bounds.size {
-                return Ok(Registered::Full(register_full(held)));
+            let registered = register_in(
+                &transaction,
+                &issued,
+                &bounds,
+                mint.as_ref().map(|(host, entry)| (host.as_str(), entry)),
+                bootstrap.as_ref(),
+            )
+            .await?;
+            if registered != Registered::Registered {
+                return Ok((registered, None));
             }
-            if let Some(bootstrap) = &bootstrap {
-                if names(&*transaction, bootstrap).await? {
-                    return Ok(Registered::BootstrapRevoked);
-                }
-            }
-            if let Some(predecessor) = &issued.predecessor {
-                let decided = decide_renewal(&*transaction, id, predecessor, &bounds).await?;
-                if decided != Registered::Registered {
-                    return Ok(decided);
-                }
-            }
-            write_issued(&*transaction, &issued).await?;
-            notify(&*transaction, CERTIFICATE, &issued.facts.id.serial).await?;
-            if let Some((host, entry)) = &mint {
-                if write_seen(&*transaction, host, entry).await? {
-                    notify(&*transaction, HOST, host).await?;
-                }
-            }
+            let version = read_list_version(&transaction).await?;
             transaction.commit().await.map_err(sql)?;
-            Ok(Registered::Registered)
-        })
+            Ok((registered, Some(version)))
+        })?;
+        self.wrote_list(version);
+        Ok(registered)
     }
 
     /// One transaction that holds the table against every other adder, so the bound is counted
@@ -237,8 +246,8 @@ impl LedgerStore for PgLedgerStore {
                     )
                     .await
                     .map_err(sql)?;
-                super::notify::notify(&*transaction, super::notify::REVOCATION, &wider.id).await?;
-                let version = bump_list_version(&*transaction).await?;
+                super::notify::notify(&transaction, super::notify::REVOCATION, &wider.id).await?;
+                let version = bump_list_version(&transaction).await?;
                 transaction.commit().await.map_err(sql)?;
                 return Ok((Added::Widened(wider), Some(version)));
             }
@@ -254,9 +263,9 @@ impl LedgerStore for PgLedgerStore {
             }
             let position = last.map_or(0, |last| last + 1);
             let id = entry.id.clone();
-            write_revocations(&*transaction, &[(position, entry)]).await?;
-            super::notify::notify(&*transaction, super::notify::REVOCATION, &id).await?;
-            let version = bump_list_version(&*transaction).await?;
+            write_revocations(&transaction, &[(position, entry)]).await?;
+            super::notify::notify(&transaction, super::notify::REVOCATION, &id).await?;
+            let version = bump_list_version(&transaction).await?;
             transaction.commit().await.map_err(sql)?;
             Ok((Added::Added, Some(version)))
         })?;
@@ -276,8 +285,8 @@ impl LedgerStore for PgLedgerStore {
             if removed == 0 {
                 return Ok(None);
             }
-            super::notify::notify(&*transaction, super::notify::REVOCATION, &id).await?;
-            let version = bump_list_version(&*transaction).await?;
+            super::notify::notify(&transaction, super::notify::REVOCATION, &id).await?;
+            let version = bump_list_version(&transaction).await?;
             transaction.commit().await.map_err(sql)?;
             Ok(Some(version))
         })?;
@@ -300,17 +309,16 @@ impl LedgerStore for PgLedgerStore {
     /// transaction: a Gateway mark committed before it is seen, and one that waits for it releases
     /// what it bound. A Host whose row is marked as a Gateway is bound none (ADR-0043 clause 16).
     /// The hold is one that conflicts with itself, so two binders of one Host wait for each other
-    /// rather than both holding a share of the row they then write. An `instance_uid` another
-    /// Host's array lists, as a release before the bindings' table bound it, is answered as that
-    /// Host's too, and a new binding goes into the Host's array as well; a Gateway's array binds
-    /// nothing. No such release runs on this schema, whose oldest Server is 0.8.0: the arrays are
-    /// kept for the removal rule of ADR-0044 clause 22.
+    /// rather than both holding a share of the row they then write. The Hosts' arrays are neither
+    /// read nor added to (see `unbind_in`). What it binds or makes is announced after the commit
+    /// ([`follow_commit`]): it widens what the Host speaks for, which every binding decides here
+    /// again, so no announcing commit waits for the flush of another's.
     fn bind_seen(&self, instance_uid: &str, host: &str, row: &Host) -> Result<Bound, String> {
         let (instance_uid, host, row) = (instance_uid.to_string(), host.to_string(), row.clone());
         self.database.run(move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
-            let made = insert_host_row(&*transaction, &host, &row).await?;
+            let made = insert_host_row(&transaction, &host, &row).await?;
             let gateway: bool = transaction
                 .query_one(
                     "SELECT gateway FROM hosts WHERE host = $1 FOR NO KEY UPDATE",
@@ -321,19 +329,6 @@ impl LedgerStore for PgLedgerStore {
                 .get(0);
             if gateway {
                 return Ok(Bound::Gateway);
-            }
-            if let Some(row) = transaction
-                .query_opt(
-                    "SELECT host FROM hosts WHERE NOT gateway AND host <> $2 \
-                     AND $1 = ANY(instance_uids) \
-                     AND NOT EXISTS (SELECT 1 FROM host_bindings WHERE instance_uid = $1) \
-                     ORDER BY host LIMIT 1",
-                    &[&instance_uid, &host],
-                )
-                .await
-                .map_err(sql)?
-            {
-                return Ok(Bound::Taken(row.get(0)));
             }
             let inserted = transaction
                 .execute(
@@ -355,13 +350,14 @@ impl LedgerStore for PgLedgerStore {
                 // Refused: the transaction is dropped, so the row made for it is not kept either.
                 return Ok(Bound::Taken(holder));
             }
-            if inserted > 0 {
-                append_to_array(&*transaction, &instance_uid, &host).await?;
-            }
-            if made || inserted > 0 {
-                notify(&*transaction, HOST, &host).await?;
+            let announced = made || inserted > 0;
+            if announced {
+                will_follow(HOST, &host);
             }
             transaction.commit().await.map_err(sql)?;
+            if announced {
+                follow_commit(client, &pool);
+            }
             Ok(Bound::Bound)
         })
     }
@@ -371,9 +367,9 @@ impl LedgerStore for PgLedgerStore {
         self.database.run(move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
-            let host = unbind_in(&*transaction, &instance_uid).await?;
+            let host = unbind_in(&transaction, &instance_uid).await?;
             if host.is_some() {
-                notify(&*transaction, HOST, host.as_deref().unwrap_or_default()).await?;
+                notify(&transaction, HOST, host.as_deref().unwrap_or_default()).await?;
             }
             transaction.commit().await.map_err(sql)?;
             Ok(host)
@@ -387,7 +383,7 @@ impl LedgerStore for PgLedgerStore {
         self.database.run(move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
-            let Some(host) = unbind_in(&*transaction, &old).await? else {
+            let Some(host) = unbind_in(&transaction, &old).await? else {
                 return Ok(None);
             };
             transaction
@@ -406,10 +402,7 @@ impl LedgerStore for PgLedgerStore {
                 .await
                 .map_err(sql)?
                 .get(0);
-            if holder == host {
-                append_to_array(&*transaction, &new, &host).await?;
-            }
-            notify(&*transaction, HOST, &host).await?;
+            notify(&transaction, HOST, &host).await?;
             transaction.commit().await.map_err(sql)?;
             let bound = if holder == host {
                 Bound::Bound
@@ -430,7 +423,7 @@ impl LedgerStore for PgLedgerStore {
                 .await
                 .map_err(sql)?;
             if removed > 0 {
-                notify(&*transaction, HOST, &host).await?;
+                notify(&transaction, HOST, &host).await?;
             }
             transaction.commit().await.map_err(sql)
         })
@@ -441,14 +434,19 @@ impl LedgerStore for PgLedgerStore {
     }
 
     /// One transaction on the rows the act names, each field decided from what is stored, so no
-    /// instance writes back another instance's change from a stale copy.
-    fn write_host_act(&self, act: &HostAct) -> Result<(), String> {
+    /// instance writes back another instance's change from a stale copy. A Host row made or whose
+    /// valid until moves forward (`Seen`, `Extended`), by a report, an issuance or a prune, is
+    /// announced after the commit ([`follow_commit`]); a Gateway's mark and a Host forgotten narrow
+    /// what a Host speaks for, and are announced in their transaction. A Gateway's mark is written
+    /// only where the transaction finds the host's row or a register entry naming it, whatever
+    /// the instance holds, and answers `false` with nothing written otherwise.
+    fn write_host_act(&self, act: &HostAct) -> Result<bool, String> {
         let act = act.clone();
         self.database.run(move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
             let changed = match &act {
-                HostAct::Seen { host, entry } => write_seen(&*transaction, host, entry).await?,
+                HostAct::Seen { host, entry } => write_seen(&transaction, host, entry).await?,
                 HostAct::Extended(untils) => {
                     let mut changed = false;
                     for (host, until) in untils {
@@ -468,15 +466,34 @@ impl LedgerStore for PgLedgerStore {
                 HostAct::Gateway { host, gateway } => {
                     let subject = serde_json::to_value(crate::revocation::SubjectValues::default())
                         .expect("subject values serialize");
-                    transaction
+                    // A host is known by its row, which the update holds, so a Host forgotten
+                    // meanwhile is waited for and found gone, or by a register entry naming it,
+                    // held the same way so an entry removed meanwhile is found gone, which makes
+                    // the row; a row another transaction makes meanwhile is waited for and
+                    // updated.
+                    let known = transaction
                         .execute(
-                            "INSERT INTO hosts (host, gateway, instance_uids, subject) \
-                             VALUES ($1, $2, '{}', $3) \
-                             ON CONFLICT (host) DO UPDATE SET gateway = EXCLUDED.gateway",
-                            &[host, gateway, &subject],
+                            "UPDATE hosts SET gateway = $2 WHERE host = $1",
+                            &[host, gateway],
                         )
                         .await
-                        .map_err(sql)?;
+                        .map_err(sql)?
+                        > 0
+                        || transaction
+                            .execute(
+                                "INSERT INTO hosts (host, gateway, instance_uids, subject) \
+                                 SELECT $1, $2, '{}', $3 \
+                                 WHERE EXISTS (SELECT 1 FROM certificates WHERE host = $1 FOR KEY SHARE) \
+                                 ON CONFLICT (host) DO UPDATE SET gateway = EXCLUDED.gateway",
+                                &[host, gateway, &subject],
+                            )
+                            .await
+                            .map_err(sql)?
+                            > 0;
+                    if !known {
+                        // Nothing was written; the transaction is dropped unannounced.
+                        return Ok(false);
+                    }
                     if *gateway {
                         transaction
                             .execute("DELETE FROM host_bindings WHERE host = $1", &[host])
@@ -511,17 +528,25 @@ impl LedgerStore for PgLedgerStore {
                     !gone.is_empty()
                 }
             };
+            let follows = matches!(act, HostAct::Seen { .. } | HostAct::Extended(_));
             if changed {
-                notify(&*transaction, HOST, "").await?;
+                if follows {
+                    will_follow(HOST, "");
+                } else {
+                    notify(&transaction, HOST, "").await?;
+                }
             }
-            transaction.commit().await.map_err(sql)
+            transaction.commit().await.map_err(sql)?;
+            if changed && follows {
+                follow_commit(client, &pool);
+            }
+            Ok(true)
         })
     }
 
     /// Writes each Host that changed since the last commit, and removes each one that is gone with
-    /// its bindings. The `instance_uids` a Host's row keeps are those this instance holds, the
-    /// array a release before the bindings' table read, kept for the removal rule of
-    /// ADR-0044 clause 22; the bindings are read from that table.
+    /// its bindings. A Host's array only loses the `instance_uid`s the Host no longer speaks for
+    /// (see `unbind_in`); the bindings are read from their table.
     fn save_hosts(&self, hosts: &BTreeMap<String, Host>) -> Result<(), String> {
         let mut written = self.written_hosts.lock().expect("hosts lock");
         let changed: Vec<(String, Host)> = hosts
@@ -549,9 +574,9 @@ impl LedgerStore for PgLedgerStore {
                 .await
                 .map_err(sql)?;
             for (host, entry) in &changed {
-                write_host(&*transaction, host, entry).await?;
+                write_host(&transaction, host, entry).await?;
             }
-            notify(&*transaction, HOST, "").await?;
+            notify(&transaction, HOST, "").await?;
             transaction.commit().await.map_err(sql)
         })?;
         hosts.clone_into(&mut written);
@@ -560,10 +585,12 @@ impl LedgerStore for PgLedgerStore {
 }
 
 /// Removes the binding of `instance_uid` inside the caller's transaction: the Host it was bound to,
-/// `None` when it was bound to none. The Hosts' arrays, which a release before the bindings' table
-/// bound by and which are kept for the removal rule of
-/// ADR-0044 clause 22, lose it too, so neither finds it bound
-/// once it is released.
+/// `None` when it was bound to none. The Hosts' arrays lose it too. This release adds nothing to
+/// them and reads them no more, but a Server of 0.8.0 beside it reads an array for an
+/// `instance_uid` no binding holds, and must not find a released one held there. The release after
+/// this one stops this, and the release after that removes the arrays
+/// (ADR-0050
+/// clause 22).
 async fn unbind_in(
     client: &impl GenericClient,
     instance_uid: &str,
@@ -588,8 +615,7 @@ async fn unbind_in(
 }
 
 /// Makes `host`'s row as `entry` holds it when the store has none, its array empty: what binds the
-/// Host is its rows in `host_bindings`, each listed in the array by the act that binds it. Answers
-/// whether it made the row.
+/// Host is its rows in `host_bindings`. Answers whether it made the row.
 async fn insert_host_row(
     client: &impl GenericClient,
     host: &str,
@@ -632,26 +658,6 @@ async fn write_seen(client: &impl GenericClient, host: &str, entry: &Host) -> Re
         .await
         .map_err(sql)?;
     Ok(moved > 0)
-}
-
-/// Lists `instance_uid` in `host`'s array inside the caller's transaction, as a release before the
-/// bindings' table bound by it, kept for the removal rule of
-/// ADR-0044 clause 22; a Host with no row yet takes it with the
-/// row its act writes.
-async fn append_to_array(
-    client: &impl GenericClient,
-    instance_uid: &str,
-    host: &str,
-) -> Result<(), String> {
-    client
-        .execute(
-            "UPDATE hosts SET instance_uids = array_append(instance_uids, $1) \
-             WHERE host = $2 AND NOT $1 = ANY(instance_uids)",
-            &[&instance_uid, &host],
-        )
-        .await
-        .map_err(sql)?;
-    Ok(())
 }
 
 /// Binds every `instance_uid` `entry` speaks for to `host`, in a database that holds no binding of
@@ -900,6 +906,67 @@ async fn decide_renewal(
     Ok(Registered::Registered)
 }
 
+/// Registers `issued`, deciding from what is stored, with the Host an approval mints, `mint`,
+/// written when the store has no row of it and else its valid until moved forward, inside the
+/// caller's transaction, which commits it or not: the register's own transaction, or the one that
+/// decides an approval's request (ADR-0050 clause 9). The table is held against every other
+/// adder while the bounds are counted, and an approval's bootstrap certificate, `bootstrap`, is
+/// looked up in the list the transaction holds, so a revocation another instance committed first
+/// refuses it. An entry written moves the list's version (ADR-0050 clause 10), which the caller
+/// reads in the transaction to take up. Anything but [`Registered::Registered`] leaves the
+/// transaction to be rolled back.
+///
+/// # Errors
+/// Returns an error when a statement fails.
+pub(crate) async fn register_in(
+    transaction: &impl GenericClient,
+    issued: &Issued,
+    bounds: &RegisterBounds,
+    mint: Option<(&str, &Host)>,
+    bootstrap: Option<&CertId>,
+) -> Result<Registered, String> {
+    transaction
+        .batch_execute(
+            "LOCK TABLE certificates IN SHARE ROW EXCLUSIVE MODE; \
+             LOCK TABLE revocations IN SHARE MODE",
+        )
+        .await
+        .map_err(sql)?;
+    let id = &issued.facts.id;
+    let held: i64 = transaction
+        .query_one(
+            "SELECT count(*) FROM certificates WHERE NOT (issuer = $1 AND serial = $2)",
+            &[&id.issuer, &id.serial],
+        )
+        .await
+        .map_err(sql)?
+        .get(0);
+    let held = usize::try_from(held).unwrap_or(usize::MAX);
+    if held >= bounds.size {
+        return Ok(Registered::Full(register_full(held)));
+    }
+    if let Some(bootstrap) = bootstrap {
+        if names(transaction, bootstrap).await? {
+            return Ok(Registered::BootstrapRevoked);
+        }
+    }
+    if let Some(predecessor) = &issued.predecessor {
+        let decided = decide_renewal(transaction, id, predecessor, bounds).await?;
+        if decided != Registered::Registered {
+            return Ok(decided);
+        }
+    }
+    write_issued(transaction, issued).await?;
+    notify(transaction, CERTIFICATE, &issued.facts.id.serial).await?;
+    bump_list_version(transaction).await?;
+    if let Some((host, entry)) = mint {
+        if write_seen(transaction, host, entry).await? {
+            notify(transaction, HOST, host).await?;
+        }
+    }
+    Ok(Registered::Registered)
+}
+
 /// Whether a revocation in the list names the certificate `id`, by its serial under one of the
 /// issuers it names.
 pub(crate) async fn names(client: &impl GenericClient, id: &CertId) -> Result<bool, String> {
@@ -956,11 +1023,14 @@ pub(crate) async fn write_host(
 ) -> Result<(), String> {
     let uids: Vec<&str> = entry.instance_uids.iter().map(String::as_str).collect();
     let subject = serde_json::to_value(&entry.subject).expect("subject values serialize");
+    // The array only loses what `entry` no longer speaks for: see `unbind_in`.
     client
         .execute(
             "INSERT INTO hosts (host, gateway, instance_uids, subject, approved_ms, \
-             valid_until_ms) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (host) DO UPDATE SET \
-             gateway = EXCLUDED.gateway, instance_uids = EXCLUDED.instance_uids, \
+             valid_until_ms) VALUES ($1, $2, '{}', $4, $5, $6) ON CONFLICT (host) DO UPDATE SET \
+             gateway = EXCLUDED.gateway, \
+             instance_uids = ARRAY(SELECT uid FROM unnest(hosts.instance_uids) AS uid \
+             WHERE uid = ANY($3::text[])), \
              subject = EXCLUDED.subject, approved_ms = EXCLUDED.approved_ms, \
              valid_until_ms = EXCLUDED.valid_until_ms",
             &[
@@ -1112,7 +1182,10 @@ mod tests {
         assert_eq!(ledger.revocations, list);
         assert_eq!(ledger.hosts, hosts);
 
-        reopened.remove_issued(&root.facts.id).expect("remove");
+        assert!(
+            reopened.remove_issued(&root.facts.id, 100).expect("remove"),
+            "an entry whose renewals have all expired is removed"
+        );
         assert!(reopened.remove_revocation("r2").expect("remove"));
         assert!(
             !reopened.remove_revocation("r2").expect("remove"),
@@ -1164,14 +1237,14 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0044
+    /// Verifies: ADR-0050
     #[test]
     fn the_ledger_port_contract_holds_on_the_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
         contract(&|| Box::new(FsLedgerStore::open(dir.path()).expect("open")));
     }
 
-    /// Verifies: ADR-0044
+    /// Verifies: ADR-0050
     #[test]
     fn the_ledger_port_contract_holds_on_postgres() {
         let Some(test) = TestDatabase::named() else {
@@ -1251,14 +1324,14 @@ mod tests {
         assert_eq!(ids, expected, "nothing refused was written");
     }
 
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0048
     #[test]
     fn the_register_write_decides_from_the_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
         register_contract(&|| Box::new(FsLedgerStore::open(dir.path()).expect("open")));
     }
 
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0048
     #[test]
     fn the_register_write_decides_from_postgres() {
         let Some(test) = TestDatabase::named() else {
@@ -1271,7 +1344,7 @@ mod tests {
     /// Two instances registering at once count the register's size together: in every round two
     /// writers race for the one place left, behind a barrier, and exactly one is written while the
     /// other finds the register full.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0048
     #[test]
     fn two_writers_at_the_registers_bound_write_one_entry_between_them() {
         let Some(test) = TestDatabase::named() else {
@@ -1319,7 +1392,7 @@ mod tests {
     /// An instance whose view of the list is stale cannot register the renewal of a certificate
     /// another instance revoked: B never hears of the revocation through A, and the register write
     /// refuses the renewal from what the database holds.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0048
     #[test]
     fn a_stale_instance_cannot_register_the_renewal_of_a_revoked_certificate() {
         use crate::revocation::{Authority, Revocations, RENEWS_REVOKED};
@@ -1370,7 +1443,7 @@ mod tests {
     /// Two instances adding at once count the bound together: in every round two adders race for
     /// the one place left, behind a barrier, and exactly one is added while the other finds the
     /// list full, so the list never grows past its bound and no two entries share a place.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0048
     #[test]
     fn two_adders_at_the_bound_add_one_entry_between_them() {
         let Some(test) = TestDatabase::named() else {
@@ -1433,10 +1506,22 @@ mod tests {
         );
     }
 
+    /// Lists each Host's `instance_uid`s in its array, as a release before the bindings' table
+    /// wrote them: this release writes none there.
+    fn listed_in_the_arrays(test: &TestDatabase, hosts: &BTreeMap<String, Host>) {
+        for (name, entry) in hosts {
+            let uids: Vec<&str> = entry.instance_uids.iter().map(String::as_str).collect();
+            test.sql(&format!(
+                "UPDATE hosts SET instance_uids = '{{{}}}' WHERE host = '{name}'",
+                uids.join(",")
+            ));
+        }
+    }
+
     /// The bindings move out of the Hosts' arrays of a database a release before them wrote: each
     /// `instance_uid` an array holds is bound to its Host. An `instance_uid` two Hosts' arrays hold
     /// fails the migration, naming it, and changes nothing.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0048
     #[test]
     fn the_bindings_move_out_of_the_hosts_arrays() {
         use crate::postgres::schema::{MIGRATIONS, SCHEMA_TABLE};
@@ -1463,6 +1548,7 @@ mod tests {
             PgLedgerStore::new(database.clone())
                 .save_hosts(&hosts)
                 .expect("save");
+            listed_in_the_arrays(&test, &hosts);
             // The database as the release before the bindings left it.
             test.sql(&format!(
                 "DROP TABLE host_bindings; DROP INDEX certificates_predecessor; \
@@ -1496,7 +1582,7 @@ mod tests {
     /// Two instances binding one `instance_uid` at once, each to a Host of its own, bind it once:
     /// in every round two binders race behind a barrier, and exactly one binds while the other is
     /// answered with the Host that holds it.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0048
     #[test]
     fn two_binders_of_one_instance_uid_bind_it_once() {
         let Some(test) = TestDatabase::named() else {
@@ -1538,9 +1624,9 @@ mod tests {
     /// Two instances binding two `instance_uid`s to one Host at once both bind theirs: the row
     /// each holds while it binds is a hold that waits for the other, not a share both take and
     /// then write, which the database would break as a deadlock
-    /// (ADR-0041
+    /// (ADR-0048
     /// clause 19).
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0048
     #[test]
     fn two_binders_of_one_host_bind_both_without_a_deadlock() {
         let Some(test) = TestDatabase::named() else {
@@ -1583,7 +1669,8 @@ mod tests {
 
     /// A Gateway's mark and a binding to its Host made at once never leave a binding to it: the
     /// binding waits for the mark and sees it, or the mark waits for the binding and releases it
-    /// (ADR-0043 clause 16). The Host has no row before either.
+    /// (ADR-0043 clause 16). The Host has no row before either; a register entry names it, so the
+    /// mark knows it.
     /// Verifies: ADR-0043
     #[test]
     fn a_gateway_mark_and_a_binding_at_once_leave_the_gateway_bound_none() {
@@ -1597,16 +1684,27 @@ mod tests {
         );
         for round in 0..20 {
             let gateway = format!("gateway/{round}");
+            let mut entry = issued(&format!("{round:02x}"), None);
+            entry.facts.host = Some(gateway.clone());
+            marker
+                .register_issued(
+                    &entry,
+                    &RegisterBounds {
+                        size: 100,
+                        per_root: 10,
+                    },
+                )
+                .expect("register");
             let barrier = std::sync::Barrier::new(2);
             std::thread::scope(|scope| {
                 scope.spawn(|| {
                     barrier.wait();
-                    marker
+                    assert!(marker
                         .write_host_act(&HostAct::Gateway {
                             host: gateway.clone(),
                             gateway: true,
                         })
-                        .expect("mark");
+                        .expect("mark"));
                 });
                 scope.spawn(|| {
                     barrier.wait();
@@ -1627,9 +1725,9 @@ mod tests {
 
     /// A binding is made with its Host's row, in one write, so no binding stands without the Host
     /// it binds to; one another Host holds writes nothing, the row it would have made included
-    /// (ADR-0041
+    /// (ADR-0048
     /// clause 19).
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0048
     #[test]
     fn a_binding_is_made_with_its_hosts_row() {
         let Some(test) = TestDatabase::named() else {
@@ -1757,7 +1855,7 @@ mod tests {
     /// An instance whose view of the Hosts is stale cannot bind an `instance_uid` another
     /// instance bound to another Host: B never hears of A's binding, and its report is refused
     /// naming the Host that holds the Agent, by which B decides from then on.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0048
     #[test]
     fn a_stale_instance_cannot_bind_an_agent_another_host_holds() {
         use crate::revocation::{bound_elsewhere, Revocations};
@@ -1812,12 +1910,12 @@ mod tests {
         }
     }
 
-    /// The list's one version moves with every revocation added or widened and every lift, in
-    /// their transactions, and with nothing else; an instance holds the version its own write left
-    /// only when no other instance wrote between, and none until it reads the list again
-    /// otherwise, so the version it serves never names a list it does not hold
-    /// (ADR-0044 clause 10).
-    /// Verifies: ADR-0044
+    /// The list's one version moves with every revocation added or widened, every lift and every
+    /// register entry, in their transactions, and with nothing else; an instance holds the
+    /// version its own write left only when no other instance wrote between, and none until it
+    /// reads the list again otherwise, so the version it serves never names a list it does not
+    /// hold (ADR-0050 clause 10).
+    /// Verifies: ADR-0050
     #[test]
     fn the_list_version_moves_with_each_revocation_and_lift_and_names_only_the_list_held() {
         let Some(test) = TestDatabase::named() else {
@@ -1860,17 +1958,27 @@ mod tests {
             (Some(1), 1),
             "a revocation held already moves nothing, and keeps the version held"
         );
+        let (_, fetched) = crate::transport::gateway_list_of(&a);
         a.record(issued("0c", None).facts, b"\x01", None)
             .expect("a register entry");
-        assert_eq!(stored(), 1, "a register entry moves nothing");
+        assert_ne!(
+            crate::transport::gateway_list_of(&a).1,
+            fetched,
+            "a Gateway holding the ETag from before the entry is not answered 304"
+        );
+        assert_eq!(
+            (a.list_version(), stored()),
+            (Some(2), 2),
+            "a register entry moves it too"
+        );
 
         b.revoke_certificate("client", "0b")
             .expect("B revokes, holding version 0");
-        assert_eq!(stored(), 2);
+        assert_eq!(stored(), 3);
         assert_eq!(
             b.list_version(),
             None,
-            "B's list misses A's revocation, so it holds no version"
+            "B's ledger misses A's revocation and register entry, so it holds no version"
         );
         assert_eq!(
             b.revoked_certificates_at("client").1,
@@ -1878,26 +1986,27 @@ mod tests {
             "and serves none with its list"
         );
         b.reload_ledger().expect("reload");
-        assert_eq!(b.list_version(), Some(2));
+        assert_eq!(b.list_version(), Some(3));
 
         let lifted = b.list()[0].id.clone();
         assert!(b.lift(&lifted).expect("lift"));
-        assert_eq!((b.list_version(), stored()), (Some(3), 3));
+        assert_eq!((b.list_version(), stored()), (Some(4), 4));
         assert!(!b.lift(&lifted).expect("lift again"));
         assert_eq!(
             (b.list_version(), stored()),
-            (Some(3), 3),
+            (Some(4), 4),
             "a lift of nothing moves nothing, and keeps the version held"
         );
     }
 
-    /// One version never names two Gateway bodies: when B registers a renewal and A revokes its
-    /// predecessor before A has taken up B's register entry, A's write moves the version by one,
-    /// but the list A resolves lacks the renewal. A's `ETag` before it reads the ledger again and
-    /// after differ, so a Gateway that fetched the first is answered in full by either instance
-    /// once both hold the renewal
-    /// (ADR-0038 clauses 28 and 34).
-    /// Verifies: ADR-0038, ADR-0044
+    /// One version never names two Gateway bodies: when a Server of 0.8.0 registers a renewal,
+    /// which moves no version, and A revokes its predecessor before A has taken the renewal up,
+    /// A's write moves the version by one and A holds it, though the list A resolves lacks the
+    /// renewal. A holds the same version before it reads the ledger again and after, and its
+    /// `ETag`s still differ by the body's hash, so a Gateway that fetched the first is answered in
+    /// full by either instance once both hold the renewal
+    /// (ADR-0038 clauses 28 and 34, ADR-0050 clause 10).
+    /// Verifies: ADR-0038, ADR-0050
     #[test]
     fn one_list_version_never_names_two_gateway_bodies() {
         let Some(test) = TestDatabase::named() else {
@@ -1925,11 +2034,15 @@ mod tests {
         let a = instance();
         a.record(issued("0a", None).facts, b"\x01", None)
             .expect("enrol X");
+        let mut renewal = issued("0b", Some("0a"));
+        renewal.facts.host = None;
+        database
+            .run(move |pool| async move {
+                let client = client(&pool).await?;
+                write_issued(&client, &renewal).await
+            })
+            .expect("a Server of 0.8.0 registers X', a renewal of X, moving no version");
         let b = instance();
-        let mut renewal = issued("0b", Some("0a")).facts;
-        renewal.host = None;
-        b.record(renewal, b"\x01", Some(CertId::new(b"ca", "0a")))
-            .expect("B registers X', a renewal of X");
 
         a.revoke_certificate("client", "0a")
             .expect("A revokes X, not holding X'");
@@ -1938,13 +2051,19 @@ mod tests {
             !before.contains(r#""serial":"b""#),
             "A does not resolve X' yet: {before}"
         );
+        let held = a.list_version();
+        assert_eq!(
+            held,
+            Some(stored_version(&test)),
+            "A's write followed the version it held, so A holds the new one"
+        );
         a.reload_ledger().expect("A takes up X'");
         let (after, etag) = crate::transport::gateway_list_of(&a);
         assert!(
             after.contains(r#""serial":"b""#),
             "A resolves X' now: {after}"
         );
-        assert_eq!(a.list_version(), Some(1), "one version, before and after");
+        assert_eq!(a.list_version(), held, "one version, before and after");
         assert_ne!(
             fetched, etag,
             "a Gateway holding the ETag of the list without X' is not answered 304"
@@ -1954,6 +2073,166 @@ mod tests {
             crate::transport::gateway_list_of(&b).1,
             etag,
             "B answers the ETag A gives once both hold the same list"
+        );
+    }
+
+    /// The list's version as `test`'s database holds it.
+    fn stored_version(test: &TestDatabase) -> u64 {
+        test.rows("SELECT version FROM revocation_list_version")[0][0]
+            .as_deref()
+            .expect("a version")
+            .parse()
+            .expect("a number")
+    }
+
+    /// A clock the test sets.
+    struct Set(std::sync::atomic::AtomicU64);
+
+    impl crate::fleet::Clock for Set {
+        fn now_ms(&self) -> u64 {
+            self.0.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    /// Every change to the register moves the list's version in its own transaction: an entry
+    /// written, and one removed; a removal the store refuses moves nothing. The adapter holds the
+    /// version its own write left (ADR-0050 clause 10).
+    /// Verifies: ADR-0050
+    #[test]
+    fn a_register_change_moves_the_list_version() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let store = PgLedgerStore::new(database.clone());
+        assert_eq!(stored_version(&test), 0);
+        store.put_issued(&issued("0a", None)).expect("put");
+        assert_eq!(
+            (store.list_version(), stored_version(&test)),
+            (Some(1), 1),
+            "an entry put"
+        );
+        let bounds = RegisterBounds {
+            size: 10,
+            per_root: 10,
+        };
+        let mut renewal = issued("0b", Some("0a"));
+        renewal.facts.not_after_ms = 50;
+        assert_eq!(
+            store.register_issued(&renewal, &bounds).expect("register"),
+            Registered::Registered
+        );
+        assert_eq!(
+            (store.list_version(), stored_version(&test)),
+            (Some(2), 2),
+            "an entry registered"
+        );
+        assert!(
+            !store
+                .remove_issued(&CertId::new(b"ca", "0a"), 20)
+                .expect("remove"),
+            "a renewal valid at 20 keeps its predecessor, expired at 9"
+        );
+        assert_eq!(stored_version(&test), 2, "a removal refused moves nothing");
+        assert!(store
+            .remove_issued(&CertId::new(b"ca", "0b"), 100)
+            .expect("remove"));
+        assert_eq!(
+            (store.list_version(), stored_version(&test)),
+            (Some(3), 3),
+            "an entry removed"
+        );
+    }
+
+    /// The prune removes a register entry only while the database holds no valid certificate
+    /// renewed from it, at any depth, whatever the instance that prunes holds: A never took up X',
+    /// a renewal of X, nor X'', a renewal of X', that a Server of 0.8.0 registered, moving no
+    /// version. A prunes X once it expired, X' expired too and X'' still valid, and X stays, so a
+    /// revocation of X still revokes X'', and A holds no version until it reads the ledger again.
+    /// Once X'' has expired too, all three go, and A holds the version its removals left
+    /// (ADR-0050 clause 10, ADR-0038 clause 28).
+    /// Verifies: ADR-0050, ADR-0038
+    #[test]
+    fn the_prune_keeps_an_entry_a_valid_renewal_in_the_database_descends_from() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let clock = Arc::new(Set(std::sync::atomic::AtomicU64::new(1)));
+        let instance = || {
+            crate::revocation::Revocations::open(
+                Box::new(PgLedgerStore::new(database.clone())),
+                clock.clone(),
+                vec![crate::revocation::Authority {
+                    role: "client".into(),
+                    subject: CertId::new(b"ca", "00").issuer,
+                    name: "CN=ca".into(),
+                }],
+            )
+            .expect("open")
+        };
+        let held = |serial: &str| {
+            let serial = CertId::new(b"ca", serial).serial;
+            test.rows(&format!(
+                "SELECT count(*) FROM certificates WHERE serial = '{serial}'"
+            ))[0][0]
+                .as_deref()
+                == Some("1")
+        };
+        let a = instance();
+        let mut x = issued("0a", None).facts;
+        x.not_after_ms = 5;
+        a.record(x, b"\x01", None).expect("A enrols X");
+        let mut renewal = issued("0b", Some("0a"));
+        renewal.facts.host = None;
+        renewal.facts.not_after_ms = 8;
+        let mut grandchild = issued("0e", Some("0b"));
+        grandchild.facts.host = None;
+        grandchild.facts.not_after_ms = 1_000;
+        database
+            .run(move |pool| async move {
+                let client = client(&pool).await?;
+                write_issued(&client, &renewal).await?;
+                write_issued(&client, &grandchild).await
+            })
+            .expect("a Server of 0.8.0 registers X', a renewal of X, and X'', one of X'");
+        assert_eq!(a.list_version(), Some(stored_version(&test)));
+
+        clock.0.store(10, std::sync::atomic::Ordering::SeqCst);
+        let mut other = issued("0c", None).facts;
+        other.host = Some("other-host".into());
+        other.not_after_ms = 1_000;
+        a.record(other, b"\x02", None)
+            .expect("A registers another, and prunes X");
+        assert!(held("0a"), "X, below which X'' is valid, was removed");
+        assert_eq!(
+            a.list_version(),
+            None,
+            "A's register is not the stored one, so A holds no version"
+        );
+
+        let c = instance();
+        c.revoke_certificate("client", "0a").expect("revoke X");
+        assert!(
+            c.is_certificate_revoked(&CertId::new(b"ca", "0e")),
+            "the revocation of X revokes X''"
+        );
+
+        clock.0.store(2_000, std::sync::atomic::Ordering::SeqCst);
+        a.reload_ledger().expect("A reads the ledger again");
+        let mut last = issued("0d", None).facts;
+        last.host = Some("last-host".into());
+        last.not_after_ms = 3_000;
+        a.record(last, b"\x03", None)
+            .expect("A registers one more, and prunes again");
+        assert!(
+            !held("0a") && !held("0b") && !held("0e"),
+            "X, X' and X'' go once none is valid"
+        );
+        assert_eq!(
+            a.list_version(),
+            Some(stored_version(&test)),
+            "A holds the version its own removals and entry left"
         );
     }
 
@@ -2043,9 +2322,9 @@ mod tests {
 
     /// What one instance binds, releases and moves reaches every other that follows the
     /// notifications, without a restart: B admits by A's release, A's re-key and A's binding once
-    /// it hears of them (ADR-0041
+    /// it hears of them (ADR-0048
     /// clause 19).
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0048
     #[test]
     fn a_binding_another_instance_changes_reaches_an_instance_that_follows() {
         let Some(test) = TestDatabase::named() else {
@@ -2095,9 +2374,200 @@ mod tests {
         );
     }
 
+    /// Waits up to ten seconds for `condition`.
+    fn within_ten_seconds(condition: &dyn Fn() -> bool) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            if condition() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        condition()
+    }
+
+    /// A's database, shared as two instances beside each other share it, and B following it,
+    /// once B has heard of a binding A made: B listens.
+    fn a_and_listening_b(
+        test: &TestDatabase,
+    ) -> (
+        Arc<Database>,
+        crate::revocation::Revocations,
+        Arc<crate::revocation::Revocations>,
+        tokio::runtime::Runtime,
+    ) {
+        let database = Database::open_in(&test.config(), Exclusive::Shared, Some(&test.schema))
+            .expect("A's database");
+        let a = instances_on(&database)();
+        let (b, runtime) = follower(test);
+        a.check_report("h0", &SubjectValues::default(), 1_000, b"\x10")
+            .expect("bind");
+        assert!(
+            within_ten_seconds(&|| b.may_report("other", b"\x10").is_err()),
+            "B never heard of A's first binding"
+        );
+        (database, a, b, runtime)
+    }
+
+    /// A binding a report makes, and the Host row it makes or whose valid until it moves forward,
+    /// are announced after their commit, in a transaction of their own: where that notice is lost,
+    /// as when the instance ends between the commit and the `NOTIFY`, the other instance does not
+    /// hear of them, and the next notice it hears has it read them all
+    /// (ADR-0048 clause 9).
+    /// Verifies: ADR-0048
+    #[test]
+    fn a_binding_and_a_host_a_report_writes_are_announced_after_their_commit() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let (database, a, b, _runtime) = a_and_listening_b(&test);
+        let subject = SubjectValues::default();
+        database.afterwards().drop_all(true);
+        a.check_report("h1", &subject, 1_000, b"\x01")
+            .expect("the binding is made, its notice lost");
+        a.check_report("h0", &subject, 2_000, b"\x10")
+            .expect("the valid until moves forward, its notice lost");
+        let until = |host: &str| {
+            b.hosts()
+                .into_iter()
+                .find(|(name, _, _)| name == host)
+                .and_then(|(_, entry, _)| entry.valid_until_ms)
+        };
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        assert!(
+            b.may_report("h2", b"\x01").is_ok(),
+            "B heard of a binding whose notice after the commit was lost"
+        );
+        assert_eq!(
+            until("h0"),
+            Some(1_000),
+            "B heard of a valid until whose notice after the commit was lost"
+        );
+
+        database.afterwards().drop_all(false);
+        a.check_report("h3", &subject, 1_000, b"\x03")
+            .expect("bind");
+        assert!(
+            within_ten_seconds(&|| b.may_report("h2", b"\x03").is_err()),
+            "B hears of the binding announced after its commit"
+        );
+        assert!(
+            b.may_report("h2", b"\x01").is_err(),
+            "and holds the one whose notice was lost"
+        );
+        assert_eq!(until("h0"), Some(2_000), "and the valid until moved");
+    }
+
+    /// A notice after its commit that fails is sent again, and the write it follows answers as
+    /// made.
+    /// Verifies: ADR-0048
+    #[test]
+    fn a_notice_after_its_commit_that_fails_is_sent_again_and_the_write_answers_as_made() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let (database, a, b, _runtime) = a_and_listening_b(&test);
+        database.afterwards().fail_next(2);
+        a.check_report("h1", &SubjectValues::default(), 1_000, b"\x01")
+            .expect("the write answers as made");
+        assert!(
+            within_ten_seconds(&|| b.may_report("h2", b"\x01").is_err()),
+            "B hears of the binding once its notice is sent again"
+        );
+    }
+
+    /// Every write that narrows trust, and a register entry, keeps its notification in its
+    /// transaction: B hears of each although every notice sent after a commit is lost
+    /// (ADR-0048 clause 9).
+    /// Verifies: ADR-0048
+    #[test]
+    fn the_writes_that_narrow_trust_are_heard_although_every_notice_after_a_commit_is_lost() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let (database, a, b, _runtime) = a_and_listening_b(&test);
+        let subject = SubjectValues::default();
+        let store = PgLedgerStore::new(database.clone());
+        for (host, uid) in [("h1", b"\x01"), ("h1", b"\x02"), ("g", b"\x04")] {
+            a.check_report(host, &subject, 1_000, uid).expect("bind");
+        }
+        a.check_report("old", &subject, 5, b"\x06").expect("bind");
+        assert!(
+            within_ten_seconds(&|| [b"\x01", b"\x02", b"\x04", b"\x06"]
+                .iter()
+                .all(|uid| b.may_report("h2", *uid).is_err())),
+            "B never heard of A's bindings"
+        );
+        database.afterwards().drop_all(true);
+
+        a.release(b"\x01").expect("release");
+        assert!(
+            within_ten_seconds(&|| b.may_report("h2", b"\x01").is_ok()),
+            "B hears of the release"
+        );
+        a.rebind(b"\x02", b"\x03").expect("re-key");
+        assert!(
+            within_ten_seconds(
+                &|| b.may_report("h2", b"\x02").is_ok() && b.may_report("h2", b"\x03").is_err()
+            ),
+            "B hears of the re-key"
+        );
+        store
+            .unbind_host("h1")
+            .expect("release every binding of h1");
+        assert!(
+            within_ten_seconds(&|| b.may_report("h2", b"\x03").is_ok()),
+            "B hears of the release of every binding of a Host"
+        );
+        assert!(a.set_gateway("g", true).expect("mark"));
+        assert!(
+            within_ten_seconds(&|| b.is_gateway("g")),
+            "B hears of the Gateway's mark"
+        );
+        assert!(a.set_gateway("g", false).expect("unmark"));
+        assert!(
+            within_ten_seconds(&|| !b.is_gateway("g")),
+            "B hears of the mark taken away"
+        );
+        store
+            .write_host_act(&HostAct::Forgotten {
+                hosts: vec!["old".to_string()],
+                now_ms: 10,
+            })
+            .expect("forget");
+        assert!(
+            within_ten_seconds(&|| !b.hosts().iter().any(|(host, _, _)| host == "old")),
+            "B hears of the Host forgotten"
+        );
+        let root = issued("0a", None).facts;
+        a.record(root.clone(), b"\x01", None).expect("register");
+        assert!(
+            within_ten_seconds(&|| b.issued_entry(&root.id).is_some()),
+            "B hears of the register entry"
+        );
+        store
+            .add_revocation(
+                &Revocation {
+                    id: "r".into(),
+                    revoked: Revoked::Certificate {
+                        authority: "client".into(),
+                        issuers: vec![root.id.issuer.clone()],
+                        serial: root.id.serial.clone(),
+                    },
+                    revoked_ms: 1,
+                },
+                10,
+            )
+            .expect("revoke");
+        assert!(
+            within_ten_seconds(&|| b.is_certificate_revoked(&root.id)),
+            "B hears of the revocation"
+        );
+    }
+
     /// A save of the Hosts that fails part-way leaves them as they were, and the next save still
     /// writes what changed: the adapter's memory follows only what committed.
-    /// Verifies: ADR-0044
+    /// Verifies: ADR-0050
     #[test]
     fn a_save_that_fails_part_way_leaves_nothing_of_itself() {
         let Some(test) = TestDatabase::named() else {
@@ -2120,24 +2590,77 @@ mod tests {
         assert_eq!(store.load().expect("load").hosts, after);
     }
 
-    /// An `instance_uid` another Host's array lists, and no binding row holds, is answered as that
-    /// Host's, as the release before the bindings' table, which bound by the arrays alone, left
-    /// it.
-    /// Verifies: ADR-0041
+    /// This release adds nothing to the Hosts' `instance_uids` arrays and no longer reads them. It
+    /// still takes an `instance_uid` out of them once its binding is released, so a Server of
+    /// 0.8.0 beside it, which reads an array for an `instance_uid` no binding holds, never takes
+    /// a released binding for one that is held
+    /// (ADR-0050
+    /// clause 22).
+    /// Verifies: ADR-0050
     #[test]
-    fn an_instance_uid_only_an_array_lists_is_that_hosts() {
+    fn the_hosts_arrays_are_added_to_no_more_and_lose_what_is_released() {
         let Some(test) = TestDatabase::named() else {
             return;
         };
-        let store = PgLedgerStore::new(test.open());
+        let database = test.open();
+        let store = PgLedgerStore::new(database.clone());
+        let arrays = || test.rows("SELECT host, instance_uids::text FROM hosts ORDER BY host");
+        let row = |host: &str, uids: &str| vec![Some(host.to_string()), Some(uids.to_string())];
+        // As a Server of 0.8.0 leaves a Host: bound, and listed in its array.
         store
-            .save_hosts(&BTreeMap::from([("a".to_string(), host(&["01"], false))]))
+            .save_hosts(&BTreeMap::from([("a".to_string(), host(&[], false))]))
             .expect("save");
-        assert!(test
-            .rows("SELECT 1 FROM host_bindings WHERE instance_uid = '01'")
-            .is_empty());
-        assert_eq!(store.bind("01", "b"), Ok(Bound::Taken("a".to_string())));
-        assert_eq!(store.bind("01", "a"), Ok(Bound::Bound));
+        test.sql(
+            "INSERT INTO host_bindings VALUES ('01', 'a'), ('02', 'a'); \
+             UPDATE hosts SET instance_uids = '{01,02}' WHERE host = 'a'",
+        );
+
+        // Binding, a new Host, a rekey and a save add nothing.
+        assert_eq!(store.bind("03", "a"), Ok(Bound::Bound));
+        assert_eq!(
+            store.bind_seen("04", "b", &host(&[], false)),
+            Ok(Bound::Bound)
+        );
+        assert_eq!(
+            store.rebind("04", "05"),
+            Ok(Some(("b".to_string(), Bound::Bound)))
+        );
+        store
+            .save_hosts(&BTreeMap::from([
+                ("a".to_string(), host(&["01", "02", "03"], false)),
+                ("b".to_string(), host(&["05"], false)),
+                ("c".to_string(), host(&["06"], false)),
+            ]))
+            .expect("save");
+        assert_eq!(
+            arrays(),
+            [row("a", "{01,02}"), row("b", "{}"), row("c", "{}")],
+            "nothing added"
+        );
+
+        // A released binding leaves the array, by an unbind, a rekey, or a save without it.
+        assert_eq!(store.unbind("01"), Ok(Some("a".to_string())));
+        assert_eq!(arrays()[0], row("a", "{02}"), "unbound");
+        test.sql("UPDATE hosts SET instance_uids = '{01,02}' WHERE host = 'a'");
+        test.sql("INSERT INTO host_bindings VALUES ('01', 'a')");
+        assert_eq!(
+            store.rebind("01", "07"),
+            Ok(Some(("a".to_string(), Bound::Bound)))
+        );
+        assert_eq!(arrays()[0], row("a", "{02}"), "rekeyed");
+        store
+            .save_hosts(&BTreeMap::from([
+                ("a".to_string(), host(&["03", "07"], false)),
+                ("b".to_string(), host(&["05"], false)),
+                ("c".to_string(), host(&["06"], false)),
+            ]))
+            .expect("save");
+        assert_eq!(arrays()[0], row("a", "{}"), "saved without it");
+
+        // An `instance_uid` only an array lists, as no release since the bindings' table leaves
+        // one, is no longer read: it binds where it is seen.
+        test.sql("UPDATE hosts SET instance_uids = '{08}' WHERE host = 'a'");
+        assert_eq!(store.bind("08", "b"), Ok(Bound::Bound));
     }
 
     /// A Gateway's Host is bound none when the bindings leave the arrays: an `instance_uid` a
@@ -2151,12 +2674,14 @@ mod tests {
             return;
         };
         let database = test.open();
+        let hosts = BTreeMap::from([
+            ("g".to_string(), host(&["01"], true)),
+            ("h".to_string(), host(&["01"], false)),
+        ]);
         PgLedgerStore::new(database.clone())
-            .save_hosts(&BTreeMap::from([
-                ("g".to_string(), host(&["01"], true)),
-                ("h".to_string(), host(&["01"], false)),
-            ]))
+            .save_hosts(&hosts)
             .expect("save");
+        listed_in_the_arrays(&test, &hosts);
         test.sql(&format!(
             "DROP TABLE host_bindings; DROP INDEX certificates_predecessor; \
              DELETE FROM {SCHEMA_TABLE} WHERE version = 4"
@@ -2182,8 +2707,8 @@ mod tests {
         database
             .run(|pool| async move {
                 let client = client(&pool).await?;
-                write_bindings(&**client, "g", &host(&["01"], true)).await?;
-                write_bindings(&**client, "h", &host(&["02"], false)).await
+                write_bindings(&client, "g", &host(&["01"], true)).await?;
+                write_bindings(&client, "h", &host(&["02"], false)).await
             })
             .expect("write");
         assert_eq!(
@@ -2196,7 +2721,7 @@ mod tests {
     /// restart, and a revocation of its chain's root revokes it there: B learns of A's renewal from
     /// its notification alone, and then refuses it once the root is revoked
     /// (ADR-0038 clause 28).
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0048
     #[test]
     fn a_renewal_another_instance_registers_is_revoked_with_its_root_on_an_instance_that_follows() {
         use crate::revocation::Revoked;
@@ -2252,7 +2777,7 @@ mod tests {
     /// An approval's fields survive a first report another instance makes from a stale view: B
     /// never heard of A's approval, makes the Host at its first report, and what is stored is
     /// still the approved Host, its valid until moved forward.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0048
     #[test]
     fn an_approval_survives_a_first_report_on_an_instance_that_never_heard_of_it() {
         let Some(test) = TestDatabase::named() else {
@@ -2333,5 +2858,237 @@ mod tests {
         instance()
             .check_report("h", &subject, 10, b"\x02")
             .expect("the instance_uid is free");
+    }
+
+    /// A Gateway's mark through an instance that has not taken up a Host another instance wrote is
+    /// decided by the database, in the transaction that writes it: B's report wrote the Host, A,
+    /// which hears nothing, marks it and holds it as stored, and B holds the mark once it hears of
+    /// it; a host only a register entry names is marked too (ADR-0048 clause 19;
+    /// ADR-0043 clause 16).
+    /// Verifies: ADR-0048
+    #[test]
+    fn a_gateway_mark_finds_a_host_another_instance_wrote() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = Database::open_in(&test.config(), Exclusive::Shared, Some(&test.schema))
+            .expect("A's database");
+        let instance = instances_on(&database);
+        let a = instance();
+        let (b, _runtime) = follower(&test);
+        let subject = SubjectValues {
+            organization: "Kunde".into(),
+            ..SubjectValues::default()
+        };
+        b.check_report("g", &subject, 1_000, b"\x01")
+            .expect("B writes the Host");
+        let registered = issued("0a", None);
+        PgLedgerStore::new(database.clone())
+            .register_issued(
+                &registered,
+                &RegisterBounds {
+                    size: 10,
+                    per_root: 10,
+                },
+            )
+            .expect("a register entry without a Host row");
+        let register_host = registered.facts.host.clone().expect("it names a host");
+        let held = |name: &str| {
+            a.hosts()
+                .into_iter()
+                .find(|(host, _, _)| host == name)
+                .map(|(_, host, _)| host)
+        };
+        assert_eq!(held("g"), None, "A has not taken up B's Host");
+
+        assert!(
+            a.set_gateway("g", true).expect("mark"),
+            "A marks the Host B wrote"
+        );
+        let stored = held("g").expect("A holds the Host it marked");
+        assert!(stored.gateway);
+        assert_eq!(stored.subject, subject, "A holds the Host as stored");
+        assert_eq!(
+            stored.valid_until_ms,
+            Some(1_000),
+            "A holds the Host as stored"
+        );
+        assert!(
+            test.rows("SELECT 1 FROM host_bindings WHERE host = 'g'")
+                .is_empty(),
+            "the mark released B's binding"
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !b.is_gateway("g") && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(b.is_gateway("g"), "B holds the mark once it hears of it");
+
+        assert!(
+            a.set_gateway(&register_host, true).expect("mark"),
+            "a register entry names the host"
+        );
+        assert_eq!(
+            test.rows(&format!(
+                "SELECT gateway FROM hosts WHERE host = '{register_host}'"
+            )),
+            vec![vec![Some("t".to_string())]]
+        );
+    }
+
+    /// A Gateway's mark of a host neither the Hosts nor the register names is refused through any
+    /// instance and writes nothing, in either direction, though the instance still holds the Host
+    /// in memory after another instance forgot it (ADR-0048 clause 19; ADR-0043
+    /// clause 16).
+    /// Verifies: ADR-0048
+    #[test]
+    fn a_gateway_mark_of_a_host_the_database_does_not_know_writes_nothing() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let instance = instances_on(&database);
+        let a = instance();
+        let subject = SubjectValues::default();
+        a.check_report("old", &subject, 1_000, b"\x01")
+            .expect("A writes the Host");
+        test.rows(
+            "DELETE FROM host_bindings WHERE host = 'old'; DELETE FROM hosts WHERE host = 'old'",
+        );
+        let b = instance();
+        for (on, name) in [(&a, "nobody"), (&b, "nobody"), (&a, "old"), (&b, "old")] {
+            for gateway in [true, false] {
+                assert!(
+                    !on.set_gateway(name, gateway).expect("asked"),
+                    "{name} marked {gateway}"
+                );
+            }
+        }
+        assert!(
+            test.rows("SELECT host FROM hosts WHERE host IN ('nobody', 'old')")
+                .is_empty(),
+            "nothing is written"
+        );
+        assert!(!a.is_gateway("old") && !b.is_gateway("nobody"));
+    }
+
+    /// Marks `host` as a Gateway through `store` while `held`, another instance's writes, stands
+    /// uncommitted, and commits them once the mark waits on one of their locks, within ten
+    /// seconds: what the mark answered.
+    fn marked_while_held(
+        test: &TestDatabase,
+        database: &Arc<Database>,
+        store: &PgLedgerStore,
+        held: &'static str,
+        host: &str,
+    ) -> Result<bool, String> {
+        let (holding, pid) = database
+            .run(move |pool| async move {
+                let holding = client(&pool).await?;
+                holding.batch_execute(held).await.map_err(sql)?;
+                let pid: i32 = holding
+                    .query_one("SELECT pg_backend_pid()", &[])
+                    .await
+                    .map_err(sql)?
+                    .get(0);
+                Ok((holding, pid))
+            })
+            .expect("held");
+        std::thread::scope(|scope| {
+            let marker = scope.spawn(|| {
+                store.write_host_act(&HostAct::Gateway {
+                    host: host.to_string(),
+                    gateway: true,
+                })
+            });
+            let waiting =
+                format!("SELECT 1 FROM pg_stat_activity WHERE {pid} = ANY(pg_blocking_pids(pid))");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while test.rows(&waiting).is_empty() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the mark never waited on the held writes"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            database
+                .run(move |_| async move {
+                    holding.batch_execute("COMMIT").await.map_err(sql)?;
+                    Ok(())
+                })
+                .expect("commit the held writes");
+            marker.join().expect("marker")
+        })
+    }
+
+    /// A Gateway's mark made while another instance forgets the Host waits for the forget and
+    /// finds the Host gone: it is refused and writes no row back, where no register entry names
+    /// the host (ADR-0048 clause 19; ADR-0043 clauses 15 and 16).
+    /// Verifies: ADR-0048
+    #[test]
+    fn a_gateway_mark_made_while_its_host_is_forgotten_writes_no_row_back() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let store = PgLedgerStore::new(database.clone());
+        store
+            .write_host_act(&HostAct::Seen {
+                host: "ended".into(),
+                entry: Host {
+                    valid_until_ms: Some(10),
+                    ..Host::default()
+                },
+            })
+            .expect("the Host");
+        // Another instance's forget, held open after its delete.
+        let marked = marked_while_held(
+            &test,
+            &database,
+            &store,
+            "BEGIN; DELETE FROM hosts WHERE host = 'ended' AND NOT gateway \
+             AND valid_until_ms <= 20",
+            "ended",
+        );
+        assert_eq!(marked, Ok(false), "the mark found the Host gone");
+        assert!(test
+            .rows("SELECT 1 FROM hosts WHERE host = 'ended'")
+            .is_empty());
+    }
+
+    /// A Gateway's mark made while another instance removes the last register entry naming a host
+    /// without a row waits for the removal and finds the entry gone: it is refused and makes no
+    /// row (ADR-0048 clause 19).
+    /// Verifies: ADR-0048
+    #[test]
+    fn a_gateway_mark_made_while_its_last_register_entry_is_removed_makes_no_row() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let store = PgLedgerStore::new(database.clone());
+        let mut entry = issued("0a", None);
+        entry.facts.host = Some("leaving".into());
+        store
+            .register_issued(
+                &entry,
+                &RegisterBounds {
+                    size: 10,
+                    per_root: 10,
+                },
+            )
+            .expect("the register entry");
+        // Another instance's removal of the entry, held open after its delete.
+        let marked = marked_while_held(
+            &test,
+            &database,
+            &store,
+            "BEGIN; DELETE FROM certificates WHERE host = 'leaving'",
+            "leaving",
+        );
+        assert_eq!(marked, Ok(false), "the mark found the entry gone");
+        assert!(test
+            .rows("SELECT 1 FROM hosts WHERE host = 'leaving'")
+            .is_empty());
     }
 }

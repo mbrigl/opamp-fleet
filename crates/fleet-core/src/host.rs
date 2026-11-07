@@ -2,7 +2,7 @@
 //!
 //! A certificate the Server issues names its host (`urn:opamp-fleet:host:<id>`). One an operator
 //! provisioned may name none; the Server gives it a host derived from its issuer and serial when it
-//! first renews it (ADR-0022 clause 11), and a Gateway binds its Agents to that same host before the
+//! first renews it (ADR-0052 clause 11), and a Gateway binds its Agents to that same host before the
 //! renewal (ADR-0015 clause 15), so the renewal does not move them.
 
 use sha2::{Digest as _, Sha256};

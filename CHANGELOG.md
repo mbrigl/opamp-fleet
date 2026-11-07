@@ -14,6 +14,401 @@ once its tag exists.
 > rest — is not backfilled here; it is in the git log and in the ADRs. The first four releases were
 > all cut on 2026-08-09, so the dates below say less than the order does.
 
+## [Unreleased]
+
+### Added
+
+- **The lists that grow with the fleet page, filter on the Server, and name the holder**
+  ([ADR-0049](docs/adr/0049-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server.md)).
+  `GET /api/v1/agents`, `/hosts`, `/certificates` and `/revocations` take `limit` (1 to 1000)
+  and answer one page with `X-Total-Count` and a `Link` to the next; the Agents take `q`,
+  `selector`, `connected`, `stale`, `service_name`, `sort`, `order` and, on PostgreSQL, `holder`.
+  A parameter a route does not take is answered `400`. Each Agent's view carries `holder` and
+  `holder_host`, the instance that carries it on PostgreSQL, empty on files.
+  `GET /api/v1/agents/attributes` answers the pairs and types the forms suggest. The Agents tab
+  asks for one page at a time, and selecting all selects that page. On PostgreSQL an Agent behind
+  a Gateway now inherits the labels of its Client Agent in the memory of its instance too,
+  whichever instance carries the Client Agent, and follows a change of them. A Client Agent that
+  arrives behind the Gateway after its fellow Agent was placed is still inherited only once the
+  group is placed again, as the manual's *Labels on several instances* says. The schema gains
+  migration 11, which a Server of 0.8.0 serves on; the rows such a Server writes are read
+  correctly by this release.
+  **What to do:** a script that reads one of the four lists whole keeps working while it holds at
+  most 10 000 entries after its filters; past that it is answered `400` naming `limit`, and must
+  page by `limit` and the `Link` header. A script that sends a query parameter these routes do not
+  name gets `400` now.
+
+- **Two consecutive releases serve one PostgreSQL database side by side**
+  ([ADR-0048](docs/adr/0048-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+  clause 16). The instances of 0.8.0 keep serving beside those of this release, so a rolling
+  update may replace them one at a time. Migration 12 records the release of each lease; a lease
+  of 0.8.0 counts as 0.8.0. An instance refuses its start, naming both releases and changing
+  nothing, while a live lease is of a release older than the oldest Server the schema names once
+  its migrations are applied. An instance whose lease lapsed while a newer release migrated stops
+  when it takes its new lease and exits with a failure.
+  **What to do:** nothing for the step from 0.8.0. To skip a release, stop every instance of the
+  older one first.
+
+- **The `opamp` crate's WebSocket driver may connect from a named address, and logs the delay it
+  drew after a lost connection**
+  ([ADR-0048](docs/adr/0048-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+  clause 20). `ws::run_from` and `ws::connect_from` take a local address; `ws::run` and
+  `ws::connect` are unchanged and name none. The line *connection lost; reconnecting* carries
+  `delay_ms`, the wait before the first attempt.
+  **What to do:** nothing.
+
+- **A presence batch written late is logged**
+  ([ADR-0048](docs/adr/0048-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+  clause 5). On PostgreSQL an instance warns, with `late_ms`, when a batch is written later than
+  `presence_interval_secs` after it was due.
+  **What to do:** nothing; the warning says the database is not keeping up with the fleet.
+
+### Changed
+
+- **A rejected key stays refused beyond its window, and a key may be rejected before its request
+  arrives**
+  ([ADR-0052](docs/adr/0052-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)
+  clauses 10 and 16). A rejection no longer ends with the window: the Server keeps the rejected
+  keys, in `enrolment.json` on files and in a table of their own on PostgreSQL, and a request for
+  one is answered as rejected and not listed in every later window, on every instance. An approval
+  never signs a rejected key. `POST /api/v1/enrolments/{id}/reject` of an `id` the queue does not
+  hold now answers `204` instead of `404`, with the window open or closed, and its request is
+  refused when it arrives; an `id` that is not 64 lowercase hexadecimal digits answers `400`. The
+  `enrolment.rejected` audit line carries `queued`, false for such a rejection. No route lifts a
+  rejection. The schema gains migration 15, which a Server of 0.8.0 serves on; such a Server reads
+  no rejected key.
+  **What to do:** a host rejected by mistake enrols with a new key: delete
+  `client-key.pending.pem` and `client-csr.pending.pem` from its state directory. A script that
+  took `404` from a rejection to mean that the request is gone now gets `204`. While instances of
+  0.8.0 still run, approve through instances of this release: one of 0.8.0 reads no rejected key,
+  so through it a rejected key waits again and may be approved. After a
+  database restore, keep the window closed and reject the ids decided since the backup before
+  opening it, as the manual's restore now says. A Server of 0.8.0 on files does not start on an
+  `enrolment.json` that holds a rejected key; to go back to 0.8.0, delete its `rejected` field,
+  which ends those rejections.
+
+### Fixed
+
+- **An instance's memory no longer grows with every read of the whole fleet.** On Linux the Server
+  gave each of its threads a malloc arena of its own, up to eight for each CPU, and each arena kept
+  what was freed in it, so an instance's resident memory grew with every read of the whole fleet, as
+  a rollout makes, long after the memory in use had levelled off: under the G-20 load test an
+  instance of 10 000 Agents held 1.3 GiB after 15 minutes, still growing. The Server now allocates
+  from two arenas: the same instance held about 370 MiB after 15 minutes, three instances carrying
+  100 000 Agents held about 1 GiB each where they held 3.4 to 4 GiB before. What still grows under a
+  steady fleet ends at a bound: the database connections' buffers, sized to the largest presence
+  batch each has written, up to about 4.5 KiB for each Agent of the most an instance has held at
+  once (after a failover, its larger share) at the default `pool_size`, and about 0.5 KiB for each
+  Agent labelled. `MALLOC_ARENA_MAX` sets another count.
+  **What to do:** nothing.
+- **A connecting fleet's new Agents no longer commit one at a time across the database**
+  ([ADR-0048](docs/adr/0048-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+  clauses 9 and 10). On PostgreSQL each new Agent's binding to its Host announced itself in its
+  commit, and PostgreSQL lets such commits through one at a time, each waiting for the flush of the
+  one ahead: a fleet of 10 000 connected at about 120 to 210 new Agents a second, and other calls
+  gave up on the pool meanwhile. A binding a report makes, and a Host a report, an issuance or a
+  prune makes or moves forward, are now announced right after the commit, and every lease renewal
+  reads the register, the revocation list and the Hosts again, so another instance holds them within
+  one renewal even where the announcement was lost. Revocations, releases, re-keys, a Gateway's
+  mark, a Host forgotten and certificates registered or removed are announced in their commit as
+  before.
+  **What to do:** nothing.
+
+- **A Gateway's mark finds a Host another instance wrote**
+  ([ADR-0048](docs/adr/0048-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+  clause 19). On PostgreSQL `PUT /api/v1/hosts/{host}/gateway` decided whether the host is known
+  from the instance's copy of the Hosts and the register, so a Host whose first report reached
+  another instance was answered `404` until this instance had heard of it, and a Host the database
+  had forgotten could be marked from a stale copy. The database now decides it in the transaction
+  that writes the mark: a Host row or a register entry naming the host makes it known, and any
+  other host is answered `404` with nothing written. On files the Server decides from what it
+  holds, as before.
+  **What to do:** while instances of 0.8.0 run beside this release, make marks through an
+  instance of this release: 0.8.0 still decides from its copy.
+
+- **A new Agent is not sent away while a connecting fleet holds the database's pool**
+  ([ADR-0050](docs/adr/0050-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
+  clause 24). On PostgreSQL, a new Agent's first report gave up after 5 s without a pooled
+  connection and was answered `Unavailable`, which kept an Agent away 30 to 60 s; while a large
+  fleet connected, the pool was held that long at times. Creating an Agent's record now waits up to
+  the 15 s bound of its call for a connection; every other call keeps its 5 s.
+  **What to do:** nothing.
+
+- **A Client the Server answered `Unavailable` on a WebSocket comes back after the wait it was
+  told** ([ADR-0045](docs/adr/0045-tls-1-3-two-planes-and-bounded-input.md), its *Context*: the
+  Client closes the connection, waits, and reconnects). It closed the connection, waited the wait
+  the Server named and then drew the delay of a lost connection, up to 30 s more, on top: an Agent
+  told 30 s stayed away 30 to 60 s. It now waits the named wait, or the next backoff step when that
+  is longer, as after a refused upgrade, and nothing on top. `Unavailable`s in a row grow along
+  the backoff, up to a minute, until a connection handles a reply, so a named wait of zero is no
+  reconnect a second. Agents told `Unavailable` at the same moment now come back at the same
+  moment, no longer spread over 30 s. Plain HTTP waited the named wait already.
+  **What to do:** nothing.
+
+- **An Agent that comes back on a new connection of its host keeps its identity**
+  ([ADR-0048](docs/adr/0048-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+  clause 8). A peer whose reports waited for the database longer than one heartbeat interval
+  ended its connection for silence and came back while the Server still handled the old one's
+  reports; its Agents were taken for duplicates of themselves and re-keyed, each into a record of
+  its own without the labels and assignments of the old one. Now only an Agent alive on a
+  connection of another peer is a duplicate. On a new connection of the host whose certificate its
+  old connection presented, the newest connection takes the Agent. While it carries the Agent, the
+  older one's reports are taken up but take it no more, its goodbye does not end the Agent's
+  connection, it is not asked for the component map, and a queued restart, in a reply or pushed,
+  goes out only on the connection that carries the Agent. A newer connection that has carried
+  none of the Agent's reports for one heartbeat interval (the one the Server offers, else 30 s)
+  carries it no more: the next report on an older connection takes it back, so an Agent a
+  Gateway's pool moved to another of its open connections follows it there. A connection that
+  presented no host is re-keyed as before.
+  Two Agents of one `instance_uid` on one host, a clone with the host's certificate, now share one
+  record rather than being told apart.
+  **What to do:** nothing; give a cloned host a certificate of its own.
+
+- **A revocation is made only with its certificate on the audit record**
+  ([ADR-0046](docs/adr/0046-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again.md)
+  clauses 1 and 5). The `revocation.revoked` that names a revoked certificate followed the
+  revocation and was dropped when the audit record's queue filled, or a write failed, after the
+  revocation's `operator.act` was queued: the revocation took effect, and the record did not say
+  which certificate it revoked, so a restore of the database could not set it again. A
+  revocation now holds a place in the queue before it runs, is answered `503` and not made where
+  none is free, and writes its entry into that place once made. A bootstrap certificate's
+  revocation whose PKCS#12 file could not be removed, answered `500`, left no `revocation.revoked`
+  at all; it now leaves one. A revocation whose store answered an error, which may have made it
+  all the same, leaves one with the outcome `unknown`, which a restore sets again.
+  **What to do:** nothing; a `503` to a revocation is retried like any other.
+
+- **Every act a restore repeats is made only with its entry on the audit record**
+  ([ADR-0046](docs/adr/0046-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again.md)
+  clauses 1 and 5). A Gateway mark set or cleared, a floor set, a request rejected and the
+  enrolment window closed by an operator wrote their entries after the act, and lost them when
+  the queue filled or a write failed in between, so a restore of the database did not repeat
+  them: a Host carried other hosts' Agents again, a floor came back lower, or a rejected request
+  came back pending. Each now holds a place in the queue before it runs, as a revocation does, is
+  answered `503` and not made where none is free, and writes its entry into that place once made.
+  `host.gateway` now names, as `gateway`, whether the mark is set. An act whose store answered an
+  error leaves its entry with the outcome `unknown`, which a restore repeats; for a Gateway mark,
+  it clears the mark whichever was asked for.
+  **What to do:** nothing; a `503` to one of these acts is retried like any other.
+
+- **An instance on PostgreSQL takes up its Agents without waiting one database round trip at a
+  time**
+  ([ADR-0048](docs/adr/0048-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+  clause 8,
+  [ADR-0050](docs/adr/0050-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
+  clause 22). Each Agent's report held one lock of the whole instance across its calls to the
+  database, on a worker of the runtime, so an instance served one round trip at a time: TLS
+  handshakes and the heartbeats of connected Agents waited behind it, and an instance took up about
+  two new Agents a second. A report now runs off the runtime's workers, makes its calls to the
+  database under a lock of its own Agent, and takes the instance's lock only to take what it read
+  and wrote into memory. The binding of an Agent to its Host and the write of the Host are made
+  with the host register's lock let go too, so a handshake and another report no longer wait for
+  them. The ceiling `max_agents` is decided from a count the database keeps,
+  migration 14, a table and a trigger on the Agents' table that counts what a Server of 0.8.0 adds
+  and removes too, in the one statement that creates a record, rather than by counting every
+  record under a lock held across several round trips. While an instance of 0.8.0 runs beside
+  those of this release, the ceiling may be passed by the records created at the same moment. That
+  creation does not wait for the database's disk, so a crash of the database may lose the records
+  created last; each such Agent's next report creates its record again. Each
+  statement is prepared once per pooled connection, so running it again costs one round trip. A
+  report whose Agent is forgotten through another instance while it runs starts again, and is
+  answered `Unavailable` after three such rounds.
+  An instance's pool holds `[database] pool_size` connections, 16 by default (it held 8), and at
+  most half of them create new Agents' records at once.
+  The Server and a Gateway now read an Agent's WebSocket on while they handle one of its
+  messages and answer its pings meanwhile, so a slow database ends no Agent's connection for
+  silence; the messages read meanwhile are handled in the order they arrived, at most eight, or
+  the message limit in bytes, waiting behind the one in hand before the connection is read no
+  further.
+  **What to do:** the database role needs the right to create functions in its schema as well as
+  tables; PostgreSQL's `CREATE` right on the schema gives both. Allow the database's
+  `max_connections` for `pool_size` connections of each instance.
+
+- **An Agent leaves a Server that stopped answering within one heartbeat interval**
+  ([ADR-0051](docs/adr/0051-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended.md)).
+  A Server that was frozen, lost its power or was cut off closed nothing, and its Agents stayed on
+  it until TCP gave up, about fifteen minutes. The Client, a Gateway's upstream connections and the
+  `opamp` crate's WebSocket driver now send a WebSocket ping once nothing has arrived for half a
+  heartbeat interval, end the connection once nothing has arrived for a whole one, and reconnect
+  after the delay drawn over `[0, 30 s)`; a pong gets the rest of the interval from when its ping
+  went out, so an Agent busy with an install does not drop a live Server. Opening a connection
+  is bounded too, the probe of an offered endpoint among them: resolving the name gets one
+  interval, and each address it resolves to, tried in turn, gets one for the TCP connection, the
+  TLS handshake and the upgrade together, so a name whose first address is dead, as `::1` is to a
+  Server listening on `127.0.0.1` only, still connects. An address that answers the upgrade
+  with anything but a WebSocket, an HTTP refusal among them, ends the attempt. With heartbeats
+  disabled the bound is 30 seconds. The line *nothing arrived from the server within the bound;
+  ending the connection* carries `bound_ms`.
+  `opamp::client::ws::Silence` names the bounds; the crate's other functions and settings are
+  unchanged, but `Connection::connect_websocket` now fails once those bounds have passed.
+  **What to do:** nothing. A Client whose `heartbeat_interval_secs` is very short now also ends a
+  connection that is silent that long. A Server instance that handles no message for a whole
+  interval, overloaded rather than lost, now loses its Agents to the other instances, which
+  reconnect spread by the drawn delay; a message that takes longer than an interval to arrive
+  whole ends the connection and is sent again; and when a Gateway's upstream freezes, the Agents
+  behind that Gateway may reconnect to it as well.
+
+- **An approval records its certificate only with its decision**
+  ([ADR-0050](docs/adr/0050-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)).
+  This removes the 0.8.0 bound *An approval whose commit fails leaves its certificate recorded*.
+  On PostgreSQL the register entry and the Host an approval mints are written in the transaction
+  that decides the request. When that commit fails, nothing is registered, the request still
+  waits, and approved again it is signed once more, so one certificate for its key is valid. An
+  approval that cannot tell whether its commit landed reads the request back under a lock on its
+  row. On files the decision is written first and taken back when the register entry cannot be
+  written, and a start puts a decided request whose certificate the register does not hold back
+  to waiting. In the audit record `issuance.signed` names the request under `request`,
+  `enrolment.approved` names the certificate under `serial` and is recorded before the approval
+  is answered, and a signature whose decision was not written is recorded as
+  `issuance.undecided` with the outcome `rolled_back`, or `unknown` when the outcome could not be
+  read back.
+  **What to do:** nothing. A certificate of an enrolment was issued where `enrolment.approved`
+  names its serial, and not where `issuance.undecided` names it `rolled_back`; for a signature
+  neither names, or one named `unknown`, `GET /api/v1/certificates` answers while the
+  certificate is valid.
+- **A presence row ends with its connection**
+  ([ADR-0048](docs/adr/0048-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+  clause 8). On PostgreSQL an Agent's row could keep naming an instance as connected after the
+  connection ended, until the silence bound, so the fleet list and the holder named an instance
+  that no longer carried the Agent. That happened when a connect's take was written but its
+  answer was lost, after a re-key, when a batch named its instance again over a take another
+  instance counted since, or when a batch's late answers replaced a newer take's count. Such an
+  Agent's goodbye is now written with the next batch. An Agent that disconnected under a lease the
+  instance later lost is flushed at shutdown again, and so is one whose connect's take was not
+  written, where the instance was answered a count of takes for it before or created its record,
+  and no instance took it since.
+  **What to do:** nothing.
+- **A shutdown flush keeps what a newer carrier wrote**
+  ([ADR-0048](docs/adr/0048-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+  clause 8). On PostgreSQL an instance stopping could write its older record of an Agent over the
+  report of the instance that carried the Agent next, when that instance's take was not written:
+  the Operator plane then showed the older sequence number, description and health. A shutdown
+  flush now writes no record whose stored sequence number is higher than its own, also where the
+  stopping instance still holds the Agent. An instance whose take was not written writes the
+  record at every report of the Agent until a count of takes is answered for it, at its next
+  presence batch at the latest once no other live instance holds the Agent, so a record an older
+  flush wrote over an Agent that started again with lower sequence numbers is written again at the
+  Agent's next report.
+  **What to do:** nothing.
+- **A Deployment keeps no deleted member**
+  ([ADR-0048](docs/adr/0048-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+  clause 19). On PostgreSQL a Deployment could keep naming a Configuration or a Package that was
+  deleted: when an instance that had not yet heard of the deletion added it, when an add met the
+  deletion, or when a crash cut the deletion off before it took the member out of the
+  Deployments. The deletion now takes the member out of every Deployment in the transaction that
+  deletes it, and an add reads the member it adds in its own transaction and answers `404` when it
+  is gone. An instance of 0.8.0 beside this release still adds and deletes as before.
+  **What to do:** nothing. A member a Deployment named before the update, or one an add through an
+  instance of 0.8.0 left while both releases ran, stays until it is taken out of the Deployment,
+  by `DELETE /api/v1/deployments/{name}/configurations/{configuration}` or
+  `DELETE /api/v1/deployments/{name}/packages/{agent_type}/{version}`.
+- **A sweep stops once its lock is lost**
+  ([ADR-0050](docs/adr/0050-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
+  clause 14). On PostgreSQL a sweep whose database session ended after it had read which artifacts
+  the entries name could still delete one that an upload through another instance had just
+  stored, and the new entry named a missing artifact. A sweep now marks, on the session that holds
+  its lock, the artifacts it deletes, renews each mark before its deletion, and deletes nothing
+  more once the lock is lost, saying so in the log. An upload of a marked artifact is refused until
+  the sweep has taken its marks away; marks it could not take away its instance tries again every
+  `lease_renew_secs`, and those of an instance whose lease is no longer live go with any sweep
+  once 130 seconds old. The schema gains migration 13, which a Server of 0.8.0 serves on; such a
+  Server neither marks nor reads a mark.
+  **What to do:** nothing. An upload refused with *the artifact was removed while it was uploaded;
+  upload it again* is uploaded again. A start that fails naming an entry whose artifact *is not
+  stored* is mended by uploading that artifact again, or by restoring it from a backup: a sweep
+  through an instance of 0.8.0 while both releases ran, an instance suspended for more than 130
+  seconds while a sweep's call to the bucket was in flight, or a failover to an asynchronous
+  replica the marks had not reached can leave one.
+- **A suspended instance serves nothing on a lease that lapsed meanwhile**
+  ([ADR-0048](docs/adr/0048-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+  clause 3,
+  [ADR-0050](docs/adr/0050-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
+  clause 14). On PostgreSQL an instance measured its lease on a clock that does not count the time
+  its host was suspended. After a suspend it served on until its next renewal, up to
+  `lease_renew_secs`, while its lease had lapsed for every other instance: it could admit an Agent
+  against a revocation list it no longer followed. It now measures on `CLOCK_BOOTTIME`, which
+  counts a suspend, and reads that clock before each answer: a request on either plane and a
+  message of an Agent are answered `503` while the lease is lapsed by it, and within 100
+  milliseconds it ends its sessions and closes both listeners until it holds a new lease. A sweep
+  likewise deletes nothing more once more than 15 seconds have passed, a suspend included, since it
+  renewed the mark of the artifact it deletes next.
+  **What to do:** nothing. A virtual machine paused by its hypervisor, whose clocks do not count
+  the pause, is not covered: such an instance serves on until its next renewal finds its lease
+  lapsed, as before.
+- **An Agent is read in one snapshot**
+  ([ADR-0043](docs/adr/0043-the-fleet-record-of-agents-and-hosts.md)). On PostgreSQL an instance
+  read an Agent's Configurations and then its row as two statements, when it read the fleet whole,
+  a few Agents, the assignments at its start, or an Agent it was about to create and found stored.
+  A rollout that committed between them paired its revisions with another rollout's Deployment,
+  and the instance could offer the Agent an assignment no rollout made until its next read. Each
+  of these reads is now one statement, which reads one committed state.
+  **What to do:** nothing.
+- **An act whose answer is lost is taken up once it commits**
+  ([ADR-0048](docs/adr/0048-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+  clauses 8 and 10). On PostgreSQL an act whose commit landed while its answer was lost, on a
+  dropped connection or the bound of a call, was taken as failed, and the instance that made it
+  passed its own notification over. Its memory kept what was there before until its listening
+  connection was made again, or, for a revocation, until its next renewal. A re-key left the
+  Agent's row under the new identity, connected and held by this instance, while the Agent was
+  created again under its old one; that row counted against `max_agents` until it was forgotten.
+  An instance now reads again what such an act names, at once and again when the act's own
+  notification arrives. A re-key reads the row back before it answers, and assigns the new
+  identity where the move landed. Where that read back fails, the move's own notification, the
+  Agent's next report or a write that finds the old row gone reads it back, again until it holds;
+  the Agent and its session are kept under the old identity meanwhile, a session that ended is
+  written disconnected on the new row once it holds, and the new identity is assigned at the next
+  report. Until then a report under the old identity of which the instance holds no record is
+  answered `Unavailable`.
+  **What to do:** nothing. An act answered `500` may have landed: read it back, or make it again;
+  setting a label or a floor and adding a revocation again changes nothing more. An extra row of
+  an Agent a re-key left, before this release or because the Agent reconnected to another
+  instance before it was assigned its new identity, reads as disconnected, at the latest once the
+  instance that re-keyed it has stopped and its lease lapsed, and is forgotten by the silence
+  bound, or at once through `DELETE /api/v1/agents/{uid}`.
+- **A queued restart survives a failed send**
+  ([ADR-0048](docs/adr/0048-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+  clause 8). The Server cleared an Agent's queued restart before it sent the command, so a send
+  that failed lost a restart the Operator plane had accepted, on files and on PostgreSQL alike. A
+  command whose WebSocket frame the connection does not take, or whose plain-HTTP answer is past
+  the size limit, is now queued again and sent at the Agent's next exchange, on a lease that
+  lapsed meanwhile too. Where the store cannot take it back, the Server tries again at intervals
+  that grow to a minute until it holds; a Server that stops first loses it, and a restart
+  requested or delivered meanwhile, or the Agent's forget, ends the tries. A re-key of the Agent
+  through this instance takes the tries to its new `instance_uid`; one through another instance
+  ends them, and the Server warns `the restart is no longer tried, the Agent's row is gone`
+  naming the Agent, as it does where the Agent was forgotten. A command that reached
+  the Agent although its send failed restarts the Managed Process twice, and so may a restart
+  requested and delivered through another instance before this one heard of the request. A frame
+  lost after the connection took it, and on plain HTTP a lost answer to a poll, is still not seen.
+  **What to do:** nothing. Request a restart that did not happen again, and one the warning names.
+- **The audit record names the lease of each decision**
+  ([ADR-0047](docs/adr/0047-the-audit-record-is-one-hash-chain-per-lease-and-names-the-lease-each-decision-was-taken-under.md)
+  clause 3,
+  [ADR-0046](docs/adr/0046-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again.md)
+  clause 5). On PostgreSQL a decision an instance took while it held no lease, such as an
+  enrolment window running out after its lease lapsed, was written into the chain of its next
+  lease as if taken under that lease. It now carries `taken_under` `none`, as does one taken while
+  the lease is lapsed by the instance's clock. The chain of a lease that an instance which must be
+  alone takes over before it lapses, its holder gone, is closed with `reason` `holder_gone`
+  instead of `lease_lapsed`. A shutdown whose closing write landed while its answer was lost read
+  as failed and left its lease to lapse; it now reads the chain back, and releases the lease when
+  the chain holds its closing entry. After the close a decision is refused, and the shutdown logs
+  at `error` how many went unrecorded.
+  **What to do:** nothing. A tool that reads `taken_under` as a chain identifier treats `none` as
+  no lease, and one that reads `reason` knows `holder_gone`.
+- **A renewal stays revoked with its predecessor on every instance**
+  ([ADR-0050](docs/adr/0050-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
+  clause 10). On PostgreSQL an instance that missed the notification of a renewal another
+  instance registered, and then revoked the certificate it renewed, admitted the renewal, and so
+  did its Gateways' list, until another instance changed the list. Every change to the register
+  now moves the revocation list's version, so such an instance reads the register again by its
+  next lease renewal. An instance that pruned an expired certificate could remove it while a
+  renewal of it it had not taken up was still valid, and a later revocation of the expired one
+  then left the renewal admitted; the database now keeps such an entry. A Gateway fetches the
+  list in full after each renewal or enrolment rather than being answered `304`.
+  **What to do:** nothing. While instances of 0.8.0 serve beside this release, a renewal one of
+  them registers still moves no version, and one pruning beside this one removes an expired entry
+  regardless of its renewals; replace them to close both.
+
 ## [0.8.0]
 
 ### Added

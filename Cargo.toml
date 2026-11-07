@@ -109,7 +109,7 @@ time = { version = "0.3", default-features = false, features = ["std"] }
 # renew (ADR-0038). rcgen parses X.509 only behind a private, test-only path, so this is the
 # public way in — and it is the very parser rcgen itself uses, already in the tree.
 x509-parser = "0.18"
-# The bootstrap certificate as a password-protected PKCS#12 file (ADR-0022): the Server writes it,
+# The bootstrap certificate as a password-protected PKCS#12 file (ADR-0052): the Server writes it,
 # the Client reads it. Pure Rust on the RustCrypto crates, for the password-based encryption only;
 # the TLS handshake stays on ring. Pinned exactly, and without its default `pbes1` feature, so the
 # legacy RC2 and 3DES schemes are not linked. `pkcs12`, `pkcs5` and `der` read the file's structure,
@@ -156,11 +156,11 @@ sysinfo = { version = "0.40", default-features = false, features = ["system"] }
 # presenting a client certificate (ADR-0038) to a Server with a publicly trusted one, which needs
 # a rustls config built by hand. Data, not code — and already in the tree via the TLS stack.
 webpki-roots = "1"
-# Artifact bytes in an S3-compatible bucket (ADR-0044). `aws-base`, `ring` and `reqwest` build the
+# Artifact bytes in an S3-compatible bucket (ADR-0050). `aws-base`, `ring` and `reqwest` build the
 # S3 client on *ring*; the `aws` feature would pull `aws-lc-rs` (ADR-0045), and so would the
 # default `fs`, which nothing here needs. The HTTP client is the Server's own, handed in.
 object_store = { version = "0.14.2", default-features = false, features = ["aws-base", "ring", "reqwest"] }
-# The Server's records in PostgreSQL (ADR-0044). `tokio-postgres` speaks the protocol in plain SQL
+# The Server's records in PostgreSQL (ADR-0050). `tokio-postgres` speaks the protocol in plain SQL
 # and reads no `PG*` variable; `with-serde_json-1` maps `jsonb` to `serde_json::Value`, already in
 # the tree. `deadpool-postgres` pools the connections on the Tokio runtime. `tokio-postgres-rustls`
 # carries them over the TLS 1.3, *ring*-only client of `opamp::tls`: its `ring` feature, never
@@ -195,14 +195,14 @@ clap = { version = "4", features = ["derive"] }
 service-manager = "0.11"
 # The questionnaire of `service install --interactive` and `service config` (ADR-0019 clause 28): validated answers, defaults and a yes/no confirmation, the same on three operating systems.
 # `password` is the one feature: the password of a `bootstrap.p12` is asked with input hidden
-# (ADR-0022), and its one dependency, `zeroize`, is already in the tree. It pulls no TLS/crypto
+# (ADR-0052), and its one dependency, `zeroize`, is already in the tree. It pulls no TLS/crypto
 # backend, so ADR-0045 holds.
 dialoguer = { version = "0.12", default-features = false, features = ["password"] }
 # The Windows-only SCM runtime shim (ADR-0019): status reporting and the stop control handler,
 # without which the SCM kills the service with error 1053. Compiled on Windows targets only.
 windows-service = "0.8"
 
-# The key derivations of the bootstrap PKCS#12 file (ADR-0022) run 600 000 iterations: unoptimized,
+# The key derivations of the bootstrap PKCS#12 file (ADR-0052) run 600 000 iterations: unoptimized,
 # a test that seals and opens one file waits seconds. The crates their loops are compiled in are
 # optimized in the dev profile too; nothing else is.
 [profile.dev.package]

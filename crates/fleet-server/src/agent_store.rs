@@ -3,7 +3,7 @@
 //! The fleet is loaded whole at startup and held in memory; at runtime the store receives writes
 //! and deletions for single Agents — `load`, `get`, `put`, `set_labels`, `set_restart_pending`,
 //! `remove`, `rekey` — and one operation for a rollout, which writes the revisions it pins and the
-//! assignments that pin them together (ADR-0044 clause 2). A report, a label change, a restart
+//! assignments that pin them together (ADR-0050 clause 2). A report, a label change, a restart
 //! request and a rollout each write their own part of a record, so on a store other Servers share
 //! the write of one never undoes another's
 //! (ADR-0043 clause 2). The integrity questions a deletion
@@ -32,7 +32,27 @@ use sha2::{Digest, Sha256};
 
 use crate::configs::Pinned;
 use crate::fleet::{Assignment, Transport};
+use crate::listing::{AgentFilter, AgentSort, Candidate, Position};
 use crate::packages::PackageId;
+
+/// What the derived values of `record` come from
+/// (ADR-0049
+/// clause 8).
+#[must_use]
+pub fn source_of<'a>(
+    uid: &'a InstanceUid,
+    record: &'a PersistedAgent,
+) -> crate::listing::Source<'a> {
+    crate::listing::Source {
+        uid,
+        description: record.description.as_ref(),
+        health: record.health.as_ref(),
+        remote_config_status: record.remote_config_status.as_ref(),
+        package_statuses: record.package_statuses.as_ref(),
+        capabilities: record.capabilities,
+        transport: record.transport,
+    }
+}
 
 /// Everything about one Agent that survives a restart: what it reported and what an operator
 /// queued for it — never what a live connection knows (`connected`, the owning connection).
@@ -162,10 +182,94 @@ pub struct StoredAgent {
     /// Connected as stored, and only while the instance it names as the holder has a live lease;
     /// `false` on a store that keeps no presence.
     pub connected: bool,
+    /// The instance its presence names, while that instance has a live lease
+    /// (ADR-0048
+    /// clause 13); `None` on a store that keeps no presence.
+    pub holder: Option<Holder>,
+}
+
+/// The instance that holds an Agent: the id of its lease, and the host name the lease records.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Holder {
+    pub instance_id: String,
+    pub host: String,
+}
+
+/// What [`AgentStore::query_page`] is asked
+/// (ADR-0049
+/// clause 9).
+pub struct PageQuery<'a> {
+    pub filter: &'a AgentFilter,
+    pub sort: AgentSort,
+    pub descending: bool,
+    /// The position the page starts after; `None` for the first page.
+    pub after: Option<&'a Position>,
+    /// The most records it answers.
+    pub limit: usize,
+    /// A record heard from last before this is stale, where it promised heartbeats.
+    pub seen_before_ms: u64,
+}
+
+/// One record of a page, with its presence and where its Client Agent places it (ADR-0043
+/// clause 19), as the store found it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PagedAgent {
+    pub uid: InstanceUid,
+    pub stored: StoredAgent,
+    /// Its Client Agent — itself, for the Client Agent — when its group holds exactly one.
+    pub client_agent: Option<InstanceUid>,
+    /// Its group holds more than one Client Agent.
+    pub ambiguous: bool,
+    /// The labels of its Client Agent; empty for the Client Agent itself.
+    pub inherited: BTreeMap<String, String>,
+    /// Where it stands in the order the page was sorted by, as the store sorted it: what the
+    /// cursor of the page after it names.
+    pub position: Position,
+}
+
+/// What [`AgentStore::reported_values`] answers
+/// (ADR-0049
+/// clause 9): the distinct reported `key=value` pairs and `service_name` values, each sorted.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ReportedValues {
+    pub pairs: Vec<String>,
+    pub service_names: Vec<String>,
+}
+
+impl ReportedValues {
+    /// The distinct values of `derived`, each sorted, at most `limit` of each.
+    #[must_use]
+    pub fn of<'a>(
+        derived: impl IntoIterator<Item = &'a crate::listing::Derived>,
+        limit: usize,
+    ) -> Self {
+        let (mut pairs, mut names) = (BTreeSet::new(), BTreeSet::new());
+        for derived in derived {
+            pairs.extend(
+                derived.reported.iter().filter_map(|(key, value)| {
+                    value.as_ref().map(|value| format!("{key}={value}"))
+                }),
+            );
+            if !derived.service_name.is_empty() {
+                names.insert(derived.service_name.clone());
+            }
+        }
+        ReportedValues {
+            pairs: pairs.into_iter().take(limit).collect(),
+            service_names: names.into_iter().take(limit).collect(),
+        }
+    }
+}
+
+/// What [`AgentStore::query_page`] answers: the page, and how many records match the filter.
+#[derive(Debug, Default)]
+pub struct AgentPage {
+    pub agents: Vec<PagedAgent>,
+    pub total: usize,
 }
 
 /// What [`AgentStore::take`] found of the holder it replaced
-/// (ADR-0041
+/// (ADR-0048
 /// clause 8).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Taken {
@@ -214,7 +318,7 @@ impl Pin<'_> {
     }
 }
 
-/// The storage port (ADR-0043, ADR-0044): the only thing the fleet logic knows about persistence. A
+/// The storage port (ADR-0043, ADR-0050): the only thing the fleet logic knows about persistence. A
 /// database or an external store is a new implementation of these operations plus one wiring
 /// line — the rest of the Server is, by construction, unaffected.
 pub trait AgentStore: Send + Sync {
@@ -224,7 +328,7 @@ pub trait AgentStore: Send + Sync {
 
     /// The record of `uid` as stored now, `None` when none is: what an instance reads again when
     /// another instance announced a change to it
-    /// (ADR-0041
+    /// (ADR-0048
     /// clause 9). The default reads every record through [`load`](Self::load), as a store that
     /// is its only writer may; a shared store, and a wrapper of one, overrides it, or each read
     /// reads the whole fleet.
@@ -256,7 +360,7 @@ pub trait AgentStore: Send + Sync {
 
     /// Every stored record with its presence, or those of `only` where it names some, in the order
     /// of their `instance_uid`: what the Operator plane reads where the fleet is not in memory
-    /// (ADR-0044 clause 3). The default reads every record
+    /// (ADR-0050 clause 3). The default reads every record
     /// through [`load`](Self::load), each disconnected, as a store that keeps no presence may; a
     /// shared store, and a wrapper of one, overrides it.
     ///
@@ -276,6 +380,7 @@ pub trait AgentStore: Send + Sync {
                     StoredAgent {
                         record,
                         connected: false,
+                        holder: None,
                     },
                 )
             })
@@ -284,9 +389,99 @@ pub trait AgentStore: Send + Sync {
         Ok(all)
     }
 
+    /// The records that match `query.filter`, with their presence, in the order of its sort after
+    /// the position it names, at most `query.limit` of them, and the number that match
+    /// (ADR-0049
+    /// clause 9). The default answers from every record [`load`](Self::load) reads, each
+    /// disconnected and held by none, as a store that keeps no presence may. It knows no host
+    /// register, so it places no Agent under a Client Agent and matches no Host value: a Server
+    /// on such a store answers the Operator plane's lists from memory, and asks this only for the
+    /// Agents that arrived over a Host. A shared store, and a wrapper of one, overrides it.
+    ///
+    /// # Errors
+    /// Returns an error when the records cannot be read.
+    fn query_page(&self, query: &PageQuery<'_>) -> Result<AgentPage, String> {
+        let none = BTreeMap::new();
+        let mut matching = Vec::new();
+        for (uid, record) in self.load()? {
+            let derived = crate::listing::derive(&source_of(&uid, &record));
+            let effective = crate::labels::effective_description(&crate::labels::Sources {
+                host: &none,
+                reported: record.description.as_ref(),
+                own: &record.labels,
+                inherited: &none,
+            });
+            let candidate = Candidate {
+                derived: &derived,
+                connected: false,
+                stale: crate::listing::is_stale(
+                    record.capabilities,
+                    record.last_seen_ms,
+                    query.seen_before_ms,
+                ),
+                holder: None,
+                host: record.host.as_deref(),
+                effective: effective.as_ref(),
+                own: &record.labels,
+                inherited: &none,
+                host_values: &none,
+            };
+            if !query.filter.admits(&candidate) {
+                continue;
+            }
+            let position = Position {
+                key: crate::listing::agent_key(
+                    query.sort,
+                    &derived,
+                    false,
+                    record.sequence_num,
+                    record.last_seen_ms,
+                ),
+                tiebreak: uid.to_string(),
+            };
+            matching.push((
+                position.clone(),
+                PagedAgent {
+                    uid,
+                    stored: StoredAgent {
+                        record,
+                        connected: false,
+                        holder: None,
+                    },
+                    client_agent: None,
+                    ambiguous: false,
+                    inherited: BTreeMap::new(),
+                    position,
+                },
+            ));
+        }
+        let page = crate::listing::page(matching, query.descending, query.after, query.limit);
+        Ok(AgentPage {
+            agents: page.entries,
+            total: page.total,
+        })
+    }
+
+    /// The distinct reported `key=value` pairs and `service_name` values of every record, each
+    /// sorted, at most `limit` of each: what the UI suggests
+    /// (ADR-0049
+    /// clause 9). The default answers from every record [`load`](Self::load) reads; a shared store,
+    /// and a wrapper of one, overrides it.
+    ///
+    /// # Errors
+    /// Returns an error when the records cannot be read.
+    fn reported_values(&self, limit: usize) -> Result<ReportedValues, String> {
+        let derived: Vec<crate::listing::Derived> = self
+            .load()?
+            .iter()
+            .map(|(uid, record)| crate::listing::derive(&source_of(uid, record)))
+            .collect();
+        Ok(ReportedValues::of(&derived, limit))
+    }
+
     /// Whether other Servers write this store too, so the fleet reads an Agent it does not hold
     /// from it rather than from what it loaded, and decides an act on an Agent from what it stores
-    /// (ADR-0044 clause 3). A store that is its one Server's alone
+    /// (ADR-0050 clause 3). A store that is its one Server's alone
     /// says no.
     fn is_shared(&self) -> bool {
         false
@@ -317,7 +512,11 @@ pub trait AgentStore: Send + Sync {
     /// the stored holder is `holder`, or is none and the stored count of takes is still `take`,
     /// the count this Server was last answered for the Agent, so an Agent that moved to another
     /// Server keeps what that Server wrote of it, also once it disconnected there, however the
-    /// Servers' clocks differ (ADR-0043 clause 2). `holder`
+    /// Servers' clocks differ (ADR-0043 clause 2), and only where the stored sequence number is not
+    /// higher than the record's, so a Server that still holds the row as it stops leaves a newer
+    /// report another Server wrote meanwhile
+    /// (ADR-0048
+    /// clause 8). `holder`
     /// is the instance id of this Server's lease, `None` without one, and `take` is `None` where
     /// this Server was answered none. Answers whether it wrote the record. A store whose one
     /// Server is its only writer writes as `write_report` does.
@@ -383,10 +582,11 @@ pub trait AgentStore: Send + Sync {
     /// `instance_uid` whatever order they are given in, so two batches over the same Agents never
     /// deadlock (ADR-0043 clause 4). Each Agent comes with
     /// the count of takes `holder` was last answered for it, `None` where it was answered none. A
-    /// connected Agent names `holder` as the instance that holds its connection only where the
-    /// stored presence names `holder`, or none, or an instance without a live lease: a batch read
-    /// before another instance took the Agent never undoes that take, and writes nothing of it.
-    /// Naming `holder` anew counts as a take. A disconnect is written only of an Agent whose stored
+    /// connected Agent names `holder` as the instance that holds its connection where the stored
+    /// presence names `holder`, and anew only where it names none or an instance without a live
+    /// lease, and, where the Agent comes with a count, only while the stored count is still that
+    /// one: a batch read before another instance took the Agent never undoes that take, and writes
+    /// nothing of it. Naming `holder` anew counts as a take. A disconnect is written only of an Agent whose stored
     /// presence names `holder` and still holds the count it comes with, so it never undoes another
     /// instance's take, nor a take of `holder` made since, however the instances' clocks differ;
     /// `last_seen_ms` never moves back. A record no longer stored is written nothing. Answers the
@@ -411,7 +611,7 @@ pub trait AgentStore: Send + Sync {
     /// the holder it replaced is another Server, live lease or not, so that one stops carrying it,
     /// and counts each change of holder, so the take that makes it change more than ten times
     /// within a minute says so
-    /// (ADR-0041
+    /// (ADR-0048
     /// clause 8). Answers `None` when there is no record. A store whose one Server holds every
     /// presence in memory keeps none, and writes nothing.
     ///
@@ -430,7 +630,7 @@ pub trait AgentStore: Send + Sync {
     /// The holder each stored presence of `uids` names, by the id of its lease, `None` where it
     /// names none; a record not stored is left out. What an instance that heard of a take reads
     /// to decide whether it still carries the Agent
-    /// (ADR-0041
+    /// (ADR-0048
     /// clause 8).
     ///
     /// # Errors
@@ -439,6 +639,24 @@ pub trait AgentStore: Send + Sync {
         &self,
         uids: &[InstanceUid],
     ) -> Result<HashMap<InstanceUid, Option<String>>, String> {
+        let _ = uids;
+        Err("this store keeps no presence; its Server decides from what it holds".to_string())
+    }
+
+    /// The holder each stored presence of `uids` names, as [`holders`](Self::holders) answers it,
+    /// and the record's count of takes; a record not stored is left out. What an instance that does
+    /// not know whether its take was written, since its answer was lost, reads before it writes the
+    /// Agent's disconnect under the count it read. A database adapter reads them under a share
+    /// lock, which waits for a take still in flight
+    /// (ADR-0048
+    /// clause 8).
+    ///
+    /// # Errors
+    /// Returns an error when the records cannot be read, and on a store that keeps no presence.
+    fn takes(
+        &self,
+        uids: &[InstanceUid],
+    ) -> Result<HashMap<InstanceUid, (Option<String>, u64)>, String> {
         let _ = uids;
         Err("this store keeps no presence; its Server decides from what it holds".to_string())
     }
@@ -479,7 +697,20 @@ pub trait AgentStore: Send + Sync {
         self.remove(old)
     }
 
-    /// A rollout (ADR-0044 clause 2): the revisions it pins, each added to its Configuration's
+    /// Whether a [`rekey`](Self::rekey) of `old` to `new` that answered an error was made all the
+    /// same: the record is stored under `new` and no longer under `old`. What an instance whose
+    /// re-key lost its answer reads back before it answers the Agent; a database adapter waits for
+    /// a move of the record still in flight
+    /// (ADR-0048
+    /// clause 10).
+    ///
+    /// # Errors
+    /// Returns an error when the records cannot be read; the outcome is then not known.
+    fn moved(&self, old: &InstanceUid, new: &InstanceUid) -> Result<bool, String> {
+        Ok(self.get(new)?.is_some() && self.get(old)?.is_none())
+    }
+
+    /// A rollout (ADR-0050 clause 2): the revisions it pins, each added to its Configuration's
     /// retained revisions by its hash and no other revision touched, and the records carrying the
     /// assignments that pin them, as one operation. A database adapter holds each pinned
     /// Configuration's row against a collection until it commits, so no other instance collects a

@@ -1880,7 +1880,7 @@ async fn the_forms_mark_every_field_required_or_optional() {
 }
 
 /// The bundled UI asks for a bootstrap password of 8 to 128 characters, as the Server takes.
-/// Verifies: ADR-0022
+/// Verifies: ADR-0052
 #[tokio::test]
 async fn the_ui_asks_for_a_bootstrap_password_of_8_to_128_characters() {
     let server = spawn().await;
@@ -2031,14 +2031,14 @@ async fn the_ui_shows_the_sha256_and_carries_the_signing_file_the_api_serves() {
 
 /// The bundled UI is a client of the REST API and nothing more (ADR-0026 clause 24), so its
 /// Enrolments tab depends on the names the enrolment routes share with it: the routes it calls and
-/// the fields it shows and sends, the requested key's fingerprint above all — what ADR-0022 clause 10 lists
+/// the fields it shows and sends, the requested key's fingerprint above all — what ADR-0052 clause 10 lists
 /// so an operator can match a request to the Client's log. The page asks for them, and the OpenAPI
 /// document describes them; a rename on one side breaks here rather than in an empty column. What
 /// the page does with them is not tested in the repository: it is one embedded page with no
 /// frontend toolchain to run it in. The queue lists the bootstrap certificate's subject values and
 /// not the request's own subject, the issue form sends all six attributes and the password, and
-/// the page never handles a private key: every certificate offers its PKCS#12 file (ADR-0022).
-/// Verifies: ADR-0025, ADR-0022
+/// the page never handles a private key: every certificate offers its PKCS#12 file (ADR-0052).
+/// Verifies: ADR-0025, ADR-0052
 #[tokio::test]
 async fn the_ui_and_the_enrolment_api_share_their_names() {
     let server = spawn().await;
@@ -2214,6 +2214,299 @@ async fn a_cross_site_enrolment_decision_is_refused() {
             same_origin.status(),
             403,
             "a same-origin {act} is not a CSRF"
+        );
+    }
+}
+
+/// `count` Agents reported to `server`, each by its own name, `agent-00000` onwards.
+fn fleet_of(server: &support::TestServer, count: u32) -> std::collections::BTreeSet<String> {
+    (0..count)
+        .map(|n| {
+            let mut bytes = [0u8; 16];
+            bytes[..4].copy_from_slice(&n.to_be_bytes());
+            bytes[15] = 1;
+            let uid = opamp::uid::InstanceUid(bytes);
+            server.state.process(
+                support::full_report(&uid, &format!("agent-{n:05}"), 1),
+                fleet_server::fleet::Transport::Http,
+                None,
+            );
+            uid.to_string()
+        })
+        .collect()
+}
+
+/// One read of the list: its status, `X-Total-Count`, the target of its `rel="next"` link, and
+/// its body.
+async fn listing(
+    client: &reqwest::Client,
+    addr: std::net::SocketAddr,
+    path: &str,
+) -> (u16, Option<String>, Option<String>, serde_json::Value) {
+    let response = client.get(url(addr, path)).send().await.expect("send");
+    let status = response.status().as_u16();
+    let total = response
+        .headers()
+        .get("x-total-count")
+        .map(|v| v.to_str().expect("text").to_string());
+    let next = response.headers().get("link").map(|link| {
+        let link = link.to_str().expect("text");
+        assert!(link.ends_with("; rel=\"next\""), "{link}");
+        link.trim_start_matches('<')
+            .split('>')
+            .next()
+            .expect("a target")
+            .to_string()
+    });
+    (status, total, next, response.json().await.expect("json"))
+}
+
+/// The Instance UIDs of a page.
+fn uids_of(body: &serde_json::Value) -> Vec<String> {
+    body.as_array()
+        .expect("an array")
+        .iter()
+        .map(|agent| agent["instance_uid"].as_str().expect("uid").to_string())
+        .collect()
+}
+
+/// 2 500 Agents read with `limit=1000` arrive as three pages, each followed by its `Link`, the
+/// last with none, every one counting all, no Agent twice and none missing, in the order of their
+/// names.
+/// Verifies: ADR-0049, G-5
+#[tokio::test]
+async fn the_fleet_pages_by_cursor_with_no_agent_twice_and_none_missing() {
+    let server = spawn().await;
+    let client = reqwest::Client::new();
+    let fleet = fleet_of(&server, 2500);
+    let mut path = "/api/v1/agents?limit=1000".to_string();
+    let (mut seen, mut sizes) = (Vec::new(), Vec::new());
+    loop {
+        let (status, total, next, body) = listing(&client, server.rest_addr, &path).await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(total.as_deref(), Some("2500"));
+        let page = uids_of(&body);
+        sizes.push(page.len());
+        seen.extend(page);
+        match next {
+            Some(next) => {
+                assert!(
+                    next.starts_with("/api/v1/agents?limit=1000&cursor="),
+                    "{next}"
+                );
+                path = next;
+            }
+            None => break,
+        }
+    }
+    assert_eq!(sizes, [1000, 1000, 500]);
+    let distinct: std::collections::BTreeSet<String> = seen.iter().cloned().collect();
+    assert_eq!(distinct.len(), seen.len(), "no Agent twice");
+    assert_eq!(distinct, fleet, "none missing");
+    let by_name: Vec<String> = fleet.iter().cloned().collect();
+    assert_eq!(
+        seen, by_name,
+        "by name, which here orders as the Instance UID does"
+    );
+}
+
+/// Without `limit` the list is the whole array, as it always was, counted; a list longer than the
+/// bound is refused naming `limit`, never cut short. An Agent's view on the filesystem store names
+/// no holder.
+/// Verifies: ADR-0049, G-5
+#[tokio::test]
+async fn without_limit_the_whole_fleet_comes_back_up_to_the_bound() {
+    let server = spawn().await;
+    let client = reqwest::Client::new();
+    fleet_of(&server, 2500);
+    let (status, total, next, body) = listing(&client, server.rest_addr, "/api/v1/agents").await;
+    assert_eq!((status, total.as_deref(), next), (200, Some("2500"), None));
+    assert_eq!(uids_of(&body).len(), 2500);
+    assert_eq!(body[0]["holder"], "");
+    assert_eq!(body[0]["holder_host"], "");
+    assert_eq!(agents(&client, server.rest_addr).await.len(), 2500);
+
+    fleet_of(&server, 10_001);
+    let (status, _, _, body) = listing(&client, server.rest_addr, "/api/v1/agents").await;
+    assert_eq!(status, 400, "{body}");
+    assert!(
+        body["error"].as_str().expect("why").starts_with("limit:"),
+        "{body}"
+    );
+    let (status, total, next, _) =
+        listing(&client, server.rest_addr, "/api/v1/agents?q=agent-0999").await;
+    assert_eq!(
+        (status, total.as_deref(), next),
+        (200, Some("10"), None),
+        "the bound counts what the filters leave: agent-09990 to agent-09999"
+    );
+}
+
+/// What a request may not ask is answered `400` naming it; a `limit` above the most a page holds
+/// is answered as that most.
+/// Verifies: ADR-0049
+#[tokio::test]
+async fn a_list_request_it_cannot_answer_is_refused_naming_what() {
+    let server = spawn().await;
+    let client = reqwest::Client::new();
+    fleet_of(&server, 1200);
+    let (status, _, next, body) =
+        listing(&client, server.rest_addr, "/api/v1/agents?limit=5000").await;
+    assert_eq!(status, 200);
+    assert_eq!(uids_of(&body).len(), 1000, "as 1000");
+    let next = next.expect("more follow");
+    let (status, _, _, body) = listing(&client, server.rest_addr, &next).await;
+    assert_eq!((status, uids_of(&body).len()), (200, 200));
+    let cursor = next.split("cursor=").nth(1).expect("a cursor");
+    let (status, _, _, body) = listing(
+        &client,
+        server.rest_addr,
+        &format!("/api/v1/agents?cursor={cursor}"),
+    )
+    .await;
+    assert_eq!(
+        (status, uids_of(&body).len()),
+        (200, 200),
+        "a cursor alone pages at the most a page holds"
+    );
+    for (path, named) in [
+        ("/api/v1/agents?limit=0", "limit"),
+        ("/api/v1/agents?limit=-3", "limit"),
+        ("/api/v1/agents?limit=many", "limit"),
+        ("/api/v1/agents?limit=10&cursor=nonsense", "cursor"),
+        (
+            &format!("/api/v1/agents?limit=1000&sort=seq&cursor={cursor}") as &str,
+            "cursor",
+        ),
+        (
+            &format!("/api/v1/agents?limit=1000&q=agent&cursor={cursor}"),
+            "cursor",
+        ),
+        ("/api/v1/agents?colour=blue", "colour"),
+        ("/api/v1/agents?q=a&q=b", "q"),
+        ("/api/v1/agents?holder=none", "holder"),
+        ("/api/v1/agents?sort=size", "sort"),
+        ("/api/v1/agents?order=up", "order"),
+        ("/api/v1/agents?connected=yes", "connected"),
+        ("/api/v1/agents?stale=1", "stale"),
+        ("/api/v1/agents?selector=tier", "selector"),
+        ("/api/v1/agents?limit=%2B5", "limit"),
+        ("/api/v1/agents?q=%+1", "the query string"),
+    ] {
+        let (status, _, _, body) = listing(&client, server.rest_addr, path).await;
+        assert_eq!(status, 400, "{path}: {body}");
+        assert!(
+            body["error"]
+                .as_str()
+                .expect("why")
+                .starts_with(&format!("{named}:")),
+            "{path}: {body}"
+        );
+    }
+}
+
+/// What the forms suggest, the Server answers: the distinct pairs the fleet reports and the
+/// distinct types, each sorted.
+/// Verifies: ADR-0049
+#[tokio::test]
+async fn the_attributes_the_fleet_reports_are_answered_for_the_forms() {
+    let server = spawn().await;
+    let client = reqwest::Client::new();
+    fleet_of(&server, 3);
+    let (status, _, _, body) =
+        listing(&client, server.rest_addr, "/api/v1/agents/attributes").await;
+    assert_eq!(status, 200, "{body}");
+    let types: Vec<String> = serde_json::from_value(body["service_names"].clone()).expect("types");
+    assert_eq!(types, [AGENT_TYPE]);
+    let pairs: Vec<String> = serde_json::from_value(body["attributes"].clone()).expect("pairs");
+    assert!(
+        pairs.contains(&format!("service.name={AGENT_TYPE}")),
+        "{pairs:?}"
+    );
+    let mut sorted = pairs.clone();
+    sorted.sort();
+    sorted.dedup();
+    assert_eq!(pairs, sorted, "distinct and sorted");
+}
+
+/// A cursor made by hand for a request with no parameter but `limit`, naming `tiebreak` after the
+/// key `key`.
+fn forged_cursor(key: &str, tiebreak: &str) -> String {
+    use base64::Engine as _;
+    use sha2::Digest as _;
+    let digest = hex::encode(&sha2::Sha256::digest(b"")[..16]);
+    let body = serde_json::json!({"p": {"key": {"Text": key}, "tiebreak": tiebreak}, "d": digest});
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(body.to_string())
+}
+
+/// A NUL, which no store can hold in a text it searches, is refused where it arrives: in a list's
+/// parameter or cursor with a `400` naming it, and in a label. A cursor made by hand without one
+/// is a position and nothing more.
+/// Verifies: ADR-0049, ADR-0043
+#[tokio::test]
+async fn a_nul_is_refused_in_a_list_parameter_a_cursor_and_a_label() {
+    let server = spawn().await;
+    let client = reqwest::Client::new();
+    fleet_of(&server, 3);
+    let (status, _, _, body) = listing(
+        &client,
+        server.rest_addr,
+        &format!(
+            "/api/v1/agents?limit=10&cursor={}",
+            forged_cursor("agent", "")
+        ),
+    )
+    .await;
+    assert_eq!(
+        (status, uids_of(&body).len()),
+        (200, 3),
+        "a forged cursor is a position"
+    );
+    for (path, named) in [
+        ("/api/v1/agents?q=a%00b".to_string(), "q"),
+        ("/api/v1/agents?selector=env%3Dp%00".to_string(), "selector"),
+        (
+            "/api/v1/agents?service_name=x%00".to_string(),
+            "service_name",
+        ),
+        ("/api/v1/agents?sort=name%00".to_string(), "sort"),
+        (
+            format!(
+                "/api/v1/agents?limit=10&cursor={}",
+                forged_cursor("a\u{0}", "x")
+            ),
+            "cursor",
+        ),
+        (
+            format!(
+                "/api/v1/agents?limit=10&cursor={}",
+                forged_cursor("a", "x\u{0}")
+            ),
+            "cursor",
+        ),
+    ] {
+        let (status, _, _, body) = listing(&client, server.rest_addr, &path).await;
+        assert_eq!(status, 400, "{path}: {body}");
+        assert!(
+            body["error"]
+                .as_str()
+                .expect("why")
+                .starts_with(&format!("{named}:")),
+            "{path}: {body}"
+        );
+    }
+    let uid = opamp::uid::InstanceUid::default();
+    report(&client, server.addr, &support::full_report(&uid, "host", 1)).await;
+    for labels in [
+        serde_json::json!({"ring": "a\u{0}b"}),
+        serde_json::json!({"ri\u{0}ng": "a"}),
+    ] {
+        assert_eq!(
+            set_labels(&client, server.rest_addr, &uid, labels.clone())
+                .await
+                .status(),
+            400,
+            "{labels}"
         );
     }
 }

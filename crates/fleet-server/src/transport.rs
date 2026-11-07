@@ -58,7 +58,7 @@ pub struct Admission {
 }
 
 /// How often a plain-HTTP peer's admission is recorded: once per address and certificate per
-/// hour, so a poll every few seconds does not crowd the record (ADR-0039 clause 1).
+/// hour, so a poll every few seconds does not crowd the record (ADR-0046 clause 1).
 const ADMITTED_EVERY: Duration = Duration::from_secs(3600);
 
 /// The plain-HTTP peers remembered as recorded at most.
@@ -72,7 +72,7 @@ pub struct Proofs {
     /// The certificate itself (DER), which a bootstrap proof naming it must embed byte for byte
     /// (ADR-0015 clause 25).
     pub der: Option<Arc<[u8]>>,
-    /// The host the certificate was issued to, when it names one (ADR-0022 clause 11).
+    /// The host the certificate was issued to, when it names one (ADR-0052 clause 11).
     pub host: Option<String>,
     /// The certificate's subject values, which a Host made at its first report carries
     /// (ADR-0043 clause 15).
@@ -129,6 +129,9 @@ fn is_gateway(subject: &Subject, revocations: Option<&Arc<Revocations>>) -> bool
     }
 }
 
+/// What a message is refused with while the instance holds no lease it can prove.
+const NO_LEASE: &str = "this instance holds no lease it can prove; connect again";
+
 /// What a message past the limit is answered (ADR-0045 clause 25).
 const THROTTLED: &str = "too many messages arrive from this sender — retry later";
 
@@ -162,7 +165,7 @@ impl Admission {
         self
     }
 
-    /// Records every decision in `audit` (ADR-0039).
+    /// Records every decision in `audit` (ADR-0046).
     #[must_use]
     pub fn with_audit(mut self, audit: Option<Arc<dyn Audit>>) -> Self {
         self.audit = audit;
@@ -429,7 +432,7 @@ async fn gateway_revocations(State(state): State<Arc<AppState>>, request: Reques
                 .is_some_and(|host| revocations.is_gateway(host))
             {
                 // A member asking for what only a Gateway is handed is a refusal like any other
-                // (ADR-0039 clause 1).
+                // (ADR-0046 clause 1).
                 state.audit_refusal(
                     Entry::new("gateway_list.refused", "refused")
                         .peer(peer_ip(&request))
@@ -461,10 +464,10 @@ async fn gateway_revocations(State(state): State<Arc<AppState>>, request: Reques
 
 /// The Gateways' list as its body and its `ETag`. The `ETag` is the SHA-256 of the body, and where
 /// the store keeps the list's one version, as PostgreSQL does, `list-<version>-` before it
-/// (ADR-0044 clause 10). Every instance that holds the same list
+/// (ADR-0050 clause 10). Every instance that holds the same list
 /// at the same version answers the same `ETag`; the hash keeps one version from naming two bodies,
-/// as it would when the instance that revoked had not yet taken up a renewal another instance
-/// registered. Either way it changes with the list and survives a restart.
+/// as it would when a Server of 0.8.0 beside this one registered a renewal, which moves no version
+/// (ADR-0050 clause 10). Either way it changes with the list and survives a restart.
 #[must_use]
 pub fn gateway_list(certificates: &[serde_json::Value], version: Option<u64>) -> (String, String) {
     use sha2::Digest as _;
@@ -576,7 +579,7 @@ async fn admit(
     next: Next,
 ) -> Response {
     // What this gate proves is *fleet membership* and the host, not which Agent is speaking:
-    // `instance_uid` stays self-asserted behind the certificate (ADR-0022 clause 11 and ADR-0038 clause 12). Admission
+    // `instance_uid` stays self-asserted behind the certificate (ADR-0052 clause 11 and ADR-0038 clause 12). Admission
     // is the trust boundary; the host is the only bound between admitted Agents. An
     // `Authorization` header is not read here or anywhere behind it (ADR-0038 clause 1).
     let peer = peer_ip(&request);
@@ -682,7 +685,7 @@ async fn admit(
         .map(|cert| admission.issuers.classify(cert.as_ref()))
         .unwrap_or(Peer::Member);
     if let Peer::Enrolling { .. } = &classified {
-        // A bootstrap certificate opens nothing outside an enrolment window (ADR-0022 clause 9).
+        // A bootstrap certificate opens nothing outside an enrolment window (ADR-0052 clause 9).
         // The handshake proved the certificate, so this is no guess and counts as no failure:
         // hosts that wait for an operator must not throttle the members behind the same address.
         if !admission.enrolment.as_ref().is_some_and(|e| e.is_open()) {
@@ -716,7 +719,7 @@ async fn admit(
                         .and_then(|facts| admission.issuers_role(&facts.id.issuer)),
                 )
                 .with("serial", serial.map(str::to_string));
-            // Not admitted without its record (ADR-0039 clause 5).
+            // Not admitted without its record (ADR-0046 clause 5).
             if audit.record(entry).is_err() {
                 return busy();
             }
@@ -746,7 +749,7 @@ struct Fleet(Arc<AppState>, Issuers);
 /// One connection as the fleet sees it.
 struct Carrier {
     transport: Transport,
-    /// Set on an enrolment connection (ADR-0022 clause 9): the bootstrap certificate it carried,
+    /// Set on an enrolment connection (ADR-0052 clause 9): the bootstrap certificate it carried,
     /// where from, and the key its request asks to be certified, once it has sent one.
     enrolling: Option<Enrolling>,
     /// This connection's identity — what the duplicate detection tells connections apart by. Plain
@@ -756,7 +759,7 @@ struct Carrier {
     /// (ADR-0015), so all of them are marked unreachable when it goes.
     seen: Vec<InstanceUid>,
     /// What admitted the connection: re-checked before a CSR is signed, and the presented
-    /// certificate is the predecessor of one it renews (ADR-0044 clause 9 and ADR-0038 clause 28).
+    /// certificate is the predecessor of one it renews (ADR-0050 clause 9 and ADR-0038 clause 28).
     proofs: Proofs,
     /// Where the connection comes from.
     peer: Option<IpAddr>,
@@ -1037,6 +1040,13 @@ impl Handler for Fleet {
     }
 
     async fn on_message(&self, carrier: &mut Carrier, report: AgentToServer) -> Reply {
+        // Nothing is answered on a lease this instance cannot prove, after a suspend before its
+        // listeners are closed included
+        // (ADR-0048
+        // clause 3).
+        if !self.0.holds_its_lease() {
+            return Reply::Refuse(StatusCode::SERVICE_UNAVAILABLE, NO_LEASE.to_string());
+        }
         // An enrolment request through a Gateway (ADR-0015 clause 25); counted in the Gateway's
         // enrolment aggregate and, once checked, by the bootstrap certificate it names (ADR-0015 clause 26).
         let through_gateway = self.enrolment_through_gateway(carrier, &report);
@@ -1080,9 +1090,17 @@ impl Handler for Fleet {
                 subject_values: carrier.proofs.subject_values.clone(),
                 not_after_ms: *not_after_ms,
             });
-        let outcome =
-            self.0
-                .process_presented(report, carrier.transport, carrier.conn, presented.as_ref());
+        // The report reads and writes the store, so it runs off the runtime's workers: a
+        // handshake, another connection's message and a ping never wait for it.
+        let (state, transport, conn) = (self.0.clone(), carrier.transport, carrier.conn);
+        let outcome = match tokio::task::spawn_blocking(move || {
+            state.process_presented(report, transport, conn, presented.as_ref())
+        })
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(e) => std::panic::resume_unwind(e.into_panic()),
+        };
         if let (Some(uid), Some(_)) = (outcome.uid, carrier.conn) {
             if outcome.disconnected {
                 carrier.seen.retain(|s| s != &uid);
@@ -1094,6 +1112,13 @@ impl Handler for Fleet {
     }
 
     fn on_outbound(&self, carrier: &mut Carrier, push: Push) -> Vec<ServerToAgent> {
+        // Nothing is pushed on a lease this instance cannot prove: a queued restart stays queued,
+        // and an offer or an approval waits for an instance that holds one
+        // (ADR-0048
+        // clause 3).
+        if !self.0.holds_its_lease() {
+            return Vec::new();
+        }
         if let (Push::Enrolment, Some(enrolling)) = (push, &carrier.enrolling) {
             // A decision reached while the host waits: an approval is handed over at once.
             let Some(request) = enrolling.request.lock().expect("request lock").clone() else {
@@ -1121,11 +1146,15 @@ impl Handler for Fleet {
                 }
             }
         }
+        // Only a WebSocket carries Agents to push to, and each has its connection.
+        let Some(conn) = carrier.conn else {
+            return Vec::new();
+        };
         let mut messages = Vec::new();
         for uid in &carrier.seen {
             // A queued restart goes first, as its own message — the Baseline's command message is
             // never combined with an offer.
-            if let Some(command) = self.0.restart_command_for(uid) {
+            if let Some(command) = self.0.restart_command_for(uid, conn) {
                 debug!(agent = %uid, "pushing a restart command");
                 messages.push(command);
             }
@@ -1158,6 +1187,13 @@ impl Handler for Fleet {
             });
         }
         Some(Closing::policy(reason))
+    }
+
+    /// A restart command its connection did not take stays queued
+    /// (ADR-0048
+    /// clause 8).
+    fn on_unsent(&self, message: &ServerToAgent) {
+        self.0.unsent(message);
     }
 
     /// The connection is gone; every Agent it carried is unreachable until it reports again.
@@ -1222,7 +1258,7 @@ impl Fleet {
         true
     }
 
-    /// One message on an enrolment connection (ADR-0022 clause 9). Nothing in it is read but the
+    /// One message on an enrolment connection (ADR-0052 clause 9). Nothing in it is read but the
     /// certificate signing request: no Agent record is created and nothing is offered but the
     /// issued certificate.
     fn enrol(&self, enrolling: &Enrolling, report: &AgentToServer) -> ServerToAgent {
@@ -1395,7 +1431,7 @@ impl Fleet {
         }
     }
 
-    /// Takes in an enrolment request, or answers it once it has been decided (ADR-0022 clauses 9 and 10): what both an enrolment connection and a Gateway's relay are answered.
+    /// Takes in an enrolment request, or answers it once it has been decided (ADR-0052 clauses 9 and 10): what both an enrolment connection and a Gateway's relay are answered.
     fn file(
         &self,
         enrolment: &Enrolment,
@@ -1431,7 +1467,7 @@ impl Fleet {
                 unavailable(instance_uid, "the enrolment queue is full — retry later")
             }
             Submitted::OverShare { first } => {
-                // Audited once per certificate and window (ADR-0022): a host re-sending its
+                // Audited once per certificate and window (ADR-0052): a host re-sending its
                 // refused request does not flood the record.
                 if let (true, Some(audit)) = (first, self.0.audit()) {
                     audit.refusal(
@@ -1473,5 +1509,35 @@ fn proves_the_handshake(csr_pem: &str, handshake: &Requester) -> Result<(), Stri
                 .to_string(),
         ),
         _ => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A restart command the endpoint reports unsent is queued again, so it is sent once more.
+    /// Verifies: ADR-0048
+    #[test]
+    fn a_restart_command_reported_unsent_is_queued_again() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = Arc::new(AppState::new(dir.path().to_path_buf()).expect("state"));
+        let uid = InstanceUid([0x30; 16]);
+        state.process(
+            AgentToServer {
+                instance_uid: uid.as_bytes().to_vec(),
+                sequence_num: 1,
+                capabilities: opamp::proto::AgentCapabilities::ReportsStatus as u64
+                    | opamp::proto::AgentCapabilities::AcceptsRestartCommand as u64,
+                ..Default::default()
+            },
+            Transport::WebSocket,
+            Some(1),
+        );
+        assert!(state.request_restart(&uid).is_ok(), "queued");
+        let command = state.restart_command_for(&uid, 1).expect("sent");
+        let fleet = Fleet(state.clone(), Issuers::default());
+        fleet.on_unsent(&command);
+        assert!(state.restart_command_for(&uid, 1).is_some(), "sent again");
     }
 }

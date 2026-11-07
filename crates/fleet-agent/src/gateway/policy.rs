@@ -1,4 +1,4 @@
-//! Which host a Gateway takes to speak for an `instance_uid` (ADR-0015 clause 15, after ADR-0022
+//! Which host a Gateway takes to speak for an `instance_uid` (ADR-0015 clause 15, after ADR-0052
 //! clause 11): the host of the first report for it, kept across the Gateway's restarts in its store
 //! ([`store`](crate::gateway::store)). What the Gateway forwards, relays and passes on for an Agent
 //! is decided against this binding; the state is the core's, and the package cache holds it and
