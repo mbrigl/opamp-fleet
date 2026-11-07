@@ -17,6 +17,7 @@ use std::time::Duration;
 use fleet_server::config::{LeaseTimes, PostgresConfig};
 use fleet_server::enrolment::Enrolment;
 use fleet_server::floors::PackageFloors;
+use fleet_server::postgres::schema::{Migration, MIGRATIONS};
 use fleet_server::postgres::{Database, Exclusive};
 use fleet_server::revocation::{CertId, Revocations};
 use fleet_server::Records;
@@ -281,7 +282,7 @@ impl Instance {
     /// [`start`](Self::start), taking up nothing another instance commits until
     /// [`follow`](Self::follow) is called: what it hears is held back until then.
     async fn start_deaf(pki: &Pki, schema: &Schema, config: PostgresConfig) -> Self {
-        Self::start_with(pki, schema, config, true, false, None, None).await
+        Self::start_with(pki, schema, config, true, false, None, None, None).await
     }
 
     /// [`start`](Self::start), its Agent plane's admission counted by a throttle of `limits`, as
@@ -292,7 +293,7 @@ impl Instance {
         config: PostgresConfig,
         limits: fleet_server::throttle::Limits,
     ) -> Self {
-        Self::start_with(pki, schema, config, true, true, Some(limits), None).await
+        Self::start_with(pki, schema, config, true, true, Some(limits), None, None).await
     }
 
     /// Starts taking up what other instances commit, for an instance started deaf.
@@ -309,7 +310,7 @@ impl Instance {
         config: PostgresConfig,
         renewals: bool,
     ) -> Self {
-        Self::start_with(pki, schema, config, renewals, true, None, None).await
+        Self::start_with(pki, schema, config, renewals, true, None, None, None).await
     }
 
     /// [`start`](Self::start), its package blobs on the filesystem in `blobs`, which other
@@ -320,12 +321,36 @@ impl Instance {
         config: PostgresConfig,
         blobs: &std::path::Path,
     ) -> Self {
-        Self::start_with(pki, schema, config, true, true, None, Some(blobs)).await
+        Self::start_with(pki, schema, config, true, true, None, Some(blobs), None).await
+    }
+
+    /// [`start`](Self::start), as a Server of `release` whose schema is `migrations`: one of two
+    /// versions side by side.
+    async fn start_as(
+        pki: &Pki,
+        schema: &Schema,
+        config: PostgresConfig,
+        release: &'static str,
+        migrations: &'static [Migration],
+    ) -> Self {
+        Self::start_with(
+            pki,
+            schema,
+            config,
+            true,
+            true,
+            None,
+            None,
+            Some((release, migrations)),
+        )
+        .await
     }
 
     /// [`start_following`](Self::start_following), following other instances where `follows`
-    /// says so, its admission throttled where `throttle` names limits, and its package blobs in
-    /// `blobs` where it names a directory.
+    /// says so, its admission throttled where `throttle` names limits, its package blobs in
+    /// `blobs` where it names a directory, and as the release and schema `version` names, or
+    /// this build's.
+    #[allow(clippy::too_many_arguments)]
     async fn start_with(
         pki: &Pki,
         schema: &Schema,
@@ -334,12 +359,16 @@ impl Instance {
         follows: bool,
         throttle: Option<fleet_server::throttle::Limits>,
         blobs: Option<&std::path::Path>,
+        version: Option<(&'static str, &'static [Migration])>,
     ) -> Self {
         opamp::tls::install_ring_provider();
         let dir = tempfile::tempdir().expect("tempdir");
         let name = schema.name.clone();
-        let database = tokio::task::spawn_blocking(move || {
-            Database::open_in(&config, Exclusive::Shared, Some(&name))
+        let database = tokio::task::spawn_blocking(move || match version {
+            Some((release, migrations)) => {
+                Database::open_as(&config, Exclusive::Shared, Some(&name), release, migrations)
+            }
+            None => Database::open_in(&config, Exclusive::Shared, Some(&name)),
         })
         .await
         .expect("open")
@@ -4116,5 +4145,228 @@ async fn an_agent_behind_a_gateway_inherits_the_labels_of_its_client_agent_anoth
         eventually(Duration::from_secs(10), || inherits("core")).await,
         "B followed the labels of the Client Agent behind the Gateway: {:?}",
         view_of(&b, agent).map(|view| view.inherited_labels)
+    );
+}
+
+/// The schema of a Server two releases on: this release's migrations and one more, which names
+/// 0.9.0 as the oldest Server that understands what it leaves.
+fn two_releases_on() -> &'static [Migration] {
+    let mut migrations = MIGRATIONS.to_vec();
+    migrations.push(Migration {
+        version: i32::try_from(migrations.len() + 1).expect("few"),
+        oldest_server: "0.9.0",
+        sql: "CREATE TABLE fleet_test_ahead (n integer)",
+    });
+    Box::leak(migrations.into_boxed_slice())
+}
+
+/// The upgrade from 0.8.0 itself: on the schema 0.8.0 leaves, migrations 1 to 11, with a live lease
+/// as an instance of 0.8.0 takes one, writing no release, two instances of this release that start
+/// at once apply migration 12 once beside it and both serve, and that lease reads 0.8.0
+/// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+/// clause 16).
+/// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn this_release_starts_beside_a_live_lease_of_0_8_0_and_migrates_once() {
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let config = || schema.config_on(schema.config.port);
+    let (before, name) = (config(), schema.name.clone());
+    tokio::task::spawn_blocking(move || {
+        Database::open_as(
+            &before,
+            Exclusive::Shared,
+            Some(&name),
+            "0.8.0",
+            &MIGRATIONS[..11],
+        )
+        .map(|_| ())
+    })
+    .await
+    .expect("open")
+    .expect("the schema of 0.8.0");
+    // A lease as 0.8.0 takes one: no `release` column yet, and none written.
+    let old = "00000000-0000-4000-8000-000000000080";
+    schema.sql(&format!(
+        "INSERT INTO leases (instance_id, host, must_be_alone, taken_at, renewed_at, expires_at) \
+         VALUES ('{old}', 'host-0.8.0', false, now(), now(), now() + interval '1 hour')"
+    ));
+    let (newer, other) = tokio::join!(
+        Instance::start_as(&pki, &schema, config(), "0.8.1", MIGRATIONS),
+        Instance::start_as(&pki, &schema, config(), "0.8.1", MIGRATIONS),
+    );
+    assert_eq!(
+        schema.query("SELECT count(*)::text FROM fleet_schema WHERE version = 12"),
+        ["1"],
+        "migration 12 applied once"
+    );
+    for instance in [&newer, &other] {
+        assert!(instance.both_planes().0, "both serve beside 0.8.0");
+    }
+    assert_eq!(
+        schema.query(&format!(
+            "SELECT release FROM leases WHERE instance_id = '{old}' AND expires_at > now()"
+        )),
+        ["0.8.0"],
+        "the lease of 0.8.0 reads 0.8.0"
+    );
+}
+
+/// The schema of the next patch release: this release's migrations and one more, which names
+/// 0.8.0, so the instances of 0.8.0 serve on what it leaves.
+fn the_next_patch_release() -> &'static [Migration] {
+    let mut migrations = MIGRATIONS.to_vec();
+    migrations.push(Migration {
+        version: i32::try_from(migrations.len() + 1).expect("few"),
+        oldest_server: "0.8.0",
+        sql: "CREATE TABLE fleet_test_next (n integer)",
+    });
+    Box::leak(migrations.into_boxed_slice())
+}
+
+/// With an instance of N on its schema, two instances of N+1 that start at once apply N+1's
+/// migration once and both serve; the instances of N and N+1 both serve the Agents that report
+/// to either, each reading the other's; and each lease names the release of its instance
+/// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+/// clause 16).
+/// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_versions_serve_side_by_side_and_the_newer_migrates_once() {
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let config = || schema.config_on(schema.config.port);
+    let next = the_next_patch_release();
+    let older = Instance::start_as(&pki, &schema, config(), "0.8.0", MIGRATIONS).await;
+    assert_eq!(
+        schema.query("SELECT max(version)::text FROM fleet_schema"),
+        [MIGRATIONS.len().to_string()]
+    );
+    let (newer, other) = tokio::join!(
+        Instance::start_as(&pki, &schema, config(), "0.8.1", next),
+        Instance::start_as(&pki, &schema, config(), "0.8.1", next),
+    );
+    assert_eq!(
+        schema.query(&format!(
+            "SELECT count(*)::text FROM fleet_schema WHERE version = {}",
+            next.len()
+        )),
+        ["1"],
+        "migrated once"
+    );
+    for instance in [&older, &newer, &other] {
+        assert!(instance.both_planes().0, "every instance serves");
+    }
+    let mut releases = schema.query("SELECT release FROM leases WHERE expires_at > now()");
+    releases.sort();
+    assert_eq!(
+        releases,
+        ["0.8.0", "0.8.1", "0.8.1"],
+        "each lease names its release"
+    );
+
+    let (on_older, on_newer) = (InstanceUid([0x51; 16]), InstanceUid([0x52; 16]));
+    let (cert, key) = pki.issue_to_host("h1");
+    let mut session = websocket(&older, &pki, &cert, &key).await;
+    report_as(&mut session, on_older, 1, 0, PACKAGED, true).await;
+    let (cert, key) = pki.issue_to_host("h2");
+    let mut session = websocket(&newer, &pki, &cert, &key).await;
+    report_as(&mut session, on_newer, 1, 0, PACKAGED, true).await;
+    for (reader, uid, carrier) in [(&newer, on_older, &older), (&older, on_newer, &newer)] {
+        let state = reader.state.clone();
+        let view = tokio::task::spawn_blocking(move || state.agent_view(&uid))
+            .await
+            .expect("read")
+            .expect("readable")
+            .expect("known on the other version");
+        assert_eq!(
+            Some(view.holder),
+            carrier.instance_id(),
+            "read through the other version, the Agent names its carrier"
+        );
+    }
+}
+
+/// An instance whose lease lapsed while a Server two releases on migrated checks the schema as
+/// it takes its new lease, and stops: it takes none, keeps the refusal naming both versions, and
+/// ends what its lease sends, so its planes stay closed and the Server exits
+/// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+/// clause 16).
+/// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_instance_whose_lease_lapsed_while_a_newer_server_migrated_stops_at_its_new_lease() {
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let target = std::net::ToSocketAddrs::to_socket_addrs(&(
+        schema.config.host.as_str(),
+        schema.config.port,
+    ))
+    .expect("resolve")
+    .next()
+    .expect("an address");
+    let (port, frozen) = freezable_proxy(target);
+    let (config, name) = (schema.config_on(port), schema.name.clone());
+    let older = tokio::task::spawn_blocking(move || {
+        Database::open_as(&config, Exclusive::Shared, Some(&name), "0.8.0", MIGRATIONS)
+    })
+    .await
+    .expect("open")
+    .expect("0.8.0 opens");
+    let lease = {
+        let older = older.clone();
+        tokio::task::spawn_blocking(move || {
+            fleet_server::instance::Lease::take(older, TIMES, "host-older")
+        })
+        .await
+        .expect("take")
+        .expect("a lease")
+    };
+    let mut held = lease.held();
+
+    frozen.store(true, Ordering::SeqCst);
+    assert!(
+        eventually(TIMES.lapse + Duration::from_secs(2), || held
+            .borrow()
+            .is_none())
+        .await,
+        "the lease was not given up"
+    );
+    // Lapsed in the database too, so the newer Server sees no live lease and migrates.
+    schema.sql("UPDATE leases SET expires_at = now() - interval '1 second'");
+    let (config, name) = (schema.config_on(schema.config.port), schema.name.clone());
+    tokio::task::spawn_blocking(move || {
+        Database::open_as(
+            &config,
+            Exclusive::Shared,
+            Some(&name),
+            "0.10.0",
+            two_releases_on(),
+        )
+        .map(|_| ())
+    })
+    .await
+    .expect("open")
+    .expect("the newer Server migrates");
+
+    frozen.store(false, Ordering::SeqCst);
+    let ended = tokio::time::timeout(Duration::from_secs(30), async {
+        while held.changed().await.is_ok() {}
+    })
+    .await;
+    assert!(ended.is_ok(), "the instance did not stop");
+    assert!(held.borrow().is_none(), "it holds no lease");
+    let refusal = older.outdated().expect("the refusal is kept");
+    for named in ["needs Server 0.9.0", "this Server is 0.8.0"] {
+        assert!(refusal.contains(named), "{named}: {refusal}");
+    }
+    assert!(
+        schema
+            .query("SELECT instance_id::text FROM leases WHERE expires_at > now()")
+            .is_empty(),
+        "no new lease"
     );
 }

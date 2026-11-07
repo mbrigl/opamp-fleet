@@ -220,8 +220,8 @@ async fn until_deadline<T>(
 
 /// Renews the lease `taken` until it cannot prove it; then takes a new one under a new instance
 /// id, and renews that. Ends, and with it what `held` sends, once the exclusive lock of an
-/// instance that must be alone is lost: such an instance takes it again only when it is started
-/// again
+/// instance that must be alone is lost, or once a new lease finds a schema that needs a newer
+/// Server: such an instance takes it again only when it is started again
 /// (ADR-0041
 /// clause 2).
 async fn renew(
@@ -319,6 +319,19 @@ async fn renew(
                         takeovers.send_modify(|count| *count += 1);
                     }
                     break;
+                }
+                // A schema migrated by a newer Server while this one held no lease: it stops, as
+                // at a failed start
+                // (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+                // clause 16).
+                Err(e) if database.outdated().is_some() => {
+                    error!(
+                        lost = %instance_id,
+                        error = %e,
+                        "a newer Server migrated the schema while this instance held no lease: \
+                         stopping"
+                    );
+                    return;
                 }
                 Err(e) => {
                     warn!(lost = %instance_id, error = %e, "could not take a new lease");

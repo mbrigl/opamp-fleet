@@ -135,7 +135,27 @@ pub const MIGRATIONS: &[Migration] = &[
         oldest_server: "0.8.0",
         sql: AGENTS_DERIVED,
     },
+    // A column only added, with a default. A Server of 0.8.0 writes no release into it, and every
+    // lease taken before it is one of 0.8.0, which the default names
+    // (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    // clause 16).
+    Migration {
+        version: 12,
+        oldest_server: "0.8.0",
+        sql: LEASE_RELEASE,
+    },
 ];
+
+/// The release of the instance that holds each lease
+/// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+/// clause 16): what an instance compares with the oldest Server its migrations leave before it
+/// migrates.
+const LEASE_RELEASE: &str = "
+ALTER TABLE leases ADD COLUMN release text NOT NULL DEFAULT '0.8.0';
+";
+
+/// What a lease of 0.8.0 records, which writes no release: the column's default.
+pub const RELEASE_BEFORE_THE_RECORD: &str = "0.8.0";
 
 /// The first schema: one table per kind of record, the parts of a record that are many in tables of
 /// their own (ADR-0044 clauses 4 to 6, 9 to 11 and 21). Unsigned integers are kept as `bigint` with
@@ -495,23 +515,18 @@ pub struct Applied {
     pub versions: Vec<i32>,
 }
 
-/// Applies every migration of `migrations` the database has not yet seen, in order, inside the
-/// transaction `client` holds, and records each. A schema whose oldest Server is above `ours` is
-/// refused before anything is written, naming both versions.
-///
-/// # Errors
-/// Returns an error when the schema needs a newer Server, or a statement fails.
-pub async fn apply(
+/// The newest of the oldest Server versions `fleet_schema` records, `None` when it records none
+/// or does not exist.
+async fn oldest_recorded(
     client: &impl GenericClient,
-    migrations: &[Migration],
-    ours: &str,
-) -> Result<Applied, String> {
+) -> Result<(std::collections::BTreeSet<i32>, Option<String>), String> {
     let exists: bool = client
         .query_one("SELECT to_regclass($1) IS NOT NULL", &[&SCHEMA_TABLE])
         .await
         .map_err(super::sql)?
         .get(0);
     let mut seen = std::collections::BTreeSet::new();
+    let mut needs: Option<String> = None;
     if exists {
         let rows = client
             .query(
@@ -520,24 +535,156 @@ pub async fn apply(
             )
             .await
             .map_err(super::sql)?;
-        let mut needs: Option<String> = None;
         for row in rows {
             seen.insert(row.get::<_, i32>(0));
-            let oldest: String = row.get(1);
-            if needs
-                .as_deref()
-                .is_none_or(|known| compare(&oldest, known) == Ordering::Greater)
-            {
-                needs = Some(oldest);
-            }
+            needs = Some(newer(needs, row.get(1)));
         }
-        if let Some(needs) = needs.filter(|needs| compare(needs, ours) == Ordering::Greater) {
+    }
+    Ok((seen, needs))
+}
+
+/// The newer of `known`, if any, and `other`.
+fn newer(known: Option<String>, other: String) -> String {
+    match known {
+        Some(known) if compare(&other, &known) != Ordering::Greater => known,
+        _ => other,
+    }
+}
+
+/// Why a Server of `ours` refuses a schema whose oldest Server is `needs`, naming both versions.
+fn needs_newer(needs: &str, ours: &str) -> String {
+    format!(
+        "its schema needs Server {needs} or later, and this Server is {ours} — run a Server of \
+         {needs} or later; this one changed nothing in the database"
+    )
+}
+
+/// Refuses the schema when it names an oldest Server newer than `ours`, naming both versions: what
+/// an instance checks under the migrations' lock before it migrates and in the transaction that
+/// takes each lease
+/// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+/// clause 16).
+///
+/// # Errors
+/// Returns the refusal, or an error when a statement fails.
+pub(crate) async fn check(client: &impl GenericClient, ours: &str) -> Result<(), String> {
+    match oldest_recorded(client).await?.1 {
+        Some(needs) if compare(&needs, ours) == Ordering::Greater => Err(needs_newer(&needs, ours)),
+        _ => Ok(()),
+    }
+}
+
+/// Whether `leases` records the release of each lease, as it does once migration 12 is applied.
+///
+/// # Errors
+/// Returns an error when the statement fails.
+async fn leases_record_releases(client: &impl GenericClient) -> Result<bool, String> {
+    Ok(client
+        .query_one(
+            "SELECT EXISTS (SELECT 1 FROM information_schema.columns \
+             WHERE table_schema = current_schema() AND table_name = 'leases' \
+             AND column_name = 'release')",
+            &[],
+        )
+        .await
+        .map_err(super::sql)?
+        .get(0))
+}
+
+/// The live lease whose release is the oldest below `oldest`, as its instance id and release,
+/// `None` when there is none. A lease of an instance that had to be alone counts as none: the
+/// caller holds the exclusive lock or found it free, so that lease's process is gone, and the
+/// next lease taken takes it over
+/// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+/// clauses 2 and 16).
+async fn lease_older_than(
+    client: &impl GenericClient,
+    oldest: &str,
+) -> Result<Option<(String, String)>, String> {
+    let exists: bool = client
+        .query_one("SELECT to_regclass('leases') IS NOT NULL", &[])
+        .await
+        .map_err(super::sql)?
+        .get(0);
+    if !exists {
+        return Ok(None);
+    }
+    // Before migration 12 no lease records its release, and every one is of 0.8.0.
+    let rows = if leases_record_releases(client).await? {
+        client
+            .query(
+                "SELECT instance_id::text, release FROM leases \
+                 WHERE expires_at > now() AND NOT must_be_alone",
+                &[],
+            )
+            .await
+    } else {
+        client
+            .query(
+                "SELECT instance_id::text, $1::text FROM leases \
+                 WHERE expires_at > now() AND NOT must_be_alone",
+                &[&RELEASE_BEFORE_THE_RECORD],
+            )
+            .await
+    }
+    .map_err(super::sql)?;
+    let mut found: Option<(String, String)> = None;
+    for row in rows {
+        let (id, release): (String, String) = (row.get(0), row.get(1));
+        if compare(&release, oldest) != Ordering::Less {
+            continue;
+        }
+        if found
+            .as_ref()
+            .is_none_or(|(_, known)| compare(&release, known) == Ordering::Less)
+        {
+            found = Some((id, release));
+        }
+    }
+    Ok(found)
+}
+
+/// Applies every migration of `migrations` the database has not yet seen, in order, inside the
+/// transaction `client` holds, and records each. A schema whose oldest Server is above `ours` is
+/// refused before anything is written, naming both versions, and so is every schema while a live
+/// lease names a release older than the oldest Server the schema names once `migrations` are
+/// applied, naming both releases, whether they are applied already or not
+/// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+/// clause 16).
+///
+/// # Errors
+/// Returns an error when the schema needs a newer Server, a live lease is of an older one, or a
+/// statement fails.
+pub async fn apply(
+    client: &impl GenericClient,
+    migrations: &[Migration],
+    ours: &str,
+) -> Result<Applied, String> {
+    let (seen, needs) = oldest_recorded(client).await?;
+    if let Some(needs) = needs
+        .as_deref()
+        .filter(|needs| compare(needs, ours) == Ordering::Greater)
+    {
+        return Err(needs_newer(needs, ours));
+    }
+    let leaves = migrations.iter().fold(needs, |known, migration| {
+        Some(newer(known, migration.oldest_server.to_string()))
+    });
+    if let Some(leaves) = &leaves {
+        if let Some((instance_id, release)) = lease_older_than(client, leaves).await? {
             return Err(format!(
-                "its schema needs Server {needs} or later, and this Server is {ours} — run a \
-                 Server of {needs} or later; this one changed nothing in the database"
+                "the live lease {instance_id} is of Server {release}, and the schema needs Server \
+                 {leaves} or later once this Server, {ours}, has applied its migrations — stop \
+                 the instances of {release} first; this one changed nothing in the database"
             ));
         }
-    } else {
+    }
+    let exists: bool = client
+        .query_one("SELECT to_regclass($1) IS NOT NULL", &[&SCHEMA_TABLE])
+        .await
+        .map_err(super::sql)?
+        .get(0);
+    if !exists {
         client
             .batch_execute(&format!(
                 "CREATE TABLE {SCHEMA_TABLE} (
@@ -575,8 +722,9 @@ mod tests {
     use super::*;
 
     /// The migrations are numbered from 1 without a gap, and none names a Server newer than this
-    /// one — a build that refused its own schema would never start.
+    /// one — a build that refused its own schema would never start. This release's own name 0.8.0.
     /// Verifies: ADR-0044
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
     #[test]
     fn the_migrations_are_numbered_and_this_server_understands_them() {
         for (index, migration) in MIGRATIONS.iter().enumerate() {
@@ -597,6 +745,26 @@ mod tests {
                 migration.version
             );
         }
+        // The first release to run beside another serves beside 0.8.0: its migrations name it, so
+        // the instances of 0.8.0 that still run serve on the schema they leave
+        // (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+        // clause 16).
+        for migration in &MIGRATIONS[10..] {
+            assert_eq!(
+                migration.oldest_server, "0.8.0",
+                "migration {} names 0.8.0",
+                migration.version
+            );
+        }
+        assert_eq!(
+            MIGRATIONS.len(),
+            12,
+            "migrations 11 and 12 are this release's"
+        );
+        assert!(
+            LEASE_RELEASE.contains(&format!("DEFAULT '{RELEASE_BEFORE_THE_RECORD}'")),
+            "a lease of 0.8.0 records 0.8.0"
+        );
         assert_eq!(compare("0.10.0", "0.9.0"), Ordering::Greater);
         assert_eq!(compare("not-a-version", "99.0.0"), Ordering::Greater);
     }
