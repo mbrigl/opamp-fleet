@@ -895,10 +895,11 @@ What the questionnaire asks about is only what has no useful default on a fresh 
   where they lie, logs the request's key fingerprint and waits until an operator approves it, then
   stores the issued certificate in the state directory. Ctrl-C stops the wait; the file stays
   written, nothing is registered, and running the questionnaire again asks again and resumes the
-  same request, printing its fingerprint. A request an operator rejected stays rejected: the
-  Server's refusal is logged and the wait goes on, so stop it, delete `client-key.pending.pem` and
-  `client-csr.pending.pem` from the state directory, and run the questionnaire again for a fresh
-  request. A path that names no readable file, here or for the CA, is asked for again;
+  same request, printing its fingerprint. A request an operator rejected stays rejected for its
+  key, in every later window too: the Server's refusal is logged and the wait goes on, so stop it,
+  delete `client-key.pending.pem` and `client-csr.pending.pem` from the state directory, and run
+  the questionnaire again for a fresh request with a new key. A path that names no readable file,
+  here or for the CA, is asked for again;
 - **the package verification key** ([`[packages]`](#packages)). It also decides whether the Server
   may update this Client: a new file is written with `self_update = true`, which takes effect once
   a key is set. An empty answer is accepted, and the questionnaire then says that this Client
@@ -1476,13 +1477,15 @@ starts. Enrolment runs the same either way:
    stores it, and uses it from then on.
 
 Until the request is answered, the Client keeps its pending key and re-sends the same request. A
-closed window is answered `503`, which the Client retries with its usual backoff and which does not
-count toward the Server's admission throttle. The issued
-certificate is renewed the same way once it is two thirds through its validity, with no operator
-involved. The private key is written `0600`; on Windows the state directory's ACL is what protects
-it. Over an `https://` endpoint the enrolling Client sends its request alone, before the Server's
-first answer, and re-sends it at every poll. A host behind a Gateway enrols through it over
-`https://` (see [Enrolment through a Gateway](#enrolment-through-a-gateway)).
+rejected request stays rejected for its key, beyond the window; a fresh request with a new key
+starts once `client-key.pending.pem` and `client-csr.pending.pem` are deleted from the state
+directory. A closed window is answered `503`, which the Client retries with its usual backoff and
+which does not count toward the Server's admission throttle. The issued certificate is renewed the
+same way once it is two thirds through its validity, with no operator involved. The private key is
+written `0600`; on Windows the state directory's ACL is what protects it. Over an `https://`
+endpoint the enrolling Client sends its request alone, before the Server's first answer, and
+re-sends it at every poll. A host behind a Gateway enrols through it over `https://` (see [Enrolment
+through a Gateway](#enrolment-through-a-gateway)).
 
 ### A leftover `[auth]`
 

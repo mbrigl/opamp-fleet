@@ -98,13 +98,13 @@ impl Records {
                 self.bootstrap.len()
             ),
             format!(
-                "the enrolment window and {} pending requests",
-                self.enrolment.as_ref().map_or(0, |persisted| {
-                    serde_json::to_value(persisted)
-                        .ok()
-                        .and_then(|value| value.get("requests")?.as_array().map(Vec::len))
-                        .unwrap_or(0)
-                })
+                "the enrolment window, {} pending requests and {} rejected keys",
+                self.enrolment
+                    .as_ref()
+                    .map_or(0, |persisted| persisted.requests.len()),
+                self.enrolment
+                    .as_ref()
+                    .map_or(0, |persisted| persisted.rejected.len())
             ),
             format!("{} package floors", self.floors.len()),
         ]
@@ -679,8 +679,12 @@ mod tests {
             .expect("bootstrap");
         fs::FsEnrolmentStore::open(root)
             .save(
-                &serde_json::from_value(serde_json::json!({"window_until_ms": 99, "requests": []}))
-                    .expect("window"),
+                &serde_json::from_value(serde_json::json!({
+                    "window_until_ms": 99,
+                    "requests": [],
+                    "rejected": {"ab": 5},
+                }))
+                .expect("window"),
             )
             .expect("enrolment");
         fs::FsFloorStore::open(root)

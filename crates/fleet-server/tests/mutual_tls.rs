@@ -1067,11 +1067,12 @@ fn a_bootstrap_ca_sharing_its_subject_with_the_client_ca_is_refused() {
     );
 }
 
-/// An operator deciding a request that is not pending is told so: an unknown id is `404` for an
-/// approval and a rejection alike (ADR-0022 clause 10).
-/// Verifies: ADR-0038
+/// An operator approving a request that is not pending is told so with `404`; a rejection of an id
+/// the queue does not hold is `204`, so its key is refused when it arrives, and one of an id that
+/// is no key's fingerprint is `400` (clause 10).
+/// Verifies: ADR-0038, ADR-draft-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window
 #[tokio::test]
-async fn an_unknown_enrolment_request_is_answered_404() {
+async fn an_unknown_request_is_not_approved_and_is_rejected_before_it_arrives() {
     let pki = Pki::new();
     let bootstrap = Pki::named("opamp-fleet-test-bootstrap-ca");
     let served = serve(
@@ -1084,20 +1085,26 @@ async fn an_unknown_enrolment_request_is_answered_404() {
     )
     .await;
     let operator_client = client(&served.ca_pem, None);
-    for decision in ["approve", "reject"] {
+    let unqueued = "ab".repeat(32);
+    for (id, decision, status) in [
+        ("no-such-request", "approve", reqwest::StatusCode::NOT_FOUND),
+        (unqueued.as_str(), "approve", reqwest::StatusCode::NOT_FOUND),
+        (
+            "no-such-request",
+            "reject",
+            reqwest::StatusCode::BAD_REQUEST,
+        ),
+        (unqueued.as_str(), "reject", reqwest::StatusCode::NO_CONTENT),
+    ] {
         let response = operator_client
             .post(operator(
                 &served,
-                &format!("/api/v1/enrolments/no-such-request/{decision}"),
+                &format!("/api/v1/enrolments/{id}/{decision}"),
             ))
             .send()
             .await
             .expect("send");
-        assert_eq!(
-            response.status(),
-            reqwest::StatusCode::NOT_FOUND,
-            "{decision}"
-        );
+        assert_eq!(response.status(), status, "{decision} {id}");
     }
 }
 

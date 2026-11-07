@@ -63,6 +63,30 @@ once its tag exists.
   `presence_interval_secs` after it was due.
   **What to do:** nothing; the warning says the database is not keeping up with the fleet.
 
+### Changed
+
+- **A rejected key stays refused beyond its window, and a key may be rejected before its request
+  arrives**
+  ([ADR-draft-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window](docs/adr/draft-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)
+  clauses 10 and 16). A rejection no longer ends with the window: the Server keeps the rejected
+  keys, in `enrolment.json` on files and in a table of their own on PostgreSQL, and a request for
+  one is answered as rejected and not listed in every later window, on every instance. An approval
+  never signs a rejected key. `POST /api/v1/enrolments/{id}/reject` of an `id` the queue does not
+  hold now answers `204` instead of `404`, with the window open or closed, and its request is
+  refused when it arrives; an `id` that is not 64 lowercase hexadecimal digits answers `400`. The
+  `enrolment.rejected` audit line carries `queued`, false for such a rejection. No route lifts a
+  rejection. The schema gains migration 15, which a Server of 0.8.0 serves on; such a Server reads
+  no rejected key.
+  **What to do:** a host rejected by mistake enrols with a new key: delete
+  `client-key.pending.pem` and `client-csr.pending.pem` from its state directory. A script that
+  took `404` from a rejection to mean that the request is gone now gets `204`. While instances of
+  0.8.0 still run, approve through instances of this release: one of 0.8.0 reads no rejected key,
+  so through it a rejected key waits again and may be approved. After a
+  database restore, keep the window closed and reject the ids decided since the backup before
+  opening it, as the manual's restore now says. A Server of 0.8.0 on files does not start on an
+  `enrolment.json` that holds a rejected key; to go back to 0.8.0, delete its `rejected` field,
+  which ends those rejections.
+
 ### Fixed
 
 - **An instance's memory no longer grows with every read of the whole fleet.** On Linux the Server
