@@ -234,9 +234,10 @@ once its tag exists.
   is bounded too, the probe of an offered endpoint among them: resolving the name gets one
   interval, and each address it resolves to, tried in turn, gets one for the TCP connection, the
   TLS handshake and the upgrade together, so a name whose first address is dead, as `::1` is to a
-  Server listening on `127.0.0.1` only, still connects. An HTTP answer to the upgrade ends the
-  attempt. With heartbeats disabled the bound is 30 seconds. The line *nothing arrived from the
-  server within the bound; ending the connection* carries `bound_ms`.
+  Server listening on `127.0.0.1` only, still connects. An address that answers the upgrade
+  with anything but a WebSocket, an HTTP refusal among them, ends the attempt. With heartbeats
+  disabled the bound is 30 seconds. The line *nothing arrived from the server within the bound;
+  ending the connection* carries `bound_ms`.
   `opamp::client::ws::Silence` names the bounds; the crate's other functions and settings are
   unchanged, but `Connection::connect_websocket` now fails once those bounds have passed.
   **What to do:** nothing. A Client whose `heartbeat_interval_secs` is very short now also ends a

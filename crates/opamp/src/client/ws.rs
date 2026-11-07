@@ -245,8 +245,9 @@ pub(crate) async fn open(settings: &Settings, local: Option<IpAddr>) -> Result<S
 /// Opens a WebSocket to the first of `addresses`, in their order, that one is opened to within
 /// `bound`, the TCP connection, the TLS handshake and the upgrade together. The TLS server name
 /// and the `Host` header are the endpoint's name. An address not reached, by its bound or by an
-/// error of the connection, the handshake or the I/O, gives way to the next; an HTTP answer to the
-/// upgrade is the Server's and ends the attempt as it is. With `local`, only the addresses of its
+/// error of the connection, the TLS handshake or the I/O, gives way to the next. An address that
+/// answered the upgrade, with an HTTP refusal or with anything that is not a WebSocket, ends the
+/// attempt with that answer, as does any other error. With `local`, only the addresses of its
 /// family are tried, each from it.
 async fn open_each(
     settings: &Settings,
@@ -276,16 +277,16 @@ async fn open_each(
         };
         match tokio::time::timeout(bound, attempt).await {
             Ok(Ok(socket)) => return Ok(socket),
-            Ok(Err(ended @ (Connect::Refused(WsError::Http(_)) | Connect::InvalidEndpoint(_)))) => {
-                return Err(ended)
-            }
+            // Not reached: the connection, the TLS handshake or the I/O failed.
             Ok(Err(Connect::Refused(WsError::Io(e)))) => {
                 last = Some(Connect::Refused(WsError::Io(std::io::Error::new(
                     e.kind(),
                     format!("{remote}: {e}"),
                 ))));
             }
-            Ok(Err(e)) => last = Some(e),
+            Ok(Err(e @ Connect::Refused(WsError::Tls(_)))) => last = Some(e),
+            // Reached: something answered the upgrade, and its answer is the attempt's.
+            Ok(Err(answered)) => return Err(answered),
             Err(_) => {
                 last = Some(timed_out(format!(
                     "nothing arrived from {remote} within {} ms of opening the connection",
@@ -1404,28 +1405,23 @@ mod tests {
         );
     }
 
-    /// An HTTP answer to the upgrade is the Server's verdict, not an address that was not
-    /// reached: a refusal on the first address ends the attempt as it is, and the next address is
-    /// not tried
-    /// (ADR-0051
-    /// clause 3).
-    /// Verifies: ADR-0051
-    #[tokio::test]
-    async fn an_http_answer_on_the_first_address_ends_the_attempt() {
+    /// Opens with [`open_each`] to two addresses: the first answers the upgrade request with
+    /// `answer`, the second is never accepted, so a connection to it waits in its backlog. Gives
+    /// back the attempt's outcome and whether the second address was tried.
+    async fn first_answers(answer: &'static [u8]) -> (Result<Socket, Connect>, bool) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-        let refusing = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let answering = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind");
-        // Never accepted: a connection to it would wait in its backlog, where `accept` finds it.
         let next = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
         next.set_nonblocking(true).expect("non-blocking");
         let addresses = vec![
-            refusing.local_addr().expect("addr"),
+            answering.local_addr().expect("addr"),
             next.local_addr().expect("addr"),
         ];
-        let _refuse = tokio::spawn(async move {
-            let (mut stream, _) = refusing.accept().await.expect("accept");
+        let _answer = tokio::spawn(async move {
+            let (mut stream, _) = answering.accept().await.expect("accept");
             let mut request = Vec::new();
             let mut buffer = [0u8; 1024];
             while !request.windows(4).any(|w| w == b"\r\n\r\n") {
@@ -1433,10 +1429,7 @@ mod tests {
                 assert!(read > 0, "the request ends before its headers do");
                 request.extend_from_slice(&buffer[..read]);
             }
-            stream
-                .write_all(b"HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\n\r\n")
-                .await
-                .expect("answer");
+            stream.write_all(answer).await.expect("answer");
             std::future::pending::<()>().await;
         });
         let interval = Duration::from_secs(2);
@@ -1447,16 +1440,141 @@ mod tests {
         )
         .await
         .expect("the attempt ends within the test's bound");
+        let tried = match next.accept() {
+            Ok(_) => true,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => false,
+            Err(e) => panic!("accept: {e}"),
+        };
+        (opened, tried)
+    }
+
+    /// An HTTP answer to the upgrade is the Server's verdict, not an address that was not
+    /// reached: a refusal on the first address ends the attempt as it is, and the next address is
+    /// not tried
+    /// (ADR-0051 clause 3).
+    /// Verifies: ADR-0051
+    #[tokio::test]
+    async fn an_http_answer_on_the_first_address_ends_the_attempt() {
+        let (opened, tried) =
+            first_answers(b"HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\n\r\n").await;
         match opened {
             Err(Connect::Refused(WsError::Http(response))) => {
                 assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
             }
             other => panic!("the refusal comes back as it is: {other:?}"),
         }
+        assert!(!tried, "the next address was not tried");
+    }
+
+    /// An address that answers the upgrade with something that is not HTTP was reached all the
+    /// same: its answer ends the attempt, and the next address is not tried
+    /// (ADR-0051 clause 3).
+    /// Verifies: ADR-0051
+    #[tokio::test]
+    async fn an_answer_that_is_no_http_on_the_first_address_ends_the_attempt() {
+        let (opened, tried) = first_answers(b"this is no HTTP at all\r\n\r\n").await;
+        match opened {
+            Err(Connect::Refused(WsError::Io(_) | WsError::Tls(_))) | Ok(_) => {
+                panic!("the garbled answer comes back as it is: {opened:?}")
+            }
+            Err(_) => {}
+        }
+        assert!(!tried, "the next address was not tried");
+    }
+
+    /// A first address that refuses the connection, as `::1` does to a Server listening on
+    /// `127.0.0.1` only, gives way to the next at once
+    /// (ADR-0051 clause 3).
+    /// Verifies: ADR-0051
+    #[tokio::test]
+    async fn a_first_address_that_refuses_gives_way_to_the_next() {
+        // A port that was bound and is free again: nothing listens on it, so it refuses.
+        let refusing = std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("bind")
+            .local_addr()
+            .expect("addr");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addresses = vec![refusing, listener.local_addr().expect("addr")];
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            accept_async(stream).await.expect("handshake")
+        });
+        let interval = Duration::from_secs(5);
+        let settings = settings_for(addresses[1], interval);
+        let started = tokio::time::Instant::now();
+        let opened = tokio::time::timeout(
+            Duration::from_secs(10),
+            open_each(&settings, None, addresses, interval),
+        )
+        .await
+        .expect("the attempt ends within the test's bound");
+        assert!(opened.is_ok(), "the second address opens: {opened:?}");
+        assert!(
+            started.elapsed() < interval,
+            "without waiting out the first address's interval: {:?}",
+            started.elapsed()
+        );
+        server.await.expect("the server task");
+    }
+
+    /// A `wss` endpoint opened to an address carries the endpoint's name as the TLS server name,
+    /// so the certificate is checked against the name, not the address
+    /// (ADR-0051 clause 3).
+    /// Verifies: ADR-0051
+    #[tokio::test]
+    async fn the_tls_server_name_is_the_endpoints_name() {
+        crate::tls::install_ring_provider();
+        let key = rcgen::KeyPair::generate().expect("key");
+        let cert = rcgen::CertificateParams::new(vec!["fleet.example".to_string()])
+            .expect("params")
+            .self_signed(&key)
+            .expect("certificate");
+        let server_config = crate::tls::server_builder()
+            .with_no_client_auth()
+            .with_single_cert(
+                crate::tls::certificates(cert.pem().as_bytes()).expect("certificate"),
+                crate::tls::private_key(key.serialize_pem().as_bytes()).expect("key"),
+            )
+            .expect("server configuration");
+        let client_config = crate::tls::client_builder()
+            .with_root_certificates(crate::tls::root_store(cert.pem().as_bytes()).expect("roots"))
+            .with_no_client_auth();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let address = listener.local_addr().expect("addr");
+        // A blocking TLS server that completes the upgrade and reports the name the client sent.
+        let server = tokio::task::spawn_blocking(move || {
+            let (tcp, _) = listener.accept().expect("accept");
+            let connection =
+                rustls::ServerConnection::new(std::sync::Arc::new(server_config)).expect("tls");
+            let socket =
+                tokio_tungstenite::tungstenite::accept(rustls::StreamOwned::new(connection, tcp))
+                    .expect("handshake");
+            socket.get_ref().conn.server_name().map(str::to_string)
+        });
+        let settings = Settings {
+            endpoint: format!("wss://fleet.example:{}/v1/opamp", address.port()),
+            headers: HeaderMap::new(),
+            connector: Some(Connector::Rustls(std::sync::Arc::new(client_config))),
+            max_message_size: 4096,
+            heartbeat: Some(Duration::from_secs(5)),
+        };
+        let opened = tokio::time::timeout(
+            Duration::from_secs(10),
+            open_each(&settings, None, vec![address], Duration::from_secs(5)),
+        )
+        .await
+        .expect("the attempt ends within the test's bound");
+        assert!(
+            opened.is_ok(),
+            "the certificate for the name is accepted: {opened:?}"
+        );
+        let name = server.await.expect("the server task");
         assert_eq!(
-            next.accept().map(|_| ()).map_err(|e| e.kind()),
-            Err(std::io::ErrorKind::WouldBlock),
-            "the next address was not tried"
+            name.as_deref(),
+            Some("fleet.example"),
+            "the server name is the name"
         );
     }
 
