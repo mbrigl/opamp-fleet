@@ -169,8 +169,12 @@ the SHA-256 of the entry before it, emit the same entry as a `tracing` event wit
    that were refused for want of a record, are counted, and the next entry that lands carries the
    count as `unrecorded_before`. Once an orderly shutdown has closed the chain on PostgreSQL, a
    decision is refused for want of a record, and the count of those is logged at `error` before the
-   process exits. A security decision is never taken without its record queued, and a record that is
-   lost is never lost silently.
+   process exits. One remainder is counted and may not be logged: refusals aggregated (clause 4)
+   after the close's last flush of the aggregates and before the chain counts as closed are
+   counted when the writer flushes the aggregates next, at its next tick once their second has
+   passed or as it ends, which may come after the count was logged. A security decision is never
+   taken without its record queued, and, but for those refusals, a record that is lost is never
+   lost silently.
 
 6. **The log carries it too.** Every entry is also emitted as a `tracing` event with the target
    `audit`, the same fields, at `info`, so a log collector receives it without reading the store.
