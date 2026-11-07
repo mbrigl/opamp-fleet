@@ -344,19 +344,26 @@ async fn a_verified_offer_restarts_the_gateway_and_leaves_the_supervisors_runnin
 
     // The offer is applied and acknowledged — which is what ends the transport run and restarts the
     // gateway task underneath. The Client reports the offer applied once it verified it by
-    // connecting; the Server's record of the Agent holds that report.
+    // connecting; the Server's record of the Agent holds that report. The Client dials its second
+    // connection as soon as it closes the first, so its report may arrive while the Server still
+    // holds the first connection open: with no host presented that is a duplicate, and the Server
+    // re-keys the Agent (ADR-0048 clause 8). Two records then carry the name, so the wait looks at
+    // each and follows the one that holds the report, by its `instance_uid`.
     let records = fleet_server::fs::FsAgentStore::open(&dir.path().join("fleet-configs"))
         .expect("the server's records");
-    let applied_at = wait_until("the offer reported applied", || {
-        let view = state
+    let (applied_uid, applied_at) = wait_until("the offer reported applied", || {
+        state
             .snapshot()
             .into_iter()
-            .find(|a| a.service_instance_name == "edge-host")?;
-        let record = records
-            .get(&InstanceUid::parse(&view.instance_uid)?)
-            .ok()??;
-        let status = record.connection_settings_status?;
-        (status.status == ConnectionSettingsStatuses::Applied as i32).then_some(view.sequence_num)
+            .filter(|a| a.service_instance_name == "edge-host")
+            .find_map(|view| {
+                let record = records
+                    .get(&InstanceUid::parse(&view.instance_uid)?)
+                    .ok()??;
+                let status = record.connection_settings_status?;
+                (status.status == ConnectionSettingsStatuses::Applied as i32)
+                    .then_some((view.instance_uid, view.sequence_num))
+            })
     })
     .await;
     // Proof that the offer is in force, and not merely reported: the file configures no
@@ -368,7 +375,7 @@ async fn a_verified_offer_restarts_the_gateway_and_leaves_the_supervisors_runnin
         state
             .snapshot()
             .iter()
-            .find(|a| a.service_instance_name == "edge-host")
+            .find(|a| a.instance_uid == applied_uid)
             .filter(|a| a.sequence_num >= applied_at + 2)
             .map(|_| ())
     })
@@ -398,9 +405,14 @@ async fn a_verified_offer_restarts_the_gateway_and_leaves_the_supervisors_runnin
         .await
         .expect("send through the restarted gateway");
 
-    let agents = wait_until("three agents after the restart", || {
+    // The Agent behind the restarted Gateway arrives. It is looked for by its `instance_uid`,
+    // not by a count of records, which a re-key of the Client's Agent raises by one.
+    let agents = wait_until("the gatewayed agent after the restart", || {
         let snapshot = state.snapshot();
-        (snapshot.len() == 3).then_some(snapshot)
+        snapshot
+            .iter()
+            .any(|a| a.instance_uid == downstream.to_string())
+            .then_some(snapshot)
     })
     .await;
     assert!(
