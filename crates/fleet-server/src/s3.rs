@@ -931,7 +931,7 @@ pub(crate) mod tests {
     /// A failed upload leaves nothing under `blobs/`; the listing passes a staging object over, and
     /// with the filesystem record store, which holds no lease, the cleanup at startup deletes every
     /// one; any other key under the prefix fails startup, naming the key (ADR-0044 clause 16).
-    /// Verifies: ADR-0044, ADR-0044
+    /// Verifies: ADR-0044
     #[test]
     fn leftover_staging_objects_go_and_unknown_keys_fail_startup_on_s3() {
         let Some(config) = named_store() else { return };
