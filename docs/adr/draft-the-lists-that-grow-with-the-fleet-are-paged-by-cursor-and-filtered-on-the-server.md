@@ -133,7 +133,12 @@ answered with the whole array up to a bound.
      ([ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side](draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
      clause 16) and does not write them. Before `query_page` reads, the instance derives such
      rows again from their records, in batches, and writes them, so the answer is the same while
-     two releases share the database.
+     two releases share the database, but for a small window. The deriving and the page's read
+     are two transactions, and the deriving writes a row only where it is unchanged since the
+     batch read it. A row the release before writes while the instance derives, or between the
+     deriving and the page's read, is read with the derived columns it had, until a later read
+     derives it again. A batch none of whose rows could be written ends the deriving for that
+     read, so the rows after it wait for a later read too.
    - The labels an Agent inherits and the subject values of its Host are joined at read time, from
      the record of its Client Agent and from its Host, so a label change on a Client Agent writes
      that one row and no other.
