@@ -14,9 +14,71 @@ once its tag exists.
 > rest — is not backfilled here; it is in the git log and in the ADRs. The first four releases were
 > all cut on 2026-08-09, so the dates below say less than the order does.
 
-## [Unreleased]
+## [0.8.1]
 
 ### Added
+
+- **Several Server instances serve the fleet on when one of them is lost**
+  ([ADR-0048](docs/adr/0048-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md),
+  [ADR-0051](docs/adr/0051-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended.md),
+  G-20 in [the specification](docs/SPECIFICATION.md)). Two or more instances on one PostgreSQL
+  database and one bucket, with no CA key in a file, serve a fleet of up to about 100 000 Agents:
+  - **An instance lost.** Every Agent it carried is connected to another instance within
+    `lease_secs` and two heartbeat intervals, 90 seconds at the defaults, each after the delay it
+    drew. An instance that froze, lost its power or was cut off counts as lost: an Agent leaves a
+    Server from which nothing has arrived for one heartbeat interval.
+  - **A revocation** committed on any instance ends the sessions it concerns on every instance
+    within `lease_renew_secs`, 10 seconds at the defaults.
+  - **A rolling update.** Instances of 0.8.0 serve on beside those of this release, so the
+    instances are replaced one at a time while the others serve the fleet.
+  - **The lists that grow with the fleet** page and filter on the Server, and each Agent names the
+    instance that carries it.
+  - **A rejected key stays refused** on every instance, beyond the window it was rejected in.
+  - **The fleet at scale.** A report no longer waits behind other Agents' calls to the database,
+    new Agents are no longer committed one at a time, and an instance's memory levels off.
+
+  Two tests in `crates/fleet-server/tests/g20.rs` decide G-20, and both passed on three instances
+  on one host with 8 CPUs. In the failover, 10 000 simulated hosts and a Gateway of ten connections
+  carrying ten Agents each connect, and one instance is killed, in another run frozen: every Agent
+  it carried was connected to another instance within the bound, at about 435 new Agents a second.
+  In the load test, three instances carry 100 000 Agents, ten on each connection, for ten minutes,
+  with no presence batch written late and no notification left unread. `scripts/check-g20.sh` runs
+  both on a machine with 8 CPUs and 8 GiB of memory, as does the *G-20* workflow on demand, which
+  has not yet run on a hosted runner
+  ([the manual](docs/manual/server.md#a-third-instance)).
+
+  The bounds of this release:
+  - **G-20 holds while the database and the bucket are served on.** Making them redundant is the
+    operator's, as [the manual](docs/manual/server.md#the-database-and-the-bucket) says.
+  - **A CA key in a file means a standby**, as in 0.8.0
+    ([the manual](docs/manual/server.md#a-ca-key-in-a-file-means-a-standby)).
+  - **Two cases inherit labels in an instance's memory only once their group is placed again**:
+    a Client Agent bound to its Host just before another instance first places a fellow Agent of
+    that Host, and a Client Agent that arrives behind a Gateway after another instance placed a
+    fellow Agent behind it
+    ([the manual](docs/manual/server.md#labels-on-several-instances)).
+  - **Beside 0.8.0** four things differ until its last instance stops: `max_agents` may be passed
+    by records the two releases create at the same moment, a creation of the same new Agent by
+    both may end one of them as a deadlock, answered `Unavailable`, and an instance of 0.8.0
+    decides a Gateway's mark from its own copy and reads no rejected key.
+  - **A virtual machine paused by its hypervisor** serves on until its next renewal finds its
+    lease lapsed.
+
+  The schema gains migrations 11 to 15, which name 0.8.0 as the oldest Server that serves on it.
+  **What to do:**
+  - **From 0.8.0 with several instances:** read the *What to do* of each entry below and back the
+    database up. Give the database role PostgreSQL's `CREATE` right on its schema, and allow the
+    database's `max_connections` for `[database] pool_size` connections of each instance, 16 by
+    default where it was 8. Then replace the instances one at a time, as
+    [A rolling update](docs/manual/server.md#a-rolling-update) says, at a quiet moment: the first
+    instance of this release builds three indexes over the Agents' table while it migrates, and
+    every write of an Agent's record waits for it. Until the last instance of 0.8.0 has stopped,
+    approve enrolment requests and make Gateway marks through instances of this release.
+  - **From 0.8.0 with one Server:** on PostgreSQL, give the database role the `CREATE` right on its
+    schema, then stop the Server and start this release at a quiet moment. On files, nothing.
+  - **From 0.7.1 or earlier:** stop every Server first, since an instance of this release starts
+    only once no Server holds the database alone, and do what the *What to do* of each entry of
+    0.8.0 below says as well.
 
 - **The lists that grow with the fleet page, filter on the Server, and name the holder**
   ([ADR-0049](docs/adr/0049-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server.md)).
@@ -409,7 +471,7 @@ once its tag exists.
   them registers still moves no version, and one pruning beside this one removes an expired entry
   regardless of its renewals; replace them to close both.
 
-## [0.8.0]
+## [0.8.0] - 2026-11-02
 
 ### Added
 
