@@ -238,7 +238,7 @@ impl AgentStore for PgAgentStore {
         Ok(self.get_many(std::slice::from_ref(uid))?.remove(uid))
     }
 
-    /// One query for the rows, one for their Configurations, however many records it reads.
+    /// One query for the rows and their Configurations, however many records it reads.
     fn get_many(
         &self,
         uids: &[InstanceUid],
@@ -268,13 +268,7 @@ impl AgentStore for PgAgentStore {
             only.map(|uids| uids.iter().map(ToString::to_string).collect());
         let (records, mut presence) = self.database.run(move |pool| async move {
             let mut client = client(&pool).await?;
-            let transaction = client
-                .build_transaction()
-                .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
-                .read_only(true)
-                .start()
-                .await
-                .map_err(sql)?;
+            let transaction = snapshot(&mut client).await?;
             let records = read(&*transaction, keys.as_deref()).await?;
             let (filter, params): (&str, Vec<&(dyn tokio_postgres::types::ToSql + Sync)>) =
                 match &keys {
@@ -1027,6 +1021,12 @@ const COLUMNS: &str = "instance_uid, sequence_num, capabilities, transport, last
      connection_settings_status, package_statuses, available_components, labels, host, \
      deployment, package_agent_type, package_version";
 
+/// The assignment's Configurations of the `agents` row a query selects, by name to revision, in
+/// the statement that reads the row: one statement reads one committed state whatever the
+/// transaction's isolation, so no rollout that commits meanwhile is read in part.
+const CONFIGURATIONS: &str = "(SELECT json_object_agg(c.configuration, c.revision) \
+     FROM agent_assignment_configurations AS c WHERE c.instance_uid = agents.instance_uid)";
+
 /// A wire-typed field as its protobuf bytes, the encoding whose compatibility rules the Baseline
 /// already governs (ADR-0044 clause 4).
 fn encode<M: Message>(message: Option<&M>) -> Option<Vec<u8>> {
@@ -1052,7 +1052,22 @@ pub(crate) async fn read_all(
     read(client, None).await
 }
 
-/// The records of the keys `only` names, or of every Agent where it names none.
+/// A transaction that reads one committed state of the database and writes nothing: the
+/// statements of a read in it see no commit made between them, such as an Agent's row without
+/// its presence.
+async fn snapshot(
+    client: &mut deadpool_postgres::Object,
+) -> Result<deadpool_postgres::Transaction<'_>, String> {
+    client
+        .build_transaction()
+        .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
+        .read_only(true)
+        .start()
+        .await
+        .map_err(sql)
+}
+
+/// The records of the keys `only` names, or of every Agent where it names none, in one statement.
 pub(super) async fn read(
     client: &impl GenericClient,
     only: Option<&[String]>,
@@ -1061,10 +1076,12 @@ pub(super) async fn read(
         Some(uids) => (" WHERE instance_uid = ANY($1)", vec![uids]),
         None => ("", Vec::new()),
     };
-    let mut released = released_configurations(client, filter, &params).await?;
     let mut records = HashMap::new();
     for row in client
-        .query(&format!("SELECT {COLUMNS} FROM agents{filter}"), &params)
+        .query(
+            &format!("SELECT {COLUMNS}, {CONFIGURATIONS} FROM agents{filter}"),
+            &params,
+        )
         .await
         .map_err(sql)?
     {
@@ -1078,7 +1095,7 @@ pub(super) async fn read(
             row.get(15),
             row.get(16),
             row.get(17),
-            released.remove(&key).unwrap_or_default(),
+            configurations_of(row.get(18)).map_err(named)?,
         )
         .map_err(named)?;
         let record = PersistedAgent {
@@ -1105,37 +1122,18 @@ pub(super) async fn read(
         };
         records.insert(uid, record);
     }
-    if let Some(key) = released.keys().next() {
-        return Err(format!(
-            "an assignment in the database names agent {key}, which is not there"
-        ));
-    }
     Ok(records)
 }
 
-/// The assignment's Configurations of the rows `filter` selects, by `instance_uid`.
-async fn released_configurations(
-    client: &impl GenericClient,
-    filter: &str,
-    params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
-) -> Result<HashMap<String, BTreeMap<String, String>>, String> {
-    let mut released: HashMap<String, BTreeMap<String, String>> = HashMap::new();
-    for row in client
-        .query(
-            &format!(
-                "SELECT instance_uid, configuration, revision FROM agent_assignment_configurations{filter}"
-            ),
-            params,
-        )
-        .await
-        .map_err(sql)?
-    {
-        released
-            .entry(row.get(0))
-            .or_default()
-            .insert(row.get(1), row.get(2));
-    }
-    Ok(released)
+/// The assignment's Configurations of a row, as [`CONFIGURATIONS`] selects them.
+fn configurations_of(
+    configurations: Option<serde_json::Value>,
+) -> Result<BTreeMap<String, String>, String> {
+    configurations
+        .map(serde_json::from_value)
+        .transpose()
+        .map(Option::unwrap_or_default)
+        .map_err(|e| format!("the assignment's Configurations: {e}"))
 }
 
 /// The assignment the assignment's columns of one row and its Configurations make.
@@ -1169,11 +1167,13 @@ fn assignment_of(
 async fn read_assignments(
     client: &impl GenericClient,
 ) -> Result<HashMap<InstanceUid, Assignment>, String> {
-    let mut released = released_configurations(client, "", &[]).await?;
     let mut assignments = HashMap::new();
     for row in client
         .query(
-            "SELECT instance_uid, deployment, package_agent_type, package_version FROM agents",
+            &format!(
+                "SELECT instance_uid, deployment, package_agent_type, package_version, \
+                 {CONFIGURATIONS} FROM agents"
+            ),
             &[],
         )
         .await
@@ -1187,17 +1187,12 @@ async fn read_assignments(
             row.get(1),
             row.get(2),
             row.get(3),
-            released.remove(&key).unwrap_or_default(),
+            configurations_of(row.get(4)).map_err(named)?,
         )
         .map_err(named)?;
         if let Some(assignment) = assignment {
             assignments.insert(uid, assignment);
         }
-    }
-    if let Some(key) = released.keys().next() {
-        return Err(format!(
-            "an assignment in the database names agent {key}, which is not there"
-        ));
     }
     Ok(assignments)
 }
@@ -2153,6 +2148,183 @@ mod tests {
             opened.referenced_revisions("base"),
             BTreeSet::from(["0123abcd".to_string()])
         );
+    }
+
+    /// What a read found of the Agent's assignment: its Deployment and its revision of `base`.
+    fn found(assignment: Option<Assignment>) -> Option<(String, String)> {
+        assignment.map(|assignment| {
+            (
+                assignment.deployment,
+                assignment.configurations["base"].clone(),
+            )
+        })
+    }
+
+    fn pair(deployment: &str, revision: &str) -> (String, String) {
+        (deployment.to_string(), revision.to_string())
+    }
+
+    /// Runs `read` on a thread of its own, and its answer within 30 seconds.
+    fn answer_of<T: Send + 'static>(
+        label: &str,
+        read: impl FnOnce() -> T + Send + 'static,
+    ) -> impl FnOnce() -> T {
+        let (sent, answer) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sent.send(read());
+        });
+        let label = label.to_string();
+        move || {
+            answer
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .unwrap_or_else(|_| panic!("{label}: no answer"))
+        }
+    }
+
+    /// A read of an Agent reads its row and its Configurations from one committed state: a
+    /// rollout that commits while the read waits for the row is read whole or not at all, by
+    /// `get_many`, `load`, `query` and opening the adapter, never one rollout's revisions with
+    /// another's Deployment. The rollout commits from a session that holds `agents` against reads
+    /// until the read waits for it. A read in one statement waits before it reads anything, and
+    /// reads what the rollout committed; `query` reads in a snapshot taken before it waits, and
+    /// reads what was there before.
+    /// Verifies: ADR-0043, ADR-0041
+    #[test]
+    fn an_agent_is_read_in_one_snapshot_whatever_commits_while_it_waits() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let store = Arc::new(PgAgentStore::new(database.clone()));
+        let uid = InstanceUid([7; 16]);
+        store.put(&uid, &record()).expect("put");
+        let mut states = [pair("stable", "0123abcd"), pair("canary", "4567cdef")];
+        // Each race rolls the Agent over to the other state.
+        let mut race =
+            |label: &str,
+             reads_after: bool,
+             read: Box<dyn FnOnce() -> Option<(String, String)> + Send>| {
+                let [before, after] = states.clone();
+                let held = test.hold_reads(
+                    "agents",
+                    &format!(
+                        "UPDATE agents SET deployment = '{}'; \
+                     UPDATE agent_assignment_configurations SET revision = '{}'",
+                        after.0, after.1
+                    ),
+                );
+                let answer = answer_of(label, read);
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                while test.sessions(
+                    "wait_event_type = 'Lock' AND query LIKE 'SELECT instance_uid%FROM agents%'",
+                ) == 0
+                {
+                    assert!(std::time::Instant::now() < deadline, "{label}: never waits");
+                }
+                held.open();
+                let expected = if reads_after { &after } else { &before };
+                assert_eq!(answer().as_ref(), Some(expected), "{label}");
+                states = [after, before];
+            };
+
+        let reading = store.clone();
+        race(
+            "get_many",
+            true,
+            Box::new(move || {
+                found(
+                    reading
+                        .get_many(&[uid])
+                        .expect("get_many")
+                        .remove(&uid)
+                        .and_then(|record| record.assignment),
+                )
+            }),
+        );
+        let reading = store.clone();
+        race(
+            "load",
+            true,
+            Box::new(move || {
+                found(
+                    reading
+                        .load()
+                        .expect("load")
+                        .remove(&uid)
+                        .and_then(|record| record.assignment),
+                )
+            }),
+        );
+        let reading = store.clone();
+        race(
+            "query",
+            false,
+            Box::new(move || {
+                found(
+                    reading
+                        .query(None)
+                        .expect("query")
+                        .pop()
+                        .and_then(|(_, stored)| stored.record.assignment),
+                )
+            }),
+        );
+        race(
+            "open",
+            true,
+            Box::new(move || {
+                let opened = PgAgentStore::open(database).expect("open");
+                let deployment = ["stable", "canary"]
+                    .into_iter()
+                    .find(|name| opened.pinning(Pin::Deployment(name)) == 1)?;
+                let revisions = opened.referenced_revisions("base");
+                let [revision] =
+                    <[String; 1]>::try_from(revisions.into_iter().collect::<Vec<_>>()).ok()?;
+                Some(pair(deployment, &revision))
+            }),
+        );
+    }
+
+    /// A creation that finds the Agent stored reads it from one committed state: a rollout that
+    /// commits while the read is part-way, its Configurations held at a gate, is not read in part.
+    /// The creation counts the rows of `agents` first, so the gate stands in the Configurations,
+    /// behind a view in place of their table.
+    /// Verifies: ADR-0043, ADR-0041
+    #[test]
+    fn a_creation_that_finds_the_agent_reads_it_in_one_snapshot() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let store = Arc::new(PgAgentStore::new(test.open()));
+        let uid = InstanceUid([8; 16]);
+        store.put(&uid, &record()).expect("put");
+        let key = 0x2900_2900;
+        test.sql(&format!(
+            "ALTER TABLE agent_assignment_configurations RENAME TO held_configurations; \
+             CREATE FUNCTION fleet_test_held() RETURNS boolean LANGUAGE plpgsql AS $$ BEGIN \
+                 PERFORM pg_advisory_lock_shared({key}); \
+                 PERFORM pg_advisory_unlock_shared({key}); RETURN true; END $$; \
+             CREATE VIEW agent_assignment_configurations AS \
+                 SELECT * FROM held_configurations WHERE fleet_test_held();"
+        ));
+        let gate = test.gate(key);
+        let creating = store.clone();
+        let answer = answer_of("create_within", move || {
+            match creating.create_within(&uid, &record(), 10).expect("create") {
+                Creation::Found(record) => found(record.assignment),
+                _ => None,
+            }
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !test.waits_for(key) {
+            assert!(std::time::Instant::now() < deadline, "never waits");
+        }
+        test.sql(
+            "UPDATE agents SET deployment = 'canary'; \
+             UPDATE held_configurations SET revision = '4567cdef'",
+        );
+        gate.open();
+        assert_eq!(answer(), Some(pair("stable", "0123abcd")));
     }
 
     /// A record created, a report written and a record imported each carry their derived columns
