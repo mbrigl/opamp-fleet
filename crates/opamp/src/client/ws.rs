@@ -1,7 +1,7 @@
 //! The WebSocket transport: one connection, reconnected with backoff, carrying every Agent of the
 //! session — the *n* over one of ADR-0015.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
 use crate::frame;
@@ -38,6 +38,51 @@ pub struct Settings {
     pub max_message_size: usize,
     /// A routine report per Agent this often; `None` sends none.
     pub heartbeat: Option<Duration>,
+}
+
+/// How long a connection may stay silent: a WebSocket ping goes out once nothing has arrived for
+/// `ping_after`, and the connection ends once nothing has arrived for `end_after`
+/// (ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Silence {
+    pub ping_after: Duration,
+    pub end_after: Duration,
+}
+
+impl Silence {
+    /// The bound without a heartbeat: the default heartbeat interval.
+    pub const WITHOUT_HEARTBEAT: Duration = Duration::from_secs(30);
+
+    /// The bounds for a connection with the heartbeat `heartbeat`: the end after one interval, the
+    /// ping after half of one.
+    #[must_use]
+    pub fn of(heartbeat: Option<Duration>) -> Self {
+        let end_after = heartbeat
+            .filter(|interval| !interval.is_zero())
+            .unwrap_or(Self::WITHOUT_HEARTBEAT);
+        Silence {
+            ping_after: end_after / 2,
+            end_after,
+        }
+    }
+
+    /// When the silence is next acted on, with something last heard at `heard` and the ping sent
+    /// since at `pinged`, if one was: without a ping, the moment to send one; with one, the end,
+    /// which gives the pong the rest of the interval from when the ping went out, so a loop that
+    /// was busy reading nothing does not take its own delay for the peer's silence.
+    #[must_use]
+    pub fn next(
+        &self,
+        heard: tokio::time::Instant,
+        pinged: Option<tokio::time::Instant>,
+    ) -> tokio::time::Instant {
+        match pinged {
+            None => heard + self.ping_after,
+            Some(pinged) => {
+                (heard + self.end_after).max(pinged + (self.end_after - self.ping_after))
+            }
+        }
+    }
 }
 
 /// How one connection ended.
@@ -80,15 +125,7 @@ pub async fn run_from<S: Session, X: StopSignal>(
         // than a refusal's `Retry-After`.
         let mut lost = false;
         let mut retry_after = None;
-        match connect_from(
-            &settings.endpoint,
-            &settings.headers,
-            settings.connector.clone(),
-            settings.max_message_size,
-            local,
-        )
-        .await
-        {
+        match open(settings, local).await {
             Ok(socket) => {
                 info!(endpoint = %settings.endpoint, "connected");
                 backoff.reset();
@@ -155,6 +192,96 @@ pub async fn run_from<S: Session, X: StopSignal>(
     }
 }
 
+/// One attempt to open a connection, for [`run_from`] and for `Connection::connect_websocket`:
+/// the endpoint's name is resolved within one silence bound, and its addresses are tried in turn
+/// by [`open_each`], so an endpoint that accepts and never answers is a failed attempt rather than
+/// a wait without end, and one dead address does not hide the next
+/// (ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended clause 3).
+pub(crate) async fn open(settings: &Settings, local: Option<IpAddr>) -> Result<Socket, Connect> {
+    let bound = Silence::of(settings.heartbeat).end_after;
+    let (_, host, port) = target(&settings.endpoint, &settings.headers)?;
+    let addresses =
+        match tokio::time::timeout(bound, tokio::net::lookup_host((host.as_str(), port))).await {
+            Ok(Ok(addresses)) => addresses.collect(),
+            Ok(Err(e)) => return Err(Connect::Refused(WsError::Io(e))),
+            Err(_) => {
+                return Err(timed_out(format!(
+                    "{host} did not resolve within {} ms",
+                    bound.as_millis()
+                )))
+            }
+        };
+    open_each(settings, local, addresses, bound).await
+}
+
+/// Opens a WebSocket to the first of `addresses`, in their order, that one is opened to within
+/// `bound`, the TCP connection, the TLS handshake and the upgrade together. The TLS server name
+/// and the `Host` header are the endpoint's name. An address not reached, by its bound or by an
+/// error of the connection, the TLS handshake or the I/O, gives way to the next. An address that
+/// answered the upgrade, with an HTTP refusal or with anything that is not a WebSocket, ends the
+/// attempt with that answer, as does any other error. With `local`, only the addresses of its
+/// family are tried, each from it.
+async fn open_each(
+    settings: &Settings,
+    local: Option<IpAddr>,
+    addresses: Vec<SocketAddr>,
+    bound: Duration,
+) -> Result<Socket, Connect> {
+    let mut last = None;
+    for remote in addresses
+        .into_iter()
+        .filter(|remote| local.is_none_or(|local| remote.is_ipv4() == local.is_ipv4()))
+    {
+        let attempt = async {
+            let (request, _, _) = target(&settings.endpoint, &settings.headers)?;
+            let stream = stream_to(remote, local)
+                .await
+                .map_err(|e| Connect::Refused(WsError::Io(e)))?;
+            client_async_tls_with_config(
+                request,
+                stream,
+                Some(config(settings.max_message_size)),
+                settings.connector.clone(),
+            )
+            .await
+            .map(|(socket, _)| socket)
+            .map_err(Connect::Refused)
+        };
+        match tokio::time::timeout(bound, attempt).await {
+            Ok(Ok(socket)) => return Ok(socket),
+            // Not reached: the connection, the TLS handshake or the I/O failed.
+            Ok(Err(Connect::Refused(WsError::Io(e)))) => {
+                last = Some(Connect::Refused(WsError::Io(std::io::Error::new(
+                    e.kind(),
+                    format!("{remote}: {e}"),
+                ))));
+            }
+            Ok(Err(e @ Connect::Refused(WsError::Tls(_)))) => last = Some(e),
+            // Reached: something answered the upgrade, and its answer is the attempt's.
+            Ok(Err(answered)) => return Err(answered),
+            Err(_) => {
+                last = Some(timed_out(format!(
+                    "nothing arrived from {remote} within {} ms of opening the connection",
+                    bound.as_millis()
+                )));
+            }
+        }
+    }
+    Err(last.unwrap_or_else(|| {
+        Connect::Refused(WsError::Io(std::io::Error::new(
+            std::io::ErrorKind::AddrNotAvailable,
+            format!("no address of {} to connect to", settings.endpoint),
+        )))
+    }))
+}
+
+fn timed_out(message: String) -> Connect {
+    Connect::Refused(WsError::Io(std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        message,
+    )))
+}
+
 /// What to wait before the next attempt: the first reconnect after a connection that stood was
 /// lost is drawn over `[0, 30 s)`; an attempt that failed waits the next exponential step, or the
 /// `Retry-After` it was refused with when that is longer.
@@ -213,19 +340,39 @@ pub async fn connect_from(
     max_message_size: usize,
     local: Option<IpAddr>,
 ) -> Result<Socket, Connect> {
-    let config = WebSocketConfig::default()
-        .max_message_size(Some(max_message_size))
-        .max_frame_size(Some(max_message_size));
-    let mut request = endpoint
-        .into_client_request()
-        .map_err(|e| Connect::InvalidEndpoint(format!("invalid endpoint {endpoint}: {e}")))?;
-    request.headers_mut().extend(headers.clone());
+    let (request, host, port) = target(endpoint, headers)?;
+    let config = config(max_message_size);
     let Some(local) = local else {
         return connect_async_tls_with_config(request, Some(config), false, connector)
             .await
             .map(|(socket, _)| socket)
             .map_err(Connect::Refused);
     };
+    let stream = bound_stream(local, &host, port)
+        .await
+        .map_err(|e| Connect::Refused(WsError::Io(e)))?;
+    client_async_tls_with_config(request, stream, Some(config), connector)
+        .await
+        .map(|(socket, _)| socket)
+        .map_err(Connect::Refused)
+}
+
+/// The upgrade request to `endpoint` with `headers`, and the host and port it names.
+fn target(
+    endpoint: &str,
+    headers: &HeaderMap,
+) -> Result<
+    (
+        tokio_tungstenite::tungstenite::handshake::client::Request,
+        String,
+        u16,
+    ),
+    Connect,
+> {
+    let mut request = endpoint
+        .into_client_request()
+        .map_err(|e| Connect::InvalidEndpoint(format!("invalid endpoint {endpoint}: {e}")))?;
+    request.headers_mut().extend(headers.clone());
     let uri = request.uri();
     let host = uri
         .host()
@@ -240,13 +387,14 @@ pub async fn connect_from(
         } else {
             80
         });
-    let stream = bound_stream(local, &host, port)
-        .await
-        .map_err(|e| Connect::Refused(WsError::Io(e)))?;
-    client_async_tls_with_config(request, stream, Some(config), connector)
-        .await
-        .map(|(socket, _)| socket)
-        .map_err(Connect::Refused)
+    Ok((request, host, port))
+}
+
+/// The socket's limits: the receive limit, and the per-frame cap moved with it.
+fn config(max_message_size: usize) -> WebSocketConfig {
+    WebSocketConfig::default()
+        .max_message_size(Some(max_message_size))
+        .max_frame_size(Some(max_message_size))
 }
 
 /// A TCP connection to `host:port` from `local`, trying each address of `host` of `local`'s family.
@@ -256,13 +404,7 @@ async fn bound_stream(local: IpAddr, host: &str, port: u16) -> std::io::Result<T
         if remote.is_ipv4() != local.is_ipv4() {
             continue;
         }
-        let socket = if local.is_ipv4() {
-            tokio::net::TcpSocket::new_v4()?
-        } else {
-            tokio::net::TcpSocket::new_v6()?
-        };
-        socket.bind(std::net::SocketAddr::new(local, 0))?;
-        match socket.connect(remote).await {
+        match stream_to(remote, Some(local)).await {
             Ok(stream) => return Ok(stream),
             Err(e) => last = Some(e),
         }
@@ -273,6 +415,20 @@ async fn bound_stream(local: IpAddr, host: &str, port: u16) -> std::io::Result<T
             format!("no address of {host} in the family of {local}"),
         )
     }))
+}
+
+/// A TCP connection to `remote`, from `local` where it names one.
+async fn stream_to(remote: SocketAddr, local: Option<IpAddr>) -> std::io::Result<TcpStream> {
+    let Some(local) = local else {
+        return TcpStream::connect(remote).await;
+    };
+    let socket = if local.is_ipv4() {
+        tokio::net::TcpSocket::new_v4()?
+    } else {
+        tokio::net::TcpSocket::new_v6()?
+    };
+    socket.bind(SocketAddr::new(local, 0))?;
+    socket.connect(remote).await
 }
 
 async fn serve<S: Session, X: StopSignal>(
@@ -298,7 +454,16 @@ async fn serve<S: Session, X: StopSignal>(
         .heartbeat
         .map(|period| tokio::time::interval_at(tokio::time::Instant::now() + period, period));
 
+    // A Server that sends nothing for a heartbeat interval, not even the pong to a ping sent
+    // half-way, is taken for lost: frozen, without power or cut off, it closes nothing, and TCP
+    // would hold the connection for many minutes
+    // (ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended).
+    let silence = Silence::of(settings.heartbeat);
+    let mut heard = tokio::time::Instant::now();
+    let mut pinged = None;
+
     loop {
+        let quiet_until = silence.next(heard, pinged);
         let heartbeat_due = async {
             match heartbeat.as_mut() {
                 Some(interval) => {
@@ -321,6 +486,9 @@ async fn serve<S: Session, X: StopSignal>(
                     }
                     None => return Served::ConnectionLost,
                 };
+                // Anything that arrives is a sign of life, a pong as much as a message.
+                heard = tokio::time::Instant::now();
+                pinged = None;
                 match message {
                     Message::Binary(data) => {
                         let reply: ServerToAgent = match frame::decode(&data, limit) {
@@ -382,6 +550,21 @@ async fn serve<S: Session, X: StopSignal>(
                 if send_all(&mut socket, session.routine(), limit).await.is_err() {
                     return Served::ConnectionLost;
                 }
+            }
+            () = tokio::time::sleep_until(quiet_until) => {
+                if pinged.is_some() {
+                    // Nothing to close gracefully: a Server that does not answer a ping would not
+                    // read a close frame either.
+                    warn!(
+                        bound_ms = u64::try_from(silence.end_after.as_millis()).unwrap_or(u64::MAX),
+                        "nothing arrived from the server within the bound; ending the connection"
+                    );
+                    return Served::ConnectionLost;
+                }
+                if socket.send(Message::Ping(Vec::new().into())).await.is_err() {
+                    return Served::ConnectionLost;
+                }
+                pinged = Some(tokio::time::Instant::now());
             }
             () = stop.requested() => {
                 say_goodbye(&mut socket, session, limit).await;
@@ -624,6 +807,543 @@ mod tests {
         assert!(
             back >= Duration::from_millis(drawn),
             "back after {back:?}, before the {drawn} ms drawn"
+        );
+    }
+
+    /// The bounds follow the heartbeat: a ping after half an interval of silence, the end after a
+    /// whole one; without a heartbeat, the default interval of 30 seconds
+    /// (ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended clause 2).
+    /// Verifies: ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended
+    #[test]
+    fn the_bounds_follow_the_heartbeat_and_are_thirty_seconds_without_one() {
+        let thirty = Silence {
+            ping_after: Duration::from_secs(15),
+            end_after: Duration::from_secs(30),
+        };
+        assert_eq!(Silence::of(Some(Duration::from_secs(30))), thirty);
+        assert_eq!(
+            Silence::of(Some(Duration::from_secs(2))),
+            Silence {
+                ping_after: Duration::from_secs(1),
+                end_after: Duration::from_secs(2),
+            }
+        );
+        assert_eq!(Silence::of(None), thirty, "no heartbeat");
+        assert_eq!(
+            Silence::of(Some(Duration::ZERO)),
+            thirty,
+            "a heartbeat of zero is none"
+        );
+    }
+
+    /// How soon after its bound a silent connection must have ended: a margin for a loaded test
+    /// machine, well short of the bound's own length times ten.
+    const WITHIN: Duration = Duration::from_millis(2_500);
+
+    /// A session whose every reply keeps it busy for `busy`, reading nothing meanwhile, and which
+    /// reports at every heartbeat; it counts the replies it was busy with.
+    struct Busy {
+        busy: Duration,
+        replies: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Session for Busy {
+        fn connected(&mut self) -> Vec<AgentToServer> {
+            vec![AgentToServer::default()]
+        }
+        fn routine(&mut self) -> Vec<AgentToServer> {
+            vec![AgentToServer::default()]
+        }
+        fn owed(&mut self) -> Vec<AgentToServer> {
+            Vec::new()
+        }
+        fn on_reply(&mut self, _: &ServerToAgent) -> Option<Duration> {
+            None
+        }
+        async fn after_reply<K: ReportSink>(&mut self, _: &mut K) -> AfterReply {
+            tokio::time::sleep(self.busy).await;
+            self.replies
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            AfterReply::Continue
+        }
+        async fn changed(&mut self) {
+            std::future::pending().await
+        }
+        fn exchange_failed(&mut self) {}
+        async fn stop(&mut self) {}
+        fn goodbyes(&mut self) -> Vec<AgentToServer> {
+            Vec::new()
+        }
+    }
+
+    /// A session busy with each reply for longer than an interval keeps a connection to a server
+    /// that answers everything: its own delay is not the server's silence
+    /// (ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended clause 1).
+    /// Verifies: ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended
+    #[tokio::test]
+    async fn a_session_busy_for_longer_than_an_interval_keeps_a_live_connection() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        // Answers every report and, as it reads, every ping.
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let mut socket = accept_async(stream).await.expect("handshake");
+            while let Some(Ok(message)) = socket.next().await {
+                if matches!(message, Message::Binary(_)) {
+                    let reply = frame::encode_within(&ServerToAgent::default(), 4096)
+                        .expect("within the limit");
+                    if socket.send(Message::Binary(reply.into())).await.is_err() {
+                        return;
+                    }
+                }
+            }
+        });
+        let heartbeat = Duration::from_millis(200);
+        let settings = settings_for(addr, heartbeat);
+        let (socket, _) = tokio_tungstenite::connect_async(&settings.endpoint)
+            .await
+            .expect("connect");
+        let replies = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut busy = Busy {
+            busy: heartbeat * 3,
+            replies: replies.clone(),
+        };
+        let mut never = Never;
+        let counted = replies.clone();
+        tokio::time::timeout(Duration::from_secs(20), async {
+            tokio::select! {
+                () = async {
+                    while counted.load(std::sync::atomic::Ordering::SeqCst) < 5 {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                } => {}
+                _ = serve(socket, &settings, &mut busy, &mut never) => {
+                    panic!(
+                        "the connection ended after {} busy replies",
+                        replies.load(std::sync::atomic::Ordering::SeqCst)
+                    )
+                }
+            }
+        })
+        .await
+        .expect("five busy replies in time");
+    }
+
+    /// The exact window: without a ping the next act is the ping, half an interval after the last
+    /// sign of life; with one, the end comes a whole interval after the last sign of life, or the
+    /// rest of the interval after the ping when the ping went out late
+    /// (ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended clause 1).
+    /// Verifies: ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended
+    #[test]
+    fn the_pong_is_given_the_rest_of_the_interval_from_its_ping() {
+        let silence = Silence::of(Some(Duration::from_secs(30)));
+        let heard = tokio::time::Instant::now();
+        let at = |secs: u64| heard + Duration::from_secs(secs);
+        assert_eq!(silence.next(heard, None), at(15), "the ping half-way");
+        assert_eq!(
+            silence.next(heard, Some(at(15))),
+            at(30),
+            "a ping in time: one interval"
+        );
+        assert_eq!(
+            silence.next(heard, Some(at(20))),
+            at(35),
+            "a ping five seconds late: the rest of the interval from it"
+        );
+        assert_eq!(
+            silence.next(heard, Some(at(90))),
+            at(105),
+            "after a busy minute: fifteen seconds for the pong"
+        );
+    }
+
+    /// Settings for a test server at `addr` with a heartbeat of `heartbeat`.
+    fn settings_for(addr: std::net::SocketAddr, heartbeat: Duration) -> Settings {
+        Settings {
+            endpoint: format!("ws://{addr}/v1/opamp"),
+            headers: HeaderMap::new(),
+            connector: None,
+            max_message_size: 4096,
+            heartbeat: Some(heartbeat),
+        }
+    }
+
+    /// A server that completes the upgrade and then reads nothing, as a frozen process does: its
+    /// kernel holds the connection, and no pong ever comes. The socket is kept until the test
+    /// ends.
+    async fn frozen_server() -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let held = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let _socket = accept_async(stream).await.expect("handshake");
+            std::future::pending::<()>().await;
+        });
+        (addr, held)
+    }
+
+    /// A connection on which nothing arrives for one heartbeat interval is ended as a lost one,
+    /// with a log line naming the bound, and no sooner than the bound
+    /// (ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended clauses 1,
+    /// 4).
+    /// Verifies: ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended
+    #[tokio::test]
+    async fn a_connection_on_which_nothing_arrives_for_a_heartbeat_interval_is_ended() {
+        let written = Written::default();
+        let log = written.clone();
+        let _guard = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_writer(move || log.clone())
+                .with_ansi(false)
+                .finish(),
+        );
+        let (addr, _held) = frozen_server().await;
+        let heartbeat = Duration::from_millis(500);
+        let settings = settings_for(addr, heartbeat);
+        let (socket, _) = tokio_tungstenite::connect_async(&settings.endpoint)
+            .await
+            .expect("connect");
+        let opened = tokio::time::Instant::now();
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(10),
+            serve(socket, &settings, &mut Quiet, &mut Never),
+        )
+        .await
+        .expect("the connection is ended within the test's bound");
+        assert!(matches!(outcome, Served::ConnectionLost), "ended as lost");
+        let ended = opened.elapsed();
+        assert!(ended >= heartbeat, "not before the bound: {ended:?}");
+        assert!(
+            ended < heartbeat + WITHIN,
+            "once the bound passes, within {WITHIN:?} of it: {ended:?}"
+        );
+        let text = String::from_utf8(written.0.lock().expect("log").clone()).expect("utf-8");
+        assert!(
+            text.lines()
+                .any(|line| line.contains("nothing arrived") && line.contains("bound_ms=500")),
+            "the end is logged with its bound: {text}"
+        );
+    }
+
+    /// A server that answers pings and sends nothing else keeps the connection over many bounds:
+    /// the pongs are signs of life
+    /// (ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended clauses 1,
+    /// 2).
+    /// Verifies: ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended
+    #[tokio::test]
+    async fn a_server_that_answers_only_pings_keeps_the_connection() {
+        const PINGS: usize = 8;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        // Reads everything, so the library answers each ping; reports when it has seen enough.
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let mut socket = accept_async(stream).await.expect("handshake");
+            let mut pings = 0;
+            while let Some(Ok(message)) = socket.next().await {
+                if matches!(message, Message::Ping(_)) {
+                    pings += 1;
+                    if pings == PINGS {
+                        return Some(socket);
+                    }
+                }
+            }
+            None
+        });
+        let heartbeat = Duration::from_millis(200);
+        let settings = settings_for(addr, heartbeat);
+        let (socket, _) = tokio_tungstenite::connect_async(&settings.endpoint)
+            .await
+            .expect("connect");
+        let opened = tokio::time::Instant::now();
+        let (mut quiet, mut never) = (Quiet, Never);
+        let seen = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::select! {
+                seen = server => seen.expect("the server task"),
+                _ = serve(socket, &settings, &mut quiet, &mut never) => {
+                    panic!("the connection ended after {:?}", opened.elapsed())
+                }
+            }
+        })
+        .await
+        .expect("the server sees its pings in time");
+        assert!(seen.is_some(), "the connection stood through {PINGS} pings");
+        assert!(
+            opened.elapsed() >= heartbeat * 2,
+            "over more than one bound: {:?}",
+            opened.elapsed()
+        );
+    }
+
+    /// An upgrade that is never answered — a TCP connection accepted by a kernel whose process
+    /// is frozen — fails once the bound has passed
+    /// (ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended clause 3).
+    /// Verifies: ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended
+    #[tokio::test]
+    async fn an_upgrade_that_is_never_answered_fails_within_the_bound() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let _held = tokio::spawn(async move {
+            let (_stream, _) = listener.accept().await.expect("accept");
+            std::future::pending::<()>().await;
+        });
+        let heartbeat = Duration::from_millis(500);
+        let settings = settings_for(addr, heartbeat);
+        let started = tokio::time::Instant::now();
+        let opened = tokio::time::timeout(Duration::from_secs(10), open(&settings, None))
+            .await
+            .expect("the attempt fails within the test's bound");
+        assert!(opened.is_err(), "an unanswered upgrade is a failed attempt");
+        let failed = started.elapsed();
+        assert!(failed >= heartbeat, "not before the bound: {failed:?}");
+        assert!(
+            failed < heartbeat + WITHIN,
+            "once the bound passes, within {WITHIN:?} of it: {failed:?}"
+        );
+    }
+
+    /// A name whose first address accepts a TCP connection and never answers, as a frozen
+    /// process's kernel does, still connects: that address gives way to the next once its own
+    /// interval has passed, and the upgrade to the next carries the name, not the address
+    /// (ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended
+    /// clause 3).
+    /// Verifies: ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended
+    #[tokio::test]
+    async fn an_address_not_reached_within_its_interval_gives_way_to_the_next() {
+        // The kernel completes the TCP connection into the backlog; nothing ever answers it.
+        let silent = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addresses = vec![
+            silent.local_addr().expect("addr"),
+            listener.local_addr().expect("addr"),
+        ];
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let mut host = None;
+            // The callback's error type is tungstenite's, large as it is.
+            #[allow(clippy::result_large_err)]
+            let record = |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                          response| {
+                host = request
+                    .headers()
+                    .get("host")
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_string);
+                Ok(response)
+            };
+            let socket = tokio_tungstenite::accept_hdr_async(stream, record)
+                .await
+                .expect("handshake");
+            (socket, host)
+        });
+        let interval = Duration::from_millis(500);
+        let mut settings = settings_for(addresses[0], interval);
+        settings.endpoint = "ws://fleet.example:4320/v1/opamp".to_string();
+        let started = tokio::time::Instant::now();
+        let opened = tokio::time::timeout(
+            Duration::from_secs(10),
+            open_each(&settings, None, addresses, interval),
+        )
+        .await
+        .expect("the attempt ends within the test's bound");
+        let took = started.elapsed();
+        assert!(opened.is_ok(), "the second address opens: {opened:?}");
+        assert!(
+            took >= interval,
+            "the first address had its interval: {took:?}"
+        );
+        assert!(
+            took < interval + WITHIN,
+            "and the second was tried right after it: {took:?}"
+        );
+        let (_socket, host) = server.await.expect("the server task");
+        assert_eq!(
+            host.as_deref(),
+            Some("fleet.example:4320"),
+            "the name is the host"
+        );
+    }
+
+    /// Opens with [`open_each`] to two addresses: the first answers the upgrade request with
+    /// `answer`, the second is never accepted, so a connection to it waits in its backlog. Gives
+    /// back the attempt's outcome and whether the second address was tried.
+    async fn first_answers(answer: &'static [u8]) -> (Result<Socket, Connect>, bool) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let answering = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let next = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        next.set_nonblocking(true).expect("non-blocking");
+        let addresses = vec![
+            answering.local_addr().expect("addr"),
+            next.local_addr().expect("addr"),
+        ];
+        let _answer = tokio::spawn(async move {
+            let (mut stream, _) = answering.accept().await.expect("accept");
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 1024];
+            while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                let read = stream.read(&mut buffer).await.expect("read");
+                assert!(read > 0, "the request ends before its headers do");
+                request.extend_from_slice(&buffer[..read]);
+            }
+            stream.write_all(answer).await.expect("answer");
+            std::future::pending::<()>().await;
+        });
+        let interval = Duration::from_secs(2);
+        let settings = settings_for(addresses[0], interval);
+        let opened = tokio::time::timeout(
+            Duration::from_secs(10),
+            open_each(&settings, None, addresses, interval),
+        )
+        .await
+        .expect("the attempt ends within the test's bound");
+        let tried = match next.accept() {
+            Ok(_) => true,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => false,
+            Err(e) => panic!("accept: {e}"),
+        };
+        (opened, tried)
+    }
+
+    /// An HTTP answer to the upgrade is the Server's verdict, not an address that was not
+    /// reached: a refusal on the first address ends the attempt as it is, and the next address is
+    /// not tried
+    /// (ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended clause 3).
+    /// Verifies: ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended
+    #[tokio::test]
+    async fn an_http_answer_on_the_first_address_ends_the_attempt() {
+        let (opened, tried) =
+            first_answers(b"HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\n\r\n").await;
+        match opened {
+            Err(Connect::Refused(WsError::Http(response))) => {
+                assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            }
+            other => panic!("the refusal comes back as it is: {other:?}"),
+        }
+        assert!(!tried, "the next address was not tried");
+    }
+
+    /// An address that answers the upgrade with something that is not HTTP was reached all the
+    /// same: its answer ends the attempt, and the next address is not tried
+    /// (ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended clause 3).
+    /// Verifies: ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended
+    #[tokio::test]
+    async fn an_answer_that_is_no_http_on_the_first_address_ends_the_attempt() {
+        let (opened, tried) = first_answers(b"this is no HTTP at all\r\n\r\n").await;
+        match opened {
+            Err(Connect::Refused(WsError::Io(_) | WsError::Tls(_))) | Ok(_) => {
+                panic!("the garbled answer comes back as it is: {opened:?}")
+            }
+            Err(_) => {}
+        }
+        assert!(!tried, "the next address was not tried");
+    }
+
+    /// A first address that refuses the connection, as `::1` does to a Server listening on
+    /// `127.0.0.1` only, gives way to the next at once
+    /// (ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended clause 3).
+    /// Verifies: ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended
+    #[tokio::test]
+    async fn a_first_address_that_refuses_gives_way_to_the_next() {
+        // A port that was bound and is free again: nothing listens on it, so it refuses.
+        let refusing = std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("bind")
+            .local_addr()
+            .expect("addr");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addresses = vec![refusing, listener.local_addr().expect("addr")];
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            accept_async(stream).await.expect("handshake")
+        });
+        let interval = Duration::from_secs(5);
+        let settings = settings_for(addresses[1], interval);
+        let started = tokio::time::Instant::now();
+        let opened = tokio::time::timeout(
+            Duration::from_secs(10),
+            open_each(&settings, None, addresses, interval),
+        )
+        .await
+        .expect("the attempt ends within the test's bound");
+        assert!(opened.is_ok(), "the second address opens: {opened:?}");
+        assert!(
+            started.elapsed() < interval,
+            "without waiting out the first address's interval: {:?}",
+            started.elapsed()
+        );
+        server.await.expect("the server task");
+    }
+
+    /// A `wss` endpoint opened to an address carries the endpoint's name as the TLS server name,
+    /// so the certificate is checked against the name, not the address
+    /// (ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended clause 3).
+    /// Verifies: ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended
+    #[tokio::test]
+    async fn the_tls_server_name_is_the_endpoints_name() {
+        crate::tls::install_ring_provider();
+        let key = rcgen::KeyPair::generate().expect("key");
+        let cert = rcgen::CertificateParams::new(vec!["fleet.example".to_string()])
+            .expect("params")
+            .self_signed(&key)
+            .expect("certificate");
+        let server_config = crate::tls::server_builder()
+            .with_no_client_auth()
+            .with_single_cert(
+                crate::tls::certificates(cert.pem().as_bytes()).expect("certificate"),
+                crate::tls::private_key(key.serialize_pem().as_bytes()).expect("key"),
+            )
+            .expect("server configuration");
+        let client_config = crate::tls::client_builder()
+            .with_root_certificates(crate::tls::root_store(cert.pem().as_bytes()).expect("roots"))
+            .with_no_client_auth();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let address = listener.local_addr().expect("addr");
+        // A blocking TLS server that completes the upgrade and reports the name the client sent.
+        let server = tokio::task::spawn_blocking(move || {
+            let (tcp, _) = listener.accept().expect("accept");
+            let connection =
+                rustls::ServerConnection::new(std::sync::Arc::new(server_config)).expect("tls");
+            let socket =
+                tokio_tungstenite::tungstenite::accept(rustls::StreamOwned::new(connection, tcp))
+                    .expect("handshake");
+            socket.get_ref().conn.server_name().map(str::to_string)
+        });
+        let settings = Settings {
+            endpoint: format!("wss://fleet.example:{}/v1/opamp", address.port()),
+            headers: HeaderMap::new(),
+            connector: Some(Connector::Rustls(std::sync::Arc::new(client_config))),
+            max_message_size: 4096,
+            heartbeat: Some(Duration::from_secs(5)),
+        };
+        let opened = tokio::time::timeout(
+            Duration::from_secs(10),
+            open_each(&settings, None, vec![address], Duration::from_secs(5)),
+        )
+        .await
+        .expect("the attempt ends within the test's bound");
+        assert!(
+            opened.is_ok(),
+            "the certificate for the name is accepted: {opened:?}"
+        );
+        let name = server.await.expect("the server task");
+        assert_eq!(
+            name.as_deref(),
+            Some("fleet.example"),
+            "the server name is the name"
         );
     }
 

@@ -565,6 +565,19 @@ impl Instance {
         }
     }
 
+    /// Freezes the process without warning (`SIGSTOP`): it closes nothing and answers nothing,
+    /// while its kernel keeps its connections. Dropping it kills it.
+    fn freeze(&self) {
+        if let Some(child) = self.child.as_ref() {
+            let stopped = Command::new("kill")
+                .arg("-STOP")
+                .arg(child.id().to_string())
+                .status()
+                .expect("run kill");
+            assert!(stopped.success(), "SIGSTOP");
+        }
+    }
+
     /// Its resident memory, in MiB.
     fn rss_mib(&self) -> u64 {
         self.child
@@ -656,17 +669,22 @@ impl Balancer {
             socket.listen(8192).expect("listen")
         });
         let address = listener.local_addr().expect("address");
-        // The probe: an instance that takes no TCP connection gets none.
+        // The probe: an instance that does not answer gets no connection. A TCP connection alone
+        // would not tell, since the kernel of a frozen process still accepts it; the probe sends
+        // bytes that are no TLS and waits for the instance to answer or close.
         for (backend, &target) in backends.iter().enumerate() {
             let up = up.clone();
             runtime.spawn(async move {
                 loop {
-                    let answers = tokio::time::timeout(
-                        Duration::from_millis(300),
-                        tokio::net::TcpStream::connect(target),
-                    )
+                    let answers = tokio::time::timeout(Duration::from_secs(1), async {
+                        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+                        let mut stream = tokio::net::TcpStream::connect(target).await.ok()?;
+                        stream.write_all(b"probe\r\n\r\n").await.ok()?;
+                        let mut answer = [0u8; 64];
+                        stream.read(&mut answer).await.ok()
+                    })
                     .await
-                    .is_ok_and(|connected| connected.is_ok());
+                    .is_ok_and(|answered| answered.is_some());
                     up[backend].store(answers, Ordering::SeqCst);
                     tokio::time::sleep(Duration::from_millis(200)).await;
                 }
@@ -1238,6 +1256,29 @@ fn in_list(uids: impl IntoIterator<Item = InstanceUid>) -> String {
 /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
 #[test]
 fn g20_a_killed_instance_s_agents_are_carried_by_the_others_within_the_bounds() {
+    failover(Loss::Killed);
+}
+
+/// G-20's failover with the instance frozen (`SIGSTOP`) rather than killed: it closes nothing, its
+/// kernel keeps the connections, and its Agents notice it only by the silence of one heartbeat
+/// interval. The same bounds hold as for a killed instance.
+/// Verifies: ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended
+/// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+#[test]
+fn g20_a_frozen_instance_s_agents_are_carried_by_the_others_within_the_bounds() {
+    failover(Loss::Frozen);
+}
+
+/// How the failover loses its instance.
+#[derive(Clone, Copy, Debug)]
+enum Loss {
+    /// `SIGKILL`: the kernel resets every connection.
+    Killed,
+    /// `SIGSTOP`: nothing is closed and nothing answers.
+    Frozen,
+}
+
+fn failover(loss: Loss) {
     if !stack_named() {
         return;
     }
@@ -1356,9 +1397,13 @@ fn g20_a_killed_instance_s_agents_are_carried_by_the_others_within_the_bounds() 
         );
 
         let killed_at = Instant::now();
-        instances[KILLED].kill();
+        match loss {
+            Loss::Killed => instances[KILLED].kill(),
+            Loss::Frozen => instances[KILLED].freeze(),
+        }
         eprintln!(
-            "killed instance {KILLED}, which carried {killed_agents} Agents on {} connections",
+            "lost instance {KILLED} ({loss:?}), which carried {killed_agents} Agents on {} \
+             connections",
             killed_hosts.len()
         );
 
@@ -1508,7 +1553,7 @@ fn g20_a_killed_instance_s_agents_are_carried_by_the_others_within_the_bounds() 
 
         eprintln!(
             "G-20 failover: {agents} Agents, 1 per connection, a Gateway of {GATEWAY_CONNECTIONS} \
-             connections, 3 instances, instance {KILLED} killed carrying {killed_agents}; carried \
+             connections, 3 instances, instance {KILLED} lost ({loss:?}) carrying {killed_agents}; carried \
              by the others after {carried_after:?} (bound {CARRIED_WITHIN:?}); revocations ended \
              their sessions after {revoked_within:?} (bound {REVOKED_WITHIN:?}); ramp \
              {ramp_took:?}; {}",

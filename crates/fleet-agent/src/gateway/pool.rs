@@ -31,7 +31,7 @@ use crate::gateway::registry::Registry;
 
 /// One upstream connection: a sender into its writer task, and who rides it.
 struct Upstream {
-    outbound: mpsc::Sender<Vec<u8>>,
+    outbound: mpsc::Sender<Message>,
     /// The Agents assigned to this connection — the count least-connections balances on, and the
     /// set to re-home when it drops.
     carries: Vec<InstanceUid>,
@@ -78,21 +78,25 @@ impl Pool {
         // Two attempts: the assigned connection may have died between the last send and this one,
         // and re-homing is exactly what clause 9 of ADR-0015 asks for.
         let outbound = self.connection_for(uid).await?;
-        if outbound.send(frame.clone()).await.is_ok() {
+        if outbound
+            .send(Message::Binary(frame.clone().into()))
+            .await
+            .is_ok()
+        {
             return Ok(());
         }
         debug!(agent = %uid, "the upstream connection is gone; re-homing");
         self.forget_connection_of(uid);
         let outbound = self.connection_for(uid).await?;
         outbound
-            .send(frame)
+            .send(Message::Binary(frame.into()))
             .await
             .map_err(|e| format!("cannot forward a report of {uid}: {e}"))
     }
 
     /// The Agent's connection: the one it is stuck to while that lives, else the least-loaded one,
     /// else a new one while the cap allows.
-    async fn connection_for(&self, uid: InstanceUid) -> Result<mpsc::Sender<Vec<u8>>, String> {
+    async fn connection_for(&self, uid: InstanceUid) -> Result<mpsc::Sender<Message>, String> {
         {
             let mut inner = self.inner.lock().expect("pool lock");
             if let Some(&index) = inner.assigned.get(&uid) {
@@ -143,20 +147,24 @@ impl Pool {
     }
 
     /// Opens one upstream connection and starts its reader and writer tasks.
-    async fn open(&self, uid: InstanceUid) -> Result<mpsc::Sender<Vec<u8>>, String> {
+    async fn open(&self, uid: InstanceUid) -> Result<mpsc::Sender<Message>, String> {
         // This Gateway's own identity, and no `Authorization`: a downstream peer's is never
         // forwarded, and nothing is sent in its place (ADR-0015 clause 11, ADR-0038).
         let mut upstream = crate::transport::connection(&self.config)?;
         upstream.max_message_size = self.limit;
+        // An upstream that sends nothing for a heartbeat interval, not even the pong to a ping
+        // sent half-way, is taken for lost; opening is bounded by `connect_websocket`
+        // (ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended).
+        let silence = opamp::client::ws::Silence::of(upstream.heartbeat);
         let socket = upstream.connect_websocket().await?;
 
         let (mut sink, mut stream) = socket.split();
-        let (tx, mut rx) = mpsc::channel::<Vec<u8>>(64);
+        let (tx, mut rx) = mpsc::channel::<Message>(64);
         let alive = Arc::new(AtomicBool::new(true));
 
-        tokio::spawn(async move {
-            while let Some(frame) = rx.recv().await {
-                if sink.send(Message::Binary(frame.into())).await.is_err() {
+        let writer = tokio::spawn(async move {
+            while let Some(message) = rx.recv().await {
+                if sink.send(message).await.is_err() {
                     break;
                 }
             }
@@ -166,8 +174,39 @@ impl Pool {
         let registry = self.registry.clone();
         let limit = self.limit;
         let reader_alive = alive.clone();
+        let pinger = tx.clone();
         tokio::spawn(async move {
-            while let Some(message) = stream.next().await {
+            let mut heard = tokio::time::Instant::now();
+            let mut pinged = None;
+            loop {
+                let quiet_until = silence.next(heard, pinged);
+                let message = tokio::select! {
+                    message = stream.next() => message,
+                    () = tokio::time::sleep_until(quiet_until) => {
+                        if pinged.is_some() {
+                            warn!(
+                                bound_ms = u64::try_from(silence.end_after.as_millis())
+                                    .unwrap_or(u64::MAX),
+                                "nothing arrived on an upstream connection within the bound; \
+                                 ending it"
+                            );
+                            // Gone before the writer is: a forward that finds its send failed must
+                            // not be handed this connection again.
+                            reader_alive.store(false, Ordering::Relaxed);
+                            // A writer blocked on a peer that reads nothing would never notice.
+                            writer.abort();
+                            break;
+                        }
+                        // A full queue means the writer is blocked already; the end comes anyway.
+                        let _ = pinger.try_send(Message::Ping(Vec::new().into()));
+                        pinged = Some(tokio::time::Instant::now());
+                        continue;
+                    }
+                };
+                let Some(message) = message else { break };
+                // Anything that arrives is a sign of life, a pong as much as a message.
+                heard = tokio::time::Instant::now();
+                pinged = None;
                 let payload = match message {
                     Ok(Message::Binary(payload)) => payload,
                     Ok(Message::Close(_)) | Err(_) => break,
@@ -250,6 +289,18 @@ impl Pool {
                 }
             }
         }
+    }
+
+    /// How many connections are alive.
+    #[cfg(test)]
+    pub(crate) fn live(&self) -> usize {
+        self.inner
+            .lock()
+            .expect("pool lock")
+            .connections
+            .iter()
+            .filter(|c| c.alive.load(Ordering::Relaxed))
+            .count()
     }
 
     /// The connection an Agent is assigned to, by index.

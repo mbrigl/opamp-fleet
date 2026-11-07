@@ -956,10 +956,19 @@ mod tests {
     /// A Gateway's handler in front of the upstream at `server`, with a fresh, empty revocation
     /// list.
     async fn forwarding_to(state: &std::path::Path, server: std::net::SocketAddr) -> Forwarding {
+        forwarding_with(state, server, "").await
+    }
+
+    /// [`forwarding_to`], with `top` added to the top level of the Client's configuration.
+    async fn forwarding_with(
+        state: &std::path::Path,
+        server: std::net::SocketAddr,
+        top: &str,
+    ) -> Forwarding {
         opamp::tls::install_ring_provider();
         let config: Arc<ClientConfig> = Arc::new(
             toml::from_str(&format!(
-                "endpoint = \"ws://{server}/v1/opamp\"\nstate_dir = {:?}\n\
+                "endpoint = \"ws://{server}/v1/opamp\"\nstate_dir = {:?}\n{top}\
                  [gateway]\nlisten = \"127.0.0.1:9\"\nmax_carried_agents = 3\n",
                 state.display().to_string()
             ))
@@ -1009,6 +1018,307 @@ mod tests {
             instance_uid: uid.as_bytes().to_vec(),
             ..Default::default()
         }
+    }
+
+    /// An upstream that completes each upgrade and counts it; one that `reads` answers pings (the
+    /// library does as it reads) and counts them, one that does not is frozen: its kernel holds
+    /// the connection and nothing comes back.
+    async fn counting_upstream(
+        reads: bool,
+    ) -> (
+        std::net::SocketAddr,
+        Arc<std::sync::atomic::AtomicUsize>,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let (accepts, pings) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let (accepted, pinged) = (accepts.clone(), pings.clone());
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let pinged = pinged.clone();
+                let Ok(mut socket) = tokio_tungstenite::accept_async(stream).await else {
+                    continue;
+                };
+                accepted.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(async move {
+                    use futures_util::StreamExt;
+                    if !reads {
+                        std::future::pending::<()>().await;
+                    }
+                    while let Some(Ok(message)) = socket.next().await {
+                        if matches!(message, tokio_tungstenite::tungstenite::Message::Ping(_)) {
+                            pinged.fetch_add(1, Ordering::SeqCst);
+                        }
+                    }
+                    drop(socket);
+                });
+            }
+        });
+        (addr, accepts, pings)
+    }
+
+    /// An upstream connection on which nothing arrives for one heartbeat interval is ended, and
+    /// the Agent it carried is placed anew at its next report, on a connection of its own
+    /// (ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended clauses 1,
+    /// 4).
+    /// Verifies: ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended
+    #[tokio::test]
+    async fn an_upstream_connection_on_which_nothing_arrives_is_ended_and_its_agents_placed_anew() {
+        use std::sync::atomic::Ordering;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (server, accepts, _) = counting_upstream(false).await;
+        let forwarding = forwarding_with(dir.path(), server, "heartbeat_interval_secs = 1\n").await;
+        let uid = InstanceUid::default();
+        forwarding
+            .pool
+            .forward(uid, &report(uid))
+            .await
+            .expect("forwarded");
+        let opened = std::time::Instant::now();
+        assert_eq!(accepts.load(Ordering::SeqCst), 1, "one connection");
+        let placed_anew = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            loop {
+                let _ = forwarding.pool.forward(uid, &report(uid)).await;
+                if accepts.load(Ordering::SeqCst) == 2 {
+                    return opened.elapsed();
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("the Agent is placed on a new connection once the silent one ended");
+        assert!(
+            placed_anew >= std::time::Duration::from_secs(1),
+            "not before the bound of one heartbeat interval: {placed_anew:?}"
+        );
+        assert!(
+            placed_anew < std::time::Duration::from_secs(1) + POOL_WITHIN,
+            "once the bound passes, within {POOL_WITHIN:?} of it: {placed_anew:?}"
+        );
+    }
+
+    /// How soon after its bound of one second a silent upstream connection must have ended: a
+    /// margin for a loaded test machine and the forwards' pace, well short of the bound times ten.
+    const POOL_WITHIN: std::time::Duration = std::time::Duration::from_secs(3);
+
+    /// An upstream that accepts the TCP connection and never answers the upgrade fails the
+    /// forward once one heartbeat interval has passed, rather than holding it
+    /// (ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended clause 3).
+    /// Verifies: ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended
+    #[tokio::test]
+    async fn an_upstream_that_never_answers_the_upgrade_fails_the_forward_within_the_bound() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let server = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                held.push(stream);
+            }
+        });
+        let dir = tempfile::tempdir().expect("tempdir");
+        let forwarding = forwarding_with(dir.path(), server, "heartbeat_interval_secs = 1\n").await;
+        let uid = InstanceUid::default();
+        let started = std::time::Instant::now();
+        let forwarded = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            forwarding.pool.forward(uid, &report(uid)),
+        )
+        .await
+        .expect("the forward ends within the test's bound");
+        assert!(
+            forwarded.is_err(),
+            "an unanswered upgrade fails the forward"
+        );
+        let failed = started.elapsed();
+        assert!(
+            failed >= std::time::Duration::from_secs(1),
+            "not before the bound: {failed:?}"
+        );
+        assert!(
+            failed < std::time::Duration::from_secs(1) + POOL_WITHIN,
+            "once the bound passes, within {POOL_WITHIN:?} of it: {failed:?}"
+        );
+    }
+
+    /// An upstream reader held up by a downstream Agent that reads its replies slowly, for longer
+    /// than an interval, keeps a connection to an upstream that answers: the Gateway's own delay
+    /// is not the Server's silence
+    /// (ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended clause 1).
+    /// Verifies: ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended
+    #[tokio::test]
+    async fn an_upstream_reader_held_up_by_a_slow_downstream_keeps_a_live_connection() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let server = listener.local_addr().expect("addr");
+        let (accepts, pings) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let (accepted, pinged) = (accepts.clone(), pings.clone());
+        // Answers the first report with two replies for its Agent, then sends nothing more but
+        // reads on, so the library answers every ping.
+        tokio::spawn(async move {
+            use futures_util::{SinkExt, StreamExt};
+            use tokio_tungstenite::tungstenite::Message;
+            while let Ok((stream, _)) = listener.accept().await {
+                let Ok(mut socket) = tokio_tungstenite::accept_async(stream).await else {
+                    continue;
+                };
+                accepted.fetch_add(1, Ordering::SeqCst);
+                let pinged = pinged.clone();
+                tokio::spawn(async move {
+                    let mut answered = false;
+                    while let Some(Ok(message)) = socket.next().await {
+                        match message {
+                            Message::Binary(data) if !answered => {
+                                answered = true;
+                                let report: AgentToServer =
+                                    opamp::frame::decode(&data, 1 << 20).expect("a report");
+                                for _ in 0..2 {
+                                    let reply = ServerToAgent {
+                                        instance_uid: report.instance_uid.clone(),
+                                        ..Default::default()
+                                    };
+                                    let framed = opamp::frame::encode_within(&reply, 1 << 20)
+                                        .expect("within the limit");
+                                    let _ = socket.send(Message::Binary(framed.into())).await;
+                                }
+                            }
+                            Message::Ping(_) => {
+                                pinged.fetch_add(1, Ordering::SeqCst);
+                            }
+                            _ => {}
+                        }
+                    }
+                });
+            }
+        });
+        let dir = tempfile::tempdir().expect("tempdir");
+        let forwarding = forwarding_with(dir.path(), server, "heartbeat_interval_secs = 1\n").await;
+        // The downstream peer takes one reply and then reads nothing for three intervals: the
+        // second reply holds the upstream reader in `deliver`.
+        let (tx, mut rx) = mpsc::channel(1);
+        let mut peer = downstream(Transport::WebSocket, Some(tx), certificate());
+        let uid = InstanceUid::default();
+        forwarding.forward_from_socket(&mut peer, report(uid)).await;
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        let drained = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+        let after = pings.load(Ordering::SeqCst);
+        let pinged_on = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while pings.load(Ordering::SeqCst) < after + 3 {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        })
+        .await;
+        assert!(
+            pinged_on.is_ok(),
+            "the connection is pinged on once the reader is free again"
+        );
+        forwarding
+            .pool
+            .forward(uid, &report(uid))
+            .await
+            .expect("forwarded again");
+        assert_eq!(
+            accepts.load(Ordering::SeqCst),
+            1,
+            "the connection stood through the held-up reader"
+        );
+        drained.abort();
+    }
+
+    /// An upstream connection ended for its silence is closed towards the Server too: its writer,
+    /// which may be blocked on a peer that reads nothing, is aborted rather than left holding the
+    /// socket (ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended
+    /// clause 4).
+    /// Verifies: ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended
+    #[tokio::test]
+    async fn an_ended_upstream_connection_is_closed_towards_the_server() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let server = listener.local_addr().expect("addr");
+        let (thaw, thawed) = oneshot::channel::<()>();
+        // Frozen until told to read; then reports whether the connection is gone.
+        let closed = tokio::spawn(async move {
+            use futures_util::StreamExt;
+            let (stream, _) = listener.accept().await.expect("accept");
+            let mut socket = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("handshake");
+            let _ = thawed.await;
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    match socket.next().await {
+                        None | Some(Err(_)) => return,
+                        Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_))) => return,
+                        Some(Ok(_)) => {}
+                    }
+                }
+            })
+            .await
+            .is_ok()
+        });
+        let dir = tempfile::tempdir().expect("tempdir");
+        let forwarding = forwarding_with(dir.path(), server, "heartbeat_interval_secs = 1\n").await;
+        let uid = InstanceUid::default();
+        forwarding
+            .pool
+            .forward(uid, &report(uid))
+            .await
+            .expect("forwarded");
+        let ended = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while forwarding.pool.live() > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        })
+        .await;
+        assert!(ended.is_ok(), "the silent connection ends");
+        let _ = thaw.send(());
+        assert!(
+            closed.await.expect("the server task"),
+            "the Server sees the connection closed"
+        );
+    }
+
+    /// An upstream that answers the pool's pings keeps its connection over several bounds,
+    /// though it sends nothing else
+    /// (ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended clause 1).
+    /// Verifies: ADR-draft-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended
+    #[tokio::test]
+    async fn an_upstream_that_answers_pings_keeps_its_connection() {
+        use std::sync::atomic::Ordering;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (server, accepts, pings) = counting_upstream(true).await;
+        let forwarding = forwarding_with(dir.path(), server, "heartbeat_interval_secs = 1\n").await;
+        let uid = InstanceUid::default();
+        forwarding
+            .pool
+            .forward(uid, &report(uid))
+            .await
+            .expect("forwarded");
+        let pinged = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while pings.load(Ordering::SeqCst) < 4 {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        })
+        .await;
+        assert!(pinged.is_ok(), "the pool pings a quiet upstream");
+        forwarding
+            .pool
+            .forward(uid, &report(uid))
+            .await
+            .expect("forwarded again");
+        assert_eq!(
+            accepts.load(Ordering::SeqCst),
+            1,
+            "the connection stood through its pings"
+        );
     }
 
     /// A peer that goes takes its Agents' places on the upstream connections with it, so a peer
