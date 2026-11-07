@@ -181,9 +181,8 @@ The plan lands on `main` in three stages, each a release of its own.
    bounds: instances are upgraded together, no load is proven, and with a CA key as a file on the
    Server an instance runs alone. Its decisions are the eight drafts it numbers and accepts.
 2. **G-20: the fleet at scale, and an upgrade without a stop.** Tickets 07, 11, 14, 15, 34 to 41
-   done; no ticket of this plan is open for stage 2. One ticket of the design revision blocks it:
-   docs/plan/revision-2026-11-06/09-a-key-rejected-in-a-restore-stays-refused-beyond-its-window.md.
-   Ticket 35 is closed as resolved by tickets
+   done, and ticket 09 of the design revision, a rejected key that stays refused beyond its
+   window; no ticket is open for stage 2. Ticket 35 is closed as resolved by tickets
    36, 37 and 40: the load test at 450 connections a second and the failover on a host with every
    core busy hold exactly the Agents, and a row left held could not be reproduced. The failover
    counts the held rows of the Gateway's Agents and of the single-Agent hosts apart, and that
@@ -197,9 +196,11 @@ The plan lands on `main` in three stages, each a release of its own.
    ADR-draft-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision,
    which supersedes ADR-0044,
    ADR-draft-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again,
-   which supersedes ADR-0039, and
+   which supersedes ADR-0039,
    ADR-draft-the-audit-record-is-one-hash-chain-per-lease-and-names-the-lease-each-decision-was-taken-under,
-   which supersedes ADR-0042.
+   which supersedes ADR-0042, and
+   ADR-draft-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window,
+   which supersedes ADR-0022.
 3. **The keys on a token.** Tickets 12, 16 and 17. The CA keys live on a PKCS#11 token, so
    instances holding a CA run side by side, the heads of the audit chains are signed, and the
    record may be exported. Its four drafts are on the local branch `feat/multi-instance-stage-3`,
@@ -228,11 +229,6 @@ The plan lands on `main` in three stages, each a release of its own.
     deleted members, the sweep, the lease across a suspend, a commit whose answer is lost, one
     snapshot per read, a queued restart, the audit record's leases and the revocation list's
     version. They block G-20. The other findings are tickets in plan directories of their own.
-- **Open before stage 2 lands:**
-  - docs/plan/revision-2026-11-06/09-a-key-rejected-in-a-restore-stays-refused-beyond-its-window.md:
-    after a database restore, a request approved since the backup can be approved again once its
-    window closes and its host sends it again, which signs a certificate for its key that no
-    revocation names. It blocks G-20.
 - **Once stage 1 is on `main`,** this branch takes `main` up, and its drafts cite the numbers the
   stage-1 drafts got.
 - **Beside `feat/core-repack`.** That branch carries the `supervisor.*` label rule of the fleet
@@ -252,12 +248,12 @@ The plan lands on `main` in three stages, each a release of its own.
   ADR-0038 and
   ADR-0040. Once stage 1 is on `main` they carry
   numbers, and the plan's references take them up.
-- Implemented here, all proposed: the ten drafts of stages 2 and 3 named under *Stages*. The paging
-  draft adds to the fleet record's port and to the stores' columns without restating either; the
-  PKCS#11 draft adds the audit export under the open outbound rule of the TLS draft's clause 21,
-  decides the module's own connection under that clause's rule for a library the Server loads,
-  and the token's keys beside the alone rule of the instances
-  draft's clause 2. Each restatement supersedes the ADR it restates when the human accepts it.
+- Implemented here, all proposed: the eleven drafts of stages 2 and 3 named under *Stages*. The
+  paging draft adds to the fleet record's port and to the stores' columns without restating either;
+  the PKCS#11 draft adds the audit export under the open outbound rule of the TLS draft's clause 21,
+  decides the module's own connection under that clause's rule for a library the Server loads, and
+  the token's keys beside the alone rule of the instances draft's clause 2. Each restatement
+  supersedes the ADR it restates when the human accepts it.
 - The specification change G-20 is drafted on this branch and lands with stage 2; only the human
   lands it.
 - No new ADR is needed beyond these.
