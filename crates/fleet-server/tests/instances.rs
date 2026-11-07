@@ -79,6 +79,51 @@ impl Drop for Slot {
     }
 }
 
+/// What a session of a test's own connects with: the database's settings and, over TLS, its roots.
+struct Session {
+    pg: tokio_postgres::Config,
+    roots: Option<rustls::RootCertStore>,
+}
+
+impl Session {
+    async fn open(self) -> tokio_postgres::Client {
+        match self.roots {
+            Some(roots) => {
+                opamp::tls::install_ring_provider();
+                let tls = tokio_postgres_rustls::MakeRustlsConnect::new(
+                    opamp::tls::client_builder()
+                        .with_root_certificates(roots)
+                        .with_no_client_auth(),
+                );
+                let (client, connection) = self.pg.connect(tls).await.expect("db");
+                tokio::spawn(connection);
+                client
+            }
+            None => {
+                let (client, connection) =
+                    self.pg.connect(tokio_postgres::NoTls).await.expect("db");
+                tokio::spawn(connection);
+                client
+            }
+        }
+    }
+}
+
+/// A transaction [`Schema::hold`] holds open, rolled back once this is dropped.
+struct Held {
+    release: Option<std::sync::mpsc::Sender<()>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        drop(self.release.take());
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
 impl Schema {
     fn named() -> Option<Self> {
         let variable = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
@@ -141,47 +186,17 @@ impl Schema {
 
     /// The first column of every row `query` answers in this schema, as text.
     fn query(&self, query: &str) -> Vec<String> {
-        let password = std::fs::read_to_string(&self.config.password_file).expect("password");
-        let mut pg = tokio_postgres::Config::new();
-        pg.host(&self.config.host)
-            .port(self.config.port)
-            .dbname(&self.config.dbname)
-            .user(&self.config.user)
-            .password(password.trim());
         let query = format!("SET search_path = {};", self.name) + query;
-        let roots = self.config.ca_file.as_ref().map(|path| {
-            opamp::tls::root_store(&std::fs::read(path).expect("FLEET_TEST_POSTGRES_CA_FILE"))
-                .expect("roots")
-        });
-        if roots.is_some() {
-            pg.ssl_mode(tokio_postgres::config::SslMode::Require);
-        }
+        let session = self.session();
         std::thread::spawn(move || {
             tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .expect("runtime")
                 .block_on(async move {
-                    let client = match roots {
-                        Some(roots) => {
-                            opamp::tls::install_ring_provider();
-                            let tls = tokio_postgres_rustls::MakeRustlsConnect::new(
-                                opamp::tls::client_builder()
-                                    .with_root_certificates(roots)
-                                    .with_no_client_auth(),
-                            );
-                            let (client, connection) = pg.connect(tls).await.expect("db");
-                            tokio::spawn(connection);
-                            client
-                        }
-                        None => {
-                            let (client, connection) =
-                                pg.connect(tokio_postgres::NoTls).await.expect("db");
-                            tokio::spawn(connection);
-                            client
-                        }
-                    };
-                    client
+                    session
+                        .open()
+                        .await
                         .simple_query(&query)
                         .await
                         .expect("query")
@@ -197,6 +212,55 @@ impl Schema {
         })
         .join()
         .expect("the query's thread")
+    }
+
+    /// Runs `statements` in a transaction on a session of its own, in this schema, and holds the
+    /// transaction open, with the locks it took, until the [`Held`] is dropped; then rolls it back.
+    fn hold(&self, statements: &str) -> Held {
+        let statements = format!("SET search_path = {};\nBEGIN;\n{statements}", self.name);
+        let session = self.session();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let (taken, takes) = std::sync::mpsc::channel::<()>();
+        let thread = std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime")
+                .block_on(async move {
+                    let client = session.open().await;
+                    client.batch_execute(&statements).await.expect("the hold");
+                    let _ = taken.send(());
+                    let _ = tokio::task::spawn_blocking(move || released.recv()).await;
+                    client
+                        .batch_execute("ROLLBACK")
+                        .await
+                        .expect("the rollback");
+                });
+        });
+        takes.recv().expect("the hold is held");
+        Held {
+            release: Some(release),
+            thread: Some(thread),
+        }
+    }
+
+    /// What a session of this test's own, past every adapter, connects with.
+    fn session(&self) -> Session {
+        let password = std::fs::read_to_string(&self.config.password_file).expect("password");
+        let mut pg = tokio_postgres::Config::new();
+        pg.host(&self.config.host)
+            .port(self.config.port)
+            .dbname(&self.config.dbname)
+            .user(&self.config.user)
+            .password(password.trim());
+        let roots = self.config.ca_file.as_ref().map(|path| {
+            opamp::tls::root_store(&std::fs::read(path).expect("FLEET_TEST_POSTGRES_CA_FILE"))
+                .expect("roots")
+        });
+        if roots.is_some() {
+            pg.ssl_mode(tokio_postgres::config::SslMode::Require);
+        }
+        Session { pg, roots }
     }
 }
 
@@ -3431,6 +3495,217 @@ fn an_agent_whose_holder_changes_eleven_times_in_a_minute_is_logged_once_as_a_li
             assert_eq!(likely(), usize::from(change == 11), "after change {change}");
         }
     });
+}
+
+/// A first report of `uid`, framed, its answer not awaited: what a peer sends when it connects.
+fn first_report(uid: InstanceUid, sequence_num: u64) -> tokio_tungstenite::tungstenite::Message {
+    use opamp::proto::{AgentDescription, AnyValue, KeyValue};
+    let report = AgentToServer {
+        instance_uid: uid.as_bytes().to_vec(),
+        sequence_num,
+        capabilities: AgentCapabilities::ReportsStatus as u64,
+        agent_description: Some(AgentDescription {
+            identifying_attributes: vec![KeyValue {
+                key: "service.name".to_string(),
+                value: Some(AnyValue {
+                    value: Some(opamp::proto::any_value::Value::StringValue(
+                        "otelcol".to_string(),
+                    )),
+                }),
+            }],
+            non_identifying_attributes: Vec::new(),
+        }),
+        ..Default::default()
+    };
+    tokio_tungstenite::tungstenite::Message::Binary(
+        opamp::frame::encode_within(&report, usize::MAX)
+            .expect("frame")
+            .into(),
+    )
+}
+
+/// The identities the next `count` answers on `session` assign, each within ten seconds.
+async fn assigned(session: &mut Socket, count: usize) -> Vec<Option<Vec<u8>>> {
+    let mut assigned = Vec::new();
+    for _ in 0..count {
+        let reply = next_message(session, Duration::from_secs(10))
+            .await
+            .expect("an answer to each report");
+        assert!(
+            reply.error_response.is_none(),
+            "each report is taken up: {:?}",
+            reply.error_response
+        );
+        assigned.push(
+            reply
+                .agent_identification
+                .map(|identification| identification.new_instance_uid),
+        );
+    }
+    assigned
+}
+
+/// A peer of ten Agents whose first reports wait for the database longer than its heartbeat
+/// interval gives its connection up and comes back on a new one with the same certificate, while
+/// the Server still handles the old one's reports: its Agents keep their identities, one record
+/// each, and the newest connection carries them. A report or a goodbye the older connection
+/// delivers after that does not take its Agent back or end it, so the older connection's close
+/// leaves every Agent connected.
+/// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_peer_whose_first_reports_wait_keeps_its_agents_identities_on_its_new_connection() {
+    use futures_util::{SinkExt, StreamExt};
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let a = Instance::start(&pki, &schema, schema.config_on(schema.config.port)).await;
+    let (cert, key) = pki.issue_to_host("edge-36");
+    let uids: Vec<InstanceUid> = (0..10u8)
+        .map(|i| {
+            let mut uid = [0x36; 16];
+            uid[15] = i;
+            InstanceUid(uid)
+        })
+        .collect();
+
+    // Every report's first read of the store waits while the agents' table is locked.
+    let held = schema.hold("LOCK TABLE agents IN ACCESS EXCLUSIVE MODE");
+    let mut old = websocket(&a, &pki, &cert, &key).await;
+    for uid in &uids {
+        old.send(first_report(*uid, 1)).await.expect("send");
+    }
+    let waits = || {
+        schema.query(
+            "SELECT count(*) FROM pg_locks WHERE relation = 'agents'::regclass AND NOT granted",
+        ) != ["0"]
+    };
+    assert!(
+        eventually(Duration::from_secs(10), waits).await,
+        "the old connection's first report waits for the database"
+    );
+    // Its peer heard nothing for an interval, gave the connection up and comes back on a new one.
+    let mut new = websocket(&a, &pki, &cert, &key).await;
+    for uid in &uids {
+        new.send(first_report(*uid, 2)).await.expect("send");
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    drop(held);
+
+    assert_eq!(
+        assigned(&mut new, uids.len()).await,
+        vec![None; uids.len()],
+        "no Agent on the new connection is re-keyed"
+    );
+    assert_eq!(
+        assigned(&mut old, uids.len()).await,
+        vec![None; uids.len()],
+        "the old connection's first reports assign nothing either"
+    );
+    // A report the old connection delivers late does not take its Agent back from the new one,
+    // nor writes a take.
+    let takes = || {
+        schema.query(&format!(
+            "SELECT takes FROM agents WHERE instance_uid = '{}'",
+            uids[0]
+        ))
+    };
+    let before = takes();
+    old.send(first_report(uids[0], 3)).await.expect("send");
+    assert_eq!(assigned(&mut old, 1).await, vec![None]);
+    assert_eq!(takes(), before, "the late report writes no take");
+    // Nor does a goodbye it delivers late end its Agent's connection on the new one.
+    let goodbye = {
+        let mut report = AgentToServer {
+            instance_uid: uids[1].as_bytes().to_vec(),
+            sequence_num: 3,
+            capabilities: AgentCapabilities::ReportsStatus as u64,
+            ..Default::default()
+        };
+        report.agent_disconnect = Some(opamp::proto::AgentDisconnect {});
+        tokio_tungstenite::tungstenite::Message::Binary(
+            opamp::frame::encode_within(&report, usize::MAX)
+                .expect("frame")
+                .into(),
+        )
+    };
+    old.send(goodbye).await.expect("send");
+    assert_eq!(assigned(&mut old, 1).await, vec![None]);
+    old.close(None).await.expect("close");
+    while let Ok(Some(Ok(_))) = tokio::time::timeout(Duration::from_secs(5), old.next()).await {}
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    for uid in &uids {
+        assert!(
+            view_of(&a, *uid).is_some_and(|view| view.connected),
+            "{uid} is carried by the new connection"
+        );
+    }
+    assert_eq!(a.state.snapshot().len(), uids.len(), "one record an Agent");
+    assert_eq!(
+        schema.query("SELECT count(*) FROM agents"),
+        [uids.len().to_string()]
+    );
+}
+
+/// A duplicate `instance_uid` on two live connections of different peers is re-keyed as before:
+/// on two Gateways' connections, whose certificates bind no Agent, and on two connections that
+/// present no host, by the duplicate detection; on two hosts' connections by the binding of the
+/// identity to the host that reported it first. The incumbent keeps its identity each time.
+/// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side, ADR-0038
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_duplicate_on_live_connections_of_different_peers_is_rekeyed() {
+    use futures_util::SinkExt;
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let a = Instance::start(&pki, &schema, schema.config_on(schema.config.port)).await;
+    let gateways = [pki.issue_to_host("gw-a"), pki.issue_to_host("gw-b")];
+    let unnamed = pki.issue("no-host");
+    let hosts = [pki.issue_to_host("host-a"), pki.issue_to_host("host-b")];
+    let mut gateway_sessions = Vec::new();
+    for (cert, key) in &gateways {
+        let mut session = websocket(&a, &pki, cert, key).await;
+        exchange(&mut session).await;
+        gateway_sessions.push(session);
+    }
+    for host in ["gw-a", "gw-b"] {
+        assert!(a.revocations.set_gateway(host, true).expect("mark"));
+    }
+    let pairs = [
+        (
+            "two Gateways",
+            gateway_sessions.remove(0),
+            gateway_sessions.remove(0),
+        ),
+        (
+            "two connections without a host",
+            websocket(&a, &pki, &unnamed.0, &unnamed.1).await,
+            websocket(&a, &pki, &unnamed.0, &unnamed.1).await,
+        ),
+        (
+            "two hosts",
+            websocket(&a, &pki, &hosts[0].0, &hosts[0].1).await,
+            websocket(&a, &pki, &hosts[1].0, &hosts[1].1).await,
+        ),
+    ];
+    for (i, (case, mut first, mut second)) in pairs.into_iter().enumerate() {
+        let uid = InstanceUid([0x60 + u8::try_from(i).expect("few"); 16]);
+        first.send(first_report(uid, 1)).await.expect("send");
+        assert_eq!(assigned(&mut first, 1).await, vec![None], "{case}");
+        second.send(first_report(uid, 1)).await.expect("send");
+        let new = assigned(&mut second, 1).await.remove(0);
+        assert!(
+            new.as_ref().is_some_and(|new| new != uid.as_bytes()),
+            "{case}: the second is re-keyed"
+        );
+        assert!(
+            view_of(&a, uid).is_some_and(|view| view.connected),
+            "{case}: the incumbent keeps its identity"
+        );
+        drop((first, second));
+    }
 }
 
 /// A log line sink for a test's own subscriber.

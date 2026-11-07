@@ -1802,7 +1802,8 @@ fn failover(loss: Loss) {
 /// minutes, while one Agent in a hundred reconnects each minute, labels are set on 100 Agents every
 /// five seconds, a Configuration is rolled out to 10 000 Agents and a certificate revoked once a
 /// minute, and a page of the Agents is read every ten seconds: no presence batch is written later
-/// than its interval after it was due, and no notification is left unread.
+/// than its interval after it was due, and no notification is left unread. No Agent is re-keyed
+/// as a duplicate, while the fleet connects or after.
 /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
 #[test]
 fn g20_three_instances_carry_the_presence_and_notifications_of_100_000_agents() {
@@ -1911,13 +1912,20 @@ fn g20_three_instances_carry_the_presence_and_notifications_of_100_000_agents() 
                 })
                 .sum()
         };
+        let rekeyed_in_ramp = rekeyed(&[0, 0, 0]);
         eprintln!(
             "{agents} Agents on {hosts} connections ({per_host} each) across 3 instances, held \
-             after {ramp_took:?}, {:.0} new Agents a second, {} re-keyed as duplicates, which the \
-             run does not count; {}",
+             after {ramp_took:?}, {:.0} new Agents a second, {rekeyed_in_ramp} re-keyed as \
+             duplicates; {}",
             agents as f64 / ramp_took.as_secs_f64(),
-            rekeyed(&[0, 0, 0]),
             memory(&instances)
+        );
+        // A connection whose first reports waited for the database past its peer's heartbeat
+        // interval comes back while its instance still handles the old one; its Agents are not
+        // duplicates of themselves.
+        assert_eq!(
+            rekeyed_in_ramp, 0,
+            "no Agent was re-keyed as a duplicate while the fleet connected"
         );
 
         // What the rollout releases: one Configuration in a Deployment aimed at a tenth of the

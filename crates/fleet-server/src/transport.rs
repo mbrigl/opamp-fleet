@@ -1146,11 +1146,15 @@ impl Handler for Fleet {
                 }
             }
         }
+        // Only a WebSocket carries Agents to push to, and each has its connection.
+        let Some(conn) = carrier.conn else {
+            return Vec::new();
+        };
         let mut messages = Vec::new();
         for uid in &carrier.seen {
             // A queued restart goes first, as its own message — the Baseline's command message is
             // never combined with an offer.
-            if let Some(command) = self.0.restart_command_for(uid) {
+            if let Some(command) = self.0.restart_command_for(uid, conn) {
                 debug!(agent = %uid, "pushing a restart command");
                 messages.push(command);
             }
@@ -1531,9 +1535,9 @@ mod tests {
             Some(1),
         );
         assert!(state.request_restart(&uid).is_ok(), "queued");
-        let command = state.restart_command_for(&uid).expect("sent");
+        let command = state.restart_command_for(&uid, 1).expect("sent");
         let fleet = Fleet(state.clone(), Issuers::default());
         fleet.on_unsent(&command);
-        assert!(state.restart_command_for(&uid).is_some(), "sent again");
+        assert!(state.restart_command_for(&uid, 1).is_some(), "sent again");
     }
 }

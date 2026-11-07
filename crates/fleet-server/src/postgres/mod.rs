@@ -2088,36 +2088,9 @@ mod tests {
         );
     }
 
-    /// What the tests of this module log, read back: the global subscriber of the test process,
-    /// since the database logs from threads of its own runtime.
-    fn logged() -> &'static std::sync::Mutex<Vec<u8>> {
-        static LOG: std::sync::OnceLock<Arc<std::sync::Mutex<Vec<u8>>>> =
-            std::sync::OnceLock::new();
-        LOG.get_or_init(|| {
-            let log = Arc::new(std::sync::Mutex::new(Vec::new()));
-            let writer = log.clone();
-            let subscriber = tracing_subscriber::fmt()
-                .with_writer(move || LogBuffer(writer.clone()))
-                .with_ansi(false)
-                .finish();
-            let _ = tracing::subscriber::set_global_default(subscriber);
-            log
-        })
-    }
-
-    /// A `tracing` writer into a shared buffer.
-    struct LogBuffer(Arc<std::sync::Mutex<Vec<u8>>>);
-
-    impl std::io::Write for LogBuffer {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().expect("log").extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
+    // What the tests of this module log is read back from the global subscriber of the test
+    // process, since the database logs from threads of its own runtime.
+    use crate::test_support::logged;
 
     /// A Server whose lock's connection ends while it runs notices: it logs why and refuses every
     /// call from then on, rather than writing on while a second Server may start (ADR-0044

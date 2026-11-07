@@ -707,8 +707,13 @@ async fn nothing_is_pushed_while_the_lease_is_lapsed_by_its_clock() {
             Ok(Some(Err(_)) | None) => break,
         }
     }
+    // The lease proved again, the restart is still queued: the next report is sent it.
+    suspended.store(0, Ordering::SeqCst);
+    let mut next = full_report(&uid, "restartable", 2);
+    next.capabilities |= opamp::proto::AgentCapabilities::AcceptsRestartCommand as u64;
+    send(&mut socket, &next).await;
     assert!(
-        server.state.restart_command_for(&uid).is_some(),
+        recv(&mut socket).await.command.is_some(),
         "the restart stays queued"
     );
 }
