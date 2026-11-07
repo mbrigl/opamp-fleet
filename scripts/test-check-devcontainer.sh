@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Self-test of scripts/check-devcontainer.sh. Verifies: ADR-0004
+# Self-test of scripts/check-devcontainer.sh. Verifies: ADR-0053
 #
 # Each case builds a fixture under a temporary directory — a devcontainer.json with comments and
 # one pinned Feature and the postStartCommand that enables the git hooks, the lock that resolves
