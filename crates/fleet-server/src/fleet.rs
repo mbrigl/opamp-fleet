@@ -948,14 +948,21 @@ enum UnsureRekey {
 /// What the last presence batch wrote: the holder it named, each Agent's presence, and the count of
 /// takes the store last answered for each Agent, which a disconnect is written only under and which
 /// outlives the holder it was answered under. The Agents whose take's answer was lost are unsure:
-/// their count is read before their disconnect is written. Every change of what is kept of an Agent
-/// moves its generation, so a batch applies its answers only to what did not change meanwhile.
+/// their count is read before their disconnect is written, and the count they were answered before
+/// is kept apart, for the shutdown flush alone. Every change of what is kept of an Agent moves its
+/// generation, so a batch applies its answers only to what did not change meanwhile.
 #[derive(Default)]
 struct PresenceWritten {
     holder: Option<String>,
     agents: HashMap<InstanceUid, Presence>,
     takes: HashMap<InstanceUid, u64>,
     unsure: HashSet<InstanceUid>,
+    /// The count of takes last answered for an Agent whose take since lost its answer, or 0 where
+    /// this instance created its record: still the count this instance was last answered, so the
+    /// shutdown flush writes the record under it, where the row names no holder and no take was
+    /// counted since (ADR-0043 clause 2). No batch names this instance by it. A count answered since
+    /// in `takes` outranks it, so an answer leaves it as it is.
+    before_lost: HashMap<InstanceUid, u64>,
     generations: HashMap<InstanceUid, u64>,
     generation: u64,
 }
@@ -983,8 +990,9 @@ impl PresenceWritten {
     }
 
     /// Keeps `take` as the count of takes of `uid` a take answered, whatever was kept: the take
-    /// holds the fleet lock, so its answer is the latest, also where the record was forgotten and
-    /// created again with a count that starts over.
+    /// holds the Agent's own lock, which every take of this instance holds too, so its answer is the
+    /// latest, also where the record was forgotten and created again with a count that starts over;
+    /// and the generation moves, so a batch in flight drops its answer.
     fn taken(&mut self, uid: InstanceUid, presence: Presence, take: u64) {
         self.agents.insert(uid, presence);
         self.takes.insert(uid, take);
@@ -994,9 +1002,12 @@ impl PresenceWritten {
 
     /// Notes that the take of `uid` may have been written, though its answer was lost: no count is
     /// known for it any more, so a batch names this instance over a row no live instance holds
-    /// whatever its count, and its disconnect waits for a count read back.
+    /// whatever its count, and its disconnect waits for a count read back. The count answered
+    /// before is kept for the shutdown flush.
     fn lost(&mut self, uid: InstanceUid) {
-        self.takes.remove(&uid);
+        if let Some(take) = self.takes.remove(&uid) {
+            self.before_lost.insert(uid, take);
+        }
         self.unsure.insert(uid);
         self.changed(uid);
     }
@@ -1006,6 +1017,7 @@ impl PresenceWritten {
         self.agents.remove(uid);
         self.takes.remove(uid);
         self.unsure.remove(uid);
+        self.before_lost.remove(uid);
         self.changed(*uid);
     }
 
@@ -1016,6 +1028,9 @@ impl PresenceWritten {
         }
         if let Some(take) = self.takes.remove(old) {
             self.takes.insert(new, take);
+        }
+        if let Some(take) = self.before_lost.remove(old) {
+            self.before_lost.insert(new, take);
         }
         if self.unsure.remove(old) {
             self.unsure.insert(new);
@@ -1046,6 +1061,7 @@ impl PresenceWritten {
         self.agents.retain(|uid, _| fleet.contains_key(uid));
         self.takes.retain(|uid, _| fleet.contains_key(uid));
         self.unsure.retain(|uid| fleet.contains_key(uid));
+        self.before_lost.retain(|uid, _| fleet.contains_key(uid));
         self.generations.retain(|uid, _| fleet.contains_key(uid));
     }
 }
@@ -3379,13 +3395,32 @@ impl AppState {
     /// report of it holds from its start to its answer, is held across the write; and a report is
     /// answered only once its record is written (ADR-0043 clause 4). What a store's write may take
     /// is bounded: a PostgreSQL call fails after `postgres::CALL_TIMEOUT` (ADR-0044 clause 24).
+    ///
+    /// On a shared store, an Agent this instance was answered no count of takes for, its take not
+    /// written or its answer lost, has its record written at every report and no digest kept: a
+    /// shutdown flush of another instance with a higher sequence number, as of an Agent that started
+    /// again, may have written over it, and the next report writes it again. Once a count is
+    /// answered, a report that changes nothing durable writes nothing again
+    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// clause 8).
     fn persist(&self, uid: &InstanceUid, persisted: &PersistedAgent) -> Result<bool, String> {
         let digest = persisted.durable_digest();
-        if self.written.lock().expect("written lock").get(uid) == Some(&digest) {
+        let counted = !self.agent_store.is_shared()
+            || self
+                .presence_written
+                .lock()
+                .expect("presence lock")
+                .takes
+                .contains_key(uid);
+        if counted && self.written.lock().expect("written lock").get(uid) == Some(&digest) {
             return Ok(true);
         }
         if !self.agent_store.write_report(uid, persisted)? {
             return Ok(false);
+        }
+        if !counted {
+            self.written.lock().expect("written lock").remove(uid);
+            return Ok(true);
         }
         self.written
             .lock()
@@ -3644,8 +3679,9 @@ impl AppState {
 
     /// Takes up what [`take_row`](Self::take_row) answered, with the presence the record holds
     /// once the report is taken into it. A take whose answer was lost may have been written: its
-    /// disconnect is written only under the count read back then.
-    fn took(&self, uid: &InstanceUid, took: Took, presence: Presence) {
+    /// disconnect is written only under the count read back then, and its record flushed at the
+    /// shutdown only under the count answered before, 0 where `created` this record.
+    fn took(&self, uid: &InstanceUid, took: Took, presence: Presence, created: bool) {
         let mut written = self.presence_written.lock().expect("presence lock");
         match took {
             Took::Nothing => {}
@@ -3656,6 +3692,10 @@ impl AppState {
             Took::Lost { holder } => {
                 written.under(&holder);
                 written.lost(*uid);
+                // The record this instance created counted no take then.
+                if created {
+                    written.before_lost.insert(*uid, 0);
+                }
             }
         }
     }
@@ -3779,12 +3819,14 @@ impl AppState {
         let holder = self.lease.get().and_then(|lease| lease.borrow().clone());
         // The counts outlive the lease they were answered under: a count still stored says no
         // instance took the Agent since, whatever lease this instance serves under now.
-        let takes = self
-            .presence_written
-            .lock()
-            .expect("presence lock")
-            .takes
-            .clone();
+        // An Agent whose take lost its answer is flushed under the count answered before it, which
+        // a take counted since, also its own lost one, no longer matches.
+        let takes = {
+            let presence = self.presence_written.lock().expect("presence lock");
+            let mut takes = presence.before_lost.clone();
+            takes.extend(presence.takes.iter().map(|(uid, take)| (*uid, *take)));
+            takes
+        };
         let mut written = self.written.lock().expect("written lock");
         for (uid, record) in fleet.iter().filter(|(_, record)| record.heard || !shared) {
             let persisted = record.to_persisted();
@@ -4332,7 +4374,7 @@ impl AppState {
         record.heard = true;
         record.last_seen_ms = self.clock.now_ms();
         if connects {
-            self.took(&uid, took, record.presence());
+            self.took(&uid, took, record.presence(), created);
         }
         if msg.capabilities != 0 {
             record.capabilities = msg.capabilities;
@@ -13317,6 +13359,366 @@ mod tests {
         a.write_presence(LEASE_A).expect("A's batch");
         a.write_presence(LEASE_A).expect("A's next batch");
         assert_eq!(stored_presence(&test, &uid), format!("{LEASE_A} true 3"));
+    }
+
+    /// An Agent whose take on A was not written, and that disconnected before A's next batch, has
+    /// its last record written by A's shutdown flush: the batch read a row that names no holder
+    /// and no take since, so what A heard of it last is the newest.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    #[test]
+    fn the_shutdown_flush_writes_an_agent_whose_take_was_not_written() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let (a, _b, hooks) = hooked_pair(&database);
+        let uid = InstanceUid([0x92; 16]);
+        a.process(report(&uid, 1), Transport::WebSocket, Some(7));
+        a.mark_disconnected(&[uid], 7);
+        a.write_presence(LEASE_A).expect("A's batch");
+        assert_eq!(stored_presence(&test, &uid), "none false 1");
+        hooks.failing_takes.store(true, Ordering::SeqCst);
+        a.process(report(&uid, 2), Transport::WebSocket, Some(8));
+        hooks.failing_takes.store(false, Ordering::SeqCst);
+        a.mark_disconnected(&[uid], 8);
+        a.write_presence(LEASE_A).expect("A's batch");
+        assert_eq!(
+            stored_presence(&test, &uid),
+            "none false 1",
+            "the take is not written"
+        );
+        test.sql(&format!(
+            "UPDATE agents SET sequence_num = 0 WHERE instance_uid = '{uid}'"
+        ));
+        a.flush_agents();
+        assert_eq!(
+            test.rows(&format!(
+                "SELECT sequence_num::text FROM agents WHERE instance_uid = '{uid}'"
+            )),
+            [[Some("2".to_string())]],
+            "the last record is written"
+        );
+    }
+
+    /// An Agent whose take on A was not written, that B took and let go before A's next batch
+    /// read the row, keeps what B flushed of it at A's shutdown flush: the row names no holder,
+    /// but B's take counted since the one A was answered.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    #[test]
+    fn the_shutdown_flush_of_a_lost_take_keeps_a_take_counted_since() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let (a, b, hooks) = hooked_pair(&database);
+        let uid = InstanceUid([0x93; 16]);
+        a.process(report(&uid, 1), Transport::WebSocket, Some(7));
+        a.mark_disconnected(&[uid], 7);
+        a.write_presence(LEASE_A).expect("A's batch");
+        hooks.failing_takes.store(true, Ordering::SeqCst);
+        a.process(report(&uid, 2), Transport::WebSocket, Some(8));
+        hooks.failing_takes.store(false, Ordering::SeqCst);
+        a.mark_disconnected(&[uid], 8);
+        b.process(report(&uid, 5), Transport::WebSocket, Some(9));
+        b.mark_disconnected(&[uid], 9);
+        b.write_presence(LEASE_B).expect("B's batch");
+        b.flush_agents();
+        assert_eq!(stored_presence(&test, &uid), "none false 2");
+        a.write_presence(LEASE_A).expect("A's batch");
+        a.flush_agents();
+        assert_eq!(
+            test.rows(&format!(
+                "SELECT sequence_num::text FROM agents WHERE instance_uid = '{uid}'"
+            )),
+            [[Some("5".to_string())]],
+            "B's record stays"
+        );
+    }
+
+    /// An Agent first heard on A, whose record A created and whose take was not written, and that
+    /// disconnected before A's next batch, has its last record written by A's shutdown flush: the
+    /// record counted no take when A created it.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    #[test]
+    fn the_shutdown_flush_writes_an_agent_created_here_whose_take_was_not_written() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let (a, _b, hooks) = hooked_pair(&database);
+        let uid = InstanceUid([0x94; 16]);
+        hooks.failing_takes.store(true, Ordering::SeqCst);
+        a.process(report(&uid, 1), Transport::WebSocket, Some(7));
+        hooks.failing_takes.store(false, Ordering::SeqCst);
+        a.process(report(&uid, 2), Transport::WebSocket, Some(7));
+        a.mark_disconnected(&[uid], 7);
+        a.write_presence(LEASE_A).expect("A's batch");
+        assert_eq!(
+            stored_presence(&test, &uid),
+            "none false 0",
+            "the take is not written"
+        );
+        test.sql(&format!(
+            "UPDATE agents SET sequence_num = 0 WHERE instance_uid = '{uid}'"
+        ));
+        a.flush_agents();
+        assert_eq!(
+            test.rows(&format!(
+                "SELECT sequence_num::text FROM agents WHERE instance_uid = '{uid}'"
+            )),
+            [[Some("2".to_string())]],
+            "the last record is written"
+        );
+    }
+
+    /// An Agent that B carried and wrote the disconnect of, and that A then carried with a take that
+    /// was not written, keeps what A wrote of it at B's shutdown flush: the row names no holder at
+    /// the count B was answered, but holds the higher sequence number of A's newer record.
+    /// Verifies: ADR-0043
+    #[test]
+    fn the_shutdown_flush_keeps_a_newer_carriers_record_whose_take_was_not_written() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let (a, b, hooks) = hooked_pair(&database);
+        let uid = InstanceUid([0x95; 16]);
+        b.process(report(&uid, 1), Transport::WebSocket, Some(9));
+        b.mark_disconnected(&[uid], 9);
+        b.write_presence(LEASE_B).expect("B's batch");
+        assert_eq!(stored_presence(&test, &uid), "none false 1");
+        hooks.failing_takes.store(true, Ordering::SeqCst);
+        let mut newer = report(&uid, 2);
+        newer.health = Some(opamp::proto::ComponentHealth {
+            healthy: true,
+            status: "running".to_string(),
+            ..Default::default()
+        });
+        a.process(newer, Transport::WebSocket, Some(7));
+        hooks.failing_takes.store(false, Ordering::SeqCst);
+        assert_eq!(
+            stored_presence(&test, &uid),
+            "none false 1",
+            "A's take is not written, and its report takes nothing"
+        );
+        let stored = || {
+            test.rows(&format!(
+                "SELECT sequence_num::text, (health IS NOT NULL)::text FROM agents \
+                 WHERE instance_uid = '{uid}'"
+            ))
+        };
+        assert_eq!(
+            stored(),
+            [[Some("2".to_string()), Some("true".to_string())]],
+            "A wrote its report"
+        );
+        b.flush_agents();
+        assert_eq!(
+            stored(),
+            [[Some("2".to_string()), Some("true".to_string())]],
+            "A's newer record stays"
+        );
+    }
+
+    /// An Agent another instance with a live lease holds is not taken by a report of A, whose take
+    /// was not written: the report is written, and the holder and its count stay. The holder's
+    /// shutdown flush, as it stops, writes no lower sequence number over A's report.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    #[test]
+    fn a_report_whose_take_was_not_written_takes_no_agent_a_live_instance_holds() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let (a, b, hooks) = hooked_pair(&database);
+        live_lease(&test, LEASE_B);
+        let uid = InstanceUid([0x96; 16]);
+        b.process(report(&uid, 1), Transport::WebSocket, Some(9));
+        assert_eq!(stored_presence(&test, &uid), format!("{LEASE_B} true 1"));
+        hooks.failing_takes.store(true, Ordering::SeqCst);
+        let mut newer = report(&uid, 2);
+        newer.health = Some(opamp::proto::ComponentHealth {
+            healthy: true,
+            ..Default::default()
+        });
+        a.process(newer, Transport::WebSocket, Some(7));
+        hooks.failing_takes.store(false, Ordering::SeqCst);
+        assert_eq!(stored_presence(&test, &uid), format!("{LEASE_B} true 1"));
+        let stored = || {
+            test.rows(&format!(
+                "SELECT sequence_num::text FROM agents WHERE instance_uid = '{uid}'"
+            ))
+        };
+        assert_eq!(stored(), [[Some("2".to_string())]], "A's report is written");
+        b.flush_agents();
+        assert_eq!(
+            stored(),
+            [[Some("2".to_string())]],
+            "B's flush writes no older sequence number over A's report"
+        );
+    }
+
+    /// The sequence number and health stored of `uid`, as text.
+    fn stored_report(
+        test: &crate::postgres::testing::TestDatabase,
+        uid: &InstanceUid,
+    ) -> Vec<Vec<Option<String>>> {
+        test.rows(&format!(
+            "SELECT sequence_num::text, (health IS NOT NULL)::text FROM agents \
+             WHERE instance_uid = '{uid}'"
+        ))
+    }
+
+    /// The report of `uid` with `sequence_num` and a health.
+    fn healthy_report(uid: &InstanceUid, sequence_num: u64) -> AgentToServer {
+        let mut healthy = report(uid, sequence_num);
+        healthy.health = Some(opamp::proto::ComponentHealth {
+            healthy: true,
+            ..Default::default()
+        });
+        healthy
+    }
+
+    /// An Agent that B carried up to a high sequence number and wrote the disconnect of, that
+    /// started again and is carried by A with a take that was not written, has A's record again at
+    /// A's next report, though B's shutdown flush wrote its older record over A's: A, answered no
+    /// count for the Agent, writes every report of it.
+    /// Verifies: ADR-0043, ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    #[test]
+    fn a_record_an_older_flush_wrote_over_a_restarted_agent_heals_at_its_next_report() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let (a, b, hooks) = hooked_pair(&database);
+        let uid = InstanceUid([0x98; 16]);
+        b.process(report(&uid, 50), Transport::WebSocket, Some(9));
+        b.mark_disconnected(&[uid], 9);
+        b.write_presence(LEASE_B).expect("B's batch");
+        assert_eq!(stored_presence(&test, &uid), "none false 1");
+        hooks.failing_takes.store(true, Ordering::SeqCst);
+        a.process(healthy_report(&uid, 1), Transport::WebSocket, Some(7));
+        hooks.failing_takes.store(false, Ordering::SeqCst);
+        assert_eq!(
+            stored_report(&test, &uid),
+            [[Some("1".to_string()), Some("true".to_string())]],
+            "A wrote its report"
+        );
+        b.flush_agents();
+        assert_eq!(
+            stored_report(&test, &uid),
+            [[Some("50".to_string()), Some("false".to_string())]],
+            "B's flush finds no holder, its count, and a lower sequence number"
+        );
+        a.process(report(&uid, 2), Transport::WebSocket, Some(7));
+        assert_eq!(
+            stored_report(&test, &uid),
+            [[Some("2".to_string()), Some("true".to_string())]],
+            "A's next report writes A's record again"
+        );
+        a.write_presence(LEASE_A).expect("A's batch");
+        assert_eq!(
+            stored_presence(&test, &uid),
+            format!("{LEASE_A} true 2"),
+            "the batch takes the Agent and answers a count"
+        );
+        a.process(report(&uid, 3), Transport::WebSocket, Some(7));
+        let sequence = || {
+            test.rows(&format!(
+                "SELECT sequence_num::text FROM agents WHERE instance_uid = '{uid}'"
+            ))
+        };
+        assert_eq!(
+            sequence(),
+            [[Some("3".to_string())]],
+            "no digest was kept before"
+        );
+        test.sql(&format!(
+            "UPDATE agents SET sequence_num = 0 WHERE instance_uid = '{uid}'"
+        ));
+        a.process(report(&uid, 4), Transport::WebSocket, Some(7));
+        assert_eq!(
+            sequence(),
+            [[Some("0".to_string())]],
+            "with a count, a report that changes nothing durable writes nothing"
+        );
+    }
+
+    /// An Agent that B, stopping, still holds with a live lease, that started again and is carried
+    /// by A with a take that was not written, has A's record again at A's next report, though B's
+    /// shutdown flush wrote its older record over A's.
+    /// Verifies: ADR-0043, ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    #[test]
+    fn a_record_a_stopping_holders_flush_wrote_over_a_restarted_agent_heals_at_its_next_report() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let (a, b, hooks) = hooked_pair(&database);
+        live_lease(&test, LEASE_B);
+        let uid = InstanceUid([0x99; 16]);
+        b.process(report(&uid, 50), Transport::WebSocket, Some(9));
+        assert_eq!(stored_presence(&test, &uid), format!("{LEASE_B} true 1"));
+        hooks.failing_takes.store(true, Ordering::SeqCst);
+        a.process(healthy_report(&uid, 1), Transport::WebSocket, Some(7));
+        hooks.failing_takes.store(false, Ordering::SeqCst);
+        b.flush_agents();
+        assert_eq!(
+            stored_report(&test, &uid),
+            [[Some("50".to_string()), Some("false".to_string())]],
+            "B's flush, holding the row, finds a lower sequence number"
+        );
+        a.process(report(&uid, 2), Transport::WebSocket, Some(7));
+        assert_eq!(
+            stored_report(&test, &uid),
+            [[Some("2".to_string()), Some("true".to_string())]],
+            "A's next report writes A's record again"
+        );
+    }
+
+    /// An Agent A carried, that was forgotten through B and created again there, and that A then
+    /// carries with a take that was not written, keeps what A wrote of it at B's shutdown flush:
+    /// the count B was answered of the record created again is the one stored, but the row holds
+    /// the higher sequence number of A's report.
+    /// Verifies: ADR-0043, ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    #[test]
+    fn the_shutdown_flush_keeps_a_newer_carriers_record_after_a_record_created_again() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let (a, b, hooks) = hooked_pair(&database);
+        let uid = InstanceUid([0x97; 16]);
+        a.process(report(&uid, 1), Transport::WebSocket, Some(7));
+        a.mark_disconnected(&[uid], 7);
+        a.write_presence(LEASE_A).expect("A's batch");
+        assert_eq!(stored_presence(&test, &uid), "none false 1");
+        assert!(b.forget_agent(&uid).is_ok(), "forgotten through B");
+        b.process(report(&uid, 1), Transport::WebSocket, Some(9));
+        b.mark_disconnected(&[uid], 9);
+        b.write_presence(LEASE_B).expect("B's batch");
+        assert_eq!(
+            stored_presence(&test, &uid),
+            "none false 1",
+            "created again"
+        );
+        hooks.failing_takes.store(true, Ordering::SeqCst);
+        let mut newer = report(&uid, 2);
+        newer.health = Some(opamp::proto::ComponentHealth {
+            healthy: true,
+            ..Default::default()
+        });
+        a.process(newer, Transport::WebSocket, Some(8));
+        hooks.failing_takes.store(false, Ordering::SeqCst);
+        b.flush_agents();
+        assert_eq!(
+            test.rows(&format!(
+                "SELECT sequence_num::text, (health IS NOT NULL)::text FROM agents \
+                 WHERE instance_uid = '{uid}'"
+            )),
+            [[Some("2".to_string()), Some("true".to_string())]],
+            "A's newer record stays"
+        );
     }
 
     /// An Agent whose take was written under A's old lease and whose answer was lost is named by
