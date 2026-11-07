@@ -1104,8 +1104,9 @@ Tests that carry `Verifies: ADR-0044`:
   `migrate_to_postgres_with_s3_uploads_the_referenced_blobs_and_takes_no_data_dir`,
   `blobs_to_s3_uploads_the_referenced_blobs_and_checks_every_entry`,
   `blobs_to_s3_holds_the_blob_lock_alone_and_fails_naming_it_when_held`.
-- That two writers on the database keep both of what they write, and that the migrations are
-  applied once while instances start together, is decided by tests that carry the marker of
+- That two writers on the database keep both of what they write, or count both writes against a
+  bound, and that the migrations are applied once while instances start together, is decided by
+  tests that carry the marker of
   [ADR-0041](0041-several-server-instances-share-one-postgresql-database-and-coordinate-through-it.md)
   or of
   [ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side](draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md):
