@@ -346,3 +346,17 @@ state_dir = "client-state"
 # labels): keyed by that Agent's uid, matched by the same Selectors, and effective at once. The
 # [attributes] table at the top of this file still describes the *host*, and every Agent on it
 # carries those.
+
+# 4. Telegraf, under a kind of its own. Two lines: everything else about Telegraf — the program's
+# name per platform, --config against the Configuration named `telegraf-conf`, how it states its
+# version, and the SIGHUP it re-reads its configuration on — is Telegraf's property, so the kind
+# holds it. That last one is why the kind exists: as a block key the signal was refused on Windows
+# at parse time, so one Supervisor set could not serve a mixed fleet. The kind sends the signal
+# where signals exist and restarts where they do not.
+#
+# Upload the .tar.gz InfluxData publishes exactly as published; the kind takes the member at the
+# program's place in it, usr/bin/telegraf (telegraf.exe in the Windows .zip), and refuses an
+# archive that holds it twice. See docs/artifacts/telegraf.md.
+# [[supervisor]]
+# type = "telegraf"
+# name = "telegraf"

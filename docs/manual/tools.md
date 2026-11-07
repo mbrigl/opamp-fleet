@@ -66,12 +66,18 @@ checksum file goes with them:
 |---|---|---|
 | `otelcol` | `open-telemetry/opentelemetry-collector-releases` | the core Collector's `.tar.gz`, as published |
 | `otelcol-contrib` | the same repository | the Contrib Collector's `.tar.gz`, as published |
+| `telegraf` | `dl.influxdata.com` (versions, and the SHA-256 in the release notes, from `influxdata/telegraf`) | the `.tar.gz`, or the `.zip` on Windows, as published |
 | `supervisor` | `mbrigl/opamp-fleet` — this project's own releases | the `.tar.gz` this fleet's Client is released as, one per platform, as published. It is the package a Client updates *itself* from; the `.deb`, `.rpm` and `.msi` beside it are for installing a Client by hand and are passed over |
 
 Four things it does on every run:
 
 - **It verifies the download against the SHA-256 upstream published**, before the artifact is
-  used for anything. A mismatch stops that platform and leaves the file for inspection.
+  used for anything. A mismatch stops that platform and leaves the file for inspection. A
+  Telegraf archive is also held to the `.DIGESTS` file beside it, which must agree with the
+  release notes and is required from 1.39.0 on, and to InfluxData's `.asc` signature, checked
+  with `gpgv` against the package-signing key the tool carries and required from 1.34.4 on.
+  Before those versions a missing file leaves the release notes to decide; a published one that
+  disagrees or does not verify refuses the archive at any version.
 - **It leaves the artifact alone** wherever upstream's container is one a Client can open — so
   the hash the fleet verifies is the hash on the release page, and the line from the release to
   the host is unbroken.
@@ -91,6 +97,7 @@ $ opamp-fleetctl package fetch
 Which agent:
   otelcol          linux, darwin, windows — as the release publishes
 > otelcol-contrib  linux, darwin, windows — as the release publishes
+  telegraf         linux/amd64+arm64+386 darwin/amd64+arm64 windows/amd64+arm64
   supervisor       linux/amd64+arm64 darwin/arm64+amd64 windows/amd64
 Reading the last releases of open-telemetry/opentelemetry-collector-releases …
 Which version› 0.158.0
@@ -134,7 +141,7 @@ $ opamp-fleetctl package fetch --agent otelcol-contrib --version 0.158.0 \
 
 | Option | Meaning |
 |---|---|
-| `--agent <name>` | `otelcol`, `otelcol-contrib`, or `supervisor` (this fleet's own Client). |
+| `--agent <name>` | `otelcol`, `otelcol-contrib`, `telegraf`, or `supervisor` (this fleet's own Client). |
 | `--version <v>` | The version **as upstream numbers it** — `0.158.0`, `1.19` — never the tag (`v0.158.0`). Omitted, the last five are offered. |
 | `--platform <os/arch>` | Repeatable. `linux/amd64`, `windows/amd64`, `darwin/arm64`, … A platform the release does not publish is refused with the list of those it does. |
 | `--out-dir <path>` | Where artifacts are written. Created if missing. Defaults to the working directory. |
@@ -150,7 +157,9 @@ The release is fetched under upstream's own tag, and the Package is named with t
 as SemVer, because a Package version is SemVer: a number with fewer than three components is
 completed with `.0`, and a leading zero is dropped from a component. `--version 1.19` fetches tag
 `v1.19` and uploads Package `1.19.0`; `24.04.1` becomes `24.4.1`. Both keep upstream's order. A
-number that cannot be written so is refused before anything is downloaded, naming it.
+number that cannot be written so is refused before anything is downloaded, naming it. Telegraf's
+releases are three numbers already, so `--agent telegraf --version 1.39.3` fetches tag `v1.39.3`
+and uploads Package `1.39.3`.
 
 ### What it prints at the end
 
@@ -190,6 +199,7 @@ released binary:
 |---|---|---|
 | `otelcol` | `otelcol-conf` | `service_name = otelcol` |
 | `otelcol-contrib` | `otelcol-contrib-conf` | `service_name = otelcol-contrib` |
+| `telegraf` | `telegraf-conf` | `service_name = telegraf` |
 | `supervisor` | none | — a Client is configured by `supervisor.toml` on its own host, and the fleet owns only its `[[supervisor]]` blocks |
 
 Two rules keep this from surprising anyone:
@@ -245,7 +255,8 @@ underlying cause (DNS, refused connection, TLS) rather than only the request tha
 
 ### Prerequisites and limits
 
-- **Network egress** to `api.github.com` and to the release asset host.
+- **Network egress** to `api.github.com`, to the release asset host, and — for Telegraf — to
+  `dl.influxdata.com`.
 - **The upload speaks TLS to the Operator plane**, so the Server's URL is `https://`; type it so
   at the prompt, which suggests `http://`. The tool has no CA option and trusts the Server's
   certificate through this machine's own trust store, so a Server whose certificate comes from a
@@ -255,6 +266,8 @@ underlying cause (DNS, refused connection, TLS) rather than only the request tha
 - **GitHub rate-limits unauthenticated requests to 60 per hour** per address. A run costs two
   requests (one to list versions, one to read a release), so this is only reached by scripting.
   The error says so rather than leaving you guessing.
+- **`gpgv` on the fetching host** for Telegraf 1.34.4 and later, whose signature it checks.
+  Debian and Ubuntu ship it; on macOS and Windows it comes with GnuPG.
 - **Only amd64 and arm64 (and 386 where published)** are named, matching what Agents report as
   `os.type` and `host.arch`.
 
