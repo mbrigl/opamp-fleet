@@ -35,21 +35,20 @@ if [[ "${FLEET_G20_STACK:-}" != "1" ]]; then
 fi
 command -v cargo >/dev/null || { echo "cargo is required (rust-toolchain.toml names the toolchain)" >&2; exit 1; }
 
-# What G-20's sizes need, as measured: three instances holding 100 000 Agents reach about 12 GiB
-# and grow under the load (docs/plan/fleet-at-scale-costs/05), the simulator and its balancer
-# about 2 GiB, the stores beside them. A machine with less stops here, saying so, rather than
-# failing in a way that reads as a verdict on G-20. A run at another size decides nothing and is
-# not checked.
-need_mib=$((24 * 1024))
+# What G-20's sizes need, as measured: the whole stack at 100 000 Agents, the three instances at
+# about 1 GiB each, the simulator and its balancer at about 1.9 GiB, and the stores beside them,
+# takes about 5.8 GiB; 8 GiB leaves room above that. The CPUs are a floor, not a measurement: the
+# rates were measured on 24 cores, and a host at a load of 32 on 24 cores missed them. A machine
+# with less stops here, saying so, rather than failing in a way that reads as a verdict on G-20. A
+# run at another size decides nothing and is not checked.
+need_mib=$((8 * 1024))
 need_cpus=8
 if [[ -z "${FLEET_G20_LOAD_AGENTS:-}${FLEET_G20_AGENTS_PER_HOST:-}${FLEET_G20_LOAD_SECS:-}${FLEET_G20_RAMP_PER_SEC:-}" ]]; then
   have_mib="$(awk '/^MemAvailable:/ { print int($2 / 1024) }' /proc/meminfo)"
   have_cpus="$(nproc)"
   if (( have_mib < need_mib || have_cpus < need_cpus )); then
     echo "ERROR: G-20 needs ${need_mib} MiB of memory available and ${need_cpus} CPUs; this machine" \
-      "has ${have_mib} MiB and ${have_cpus}. Its instances' memory is" \
-      "docs/plan/fleet-at-scale-costs/05-an-instance-s-memory-follows-its-agents-not-its-age.md;" \
-      "until it is settled, G-20 runs on a larger machine." >&2
+      "has ${have_mib} MiB and ${have_cpus}. G-20 runs on a machine with both." >&2
     exit 1
   fi
   echo "Capacity: ${have_mib} MiB available, ${have_cpus} CPUs"

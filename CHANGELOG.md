@@ -65,6 +65,18 @@ once its tag exists.
 
 ### Fixed
 
+- **An instance's memory no longer grows with every read of the whole fleet.** On Linux the Server
+  gave each of its threads a malloc arena of its own, up to eight for each CPU, and each arena kept
+  what was freed in it, so an instance's resident memory grew with every read of the whole fleet, as
+  a rollout makes, long after the memory in use had levelled off: under the G-20 load test an
+  instance of 10 000 Agents held 1.3 GiB after 15 minutes, still growing. The Server now allocates
+  from two arenas: the same instance held about 370 MiB after 15 minutes, three instances carrying
+  100 000 Agents held about 1 GiB each where they held 3.4 to 4 GiB before. What still grows under a
+  steady fleet ends at a bound: the database connections' buffers, sized to the largest presence
+  batch each has written, up to about 4.5 KiB for each Agent of the most an instance has held at
+  once (after a failover, its larger share) at the default `pool_size`, and about 0.5 KiB for each
+  Agent labelled. `MALLOC_ARENA_MAX` sets another count.
+  **What to do:** nothing.
 - **A connecting fleet's new Agents no longer commit one at a time across the database**
   ([ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side](docs/adr/draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
   clauses 9 and 10). On PostgreSQL each new Agent's binding to its Host announced itself in its
