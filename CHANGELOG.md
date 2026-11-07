@@ -154,6 +154,19 @@ once its tag exists.
   instance before it was assigned its new identity, reads as disconnected, at the latest once the
   instance that re-keyed it has stopped and its lease lapsed, and is forgotten by the silence
   bound, or at once through `DELETE /api/v1/agents/{uid}`.
+- **A queued restart survives a failed send**
+  ([ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side](docs/adr/draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+  clause 8). The Server cleared an Agent's queued restart before it sent the command, so a send
+  that failed lost a restart the Operator plane had accepted, on files and on PostgreSQL alike. A
+  command whose WebSocket frame the connection does not take, or whose plain-HTTP answer is past
+  the size limit, is now queued again and sent at the Agent's next exchange, on a lease that
+  lapsed meanwhile too. Where the store cannot take it back, the Server tries again at intervals
+  that grow to a minute until it holds; a Server that stops first loses it, and a restart
+  requested or delivered meanwhile, or the Agent's forget, ends the tries. A command that reached
+  the Agent although its send failed restarts the Managed Process twice, and so may a restart
+  requested and delivered through another instance before this one heard of the request. A frame
+  lost after the connection took it, and on plain HTTP a lost answer to a poll, is still not seen.
+  **What to do:** nothing. Request a restart that did not happen again.
 
 ## [0.8.0]
 

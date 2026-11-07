@@ -651,6 +651,10 @@ pub struct AppState {
     /// one each moved to, if it committed, which the Agent's next report reads back and assigns.
     /// Locked strictly after `fleet`.
     unsure_rekeys: Mutex<HashMap<InstanceUid, PendingRekey>>,
+    /// The restarts whose command was not sent and whose put-back the store did not take, each
+    /// with when it is tried again ([`retry_restarts`](Self::retry_restarts)). Locked strictly
+    /// after `fleet`.
+    unput_restarts: Mutex<HashMap<InstanceUid, Backoff>>,
     /// The lease this instance serves under on a shared store, whose instance id the presence
     /// written at a connecting report names as the holder; unset where there is none.
     lease: OnceLock<watch::Receiver<Option<String>>>,
@@ -875,6 +879,7 @@ impl AppState {
             presence_interval: Duration::ZERO,
             presence_written: Mutex::new(PresenceWritten::default()),
             unsure_rekeys: Mutex::new(HashMap::new()),
+            unput_restarts: Mutex::new(HashMap::new()),
             lease: OnceLock::new(),
             proof: OnceLock::new(),
             forgotten: Mutex::new(HashMap::new()),
@@ -2255,6 +2260,8 @@ impl AppState {
             record.restart_pending = true;
             self.written.lock().expect("written lock").remove(uid);
         }
+        // A put-back still kept is this restart now: two requests before a delivery are one.
+        self.drop_kept_restart(uid);
         drop(fleet);
         self.push.send_modify(|rev| *rev += 1);
         info!(agent = %uid, "restart requested");
@@ -2652,6 +2659,7 @@ impl AppState {
             .expect("presence lock")
             .remove(uid);
         self.drop_unsure_rekeys(uid);
+        self.drop_kept_restart(uid);
         // Its `instance_uid` leaves the Host it was bound to: whichever host reports it next binds
         // it (ADR-0043 clause 10).
         if let Some(revocations) = &self.revocations {
@@ -2675,8 +2683,9 @@ impl AppState {
         Ok(())
     }
 
-    /// The queued restart for this Agent as the Baseline's command-only message, taken exactly
-    /// once — `None` when nothing is queued (or the Agent went away).
+    /// The queued restart for this Agent as the Baseline's command-only message, taken once —
+    /// `None` when nothing is queued (or the Agent went away). One its connection does not take is
+    /// queued again through [`unsent`](Self::unsent).
     pub fn restart_command_for(&self, uid: &InstanceUid) -> Option<ServerToAgent> {
         let mut fleet = self.fleet.lock().expect("fleet lock");
         let record = fleet.get_mut(uid)?;
@@ -2691,12 +2700,17 @@ impl AppState {
     /// queued there, so it is delivered: one another instance delivered already is not delivered
     /// twice, and a request made after the clear stays queued
     /// (ADR-0043 clause 2). One that cannot be cleared is
-    /// kept for the next exchange.
+    /// kept for the next exchange, and one cleared whose command is not sent is put back by
+    /// [`unsent`](Self::unsent).
     fn take_restart(&self, uid: &InstanceUid, record: &mut AgentRecord) -> bool {
         match self.agent_store.set_restart_pending(uid, false) {
             Ok(was) => {
                 record.restart_pending = false;
                 self.written.lock().expect("written lock").remove(uid);
+                if was == Some(true) {
+                    // A put-back still kept is delivered with this one.
+                    self.drop_kept_restart(uid);
+                }
                 was == Some(true)
             }
             Err(e) => {
@@ -2704,6 +2718,132 @@ impl AppState {
                 false
             }
         }
+    }
+
+    /// A message its connection did not take. A restart command among them is queued again, so
+    /// the Agent's next exchange is sent it: on a WebSocket a restart is delivered at least once
+    /// wherever the send is seen to fail. That holds on a lease that lapsed meanwhile too, since
+    /// setting it again only restores what the Operator asked for. A put-back the store does not
+    /// take is kept and tried again by [`retry_restarts`](Self::retry_restarts)
+    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// clause 8).
+    pub fn unsent(&self, message: &ServerToAgent) {
+        let restart = opamp::proto::CommandType::Restart as i32;
+        if message.command.as_ref().map(|c| c.r#type) != Some(restart) {
+            return;
+        }
+        let Some(uid) = InstanceUid::from_wire(&message.instance_uid) else {
+            return;
+        };
+        self.put_back(&uid, false);
+    }
+
+    /// Tries again each put-back of a restart that is due, and answers how many are still kept.
+    /// One that fails again waits twice as many calls, up to [`Backoff::MAX_WAIT`]; one that holds,
+    /// or whose Agent was forgotten, is dropped. The composition root calls this every second, so
+    /// the intervals grow to a minute; a process that ends first loses the restarts still kept
+    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// clause 8).
+    pub fn retry_restarts(&self) -> usize {
+        for uid in self.due_restarts() {
+            self.put_back(&uid, true);
+        }
+        self.unput_restarts.lock().expect("restarts lock").len()
+    }
+
+    /// Counts each kept put-back down one call, and answers those whose try is due.
+    fn due_restarts(&self) -> Vec<InstanceUid> {
+        let mut kept = self.unput_restarts.lock().expect("restarts lock");
+        kept.iter_mut()
+            .filter_map(|(uid, backoff)| backoff.tick().then_some(*uid))
+            .collect()
+    }
+
+    /// Sets the restart of `uid` queued again in the store and in the record this instance holds,
+    /// and tells the sessions, under the fleet lock, which requests, deliveries and forgets take
+    /// too. A `retry` is made only while its put-back is still kept, so one a request, a delivery
+    /// or a forget dropped since it was found due is not tried; any put-back drops what is kept
+    /// once the store answers.
+    /// One the store does not take is kept, or waits longer, for
+    /// [`retry_restarts`](Self::retry_restarts). An Agent forgotten meanwhile has nothing to
+    /// restart.
+    fn put_back(&self, uid: &InstanceUid, retry: bool) {
+        let mut fleet = self.fleet.lock().expect("fleet lock");
+        if retry
+            && !self
+                .unput_restarts
+                .lock()
+                .expect("restarts lock")
+                .contains_key(uid)
+        {
+            return;
+        }
+        let answered = self.agent_store.set_restart_pending(uid, true);
+        let mut kept = self.unput_restarts.lock().expect("restarts lock");
+        match answered {
+            Ok(held) => {
+                kept.remove(uid);
+                drop(kept);
+                if held.is_none() {
+                    return;
+                }
+                if let Some(record) = fleet.get_mut(uid) {
+                    record.restart_pending = true;
+                    self.written.lock().expect("written lock").remove(uid);
+                }
+                drop(fleet);
+                self.push.send_modify(|rev| *rev += 1);
+                info!(agent = %uid, "the restart command was not sent; it stays queued");
+            }
+            Err(e) => {
+                let backoff = kept.entry(*uid).or_insert_with(Backoff::first);
+                if retry {
+                    backoff.failed();
+                }
+                warn!(agent = %uid, error = %e, "cannot queue an unsent restart again yet");
+            }
+        }
+    }
+
+    /// Takes up what another instance announced of the restarts of `uids`, every Agent where a
+    /// notification was missed: a request there is this restart now, so a put-back still kept is
+    /// dropped. After a missed notification only one whose record shows a restart queued is
+    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// clause 8).
+    ///
+    /// # Errors
+    /// Returns an error when a record cannot be read after a missed notification; what is kept
+    /// stays kept.
+    pub fn take_up_restarts(&self, uids: Option<&HashSet<InstanceUid>>) -> Result<(), String> {
+        let _fleet = self.fleet.lock().expect("fleet lock");
+        let mut kept = self.unput_restarts.lock().expect("restarts lock");
+        match uids {
+            Some(uids) => kept.retain(|uid, _| !uids.contains(uid)),
+            None => {
+                let named: Vec<InstanceUid> = kept.keys().copied().collect();
+                for uid in named {
+                    if self
+                        .agent_store
+                        .get(&uid)?
+                        .is_some_and(|stored| stored.restart_pending)
+                    {
+                        kept.remove(&uid);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Drops the put-back of `uid`'s restart kept for retry, if one is: what a request, a delivery
+    /// and a forget of the Agent do
+    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// clause 8).
+    fn drop_kept_restart(&self, uid: &InstanceUid) {
+        self.unput_restarts
+            .lock()
+            .expect("restarts lock")
+            .remove(uid);
     }
 
     /// Deletes a Configuration (ADR-0026 clause 12); `false` when none of that name exists.
@@ -2867,6 +3007,7 @@ impl AppState {
             return Gone::Forgotten;
         };
         self.end_session(uid, &record);
+        self.drop_kept_restart(uid);
         self.unsure_rekeys
             .lock()
             .expect("rekeys lock")
@@ -5307,6 +5448,38 @@ fn is_silent(record: &AgentRecord, budget: Duration, now_ms: u64) -> bool {
     now_ms.saturating_sub(record.last_seen_ms) > budget.as_millis() as u64
 }
 
+/// When a kept put-back of a restart is tried again, counted in calls of
+/// [`AppState::retry_restarts`].
+#[derive(Debug, Clone, Copy)]
+struct Backoff {
+    /// Calls until the next try.
+    left: u32,
+    /// Calls the next failure waits.
+    wait: u32,
+}
+
+impl Backoff {
+    /// The longest wait between two tries: a minute, at one call a second.
+    const MAX_WAIT: u32 = 60;
+
+    /// After the first failure: tried again at the next call.
+    fn first() -> Self {
+        Backoff { left: 1, wait: 2 }
+    }
+
+    /// Counts one call down, and answers whether a try is due.
+    fn tick(&mut self) -> bool {
+        self.left = self.left.saturating_sub(1);
+        self.left == 0
+    }
+
+    /// The try failed: the next waits twice as long, up to the bound.
+    fn failed(&mut self) {
+        self.left = self.wait;
+        self.wait = (self.wait * 2).min(Self::MAX_WAIT);
+    }
+}
+
 /// The Baseline's command-only message: identity, capabilities, and the restart — nothing else.
 fn restart_command(uid: &InstanceUid, capabilities: u64) -> ServerToAgent {
     ServerToAgent {
@@ -6166,6 +6339,454 @@ mod tests {
             "and cleared"
         );
         assert!(state.restart_command_for(&uid).is_none(), "once");
+    }
+
+    /// A restart whose command was not sent is queued again, on a lease that lapsed meanwhile
+    /// too, and the Agent's next connection is sent it, once; a message that carries no restart
+    /// leaves nothing queued. Run on each store.
+    fn a_restart_whose_send_failed_is_queued_again(state: &AppState, stored: &dyn AgentStore) {
+        let uid = InstanceUid([0x30; 16]);
+        let restartable = |sequence_num| {
+            let mut msg = report(&uid, sequence_num);
+            msg.capabilities |= opamp::proto::AgentCapabilities::AcceptsRestartCommand as u64;
+            msg
+        };
+        state.process(restartable(1), Transport::WebSocket, Some(1));
+        assert!(state.request_restart(&uid).is_ok(), "queued");
+        let command = state.restart_command_for(&uid).expect("sent");
+        assert!(
+            !stored
+                .get(&uid)
+                .expect("get")
+                .expect("stored")
+                .restart_pending
+        );
+
+        state.unsent(&ServerToAgent {
+            instance_uid: uid.as_bytes().to_vec(),
+            ..Default::default()
+        });
+        assert!(
+            !stored
+                .get(&uid)
+                .expect("get")
+                .expect("stored")
+                .restart_pending,
+            "a message without the command queues nothing"
+        );
+
+        let mut pushes = state.subscribe();
+        pushes.mark_unchanged();
+        state.answer_while(|| false);
+        state.unsent(&command);
+        state.answer_while(|| true);
+        assert!(
+            pushes.has_changed().expect("pushes"),
+            "a session that carries the Agent now is told"
+        );
+        state.mark_disconnected(&[uid], 1);
+        assert!(
+            stored
+                .get(&uid)
+                .expect("get")
+                .expect("stored")
+                .restart_pending,
+            "queued again"
+        );
+
+        let reply = state
+            .process(restartable(2), Transport::WebSocket, Some(2))
+            .reply;
+        assert_eq!(
+            reply.command.map(|c| c.r#type),
+            Some(opamp::proto::CommandType::Restart as i32),
+            "the next connection is sent it"
+        );
+        let reply = state
+            .process(restartable(3), Transport::WebSocket, Some(2))
+            .reply;
+        assert!(reply.command.is_none(), "once");
+        assert!(
+            !stored
+                .get(&uid)
+                .expect("get")
+                .expect("stored")
+                .restart_pending
+        );
+    }
+
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    #[test]
+    fn a_restart_whose_send_failed_is_queued_again_on_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = AppState::new(dir.path().to_path_buf()).expect("state");
+        let stored = crate::fs::FsAgentStore::open(dir.path()).expect("open");
+        a_restart_whose_send_failed_is_queued_again(&state, &stored);
+    }
+
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    #[test]
+    fn a_restart_whose_send_failed_is_queued_again_on_postgres() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let state = on_postgres(
+            &database,
+            Box::new(crate::postgres::agents::PgAgentStore::open(database.clone()).expect("open")),
+        );
+        let stored = crate::postgres::agents::PgAgentStore::new(database.clone());
+        a_restart_whose_send_failed_is_queued_again(&state, &stored);
+    }
+
+    /// An instance whose put-backs of restarts fail until `failing` is cleared, on files, with the
+    /// store it writes and a second handle on that store, as another instance writes it.
+    fn with_failing_restarts() -> (
+        AppState,
+        Arc<std::sync::atomic::AtomicBool>,
+        crate::fs::FsAgentStore,
+        tempfile::TempDir,
+    ) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hooked = Hooked::new(Box::new(
+            crate::fs::FsAgentStore::open(dir.path()).expect("open"),
+        ));
+        let failing = hooked.failing_restarts.clone();
+        let state = AppState::with_stores(
+            Box::new(hooked),
+            Box::new(crate::fs::FsConfigBackend::open(dir.path()).expect("configs")),
+            Box::new(crate::clock::SystemClock),
+        )
+        .expect("state");
+        let stored = crate::fs::FsAgentStore::open(dir.path()).expect("open");
+        (state, failing, stored, dir)
+    }
+
+    fn restartable(uid: &InstanceUid, sequence_num: u64) -> AgentToServer {
+        let mut msg = report(uid, sequence_num);
+        msg.capabilities |= opamp::proto::AgentCapabilities::AcceptsRestartCommand as u64;
+        msg
+    }
+
+    /// A restart taken whose send failed and whose put-back the store refused: kept for retry.
+    fn kept_put_back(state: &AppState, failing: &std::sync::atomic::AtomicBool, uid: &InstanceUid) {
+        state.process(restartable(uid, 1), Transport::WebSocket, Some(1));
+        assert!(state.request_restart(uid).is_ok(), "queued");
+        let command = state.restart_command_for(uid).expect("sent");
+        failing.store(true, Ordering::SeqCst);
+        state.unsent(&command);
+        failing.store(false, Ordering::SeqCst);
+    }
+
+    /// A kept put-back is one restart with a request made meanwhile, and with a delivery of a
+    /// restart another instance queued meanwhile: once that one is delivered, retrying queues no
+    /// second.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    #[test]
+    fn a_kept_put_back_is_dropped_by_a_request_or_a_delivery_meanwhile() {
+        let (state, failing, stored, _dir) = with_failing_restarts();
+        let uid = InstanceUid([0x33; 16]);
+        kept_put_back(&state, &failing, &uid);
+        assert!(state.request_restart(&uid).is_ok(), "requested again");
+        assert!(state.restart_command_for(&uid).is_some(), "delivered");
+        assert_eq!(state.retry_restarts(), 0, "nothing is kept");
+        assert!(
+            state.restart_command_for(&uid).is_none(),
+            "no second restart"
+        );
+
+        kept_put_back(&state, &failing, &uid);
+        assert_eq!(
+            stored.set_restart_pending(&uid, true),
+            Ok(Some(false)),
+            "requested through another instance"
+        );
+        state.take_up_agents(None).expect("taken up");
+        assert!(state.restart_command_for(&uid).is_some(), "delivered");
+        assert_eq!(state.retry_restarts(), 0, "nothing is kept");
+        assert!(
+            state.restart_command_for(&uid).is_none(),
+            "no second restart"
+        );
+
+        // Requested here and delivered through another instance.
+        kept_put_back(&state, &failing, &uid);
+        assert!(state.request_restart(&uid).is_ok(), "requested again");
+        assert_eq!(
+            stored.set_restart_pending(&uid, false),
+            Ok(Some(true)),
+            "delivered through another instance"
+        );
+        assert_eq!(state.retry_restarts(), 0, "nothing is kept");
+        assert!(
+            !stored
+                .get(&uid)
+                .expect("get")
+                .expect("stored")
+                .restart_pending,
+            "no second restart"
+        );
+    }
+
+    /// A kept put-back goes with its Agent's forget, through this instance or one heard of from
+    /// another: an Agent that comes back under the same identity is not restarted for it.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    #[test]
+    fn a_kept_put_back_goes_with_its_agents_forget() {
+        let (state, failing, stored, _dir) = with_failing_restarts();
+        let (here, elsewhere) = (InstanceUid([0x34; 16]), InstanceUid([0x35; 16]));
+        kept_put_back(&state, &failing, &here);
+        kept_put_back(&state, &failing, &elsewhere);
+        state.mark_disconnected(&[here, elsewhere], 1);
+        assert!(state.forget_agent(&here).is_ok(), "forgotten here");
+        stored.remove(&elsewhere).expect("forgotten elsewhere");
+        state.take_up_agents(None).expect("taken up");
+        for (uid, conn) in [(here, 2), (elsewhere, 3)] {
+            state.process(restartable(&uid, 1), Transport::WebSocket, Some(conn));
+        }
+        assert_eq!(state.retry_restarts(), 0, "nothing is kept");
+        for uid in [here, elsewhere] {
+            assert!(
+                !stored
+                    .get(&uid)
+                    .expect("get")
+                    .expect("stored")
+                    .restart_pending,
+                "the Agent that came back is not restarted"
+            );
+        }
+    }
+
+    /// A try found due is not made once a request and its delivery dropped the put-back before
+    /// the try took the fleet lock, so the Agent is not restarted a second time.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    #[test]
+    fn a_try_found_due_is_not_made_once_a_request_and_its_delivery_dropped_it() {
+        let (state, failing, stored, _dir) = with_failing_restarts();
+        let uid = InstanceUid([0x36; 16]);
+        kept_put_back(&state, &failing, &uid);
+        let due = state.due_restarts();
+        assert_eq!(due, [uid], "due at the next call");
+        // Between finding it due and trying it: requested and delivered.
+        assert!(state.request_restart(&uid).is_ok(), "requested again");
+        assert!(state.restart_command_for(&uid).is_some(), "delivered");
+        for uid in &due {
+            state.put_back(uid, true);
+        }
+        assert!(
+            !stored
+                .get(&uid)
+                .expect("get")
+                .expect("stored")
+                .restart_pending,
+            "no second restart"
+        );
+        assert_eq!(state.retry_restarts(), 0, "nothing is kept");
+    }
+
+    /// A request through another instance, taken up from its announcement, drops a put-back kept
+    /// here, so its delivery there is the one restart; after a missed notification one whose
+    /// record shows a restart queued is dropped, and one whose record shows none is kept.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    #[test]
+    fn a_request_announced_by_another_instance_drops_a_kept_put_back() {
+        let (state, failing, stored, _dir) = with_failing_restarts();
+        let (announced, queued, other) = (
+            InstanceUid([0x37; 16]),
+            InstanceUid([0x38; 16]),
+            InstanceUid([0x39; 16]),
+        );
+        for uid in [&announced, &queued, &other] {
+            kept_put_back(&state, &failing, uid);
+        }
+        assert_eq!(
+            stored.set_restart_pending(&announced, true),
+            Ok(Some(false))
+        );
+        state
+            .take_up_restarts(Some(&HashSet::from([announced])))
+            .expect("taken up");
+        assert_eq!(
+            stored.set_restart_pending(&announced, false),
+            Ok(Some(true)),
+            "delivered there"
+        );
+
+        assert_eq!(stored.set_restart_pending(&queued, true), Ok(Some(false)));
+        state.take_up_restarts(None).expect("taken up");
+        assert_eq!(
+            stored.set_restart_pending(&queued, false),
+            Ok(Some(true)),
+            "delivered there"
+        );
+
+        let mut kept = usize::MAX;
+        for _ in 0..4 {
+            kept = state.retry_restarts();
+        }
+        assert_eq!(kept, 0, "every put-back held or was dropped");
+        for uid in [announced, queued] {
+            assert!(
+                !stored
+                    .get(&uid)
+                    .expect("get")
+                    .expect("stored")
+                    .restart_pending,
+                "no second restart"
+            );
+        }
+        assert!(
+            stored
+                .get(&other)
+                .expect("get")
+                .expect("stored")
+                .restart_pending,
+            "the put-back nothing announced is queued again"
+        );
+    }
+
+    /// On PostgreSQL the announcement of a request through another instance is what drops a
+    /// put-back kept here: once it is taken up, the request's delivery there leaves nothing for a
+    /// retry here to restart again.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    #[test]
+    fn a_request_announced_by_another_instance_drops_a_kept_put_back_on_postgres() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.shared();
+        let hooked = Hooked::new(Box::new(crate::postgres::agents::PgAgentStore::new(
+            database.clone(),
+        )));
+        let failing = hooked.failing_restarts.clone();
+        let a = Arc::new(on_postgres(&database, Box::new(hooked)));
+        a.serve_under(tokio::sync::watch::channel(Some(LEASE_A.to_string())).1);
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let following = {
+            let _entered = runtime.enter();
+            crate::instance::follow(&database, a.clone(), None)
+        };
+        until("the first read once listening", || following.reads() > 0);
+        let uid = InstanceUid([0x3a; 16]);
+        kept_put_back(&a, &failing, &uid);
+        let kept = || a.unput_restarts.lock().expect("restarts lock").len();
+        assert_eq!(kept(), 1, "kept for retry");
+
+        let other = crate::postgres::agents::PgAgentStore::new(test.shared());
+        assert_eq!(
+            other.set_restart_pending(&uid, true),
+            Ok(Some(false)),
+            "requested through another instance"
+        );
+        until("the request taken up", || kept() == 0);
+        assert_eq!(
+            other.set_restart_pending(&uid, false),
+            Ok(Some(true)),
+            "delivered there"
+        );
+        assert_eq!(a.retry_restarts(), 0, "nothing is kept");
+        assert_eq!(
+            other.get(&uid).map(|r| r.map(|r| r.restart_pending)),
+            Ok(Some(false)),
+            "no second restart"
+        );
+    }
+
+    /// The wait between two tries of a put-back doubles and stops at a minute of calls.
+    #[test]
+    fn the_wait_between_tries_of_a_put_back_grows_to_a_minute() {
+        let mut backoff = Backoff::first();
+        let mut waits = Vec::new();
+        for _ in 0..8 {
+            let mut calls = 1;
+            while !backoff.tick() {
+                calls += 1;
+            }
+            waits.push(calls);
+            backoff.failed();
+        }
+        assert_eq!(waits, [1, 2, 4, 8, 16, 32, 60, 60]);
+    }
+
+    /// A put-back the store does not take is kept and tried again, at intervals that double, until
+    /// it holds; the Agent's next connection is then sent the restart. One whose Agent is
+    /// forgotten meanwhile is dropped.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    #[test]
+    fn a_put_back_the_store_refuses_is_tried_again_until_it_holds() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hooked = Hooked::new(Box::new(
+            crate::fs::FsAgentStore::open(dir.path()).expect("open"),
+        ));
+        let (failing, set) = (hooked.failing_restarts.clone(), hooked.restarts_set.clone());
+        let state = AppState::with_stores(
+            Box::new(hooked),
+            Box::new(crate::fs::FsConfigBackend::open(dir.path()).expect("configs")),
+            Box::new(crate::clock::SystemClock),
+        )
+        .expect("state");
+        let stored = crate::fs::FsAgentStore::open(dir.path()).expect("open");
+        let (uid, gone) = (InstanceUid([0x31; 16]), InstanceUid([0x32; 16]));
+        let restartable = |uid: &InstanceUid, sequence_num| {
+            let mut msg = report(uid, sequence_num);
+            msg.capabilities |= opamp::proto::AgentCapabilities::AcceptsRestartCommand as u64;
+            msg
+        };
+        for uid in [&uid, &gone] {
+            state.process(restartable(uid, 1), Transport::WebSocket, Some(1));
+            assert!(state.request_restart(uid).is_ok(), "queued");
+        }
+        let command = state.restart_command_for(&uid).expect("sent");
+        let other = state.restart_command_for(&gone).expect("sent");
+        let tries = || set.load(Ordering::SeqCst);
+        let base = tries();
+
+        failing.store(true, Ordering::SeqCst);
+        state.unsent(&command);
+        state.unsent(&other);
+        assert_eq!(tries(), base + 2, "each put back once");
+        assert!(
+            !stored
+                .get(&uid)
+                .expect("get")
+                .expect("stored")
+                .restart_pending
+        );
+        // Tried at the next call, then after two calls, then after four.
+        let mut seen = Vec::new();
+        for _ in 0..7 {
+            state.retry_restarts();
+            seen.push(tries() - base);
+        }
+        assert_eq!(seen, [4, 4, 6, 6, 6, 6, 8], "the intervals double");
+
+        state.mark_disconnected(&[uid, gone], 1);
+        assert!(state.forget_agent(&gone).is_ok(), "forgotten");
+        failing.store(false, Ordering::SeqCst);
+        let mut kept = usize::MAX;
+        for _ in 0..8 {
+            kept = state.retry_restarts();
+            if kept == 0 {
+                break;
+            }
+        }
+        assert_eq!(kept, 0, "it held, and the forgotten Agent's was dropped");
+        assert!(
+            stored
+                .get(&uid)
+                .expect("get")
+                .expect("stored")
+                .restart_pending,
+            "queued again"
+        );
+        let reply = state
+            .process(restartable(&uid, 2), Transport::WebSocket, Some(2))
+            .reply;
+        assert_eq!(
+            reply.command.map(|c| c.r#type),
+            Some(opamp::proto::CommandType::Restart as i32),
+            "the next connection is sent it"
+        );
     }
 
     /// ADR-0033: the fleet table shows the release, and the build stays reachable beside it. A
@@ -8346,6 +8967,10 @@ mod tests {
         takes_reads: Arc<AtomicU64>,
         before_takes: Arc<Mutex<Option<Act>>>,
         after_takes: Arc<Mutex<Option<Act>>>,
+        /// Restarts set queued that fail, as a database that does not answer, and how many were
+        /// asked for.
+        failing_restarts: Arc<std::sync::atomic::AtomicBool>,
+        restarts_set: Arc<AtomicU64>,
     }
 
     /// What [`Hooked`] runs once after a read.
@@ -8372,6 +8997,8 @@ mod tests {
                 takes_reads: Arc::new(AtomicU64::new(0)),
                 before_takes: Arc::new(Mutex::new(None)),
                 after_takes: Arc::new(Mutex::new(None)),
+                failing_restarts: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                restarts_set: Arc::new(AtomicU64::new(0)),
             }
         }
     }
@@ -8464,6 +9091,12 @@ mod tests {
             uid: &InstanceUid,
             pending: bool,
         ) -> Result<Option<bool>, String> {
+            if pending {
+                self.restarts_set.fetch_add(1, Ordering::SeqCst);
+                if self.failing_restarts.load(Ordering::SeqCst) {
+                    return Err("the restart is held back".to_string());
+                }
+            }
             self.inner.set_restart_pending(uid, pending)
         }
         fn remove(&self, uid: &InstanceUid) -> Result<(), String> {

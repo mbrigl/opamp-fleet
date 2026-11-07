@@ -1177,6 +1177,13 @@ impl Handler for Fleet {
         Some(Closing::policy(reason))
     }
 
+    /// A restart command its connection did not take stays queued
+    /// (ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    /// clause 8).
+    fn on_unsent(&self, message: &ServerToAgent) {
+        self.0.unsent(message);
+    }
+
     /// The connection is gone; every Agent it carried is unreachable until it reports again.
     /// An enrolling host was never one of the fleet's Agents, so there is nothing to mark.
     fn on_closed(&self, carrier: Carrier) {
@@ -1490,5 +1497,35 @@ fn proves_the_handshake(csr_pem: &str, handshake: &Requester) -> Result<(), Stri
                 .to_string(),
         ),
         _ => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A restart command the endpoint reports unsent is queued again, so it is sent once more.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side
+    #[test]
+    fn a_restart_command_reported_unsent_is_queued_again() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = Arc::new(AppState::new(dir.path().to_path_buf()).expect("state"));
+        let uid = InstanceUid([0x30; 16]);
+        state.process(
+            AgentToServer {
+                instance_uid: uid.as_bytes().to_vec(),
+                sequence_num: 1,
+                capabilities: opamp::proto::AgentCapabilities::ReportsStatus as u64
+                    | opamp::proto::AgentCapabilities::AcceptsRestartCommand as u64,
+                ..Default::default()
+            },
+            Transport::WebSocket,
+            Some(1),
+        );
+        assert!(state.request_restart(&uid).is_ok(), "queued");
+        let command = state.restart_command_for(&uid).expect("sent");
+        let fleet = Fleet(state.clone(), Issuers::default());
+        fleet.on_unsent(&command);
+        assert!(state.restart_command_for(&uid).is_some(), "sent again");
     }
 }
