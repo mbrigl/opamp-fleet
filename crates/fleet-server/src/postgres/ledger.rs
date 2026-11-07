@@ -47,11 +47,11 @@ impl PgLedgerStore {
 }
 
 /// Moves the list's version on, inside the caller's transaction, and answers the new one
-/// (ADR-0044 clause 10). A revocation added or widened and a lift
-/// move it, the prune's removal of a revocation among them. A register entry the prune removes does
-/// not: it only takes expired certificates out of what the list resolves, and a Gateway that keeps
-/// refusing an expired certificate loses nothing. A register entry another instance adds is covered
-/// by the body's hash in the Gateways' `ETag`, not by the version.
+/// (ADR-0044 clause 10). A revocation added or widened and a lift move it, the prune's removal of
+/// a revocation among them, and so does every change to the register: what ADR-0038 clause 28
+/// revokes depends on the register too, so an instance that missed an entry's notification finds
+/// the version moved, and never takes its own next write of the list as naming a register it does
+/// not hold.
 async fn bump_list_version(client: &impl GenericClient) -> Result<u64, String> {
     let row = client
         .query_one(
@@ -96,30 +96,63 @@ impl LedgerStore for PgLedgerStore {
 
     fn put_issued(&self, issued: &Issued) -> Result<(), String> {
         let issued = issued.clone();
-        self.database.run(move |pool| async move {
+        let version = self.database.run(move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
             write_issued(&*transaction, &issued).await?;
             notify(&*transaction, CERTIFICATE, &issued.facts.id.serial).await?;
-            transaction.commit().await.map_err(sql)
-        })
+            let version = bump_list_version(&*transaction).await?;
+            transaction.commit().await.map_err(sql)?;
+            Ok(version)
+        })?;
+        self.wrote_list(Some(version));
+        Ok(())
     }
 
-    fn remove_issued(&self, id: &CertId) -> Result<(), String> {
+    /// One transaction that holds the register against every adder, so no renewal lands between
+    /// the check and the removal, and removes the entry only while it has expired and no
+    /// certificate the table holds below it, walked down by one recursive query, is still valid:
+    /// a renewal the pruning instance never took up keeps its chain.
+    fn remove_issued(&self, id: &CertId, now_ms: u64) -> Result<bool, String> {
         let id = id.clone();
-        self.database.run(move |pool| async move {
+        let version = self.database.run(move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
             transaction
+                .execute("LOCK TABLE certificates IN SHARE ROW EXCLUSIVE MODE", &[])
+                .await
+                .map_err(sql)?;
+            let removed = transaction
                 .execute(
-                    "DELETE FROM certificates WHERE issuer = $1 AND serial = $2",
-                    &[&id.issuer, &id.serial],
+                    "WITH RECURSIVE down (issuer, serial) AS ( \
+                         SELECT issuer, serial FROM certificates \
+                         WHERE predecessor_issuer = $1 AND predecessor_serial = $2 \
+                         UNION \
+                         SELECT c.issuer, c.serial \
+                         FROM certificates c JOIN down \
+                           ON c.predecessor_issuer = down.issuer \
+                          AND c.predecessor_serial = down.serial \
+                     ) \
+                     DELETE FROM certificates \
+                     WHERE issuer = $1 AND serial = $2 AND not_after_ms <= $3 \
+                       AND NOT EXISTS ( \
+                           SELECT 1 FROM down JOIN certificates c USING (issuer, serial) \
+                           WHERE c.not_after_ms > $3 \
+                       )",
+                    &[&id.issuer, &id.serial, &signed(now_ms)],
                 )
                 .await
                 .map_err(sql)?;
+            if removed == 0 {
+                return Ok(None);
+            }
             notify(&*transaction, CERTIFICATE, &id.serial).await?;
-            transaction.commit().await.map_err(sql)
-        })
+            let version = bump_list_version(&*transaction).await?;
+            transaction.commit().await.map_err(sql)?;
+            Ok(Some(version))
+        })?;
+        self.wrote_list(version);
+        Ok(version.is_some())
     }
 
     /// One transaction that holds the register against every other writer and the list against
@@ -150,7 +183,7 @@ impl LedgerStore for PgLedgerStore {
         let bounds = *bounds;
         let mint = mint.map(|(host, entry)| (host.to_string(), entry.clone()));
         let bootstrap = bootstrap.cloned();
-        self.database.run(move |pool| async move {
+        let (registered, version) = self.database.run(move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
             let registered = register_in(
@@ -161,11 +194,15 @@ impl LedgerStore for PgLedgerStore {
                 bootstrap.as_ref(),
             )
             .await?;
-            if registered == Registered::Registered {
-                transaction.commit().await.map_err(sql)?;
+            if registered != Registered::Registered {
+                return Ok((registered, None));
             }
-            Ok(registered)
-        })
+            let version = read_list_version(&*transaction).await?;
+            transaction.commit().await.map_err(sql)?;
+            Ok((registered, Some(version)))
+        })?;
+        self.wrote_list(version);
+        Ok(registered)
     }
 
     /// One transaction that holds the table against every other adder, so the bound is counted
@@ -836,7 +873,9 @@ async fn decide_renewal(
 /// decides an approval's request (ADR-0044 clause 9). The table is held against every other
 /// adder while the bounds are counted, and an approval's bootstrap certificate, `bootstrap`, is
 /// looked up in the list the transaction holds, so a revocation another instance committed first
-/// refuses it. Anything but [`Registered::Registered`] leaves the transaction to be rolled back.
+/// refuses it. An entry written moves the list's version (ADR-0044 clause 10), which the caller
+/// reads in the transaction to take up. Anything but [`Registered::Registered`] leaves the
+/// transaction to be rolled back.
 ///
 /// # Errors
 /// Returns an error when a statement fails.
@@ -880,6 +919,7 @@ pub(crate) async fn register_in(
     }
     write_issued(transaction, issued).await?;
     notify(transaction, CERTIFICATE, &issued.facts.id.serial).await?;
+    bump_list_version(transaction).await?;
     if let Some((host, entry)) = mint {
         if write_seen(transaction, host, entry).await? {
             notify(transaction, HOST, host).await?;
@@ -1103,7 +1143,10 @@ mod tests {
         assert_eq!(ledger.revocations, list);
         assert_eq!(ledger.hosts, hosts);
 
-        reopened.remove_issued(&root.facts.id).expect("remove");
+        assert!(
+            reopened.remove_issued(&root.facts.id, 100).expect("remove"),
+            "an entry whose renewals have all expired is removed"
+        );
         assert!(reopened.remove_revocation("r2").expect("remove"));
         assert!(
             !reopened.remove_revocation("r2").expect("remove"),
@@ -1816,11 +1859,11 @@ mod tests {
         }
     }
 
-    /// The list's one version moves with every revocation added or widened and every lift, in
-    /// their transactions, and with nothing else; an instance holds the version its own write left
-    /// only when no other instance wrote between, and none until it reads the list again
-    /// otherwise, so the version it serves never names a list it does not hold
-    /// (ADR-0044 clause 10).
+    /// The list's one version moves with every revocation added or widened, every lift and every
+    /// register entry, in their transactions, and with nothing else; an instance holds the
+    /// version its own write left only when no other instance wrote between, and none until it
+    /// reads the list again otherwise, so the version it serves never names a list it does not
+    /// hold (ADR-0044 clause 10).
     /// Verifies: ADR-0044
     #[test]
     fn the_list_version_moves_with_each_revocation_and_lift_and_names_only_the_list_held() {
@@ -1864,17 +1907,27 @@ mod tests {
             (Some(1), 1),
             "a revocation held already moves nothing, and keeps the version held"
         );
+        let (_, fetched) = crate::transport::gateway_list_of(&a);
         a.record(issued("0c", None).facts, b"\x01", None)
             .expect("a register entry");
-        assert_eq!(stored(), 1, "a register entry moves nothing");
+        assert_ne!(
+            crate::transport::gateway_list_of(&a).1,
+            fetched,
+            "a Gateway holding the ETag from before the entry is not answered 304"
+        );
+        assert_eq!(
+            (a.list_version(), stored()),
+            (Some(2), 2),
+            "a register entry moves it too"
+        );
 
         b.revoke_certificate("client", "0b")
             .expect("B revokes, holding version 0");
-        assert_eq!(stored(), 2);
+        assert_eq!(stored(), 3);
         assert_eq!(
             b.list_version(),
             None,
-            "B's list misses A's revocation, so it holds no version"
+            "B's ledger misses A's revocation and register entry, so it holds no version"
         );
         assert_eq!(
             b.revoked_certificates_at("client").1,
@@ -1882,25 +1935,26 @@ mod tests {
             "and serves none with its list"
         );
         b.reload_ledger().expect("reload");
-        assert_eq!(b.list_version(), Some(2));
+        assert_eq!(b.list_version(), Some(3));
 
         let lifted = b.list()[0].id.clone();
         assert!(b.lift(&lifted).expect("lift"));
-        assert_eq!((b.list_version(), stored()), (Some(3), 3));
+        assert_eq!((b.list_version(), stored()), (Some(4), 4));
         assert!(!b.lift(&lifted).expect("lift again"));
         assert_eq!(
             (b.list_version(), stored()),
-            (Some(3), 3),
+            (Some(4), 4),
             "a lift of nothing moves nothing, and keeps the version held"
         );
     }
 
-    /// One version never names two Gateway bodies: when B registers a renewal and A revokes its
-    /// predecessor before A has taken up B's register entry, A's write moves the version by one,
-    /// but the list A resolves lacks the renewal. A's `ETag` before it reads the ledger again and
-    /// after differ, so a Gateway that fetched the first is answered in full by either instance
-    /// once both hold the renewal
-    /// (ADR-0038 clauses 28 and 34).
+    /// One version never names two Gateway bodies: when a Server of 0.8.0 registers a renewal,
+    /// which moves no version, and A revokes its predecessor before A has taken the renewal up,
+    /// A's write moves the version by one and A holds it, though the list A resolves lacks the
+    /// renewal. A holds the same version before it reads the ledger again and after, and its
+    /// `ETag`s still differ by the body's hash, so a Gateway that fetched the first is answered in
+    /// full by either instance once both hold the renewal
+    /// (ADR-0038 clauses 28 and 34, ADR-0044 clause 10).
     /// Verifies: ADR-0038, ADR-0044
     #[test]
     fn one_list_version_never_names_two_gateway_bodies() {
@@ -1929,11 +1983,15 @@ mod tests {
         let a = instance();
         a.record(issued("0a", None).facts, b"\x01", None)
             .expect("enrol X");
+        let mut renewal = issued("0b", Some("0a"));
+        renewal.facts.host = None;
+        database
+            .run(move |pool| async move {
+                let client = client(&pool).await?;
+                write_issued(&**client, &renewal).await
+            })
+            .expect("a Server of 0.8.0 registers X', a renewal of X, moving no version");
         let b = instance();
-        let mut renewal = issued("0b", Some("0a")).facts;
-        renewal.host = None;
-        b.record(renewal, b"\x01", Some(CertId::new(b"ca", "0a")))
-            .expect("B registers X', a renewal of X");
 
         a.revoke_certificate("client", "0a")
             .expect("A revokes X, not holding X'");
@@ -1942,13 +2000,19 @@ mod tests {
             !before.contains(r#""serial":"b""#),
             "A does not resolve X' yet: {before}"
         );
+        let held = a.list_version();
+        assert_eq!(
+            held,
+            Some(stored_version(&test)),
+            "A's write followed the version it held, so A holds the new one"
+        );
         a.reload_ledger().expect("A takes up X'");
         let (after, etag) = crate::transport::gateway_list_of(&a);
         assert!(
             after.contains(r#""serial":"b""#),
             "A resolves X' now: {after}"
         );
-        assert_eq!(a.list_version(), Some(1), "one version, before and after");
+        assert_eq!(a.list_version(), held, "one version, before and after");
         assert_ne!(
             fetched, etag,
             "a Gateway holding the ETag of the list without X' is not answered 304"
@@ -1958,6 +2022,166 @@ mod tests {
             crate::transport::gateway_list_of(&b).1,
             etag,
             "B answers the ETag A gives once both hold the same list"
+        );
+    }
+
+    /// The list's version as `test`'s database holds it.
+    fn stored_version(test: &TestDatabase) -> u64 {
+        test.rows("SELECT version FROM revocation_list_version")[0][0]
+            .as_deref()
+            .expect("a version")
+            .parse()
+            .expect("a number")
+    }
+
+    /// A clock the test sets.
+    struct Set(std::sync::atomic::AtomicU64);
+
+    impl crate::fleet::Clock for Set {
+        fn now_ms(&self) -> u64 {
+            self.0.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    /// Every change to the register moves the list's version in its own transaction: an entry
+    /// written, and one removed; a removal the store refuses moves nothing. The adapter holds the
+    /// version its own write left (ADR-0044 clause 10).
+    /// Verifies: ADR-0044
+    #[test]
+    fn a_register_change_moves_the_list_version() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let store = PgLedgerStore::new(database.clone());
+        assert_eq!(stored_version(&test), 0);
+        store.put_issued(&issued("0a", None)).expect("put");
+        assert_eq!(
+            (store.list_version(), stored_version(&test)),
+            (Some(1), 1),
+            "an entry put"
+        );
+        let bounds = RegisterBounds {
+            size: 10,
+            per_root: 10,
+        };
+        let mut renewal = issued("0b", Some("0a"));
+        renewal.facts.not_after_ms = 50;
+        assert_eq!(
+            store.register_issued(&renewal, &bounds).expect("register"),
+            Registered::Registered
+        );
+        assert_eq!(
+            (store.list_version(), stored_version(&test)),
+            (Some(2), 2),
+            "an entry registered"
+        );
+        assert!(
+            !store
+                .remove_issued(&CertId::new(b"ca", "0a"), 20)
+                .expect("remove"),
+            "a renewal valid at 20 keeps its predecessor, expired at 9"
+        );
+        assert_eq!(stored_version(&test), 2, "a removal refused moves nothing");
+        assert!(store
+            .remove_issued(&CertId::new(b"ca", "0b"), 100)
+            .expect("remove"));
+        assert_eq!(
+            (store.list_version(), stored_version(&test)),
+            (Some(3), 3),
+            "an entry removed"
+        );
+    }
+
+    /// The prune removes a register entry only while the database holds no valid certificate
+    /// renewed from it, at any depth, whatever the instance that prunes holds: A never took up X',
+    /// a renewal of X, nor X'', a renewal of X', that a Server of 0.8.0 registered, moving no
+    /// version. A prunes X once it expired, X' expired too and X'' still valid, and X stays, so a
+    /// revocation of X still revokes X'', and A holds no version until it reads the ledger again.
+    /// Once X'' has expired too, all three go, and A holds the version its removals left
+    /// (ADR-0044 clause 10, ADR-0038 clause 28).
+    /// Verifies: ADR-0044, ADR-0038
+    #[test]
+    fn the_prune_keeps_an_entry_a_valid_renewal_in_the_database_descends_from() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let clock = Arc::new(Set(std::sync::atomic::AtomicU64::new(1)));
+        let instance = || {
+            crate::revocation::Revocations::open(
+                Box::new(PgLedgerStore::new(database.clone())),
+                clock.clone(),
+                vec![crate::revocation::Authority {
+                    role: "client".into(),
+                    subject: CertId::new(b"ca", "00").issuer,
+                    name: "CN=ca".into(),
+                }],
+            )
+            .expect("open")
+        };
+        let held = |serial: &str| {
+            let serial = CertId::new(b"ca", serial).serial;
+            test.rows(&format!(
+                "SELECT count(*) FROM certificates WHERE serial = '{serial}'"
+            ))[0][0]
+                .as_deref()
+                == Some("1")
+        };
+        let a = instance();
+        let mut x = issued("0a", None).facts;
+        x.not_after_ms = 5;
+        a.record(x, b"\x01", None).expect("A enrols X");
+        let mut renewal = issued("0b", Some("0a"));
+        renewal.facts.host = None;
+        renewal.facts.not_after_ms = 8;
+        let mut grandchild = issued("0e", Some("0b"));
+        grandchild.facts.host = None;
+        grandchild.facts.not_after_ms = 1_000;
+        database
+            .run(move |pool| async move {
+                let client = client(&pool).await?;
+                write_issued(&**client, &renewal).await?;
+                write_issued(&**client, &grandchild).await
+            })
+            .expect("a Server of 0.8.0 registers X', a renewal of X, and X'', one of X'");
+        assert_eq!(a.list_version(), Some(stored_version(&test)));
+
+        clock.0.store(10, std::sync::atomic::Ordering::SeqCst);
+        let mut other = issued("0c", None).facts;
+        other.host = Some("other-host".into());
+        other.not_after_ms = 1_000;
+        a.record(other, b"\x02", None)
+            .expect("A registers another, and prunes X");
+        assert!(held("0a"), "X, below which X'' is valid, was removed");
+        assert_eq!(
+            a.list_version(),
+            None,
+            "A's register is not the stored one, so A holds no version"
+        );
+
+        let c = instance();
+        c.revoke_certificate("client", "0a").expect("revoke X");
+        assert!(
+            c.is_certificate_revoked(&CertId::new(b"ca", "0e")),
+            "the revocation of X revokes X''"
+        );
+
+        clock.0.store(2_000, std::sync::atomic::Ordering::SeqCst);
+        a.reload_ledger().expect("A reads the ledger again");
+        let mut last = issued("0d", None).facts;
+        last.host = Some("last-host".into());
+        last.not_after_ms = 3_000;
+        a.record(last, b"\x03", None)
+            .expect("A registers one more, and prunes again");
+        assert!(
+            !held("0a") && !held("0b") && !held("0e"),
+            "X, X' and X'' go once none is valid"
+        );
+        assert_eq!(
+            a.list_version(),
+            Some(stored_version(&test)),
+            "A holds the version its own removals and entry left"
         );
     }
 

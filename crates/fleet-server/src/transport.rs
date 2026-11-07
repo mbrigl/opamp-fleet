@@ -466,8 +466,8 @@ async fn gateway_revocations(State(state): State<Arc<AppState>>, request: Reques
 /// the store keeps the list's one version, as PostgreSQL does, `list-<version>-` before it
 /// (ADR-0044 clause 10). Every instance that holds the same list
 /// at the same version answers the same `ETag`; the hash keeps one version from naming two bodies,
-/// as it would when the instance that revoked had not yet taken up a renewal another instance
-/// registered. Either way it changes with the list and survives a restart.
+/// as it would when a Server of 0.8.0 beside this one registered a renewal, which moves no version
+/// (ADR-0044 clause 10). Either way it changes with the list and survives a restart.
 #[must_use]
 pub fn gateway_list(certificates: &[serde_json::Value], version: Option<u64>) -> (String, String) {
     use sha2::Digest as _;

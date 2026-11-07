@@ -183,12 +183,13 @@ impl LedgerStore for FsLedgerStore {
         Ok(())
     }
 
-    fn remove_issued(&self, id: &CertId) -> Result<(), String> {
+    /// The Server is the files' only writer, so the prune's finding stands.
+    fn remove_issued(&self, id: &CertId, _now_ms: u64) -> Result<bool, String> {
         super::remove_file(&self.path(id))?;
         if let Some(links) = self.links.lock().expect("links lock").as_mut() {
             links.remove(id);
         }
-        Ok(())
+        Ok(true)
     }
 
     fn register_issued(
@@ -325,7 +326,9 @@ mod tests {
         let ledger = reopened.load().expect("load");
         assert_eq!(ledger.issued, vec![issued.clone()]);
         assert_eq!(ledger.revocations, vec![revocation]);
-        reopened.remove_issued(&issued.facts.id).expect("remove");
+        assert!(reopened
+            .remove_issued(&issued.facts.id, u64::MAX)
+            .expect("remove"));
         assert!(reopened.load().expect("load").issued.is_empty());
     }
 
