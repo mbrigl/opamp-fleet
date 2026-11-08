@@ -14,7 +14,129 @@ once its tag exists.
 > rest — is not backfilled here; it is in the git log and in the ADRs. The first four releases were
 > all cut on 2026-08-09, so the dates below say less than the order does.
 
-## [0.8.1]
+## [0.8.2]
+
+### Added
+
+- **The CA keys and the audit key may live on a PKCS#11 token, and instances that reach it serve
+  side by side**
+  ([ADR-0043](docs/adr/0043-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one.md),
+  [ADR-0040](docs/adr/0040-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)
+  clauses 8 and 17). `[pkcs11]` names the token by `module`, `token_label` and `pin_file`, and
+  `[client_ca] key_label`, `[enrolment] bootstrap_ca_key_label` and `[audit] key_label` name its
+  keys in place of the key files; a key is named by a file or a label, never both. The token
+  signs and the Server builds every certificate, so no CA key is on the Server's disk, its
+  backups or its database dumps. Every signature with a key on the token holds its place in the
+  audit record first and writes `pkcs11.signed` with `key_label`, `issuer`, `serial` and
+  `use_case`; the token signs nothing the record cannot take. SoftHSM2 is the token the Server is
+  built and tested against: it serves the instances of one host, and a Server on it warns at
+  every start and writes `pkcs11.software_token`. Instances on several hosts need a network HSM,
+  which is a change of `module` alone. A PIN file others may read or its group may write, a
+  module that does not load, a token no slot carries, a PIN the token refuses, a label it does not
+  hold, and a label without `[pkcs11]` each stop the Server at startup, naming it. The image
+  carries no module.
+  - **Side by side.** A key on the token is no file, so an instance whose CA keys are named by
+    their labels need not be alone: instances that name the same labels on a token each of them
+    reaches serve at once, where a CA key in a file still means a standby
+    ([the manual](docs/manual/server.md#from-a-standby-to-side-by-side)).
+  - **One audit key.** Every instance on one database names the same `[audit] key_label`, or none.
+    Each lease records it (migration 16), and an instance whose label differs from that of a live
+    lease, a label against none included, refuses its start naming the key; one that finds a
+    differing label when it takes a new lease after a lapse stops.
+  - **Moving a fleet to the token.** A key in a file does not move onto a token without a copy
+    left outside it, so the move makes a new client CA and bootstrap CA on the token, and every
+    host moves to the new client CA at its ordinary renewal, with both client CAs in
+    `[tls] client_ca_file` meanwhile
+    ([the manual](docs/manual/server.md#moving-the-ca-keys-to-the-token)).
+
+  The schema gains migrations 16 and 17, which name 0.8.0 as the oldest Server that serves on it.
+  **What to do:**
+  - **From 0.8.1 with several instances:** replace the instances one at a time, as
+    [A rolling update](docs/manual/server.md#a-rolling-update) says, without `[audit] key_label`.
+    The first instance of this release builds an index over the audit record's table while it
+    migrates, and the record's writes wait for it; start it at a quiet moment. Every instance
+    without `[audit] key_label` now warns at its start that the heads of the audit record are not
+    signed.
+  - **From 0.8.1 with one Server:** stop it and start this release. Nothing else.
+  - **To sign with the token afterwards:** read
+    [CA keys on a PKCS#11 token](docs/manual/server.md#ca-keys-on-a-pkcs11-token). An instance with
+    `[audit] key_label` refuses to start beside a live lease that names none, as every lease of
+    0.8.0 and 0.8.1 does: stop every instance, then start them all naming the same label. With the
+    label, allow the database's `max_connections` one more connection for each instance, for the
+    lock of the instance that signs. Once checkpoints are written, run no 0.8.x Server on the
+    database again: see *The heads of the audit chains are signed* below.
+  - **From 0.8.0 or earlier:** do what the *What to do* of 0.8.1 below says as well.
+
+- **The heads of the audit chains are signed, and `server audit-verify` checks them**
+  ([ADR-0041](docs/adr/0041-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token.md)).
+  With `[audit] key_label`, the Server signs with the audit key on the token, at its start, about
+  once a minute while a chain grew, and at an orderly shutdown, a checkpoint naming the head of
+  every chain: the entry `audit.checkpoint`, on the files and on PostgreSQL alike. A token that
+  refuses to sign, or does not sign within 2 seconds, leaves `audit.checkpoint_failed`, and
+  decisions go on. On PostgreSQL one instance signs at a time, through a lock on a database
+  session of its own; migration 17 holds the checkpoints in order. A rotation or prune that removes
+  checkpoints names the last one, and a prune removes no checkpoint while an older one is held in
+  a chain it does not prune, so entries around newer checkpoints may outlive `retain_days` by up
+  to a day for each change of the signer since the oldest checkpoint left.
+  `server pki status` prints the audit key's label, its SHA-256 and its public half as PEM.
+  `server audit-verify` takes `--audit-key <PEM file>` and `--since <file>`, on the files and with
+  `--config`: it checks every checkpoint's signature and order, every head a checkpoint names, and
+  that nothing was written more than three minutes past the newest checkpoint unexcused, honours a
+  rotation or prune only once a checkpoint covers it, and prints the newest checkpoint after
+  `checkpoint: ` for the next `--since`. A record without any checkpoint fails. Without
+  `--audit-key` it says that it checked no signature. Without `[audit] key_label` no checkpoint is
+  written ([the manual](docs/manual/server.md#signed-checkpoints-of-the-chain-heads)).
+  **What to do:** with an audit key, keep the PEM `pki status` prints and the checkpoint line
+  `audit-verify` prints where the Server cannot rewrite them, and verify against them. Do not run
+  a Server of 0.8.x on a database whose record holds checkpoints. An instance that signs refuses
+  to start beside one, but nothing stops a 0.8.x instance starting beside signers or after a
+  downgrade: its prunes neither hold back from checkpoints nor name those they remove, so
+  `audit-verify --audit-key` fails until a prune by a current Server removes a later checkpoint
+  and names it, and a closed chain whose naming checkpoint it pruned is named by no checkpoint
+  again.
+
+- **The audit record may be exported as OTLP log records**
+  ([ADR-0043](docs/adr/0043-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one.md)
+  clause 9). `[audit.export]` with `endpoint`, the full OTLP/HTTP URL with its path, and an optional
+  `ca_file` sends every entry, once the store has written it, to a receiver of your own, such as an
+  OpenTelemetry Collector that forwards it to write-once storage. Each record's body is the line as
+  the store holds it, with `seq`, `time` and `prev`; its attribute `audit.event` names the event.
+  The connection is TLS 1.3, `http://` only to `127.0.0.1` or `::1`; it follows no redirect, takes
+  no proxy, presents no credential, and takes no setting from an `OTEL_*` variable. A receiver that
+  is down never holds up a decision: up to 2048 entries wait, a batch is sent again until taken,
+  and an entry that finds the queue full is dropped and counted as `audit.export_dropped` with
+  `count`, about once a minute and at shutdown. Off by default: without the section the Server
+  opens no such connection ([the manual](docs/manual/server.md#exporting-the-record)).
+  **What to do:** nothing; to keep a copy the Server cannot rewrite, name a receiver.
+
+- **`opamp-fleetctl pki token-init` makes the CA keys and the audit key on the token**
+  ([ADR-0042](docs/adr/0042-the-operator-program-opamp-fleetctl.md) clauses 6, 8, 12 and 16).
+  Run on the Server host with `--pkcs11-module`, `--token-label`, `--pin-file` and `--out`, it makes
+  the client CA's, the bootstrap CA's and the audit key on the token, labelled `client-ca`,
+  `bootstrap-ca` and `audit`, none of them extractable, refuses a label the token holds already,
+  signs both CA certificates through the token, and writes `client-ca.pem`, `bootstrap-ca.pem` and
+  `token.toml.fragment`, no key file. One that fails partway destroys the keys it made again and
+  says so, or names the labels it could not destroy, so a rerun on the same token works.
+  `pki init --ca-keys-on-token` makes neither the client CA nor the bootstrap CA and leaves both to
+  it. `pki bootstrap-ca --pkcs11-module` makes the new bootstrap CA's key on the token under a new
+  label, which it prints for `bootstrap_ca_key_label`, and writes `bootstrap-ca.pem` alone, with
+  the same cleanup ([the manual](docs/manual/tools.md#pki)).
+  **What to do:** nothing.
+
+### Changed
+
+- **A renewal proof may come from any client CA in `[tls] client_ca_file`, and from a client leaf
+  alone**
+  ([ADR-0043](docs/adr/0043-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one.md)
+  clause 13). A renewal was accepted only from a certificate the client CA of `[client_ca]` signed.
+  It is now accepted from a certificate any CA of `client_ca_file` issued directly, named as its
+  issuer and signed with its key, so a host renews across a move to new CA keys; a certificate
+  that is no client-authentication leaf, a server-only leaf or a CA certificate among them, is
+  refused as a proof.
+  **What to do:** nothing; while an old CA is in `client_ca_file`, the hosts it signed renew to
+  the current client CA.
+
+## [0.8.1] - 2026-11-07
 
 ### Added
 
