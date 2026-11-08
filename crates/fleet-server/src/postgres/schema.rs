@@ -29,7 +29,7 @@ pub const SCHEMA_TABLE: &str = "fleet_schema";
 
 /// Every table the migrations create, so that a database holding any of them is recognised as one
 /// the Server already wrote ([`super::Database::server_tables`]).
-pub const TABLES: [&str; 26] = [
+pub const TABLES: [&str; 27] = [
     "configurations",
     "configuration_revisions",
     "deployments",
@@ -52,6 +52,7 @@ pub const TABLES: [&str; 26] = [
     "audit_chains",
     "audit_entries",
     "audit_archive",
+    "audit_checkpoint_head",
     "blob_deletions",
     "agent_count",
     "enrolment_rejected",
@@ -183,7 +184,36 @@ pub const MIGRATIONS: &[Migration] = &[
         oldest_server: "0.8.0",
         sql: LEASE_AUDIT_KEY,
     },
+    // Two columns only added, without a default, an index, and a table with its one row. A Server
+    // of 0.8.0 writes no checkpoint, and an instance of this release that signs refuses to start
+    // beside one by the audit key label of migration 16
+    // (ADR-draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token clause 2).
+    Migration {
+        version: 17,
+        oldest_server: "0.8.0",
+        sql: AUDIT_CHECKPOINTS,
+    },
 ];
+
+/// The checkpoints of the audit record
+/// (ADR-draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token clause 2): each
+/// checkpoint entry's `checkpoint_seq`, at most one entry per number; the checkpoint that named each
+/// closed chain closed, so that no later one names it again; and the newest checkpoint's number and
+/// hash, which the transaction that inserts the next one compares and sets, and which a prune of
+/// the entry leaves standing.
+const AUDIT_CHECKPOINTS: &str = "
+ALTER TABLE audit_entries ADD COLUMN checkpoint_seq bigint;
+ALTER TABLE audit_chains ADD COLUMN named_closed_by bigint;
+CREATE UNIQUE INDEX audit_entries_checkpoint_seq ON audit_entries (checkpoint_seq)
+    WHERE checkpoint_seq IS NOT NULL;
+CREATE TABLE audit_checkpoint_head (
+    singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
+    seq bigint NOT NULL,
+    hash text NOT NULL
+);
+INSERT INTO audit_checkpoint_head (seq, hash)
+    VALUES (0, '0000000000000000000000000000000000000000000000000000000000000000');
+";
 
 /// The `[audit] key_label` of the instance that holds each lease, null for none
 /// (ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one
@@ -875,8 +905,9 @@ mod tests {
         }
         assert_eq!(
             MIGRATIONS.len(),
-            16,
-            "migrations 11 to 16 name 0.8.0, the audit key's label of the token draft among them"
+            17,
+            "migrations 11 to 17 name 0.8.0, the audit key's label of the token draft and the \
+             checkpoints of the audit record among them"
         );
         assert!(
             LEASE_RELEASE.contains(&format!("DEFAULT '{RELEASE_BEFORE_THE_RECORD}'")),

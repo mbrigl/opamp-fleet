@@ -512,7 +512,7 @@ password_file = "/run/secrets/fleet-db-password"
 | `lease_renew_secs` | `10` | With `"postgres"` alone: how often an instance renews its lease, from 1 to 3600. Set with `"fs"`, it fails startup naming it. |
 | `lease_secs` | `30` | With `"postgres"` alone: how long after its last renewal a lease lapses, at least three renewals and at most 3600. Set with `"fs"`, it fails startup naming it. |
 | `presence_interval_secs` | `30` | With `"postgres"` alone: how often an instance writes, in one batch, where each Agent it carries is connected and when it was last heard from, from 10 to 60. The report that connects an Agent to an instance writes it at once, so no other instance forgets an Agent that has just connected. A heartbeat reaches the database at most once per interval and Agent, so the staleness budget grows by this interval. A batch written later than this interval after it was due is logged as a warning with `late_ms`: the database is not keeping up with the fleet's presence. Set with `"fs"`, it fails startup naming it. |
-| `pool_size` | `16` | With `"postgres"` alone: the connections an instance's pool holds at most, from 2 to 256. At most half of them create the records of new Agents at once, so the other half serves every other call while creations wait for one another. The database's `max_connections` must allow `pool_size` for each instance, plus one session for each sweep in progress, one for a prune of the audit record in progress, and one that listens for notifications. Set with `"fs"`, it fails startup naming it. |
+| `pool_size` | `16` | With `"postgres"` alone: the connections an instance's pool holds at most, from 2 to 256. At most half of them create the records of new Agents at once, so the other half serves every other call while creations wait for one another. The database's `max_connections` must allow `pool_size` for each instance, plus one session for each sweep in progress, one for a prune of the audit record in progress, one that listens for notifications, and, with `[audit] key_label`, one that holds the lock of the instance that signs the audit record's checkpoints. Set with `"fs"`, it fails startup naming it. |
 | `postgres.host` | — | Required with `"postgres"`. The database's host name or IP address — what its certificate must name. |
 | `postgres.port` | `5432` | Its port. |
 | `postgres.dbname` | — | Required with `"postgres"`. The database. The Server does not create it. |
@@ -1077,6 +1077,24 @@ host.
 5. **Take the old CA out** of `client_ca_file` once the last certificate it signed has ended:
    `[client_ca] validity_days` after step 3.
 
+### The audit key on instances that already run
+
+Every instance on one database names the same `[audit] key_label`, or none, so the
+[audit key](#signed-checkpoints-of-the-chain-heads) is not turned on one instance at a time. Each
+lease records its instance's label, and an instance whose label differs from that of a live lease
+stops at its start, naming both; a lease of 0.8.0 or 0.8.1 names none. To turn the key on for
+instances that already run side by side, stop every instance
+([Stopping an instance](#stopping-an-instance)), then start them all naming the same label. With
+the label, allow the database's `max_connections` one more connection for each instance, for the
+lock of the instance that signs. Turning the key off and changing the label take the same stop
+of every instance. A Server alone, on PostgreSQL or on the files, takes either at its next start.
+
+Off, the Server writes no checkpoint, and `audit-verify --audit-key` then fails on the first entry
+written more than three minutes after the newest one; check the record without `--audit-key` from
+then on. A new label for a new key signs checkpoints the old key's PEM does not verify, and
+`audit-verify` takes one key, so while the record holds checkpoints of both, it fails on those of
+the other key, whichever PEM it is given.
+
 ### Labels on several instances
 
 The fleet view, the reach counts and what a rollout releases are read from the database, and
@@ -1200,11 +1218,12 @@ two the one left takes them all. Size them so that one instance fewer still carr
 - **New connections.** Each instance takes at most `max_new_connections_per_sec` new connections a
   second, 200 by default, which bounds how fast the Agents of a lost instance come back.
 - **The database's connections.** It must allow `pool_size` connections for each instance, one
-  more that listens for notifications, one for each sweep in progress, and one for a prune of the
-  audit record in progress: 57 for three instances at the defaults, counting one sweep and one
-  prune each, of PostgreSQL's default `max_connections` of 100, three of which it keeps for
-  superusers. A rolling update that starts a new instance before it stops an old one needs one
-  instance's share more.
+  more that listens for notifications, one for each sweep in progress, one for a prune of the
+  audit record in progress, and, with `[audit] key_label`, one that holds the signer's lock of the
+  audit record's checkpoints: 60 for three instances at the defaults with an audit key, counting
+  one sweep and one prune each, of PostgreSQL's default `max_connections` of 100, three of which it
+  keeps for superusers. A rolling update that starts a new instance before it stops an old one
+  needs one instance's share more.
 - **Peers that share an address.** Affinity sends every host behind one address translation, and
   every connection of a Gateway, to one instance, so such a group weighs on one instance alone.
 
@@ -1957,8 +1976,9 @@ certificate's `issuer` and `serial`, and the `use_case` — `renewal`, `enrolmen
 `member_csr` or `bootstrap_issue`. Its place in the record is held before the token is asked, so
 the token signs nothing the record cannot take. A Server on a software token writes
 `pkcs11.software_token` at every start.
-`[audit] key_label` names the audit key on the token. Every instance on one database names the
-same one, or none.
+`[audit] key_label` names the audit key on the token, which signs the heads of the record's
+chains ([Signed checkpoints](#signed-checkpoints-of-the-chain-heads)). Every instance on one
+database names the same one, or none.
 `[audit] max_file_bytes` (64 MiB) and `keep_files` (16) bound the space it takes on the filesystem
 store, and `[audit] retain_days` (365, at least 1) how far back it goes on PostgreSQL. Each key
 applies to its own store alone: one set for the other store stops the Server at startup, naming
@@ -2036,12 +2056,14 @@ first entry that fails, exiting non-zero: an entry altered or removed, entries m
 of a closed chain, or an entry after its close. Without `--archive` it reports the predecessor as
 not checked; an archive the database records that no chain names fails, and so does a chain that
 names a predecessor while the database records no archive. Removing a whole chain together with its
-record is not detected by the database itself. Nor is a cut made with pruning: whoever can write to
+record is not detected by the chains alone. Nor is a cut made with pruning: whoever can write to
 the database can append one `audit.pruned` with a correct hash to an open chain and delete the head
-of any chain up to the entry it names, young entries included, and the record still holds. Only an
+of any chain up to the entry it names, young entries included, and the chains still hold. Only an
 `audit.pruned` in a chain that itself holds links another or carries the predecessor on. A record
 that holds shows that what is left is linked, not that nothing younger than `retain_days` was
-removed; the signed chain heads, once they land, detect both.
+removed. The [signed checkpoints](#signed-checkpoints-of-the-chain-heads) detect both: against
+them, an `audit.pruned` counts only where a head a checkpoint signed after it is still there with
+the hash the checkpoint names.
 
 The record goes back `[audit] retain_days` (365 by default, at most 36 500). At its start and once a
 day after, each instance removes from its own chain the entries the database stored more than that
@@ -2076,6 +2098,110 @@ So when you upgrade, start the Server that holds the old `data_dir` first, and a
 then the other instances. Whichever instance takes the first lease links its own `audit/`: one on
 a new host, or one without a `data_dir`, links nothing, and the old record is then never named; a
 copied or restored `data_dir` links the copy.
+
+### Signed checkpoints of the chain heads
+
+A chain shows an entry changed or removed in its middle, but whoever can write the store can cut a
+chain's tail, remove a whole chain with its record, or rewrite a chain from any point on with fresh
+hashes. With `[audit] key_label` naming the audit key on the [token](#ca-keys-on-a-pkcs11-token),
+the Server signs, at its start, about once a minute after and at an orderly shutdown, a checkpoint
+that names the head of every chain: the entry `audit.checkpoint`, written into the signing
+instance's own chain. Whoever holds the store but not the token cannot sign one. A checkpoint
+carries:
+
+- `checkpoint_seq`, a number from 1 across the whole record, and `checkpoint_prev`, the hash of
+  the checkpoint before it;
+- `heads`: for each open chain, and each closed chain no checkpoint named closed yet, its `chain`
+  (`fs` on the filesystem store), the `seq` and hash of its last entry, and whether it is
+  `closed`. A chain named closed once is not named again;
+- `key`: the audit key's `label` and the SHA-256 of its public half;
+- `sig`: the token's ECDSA P-256 signature over the line without `sig`.
+
+A checkpoint is skipped while no chain grew. No `pkcs11.signed` is written beside it: the
+checkpoint is its own signature's entry. Signing never holds up a decision. The Server waits up to
+2 seconds for the token's signature, while decisions keep queueing. A token that refuses to sign,
+or does not sign in time, leaves `audit.checkpoint_failed` with the `error` (`timeout` for the
+second), logged at `error`, and the next minute signs afresh. Decisions go on, and the chains stay
+the record.
+
+On PostgreSQL one instance signs at a time: the one that holds a lock on a database session of its
+own, beside the pool. It checks that session every minute, and signs only while its lease is live.
+When that session ends, the next instance that tries takes the lock over. Both ends of the session
+count it dead after about 30 seconds without an answer: TCP keepalives after 10 seconds idle, every
+5 seconds, 3 unanswered, and a TCP user timeout of 30 seconds. So the lock of a signer cut off from
+the database passes on within about 30 seconds. The database holds at
+most one checkpoint per number, and takes one only while it follows the newest. A second instance
+that signed the same number writes `audit.checkpoint_failed`, so the checkpoints never fork. A
+checkpoint is rotated and pruned with the record: an `audit.rotated` or `audit.pruned` that removes
+checkpoints names the last one as `checkpoint_seq` and `checkpoint_hash`. A prune removes no
+checkpoint while an older one is still held in a chain it does not prune, so the checkpoints left
+always follow each other. Nor does it remove the checkpoint that named a closed chain closed
+while that chain still holds entries, as no later checkpoint names it. A prune repeats its rounds
+until one frees nothing more, so the chains an instance prunes, its own and, with the prune lock,
+the closed ones, drain in one prune. After the signing passed between instances that both still
+run, the checkpoints sit in both instances' chains, and each instance prunes its own chain at its
+own time of day. The entries around the newer checkpoints may then outlive `retain_days` by up to
+a day for each such change since the oldest checkpoint left.
+
+`server pki status` prints the audit key's label, its public half as PEM and the SHA-256 the
+checkpoints carry. Keep that PEM where the Server cannot rewrite it, and check the record against
+it:
+
+```console
+$ server audit-verify /var/lib/opamp-fleet-server/audit --audit-key audit-key.pem
+5113 entries in 1 files, the chain holds
+2871 checkpoints, the newest 2871 of 2026-11-08T09:12:00Z signed by the key "audit"
+checkpoint: {"checkpoint_prev":"8f0c…","checkpoint_seq":2871,"event":"audit.checkpoint",…}
+$ server audit-verify --config /etc/opamp-fleet/server.toml \
+    --audit-key audit-key.pem --since saved-checkpoint
+```
+
+With `--audit-key`, on the files and with `--config` alike, `audit-verify` also checks:
+
+- that each checkpoint's signature verifies against the key and names it;
+- that the checkpoints follow each other by number and hash. The first one left follows the last
+  one a rotation or prune removed, or is checkpoint 1;
+- that every head any checkpoint names, not only the newest one's, is there: its chain reaches
+  the `seq` named and has the named hash there, unless a rotation or prune removed it. A chain
+  whose first entries are gone begins right after the last entry a rotation or prune names;
+- that no entry was written more than three minutes after the newest checkpoint with no
+  `audit.checkpoint_failed` between: a running signer would have covered it.
+
+Only a signed removal counts. An `audit.rotated` or `audit.pruned` is honoured only where a
+checkpoint signed after it names a head of its chain at or past it, and that head is still there
+with the hash the checkpoint names: the chain's links from the removal to the head then show the
+removal was there when the head was signed. One written after the newest checkpoint, or placed
+inside a run that was cut, is listed as not honoured, so whoever can write the store cannot
+explain away a removal by adding the entry that would. A rotation or prune is covered by the next
+checkpoint, within a minute; `audit-verify` run in that minute names what it removed.
+
+A Server older than the checkpoints, such as 0.8.x, does not know them. An instance that signs
+refuses to start beside one, but nothing stops an older instance starting beside instances that
+sign, or after a downgrade. Its prunes neither hold back from checkpoints nor name those they
+remove. `audit-verify --audit-key` then fails until a prune by a current Server removes a later
+checkpoint and names it, and a closed chain whose naming checkpoint the older Server pruned is no
+longer named by any checkpoint. Do not run an older Server on a database whose record holds
+checkpoints.
+
+On the filesystem store, a repair without a link, which only an older release writes, binds
+nothing before it to the checkpoints after it either: `audit-verify` names such a repair, and the
+entries before it are to be checked against a copy taken earlier.
+
+A record without any checkpoint fails, so one whose checkpoints were removed whole does not pass
+as one that never had them. `audit-verify` names each failure by chain, entry and checkpoint, and
+exits non-zero. It prints the newest checkpoint after `checkpoint: `. Save that line where the
+Server cannot reach it, as the log copy and the export are, and give it as `--since <file>` next
+time. The record must then still hold that checkpoint unchanged and go on from it, which also
+detects a cut of the newest checkpoints together with their entries. A saved checkpoint that
+rotation or pruning removed last is matched against the hash its removal names. One older than
+that is reported as no longer held. Without `--audit-key`, `audit-verify` checks the chains alone
+and says that it checked no signature.
+
+Without `[audit] key_label` no checkpoint is written, and the Server logs at startup, at `warn`,
+that the heads of the audit record are not signed. There is no key file for the audit key: a key
+that whoever can rewrite the record can also read would sign the rewrite. What was written after
+the newest checkpoint, up to a minute, is protected by the chain alone. A compromised Server can
+have the token sign whatever it wrote; the export and the log copy show that afterwards.
 
 ## Configurations: what the fleet runs
 

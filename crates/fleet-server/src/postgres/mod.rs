@@ -19,6 +19,7 @@ pub mod agents;
 pub mod audit;
 pub mod audit_prune;
 pub mod bootstrap;
+pub mod checkpoint;
 pub mod configs;
 pub mod deployments;
 pub mod enrolment;

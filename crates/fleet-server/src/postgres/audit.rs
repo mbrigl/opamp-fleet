@@ -43,7 +43,18 @@ impl PgAuditStore {
         }
     }
 
-    fn write(&mut self, seq: u64, lines: &[&str], closing: bool) -> Result<(), String> {
+    /// Writes `lines` from `seq` on into the chain of the lease held, closing it with `closing`.
+    /// A `checkpoint`, its `checkpoint_seq` and the hash of the checkpoint before, is the one line
+    /// written: it is inserted only while the newest checkpoint is that one, and the head row moves
+    /// to it in the same transaction
+    /// (ADR-draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token clause 2).
+    fn write(
+        &mut self,
+        seq: u64,
+        lines: &[&str],
+        closing: bool,
+        checkpoint: Option<(u64, String)>,
+    ) -> Result<(), String> {
         let Some(chain) = self.chain.clone() else {
             return Err("no lease is held, so there is no chain to write into".to_string());
         };
@@ -125,15 +136,68 @@ impl PgAuditStore {
                 let lines = lines[rest..].to_vec();
                 let first = first + landed;
                 let seqs: Vec<i64> = (first..first + count - landed).collect();
-                transaction
-                    .execute(
-                        "INSERT INTO audit_entries (chain, seq, line) \
-                         SELECT $1::text::uuid, seq, line FROM unnest($2::bigint[], $3::text[]) \
-                         AS entry (seq, line)",
-                        &[&chain, &seqs, &lines],
-                    )
-                    .await
-                    .map_err(sql)?;
+                match (&checkpoint, lines.as_slice()) {
+                    (Some((checkpoint_seq, checkpoint_prev)), [line]) => {
+                        let newest = transaction
+                            .query_one(
+                                "SELECT seq, hash FROM audit_checkpoint_head FOR UPDATE",
+                                &[],
+                            )
+                            .await
+                            .map_err(sql)?;
+                        let (newest_seq, newest_hash) =
+                            (newest.get::<_, i64>(0), newest.get::<_, String>(1));
+                        let checkpoint_seq = super::signed(*checkpoint_seq);
+                        if newest_seq != checkpoint_seq - 1 || newest_hash != *checkpoint_prev {
+                            return Err(format!(
+                                "checkpoint {checkpoint_seq} does not follow the newest \
+                                 checkpoint, {newest_seq}: another instance signed first"
+                            ));
+                        }
+                        transaction
+                            .execute(
+                                "INSERT INTO audit_entries (chain, seq, line, checkpoint_seq) \
+                                 VALUES ($1::text::uuid, $2, $3, $4)",
+                                &[&chain, &first, line, &checkpoint_seq],
+                            )
+                            .await
+                            .map_err(sql)?;
+                        transaction
+                            .execute(
+                                "UPDATE audit_checkpoint_head SET seq = $1, hash = $2",
+                                &[&checkpoint_seq, &line_hash(line)],
+                            )
+                            .await
+                            .map_err(sql)?;
+                        // The closed chains it names are named once.
+                        let closed: Vec<String> = crate::checkpoint::parse(line)
+                            .map(|parsed| parsed.heads)
+                            .unwrap_or_default()
+                            .into_iter()
+                            .filter(|head| head.closed)
+                            .map(|head| head.chain)
+                            .collect();
+                        transaction
+                            .execute(
+                                "UPDATE audit_chains SET named_closed_by = $1 \
+                                 WHERE id::text = ANY($2) AND named_closed_by IS NULL",
+                                &[&checkpoint_seq, &closed],
+                            )
+                            .await
+                            .map_err(sql)?;
+                    }
+                    _ => {
+                        transaction
+                            .execute(
+                                "INSERT INTO audit_entries (chain, seq, line) \
+                                 SELECT $1::text::uuid, seq, line \
+                                 FROM unnest($2::bigint[], $3::text[]) AS entry (seq, line)",
+                                &[&chain, &seqs, &lines],
+                            )
+                            .await
+                            .map_err(sql)?;
+                    }
+                }
                 if closing {
                     let hash = all_last.map(|line| line_hash(&line)).unwrap_or_default();
                     transaction
@@ -181,11 +245,26 @@ impl AuditStore for PgAuditStore {
     }
 
     fn append(&mut self, seq: u64, lines: &[&str]) -> Result<(), String> {
-        self.write(seq, lines, false)
+        self.write(seq, lines, false, None)
+    }
+
+    fn append_checkpoint(
+        &mut self,
+        seq: u64,
+        line: &str,
+        checkpoint_seq: u64,
+        checkpoint_prev: &str,
+    ) -> Result<(), String> {
+        self.write(
+            seq,
+            &[line],
+            false,
+            Some((checkpoint_seq, checkpoint_prev.to_string())),
+        )
     }
 
     fn close(&mut self, seq: u64, lines: &[&str]) -> Result<(), String> {
-        self.write(seq, lines, true)
+        self.write(seq, lines, true, None)
     }
 
     fn stored(&mut self, chain: &str, seq: u64) -> Result<Vec<String>, String> {
@@ -403,6 +482,8 @@ pub(crate) async fn close_lapsed(
 pub struct Verified {
     pub lines: Vec<String>,
     pub failed: bool,
+    /// The newest checkpoint's line, where the record was checked against its checkpoints.
+    pub newest_checkpoint: Option<String>,
 }
 
 /// Walks every chain of the record on the database `config` names, with the Server's own
@@ -431,6 +512,21 @@ pub fn verify_in(
     verify(&database, archive)
 }
 
+/// [`verify_on`], and every chain checked against the checkpoints with `check`
+/// (ADR-draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token clause 4).
+///
+/// # Errors
+/// As [`verify_on`].
+pub fn verify_checked_on(
+    config: &PostgresConfig,
+    schema: Option<&str>,
+    archive: Option<&Path>,
+    check: Option<crate::checkpoint::Check>,
+) -> Result<Verified, String> {
+    let database = Database::connect_as(config, schema, CALL_TIMEOUT, Exclusive::Shared)?;
+    verify_checked(&database, archive, check)
+}
+
 /// What one snapshot of the record holds, walked: each chain with its host and what its walk
 /// found, the archive the database records, and the chain that names a predecessor.
 struct Snapshot {
@@ -439,6 +535,8 @@ struct Snapshot {
     /// Every chain that names a predecessor, by its `audit.chain_opened` or by an `audit.pruned`
     /// that carries it on, each once.
     named: Vec<(String, (u64, String))>,
+    /// What the check against the checkpoints found, where there was one.
+    checked: Option<crate::checkpoint::Report>,
 }
 
 /// Walks every chain on `database`; see [`verify_on`]. The chain records and every entry are read
@@ -448,6 +546,18 @@ struct Snapshot {
 /// # Errors
 /// As [`verify_on`].
 pub fn verify(database: &Database, archive: Option<&Path>) -> Result<Verified, String> {
+    verify_checked(database, archive, None)
+}
+
+/// [`verify`], and with `check` every chain checked against the checkpoints in the same snapshot.
+///
+/// # Errors
+/// As [`verify_on`].
+pub fn verify_checked(
+    database: &Database,
+    archive: Option<&Path>,
+    mut check: Option<crate::checkpoint::Check>,
+) -> Result<Verified, String> {
     let snapshot = database.run_within(super::IMPORT_TIMEOUT, |pool| async move {
         let mut client = client(&pool).await?;
         let transaction = client
@@ -492,6 +602,29 @@ pub fn verify(database: &Database, archive: Option<&Path>) -> Result<Verified, S
             .iter()
             .map(|row| (row.get(0), row.get(1), row.get(2)))
             .collect();
+        // The checkpoints, the failed ones and what removed checkpoints first, then every entry
+        // as the chains are walked
+        // (ADR-draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token clause 4).
+        if let Some(check) = check.as_mut() {
+            for row in transaction
+                .query(
+                    "SELECT chain::text, seq, line FROM audit_entries \
+                     WHERE line LIKE '%\"event\":\"audit.checkpoint%' \
+                     OR line LIKE '%\"event\":\"audit.rotated\"%' \
+                     OR line LIKE '%\"event\":\"audit.pruned\"%'",
+                    &[],
+                )
+                .await
+                .map_err(sql)?
+            {
+                check.collect(
+                    &row.get::<_, String>(0),
+                    super::unsigned(row.get::<_, i64>(1)),
+                    &row.get::<_, String>(2),
+                );
+            }
+            check.plan();
+        }
         // An `audit.pruned` links only from a chain that holds: each chain is walked with the links
         // of its own entries and of the chains found holding, and the chains that failed are
         // walked again until no further one holds. The newest first, as a prune links older
@@ -512,7 +645,7 @@ pub fn verify(database: &Database, archive: Option<&Path>) -> Result<Verified, S
                     })
                     .map(|(_, link)| (link.last_seq, link.last_hash.clone()))
                     .collect();
-                let walked = walk(&transaction, chain, pruned)
+                let walked = walk(&transaction, chain, pruned, check.as_mut())
                     .await?
                     .and_then(|walk| walk.finish(closed_hash.as_deref()));
                 if walked.is_ok() {
@@ -531,7 +664,7 @@ pub fn verify(database: &Database, archive: Option<&Path>) -> Result<Verified, S
                 .filter(|(source, _)| holding.contains(source))
                 .map(|(_, named)| named),
         );
-        let chains = records
+        let chains: Vec<(String, String, Result<crate::audit_log::Walked, String>)> = records
             .into_iter()
             .zip(walks)
             .map(|((chain, host, _), walked)| {
@@ -579,13 +712,22 @@ pub fn verify(database: &Database, archive: Option<&Path>) -> Result<Verified, S
         transaction.commit().await.map_err(sql)?;
         named.sort();
         named.dedup();
+        let present: std::collections::HashSet<&str> =
+            chains.iter().map(|(chain, _, _)| chain.as_str()).collect();
+        let checked = check.map(|check| check.finish(|chain| present.contains(chain)));
         Ok(Snapshot {
             chains,
             archive,
             named,
+            checked,
         })
     })?;
     let mut verified = Verified::default();
+    if let Some(checked) = snapshot.checked {
+        verified.failed |= checked.failed;
+        verified.lines.extend(checked.lines);
+        verified.newest_checkpoint = checked.newest;
+    }
     // Two names of a predecessor that differ cannot both be the archive's end.
     if let [first, second, ..] = snapshot.named.as_slice() {
         verified.failed = true;
@@ -703,6 +845,7 @@ async fn walk(
     transaction: &impl GenericClient,
     chain: &str,
     pruned: Vec<(u64, String)>,
+    mut check: Option<&mut crate::checkpoint::Check>,
 ) -> Result<Result<ChainWalk, String>, String> {
     let mut walk = ChainWalk::new(chain).pruned_after(pruned);
     let mut after = 0i64;
@@ -720,7 +863,11 @@ async fn walk(
         };
         after = last.get(0);
         for row in &page {
-            if let Err(e) = walk.step(super::unsigned(row.get::<_, i64>(0)), row.get(1)) {
+            let (seq, line) = (super::unsigned(row.get::<_, i64>(0)), row.get::<_, &str>(1));
+            if let Some(check) = check.as_deref_mut() {
+                check.observe(chain, seq, line);
+            }
+            if let Err(e) = walk.step(seq, line) {
                 return Ok(Err(e));
             }
         }

@@ -227,6 +227,17 @@ no module.
   written back as `audit.export_dropped`
   ([ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one](adr/draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one.md)
   clause 9).
+  With `[audit] key_label`, the writer signs a checkpoint of every chain's head at its start,
+  each minute and at the shutdown's close. `checkpoint` owns the signer port `CheckpointSigner`,
+  which the token key of `pkcs11` implements, and the port `CheckpointSource`, which answers the
+  newest checkpoint and the heads to name: `checkpoint::OneChain` on the filesystem store, and
+  `postgres::checkpoint::Checkpoints` on PostgreSQL, which elects the signer by a session-level
+  advisory lock on a connection of its own. A thread `audit-sign` reads the heads and asks the
+  token, while the writer places the checkpoint and waits up to 2 seconds for its signature.
+  `AuditStore::append_checkpoint` writes it alone; on PostgreSQL it is written under a unique
+  index and the compare-and-set of the head row of migration 17. `checkpoint::Check` is what
+  `server audit-verify --audit-key` runs over either store
+  ([ADR-draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token](adr/draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token.md)).
 - **Server ports beyond storage** — `fleet` owns `CertificateSigner`, which the local CA in `ca`
   implements for the CSR flow and the renewal proof (ADR-0026), and the `UseCase` each signature
   names. A CA key in `ca` is a key file or a key on the PKCS#11 token of `pkcs11`, which signs

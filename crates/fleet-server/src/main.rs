@@ -18,8 +18,9 @@ fn usage() -> ! {
     eprintln!(
         "Usage: server [--config <server.toml>] [--version]\n       \
          server hash-credential --basic   (reads the password from standard input)\n       \
-         server audit-verify <data_dir>/audit\n       \
-         server audit-verify --config <server.toml> [--archive <old data_dir>/audit]\n       \
+         server audit-verify <data_dir>/audit [--audit-key <PEM file> [--since <file>]]\n       \
+         server audit-verify --config <server.toml> [--archive <old data_dir>/audit]\n          \
+                             [--audit-key <PEM file> [--since <file>]]\n       \
          server pki status [--config <server.toml>]\n       \
          server migrate --config-dir <old> --packages-dir <old> --data-dir <new>\n       \
          server migrate-to-postgres --from <data_dir> [--data-dir <new>] [--config <server.toml>]\n       \
@@ -32,42 +33,56 @@ fn usage() -> ! {
 /// names the first entry whose `prev` does not match the entry before it. `server audit-verify
 /// --config <server.toml> [--archive <dir>]` walks every chain of the record in the database
 /// instead, lists the open ones, and checks the archive a move from files left
-/// (ADR-0029 clauses 5 and 6).
+/// (ADR-0029 clauses 5 and 6). Either form, given `--audit-key <PEM file>`, checks every chain
+/// against the signed checkpoints too, from the saved checkpoint line in the file `--since` names
+/// where one is given, and prints the newest checkpoint's line after `checkpoint: `
+/// (ADR-draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token clause 4).
 fn audit_verify(mut args: impl Iterator<Item = String>) -> ! {
-    let Some(first) = args.next() else { usage() };
-    if first != "--config" && first != "--archive" {
-        audit_verify_files(&first);
-    }
-    let (mut config, mut archive) = (None, None);
-    let mut flag = Some(first);
-    while let Some(name) = flag {
-        let slot = match name.as_str() {
+    let (mut dir, mut config, mut archive, mut key, mut since) = (None, None, None, None, None);
+    while let Some(arg) = args.next() {
+        let slot = match arg.as_str() {
             "--config" => &mut config,
             "--archive" => &mut archive,
+            "--audit-key" => &mut key,
+            "--since" => &mut since,
+            _ if !arg.starts_with("--") && dir.is_none() => {
+                dir = Some(PathBuf::from(arg));
+                continue;
+            }
             _ => usage(),
         };
         match args.next() {
             Some(path) if slot.is_none() => *slot = Some(PathBuf::from(path)),
             _ => usage(),
         }
-        flag = args.next();
     }
-    let Some(config) = config else { usage() };
-    let config = load_config(Some(config)).config;
-    let Some(database) = config.database.postgres() else {
-        eprintln!(
-            "the configuration names no database — with [database] store = \"fs\" verify the \
-             files: server audit-verify <data_dir>/audit"
-        );
-        std::process::exit(1);
+    if since.is_some() && key.is_none() {
+        usage();
+    }
+    let read = |what: &str, path: &PathBuf| {
+        std::fs::read(path).unwrap_or_else(|e| {
+            eprintln!("cannot read {what} {}: {e}", path.display());
+            std::process::exit(1);
+        })
     };
-    match fleet_server::postgres::audit::verify_on(database, archive.as_deref()) {
-        Ok(verified) => {
-            for line in &verified.lines {
-                println!("{line}");
-            }
-            std::process::exit(i32::from(verified.failed));
-        }
+    let check = key.map(|key| {
+        let key = fleet_server::checkpoint::AuditKey::from_pem(&read("the audit key", &key))
+            .unwrap_or_else(|e| {
+                eprintln!("{e}");
+                std::process::exit(1);
+            });
+        let since = since.map(|since| {
+            String::from_utf8_lossy(&read("the saved checkpoint", &since)).into_owned()
+        });
+        fleet_server::checkpoint::Check::new(key, since)
+    });
+    let verified = match (dir, config) {
+        (Some(dir), None) if archive.is_none() => audit_verify_files(&dir, check),
+        (None, Some(config)) => audit_verify_database(&config, archive.as_deref(), check),
+        _ => usage(),
+    };
+    match verified {
+        Ok(never) => match never {},
         Err(e) => {
             eprintln!("{e}");
             std::process::exit(1);
@@ -75,26 +90,79 @@ fn audit_verify(mut args: impl Iterator<Item = String>) -> ! {
     }
 }
 
+/// Prints what the check against the checkpoints found, or that none was made.
+fn print_checked(report: Option<&fleet_server::checkpoint::Report>) {
+    match report {
+        None => {
+            println!("no signature was checked: without --audit-key the chains alone were checked")
+        }
+        Some(report) => {
+            for line in &report.lines {
+                println!("{line}");
+            }
+            if let Some(newest) = &report.newest {
+                println!("checkpoint: {newest}");
+            }
+        }
+    }
+}
+
+/// `server audit-verify --config <server.toml>`: every chain of the record in the database.
+fn audit_verify_database(
+    config: &std::path::Path,
+    archive: Option<&std::path::Path>,
+    check: Option<fleet_server::checkpoint::Check>,
+) -> Result<std::convert::Infallible, String> {
+    let checked = check.is_some();
+    let config = load_config(Some(config.to_path_buf())).config;
+    let Some(database) = config.database.postgres() else {
+        return Err(
+            "the configuration names no database — with [database] store = \"fs\" verify the \
+             files: server audit-verify <data_dir>/audit"
+                .to_string(),
+        );
+    };
+    let verified =
+        fleet_server::postgres::audit::verify_checked_on(database, None, archive, check)?;
+    for line in &verified.lines {
+        println!("{line}");
+    }
+    if checked {
+        if let Some(newest) = &verified.newest_checkpoint {
+            println!("checkpoint: {newest}");
+        }
+    } else {
+        print_checked(None);
+    }
+    std::process::exit(i32::from(verified.failed));
+}
+
 /// `server audit-verify <dir>`: the files of the filesystem store, or an archive. A repair without
 /// a link is named, and the chain still holds.
-fn audit_verify_files(dir: &str) -> ! {
-    match fleet_server::fs::verify_audit(std::path::Path::new(dir)) {
-        Ok((files, Ok(held))) => {
+fn audit_verify_files(
+    dir: &std::path::Path,
+    check: Option<fleet_server::checkpoint::Check>,
+) -> Result<std::convert::Infallible, String> {
+    let (files, verified) = fleet_server::fs::verify_audit(dir)?;
+    let mut failed = false;
+    match verified {
+        Ok(held) => {
             for line in held.unlinked_lines() {
                 println!("{line}");
             }
             println!("{} entries in {files} files, the chain holds", held.entries);
-            std::process::exit(0);
-        }
-        Ok((_, Err(e))) => {
-            eprintln!("the chain breaks at {e}");
-            std::process::exit(1);
         }
         Err(e) => {
-            eprintln!("{e}");
-            std::process::exit(1);
+            eprintln!("the chain breaks at {e}");
+            failed = true;
         }
     }
+    let report = check
+        .map(|check| fleet_server::fs::check_audit_checkpoints(dir, check))
+        .transpose()?;
+    print_checked(report.as_ref());
+    failed |= report.as_ref().is_some_and(|report| report.failed);
+    std::process::exit(i32::from(failed));
 }
 
 /// The configuration every command that reads one reads (ADR-0024 clause 2): the file `--config`
@@ -157,6 +225,19 @@ fn pki(mut args: impl Iterator<Item = String>) -> ! {
             ending.subject,
             ending.file.display()
         );
+    }
+    // The audit key's public half, for the operator to keep where the Server cannot rewrite it
+    // (ADR-draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token clause 3).
+    match pki::audit_key(&config) {
+        Ok(None) => {}
+        Ok(Some((label, pem, sha256))) => {
+            println!("audit key {label:?}  SHA-256 {sha256}  — keep this public key where the Server cannot rewrite it:");
+            print!("{pem}");
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
     }
     std::process::exit(pki::exit_code(&endings, now));
 }
@@ -638,18 +719,19 @@ async fn serve() {
     // a module, token, PIN or key that is not there fails startup, naming it
     // (ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one
     // clause 1).
-    let token = match config
+    let (token, audit_key) = match config
         .pkcs11
         .as_ref()
         .map(fleet_server::pkcs11::Token::open)
         .transpose()
         .and_then(|token| {
-            if let (Some(token), Some(label)) = (&token, &config.audit.key_label) {
-                token.key("[audit] key_label", label)?;
-            }
-            Ok(token)
+            let audit_key = match (&token, &config.audit.key_label) {
+                (Some(token), Some(label)) => Some(token.key("[audit] key_label", label)?),
+                _ => None,
+            };
+            Ok((token, audit_key))
         }) {
-        Ok(token) => token,
+        Ok(opened) => opened,
         Err(e) => {
             eprintln!("{e}");
             std::process::exit(1);
@@ -866,9 +948,26 @@ async fn serve() {
     // PostgreSQL the chain of each lease
     // (ADR-0029).
     let sink = export.as_ref().map(|export| export.sink());
+    // With the audit key, the heads of every chain are signed about once a minute and at the
+    // shutdown's close; without it the chains alone are the record, and the Server says so
+    // (ADR-draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token clauses 2 and 5).
+    if audit_key.is_none() {
+        tracing::warn!(
+            "the heads of the audit record are not signed: [audit] key_label names no audit key \
+             on a token, so the chains alone are the record"
+        );
+    }
+    let signing = |source: Box<dyn fleet_server::checkpoint::CheckpointSource>| {
+        audit_key.clone().map(|key| {
+            fleet_server::audit_log::Signing::new(
+                Arc::new(key) as Arc<dyn fleet_server::checkpoint::CheckpointSigner>,
+                source,
+            )
+        })
+    };
     let started = match (&records, &lease) {
         (fleet_server::Records::Postgres(database), Some(lease)) => {
-            fleet_server::audit_log::AuditLog::start_exporting(
+            fleet_server::audit_log::AuditLog::start_signing(
                 Box::new(fleet_server::postgres::audit::PgAuditStore::new(
                     database.clone(),
                     lease.held(),
@@ -877,19 +976,31 @@ async fn serve() {
                 clock.clone(),
                 Some((lease.held(), Some(lease.proof()))),
                 sink,
+                signing(Box::new(
+                    fleet_server::postgres::checkpoint::Checkpoints::new(
+                        database.clone(),
+                        lease.held(),
+                    ),
+                )),
             )
         }
         _ => config
             .data_dir()
             .ok_or_else(|| "the audit record in files needs data_dir".to_string())
-            .and_then(fleet_server::fs::FsAuditStore::open)
-            .and_then(|store| {
-                fleet_server::audit_log::AuditLog::start_exporting(
+            .and_then(|root| {
+                let store = fleet_server::fs::FsAuditStore::open(root)?;
+                let tip = if audit_key.is_some() {
+                    fleet_server::fs::last_audit_checkpoint(&root.join(fleet_server::fs::AUDIT))?
+                } else {
+                    None
+                };
+                fleet_server::audit_log::AuditLog::start_signing(
                     Box::new(store),
                     config.audit.limits(),
                     clock.clone(),
                     None,
                     sink,
+                    signing(Box::new(fleet_server::checkpoint::OneChain::new(tip))),
                 )
             }),
     };

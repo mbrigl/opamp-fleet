@@ -100,6 +100,28 @@ pub fn status(config: &ServerConfig) -> Result<Vec<Ending>, String> {
         .collect()
 }
 
+/// The audit key `[audit] key_label` names on the `[pkcs11]` token, as `server pki status` prints
+/// it: its label, its public half as PEM, and the SHA-256 of that half the checkpoints carry in
+/// `key`
+/// (ADR-draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token clause 3). `None`
+/// without an audit key.
+///
+/// # Errors
+/// Returns an error when the token cannot be opened or holds no such key.
+pub fn audit_key(config: &ServerConfig) -> Result<Option<(String, String, String)>, String> {
+    let (Some(pkcs11), Some(label)) = (&config.pkcs11, &config.audit.key_label) else {
+        return Ok(None);
+    };
+    let token = crate::pkcs11::Token::open(pkcs11)?;
+    let key = token.key("[audit] key_label", label)?;
+    let spki = crate::checkpoint::CheckpointSigner::public_key_der(&key);
+    Ok(Some((
+        label.clone(),
+        crate::checkpoint::public_pem(&spki),
+        crate::checkpoint::key_sha256(&spki),
+    )))
+}
+
 /// The exit code of `server pki status`: `0` when nothing is ending, `1` when something is, `2`
 /// when something has ended.
 #[must_use]

@@ -491,6 +491,24 @@ impl rcgen::SigningKey for TokenKey {
     }
 }
 
+/// The audit key signs checkpoints through the signer port
+/// (ADR-draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token clause 1): one
+/// `C_Sign` over the digest the writer computes. The checkpoint is its own signature's entry, so
+/// no `pkcs11.signed` is written beside it.
+impl crate::checkpoint::CheckpointSigner for TokenKey {
+    fn label(&self) -> &str {
+        &self.label
+    }
+
+    fn public_key_der(&self) -> Vec<u8> {
+        rcgen::PublicKeyData::subject_public_key_info(self)
+    }
+
+    fn sign_digest(&self, digest: &[u8]) -> Result<Vec<u8>, String> {
+        self.token.sign_digest(&self.label, digest)
+    }
+}
+
 /// The entry of one certificate signed with the token key labelled `label`, naming its issuer and
 /// serial where they are known.
 #[must_use]

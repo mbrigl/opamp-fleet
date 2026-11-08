@@ -11,6 +11,9 @@ use crate::audit_log::{line_hash, AuditStore, Held, Tail};
 pub struct FsAuditStore {
     dir: PathBuf,
     current: Option<(std::fs::File, u64)>,
+    /// The last checkpoint each file the last rotation deleted held or named as removed, by the
+    /// file's name.
+    removed_checkpoints: std::collections::HashMap<String, (u64, String)>,
 }
 
 impl FsAuditStore {
@@ -30,7 +33,11 @@ impl FsAuditStore {
                 return Err(super::unknown(&path));
             }
         }
-        let mut store = FsAuditStore { dir, current: None };
+        let mut store = FsAuditStore {
+            dir,
+            current: None,
+            removed_checkpoints: std::collections::HashMap::new(),
+        };
         if let Some(newest) = store.files()?.pop() {
             let (mut file, mut size) = open_append(&newest)?;
             // A crash mid-write leaves a last line without its newline; the next entry must start
@@ -281,6 +288,102 @@ pub fn verify_in(dir: &Path) -> Result<(usize, Result<Held, String>), String> {
     ))
 }
 
+/// What marks a checkpoint's line: its `event`, the closing quote included, so that
+/// `audit.checkpoint_failed` is not taken for one.
+const CHECKPOINT_EVENT: &str = "\"event\":\"audit.checkpoint\"";
+
+/// The line of the last checkpoint `file` holds, if any.
+fn last_checkpoint_in(file: &Path) -> Result<Option<String>, String> {
+    let bytes = std::fs::read(file).map_err(|e| format!("cannot read {}: {e}", file.display()))?;
+    Ok(bytes
+        .split(|byte| *byte == b'\n')
+        .rev()
+        .filter_map(|line| std::str::from_utf8(line).ok())
+        .find(|line| line.contains(CHECKPOINT_EVENT) && crate::checkpoint::parse(line).is_ok())
+        .map(str::to_string))
+}
+
+/// The `checkpoint_seq` and hash of the last checkpoint `file` holds, or, where it holds none, of
+/// the last one an `audit.rotated` in it names as removed: what its deletion removes.
+fn removed_in(file: &Path) -> Result<Option<(u64, String)>, String> {
+    if let Some(line) = last_checkpoint_in(file)? {
+        let parsed = crate::checkpoint::parse(&line)?;
+        return Ok(Some((parsed.checkpoint_seq, line_hash(&line))));
+    }
+    rotated_in(file)
+}
+
+/// The last checkpoint an `audit.rotated` in `file` names as removed.
+fn rotated_in(file: &Path) -> Result<Option<(u64, String)>, String> {
+    let bytes = std::fs::read(file).map_err(|e| format!("cannot read {}: {e}", file.display()))?;
+    Ok(bytes
+        .split(|byte| *byte == b'\n')
+        .rev()
+        .filter_map(|line| serde_json::from_slice::<serde_json::Value>(line).ok())
+        .filter(|value| {
+            value.get("event").and_then(serde_json::Value::as_str) == Some("audit.rotated")
+        })
+        .find_map(|value| crate::checkpoint::removed_checkpoint(&value)))
+}
+
+/// The newest checkpoint the record in `dir` holds, or, where rotation deleted every one, the
+/// last one an `audit.rotated` names
+/// (ADR-draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token clause 1): where
+/// the Server's next checkpoint goes on from.
+///
+/// # Errors
+/// Returns an error when the files cannot be read.
+pub fn last_checkpoint(dir: &Path) -> Result<Option<crate::checkpoint::Tip>, String> {
+    let files = files_in(dir)?;
+    for file in files.iter().rev() {
+        if let Some(line) = last_checkpoint_in(file)? {
+            let parsed = crate::checkpoint::parse(&line)?;
+            return Ok(Some(crate::checkpoint::Tip {
+                checkpoint_seq: parsed.checkpoint_seq,
+                hash: line_hash(&line),
+                line: Some(line),
+            }));
+        }
+    }
+    for file in files.iter().rev() {
+        if let Some((checkpoint_seq, hash)) = rotated_in(file)? {
+            return Ok(Some(crate::checkpoint::Tip {
+                checkpoint_seq,
+                hash,
+                line: None,
+            }));
+        }
+    }
+    Ok(None)
+}
+
+/// The record in `dir` checked against its checkpoints with `check`
+/// (ADR-draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token clause 4): its one
+/// chain is named `fs`, and the entries the oldest rotation deleted are linked by a signed
+/// `audit.rotated` that names the hash of their last one.
+///
+/// # Errors
+/// Returns an error when the files cannot be read.
+pub fn check_checkpoints(
+    dir: &Path,
+    mut check: crate::checkpoint::Check,
+) -> Result<crate::checkpoint::Report, String> {
+    use crate::checkpoint::FS_CHAIN;
+    let lines = read_lines(&files_in(dir)?)?;
+    let entries: Vec<(u64, &str)> = lines
+        .iter()
+        .filter_map(|(_, line)| seq_of(line).map(|seq| (seq, line.as_str())))
+        .collect();
+    for (seq, line) in &entries {
+        check.collect(FS_CHAIN, *seq, line);
+    }
+    check.plan();
+    for (seq, line) in &entries {
+        check.observe(FS_CHAIN, *seq, line);
+    }
+    Ok(check.finish(|_| false))
+}
+
 impl AuditStore for FsAuditStore {
     fn tail(&mut self) -> Result<Option<Tail>, String> {
         tail_in(&self.dir)
@@ -313,13 +416,19 @@ impl AuditStore for FsAuditStore {
         self.current.as_ref().map_or(0, |(_, size)| *size)
     }
 
+    fn removed_checkpoint(&mut self, file: &str) -> Option<(u64, String)> {
+        self.removed_checkpoints.remove(file)
+    }
+
     fn rotate(&mut self, keep: usize) -> Result<Vec<(String, String)>, String> {
         self.current = None;
+        self.removed_checkpoints.clear();
         let mut files = self.files()?;
         let mut deleted = Vec::new();
         while files.len() >= keep.max(1) {
             let oldest = files.remove(0);
             let last = last_line(&oldest)?.unwrap_or_default();
+            let checkpoint = removed_in(&oldest)?;
             if let Err(e) = std::fs::remove_file(&oldest) {
                 // What was deleted already is still told; the rest stays for the next rotation.
                 tracing::error!(file = %oldest.display(), error = %e, "cannot delete an audit file");
@@ -329,6 +438,9 @@ impl AuditStore for FsAuditStore {
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_default();
+            if let Some(checkpoint) = checkpoint {
+                self.removed_checkpoints.insert(name.clone(), checkpoint);
+            }
             deleted.push((name, last));
         }
         Ok(deleted)

@@ -75,11 +75,19 @@ pub struct Pruned {
     /// Whether it removed as many entries as one round may, so that old entries may be left for
     /// the next round.
     pub capped: bool,
+    /// Whether it ended a chain's run before a checkpoint, because an older one was still held in
+    /// another chain, so that a round after it may go further.
+    pub held_back: bool,
 }
 
 /// The `audit.pruned` entries a prune writes, in order: each chain it prunes, then each link it
 /// carries on, the predecessor on the first of them.
-fn entries(chains: &[Link], carried: &[Link], predecessor: Option<&Predecessor>) -> Vec<Entry> {
+fn entries(
+    chains: &[Link],
+    carried: &[Link],
+    predecessor: Option<&Predecessor>,
+    checkpoint: Option<&(u64, String)>,
+) -> Vec<Entry> {
     let mut entries: Vec<Entry> = chains
         .iter()
         .chain(carried)
@@ -96,6 +104,15 @@ fn entries(chains: &[Link], carried: &[Link], predecessor: Option<&Predecessor>)
             .with("predecessor_chain", predecessor.chain.clone())
             .with("predecessor_seq", predecessor.seq)
             .with("predecessor_hash", predecessor.hash.clone());
+    }
+    // The last checkpoint the prune removes, or that an entry it removes named as removed, which a
+    // verifier goes on from
+    // (ADR-draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token clause 1).
+    if let (Some(first), Some((seq, hash))) = (entries.first_mut(), checkpoint) {
+        *first = first
+            .clone()
+            .with("checkpoint_seq", *seq)
+            .with("checkpoint_hash", hash.clone());
     }
     entries
 }
@@ -164,7 +181,9 @@ fn prune_in_rounds_of(
                     .to_string(),
             );
         }
-        let more = round.capped;
+        // A round that held back from a checkpoint and pruned something may have freed what it
+        // held back from: the rounds go on until nothing more is freed.
+        let more = round.capped || (round.held_back && !round.chains.is_empty());
         rounds.push(round);
         if !more {
             return Ok(rounds);
@@ -282,12 +301,18 @@ async fn round_under(
     let mut pruned = Pruned {
         closed_chains: locked,
         capped: plan.capped,
+        held_back: plan.held_back,
         ..Pruned::default()
     };
     if plan.chains.is_empty() {
         return Ok(pruned);
     }
-    let written = entries(&plan.chains, &plan.carried, plan.predecessor.as_ref());
+    let written = entries(
+        &plan.chains,
+        &plan.carried,
+        plan.predecessor.as_ref(),
+        plan.checkpoint.as_ref(),
+    );
     let recorded = tokio::task::spawn_blocking(move || {
         written.into_iter().all(|entry| audit.record(entry).is_ok()) && audit.drain(WRITTEN_TIMEOUT)
     })
@@ -316,8 +341,13 @@ struct Plan {
     chains: Vec<Link>,
     carried: Vec<Link>,
     predecessor: Option<Predecessor>,
+    /// The `checkpoint_seq` and hash of the last checkpoint it removes, or that an entry it
+    /// removes names as removed.
+    checkpoint: Option<(u64, String)>,
     /// Whether `budget` ran out, so that old entries may be left.
     capped: bool,
+    /// Whether a chain's run ended before a checkpoint newer than one held elsewhere.
+    held_back: bool,
 }
 
 /// For each chain of `chains`, the longest run of entries from its start all stored more than
@@ -331,6 +361,8 @@ async fn plan(
 ) -> Result<Plan, String> {
     let mut plan = Plan::default();
     let mut removed: Vec<Link> = Vec::new();
+    // What the chains planned so far remove, so that the checkpoints they hold count as gone.
+    let (mut planned_chains, mut planned_ends): (Vec<String>, Vec<i64>) = (Vec::new(), Vec::new());
     for chain in chains {
         if budget == 0 {
             plan.capped = true;
@@ -355,7 +387,40 @@ async fn plan(
         if old_end < first {
             continue;
         }
-        let end: i64 = old_end.min(first.saturating_add(budget - 1));
+        let mut end: i64 = old_end.min(first.saturating_add(budget - 1));
+        // No checkpoint goes while an older one is still held in a chain this round does not
+        // prune that far: the run ends before the first checkpoint past the oldest one held
+        // elsewhere, so the checkpoints left follow each other. Nor does the one checkpoint that
+        // named a closed chain closed while that chain still holds entries this round leaves:
+        // without it no checkpoint names the chain
+        // (ADR-draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token clause 1).
+        let held_back: Option<i64> = client
+            .query_one(
+                "SELECT min(c.seq) FROM audit_entries c \
+                 WHERE c.chain = $1::text::uuid AND c.seq <= $2 \
+                 AND (c.checkpoint_seq > (SELECT min(e.checkpoint_seq) FROM audit_entries e \
+                     WHERE e.checkpoint_seq IS NOT NULL AND e.chain <> $1::text::uuid \
+                     AND NOT EXISTS (SELECT 1 FROM unnest($3::text[], $4::bigint[]) \
+                         AS p (chain, seq) \
+                         WHERE e.chain = p.chain::uuid AND e.seq <= p.seq)) \
+                 OR c.checkpoint_seq IN (SELECT ch.named_closed_by FROM audit_chains ch \
+                     WHERE ch.named_closed_by IS NOT NULL AND ch.id <> $1::text::uuid \
+                     AND EXISTS (SELECT 1 FROM audit_entries e WHERE e.chain = ch.id \
+                         AND NOT EXISTS (SELECT 1 FROM unnest($3::text[], $4::bigint[]) \
+                             AS p (chain, seq) \
+                             WHERE e.chain = p.chain::uuid AND e.seq <= p.seq))))",
+                &[chain, &end, &planned_chains, &planned_ends],
+            )
+            .await
+            .map_err(sql)?
+            .get(0);
+        if let Some(checkpoint) = held_back {
+            plan.held_back = true;
+            end = end.min(checkpoint - 1);
+            if end < first {
+                continue;
+            }
+        }
         let Some(row) = client
             .query_opt(
                 "SELECT seq, line FROM audit_entries WHERE chain = $1::text::uuid AND seq = $2",
@@ -380,11 +445,29 @@ async fn plan(
             plan.capped = true;
         }
         let last_seq = super::unsigned(row.get::<_, i64>(0));
+        planned_chains.push(chain.clone());
+        planned_ends.push(end);
         plan.chains.push(Link {
             chain: chain.clone(),
             last_seq,
             last_hash: line_hash(&row.get::<_, String>(1)),
         });
+        if let Some(row) = client
+            .query_opt(
+                "SELECT checkpoint_seq, line FROM audit_entries WHERE chain = $1::text::uuid \
+                 AND seq <= $2 AND checkpoint_seq IS NOT NULL \
+                 ORDER BY checkpoint_seq DESC LIMIT 1",
+                &[chain, &super::signed(last_seq)],
+            )
+            .await
+            .map_err(sql)?
+        {
+            let removed = (
+                super::unsigned(row.get::<_, i64>(0)),
+                line_hash(&row.get::<_, String>(1)),
+            );
+            plan.checkpoint = plan.checkpoint.max(Some(removed));
+        }
         for row in client
             .query(
                 "SELECT line FROM audit_entries WHERE chain = $1::text::uuid AND seq <= $2 \
@@ -396,6 +479,13 @@ async fn plan(
             .map_err(sql)?
         {
             let line: String = row.get(0);
+            if let Ok(value) = serde_json::from_str::<Value>(&line) {
+                if value.get("event").and_then(Value::as_str) == Some(PRUNED) {
+                    plan.checkpoint = plan
+                        .checkpoint
+                        .max(crate::checkpoint::removed_checkpoint(&value));
+                }
+            }
             if let Some((link, predecessor)) = read_pruned(&line) {
                 removed.push(link);
                 plan.predecessor = plan.predecessor.or(predecessor);
