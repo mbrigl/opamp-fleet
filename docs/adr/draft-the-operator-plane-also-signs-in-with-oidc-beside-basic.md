@@ -3,15 +3,15 @@
 - **Status:** 🟡 proposed
 - **Date:** 2026-10-22
 - **Deciders:** Markus Brigl
-- **Applies to:** the Operator plane's guard and its `401` in `crates/fleet-server/src/api.rs`, the token validation and the issuer's key cache beside it, the actor of every Operator-plane audit entry, the sign-in of the bundled UI under `crates/fleet-server/static/`, the Operator plane's Content Security Policy, the `[rest.auth]` and `[rest.auth.oidc]` sections of `server.toml` and their parsing in `crates/fleet-server/src/config.rs`, `config/server.toml`, the `jsonwebtoken` dependency in `Cargo.toml` and `deny.toml`, the outbound connection to the issuer, clauses 13 and 16 of ADR-0026 and clause 21 of ADR-0012, and every document that tells an operator how to sign in
+- **Applies to:** the Operator plane's guard and its `401` in `crates/fleet-server/src/api.rs`, the token validation and the issuer's key cache beside it, the actor of every Operator-plane audit entry, the sign-in of the bundled UI under `crates/fleet-server/static/`, the Operator plane's Content Security Policy, the `[rest.auth]` and `[rest.auth.oidc]` sections of `server.toml` and their parsing in `crates/fleet-server/src/config.rs`, `config/server.toml`, the `jsonwebtoken` dependency in `Cargo.toml` and `deny.toml`, the outbound connection to the issuer, clauses 13 and 16 of ADR-0040 and clause 21 of ADR-0012, and every document that tells an operator how to sign in
 
 ## Context
 
 The Operator plane is guarded as a whole by `[rest.auth]`, Basic only
-([ADR-0026](0026-admission-by-client-certificate-and-revocation.md)
+([ADR-0040](0040-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)
 clause 13). Every route, the UI at `/` included, answers `401` with
 `WWW-Authenticate: Basic realm="opamp"`, and the browser's native prompt is the login. The
-operators' credential is the only one and carries no roles (clause 16). ADR-0026 rejected
+operators' credential is the only one and carries no roles (clause 16). ADR-0040 rejected
 pluggable authenticators for its own change and named the plane's guard as the seam where one
 could be added later.
 
@@ -37,7 +37,8 @@ all three.
 
 This ADR changes three clauses decided elsewhere: the guard of the Operator plane and the rule that
 its credential carries no rights
-([ADR-0026](0026-admission-by-client-certificate-and-revocation.md) clauses 13 and 16),
+([ADR-0040](0040-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)
+clauses 13 and 16),
 and the purposes the Server dials out for
 ([ADR-0012](0012-tls-1-3-two-planes-and-bounded-input.md) clause 21).
 Its clauses 1, 3 and 6 state them as they stand with OIDC.
@@ -49,8 +50,8 @@ validated by the Server against the provider's keys, with the bundled UI as a pu
 holds its tokens in memory, and with the token deciding who acts and nothing about what they may do.
 
 1. **The Operator plane is guarded by `[rest.auth]`, by Basic, OIDC or both, required beyond the
-   loopback.** This is ADR-0026's clause 13 as it stands with OIDC.
-   - `[rest.auth] basic_users` is a map of `user = "$argon2id$…"` (ADR-0026 clause 21); several
+   loopback.** This is ADR-0040's clause 13 as it stands with OIDC.
+   - `[rest.auth] basic_users` is a map of `user = "$argon2id$…"` (ADR-0040 clause 21); several
      users allow rotation and the withdrawal of one operator's credential. `basic_users_file` names
      a file holding that map instead ([ADR-0024](0024-the-servers-configuration.md) clause 5). An
      entry with an empty name or password fails startup.
@@ -127,7 +128,7 @@ holds its tokens in memory, and with the token deciding who acts and nothing abo
    Policy adds the issuer's origin to `connect-src`, computed at startup; every other directive
    stays as it is.
 
-6. **The operators' credentials carry no rights.** This is ADR-0026's clause 16 as it stands with
+6. **The operators' credentials carry no rights.** This is ADR-0040's clause 16 as it stands with
    OIDC. A Basic credential and a token are the only credentials of the Operator plane, and neither
    reaches an Agent's host. Every authenticated operator can do everything the plane offers. The
    Server reads no role, group or scope from a token to decide what a request may do.
@@ -166,7 +167,7 @@ forwarded into the Dev Container, and as a workflow service in CI.
   script would need a token exchange. Rejected by the maintainer.
 - **A server-side confidential client with a session cookie** (a backend for the frontend). The
   token would never reach JavaScript, but it brings a session store, CSRF defences and a cookie
-  policy — what ADR-0026 rejected — and a client secret in `server.toml`. Rejected.
+  policy — what ADR-0040 rejected — and a client secret in `server.toml`. Rejected.
 - **A reverse proxy such as oauth2-proxy in front of the plane.** No code in the Server, but a
   second component to run and harden, and the audit would lose the person unless the Server
   trusted a header the proxy sets. Rejected.
@@ -238,7 +239,7 @@ forwarded into the Dev Container, and as a workflow service in CI.
   credential when OIDC is set. They hold no fleet data, and the API's shape is public in the source.
 - Negative / trade-offs: the provider's client must be set up correctly — public client, PKCE,
   redirect URI, audience mapper — and a wrong setup shows as `401` until it is fixed.
-- Negative / trade-offs: accepting this ADR restates ADR-0026's clauses 13 and 16 and ADR-0012's
+- Negative / trade-offs: accepting this ADR restates ADR-0040's clauses 13 and 16 and ADR-0012's
   clause 21 with clauses 1, 6 and 3; the rest of those ADRs stands as it is.
 - Follow-ups: rights defined in the Server and keyed by `iss` and `sub`, with the specification
   change that narrows its Non-Goal; signing in `opamp-fleetctl` through a device flow; the glossary
