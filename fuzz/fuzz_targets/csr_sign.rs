@@ -6,6 +6,7 @@ use std::sync::OnceLock;
 
 use fleet_server::ca::ClientCa;
 use fleet_server::config::ClientCaConfig;
+use fleet_server::fleet::UseCase;
 use libfuzzer_sys::fuzz_target;
 
 fn ca() -> &'static ClientCa {
@@ -22,7 +23,8 @@ fn ca() -> &'static ClientCa {
         std::fs::write(&key_file, key.serialize_pem()).expect("write");
         let ca = ClientCa::from_config(&ClientCaConfig {
             cert_file,
-            key_file,
+            key_file: Some(key_file),
+            key_label: None,
             validity_days: 30,
         })
         .expect("ca");
@@ -42,7 +44,7 @@ fuzz_target!(|data: &[u8]| {
         organizational_unit: "Fuzz Site".to_string(),
         ..fleet_server::revocation::SubjectValues::default()
     };
-    if let Ok(issued) = ca().sign(csr, "fuzz-host", &subject) {
+    if let Ok(issued) = ca().sign(csr, "fuzz-host", &subject, UseCase::MemberCsr) {
         let (_, pem) = x509_parser::pem::parse_x509_pem(issued.pem.as_bytes()).expect("issued PEM");
         let certificate = pem.parse_x509().expect("issued certificate");
         let is_ca = certificate
