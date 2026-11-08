@@ -103,7 +103,7 @@ pub fn status(config: &ServerConfig) -> Result<Vec<Ending>, String> {
 /// The audit key `[audit] key_label` names on the `[pkcs11]` token, as `server pki status` prints
 /// it: its label, its public half as PEM, and the SHA-256 of that half the checkpoints carry in
 /// `key`
-/// (ADR-draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token clause 3). `None`
+/// (ADR-0041 clause 3). `None`
 /// without an audit key.
 ///
 /// # Errors

@@ -32,7 +32,7 @@ pub struct ClientCa {
     ca_der: Vec<u8>,
     /// The other CAs of `[tls] client_ca_file`, DER: a renewal proof's certificate may be signed
     /// by any of them, so a host renews across a move to new CA keys
-    /// (ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one
+    /// (ADR-0043
     /// clause 13).
     trusted: Vec<Vec<u8>>,
     /// The common name every certificate it signs carries, derived from the CA's (ADR-0037
@@ -58,7 +58,7 @@ impl ClientCa {
     /// The client CA as the Server signs with it: loaded from `[client_ca]`, its key from a file
     /// or from `token`, and accepting a renewal proof from any CA of `tls`'s `client_ca_file`, so
     /// a host renews across a move to new CA keys
-    /// (ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one
+    /// (ADR-0043
     /// clause 13).
     ///
     /// # Errors
@@ -191,7 +191,7 @@ impl ClientCa {
         // revocable things (ADR-0026 clause 26). rcgen would derive it from the key.
         request.params.serial_number = Some(random_serial()?);
         // A token key signs only with a place for its entry held in the record
-        // (ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one
+        // (ADR-0043
         // clause 6).
         let permit = self.issuer.key().reserve()?;
         let certificate = request
@@ -229,7 +229,7 @@ impl ClientCa {
     /// Accepts a renewal proof whose certificate any of `cas` (DER) signed, as well as its own:
     /// the CAs of `[tls] client_ca_file`, which during a move to new CA keys name the old CA beside
     /// the new
-    /// (ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one
+    /// (ADR-0043
     /// clause 13).
     #[must_use]
     pub fn trusting(mut self, cas: Vec<Vec<u8>>) -> Self {
@@ -922,7 +922,7 @@ impl crate::bootstrap::BootstrapSigner for BootstrapCa {
 
 /// A CA's private key: a PKCS#8 file read at startup, or a key on the `[pkcs11]` token named by its
 /// label, which signs there
-/// (ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one
+/// (ADR-0043
 /// clause 5).
 pub enum CaKey {
     File(Box<KeyPair>),
@@ -1082,7 +1082,7 @@ mod tests {
     /// A renewal proof's certificate from another CA of `client_ca_file` holds only as the
     /// handshake would admit it: a client-authentication leaf issued directly by that CA. A
     /// serverAuth-only leaf and a CA certificate it issued are refused; a client leaf of it holds.
-    /// Verifies: ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one
+    /// Verifies: ADR-0043
     #[test]
     fn a_proof_from_another_ca_holds_only_for_a_client_leaf_it_issued() {
         let other_key = KeyPair::generate().expect("other CA key");

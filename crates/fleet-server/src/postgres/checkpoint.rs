@@ -1,5 +1,5 @@
 //! The checkpoints of the audit record on PostgreSQL
-//! (ADR-draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token clause 2): which
+//! (ADR-0041 clause 2): which
 //! instance signs, and what its checkpoint names.
 //!
 //! The instance that holds a session-level advisory lock signs. It holds the lock on one

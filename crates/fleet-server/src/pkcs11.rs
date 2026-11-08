@@ -1,5 +1,5 @@
 //! The Server's signing keys on a PKCS#11 token
-//! (ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one).
+//! (ADR-0043).
 //!
 //! `[pkcs11]` names a module, a token and a PIN file. The Server loads the module through
 //! `cryptoki`, logs in once, and keeps a pool of four sessions on the token. A key on it is named
@@ -492,7 +492,7 @@ impl rcgen::SigningKey for TokenKey {
 }
 
 /// The audit key signs checkpoints through the signer port
-/// (ADR-draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token clause 1): one
+/// (ADR-0041 clause 1): one
 /// `C_Sign` over the digest the writer computes. The checkpoint is its own signature's entry, so
 /// no `pkcs11.signed` is written beside it.
 impl crate::checkpoint::CheckpointSigner for TokenKey {
@@ -530,7 +530,7 @@ mod tests {
 
     /// A P-256 `r || s` becomes the DER X.509 carries, a high bit padded with a zero and leading
     /// zeros dropped.
-    /// Verifies: ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one
+    /// Verifies: ADR-0043
     #[test]
     fn a_raw_signature_becomes_der() {
         let mut raw = [0u8; 64];
@@ -545,7 +545,7 @@ mod tests {
     }
 
     /// The point is read with or without the `OCTET STRING` around it.
-    /// Verifies: ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one
+    /// Verifies: ADR-0043
     #[test]
     fn the_point_is_read_wrapped_or_bare() {
         let mut bare = vec![0x04];

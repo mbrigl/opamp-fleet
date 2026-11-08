@@ -1,5 +1,5 @@
 //! The heads of the audit chains signed with the audit key on a token
-//! (ADR-draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token), on the
+//! (ADR-0041), on the
 //! filesystem store: the writer signs through the token, the Server binary signs at its start and
 //! its shutdown, and `server audit-verify --audit-key` checks the record against the key
 //! `server pki status` prints. The tests that need a token skip without
@@ -60,7 +60,7 @@ fn checkpoints(dir: &Path) -> Vec<String> {
 /// With the audit key on a token, a checkpoint is written within an interval naming the chain's
 /// head, and one at the close; the record verifies against the key's public half, and fails
 /// against another key, and where the head a checkpoint names was changed.
-/// Verifies: ADR-draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token
+/// Verifies: ADR-0041
 #[test]
 fn the_heads_are_signed_on_the_token_and_verify_against_its_public_half() {
     let Some(test) = TestToken::named() else {
@@ -237,7 +237,7 @@ fn text(bytes: &[u8]) -> String {
 /// The Server binary with `[audit] key_label` signs a checkpoint at its start and its shutdown;
 /// `server pki status` prints the key's public half, against which `server audit-verify
 /// --audit-key` holds and prints the newest checkpoint, which holds again as `--since`.
-/// Verifies: ADR-draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token
+/// Verifies: ADR-0041
 #[test]
 fn the_server_signs_its_heads_and_audit_verify_checks_them_against_pki_status() {
     let Some(test) = TestToken::named() else {
@@ -311,7 +311,7 @@ fn the_server_signs_its_heads_and_audit_verify_checks_them_against_pki_status() 
 /// Without `[audit] key_label` the Server says at startup that the heads are not signed, writes no
 /// checkpoint, and `server audit-verify --audit-key` fails naming the missing checkpoints; without
 /// `--audit-key` it says it checked no signature.
-/// Verifies: ADR-draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token
+/// Verifies: ADR-0041
 #[test]
 fn without_an_audit_key_no_checkpoint_is_written_and_the_server_says_so() {
     let dir = tempfile::tempdir().expect("dir");
@@ -346,7 +346,7 @@ fn without_an_audit_key_no_checkpoint_is_written_and_the_server_says_so() {
 
 /// On the files store, a rotation a checkpoint covers is honoured; the oldest file deleted with an
 /// `audit.rotated` forged after the newest checkpoint to explain it is reported and fails.
-/// Verifies: ADR-draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token
+/// Verifies: ADR-0041
 #[test]
 fn a_rotation_counts_once_signed_and_a_forged_one_does_not() {
     let Some(test) = TestToken::named() else {

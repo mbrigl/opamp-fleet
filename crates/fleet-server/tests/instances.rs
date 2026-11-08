@@ -335,7 +335,7 @@ impl Pki {
 
 /// The CAs of instances whose client CA key is on a token: that CA's certificate, its key named
 /// by its label, a bootstrap CA in a file, and the token's settings
-/// (ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one).
+/// (ADR-0043).
 struct Signing<'a> {
     token: &'a token::TestToken,
     client_ca_pem: String,
@@ -2036,7 +2036,7 @@ async fn on_one_token(
 /// both sign renewals: a host renews on A and another on B, each to a certificate the token's key
 /// signed, and each signature is in that instance's record. The hosts' certificates come from the
 /// CA beside it in `client_ca_file`, so each moves to the token's key at its renewal.
-/// Verifies: ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one
+/// Verifies: ADR-0043
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_instances_on_one_token_both_sign_renewals() {
     let Some(schema) = Schema::named() else {
@@ -2074,7 +2074,7 @@ async fn two_instances_on_one_token_both_sign_renewals() {
 /// A host enrols through B's Agent plane, over its WebSocket, while A opened the window; it is
 /// approved on A, whose client CA's key is on the token both share, and B hands the certificate to
 /// the connection that asked. The host is admitted on both.
-/// Verifies: ADR-0025, ADR-0027, ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one
+/// Verifies: ADR-0025, ADR-0027, ADR-0043
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_enrolment_approved_on_one_instance_is_handed_out_by_the_other() {
     let Some(schema) = Schema::named() else {
@@ -5422,7 +5422,7 @@ fn checkpoints_in(schema: &Schema) -> Vec<(String, fleet_server::checkpoint::Par
 
 /// On PostgreSQL with two instances, one signs at a time, each checkpoint names both chains, and
 /// the other takes over once the signer's connection ends; the record verifies against the key.
-/// Verifies: ADR-draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token
+/// Verifies: ADR-0041
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn one_instance_signs_at_a_time_naming_every_chain_and_another_takes_over() {
     use fleet_server::audit::Audit as _;
@@ -5607,7 +5607,7 @@ impl fleet_server::checkpoint::CheckpointSource for Racing {
 
 /// Two instances that both sign the same next checkpoint leave one per number: the insert of the
 /// one that comes second fails, and its instance writes `audit.checkpoint_failed`.
-/// Verifies: ADR-draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token
+/// Verifies: ADR-0041
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_signers_racing_leave_one_checkpoint_per_number() {
     let Some(schema) = Schema::named() else {
@@ -5670,7 +5670,7 @@ async fn two_signers_racing_leave_one_checkpoint_per_number() {
 
 /// A prune that removes checkpoints names the last of them, and the record still verifies from
 /// the first checkpoint left.
-/// Verifies: ADR-draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token
+/// Verifies: ADR-0041
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_prune_names_the_last_checkpoint_it_removes_and_the_record_verifies_after() {
     use fleet_server::audit::Audit as _;
@@ -5854,7 +5854,7 @@ async fn prune_now(
 /// entries are all past `retain_days`, holds back from its checkpoints while A still holds older
 /// ones; A's prune removes A's; then B's goes on. `audit-verify --audit-key` holds after each,
 /// once a checkpoint covers the prune's entries.
-/// Verifies: ADR-draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token
+/// Verifies: ADR-0041
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_prune_holds_back_from_checkpoints_newer_than_one_held_in_another_chain() {
     let Some(schema) = Schema::named() else {
@@ -5939,7 +5939,7 @@ async fn a_prune_holds_back_from_checkpoints_newer_than_one_held_in_another_chai
 /// The signing passes back and forth between A and B several times, and B stops, its chain
 /// closed. One prune by A, which holds the prune lock, repeats its rounds until nothing more is
 /// freed: every old checkpoint goes, in A's chain and in B's closed one, and the record verifies.
-/// Verifies: ADR-draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token
+/// Verifies: ADR-0041
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn one_prune_frees_checkpoints_after_several_signer_changes() {
     let Some(schema) = Schema::named() else {
@@ -6018,7 +6018,7 @@ async fn one_prune_frees_checkpoints_after_several_signer_changes() {
 }
 
 /// A closed chain is named closed by one checkpoint, and by none after it.
-/// Verifies: ADR-draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token
+/// Verifies: ADR-0041
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_closed_chain_is_named_by_one_checkpoint() {
     let Some(schema) = Schema::named() else {
@@ -6137,7 +6137,7 @@ async fn signed_then_still(
 
 /// A chain removed whole, with an `audit.pruned` added after the newest checkpoint to explain it,
 /// still fails: only a removal a checkpoint covers counts.
-/// Verifies: ADR-draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token
+/// Verifies: ADR-0041
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_chain_removed_with_a_forged_prune_in_the_unsigned_tail_fails() {
     let Some(schema) = Schema::named() else {
@@ -6184,7 +6184,7 @@ async fn a_chain_removed_with_a_forged_prune_in_the_unsigned_tail_fails() {
 /// A chain's young entries cut, with an `audit.pruned` added after the newest checkpoint naming
 /// the last one cut, still fails: the earlier checkpoints name heads among them, and the chain
 /// begins where no signed removal says it may.
-/// Verifies: ADR-draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token
+/// Verifies: ADR-0041
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_young_cut_with_a_forged_prune_in_the_unsigned_tail_fails() {
     let Some(schema) = Schema::named() else {
@@ -6275,7 +6275,7 @@ fn forge_pruned_at(
 
 /// B's young, signed entries cut from an unnamed `seq` on, and one `audit.pruned` placed at that
 /// `seq` naming B's own newest head: no head that is still there covers it, so it fails.
-/// Verifies: ADR-draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token
+/// Verifies: ADR-0041
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_young_cut_excused_by_a_prune_inside_it_fails() {
     let Some(schema) = Schema::named() else {
@@ -6323,7 +6323,7 @@ async fn a_young_cut_excused_by_a_prune_inside_it_fails() {
 /// Three instances. C removed whole and B's tail cut, with prunes placed in B's cut run naming
 /// C's newest head and B's own; then, separately, B and C both cut with prunes that excuse each
 /// other. Each fails.
-/// Verifies: ADR-draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token
+/// Verifies: ADR-0041
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn chains_cut_with_prunes_that_excuse_each_other_fail() {
     let Some(schema) = Schema::named() else {
@@ -6522,7 +6522,7 @@ async fn closed_chain_named_once_then_old(
 
 /// A closed chain named closed by one checkpoint: A's own prune keeps that checkpoint while the
 /// chain still holds entries, so removing the chain afterwards is still found.
-/// Verifies: ADR-draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token
+/// Verifies: ADR-0041
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_closed_chain_whose_naming_checkpoint_is_old_cannot_be_removed_unseen() {
     let Some(schema) = Schema::named() else {
@@ -6555,7 +6555,7 @@ async fn a_closed_chain_whose_naming_checkpoint_is_old_cannot_be_removed_unseen(
 
 /// As above, but C pruned its own oldest entries while open: the honest record still verifies
 /// after A's prune, since the checkpoint naming C closed, which covers C's prune, is kept.
-/// Verifies: ADR-draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token
+/// Verifies: ADR-0041
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_honest_record_holds_after_a_prune_while_a_closed_self_pruned_chain_remains() {
     let Some(schema) = Schema::named() else {

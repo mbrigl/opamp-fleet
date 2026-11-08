@@ -45,7 +45,7 @@ dialoguer.workspace = true
 rcgen.workspace = true
 # `pki token-init` and `pki bootstrap-ca --pkcs11-module` make keys on the Server's PKCS#11 token
 # through the wrapper the Server signs with
-# (ADR-draft-the-operator-program-opamp-fleetctl clause 5).
+# (ADR-0042 clause 5).
 cryptoki.workspace = true
 time.workspace = true
 x509-parser.workspace = true

@@ -1,6 +1,6 @@
 //! The CA keys on a PKCS#11 token, against SoftHSM2: the token signs, the Server builds and
 //! audits every signature
-//! (ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one).
+//! (ADR-0043).
 //! Each test makes a token of its own; without `FLEET_TEST_PKCS11_MODULE` it says so and skips.
 #![cfg(unix)]
 
@@ -88,7 +88,7 @@ fn client_ca_on(
 /// A host certificate signed through the token verifies against the CA certificate whose key is on
 /// it, and the signature wrote `pkcs11.signed` naming the key, the issuer and serial, and the use
 /// case; so does a bootstrap certificate.
-/// Verifies: ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one
+/// Verifies: ADR-0043
 #[test]
 fn the_token_signs_and_every_signature_is_audited() {
     let Some(test) = TestToken::named() else {
@@ -195,7 +195,7 @@ fn the_token_signs_and_every_signature_is_audited() {
 }
 
 /// With no place in the record for its entry, nothing is signed with a token key.
-/// Verifies: ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one
+/// Verifies: ADR-0043
 #[test]
 fn without_a_record_nothing_is_signed() {
     let Some(test) = TestToken::named() else {
@@ -237,7 +237,7 @@ fn without_a_record_nothing_is_signed() {
 /// A key file signs as before and writes no `pkcs11.signed`: the client CA moves to the token, a
 /// renewal proof from the old CA in `client_ca_file` is accepted, and the token's key signs the
 /// renewal.
-/// Verifies: ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one
+/// Verifies: ADR-0043
 #[test]
 fn a_host_moves_to_the_token_key_at_its_ordinary_renewal() {
     let Some(test) = TestToken::named() else {
@@ -322,7 +322,7 @@ fn a_host_moves_to_the_token_key_at_its_ordinary_renewal() {
 
 /// A PIN file that others may read fails startup naming it; a token that is not there and a key
 /// that is not on it fail naming them.
-/// Verifies: ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one
+/// Verifies: ADR-0043
 #[test]
 fn what_is_not_there_fails_startup_naming_it() {
     use std::os::unix::fs::PermissionsExt as _;
@@ -380,7 +380,7 @@ fn missing_with(test: &TestToken) -> fleet_server::config::Pkcs11Config {
 
 /// A module whose manufacturer is `SoftHSM` is a software token: the Server says so in its log
 /// and writes `pkcs11.software_token` at every start.
-/// Verifies: ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one
+/// Verifies: ADR-0043
 #[test]
 fn a_software_token_says_so() {
     let Some(test) = TestToken::named() else {
@@ -397,7 +397,7 @@ fn a_software_token_says_so() {
 
 /// The bootstrap CA's key on the token is checked against `bootstrap_ca_file` and against the
 /// client CA's key, as a key file is.
-/// Verifies: ADR-draft-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token
+/// Verifies: ADR-0040
 #[test]
 fn a_bootstrap_key_on_the_token_is_its_own() {
     let Some(test) = TestToken::named() else {
@@ -444,7 +444,7 @@ impl Drop for ServerUnderTest {
 /// the client CA's, the bootstrap CA's and the audit key named by their labels: `server.toml`
 /// names no path of SoftHSM2's own beside `[pkcs11] module`. It warns that the keys have no
 /// hardware protection and writes `pkcs11.software_token` into its record.
-/// Verifies: ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one
+/// Verifies: ADR-0043
 #[test]
 fn the_server_starts_on_a_software_token_and_says_so() {
     use std::io::{BufRead as _, BufReader};
@@ -538,7 +538,7 @@ fn the_server_starts_on_a_software_token_and_says_so() {
 
 /// Signatures from more threads than the pool has sessions all complete and all verify: each waits
 /// for a session of the four, and no more than four are opened.
-/// Verifies: ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one
+/// Verifies: ADR-0043
 #[test]
 fn more_signers_than_sessions_take_turns_on_the_pool() {
     const THREADS: usize = 12;

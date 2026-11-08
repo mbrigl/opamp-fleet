@@ -166,12 +166,12 @@ pub struct Database {
     outdated: std::sync::Mutex<Option<String>>,
     /// The `[audit] key_label` this instance names, which its lease records and every other live
     /// lease must name too
-    /// (ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one
+    /// (ADR-0043
     /// clause 14).
     audit_key_label: std::sync::Mutex<Option<String>>,
     /// Where the lines a lease's transaction writes into a chain are exported to, set once where
     /// `[audit.export]` names a receiver
-    /// (ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one
+    /// (ADR-0043
     /// clause 9).
     audit_export: std::sync::OnceLock<crate::audit_export::Sink>,
     /// The notifications of the calls whose answer was lost, which the listener hands on

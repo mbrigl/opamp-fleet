@@ -47,7 +47,7 @@ impl PgAuditStore {
     /// A `checkpoint`, its `checkpoint_seq` and the hash of the checkpoint before, is the one line
     /// written: it is inserted only while the newest checkpoint is that one, and the head row moves
     /// to it in the same transaction
-    /// (ADR-draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token clause 2).
+    /// (ADR-0041 clause 2).
     fn write(
         &mut self,
         seq: u64,
@@ -307,7 +307,7 @@ pub(crate) struct Written {
 impl Written {
     /// Emits the `tracing` copy of the line (ADR-0028 clause 6), and hands it to `export` where
     /// `[audit.export]` names a receiver
-    /// (ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one
+    /// (ADR-0043
     /// clause 9).
     pub(crate) fn emit(&self, export: Option<&crate::audit_export::Sink>) {
         crate::audit_log::emit(self.seq, self.event, "recorded", &self.line);
@@ -513,7 +513,7 @@ pub fn verify_in(
 }
 
 /// [`verify_on`], and every chain checked against the checkpoints with `check`
-/// (ADR-draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token clause 4).
+/// (ADR-0041 clause 4).
 ///
 /// # Errors
 /// As [`verify_on`].
@@ -604,7 +604,7 @@ pub fn verify_checked(
             .collect();
         // The checkpoints, the failed ones and what removed checkpoints first, then every entry
         // as the chains are walked
-        // (ADR-draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token clause 4).
+        // (ADR-0041 clause 4).
         if let Some(check) = check.as_mut() {
             for row in transaction
                 .query(
@@ -1331,7 +1331,7 @@ mod tests {
     /// transaction writes, `audit.chain_opened` and the closing of a lapsed chain, as well as the
     /// writer's. An entry held to try again after its lease lapsed is exported once, as it is
     /// written into the next chain, and not before.
-    /// Verifies: ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one, ADR-0029
+    /// Verifies: ADR-0043, ADR-0029
     #[test]
     fn the_export_is_handed_every_line_once_it_is_in_a_chain() {
         let Some(test) = TestDatabase::named() else {

@@ -177,7 +177,7 @@ pub const MIGRATIONS: &[Migration] = &[
     // A column only added, without a default. A Server of 0.8.0 writes no label into it, so its
     // lease names none, and an instance of this release with an audit key refuses to start beside
     // it
-    // (ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one
+    // (ADR-0043
     // clause 14).
     Migration {
         version: 16,
@@ -187,7 +187,7 @@ pub const MIGRATIONS: &[Migration] = &[
     // Two columns only added, without a default, an index, and a table with its one row. A Server
     // of 0.8.0 writes no checkpoint, and an instance of this release that signs refuses to start
     // beside one by the audit key label of migration 16
-    // (ADR-draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token clause 2).
+    // (ADR-0041 clause 2).
     Migration {
         version: 17,
         oldest_server: "0.8.0",
@@ -196,7 +196,7 @@ pub const MIGRATIONS: &[Migration] = &[
 ];
 
 /// The checkpoints of the audit record
-/// (ADR-draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token clause 2): each
+/// (ADR-0041 clause 2): each
 /// checkpoint entry's `checkpoint_seq`, at most one entry per number; the checkpoint that named each
 /// closed chain closed, so that no later one names it again; and the newest checkpoint's number and
 /// hash, which the transaction that inserts the next one compares and sets, and which a prune of
@@ -216,7 +216,7 @@ INSERT INTO audit_checkpoint_head (seq, hash)
 ";
 
 /// The `[audit] key_label` of the instance that holds each lease, null for none
-/// (ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one
+/// (ADR-0043
 /// clause 14).
 const LEASE_AUDIT_KEY: &str = "
 ALTER TABLE leases ADD COLUMN audit_key_label text;

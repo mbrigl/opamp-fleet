@@ -170,7 +170,7 @@ impl Database {
             // Every live lease that is not taken over names the same audit key as this one, or
             // none as this one does; at a start and at a new lease after a lapse alike, a
             // differing one stops the instance
-            // (ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one
+            // (ADR-0043
             // clause 14).
             if let Some(theirs) = live
                 .iter()
@@ -412,7 +412,7 @@ mod tests {
     /// records it, and an instance whose label differs from a live lease's, a label against none
     /// included, is refused naming the key, at its start and at a new lease after a lapse alike,
     /// and the refusal is kept, so the instance stops.
-    /// Verifies: ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one
+    /// Verifies: ADR-0043
     #[test]
     fn instances_on_one_database_name_the_same_audit_key() {
         let Some(test) = TestDatabase::named() else {

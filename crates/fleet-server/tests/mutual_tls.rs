@@ -594,7 +594,7 @@ async fn a_member_is_admitted_on_its_certificate_alone() {
 /// them for a move to new CA keys: a leaf of each is admitted as a member, on both transports,
 /// with `[enrolment]` set, so each is told apart from a bootstrap certificate by its issuer's
 /// name and key.
-/// Verifies: ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one
+/// Verifies: ADR-0043
 #[tokio::test]
 async fn a_leaf_of_either_of_two_same_named_client_cas_is_admitted() {
     let old = Pki::new();

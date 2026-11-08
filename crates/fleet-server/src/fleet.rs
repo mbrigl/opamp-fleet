@@ -482,7 +482,7 @@ pub trait CertificateSigner: Send + Sync {
     /// carries `subject` — the values copied from the bootstrap certificate or the predecessor
     /// (ADR-0016 clause 23 and ADR-0027 clause 12) — and never the request's. `use_case` is what
     /// asked for it, which the audit entry of a signature with a token key names
-    /// (ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one
+    /// (ADR-0043
     /// clause 6).
     ///
     /// # Errors

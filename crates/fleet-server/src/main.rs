@@ -36,7 +36,7 @@ fn usage() -> ! {
 /// (ADR-0029 clauses 5 and 6). Either form, given `--audit-key <PEM file>`, checks every chain
 /// against the signed checkpoints too, from the saved checkpoint line in the file `--since` names
 /// where one is given, and prints the newest checkpoint's line after `checkpoint: `
-/// (ADR-draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token clause 4).
+/// (ADR-0041 clause 4).
 fn audit_verify(mut args: impl Iterator<Item = String>) -> ! {
     let (mut dir, mut config, mut archive, mut key, mut since) = (None, None, None, None, None);
     while let Some(arg) = args.next() {
@@ -227,7 +227,7 @@ fn pki(mut args: impl Iterator<Item = String>) -> ! {
         );
     }
     // The audit key's public half, for the operator to keep where the Server cannot rewrite it
-    // (ADR-draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token clause 3).
+    // (ADR-0041 clause 3).
     match pki::audit_key(&config) {
         Ok(None) => {}
         Ok(Some((label, pem, sha256))) => {
@@ -717,7 +717,7 @@ async fn serve() {
     }
     // The token the CA keys and the audit key may live on, opened before any key is read from it;
     // a module, token, PIN or key that is not there fails startup, naming it
-    // (ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one
+    // (ADR-0043
     // clause 1).
     let (token, audit_key) = match config
         .pkcs11
@@ -950,7 +950,7 @@ async fn serve() {
     let sink = export.as_ref().map(|export| export.sink());
     // With the audit key, the heads of every chain are signed about once a minute and at the
     // shutdown's close; without it the chains alone are the record, and the Server says so
-    // (ADR-draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token clauses 2 and 5).
+    // (ADR-0041 clauses 2 and 5).
     if audit_key.is_none() {
         tracing::warn!(
             "the heads of the audit record are not signed: [audit] key_label names no audit key \

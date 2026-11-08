@@ -2,7 +2,7 @@
 //!
 //! `token-init`, run on the Server host, makes the client CA's, the bootstrap CA's and the audit
 //! key on the Server's PKCS#11 token instead, and `init --ca-keys-on-token` leaves those CAs to it
-//! (ADR-draft-the-operator-program-opamp-fleetctl clauses 7 and 8).
+//! (ADR-0042 clauses 7 and 8).
 //!
 //! `init` makes the three certificate authorities — the server CA, the client CA and the bootstrap
 //! CA — the Server's certificate and the package signing key; `server-cert` makes another server certificate, for the
@@ -403,7 +403,7 @@ pub fn init(options: &InitOptions) -> Result<Vec<String>, String> {
         options.ca_days,
     )?;
     // With the CA keys on the token, `token-init` makes both CAs on the Server host (clause 7 of
-    // ADR-draft-the-operator-program-opamp-fleetctl).
+    // ADR-0042).
     let cas = if options.ca_keys_on_token {
         None
     } else {
@@ -596,7 +596,7 @@ pub fn bootstrap_ca(
 }
 
 /// `pki token-init`
-/// (ADR-draft-the-operator-program-opamp-fleetctl clause 8): on the Server host, the client CA's,
+/// (ADR-0042 clause 8): on the Server host, the client CA's,
 /// the bootstrap CA's and the audit key made on the token, none extractable; both CA certificates
 /// signed through the token with their own key; and into `--out` the two certificates and
 /// `token.toml.fragment`. No key is written to a file.
@@ -706,7 +706,7 @@ fn write_token_init(
 }
 
 /// `pki bootstrap-ca --pkcs11-module`
-/// (ADR-draft-the-operator-program-opamp-fleetctl clause 12): a new bootstrap CA whose key is made
+/// (ADR-0042 clause 12): a new bootstrap CA whose key is made
 /// on the token under a new label, and its certificate into `--out`.
 ///
 /// # Errors
@@ -1949,7 +1949,7 @@ mod tests {
 
     /// With the CA keys on the token, `init` makes neither the client CA nor the bootstrap CA,
     /// writes none of their four files, and its fragment names `[tls]` alone.
-    /// Verifies: ADR-draft-the-operator-program-opamp-fleetctl, ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one
+    /// Verifies: ADR-0042, ADR-0043
     #[test]
     fn init_with_the_ca_keys_on_the_token_leaves_both_cas_to_it() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -2089,7 +2089,7 @@ mod tests {
     /// `pki token-init` makes the client CA's, the bootstrap CA's and the audit key on the token,
     /// none extractable, signs both CA certificates through it, writes no key file, and refuses a
     /// label the token holds already.
-    /// Verifies: ADR-draft-the-operator-program-opamp-fleetctl, ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one
+    /// Verifies: ADR-0042, ADR-0043
     #[test]
     fn token_init_makes_the_keys_on_the_token_and_writes_none() {
         let Some((token, _pin)) = fresh_token() else {
@@ -2150,7 +2150,7 @@ mod tests {
 
     /// `pki bootstrap-ca --pkcs11-module` makes the key on the token under a new label it prints,
     /// and writes the certificate alone.
-    /// Verifies: ADR-draft-the-operator-program-opamp-fleetctl
+    /// Verifies: ADR-0042
     #[test]
     fn a_new_bootstrap_ca_on_the_token_writes_its_certificate_alone() {
         let Some((token, _pin)) = fresh_token() else {
@@ -2174,7 +2174,7 @@ mod tests {
 
     /// A `token-init` that fails after it made keys on the token, here because `--out` cannot be
     /// created, destroys them again and says so, so a rerun on the same token works.
-    /// Verifies: ADR-draft-the-operator-program-opamp-fleetctl
+    /// Verifies: ADR-0042
     #[test]
     fn a_token_init_that_fails_partway_leaves_the_token_as_it_was() {
         let Some((token, _turn)) = fresh_token() else {

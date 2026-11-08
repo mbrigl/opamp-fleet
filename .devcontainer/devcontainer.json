@@ -58,7 +58,7 @@
   //   softhsm2  the PKCS#11 token the tests of the Server's keys on a token run against, as the
   //             CI runner's do; scripts/check-rust.sh and scripts/check-store.sh give it a
   //             configuration and a token directory of their own, outside the repository
-  //             (ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one
+  //             (ADR-0043
   //             clause 7). Without it those tests skip locally.
   "postCreateCommand": {
     "packages": "sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends shellcheck socat llvm softhsm2"

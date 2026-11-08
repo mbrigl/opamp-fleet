@@ -473,7 +473,7 @@ async fn renew(lease: &Renewing, taken: Taken) {
                 // lease that names another audit key: it stops, as at a failed start
                 // (ADR-0025
                 // clause 16, and clause 14 of
-                // ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one).
+                // ADR-0043).
                 Err(e) if database.outdated().is_some() => {
                     error!(
                         lost = %instance_id,

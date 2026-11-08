@@ -1,5 +1,5 @@
 //! The audit record's export
-//! (ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one
+//! (ADR-0043
 //! clause 9), seen from outside the Server binary: an OTLP/HTTP receiver in the test process, and a
 //! decision on the Operator plane, whose `operator.act` entry the Server records before it runs.
 #![cfg(unix)]
@@ -275,7 +275,7 @@ fn stored_act(data: &Path) -> String {
 
 /// Without `[audit.export]` the Server opens no export connection, the OpenTelemetry SDK's own
 /// variables naming a receiver in its environment notwithstanding.
-/// Verifies: ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one, ADR-0012
+/// Verifies: ADR-0043, ADR-0012
 #[test]
 fn without_an_export_section_the_server_opens_no_export_connection() {
     let (port, hearing) = receiver();
@@ -305,7 +305,7 @@ fn without_an_export_section_the_server_opens_no_export_connection() {
 /// With `[audit.export]` naming a receiver, a decision recorded reaches it as an OTLP log record
 /// whose body is the line the store holds, with its sequence number, time and previous hash, on
 /// the path the endpoint names.
-/// Verifies: ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one, ADR-0012
+/// Verifies: ADR-0043, ADR-0012
 #[test]
 fn a_recorded_decision_reaches_the_export_receiver_as_the_stored_line() {
     let (port, hearing) = receiver();
@@ -343,7 +343,7 @@ fn a_recorded_decision_reaches_the_export_receiver_as_the_stored_line() {
 /// With `[audit.export]` naming a receiver that takes connections and never answers, the Server
 /// still answers every act, its export drops what its queue cannot hold, and the count of what it
 /// dropped reaches the record as `audit.export_dropped` at shutdown.
-/// Verifies: ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one, ADR-0028
+/// Verifies: ADR-0043, ADR-0028
 #[test]
 fn a_silent_receiver_blocks_no_decision_and_the_dropped_count_reaches_the_record() {
     // Bound and never accepted from: a connection completes and then hears nothing.
@@ -425,7 +425,7 @@ fn a_silent_receiver_blocks_no_decision_and_the_dropped_count_reaches_the_record
 /// With `[audit.export]` set, the `OTEL_*` variables in the Server's environment change nothing
 /// the export sends: no header they name reaches the receiver, a credential included, nor the
 /// exporter's own `User-Agent`; the compression they name is not taken up.
-/// Verifies: ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one, ADR-0012
+/// Verifies: ADR-0043, ADR-0012
 #[test]
 fn the_export_sends_no_header_the_environment_names() {
     let (port, hearing) = receiver();
@@ -482,7 +482,7 @@ fn the_export_sends_no_header_the_environment_names() {
 /// Over `https://` the export trusts the root `ca_file` names: a TLS 1.3 receiver whose
 /// certificate a CA of the test's own signed gets the line. A receiver that speaks TLS 1.2 alone
 /// gets nothing, as one whose root is not named does not either.
-/// Verifies: ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one, ADR-0012
+/// Verifies: ADR-0043, ADR-0012
 #[test]
 fn over_https_the_export_trusts_ca_file_and_speaks_tls_1_3_alone() {
     let (tls13, ca13) = receiver_tls(&[&rustls::version::TLS13]);

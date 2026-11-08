@@ -1,6 +1,6 @@
 //! The keys `opamp-fleetctl pki token-init` and `pki bootstrap-ca --pkcs11-module` make on a
 //! PKCS#11 token, on the Server host
-//! (ADR-draft-the-operator-program-opamp-fleetctl clauses 5, 8 and 12): P-256, generated on the
+//! (ADR-0042 clauses 5, 8 and 12): P-256, generated on the
 //! token with `CKA_EXTRACTABLE` false and `CKA_SENSITIVE` true, and used only through `C_Sign`. The
 //! CA certificates are built here and signed by the token with their own key.
 
@@ -284,7 +284,7 @@ mod tests {
     use super::*;
 
     /// A P-256 `r || s` becomes the DER X.509 carries.
-    /// Verifies: ADR-draft-the-operator-program-opamp-fleetctl
+    /// Verifies: ADR-0042
     #[test]
     fn a_raw_signature_becomes_der() {
         let mut raw = [0u8; 64];

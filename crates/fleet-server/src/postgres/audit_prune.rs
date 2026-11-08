@@ -107,7 +107,7 @@ fn entries(
     }
     // The last checkpoint the prune removes, or that an entry it removes named as removed, which a
     // verifier goes on from
-    // (ADR-draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token clause 1).
+    // (ADR-0041 clause 1).
     if let (Some(first), Some((seq, hash))) = (entries.first_mut(), checkpoint) {
         *first = first
             .clone()
@@ -393,7 +393,7 @@ async fn plan(
         // elsewhere, so the checkpoints left follow each other. Nor does the one checkpoint that
         // named a closed chain closed while that chain still holds entries this round leaves:
         // without it no checkpoint names the chain
-        // (ADR-draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token clause 1).
+        // (ADR-0041 clause 1).
         let held_back: Option<i64> = client
             .query_one(
                 "SELECT min(c.seq) FROM audit_entries c \

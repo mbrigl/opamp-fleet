@@ -132,7 +132,7 @@ pub struct ServerConfig {
     #[serde(default)]
     pub audit: AuditConfig,
     /// The PKCS#11 token the CA keys and the audit key may live on
-    /// (ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one);
+    /// (ADR-0043);
     /// absent, every CA key is a file and there is no audit key.
     pub pkcs11: Option<Pkcs11Config>,
     /// How often an admitted peer may be heard on the Agent plane (ADR-0012).
@@ -224,7 +224,7 @@ pub struct AuditConfig {
 }
 
 /// The `[audit.export]` section
-/// (ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one
+/// (ADR-0043
 /// clause 9): the OTLP/HTTP endpoint every entry of the audit record is sent to as a log record,
 /// over TLS 1.3, plaintext to a loopback IP literal alone. The Server authenticates to it with
 /// nothing beyond TLS.
@@ -262,7 +262,7 @@ impl AuditExportConfig {
 }
 
 /// The `[pkcs11]` section
-/// (ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one
+/// (ADR-0043
 /// clause 1): the module the Server loads, the token it signs on, and the file of the user PIN.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -3250,7 +3250,7 @@ mod tests {
 
     /// CA keys named by their labels on the token leave an instance free to share its database
     /// with others.
-    /// Verifies: ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one
+    /// Verifies: ADR-0043
     #[test]
     fn keys_on_the_token_do_not_make_an_instance_alone() {
         let toml = "[blobs]\nstore = \"s3\"\n[blobs.s3]\nendpoint = \"https://s3.example\"\n\
@@ -3268,7 +3268,7 @@ mod tests {
     /// `[client_ca]` names its key as exactly one of a file and a label; a label, there or in
     /// `[enrolment]` or `[audit]`, needs `[pkcs11]`; a key file alone starts without a token on
     /// either store.
-    /// Verifies: ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one, ADR-draft-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token
+    /// Verifies: ADR-0043, ADR-0040
     #[test]
     fn a_ca_key_is_a_file_or_a_label_and_a_label_needs_the_token() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3571,7 +3571,7 @@ mod tests {
     /// `[audit.export]` is off unless named; it names an `https://` endpoint, or an `http://` one
     /// on a loopback IP literal, and a `ca_file`. Plaintext elsewhere, another scheme and any other
     /// key fail startup naming the section.
-    /// Verifies: ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one, ADR-0012
+    /// Verifies: ADR-0043, ADR-0012
     #[test]
     fn the_audit_export_is_off_unless_named_and_never_plaintext_off_the_loopback() {
         let load = |text: &str| {

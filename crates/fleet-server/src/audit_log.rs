@@ -144,7 +144,7 @@ pub trait AuditStore: Send {
 
     /// The `checkpoint_seq` and hash of the last checkpoint the file `file`, which the last
     /// [`rotate`](Self::rotate) deleted, held or named as removed, if any
-    /// (ADR-draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token clause 1).
+    /// (ADR-0041 clause 1).
     fn removed_checkpoint(&mut self, file: &str) -> Option<(u64, String)> {
         let _ = file;
         None
@@ -154,7 +154,7 @@ pub trait AuditStore: Send {
     /// is `checkpoint_prev`, alone, as [`append`](Self::append) does. A store several processes
     /// write holds at most one checkpoint per `checkpoint_seq` and takes one only while
     /// `checkpoint_prev` names its newest
-    /// (ADR-draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token clause 2).
+    /// (ADR-0041 clause 2).
     ///
     /// # Errors
     /// Returns an error when the line cannot be written, or another checkpoint came first; then
@@ -370,7 +370,7 @@ impl AuditLog {
 
     /// [`start`](Self::start), or with `held` [`start_under`](Self::start_under), and every line
     /// the store accepts handed to `export` as well
-    /// (ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one
+    /// (ADR-0043
     /// clause 9).
     ///
     /// # Errors
@@ -387,7 +387,7 @@ impl AuditLog {
 
     /// [`start_exporting`](Self::start_exporting), and, with `signing`, a checkpoint of the heads
     /// of every chain signed at every interval and at the shutdown's close
-    /// (ADR-draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token clause 2).
+    /// (ADR-0041 clause 2).
     ///
     /// # Errors
     /// Returns an error when the store cannot be read.
@@ -1029,7 +1029,7 @@ impl Writer {
                         let mut entry = Entry::new("audit.rotated", "recorded")
                             .with("deleted_last_hash", line_hash(&last));
                         // The last checkpoint the file held, which a verifier goes on from
-                        // (ADR-draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token
+                        // (ADR-0041
                         // clause 1).
                         if let Some((seq, hash)) = self.store.removed_checkpoint(&file) {
                             entry = entry
@@ -1210,7 +1210,7 @@ impl Writer {
 }
 
 /// The checkpoints' signing
-/// (ADR-draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token clause 2): the
+/// (ADR-0041 clause 2): the
 /// audit key, where the heads come from, and how often.
 pub struct Signing {
     pub signer: Arc<dyn crate::checkpoint::CheckpointSigner>,
@@ -2160,7 +2160,7 @@ mod tests {
     /// The export is handed every line once the store has accepted it, as the store holds it, in
     /// the order of the chain; the lines of a batch the store refused are lost, and none of them is
     /// exported.
-    /// Verifies: ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one, ADR-0028
+    /// Verifies: ADR-0043, ADR-0028
     #[test]
     fn the_export_is_handed_each_line_the_store_accepted_as_it_holds_it() {
         let memory = Memory::default();
@@ -2911,7 +2911,7 @@ mod tests {
     /// A checkpoint is written once an interval has passed, naming the head of the chain, the
     /// entry before it, and following the one before; none is written while nothing grew; and the
     /// shutdown's close writes a last one.
-    /// Verifies: ADR-draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token
+    /// Verifies: ADR-0041
     #[test]
     fn a_checkpoint_names_the_head_each_interval_and_at_the_close() {
         let memory = Memory::default();
@@ -2987,7 +2987,7 @@ mod tests {
 
     /// A token that refuses to sign, or does not sign in time, leaves `audit.checkpoint_failed`
     /// naming why, and decisions are recorded meanwhile.
-    /// Verifies: ADR-draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token
+    /// Verifies: ADR-0041
     #[test]
     fn a_token_that_does_not_sign_leaves_checkpoint_failed_and_decisions_go_on() {
         for (refuse, delay, why) in [
@@ -3030,7 +3030,7 @@ mod tests {
 
     /// A rotation that deletes a file holding checkpoints names the last of them, and the writer
     /// started on what is left goes on from it.
-    /// Verifies: ADR-draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token
+    /// Verifies: ADR-0041
     #[test]
     fn a_rotation_names_the_last_checkpoint_it_deleted() {
         let dir = tempfile::tempdir().expect("dir");

@@ -54,7 +54,7 @@ use fs::{FsAgentStore, FsBlobStore, FsConfigBackend, FsDeploymentBackend, FsPack
 /// blobs kept as files, or a CA key in a file. A CA key named by its label on a token makes it
 /// alone no more
 /// (ADR-0025
-/// clause 2, ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one
+/// clause 2, ADR-0043
 /// clause 14).
 #[must_use]
 pub fn exclusive(config: &config::ServerConfig) -> postgres::Exclusive {

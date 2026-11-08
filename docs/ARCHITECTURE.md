@@ -225,7 +225,7 @@ no module.
   its own, a thread that sends through `opentelemetry-otlp` over the TLS 1.3 *ring* client and
   tries again until the receiver takes a batch, and the count of what the full queue dropped
   written back as `audit.export_dropped`
-  ([ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one](adr/draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one.md)
+  ([ADR-0043](adr/0043-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one.md)
   clause 9).
   With `[audit] key_label`, the writer signs a checkpoint of every chain's head at its start,
   each minute and at the shutdown's close. `checkpoint` owns the signer port `CheckpointSigner`,
@@ -237,13 +237,13 @@ no module.
   `AuditStore::append_checkpoint` writes it alone; on PostgreSQL it is written under a unique
   index and the compare-and-set of the head row of migration 17. `checkpoint::Check` is what
   `server audit-verify --audit-key` runs over either store
-  ([ADR-draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token](adr/draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token.md)).
+  ([ADR-0041](adr/0041-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token.md)).
 - **Server ports beyond storage** — `fleet` owns `CertificateSigner`, which the local CA in `ca`
   implements for the CSR flow and the renewal proof (ADR-0026), and the `UseCase` each signature
   names. A CA key in `ca` is a key file or a key on the PKCS#11 token of `pkcs11`, which signs
   through `rcgen`'s `SigningKey` from a pool of four sessions, one `cryptoki` context per module in
   the process, and holds a place in the audit record before it signs
-  (ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one);
+  (ADR-0043);
   `opamp-fleetctl`'s `token` makes the keys on it. It also owns
   `Clock`, which `clock::SystemClock` implements. It owns `Elapsed` too, the time that has passed
   as a lease and a sweep measure it: `PackageStore::with_backend` takes it, and `instance`'s
