@@ -25,6 +25,9 @@ use opamp::proto::{AgentCapabilities, AgentToServer};
 use opamp::uid::InstanceUid;
 use rcgen::{CertificateParams, IsCa, Issuer, KeyPair};
 
+#[path = "support/token.rs"]
+mod token;
+
 /// A lease short enough for a test to watch it lapse.
 const TIMES: LeaseTimes = LeaseTimes {
     renew: Duration::from_secs(1),
@@ -289,11 +292,16 @@ struct Pki {
 
 impl Pki {
     fn new() -> Self {
+        Self::named("opamp-fleet-test-ca")
+    }
+
+    /// A CA whose common name is `name`.
+    fn named(name: &str) -> Self {
         let key = KeyPair::generate().expect("ca key");
         let mut params = CertificateParams::new(Vec::<String>::new()).expect("ca params");
         params
             .distinguished_name
-            .push(rcgen::DnType::CommonName, "opamp-fleet-test-ca");
+            .push(rcgen::DnType::CommonName, name);
         params.is_ca = IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
         let cert = params.self_signed(&key).expect("ca");
         Pki {
@@ -325,6 +333,20 @@ impl Pki {
     }
 }
 
+/// The CAs of instances whose client CA key is on a token: that CA's certificate, its key named
+/// by its label, a bootstrap CA in a file, and the token's settings
+/// (ADR-0043).
+struct Signing<'a> {
+    token: &'a token::TestToken,
+    client_ca_pem: String,
+    bootstrap: Pki,
+}
+
+impl Signing<'_> {
+    /// The key label of the client CA on the token.
+    const CLIENT_CA: &'static str = "client-ca";
+}
+
 /// One running instance, as the binary composes it.
 struct Instance {
     state: Arc<fleet_server::fleet::AppState>,
@@ -342,6 +364,8 @@ struct Instance {
     /// host, which the clock counts though the process did not run.
     suspended: Arc<AtomicU64>,
     stop: Option<tokio::sync::oneshot::Sender<()>>,
+    /// Every entry the instance's signatures with a token key wrote, where it signs with one.
+    audit: Option<Arc<token::Recorded>>,
     _dir: tempfile::TempDir,
 }
 
@@ -354,7 +378,29 @@ impl Instance {
     /// [`start`](Self::start), taking up nothing another instance commits until
     /// [`follow`](Self::follow) is called: what it hears is held back until then.
     async fn start_deaf(pki: &Pki, schema: &Schema, config: PostgresConfig) -> Self {
-        Self::start_with(pki, schema, config, true, false, None, None, None).await
+        Self::start_with(pki, schema, config, true, false, None, None, None, None).await
+    }
+
+    /// [`start`](Self::start), its client CA's key on the token `signing` names, opened by this
+    /// instance as the Server opens it, and enrolment with `signing`'s bootstrap CA.
+    async fn start_signing(
+        pki: &Pki,
+        schema: &Schema,
+        config: PostgresConfig,
+        signing: &Signing<'_>,
+    ) -> Self {
+        Self::start_with(
+            pki,
+            schema,
+            config,
+            true,
+            true,
+            None,
+            None,
+            None,
+            Some(signing),
+        )
+        .await
     }
 
     /// [`start`](Self::start), its Agent plane's admission counted by a throttle of `limits`, as
@@ -365,7 +411,18 @@ impl Instance {
         config: PostgresConfig,
         limits: fleet_server::throttle::Limits,
     ) -> Self {
-        Self::start_with(pki, schema, config, true, true, Some(limits), None, None).await
+        Self::start_with(
+            pki,
+            schema,
+            config,
+            true,
+            true,
+            Some(limits),
+            None,
+            None,
+            None,
+        )
+        .await
     }
 
     /// Starts taking up what other instances commit, for an instance started deaf.
@@ -382,7 +439,7 @@ impl Instance {
         config: PostgresConfig,
         renewals: bool,
     ) -> Self {
-        Self::start_with(pki, schema, config, renewals, true, None, None, None).await
+        Self::start_with(pki, schema, config, renewals, true, None, None, None, None).await
     }
 
     /// [`start`](Self::start), its package blobs on the filesystem in `blobs`, which other
@@ -393,7 +450,18 @@ impl Instance {
         config: PostgresConfig,
         blobs: &std::path::Path,
     ) -> Self {
-        Self::start_with(pki, schema, config, true, true, None, Some(blobs), None).await
+        Self::start_with(
+            pki,
+            schema,
+            config,
+            true,
+            true,
+            None,
+            Some(blobs),
+            None,
+            None,
+        )
+        .await
     }
 
     /// [`start`](Self::start), as a Server of `release` whose schema is `migrations`: one of two
@@ -414,14 +482,15 @@ impl Instance {
             None,
             None,
             Some((release, migrations)),
+            None,
         )
         .await
     }
 
     /// [`start_following`](Self::start_following), following other instances where `follows`
     /// says so, its admission throttled where `throttle` names limits, its package blobs in
-    /// `blobs` where it names a directory, and as the release and schema `version` names, or
-    /// this build's.
+    /// `blobs` where it names a directory, as the release and schema `version` names, or this
+    /// build's, and with its client CA's key on a token where `signing` names one.
     #[allow(clippy::too_many_arguments)]
     async fn start_with(
         pki: &Pki,
@@ -432,6 +501,7 @@ impl Instance {
         throttle: Option<fleet_server::throttle::Limits>,
         blobs: Option<&std::path::Path>,
         version: Option<(&'static str, &'static [Migration])>,
+        signing: Option<&Signing<'_>>,
     ) -> Self {
         opamp::tls::install_ring_provider();
         let dir = tempfile::tempdir().expect("tempdir");
@@ -458,6 +528,51 @@ impl Instance {
         let floors = Arc::new(PackageFloors::open(records.floors()).expect("floors"));
         let enrolment =
             Arc::new(Enrolment::open_on(clock.clone(), records.enrolment()).expect("enrolment"));
+        // The handshake trusts the test's CA and, where the client CA's key is on a token, that
+        // CA too; with it, a bootstrap CA lets a host enrol.
+        let client_ca_pem = format!(
+            "{}{}",
+            pki.ca_pem,
+            signing.map_or("", |signing| signing.client_ca_pem.as_str())
+        );
+        std::fs::write(dir.path().join("ca.pem"), &client_ca_pem).expect("write");
+        let enrolment_config = signing.map(|signing| {
+            let file = dir.path().join("bootstrap-ca.pem");
+            std::fs::write(&file, &signing.bootstrap.ca_pem).expect("write");
+            fleet_server::config::EnrolmentConfig {
+                bootstrap_ca_file: file,
+                bootstrap_ca_key_file: None,
+                bootstrap_ca_key_label: None,
+                max_pending_per_bootstrap:
+                    fleet_server::enrolment::DEFAULT_MAX_PENDING_PER_BOOTSTRAP,
+            }
+        });
+        let audit = signing.map(|_| Arc::new(token::Recorded::default()));
+        let client_ca = signing.map(|signing| {
+            let file = dir.path().join("client-ca.pem");
+            std::fs::write(&file, &signing.client_ca_pem).expect("write");
+            let token = signing.token.open();
+            token.set_audit(audit.clone().expect("the record"));
+            // As the binary wires it: a renewal proof from any CA of client_ca_file holds.
+            let tls = toml::from_str::<fleet_server::config::TlsConfig>(&format!(
+                "cert_file = {:?}\nkey_file = {:?}\nclient_ca_file = {:?}\n",
+                dir.path().join("server-cert.pem").display().to_string(),
+                dir.path().join("server-key.pem").display().to_string(),
+                dir.path().join("ca.pem").display().to_string(),
+            ))
+            .expect("tls config");
+            fleet_server::ca::ClientCa::for_server(
+                &fleet_server::config::ClientCaConfig {
+                    cert_file: file,
+                    key_file: None,
+                    key_label: Some(Signing::CLIENT_CA.to_string()),
+                    validity_days: 30,
+                },
+                &tls,
+                Some(&token),
+            )
+            .expect("the client CA on the token")
+        });
         let (packages, _) = fleet_server::packages::PackageStore::open_on(
             &records,
             Some(blobs.unwrap_or(dir.path())),
@@ -474,13 +589,18 @@ impl Instance {
                 ))
                 .with_revocations(Some(revocations.clone()))
                 .with_floors(Some(floors.clone()))
-                .with_enrolment(Some(enrolment.clone())),
+                .with_enrolment(Some(enrolment.clone()))
+                .with_client_ca(client_ca)
+                .with_audit(
+                    audit
+                        .clone()
+                        .map(|audit| audit as Arc<dyn fleet_server::audit::Audit>),
+                ),
         );
         let (server_cert, server_key) = pki.issue("localhost");
         for (file, pem) in [
             ("server-cert.pem", &server_cert),
             ("server-key.pem", &server_key),
-            ("ca.pem", &pki.ca_pem),
         ] {
             std::fs::write(dir.path().join(file), pem).expect("write");
         }
@@ -491,11 +611,15 @@ impl Instance {
             dir.path().join("ca.pem").display().to_string(),
         ))
         .expect("tls config");
-        let planes = fleet_server::tls::server_tls(&tls, None, None).expect("server material");
+        let planes = fleet_server::tls::server_tls(&tls, None, enrolment_config.as_ref())
+            .expect("server material");
         let throttle = throttle
             .map(|limits| Arc::new(fleet_server::throttle::Throttle::new(limits, clock.clone())));
         let mut admission = fleet_server::transport::Admission::new(true)
             .with_revocations(Some(revocations.clone()));
+        if signing.is_some() {
+            admission = admission.with_enrolment(planes.issuers, Some(enrolment.clone()));
+        }
         if let Some(throttle) = &throttle {
             admission = admission.with_throttle(throttle.clone());
         }
@@ -574,6 +698,7 @@ impl Instance {
             held,
             suspended,
             stop: Some(stop),
+            audit,
             _dir: dir,
         }
     }
@@ -709,7 +834,7 @@ async fn eventually(within: Duration, condition: impl Fn() -> bool) -> bool {
 /// Two instances on one database both hold a live lease and both answer the probe on the Agent
 /// plane; a revocation committed on A ends the session of that certificate on B within one
 /// renewal interval, and no other session.
-/// Verifies: ADR-0025, ADR-0026
+/// Verifies: ADR-0025, ADR-0040
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_revocation_on_one_instance_ends_the_session_on_the_other() {
     let Some(schema) = Schema::named() else {
@@ -1455,7 +1580,7 @@ fn database_address(schema: &Schema) -> SocketAddr {
 /// An instance whose listening connection is cut and restored acts as if everything had changed:
 /// a revocation committed on A while B heard nothing ends B's session of that certificate once B
 /// listens again.
-/// Verifies: ADR-0025, ADR-0026
+/// Verifies: ADR-0025, ADR-0040
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_revocation_committed_while_the_listening_connection_was_cut_ends_its_session_once_back()
 {
@@ -1524,7 +1649,7 @@ async fn a_notification_of_an_unknown_kind_has_everything_read_again() {
 
 /// The `ETag` of the Gateways' revocation list one instance answered is answered `304` by
 /// another, and a revocation on either moves it on both.
-/// Verifies: ADR-0025, ADR-0026
+/// Verifies: ADR-0025, ADR-0040
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_etag_one_instance_answered_is_answered_304_by_another() {
     let Some(schema) = Schema::named() else {
@@ -1653,6 +1778,7 @@ impl fleet_server::fleet::CertificateSigner for Issuing {
         _csr_pem: &str,
         host: &str,
         _subject: &fleet_server::revocation::SubjectValues,
+        _use_case: fleet_server::pkcs11::UseCase,
     ) -> Result<fleet_server::revocation::Signed, String> {
         let pki = Pki {
             ca_pem: self.ca_pem.clone(),
@@ -1766,69 +1892,263 @@ impl fleet_server::enrolment::Recorder for Registering<'_> {
     }
 }
 
-/// An enrolment request waiting on B, approved on A, is answered with its certificate on B, which
-/// wakes the connection that asked: B takes up the window A opened and the decision A took.
-/// Verifies: ADR-0025, ADR-0027
+/// A bootstrap certificate, carrying the organisation and unit an approval carries on, and its
+/// key.
+fn issue_bootstrap(bootstrap: &Pki) -> (String, String) {
+    let ca_key = KeyPair::from_pem(&bootstrap.ca_key_pem).expect("ca key");
+    let issuer = Issuer::from_ca_cert_pem(&bootstrap.ca_pem, ca_key).expect("issuer");
+    let key = KeyPair::generate().expect("key");
+    let mut params = CertificateParams::new(Vec::<String>::new()).expect("params");
+    params
+        .distinguished_name
+        .push(rcgen::DnType::OrganizationName, "Kunde GmbH");
+    params
+        .distinguished_name
+        .push(rcgen::DnType::OrganizationalUnitName, "Werk Nord");
+    params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ClientAuth];
+    let cert = params.signed_by(&key, &issuer).expect("signed");
+    (cert.pem(), key.serialize_pem())
+}
+
+/// A report of `uid` that asks for a certificate for `csr`.
+fn csr_report(uid: &InstanceUid, csr: String) -> AgentToServer {
+    use opamp::proto::{
+        CertificateRequest, ConnectionSettingsRequest, OpAmpConnectionSettingsRequest,
+    };
+    AgentToServer {
+        instance_uid: uid.as_bytes().to_vec(),
+        sequence_num: 1,
+        capabilities: AgentCapabilities::ReportsStatus as u64,
+        connection_settings_request: Some(ConnectionSettingsRequest {
+            opamp: Some(OpAmpConnectionSettingsRequest {
+                certificate_request: Some(CertificateRequest {
+                    csr: csr.into_bytes(),
+                }),
+            }),
+        }),
+        ..Default::default()
+    }
+}
+
+/// A CSR for a fresh key, with no proof, and that key.
+fn fresh_csr() -> (String, KeyPair) {
+    let key = KeyPair::generate().expect("key");
+    let csr = CertificateParams::new(Vec::<String>::new())
+        .expect("params")
+        .serialize_request(&key)
+        .expect("csr")
+        .pem()
+        .expect("pem");
+    (csr, key)
+}
+
+/// A CSR for a fresh key that proves it renews `old_pem`, whose key is `old_key`, and that key.
+fn renewing(old_pem: &str, old_key: &KeyPair) -> (String, KeyPair) {
+    use base64::Engine as _;
+    use rcgen::{PublicKeyData as _, SigningKey as _};
+    use sha2::{Digest, Sha256};
+    let new_key = KeyPair::generate().expect("new key");
+    let old_der = opamp::tls::certificates(old_pem.as_bytes()).expect("pem")[0]
+        .as_ref()
+        .to_vec();
+    let signature = old_key
+        .sign(&fleet_core::renewal::statement(&Sha256::digest(
+            new_key.subject_public_key_info(),
+        )))
+        .expect("sign");
+    let proof = format!(
+        "{}{}",
+        fleet_core::renewal::URI_PREFIX,
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(fleet_core::renewal::encode(&old_der, &signature))
+    );
+    let mut params = CertificateParams::new(Vec::<String>::new()).expect("params");
+    params
+        .subject_alt_names
+        .push(rcgen::SanType::URI(proof.try_into().expect("uri")));
+    let csr = params
+        .serialize_request(&new_key)
+        .expect("csr")
+        .pem()
+        .expect("pem");
+    (csr, new_key)
+}
+
+/// Sends `report` on `socket` and waits for the certificate the Server hands out on it.
+async fn certificate_for(socket: &mut Socket, report: &AgentToServer, within: Duration) -> String {
+    use futures_util::SinkExt;
+    use tokio_tungstenite::tungstenite::Message as Ws;
+    let framed = opamp::frame::encode_within(report, usize::MAX).expect("frame");
+    socket.send(Ws::Binary(framed.into())).await.expect("send");
+    let deadline = tokio::time::Instant::now() + within;
+    loop {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let message = next_message(socket, left)
+            .await
+            .expect("a certificate in time");
+        if let Some(certificate) = message
+            .connection_settings
+            .and_then(|settings| settings.opamp)
+            .and_then(|opamp| opamp.certificate)
+        {
+            return String::from_utf8(certificate.cert).expect("PEM");
+        }
+    }
+}
+
+/// Whether the certificate `pem` was signed by the key of the CA `ca_pem`.
+fn signed_by(pem: &str, ca_pem: &str) -> bool {
+    use x509_parser::prelude::{FromDer, X509Certificate};
+    let der = |pem: &str| {
+        opamp::tls::certificates(pem.as_bytes()).expect("pem")[0]
+            .as_ref()
+            .to_vec()
+    };
+    let (leaf, ca) = (der(pem), der(ca_pem));
+    let (_, leaf) = X509Certificate::from_der(&leaf).expect("leaf");
+    let (_, ca) = X509Certificate::from_der(&ca).expect("ca");
+    leaf.verify_signature(Some(ca.public_key())).is_ok()
+}
+
+/// Two instances whose client CA is named by its label on one token, each having opened it in
+/// this process, so one `cryptoki` context serves both, and that CA's certificate.
+async fn on_one_token(
+    schema: &Schema,
+    pki: &Pki,
+    test: &token::TestToken,
+    dir: &std::path::Path,
+) -> (Instance, Instance, String) {
+    let opened = test.open();
+    let (client_ca_pem, _) = test.ca(&opened, Signing::CLIENT_CA, "OpAMP Fleet Client CA", dir);
+    let signing = Signing {
+        token: test,
+        client_ca_pem: client_ca_pem.clone(),
+        bootstrap: Pki::named("OpAMP Fleet Bootstrap CA"),
+    };
+    let a =
+        Instance::start_signing(pki, schema, schema.config_on(schema.config.port), &signing).await;
+    let b =
+        Instance::start_signing(pki, schema, schema.config_on(schema.config.port), &signing).await;
+    (a, b, client_ca_pem)
+}
+
+/// Two instances whose client CA's key is named by its label on one SoftHSM2 token both start and
+/// both sign renewals: a host renews on A and another on B, each to a certificate the token's key
+/// signed, and each signature is in that instance's record. The hosts' certificates come from the
+/// CA beside it in `client_ca_file`, so each moves to the token's key at its renewal.
+/// Verifies: ADR-0043
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_enrolment_approved_on_one_instance_is_handed_out_by_the_other() {
-    use fleet_server::enrolment::Submitted;
+async fn two_instances_on_one_token_both_sign_renewals() {
     let Some(schema) = Schema::named() else {
         return;
     };
+    let Some(test) = token::TestToken::named() else {
+        return;
+    };
     let pki = Pki::new();
-    let a = Instance::start(&pki, &schema, schema.config_on(schema.config.port)).await;
-    let b = Instance::start(&pki, &schema, schema.config_on(schema.config.port)).await;
+    let dir = tempfile::tempdir().expect("dir");
+    let (a, b, client_ca_pem) = on_one_token(&schema, &pki, &test, dir.path()).await;
+    for (instance, host) in [(&a, "host-a"), (&b, "host-b")] {
+        let (cert, key) = pki.issue_to_host(host);
+        let old_key = KeyPair::from_pem(&key).expect("key");
+        let mut socket = websocket(instance, &pki, &cert, &key).await;
+        let (csr, _) = renewing(&cert, &old_key);
+        let renewed = certificate_for(
+            &mut socket,
+            &csr_report(&InstanceUid::default(), csr),
+            Duration::from_secs(10),
+        )
+        .await;
+        assert!(signed_by(&renewed, &client_ca_pem), "{host}: {renewed}");
+        let signed = instance
+            .audit
+            .as_ref()
+            .expect("record")
+            .events("pkcs11.signed");
+        assert_eq!(signed.len(), 1, "{host}: {signed:?}");
+        assert_eq!(signed[0]["use_case"], "renewal");
+        assert_eq!(signed[0]["key_label"], Signing::CLIENT_CA);
+    }
+}
+
+/// A host enrols through B's Agent plane, over its WebSocket, while A opened the window; it is
+/// approved on A, whose client CA's key is on the token both share, and B hands the certificate to
+/// the connection that asked. The host is admitted on both.
+/// Verifies: ADR-0025, ADR-0027, ADR-0043
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_enrolment_approved_on_one_instance_is_handed_out_by_the_other() {
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let Some(test) = token::TestToken::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let dir = tempfile::tempdir().expect("dir");
+    let opened = test.open();
+    let (client_ca_pem, _) = test.ca(
+        &opened,
+        Signing::CLIENT_CA,
+        "OpAMP Fleet Client CA",
+        dir.path(),
+    );
+    let signing = Signing {
+        token: &test,
+        client_ca_pem: client_ca_pem.clone(),
+        bootstrap: Pki::named("OpAMP Fleet Bootstrap CA"),
+    };
+    let a = Instance::start_signing(
+        &pki,
+        &schema,
+        schema.config_on(schema.config.port),
+        &signing,
+    )
+    .await;
+    let b = Instance::start_signing(
+        &pki,
+        &schema,
+        schema.config_on(schema.config.port),
+        &signing,
+    )
+    .await;
     a.enrolment.open(600).expect("A opens the window");
     assert!(
         eventually(Duration::from_secs(10), || b.enrolment.is_open()).await,
         "B never took up the window A opened"
     );
-    let (request, requester) = enrolment_request("k1");
-    let mut asking = b.enrolment.subscribe();
-    asking.borrow_and_update();
-    let on_b = b.enrolment.clone();
-    let (sent, by) = (request.clone(), requester.clone());
-    assert_eq!(
-        tokio::task::spawn_blocking(move || on_b.submit(sent, by))
-            .await
-            .expect("submit"),
-        Submitted::Waiting
-    );
-
-    assert!(
-        eventually(Duration::from_secs(10), || a
-            .enrolment
-            .pending()
-            .iter()
-            .any(|pending| pending.id == "k1"))
-        .await,
-        "A never listed the request B took in"
-    );
-    approve(&a, &pki, "k1");
-    // What the connection that asked does: it waits for a change, then asks again.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    let issued = loop {
-        assert!(
-            tokio::time::timeout_at(deadline, asking.changed())
+    let (bootstrap_cert, bootstrap_key) = issue_bootstrap(&signing.bootstrap);
+    let mut enrolling = websocket(&b, &pki, &bootstrap_cert, &bootstrap_key).await;
+    let (csr, host_key) = fresh_csr();
+    let asked = csr_report(&InstanceUid::default(), csr);
+    let approving = {
+        let a_state = a.state.clone();
+        let a_enrolment = a.enrolment.clone();
+        tokio::spawn(async move {
+            assert!(
+                eventually(Duration::from_secs(10), || !a_enrolment
+                    .pending()
+                    .is_empty())
+                .await,
+                "A never listed the request B took in"
+            );
+            let id = a_enrolment.pending()[0].id.clone();
+            tokio::task::spawn_blocking(move || a_state.approve_enrolment(&id))
                 .await
-                .is_ok(),
-            "B's waiting connection was never woken"
-        );
-        let on_b = b.enrolment.clone();
-        let (sent, by) = (request.clone(), requester.clone());
-        match tokio::task::spawn_blocking(move || on_b.submit(sent, by))
-            .await
-            .expect("submit")
-        {
-            Submitted::Issued(pem) => break pem,
-            Submitted::Waiting => continue,
-            other => panic!("B answered {other:?}"),
-        }
+                .expect("approve")
+                .expect("approved on A");
+        })
     };
-    assert!(
-        issued.starts_with("-----BEGIN CERTIFICATE-----"),
-        "{issued}"
-    );
+    let issued = certificate_for(&mut enrolling, &asked, Duration::from_secs(20)).await;
+    approving.await.expect("approved");
+    assert!(signed_by(&issued, &client_ca_pem), "{issued}");
+    let signed = a.audit.as_ref().expect("record").events("pkcs11.signed");
+    assert_eq!(signed.len(), 1, "{signed:?}");
+    assert_eq!(signed[0]["use_case"], "enrolment_approval");
+    // A member now, on either instance.
+    for instance in [&a, &b] {
+        let mut member = websocket(instance, &pki, &issued, &host_key.serialize_pem()).await;
+        exchange(&mut member).await;
+    }
 }
 
 /// During an enrolment wave on A, A reads nothing again for its own notifications, and B takes up
@@ -2235,7 +2555,7 @@ async fn a_binding_whose_notice_after_its_commit_is_lost_is_taken_up_at_the_next
 
 /// A renewal registered by another writer, whose notification never arrives while the listening
 /// connection stays up, is taken up by the next lease renewal: so a revocation of the certificate
-/// it renewed, committed by this instance afterwards, refuses the renewal too (ADR-0026 clause 28,
+/// it renewed, committed by this instance afterwards, refuses the renewal too (ADR-0040 clause 28,
 /// ADR-0023 clause 10).
 /// Verifies: ADR-0025, ADR-0023
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2545,7 +2865,7 @@ async fn a_restart_requested_through_one_instance_stays_until_the_carrying_insta
 
 /// The ceiling on Agent records holds for the fleet: with room for one, an Agent first heard of
 /// through B is refused once A stored another, and the one A stored keeps reporting through B.
-/// Verifies: ADR-0025, ADR-0026
+/// Verifies: ADR-0025, ADR-0040
 #[test]
 fn the_ceiling_on_agent_records_holds_across_instances() {
     use fleet_server::fleet::{AppState, Transport};
@@ -3688,7 +4008,7 @@ async fn a_peer_whose_first_reports_wait_keeps_its_agents_identities_on_its_new_
 /// on two Gateways' connections, whose certificates bind no Agent, and on two connections that
 /// present no host, by the duplicate detection; on two hosts' connections by the binding of the
 /// identity to the host that reported it first. The incumbent keeps its identity each time.
-/// Verifies: ADR-0025, ADR-0026
+/// Verifies: ADR-0025, ADR-0040
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_duplicate_on_live_connections_of_different_peers_is_rekeyed() {
     use futures_util::SinkExt;
@@ -3825,6 +4145,7 @@ fn mark_gateway(instance: &Instance, pki: &Pki, dir: &std::path::Path) {
             &csr,
             "gateway-host",
             &fleet_server::revocation::SubjectValues::default(),
+            fleet_server::pkcs11::UseCase::MemberCsr,
         )
         .expect("sign");
     let host = signed.facts.host.clone().expect("a host");
@@ -5026,4 +5347,1227 @@ async fn an_instance_whose_lease_lapsed_while_a_newer_server_migrated_stops_at_i
             .is_empty(),
         "no new lease"
     );
+}
+
+/// One instance's record on PostgreSQL that signs its checkpoints with `key`, every `interval`,
+/// through `source`; answers the record and its lease.
+async fn signing_record(
+    schema: &Schema,
+    key: &fleet_server::pkcs11::TokenKey,
+    interval: Duration,
+    source: impl FnOnce(
+        Arc<Database>,
+        fleet_server::instance::Held,
+    ) -> Box<dyn fleet_server::checkpoint::CheckpointSource>,
+) -> (
+    Arc<fleet_server::audit_log::AuditLog>,
+    fleet_server::instance::Lease,
+    Arc<Database>,
+) {
+    let (config, name) = (schema.config_on(schema.config.port), schema.name.clone());
+    let database = tokio::task::spawn_blocking(move || {
+        Database::open_in(&config, Exclusive::Shared, Some(&name))
+    })
+    .await
+    .expect("open")
+    .expect("open the database");
+    let lease = {
+        let database = database.clone();
+        tokio::task::spawn_blocking(move || {
+            fleet_server::instance::Lease::take(database, TIMES, "test-host")
+        })
+        .await
+        .expect("take")
+        .expect("a lease")
+    };
+    let signing = fleet_server::audit_log::Signing {
+        interval,
+        ..fleet_server::audit_log::Signing::new(
+            Arc::new(key.clone()),
+            source(database.clone(), lease.held()),
+        )
+    };
+    let audit = fleet_server::audit_log::AuditLog::start_signing(
+        Box::new(fleet_server::postgres::audit::PgAuditStore::new(
+            database.clone(),
+            lease.held(),
+        )),
+        fleet_server::audit_log::Limits::default(),
+        Arc::new(fleet_server::clock::SystemClock),
+        Some((lease.held(), Some(lease.proof()))),
+        None,
+        Some(signing),
+    )
+    .expect("the record");
+    (Arc::new(audit), lease, database)
+}
+
+/// The checkpoints the schema holds, by their number: the chain each is in and its line.
+fn checkpoints_in(schema: &Schema) -> Vec<(String, fleet_server::checkpoint::Parsed)> {
+    schema
+        .query(
+            "SELECT chain::text || ' ' || line FROM audit_entries \
+             WHERE checkpoint_seq IS NOT NULL ORDER BY checkpoint_seq",
+        )
+        .into_iter()
+        .map(|row| {
+            let (chain, line) = row.split_once(' ').expect("chain and line");
+            (
+                chain.to_string(),
+                fleet_server::checkpoint::parse(line).expect("a checkpoint"),
+            )
+        })
+        .collect()
+}
+
+/// On PostgreSQL with two instances, one signs at a time, each checkpoint names both chains, and
+/// the other takes over once the signer's connection ends; the record verifies against the key.
+/// Verifies: ADR-0041
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn one_instance_signs_at_a_time_naming_every_chain_and_another_takes_over() {
+    use fleet_server::audit::Audit as _;
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let Some(test) = token::TestToken::named() else {
+        return;
+    };
+    test.generate("audit");
+    let key = test.open().key("[audit] key_label", "audit").expect("key");
+    let interval = Duration::from_millis(300);
+    let checkpoints = |database: Arc<Database>, held| {
+        Box::new(fleet_server::postgres::checkpoint::Checkpoints::new(
+            database, held,
+        )) as Box<dyn fleet_server::checkpoint::CheckpointSource>
+    };
+    let (first, first_lease, _) = signing_record(&schema, &key, interval, checkpoints).await;
+    let (second, second_lease, _) = signing_record(&schema, &key, interval, checkpoints).await;
+    let chains = [
+        first_lease.held().borrow().clone().expect("held"),
+        second_lease.held().borrow().clone().expect("held"),
+    ];
+    for _ in 0..3 {
+        for audit in [&first, &second] {
+            audit
+                .record(fleet_server::audit::Entry::new("host.admitted", "admitted"))
+                .expect("record");
+        }
+        tokio::time::sleep(interval).await;
+    }
+    assert!(
+        eventually(Duration::from_secs(10), || checkpoints_in(&schema)
+            .iter()
+            .any(|(_, parsed)| parsed.heads.len() == 2))
+        .await,
+        "a checkpoint naming both chains"
+    );
+    let signed = checkpoints_in(&schema);
+    let signer = signed[0].0.clone();
+    assert!(
+        signed.iter().all(|(chain, _)| *chain == signer),
+        "one instance signs: {signed:?}"
+    );
+    for (n, (_, parsed)) in signed.iter().enumerate() {
+        assert_eq!(parsed.checkpoint_seq, n as u64 + 1, "one per number");
+    }
+    let named: Vec<String> = signed
+        .last()
+        .expect("one")
+        .1
+        .heads
+        .iter()
+        .map(|head| head.chain.clone())
+        .collect();
+    assert!(
+        chains.iter().all(|chain| named.contains(chain)),
+        "{named:?}"
+    );
+
+    // The signer stops; its lock's connection ends with it, and the other signs.
+    let (stopping, stopping_lease, going_on) = if signer == chains[0] {
+        (first, first_lease, second)
+    } else {
+        (second, second_lease, first)
+    };
+    assert!(stopping.close(Duration::from_secs(5)));
+    drop(stopping);
+    stopping_lease.release().await;
+    let other = chains
+        .iter()
+        .find(|chain| **chain != signer)
+        .expect("other")
+        .clone();
+    assert!(
+        eventually(Duration::from_secs(15), || {
+            let _ = going_on.record(fleet_server::audit::Entry::new("host.admitted", "admitted"));
+            checkpoints_in(&schema)
+                .iter()
+                .any(|(chain, _)| *chain == other)
+        })
+        .await,
+        "the other instance takes over the signing"
+    );
+    let taken_over = checkpoints_in(&schema);
+    let closed = taken_over
+        .iter()
+        .rev()
+        .find(|(chain, _)| *chain == other)
+        .expect("the other's")
+        .1
+        .heads
+        .iter()
+        .find(|head| head.chain == signer)
+        .cloned();
+    assert!(
+        closed.is_some_and(|head| head.closed),
+        "the stopped signer's chain is named closed: {taken_over:?}"
+    );
+    assert!(going_on.close(Duration::from_secs(5)));
+
+    let spki = fleet_server::checkpoint::CheckpointSigner::public_key_der(&key);
+    let (config, name) = (schema.config_on(schema.config.port), schema.name.clone());
+    let verified = tokio::task::spawn_blocking(move || {
+        fleet_server::postgres::audit::verify_checked_on(
+            &config,
+            Some(&name),
+            None,
+            Some(fleet_server::checkpoint::Check::new(
+                fleet_server::checkpoint::AuditKey::from_der(&spki).expect("key"),
+                None,
+            )),
+        )
+    })
+    .await
+    .expect("verify")
+    .expect("read");
+    assert!(!verified.failed, "{:?}", verified.lines);
+
+    // A chain removed with its record is named.
+    schema.sql(&format!(
+        "DELETE FROM audit_entries WHERE chain = '{signer}'::uuid; \
+         DELETE FROM audit_chains WHERE id = '{signer}'::uuid"
+    ));
+    let spki = fleet_server::checkpoint::CheckpointSigner::public_key_der(&key);
+    let (config, name) = (schema.config_on(schema.config.port), schema.name.clone());
+    let verified = tokio::task::spawn_blocking(move || {
+        fleet_server::postgres::audit::verify_checked_on(
+            &config,
+            Some(&name),
+            None,
+            Some(fleet_server::checkpoint::Check::new(
+                fleet_server::checkpoint::AuditKey::from_der(&spki).expect("key"),
+                None,
+            )),
+        )
+    })
+    .await
+    .expect("verify")
+    .expect("read");
+    assert!(verified.failed);
+    assert!(
+        verified
+            .lines
+            .iter()
+            .any(|line| line.starts_with(&format!("chain {signer}")) && line.contains("removed")),
+        "{:?}",
+        verified.lines
+    );
+}
+
+/// A source that signs whatever the lock says, as an instance that lost its lock while a
+/// checkpoint was in flight does: it reads the newest checkpoint as `Checkpoints` does, and the
+/// first time waits for the other instance to have read it too.
+struct Racing {
+    schema: Arc<Schema>,
+    barrier: Arc<std::sync::Barrier>,
+    raced: bool,
+}
+
+impl fleet_server::checkpoint::CheckpointSource for Racing {
+    fn prepare(&mut self) -> Result<Option<fleet_server::checkpoint::Prepared>, String> {
+        let newest = self
+            .schema
+            .query("SELECT seq::text || ' ' || hash FROM audit_checkpoint_head");
+        let (seq, hash) = newest[0].split_once(' ').expect("the head row");
+        let seq: u64 = seq.parse().expect("seq");
+        if !self.raced {
+            self.raced = true;
+            self.barrier.wait();
+        }
+        Ok(Some(fleet_server::checkpoint::Prepared {
+            tip: (seq > 0).then(|| fleet_server::checkpoint::Tip {
+                checkpoint_seq: seq,
+                hash: hash.to_string(),
+                line: None,
+            }),
+            heads: Vec::new(),
+        }))
+    }
+}
+
+/// Two instances that both sign the same next checkpoint leave one per number: the insert of the
+/// one that comes second fails, and its instance writes `audit.checkpoint_failed`.
+/// Verifies: ADR-0041
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_signers_racing_leave_one_checkpoint_per_number() {
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let schema = Arc::new(schema);
+    let Some(test) = token::TestToken::named() else {
+        return;
+    };
+    test.generate("audit");
+    let key = test.open().key("[audit] key_label", "audit").expect("key");
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let racing = |schema: Arc<Schema>, barrier: Arc<std::sync::Barrier>| {
+        move |_: Arc<Database>, _| {
+            Box::new(Racing {
+                schema,
+                barrier,
+                raced: false,
+            }) as Box<dyn fleet_server::checkpoint::CheckpointSource>
+        }
+    };
+    let interval = Duration::from_secs(60);
+    let (first, _first_lease, _) = signing_record(
+        &schema,
+        &key,
+        interval,
+        racing(schema.clone(), barrier.clone()),
+    )
+    .await;
+    let (second, _second_lease, _) =
+        signing_record(&schema, &key, interval, racing(schema.clone(), barrier)).await;
+    assert!(
+        eventually(Duration::from_secs(15), || !schema
+            .query(
+                "SELECT line FROM audit_entries \
+                 WHERE line LIKE '%\"event\":\"audit.checkpoint_failed\"%'"
+            )
+            .is_empty())
+        .await,
+        "the second insert failed as audit.checkpoint_failed"
+    );
+    assert_eq!(
+        schema.query("SELECT count(*)::text FROM audit_entries WHERE checkpoint_seq = 1"),
+        vec!["1".to_string()],
+        "one checkpoint 1"
+    );
+    let failed = schema.query(
+        "SELECT line FROM audit_entries WHERE line LIKE '%\"event\":\"audit.checkpoint_failed\"%'",
+    );
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert!(
+        failed[0].contains("another instance signed first") || failed[0].contains("duplicate"),
+        "{}",
+        failed[0]
+    );
+    assert_eq!(checkpoints_in(&schema).len(), 1);
+    assert!(first.close(Duration::from_secs(5)));
+    assert!(second.close(Duration::from_secs(5)));
+}
+
+/// A prune that removes checkpoints names the last of them, and the record still verifies from
+/// the first checkpoint left.
+/// Verifies: ADR-0041
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_prune_names_the_last_checkpoint_it_removes_and_the_record_verifies_after() {
+    use fleet_server::audit::Audit as _;
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let Some(test) = token::TestToken::named() else {
+        return;
+    };
+    test.generate("audit");
+    let key = test.open().key("[audit] key_label", "audit").expect("key");
+    let interval = Duration::from_millis(200);
+    let (audit, lease, database) = signing_record(&schema, &key, interval, |database, held| {
+        Box::new(fleet_server::postgres::checkpoint::Checkpoints::new(
+            database, held,
+        )) as Box<dyn fleet_server::checkpoint::CheckpointSource>
+    })
+    .await;
+    let own = lease.held().borrow().clone().expect("held");
+    assert!(
+        eventually(Duration::from_secs(15), || {
+            let _ = audit.record(fleet_server::audit::Entry::new("host.admitted", "admitted"));
+            checkpoints_in(&schema).len() >= 3
+        })
+        .await,
+        "three checkpoints"
+    );
+    // Everything up to the second checkpoint is past `retain_days`.
+    let second: String = schema
+        .query("SELECT seq::text FROM audit_entries WHERE checkpoint_seq = 2")
+        .pop()
+        .expect("checkpoint 2");
+    schema.sql(&format!(
+        "UPDATE audit_entries SET recorded_at = now() - interval '400 days' \
+         WHERE chain = '{own}'::uuid AND seq <= {second}"
+    ));
+    let (pruning, own_chain) = (audit.clone(), own.clone());
+    tokio::task::spawn_blocking(move || {
+        fleet_server::postgres::audit_prune::prune(&database, pruning, Some(own_chain), 365)
+    })
+    .await
+    .expect("prune")
+    .expect("pruned");
+    let pruned = schema
+        .query("SELECT line FROM audit_entries WHERE line LIKE '%\"event\":\"audit.pruned\"%'");
+    assert!(
+        pruned
+            .iter()
+            .any(|line| line.contains("\"checkpoint_seq\":2,")),
+        "the prune names checkpoint 2: {pruned:?}"
+    );
+    assert!(checkpoints_in(&schema)
+        .iter()
+        .all(|(_, parsed)| parsed.checkpoint_seq > 2));
+    assert!(audit.close(Duration::from_secs(5)));
+    let spki = fleet_server::checkpoint::CheckpointSigner::public_key_der(&key);
+    let (config, name) = (schema.config_on(schema.config.port), schema.name.clone());
+    let verified = tokio::task::spawn_blocking(move || {
+        fleet_server::postgres::audit::verify_checked_on(
+            &config,
+            Some(&name),
+            None,
+            Some(fleet_server::checkpoint::Check::new(
+                fleet_server::checkpoint::AuditKey::from_der(&spki).expect("key"),
+                None,
+            )),
+        )
+    })
+    .await
+    .expect("verify")
+    .expect("read");
+    assert!(!verified.failed, "{:?}", verified.lines);
+}
+
+/// A source that signs while `signs` names its instance: the real one, made when its turn comes
+/// and dropped when it ends, so that its lock's connection ends and the next instance takes the
+/// lock. How a test hands the signing from one instance to another while both run.
+struct Turn {
+    database: Arc<Database>,
+    held: fleet_server::instance::Held,
+    inner: Option<fleet_server::postgres::checkpoint::Checkpoints>,
+    signs: Arc<std::sync::Mutex<&'static str>>,
+    me: &'static str,
+}
+
+impl fleet_server::checkpoint::CheckpointSource for Turn {
+    fn prepare(&mut self) -> Result<Option<fleet_server::checkpoint::Prepared>, String> {
+        if *self.signs.lock().expect("turn") != self.me {
+            self.inner = None;
+            return Ok(None);
+        }
+        let (database, held) = (self.database.clone(), self.held.clone());
+        self.inner
+            .get_or_insert_with(|| {
+                fleet_server::postgres::checkpoint::Checkpoints::new(database, held)
+            })
+            .prepare()
+    }
+}
+
+/// A source for `signing_record` that takes turns by `signs`, as `me`.
+fn turn(
+    signs: &Arc<std::sync::Mutex<&'static str>>,
+    me: &'static str,
+) -> impl FnOnce(
+    Arc<Database>,
+    fleet_server::instance::Held,
+) -> Box<dyn fleet_server::checkpoint::CheckpointSource> {
+    let signs = signs.clone();
+    move |database, held| {
+        Box::new(Turn {
+            database,
+            held,
+            inner: None,
+            signs,
+            me,
+        }) as Box<dyn fleet_server::checkpoint::CheckpointSource>
+    }
+}
+
+/// The record in `schema` checked against the checkpoints `key` signed.
+async fn verified_against(
+    schema: &Schema,
+    key: &fleet_server::pkcs11::TokenKey,
+) -> fleet_server::postgres::audit::Verified {
+    let spki = fleet_server::checkpoint::CheckpointSigner::public_key_der(key);
+    let (config, name) = (schema.config_on(schema.config.port), schema.name.clone());
+    tokio::task::spawn_blocking(move || {
+        fleet_server::postgres::audit::verify_checked_on(
+            &config,
+            Some(&name),
+            None,
+            Some(fleet_server::checkpoint::Check::new(
+                fleet_server::checkpoint::AuditKey::from_der(&spki).expect("key"),
+                None,
+            )),
+        )
+    })
+    .await
+    .expect("verify")
+    .expect("read")
+}
+
+/// Waits until two more checkpoints are signed than now, the instances deciding meanwhile: what
+/// was written before is then covered.
+async fn two_more_checkpoints(schema: &Schema, deciding: &[&fleet_server::audit_log::AuditLog]) {
+    use fleet_server::audit::Audit as _;
+    let newest = |schema: &Schema| {
+        checkpoints_in(schema)
+            .last()
+            .map_or(0, |(_, parsed)| parsed.checkpoint_seq)
+    };
+    let from = newest(schema);
+    assert!(
+        eventually(Duration::from_secs(15), || {
+            for audit in deciding {
+                let _ = audit.record(fleet_server::audit::Entry::new("host.admitted", "admitted"));
+            }
+            newest(schema) >= from + 2
+        })
+        .await,
+        "two more checkpoints after {from}"
+    );
+}
+
+/// Prunes the record on `database` for the chain `own` to 365 days.
+async fn prune_now(
+    database: Arc<Database>,
+    audit: Arc<fleet_server::audit_log::AuditLog>,
+    own: String,
+) -> Vec<fleet_server::postgres::audit_prune::Pruned> {
+    tokio::task::spawn_blocking(move || {
+        fleet_server::postgres::audit_prune::prune(&database, audit, Some(own), 365)
+    })
+    .await
+    .expect("prune")
+    .expect("pruned")
+}
+
+/// After the signing passed from A to B, both chains hold checkpoints. B's prune, though its
+/// entries are all past `retain_days`, holds back from its checkpoints while A still holds older
+/// ones; A's prune removes A's; then B's goes on. `audit-verify --audit-key` holds after each,
+/// once a checkpoint covers the prune's entries.
+/// Verifies: ADR-0041
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_prune_holds_back_from_checkpoints_newer_than_one_held_in_another_chain() {
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let Some(test) = token::TestToken::named() else {
+        return;
+    };
+    test.generate("audit");
+    let key = test.open().key("[audit] key_label", "audit").expect("key");
+    let signs = Arc::new(std::sync::Mutex::new("a"));
+    let interval = Duration::from_millis(200);
+    let (a, a_lease, a_database) = signing_record(&schema, &key, interval, turn(&signs, "a")).await;
+    let (b, b_lease, b_database) = signing_record(&schema, &key, interval, turn(&signs, "b")).await;
+    let (a_chain, b_chain) = (
+        a_lease.held().borrow().clone().expect("a"),
+        b_lease.held().borrow().clone().expect("b"),
+    );
+    let signed_in = |chain: &str| {
+        checkpoints_in(&schema)
+            .iter()
+            .filter(|(signer, _)| signer == chain)
+            .count()
+    };
+    two_more_checkpoints(&schema, &[&a, &b]).await;
+    assert!(signed_in(&a_chain) >= 2, "A signs");
+    *signs.lock().expect("turn") = "b";
+    assert!(
+        eventually(Duration::from_secs(15), || signed_in(&b_chain) >= 1).await,
+        "B signs after A"
+    );
+    two_more_checkpoints(&schema, &[&a, &b]).await;
+    let b_checkpoints: Vec<u64> = checkpoints_in(&schema)
+        .iter()
+        .filter(|(chain, _)| *chain == b_chain)
+        .map(|(_, parsed)| parsed.checkpoint_seq)
+        .collect();
+    schema.sql("UPDATE audit_entries SET recorded_at = now() - interval '400 days'");
+
+    // B first: it holds back from its checkpoints, as A still holds older ones.
+    let rounds = prune_now(b_database.clone(), b.clone(), b_chain.clone()).await;
+    assert!(rounds.iter().any(|round| round.held_back), "{rounds:?}");
+    let held: Vec<u64> = checkpoints_in(&schema)
+        .iter()
+        .map(|(_, parsed)| parsed.checkpoint_seq)
+        .collect();
+    assert!(
+        b_checkpoints.iter().all(|seq| held.contains(seq)),
+        "B's prune held back from its checkpoints: {held:?}"
+    );
+    two_more_checkpoints(&schema, &[&a, &b]).await;
+    let verified = verified_against(&schema, &key).await;
+    assert!(!verified.failed, "{:?}", verified.lines);
+
+    // A's prune removes A's checkpoints; then B's goes on past its old ones.
+    prune_now(a_database, a.clone(), a_chain.clone()).await;
+    assert_eq!(signed_in(&a_chain), 0, "A's checkpoints are pruned");
+    two_more_checkpoints(&schema, &[&a, &b]).await;
+    let verified = verified_against(&schema, &key).await;
+    assert!(!verified.failed, "{:?}", verified.lines);
+    schema.sql(&format!(
+        "UPDATE audit_entries SET recorded_at = now() - interval '400 days' \
+         WHERE chain = '{b_chain}'::uuid AND checkpoint_seq <= {}",
+        b_checkpoints.last().expect("one")
+    ));
+    prune_now(b_database, b.clone(), b_chain.clone()).await;
+    let held: Vec<u64> = checkpoints_in(&schema)
+        .iter()
+        .map(|(_, parsed)| parsed.checkpoint_seq)
+        .collect();
+    assert!(
+        b_checkpoints.iter().all(|seq| !held.contains(seq)),
+        "B's old checkpoints go once A holds none older: {held:?}"
+    );
+    two_more_checkpoints(&schema, &[&a, &b]).await;
+    let verified = verified_against(&schema, &key).await;
+    assert!(!verified.failed, "{:?}", verified.lines);
+    assert!(a.close(Duration::from_secs(5)));
+    assert!(b.close(Duration::from_secs(5)));
+}
+
+/// The signing passes back and forth between A and B several times, and B stops, its chain
+/// closed. One prune by A, which holds the prune lock, repeats its rounds until nothing more is
+/// freed: every old checkpoint goes, in A's chain and in B's closed one, and the record verifies.
+/// Verifies: ADR-0041
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn one_prune_frees_checkpoints_after_several_signer_changes() {
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let Some(test) = token::TestToken::named() else {
+        return;
+    };
+    test.generate("audit");
+    let key = test.open().key("[audit] key_label", "audit").expect("key");
+    let signs = Arc::new(std::sync::Mutex::new("a"));
+    let interval = Duration::from_millis(200);
+    let (a, a_lease, a_database) = signing_record(&schema, &key, interval, turn(&signs, "a")).await;
+    let (b, b_lease, _) = signing_record(&schema, &key, interval, turn(&signs, "b")).await;
+    let (a_chain, b_chain) = (
+        a_lease.held().borrow().clone().expect("a"),
+        b_lease.held().borrow().clone().expect("b"),
+    );
+    for (n, me) in ["a", "b", "a", "b", "a", "b"].into_iter().enumerate() {
+        *signs.lock().expect("turn") = me;
+        let chain = if me == "a" { &a_chain } else { &b_chain };
+        let before = checkpoints_in(&schema)
+            .iter()
+            .filter(|(signer, _)| signer == chain)
+            .count();
+        assert!(
+            eventually(Duration::from_secs(15), || {
+                use fleet_server::audit::Audit as _;
+                let _ = a.record(fleet_server::audit::Entry::new("host.admitted", "admitted"));
+                let _ = b.record(fleet_server::audit::Entry::new("host.admitted", "admitted"));
+                checkpoints_in(&schema)
+                    .iter()
+                    .filter(|(signer, _)| signer == chain)
+                    .count()
+                    > before
+            })
+            .await,
+            "turn {n}: {me} signs"
+        );
+    }
+    let signers: Vec<String> = checkpoints_in(&schema)
+        .into_iter()
+        .map(|(chain, _)| chain)
+        .collect();
+    let changes = signers.windows(2).filter(|pair| pair[0] != pair[1]).count();
+    assert!(changes >= 5, "the signing changed hands: {signers:?}");
+    // B stops; A signs again.
+    *signs.lock().expect("turn") = "a";
+    assert!(b.close(Duration::from_secs(5)));
+    drop(b);
+    b_lease.release().await;
+    two_more_checkpoints(&schema, &[&a]).await;
+    let old = checkpoints_in(&schema)
+        .last()
+        .map_or(0, |(_, parsed)| parsed.checkpoint_seq);
+    schema.sql("UPDATE audit_entries SET recorded_at = now() - interval '400 days'");
+    let rounds = prune_now(a_database, a.clone(), a_chain.clone()).await;
+    assert!(rounds.len() > 1, "the rounds repeat: {rounds:?}");
+    // What was old went, but for the run of A's chain the prune never cuts past its own end.
+    let left: Vec<(String, u64)> = checkpoints_in(&schema)
+        .into_iter()
+        .map(|(chain, parsed)| (chain, parsed.checkpoint_seq))
+        .collect();
+    assert!(
+        left.iter().all(|(chain, _)| *chain == a_chain),
+        "B's closed chain holds no checkpoint: {left:?}"
+    );
+    assert!(
+        left.iter().filter(|(_, seq)| *seq <= old).count() <= 1,
+        "every old checkpoint went in one prune: {left:?}"
+    );
+    two_more_checkpoints(&schema, &[&a]).await;
+    let verified = verified_against(&schema, &key).await;
+    assert!(!verified.failed, "{:?}", verified.lines);
+    assert!(a.close(Duration::from_secs(5)));
+}
+
+/// A closed chain is named closed by one checkpoint, and by none after it.
+/// Verifies: ADR-0041
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_closed_chain_is_named_by_one_checkpoint() {
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let Some(test) = token::TestToken::named() else {
+        return;
+    };
+    test.generate("audit");
+    let key = test.open().key("[audit] key_label", "audit").expect("key");
+    let signs = Arc::new(std::sync::Mutex::new("a"));
+    let interval = Duration::from_millis(200);
+    let (a, _a_lease, _) = signing_record(&schema, &key, interval, turn(&signs, "a")).await;
+    let (b, b_lease, _) = signing_record(&schema, &key, interval, turn(&signs, "b")).await;
+    let b_chain = b_lease.held().borrow().clone().expect("b");
+    two_more_checkpoints(&schema, &[&a, &b]).await;
+    assert!(b.close(Duration::from_secs(5)));
+    drop(b);
+    b_lease.release().await;
+    for _ in 0..5 {
+        two_more_checkpoints(&schema, &[&a]).await;
+    }
+    let named: Vec<(u64, bool)> = checkpoints_in(&schema)
+        .iter()
+        .filter_map(|(_, parsed)| {
+            parsed
+                .heads
+                .iter()
+                .find(|head| head.chain == b_chain)
+                .map(|head| (parsed.checkpoint_seq, head.closed))
+        })
+        .collect();
+    assert_eq!(
+        named.iter().filter(|(_, closed)| *closed).count(),
+        1,
+        "named closed once: {named:?}"
+    );
+    assert_eq!(
+        named.last().map(|(_, closed)| *closed),
+        Some(true),
+        "and not named after: {named:?}"
+    );
+    let verified = verified_against(&schema, &key).await;
+    assert!(!verified.failed, "{:?}", verified.lines);
+    assert!(a.close(Duration::from_secs(5)));
+}
+
+/// The last entry of `chain` at or below `below`: its `seq` and line.
+fn last_entry(schema: &Schema, chain: &str, below: Option<u64>) -> (u64, String) {
+    let filter = below.map_or(String::new(), |below| format!(" AND seq <= {below}"));
+    let row = schema
+        .query(&format!(
+            "SELECT seq::text || ' ' || line FROM audit_entries \
+             WHERE chain = '{chain}'::uuid{filter} ORDER BY seq DESC LIMIT 1"
+        ))
+        .pop()
+        .expect("a row");
+    let (seq, line) = row.split_once(' ').expect("seq and line");
+    (seq.parse().expect("seq"), line.to_string())
+}
+
+/// An `audit.pruned` naming `last_seq` of `pruned_chain` with `last_hash`, added after the last
+/// entry of `into` as whoever can write the database can: its `prev` right, no checkpoint after.
+fn forge_pruned(schema: &Schema, into: &str, pruned_chain: &str, last_seq: u64, last_hash: &str) {
+    let (seq, line) = last_entry(schema, into, None);
+    let entry = fleet_server::audit::Entry::new("audit.pruned", "recorded")
+        .with("pruned_chain", pruned_chain.to_string())
+        .with("last_seq", last_seq)
+        .with("last_hash", last_hash.to_string())
+        .with("chain", into.to_string());
+    let now = u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("now")
+            .as_millis(),
+    )
+    .expect("ms");
+    let forged = fleet_server::audit_log::render(
+        seq + 1,
+        now,
+        &entry,
+        &fleet_server::audit_log::line_hash(&line),
+    );
+    schema.sql(&format!(
+        "INSERT INTO audit_entries (chain, seq, line) VALUES ('{into}'::uuid, {}, $q${forged}$q$)",
+        seq + 1
+    ));
+}
+
+/// A signs, naming B's chain; then the signing stops, so what follows is the unsigned tail.
+async fn signed_then_still(
+    schema: &Schema,
+    key: &fleet_server::pkcs11::TokenKey,
+) -> (
+    Arc<fleet_server::audit_log::AuditLog>,
+    Arc<fleet_server::audit_log::AuditLog>,
+    String,
+    String,
+    [fleet_server::instance::Lease; 2],
+) {
+    let signs = Arc::new(std::sync::Mutex::new("a"));
+    let interval = Duration::from_millis(200);
+    let (a, a_lease, _) = signing_record(schema, key, interval, turn(&signs, "a")).await;
+    let (b, b_lease, _) = signing_record(schema, key, interval, turn(&signs, "b")).await;
+    for _ in 0..3 {
+        two_more_checkpoints(schema, &[&a, &b]).await;
+    }
+    *signs.lock().expect("turn") = "nobody";
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let (a_chain, b_chain) = (
+        a_lease.held().borrow().clone().expect("a"),
+        b_lease.held().borrow().clone().expect("b"),
+    );
+    (a, b, a_chain, b_chain, [a_lease, b_lease])
+}
+
+/// A chain removed whole, with an `audit.pruned` added after the newest checkpoint to explain it,
+/// still fails: only a removal a checkpoint covers counts.
+/// Verifies: ADR-0041
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_chain_removed_with_a_forged_prune_in_the_unsigned_tail_fails() {
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let Some(test) = token::TestToken::named() else {
+        return;
+    };
+    test.generate("audit");
+    let key = test.open().key("[audit] key_label", "audit").expect("key");
+    let (_a, _b, a_chain, b_chain, _leases) = signed_then_still(&schema, &key).await;
+    let before = verified_against(&schema, &key).await;
+    assert!(!before.failed, "{:?}", before.lines);
+    let (b_seq, b_line) = last_entry(&schema, &b_chain, None);
+    schema.sql(&format!(
+        "DELETE FROM audit_entries WHERE chain = '{b_chain}'::uuid; \
+         DELETE FROM audit_chains WHERE id = '{b_chain}'::uuid"
+    ));
+    forge_pruned(
+        &schema,
+        &a_chain,
+        &b_chain,
+        b_seq,
+        &fleet_server::audit_log::line_hash(&b_line),
+    );
+    let forged = verified_against(&schema, &key).await;
+    assert!(forged.failed, "{:?}", forged.lines);
+    assert!(
+        forged
+            .lines
+            .iter()
+            .any(|line| line.starts_with(&format!("chain {b_chain}")) && line.contains("removed")),
+        "{:?}",
+        forged.lines
+    );
+    assert!(
+        forged.lines.iter().any(|line| line
+            .contains("audit.pruned lies after every signed head the record still holds")),
+        "{:?}",
+        forged.lines
+    );
+}
+
+/// A chain's young entries cut, with an `audit.pruned` added after the newest checkpoint naming
+/// the last one cut, still fails: the earlier checkpoints name heads among them, and the chain
+/// begins where no signed removal says it may.
+/// Verifies: ADR-0041
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_young_cut_with_a_forged_prune_in_the_unsigned_tail_fails() {
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let Some(test) = token::TestToken::named() else {
+        return;
+    };
+    test.generate("audit");
+    let key = test.open().key("[audit] key_label", "audit").expect("key");
+    let (_a, _b, a_chain, b_chain, _leases) = signed_then_still(&schema, &key).await;
+    let (b_seq, _) = last_entry(&schema, &b_chain, None);
+    let (cut, cut_line) = last_entry(&schema, &b_chain, Some(b_seq - 1));
+    schema.sql(&format!(
+        "DELETE FROM audit_entries WHERE chain = '{b_chain}'::uuid AND seq <= {cut}"
+    ));
+    forge_pruned(
+        &schema,
+        &a_chain,
+        &b_chain,
+        cut,
+        &fleet_server::audit_log::line_hash(&cut_line),
+    );
+    let forged = verified_against(&schema, &key).await;
+    assert!(forged.failed, "{:?}", forged.lines);
+    assert!(
+        forged.lines.iter().any(|line| line.starts_with(&format!(
+            "chain {b_chain}, entry {}: the entries before it are gone",
+            cut + 1
+        ))),
+        "{:?}",
+        forged.lines
+    );
+}
+
+/// Every `seq` of `chain` some checkpoint names as a head.
+fn named_heads(schema: &Schema, chain: &str) -> Vec<u64> {
+    let mut seqs: Vec<u64> = checkpoints_in(schema)
+        .iter()
+        .flat_map(|(_, parsed)| {
+            parsed
+                .heads
+                .iter()
+                .filter(|head| head.chain == chain)
+                .map(|head| head.seq)
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    seqs.sort_unstable();
+    seqs.dedup();
+    seqs
+}
+
+/// An `audit.pruned` written at `seq` of `into`, chained to `prev_line`, naming `last_seq` of
+/// `pruned_chain` with `last_hash`: what whoever can write the database can place inside a run
+/// it cut.
+fn forge_pruned_at(
+    schema: &Schema,
+    into: &str,
+    seq: u64,
+    prev_line: &str,
+    pruned_chain: &str,
+    last_seq: u64,
+    last_hash: &str,
+) {
+    let entry = fleet_server::audit::Entry::new("audit.pruned", "recorded")
+        .with("pruned_chain", pruned_chain.to_string())
+        .with("last_seq", last_seq)
+        .with("last_hash", last_hash.to_string())
+        .with("chain", into.to_string());
+    let now = u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("now")
+            .as_millis(),
+    )
+    .expect("ms");
+    let forged = fleet_server::audit_log::render(
+        seq,
+        now,
+        &entry,
+        &fleet_server::audit_log::line_hash(prev_line),
+    );
+    schema.sql(&format!(
+        "INSERT INTO audit_entries (chain, seq, line) VALUES ('{into}'::uuid, {seq}, $q${forged}$q$)"
+    ));
+}
+
+/// B's young, signed entries cut from an unnamed `seq` on, and one `audit.pruned` placed at that
+/// `seq` naming B's own newest head: no head that is still there covers it, so it fails.
+/// Verifies: ADR-0041
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_young_cut_excused_by_a_prune_inside_it_fails() {
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let Some(test) = token::TestToken::named() else {
+        return;
+    };
+    test.generate("audit");
+    let key = test.open().key("[audit] key_label", "audit").expect("key");
+    let (_a, _b, _a_chain, b_chain, _leases) = signed_then_still(&schema, &key).await;
+    assert!(!verified_against(&schema, &key).await.failed);
+    let named = named_heads(&schema, &b_chain);
+    let head = *named.last().expect("b named");
+    let cut = (2..head)
+        .rev()
+        .find(|seq| !named.contains(seq))
+        .expect("an unnamed seq below the head");
+    let (_, head_line) = last_entry(&schema, &b_chain, Some(head));
+    let (_, prev_line) = last_entry(&schema, &b_chain, Some(cut - 1));
+    schema.sql(&format!(
+        "DELETE FROM audit_entries WHERE chain = '{b_chain}'::uuid AND seq >= {cut}"
+    ));
+    forge_pruned_at(
+        &schema,
+        &b_chain,
+        cut,
+        &prev_line,
+        &b_chain,
+        head,
+        &fleet_server::audit_log::line_hash(&head_line),
+    );
+    let forged = verified_against(&schema, &key).await;
+    assert!(forged.failed, "{:?}", forged.lines);
+    assert!(
+        forged
+            .lines
+            .iter()
+            .any(|line| line.starts_with(&format!("chain {b_chain}, entry {head}"))),
+        "{:?}",
+        forged.lines
+    );
+}
+
+/// Three instances. C removed whole and B's tail cut, with prunes placed in B's cut run naming
+/// C's newest head and B's own; then, separately, B and C both cut with prunes that excuse each
+/// other. Each fails.
+/// Verifies: ADR-0041
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn chains_cut_with_prunes_that_excuse_each_other_fail() {
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let Some(test) = token::TestToken::named() else {
+        return;
+    };
+    test.generate("audit");
+    let key = test.open().key("[audit] key_label", "audit").expect("key");
+    let signs = Arc::new(std::sync::Mutex::new("a"));
+    let interval = Duration::from_millis(200);
+    let (a, _a_lease, _) = signing_record(&schema, &key, interval, turn(&signs, "a")).await;
+    let (b, b_lease, _) = signing_record(&schema, &key, interval, turn(&signs, "b")).await;
+    let (c, c_lease, _) = signing_record(&schema, &key, interval, turn(&signs, "c")).await;
+    for _ in 0..3 {
+        two_more_checkpoints(&schema, &[&a, &b, &c]).await;
+    }
+    *signs.lock().expect("turn") = "nobody";
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let b_chain = b_lease.held().borrow().clone().expect("b");
+    let c_chain = c_lease.held().borrow().clone().expect("c");
+    assert!(!verified_against(&schema, &key).await.failed);
+    // Where each chain can be cut: two unnamed seqs below its newest named head.
+    let cut_of = |chain: &str| {
+        let named = named_heads(&schema, chain);
+        let head = *named.last().expect("named");
+        let cut = (2..head - 1)
+            .rev()
+            .find(|seq| !named.contains(seq) && !named.contains(&(seq + 1)))
+            .expect("two unnamed seqs");
+        let (_, head_line) = last_entry(&schema, chain, Some(head));
+        let (_, prev_line) = last_entry(&schema, chain, Some(cut - 1));
+        (
+            head,
+            fleet_server::audit_log::line_hash(&head_line),
+            cut,
+            prev_line,
+        )
+    };
+    let (b_head, b_hash, b_cut, b_prev) = cut_of(&b_chain);
+    let (c_head, c_hash, c_cut, c_prev) = cut_of(&c_chain);
+    let backup = |chain: &str| {
+        schema.query(&format!(
+            "SELECT seq::text || ' ' || line FROM audit_entries WHERE chain = '{chain}'::uuid"
+        ))
+    };
+    let (b_rows, c_rows) = (backup(&b_chain), backup(&c_chain));
+    let restore = |chain: &str, rows: &[String]| {
+        schema.sql(&format!(
+            "DELETE FROM audit_entries WHERE chain = '{chain}'::uuid"
+        ));
+        for row in rows {
+            let (seq, line) = row.split_once(' ').expect("seq and line");
+            schema.sql(&format!(
+                "INSERT INTO audit_entries (chain, seq, line) \
+                 VALUES ('{chain}'::uuid, {seq}, $q${line}$q$)"
+            ));
+        }
+    };
+
+    // The two chains cut, each with a prune in its cut run naming the other's newest head.
+    schema.sql(&format!(
+        "DELETE FROM audit_entries WHERE chain = '{b_chain}'::uuid AND seq >= {b_cut}; \
+         DELETE FROM audit_entries WHERE chain = '{c_chain}'::uuid AND seq >= {c_cut}"
+    ));
+    forge_pruned_at(&schema, &b_chain, b_cut, &b_prev, &c_chain, c_head, &c_hash);
+    forge_pruned_at(&schema, &c_chain, c_cut, &c_prev, &b_chain, b_head, &b_hash);
+    let cycle = verified_against(&schema, &key).await;
+    assert!(cycle.failed, "{:?}", cycle.lines);
+    for (chain, head) in [(&b_chain, b_head), (&c_chain, c_head)] {
+        assert!(
+            cycle
+                .lines
+                .iter()
+                .any(|line| line.starts_with(&format!("chain {chain}, entry {head}"))),
+            "{chain}: {:?}",
+            cycle.lines
+        );
+    }
+    restore(&b_chain, &b_rows);
+    restore(&c_chain, &c_rows);
+    assert!(!verified_against(&schema, &key).await.failed, "restored");
+
+    // C removed whole; B cut, with prunes in its cut run naming C's newest head and B's own.
+    schema.sql(&format!(
+        "DELETE FROM audit_entries WHERE chain = '{b_chain}'::uuid AND seq >= {b_cut}; \
+         DELETE FROM audit_entries WHERE chain = '{c_chain}'::uuid; \
+         DELETE FROM audit_chains WHERE id = '{c_chain}'::uuid"
+    ));
+    forge_pruned_at(&schema, &b_chain, b_cut, &b_prev, &c_chain, c_head, &c_hash);
+    let (_, first_forged) = last_entry(&schema, &b_chain, None);
+    forge_pruned_at(
+        &schema,
+        &b_chain,
+        b_cut + 1,
+        &first_forged,
+        &b_chain,
+        b_head,
+        &b_hash,
+    );
+    let whole = verified_against(&schema, &key).await;
+    assert!(whole.failed, "{:?}", whole.lines);
+    assert!(
+        whole
+            .lines
+            .iter()
+            .any(|line| line.starts_with(&format!("chain {c_chain}")) && line.contains("removed")),
+        "{:?}",
+        whole.lines
+    );
+    let _ = (a, b, c);
+}
+
+/// The chain and `seq` of the entry that holds checkpoint `n`.
+fn checkpoint_entry(schema: &Schema, n: u64) -> (String, u64) {
+    let row = schema
+        .query(&format!(
+            "SELECT chain::text || ' ' || seq::text FROM audit_entries WHERE checkpoint_seq = {n}"
+        ))
+        .pop()
+        .expect("the checkpoint");
+    let (chain, seq) = row.split_once(' ').expect("chain and seq");
+    (chain.to_string(), seq.parse().expect("seq"))
+}
+
+/// Holds the prune lock in a session of the test's own, as another instance's round does.
+fn hold_the_prune_lock(schema: &Schema) -> impl Drop {
+    schema.hold(
+        "SELECT pg_advisory_lock(hashtextextended('opamp-fleet-server-audit-prune:' || \
+         coalesce(current_schema(), ''), 0));",
+    )
+}
+
+/// A starts and signs, C writes and closes, and one checkpoint names C closed. Everything of A up
+/// past that checkpoint and all of C are past `retain_days`; another session holds the prune lock,
+/// so A prunes its own chain alone. With `c_pruned_first`, C pruned its own oldest entries while it
+/// was open. Answers A's record, A's chain and C's chain.
+async fn closed_chain_named_once_then_old(
+    schema: &Schema,
+    key: &fleet_server::pkcs11::TokenKey,
+    c_pruned_first: bool,
+) -> (Arc<fleet_server::audit_log::AuditLog>, String, String) {
+    let signs = Arc::new(std::sync::Mutex::new("a"));
+    let interval = Duration::from_millis(200);
+    let (a, a_lease, a_database) = signing_record(schema, key, interval, turn(&signs, "a")).await;
+    let (c, c_lease, c_database) = signing_record(schema, key, interval, turn(&signs, "c")).await;
+    let a_chain = a_lease.held().borrow().clone().expect("a");
+    let c_chain = c_lease.held().borrow().clone().expect("c");
+    two_more_checkpoints(schema, &[&a, &c]).await;
+    if c_pruned_first {
+        schema.sql(&format!(
+            "UPDATE audit_entries SET recorded_at = now() - interval '400 days' \
+             WHERE chain = '{c_chain}'::uuid AND seq <= 3"
+        ));
+        prune_now(c_database, c.clone(), c_chain.clone()).await;
+        two_more_checkpoints(schema, &[&a, &c]).await;
+        assert!(!verified_against(schema, key).await.failed);
+    }
+    assert!(c.close(Duration::from_secs(5)));
+    drop(c);
+    c_lease.release().await;
+    for _ in 0..3 {
+        two_more_checkpoints(schema, &[&a]).await;
+    }
+    let named_closed = checkpoints_in(schema)
+        .iter()
+        .filter(|(_, parsed)| {
+            parsed
+                .heads
+                .iter()
+                .any(|head| head.chain == c_chain && head.closed)
+        })
+        .map(|(_, parsed)| parsed.checkpoint_seq)
+        .collect::<Vec<_>>();
+    assert_eq!(named_closed.len(), 1, "{named_closed:?}");
+    let (in_chain, after) = checkpoint_entry(schema, named_closed[0] + 1);
+    assert_eq!(in_chain, a_chain);
+    schema.sql(&format!(
+        "UPDATE audit_entries SET recorded_at = now() - interval '400 days' \
+         WHERE (chain = '{a_chain}'::uuid AND seq <= {after}) OR chain = '{c_chain}'::uuid"
+    ));
+    let lock = hold_the_prune_lock(schema);
+    let rounds = prune_now(a_database, a.clone(), a_chain.clone()).await;
+    drop(lock);
+    assert!(rounds.iter().any(|round| round.held_back), "{rounds:?}");
+    assert!(
+        checkpoints_in(schema)
+            .iter()
+            .any(|(_, parsed)| parsed.checkpoint_seq == named_closed[0]),
+        "the checkpoint that names C closed is kept while C holds entries"
+    );
+    two_more_checkpoints(schema, &[&a]).await;
+    (a, a_chain, c_chain)
+}
+
+/// A closed chain named closed by one checkpoint: A's own prune keeps that checkpoint while the
+/// chain still holds entries, so removing the chain afterwards is still found.
+/// Verifies: ADR-0041
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_closed_chain_whose_naming_checkpoint_is_old_cannot_be_removed_unseen() {
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let Some(test) = token::TestToken::named() else {
+        return;
+    };
+    test.generate("audit");
+    let key = test.open().key("[audit] key_label", "audit").expect("key");
+    let (a, _a_chain, c_chain) = closed_chain_named_once_then_old(&schema, &key, false).await;
+    let kept = verified_against(&schema, &key).await;
+    assert!(!kept.failed, "{:?}", kept.lines);
+    schema.sql(&format!(
+        "DELETE FROM audit_entries WHERE chain = '{c_chain}'::uuid; \
+         DELETE FROM audit_chains WHERE id = '{c_chain}'::uuid"
+    ));
+    let removed = verified_against(&schema, &key).await;
+    assert!(removed.failed, "{:?}", removed.lines);
+    assert!(
+        removed
+            .lines
+            .iter()
+            .any(|line| line.starts_with(&format!("chain {c_chain}")) && line.contains("removed")),
+        "{:?}",
+        removed.lines
+    );
+    assert!(a.close(Duration::from_secs(5)));
+}
+
+/// As above, but C pruned its own oldest entries while open: the honest record still verifies
+/// after A's prune, since the checkpoint naming C closed, which covers C's prune, is kept.
+/// Verifies: ADR-0041
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_honest_record_holds_after_a_prune_while_a_closed_self_pruned_chain_remains() {
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let Some(test) = token::TestToken::named() else {
+        return;
+    };
+    test.generate("audit");
+    let key = test.open().key("[audit] key_label", "audit").expect("key");
+    let (a, _a_chain, _c_chain) = closed_chain_named_once_then_old(&schema, &key, true).await;
+    let honest = verified_against(&schema, &key).await;
+    assert!(!honest.failed, "{:?}", honest.lines);
+    assert!(a.close(Duration::from_secs(5)));
 }

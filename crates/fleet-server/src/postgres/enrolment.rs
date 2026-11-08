@@ -1203,8 +1203,8 @@ mod tests {
 
     /// A request whose bootstrap certificate another instance revoked is withdrawn when it is
     /// approved, and nothing is signed, whatever the approving instance holds in memory
-    /// (ADR-0026 clause 28).
-    /// Verifies: ADR-0026
+    /// (ADR-0040 clause 28).
+    /// Verifies: ADR-0040
     #[test]
     fn an_approval_whose_bootstrap_certificate_the_list_names_signs_nothing() {
         let Some(test) = TestDatabase::named() else {
@@ -1950,10 +1950,11 @@ mod tests {
                 csr_pem: &str,
                 host: &str,
                 subject: &crate::revocation::SubjectValues,
+                _use_case: crate::fleet::UseCase,
             ) -> Result<crate::revocation::Signed, String> {
                 self.signing.send(()).expect("signing");
                 self.go.lock().expect("go").recv().expect("let go");
-                self.signs.sign(csr_pem, host, subject)
+                self.signs.sign(csr_pem, host, subject, _use_case)
             }
             fn check_claims(&self, csr_pem: &str, sender: &[u8]) -> Result<(), String> {
                 self.signs.check_claims(csr_pem, sender)
@@ -2034,7 +2035,7 @@ mod tests {
     /// A register entry that its write refuses in the transaction that decides the request, here
     /// because another instance revoked the bootstrap certificate while the request was signed,
     /// rolls the decision back with it: nothing is registered or decided, the request is
-    /// withdrawn, and the signature is recorded as rolled back (ADR-0023 clause 9, ADR-0026
+    /// withdrawn, and the signature is recorded as rolled back (ADR-0023 clause 9, ADR-0040
     /// clause 28).
     /// Verifies: ADR-0023
     #[test]
@@ -2062,6 +2063,7 @@ mod tests {
                 csr_pem: &str,
                 host: &str,
                 subject: &crate::revocation::SubjectValues,
+                _use_case: crate::fleet::UseCase,
             ) -> Result<crate::revocation::Signed, String> {
                 let bootstrap = requester().bootstrap;
                 crate::revocation::LedgerStore::add_revocation(
@@ -2078,7 +2080,7 @@ mod tests {
                     100,
                 )
                 .expect("revoked elsewhere");
-                self.0.sign(csr_pem, host, subject)
+                self.0.sign(csr_pem, host, subject, _use_case)
             }
             fn check_claims(&self, csr_pem: &str, sender: &[u8]) -> Result<(), String> {
                 self.0.check_claims(csr_pem, sender)

@@ -232,6 +232,8 @@ client_ca_file = "client-ca.pem"
 # the server certificate lives means compromising the Server mints fleet members at will. A
 # certificate can be revoked through the REST API; validity_days bounds what one stolen
 # unnoticed is good for, and a Client renews at two thirds of it.
+# The key is named by exactly one of key_file, a PKCS#8 PEM file, and key_label, a key on the
+# [pkcs11] token below.
 # [client_ca]
 # cert_file = "client-ca.pem"
 # key_file = "client-ca-key.pem"
@@ -256,10 +258,26 @@ client_ca_file = "client-ca.pem"
 #   GET  /api/v1/bootstrap-certificates  lists the valid ones, each revocable by its serial
 # The pending queue holds at most 1024 requests; those of one bootstrap certificate at most
 # max_pending_per_bootstrap of them (1 to 1024), a quarter by default.
+# bootstrap_ca_key_label names that key on the [pkcs11] token instead of bootstrap_ca_key_file.
 # [enrolment]
 # bootstrap_ca_file = "bootstrap-ca.pem"
 # bootstrap_ca_key_file = "bootstrap-ca-key.pem"
 # max_pending_per_bootstrap = 256
+
+# THE CA KEYS ON A PKCS#11 TOKEN, in place of key files: the token signs, and no key is on the
+# Server's disk. `opamp-fleetctl pki token-init`, run on this host, makes the client CA's, the
+# bootstrap CA's and the audit key on it and writes the sections that name them. With SoftHSM2 the
+# token's files serve this host alone; instances on several hosts need a network HSM. The PIN file
+# is readable by its owner and group alone, like every secret file here. SoftHSM2 finds its own
+# configuration through SOFTHSM2_CONF or /etc/softhsm2.conf; nothing of it is named here.
+# [pkcs11]
+# module = "/usr/lib/softhsm/libsofthsm2.so"
+# token_label = "fleet"
+# pin_file = "/etc/opamp-fleet/token-pin"
+# and then, instead of the key files:
+#   [client_ca]  key_label = "client-ca"
+#   [enrolment]  bootstrap_ca_key_label = "bootstrap-ca"
+#   [audit]      key_label = "audit"
 
 # Repeated admission failures from one peer address: past max_failures 401s within
 # window_secs, the address is answered 429 with Retry-After for backoff_secs, before anything else
@@ -292,6 +310,15 @@ client_ca_file = "client-ca.pem"
 # max_file_bytes = 67108864   # files: a file this large is closed and the next one started
 # keep_files = 16             # files: the oldest past this is deleted, its last hash recorded first
 # retain_days = 365           # PostgreSQL: entries older than this are pruned, 1 to 36500
+# key_label = "audit"         # the audit key on the [pkcs11] token; every instance names the same
+#
+# Off by default: every entry, once written, also sent as an OTLP log record to a receiver the
+# Server cannot rewrite. The endpoint is the full OTLP/HTTP URL WITH PATH, https:// (http:// to
+# 127.0.0.1 or ::1 alone). A receiver that is down never holds up a decision: what does not fit
+# the export's queue is dropped, and the count is written into the record as audit.export_dropped.
+# [audit.export]
+# endpoint = "https://collector.example:4318/v1/logs"
+# ca_file = "/etc/opamp-fleet/collector-root.pem"   # one PEM root no public root store holds
 
 # Optional connection settings offered to the fleet: every Agent declaring
 # AcceptsOpAMPConnectionSettings is offered these, verifies them by actually connecting, and

@@ -124,7 +124,7 @@ impl Plugin for CommandPlugin {
         //
         // **The environment is logged by key, never by value.** Both are the operator's, and a
         // Foreign Agent's environment is exactly where a token or a password is handed to it
-        // (ADR-0026's reasoning, applied to a Managed Process). Which variables are set answers
+        // (ADR-0040's reasoning, applied to a Managed Process). Which variables are set answers
         // "did my configuration reach it"; their contents answer nothing this line is for.
         debug!(
             supervisor = %ctx.name,

@@ -141,6 +141,34 @@ pub trait AuditStore: Send {
     /// # Errors
     /// Returns an error when a file cannot be deleted.
     fn rotate(&mut self, keep: usize) -> Result<Vec<(String, String)>, String>;
+
+    /// The `checkpoint_seq` and hash of the last checkpoint the file `file`, which the last
+    /// [`rotate`](Self::rotate) deleted, held or named as removed, if any
+    /// (ADR-0041 clause 1).
+    fn removed_checkpoint(&mut self, file: &str) -> Option<(u64, String)> {
+        let _ = file;
+        None
+    }
+
+    /// Appends the checkpoint `line`, numbered `checkpoint_seq` after the checkpoint whose hash
+    /// is `checkpoint_prev`, alone, as [`append`](Self::append) does. A store several processes
+    /// write holds at most one checkpoint per `checkpoint_seq` and takes one only while
+    /// `checkpoint_prev` names its newest
+    /// (ADR-0041 clause 2).
+    ///
+    /// # Errors
+    /// Returns an error when the line cannot be written, or another checkpoint came first; then
+    /// it is not in the store.
+    fn append_checkpoint(
+        &mut self,
+        seq: u64,
+        line: &str,
+        checkpoint_seq: u64,
+        checkpoint_prev: &str,
+    ) -> Result<(), String> {
+        let _ = (checkpoint_seq, checkpoint_prev);
+        self.append(seq, &[line])
+    }
 }
 
 /// How large a file grows and how many are kept (`[audit]`).
@@ -320,7 +348,7 @@ impl AuditLog {
         limits: Limits,
         clock: Arc<dyn Clock>,
     ) -> Result<Self, String> {
-        Self::start_with(store, limits, clock, None)
+        Self::start_with(store, limits, clock, None, None, None)
     }
 
     /// [`start`](Self::start) for a store of one chain per lease: each decision is marked with
@@ -337,7 +365,41 @@ impl AuditLog {
         held: crate::instance::Held,
         proof: Option<crate::instance::Proof>,
     ) -> Result<Self, String> {
-        Self::start_with(store, limits, clock, Some((held, proof)))
+        Self::start_with(store, limits, clock, Some((held, proof)), None, None)
+    }
+
+    /// [`start`](Self::start), or with `held` [`start_under`](Self::start_under), and every line
+    /// the store accepts handed to `export` as well
+    /// (ADR-0043
+    /// clause 9).
+    ///
+    /// # Errors
+    /// Returns an error when the store cannot be read.
+    pub fn start_exporting(
+        store: Box<dyn AuditStore>,
+        limits: Limits,
+        clock: Arc<dyn Clock>,
+        held: Option<(crate::instance::Held, Option<crate::instance::Proof>)>,
+        export: Option<crate::audit_export::Sink>,
+    ) -> Result<Self, String> {
+        Self::start_with(store, limits, clock, held, export, None)
+    }
+
+    /// [`start_exporting`](Self::start_exporting), and, with `signing`, a checkpoint of the heads
+    /// of every chain signed at every interval and at the shutdown's close
+    /// (ADR-0041 clause 2).
+    ///
+    /// # Errors
+    /// Returns an error when the store cannot be read.
+    pub fn start_signing(
+        store: Box<dyn AuditStore>,
+        limits: Limits,
+        clock: Arc<dyn Clock>,
+        held: Option<(crate::instance::Held, Option<crate::instance::Proof>)>,
+        export: Option<crate::audit_export::Sink>,
+        signing: Option<Signing>,
+    ) -> Result<Self, String> {
+        Self::start_with(store, limits, clock, held, export, signing)
     }
 
     fn start_with(
@@ -345,6 +407,8 @@ impl AuditLog {
         limits: Limits,
         clock: Arc<dyn Clock>,
         held: Option<(crate::instance::Held, Option<crate::instance::Proof>)>,
+        export: Option<crate::audit_export::Sink>,
+        signing: Option<Signing>,
     ) -> Result<Self, String> {
         let chain = store.chain();
         let per_lease = chain != Chain::One;
@@ -380,10 +444,12 @@ impl AuditLog {
             per_lease,
             closed: closed.clone(),
             pending: pending.clone(),
+            export,
             chain: match chain {
                 Chain::Lease(id) => Some(id),
                 Chain::One | Chain::Unleased => None,
             },
+            signing: signing.map(Signing::start).transpose()?,
         };
         if let Some(last_whole) = torn {
             // The torn piece holds no `prev` of its own; `last_whole` binds what follows to the
@@ -682,6 +748,9 @@ pub fn render(seq: u64, time_ms: u64, entry: &Entry, prev: &str) -> String {
             Field::Unsigned(n) => Value::from(*n),
             Field::Signed(n) => Value::from(*n),
             Field::Flag(flag) => Value::from(*flag),
+            Field::Json(text) => {
+                serde_json::from_str(text).unwrap_or_else(|_| Value::from(text.clone()))
+            }
         };
         line.insert(key.clone(), value);
     }
@@ -693,6 +762,15 @@ pub fn render(seq: u64, time_ms: u64, entry: &Entry, prev: &str) -> String {
 /// clause 6).
 pub(crate) fn emit(seq: u64, event: &str, outcome: &str, text: &str) {
     info!(target: "audit", seq, event = %event, outcome = %outcome, "{}", text);
+}
+
+/// What follows once the store has accepted `line`: its `tracing` event, and its export where
+/// there is one.
+fn accepted(export: Option<&crate::audit_export::Sink>, line: &Line) {
+    emit(line.seq, &line.entry.event, &line.entry.outcome, &line.text);
+    if let Some(export) = export {
+        export.offer(&line.entry.event, &line.text, line.time_ms);
+    }
 }
 
 /// The writer task's state.
@@ -722,6 +800,10 @@ struct Writer {
     pending: Arc<AtomicUsize>,
     /// The chain the batch's lines are given their place in, where the store keeps one per lease.
     chain: Option<String>,
+    /// Where each line the store accepted is exported to, where `[audit.export]` names a receiver.
+    export: Option<crate::audit_export::Sink>,
+    /// The checkpoints' signing, where `[audit] key_label` names the audit key.
+    signing: Option<Signer>,
 }
 
 /// One line of the batch.
@@ -745,7 +827,12 @@ impl Writer {
         use std::sync::mpsc::RecvTimeoutError;
         let mut last_tick = std::time::Instant::now();
         loop {
-            match rx.recv_timeout(Duration::from_secs(1)) {
+            let wait = self
+                .signing
+                .as_ref()
+                .map_or(Duration::from_secs(1), Signer::wait)
+                .min(Duration::from_secs(1));
+            match rx.recv_timeout(wait) {
                 Ok(message) => {
                     self.handle(message);
                     // What is queued already joins the batch, and the whole batch is synced once.
@@ -768,6 +855,7 @@ impl Writer {
                 last_tick = std::time::Instant::now();
                 self.tick(rx);
             }
+            self.poll_checkpoint();
         }
     }
 
@@ -814,6 +902,9 @@ impl Writer {
             Message::Close(done) => {
                 self.flush_window(u64::MAX);
                 self.commit();
+                if !self.failing.load(Ordering::SeqCst) {
+                    self.last_checkpoint();
+                }
                 let written = !self.failing.load(Ordering::SeqCst);
                 let closed = written && (!self.per_lease || self.close_chain());
                 if closed && self.per_lease {
@@ -872,7 +963,7 @@ impl Writer {
             self.batch_bytes = 0;
             self.failing.store(false, Ordering::SeqCst);
             for line in std::mem::take(&mut self.batch) {
-                emit(line.seq, &line.entry.event, &line.entry.outcome, &line.text);
+                accepted(self.export.as_ref(), &line);
             }
         }
         landed
@@ -935,12 +1026,17 @@ impl Writer {
             match self.store.rotate(self.limits.keep_files) {
                 Ok(deleted) => {
                     for (file, last) in deleted {
-                        self.append(
-                            Entry::new("audit.rotated", "recorded")
-                                .with("deleted", file)
-                                .with("deleted_last_hash", line_hash(&last)),
-                            Under::Unmarked,
-                        );
+                        let mut entry = Entry::new("audit.rotated", "recorded")
+                            .with("deleted_last_hash", line_hash(&last));
+                        // The last checkpoint the file held, which a verifier goes on from
+                        // (ADR-0041
+                        // clause 1).
+                        if let Some((seq, hash)) = self.store.removed_checkpoint(&file) {
+                            entry = entry
+                                .with("checkpoint_seq", seq)
+                                .with("checkpoint_hash", hash);
+                        }
+                        self.append(entry.with("deleted", file), Under::Unmarked);
                     }
                 }
                 Err(e) => error!(error = %e, "cannot rotate the audit record"),
@@ -1023,7 +1119,7 @@ impl Writer {
                 .take_while(|(line, stored)| line.text == **stored)
                 .count();
             for line in self.batch.drain(..landed) {
-                emit(line.seq, &line.entry.event, &line.entry.outcome, &line.text);
+                accepted(self.export.as_ref(), &line);
             }
         }
         let (seq, prev) = match self.store.tail()? {
@@ -1092,7 +1188,7 @@ impl Writer {
                 self.batch_bytes = 0;
                 self.failing.store(false, Ordering::SeqCst);
                 for line in &batch {
-                    emit(line.seq, &line.entry.event, &line.entry.outcome, &line.text);
+                    accepted(self.export.as_ref(), line);
                 }
             }
             Err(e) => {
@@ -1108,6 +1204,333 @@ impl Writer {
                 if !self.failing.swap(true, Ordering::SeqCst) {
                     error!(error = %e, "cannot write the audit record — refusing what needs one");
                 }
+            }
+        }
+    }
+}
+
+/// The checkpoints' signing
+/// (ADR-0041 clause 2): the
+/// audit key, where the heads come from, and how often.
+pub struct Signing {
+    pub signer: Arc<dyn crate::checkpoint::CheckpointSigner>,
+    pub source: Box<dyn crate::checkpoint::CheckpointSource>,
+    /// How often a checkpoint is signed: [`crate::checkpoint::INTERVAL`], shorter in tests.
+    pub interval: Duration,
+    /// How long the writer waits for a signature: [`crate::checkpoint::SIGN_WAIT`].
+    pub sign_wait: Duration,
+}
+
+impl Signing {
+    /// Signing with `signer`, the heads read from `source`, at the interval and wait the ADR
+    /// sets.
+    #[must_use]
+    pub fn new(
+        signer: Arc<dyn crate::checkpoint::CheckpointSigner>,
+        source: Box<dyn crate::checkpoint::CheckpointSource>,
+    ) -> Self {
+        Signing {
+            signer,
+            source,
+            interval: crate::checkpoint::INTERVAL,
+            sign_wait: crate::checkpoint::SIGN_WAIT,
+        }
+    }
+
+    /// Starts the thread `audit-sign`, which reads the heads and asks the token, beside the
+    /// writer.
+    fn start(self) -> Result<Signer, String> {
+        let Signing {
+            signer,
+            mut source,
+            interval,
+            sign_wait,
+        } = self;
+        let (jobs, rx) = std::sync::mpsc::sync_channel::<Job>(1);
+        let worker = signer.clone();
+        std::thread::Builder::new()
+            .name("audit-sign".to_string())
+            .spawn(move || {
+                for job in rx {
+                    match job {
+                        Job::Prepare(answer) => {
+                            let _ = answer.send(source.prepare());
+                        }
+                        Job::Sign(digest, answer) => {
+                            let _ = answer.send(worker.sign_digest(&digest));
+                        }
+                    }
+                }
+            })
+            .map_err(|e| format!("cannot start the audit signer: {e}"))?;
+        let spki = signer.public_key_der();
+        Ok(Signer {
+            jobs,
+            asked: None,
+            next: std::time::Instant::now(),
+            interval,
+            sign_wait,
+            label: signer.label().to_string(),
+            key_sha256: crate::checkpoint::key_sha256(&spki),
+            tip: None,
+        })
+    }
+}
+
+/// What the writer asks the thread `audit-sign`.
+enum Job {
+    /// The newest checkpoint and the heads to name, or `None` where this process does not sign.
+    Prepare(std::sync::mpsc::SyncSender<Result<Option<crate::checkpoint::Prepared>, String>>),
+    /// The signature over a checkpoint's digest.
+    Sign(
+        [u8; 32],
+        std::sync::mpsc::SyncSender<Result<Vec<u8>, String>>,
+    ),
+}
+
+/// The writer's side of the signing.
+struct Signer {
+    jobs: std::sync::mpsc::SyncSender<Job>,
+    /// The heads asked for and not yet answered.
+    asked: Option<std::sync::mpsc::Receiver<Result<Option<crate::checkpoint::Prepared>, String>>>,
+    /// When the next checkpoint is due.
+    next: std::time::Instant,
+    interval: Duration,
+    sign_wait: Duration,
+    label: String,
+    key_sha256: String,
+    /// The newest checkpoint this writer wrote.
+    tip: Option<crate::checkpoint::Tip>,
+}
+
+impl Signer {
+    /// How long the writer may wait for a message before it looks at the signing again.
+    fn wait(&self) -> Duration {
+        if self.asked.is_some() {
+            return Duration::from_millis(20);
+        }
+        self.next
+            .saturating_duration_since(std::time::Instant::now())
+            .max(Duration::from_millis(1))
+    }
+}
+
+impl Writer {
+    /// Asks for the heads when a checkpoint is due, and signs one once they are answered.
+    fn poll_checkpoint(&mut self) {
+        use std::sync::mpsc::{TryRecvError, TrySendError};
+        if self.closed.load(Ordering::SeqCst) {
+            return;
+        }
+        let Some(signer) = self.signing.as_mut() else {
+            return;
+        };
+        if let Some(asked) = &signer.asked {
+            match asked.try_recv() {
+                Ok(prepared) => {
+                    signer.asked = None;
+                    let wait = signer.sign_wait;
+                    self.prepared(prepared, std::time::Instant::now() + wait);
+                }
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => signer.asked = None,
+            }
+            return;
+        }
+        let now = std::time::Instant::now();
+        if now < signer.next {
+            return;
+        }
+        signer.next = now + signer.interval;
+        let (answer, asked) = std::sync::mpsc::sync_channel(1);
+        match signer.jobs.try_send(Job::Prepare(answer)) {
+            Ok(()) => signer.asked = Some(asked),
+            Err(TrySendError::Full(_)) => {
+                self.checkpoint_failed("the token is still signing the checkpoint before");
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                self.checkpoint_failed("the audit signer is gone");
+            }
+        }
+    }
+
+    /// At the shutdown's close, before the chain is closed: a last checkpoint, within the wait
+    /// for one signature.
+    fn last_checkpoint(&mut self) {
+        let Some(signer) = self.signing.as_mut() else {
+            return;
+        };
+        let deadline = std::time::Instant::now() + signer.sign_wait;
+        let asked = match signer.asked.take() {
+            Some(asked) => asked,
+            None => {
+                let (answer, asked) = std::sync::mpsc::sync_channel(1);
+                if signer.jobs.try_send(Job::Prepare(answer)).is_err() {
+                    self.checkpoint_failed("the token is still signing the checkpoint before");
+                    return;
+                }
+                asked
+            }
+        };
+        match asked.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())) {
+            Ok(prepared) => self.prepared(prepared, deadline),
+            Err(_) => self.checkpoint_failed("timeout"),
+        }
+    }
+
+    /// Writes `audit.checkpoint_failed` naming `error`, and logs it at `error`.
+    fn checkpoint_failed(&mut self, error: &str) {
+        error!(error = %error, "the heads of the audit chains were not signed");
+        self.write(crate::checkpoint::failed_entry(error), Under::Unmarked);
+        self.commit();
+    }
+
+    /// Signs and writes the checkpoint `prepared` makes possible, the signature awaited until
+    /// `deadline`.
+    fn prepared(
+        &mut self,
+        prepared: Result<Option<crate::checkpoint::Prepared>, String>,
+        deadline: std::time::Instant,
+    ) {
+        match prepared {
+            Err(e) => self.checkpoint_failed(&e),
+            // Another process signs.
+            Ok(None) => {}
+            Ok(Some(prepared)) => self.checkpoint(prepared, deadline),
+        }
+    }
+
+    /// The checkpoint itself: placed after everything written so far, signed, and written alone.
+    /// One that is not signed by `deadline`, or not written, is taken back and never written
+    /// again, as its signature covers its place.
+    fn checkpoint(&mut self, prepared: crate::checkpoint::Prepared, deadline: std::time::Instant) {
+        use crate::checkpoint::{Head, Tip, FS_CHAIN};
+        if self.closed.load(Ordering::SeqCst) {
+            return;
+        }
+        // The chain's head is what the store holds: everything before is written first.
+        self.commit();
+        if self.failing.load(Ordering::SeqCst) || !self.batch.is_empty() {
+            return;
+        }
+        if self.follow_chain().is_err() {
+            return;
+        }
+        let Some((label, key_sha256, jobs, mine)) = self.signing.as_ref().map(|signer| {
+            (
+                signer.label.clone(),
+                signer.key_sha256.clone(),
+                signer.jobs.clone(),
+                signer.tip.clone(),
+            )
+        }) else {
+            return;
+        };
+        let own = self.chain.clone().unwrap_or_else(|| FS_CHAIN.to_string());
+        let tip = match (prepared.tip, mine) {
+            (Some(read), Some(mine)) if mine.checkpoint_seq > read.checkpoint_seq => Some(mine),
+            (None, mine) => mine,
+            (read, _) => read,
+        };
+        let mut heads: Vec<Head> = prepared
+            .heads
+            .into_iter()
+            .filter(|head| head.chain != own)
+            .collect();
+        let own_head = Head {
+            chain: own.clone(),
+            seq: self.seq,
+            hash: self.prev.clone(),
+            closed: false,
+        };
+        // Skipped when no chain grew since the newest checkpoint but by that checkpoint itself.
+        if let Some((tip, named)) = tip.as_ref().and_then(|tip| tip.heads().map(|h| (tip, h))) {
+            let own_unchanged = self.prev == tip.hash || named.contains(&own_head);
+            if own_unchanged && heads.iter().all(|head| named.contains(head)) {
+                return;
+            }
+        }
+        heads.push(own_head);
+        heads.sort();
+        let (checkpoint_seq, checkpoint_prev) = tip.as_ref().map_or_else(
+            || (1, GENESIS.to_string()),
+            |tip| (tip.checkpoint_seq + 1, tip.hash.clone()),
+        );
+        let entry = crate::checkpoint::unsigned_entry(
+            checkpoint_seq,
+            &checkpoint_prev,
+            &heads,
+            &label,
+            &key_sha256,
+        );
+        let (seq, prev) = (self.seq, self.prev.clone());
+        let mut line = Line {
+            seq: 0,
+            text: String::new(),
+            entry,
+            time_ms: self.clock.now_ms(),
+            unrecorded: 0,
+            decided_under: Under::Unmarked,
+            lost: 0,
+        };
+        self.place(&mut line);
+        let signed = crate::checkpoint::signed_digest(&line.text).and_then(|digest| {
+            let (answer, signature) = std::sync::mpsc::sync_channel(1);
+            jobs.try_send(Job::Sign(digest, answer))
+                .map_err(|_| "the token is still signing the checkpoint before".to_string())?;
+            match signature
+                .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+            {
+                Ok(signed) => signed,
+                Err(_) => Err("timeout".to_string()),
+            }
+        });
+        (self.seq, self.prev) = (seq, prev.clone());
+        let sig = match signed {
+            Ok(sig) => sig,
+            Err(e) => {
+                self.checkpoint_failed(&e);
+                return;
+            }
+        };
+        line.entry.fields.insert(
+            "sig".into(),
+            Field::Text(base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                sig,
+            )),
+        );
+        self.place(&mut line);
+        let written = self
+            .store
+            .append_checkpoint(line.seq, &line.text, checkpoint_seq, &checkpoint_prev)
+            .or_else(|e| {
+                // A write whose answer was lost may have landed: then the chain holds it.
+                let landed = self.chain.clone().is_some_and(|chain| {
+                    self.store
+                        .stored(&chain, line.seq)
+                        .is_ok_and(|stored| stored.first() == Some(&line.text))
+                });
+                if landed {
+                    Ok(())
+                } else {
+                    Err(e)
+                }
+            });
+        match written {
+            Ok(()) => {
+                accepted(self.export.as_ref(), &line);
+                if let Some(signer) = self.signing.as_mut() {
+                    signer.tip = Some(Tip {
+                        checkpoint_seq,
+                        hash: self.prev.clone(),
+                        line: Some(line.text),
+                    });
+                }
+            }
+            Err(e) => {
+                (self.seq, self.prev) = (seq, prev);
+                self.checkpoint_failed(&e);
             }
         }
     }
@@ -1732,6 +2155,48 @@ mod tests {
         assert!(lines[1].contains("\"seq\":2"), "{}", lines[1]);
         assert!(lines[1].contains("\"unrecorded_before\":5"), "{}", lines[1]);
         assert_eq!(chain_of(&memory), Ok(2));
+    }
+
+    /// The export is handed every line once the store has accepted it, as the store holds it, in
+    /// the order of the chain; the lines of a batch the store refused are lost, and none of them is
+    /// exported.
+    /// Verifies: ADR-0043, ADR-0028
+    #[test]
+    fn the_export_is_handed_each_line_the_store_accepted_as_it_holds_it() {
+        let memory = Memory::default();
+        let (sink, taken) = crate::audit_export::test_sink();
+        let audit = AuditLog::start_exporting(
+            Box::new(memory.clone()),
+            Limits::default(),
+            clock(),
+            None,
+            Some(sink),
+        )
+        .expect("start");
+        audit
+            .record(Entry::new("admission.admitted", "admitted"))
+            .expect("record");
+        written(&audit);
+        assert_eq!(taken.lines(), memory.lines());
+
+        let held = memory.0.lock().expect("lock");
+        for n in 0..3 {
+            audit
+                .record(Entry::new("admission.admitted", "admitted").with("n", n))
+                .expect("record");
+        }
+        memory.1.store(true, Ordering::SeqCst);
+        drop(held);
+        assert!(!audit.drain(Duration::from_secs(10)));
+        assert!(taken.lines().is_empty(), "a refused line was exported");
+
+        memory.1.store(false, Ordering::SeqCst);
+        until("the writer never retried", || memory.lines().len() >= 2);
+        audit
+            .record(Entry::new("admission.admitted", "admitted").with("n", 9))
+            .expect("record");
+        written(&audit);
+        assert_eq!(taken.lines(), memory.lines()[1..].to_vec());
     }
 
     /// Verifies: ADR-0028
@@ -2398,5 +2863,222 @@ mod tests {
         assert!(walked(&other, None)
             .expect_err("another chain's")
             .contains("entry 2:"));
+    }
+
+    /// A signer for the writer's tests: its signature is no real one, it may refuse, and it may
+    /// take its time.
+    struct Fake {
+        refuse: bool,
+        delay: Duration,
+        signed: Arc<AtomicU64>,
+    }
+
+    impl crate::checkpoint::CheckpointSigner for Fake {
+        fn label(&self) -> &str {
+            "audit"
+        }
+        fn public_key_der(&self) -> Vec<u8> {
+            vec![1, 2, 3]
+        }
+        fn sign_digest(&self, _: &[u8]) -> Result<Vec<u8>, String> {
+            std::thread::sleep(self.delay);
+            self.signed.fetch_add(1, Ordering::SeqCst);
+            if self.refuse {
+                return Err("CKR_DEVICE_ERROR".to_string());
+            }
+            Ok(vec![0x30, 0x00])
+        }
+    }
+
+    fn signing_with(fake: Fake, interval: Duration) -> Signing {
+        Signing {
+            signer: Arc::new(fake),
+            source: Box::new(crate::checkpoint::OneChain::new(None)),
+            interval,
+            sign_wait: Duration::from_millis(300),
+        }
+    }
+
+    fn events(memory: &Memory, event: &str) -> Vec<Value> {
+        memory
+            .lines()
+            .iter()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|value| value["event"] == event)
+            .collect()
+    }
+
+    /// A checkpoint is written once an interval has passed, naming the head of the chain, the
+    /// entry before it, and following the one before; none is written while nothing grew; and the
+    /// shutdown's close writes a last one.
+    /// Verifies: ADR-0041
+    #[test]
+    fn a_checkpoint_names_the_head_each_interval_and_at_the_close() {
+        let memory = Memory::default();
+        let signed = Arc::new(AtomicU64::new(0));
+        let fake = Fake {
+            refuse: false,
+            delay: Duration::ZERO,
+            signed: signed.clone(),
+        };
+        let audit = AuditLog::start_signing(
+            Box::new(memory.clone()),
+            Limits::default(),
+            clock(),
+            None,
+            None,
+            Some(signing_with(fake, Duration::from_millis(200))),
+        )
+        .expect("start");
+        audit
+            .record(Entry::new("host.admitted", "admitted"))
+            .expect("record");
+        until("a checkpoint after the entry", || {
+            events(&memory, crate::checkpoint::CHECKPOINT).len() == 1
+        });
+        let lines = memory.lines();
+        let at = lines
+            .iter()
+            .position(|line| line.contains("\"event\":\"audit.checkpoint\""))
+            .expect("the checkpoint");
+        let parsed = crate::checkpoint::parse(&lines[at]).expect("checkpoint");
+        assert_eq!(parsed.checkpoint_seq, 1);
+        assert_eq!(parsed.checkpoint_prev, GENESIS);
+        assert_eq!(
+            parsed.heads,
+            vec![crate::checkpoint::Head {
+                chain: crate::checkpoint::FS_CHAIN.to_string(),
+                seq: u64::try_from(at).expect("seq"),
+                hash: line_hash(&lines[at - 1]),
+                closed: false,
+            }],
+            "the head is the entry before the checkpoint"
+        );
+        assert_eq!(parsed.key_label, "audit");
+        // Nothing grew: several intervals pass without another checkpoint.
+        std::thread::sleep(Duration::from_millis(700));
+        assert_eq!(events(&memory, crate::checkpoint::CHECKPOINT).len(), 1);
+        audit
+            .record(Entry::new("host.admitted", "admitted"))
+            .expect("record");
+        until("a checkpoint after the next entry", || {
+            events(&memory, crate::checkpoint::CHECKPOINT).len() == 2
+        });
+        audit
+            .record(Entry::new("host.admitted", "admitted"))
+            .expect("record");
+        assert!(audit.close(Duration::from_secs(5)));
+        let checkpoints = events(&memory, crate::checkpoint::CHECKPOINT);
+        assert_eq!(checkpoints.len(), 3, "the close wrote a last one");
+        let last = memory.lines().last().cloned().expect("a line");
+        assert!(last.contains("\"event\":\"audit.checkpoint\""), "{last}");
+        let lines = memory.lines();
+        let second = lines
+            .iter()
+            .filter(|line| line.contains("\"event\":\"audit.checkpoint\""))
+            .nth(1)
+            .expect("the second");
+        let parsed = crate::checkpoint::parse(&last).expect("checkpoint");
+        assert_eq!(parsed.checkpoint_seq, 3);
+        let second = crate::checkpoint::parse(second).expect("second");
+        assert_eq!(second.checkpoint_seq, 2);
+        assert_eq!(chain_of(&memory).map(|_| ()), Ok(()));
+    }
+
+    /// A token that refuses to sign, or does not sign in time, leaves `audit.checkpoint_failed`
+    /// naming why, and decisions are recorded meanwhile.
+    /// Verifies: ADR-0041
+    #[test]
+    fn a_token_that_does_not_sign_leaves_checkpoint_failed_and_decisions_go_on() {
+        for (refuse, delay, why) in [
+            (true, Duration::ZERO, "CKR_DEVICE_ERROR"),
+            (false, Duration::from_secs(2), "timeout"),
+        ] {
+            let memory = Memory::default();
+            let fake = Fake {
+                refuse,
+                delay,
+                signed: Arc::default(),
+            };
+            let audit = AuditLog::start_signing(
+                Box::new(memory.clone()),
+                Limits::default(),
+                clock(),
+                None,
+                None,
+                Some(signing_with(fake, Duration::from_secs(60))),
+            )
+            .expect("start");
+            audit
+                .record(Entry::new("host.admitted", "admitted"))
+                .expect("record");
+            until("checkpoint_failed", || {
+                !events(&memory, crate::checkpoint::FAILED).is_empty()
+            });
+            for _ in 0..20 {
+                audit
+                    .record(Entry::new("host.admitted", "admitted"))
+                    .expect("a decision is recorded while the token does not sign");
+            }
+            written(&audit);
+            let failed = events(&memory, crate::checkpoint::FAILED);
+            assert_eq!(failed[0]["error"], why, "{failed:?}");
+            assert!(events(&memory, crate::checkpoint::CHECKPOINT).is_empty());
+            assert_eq!(chain_of(&memory).map(|_| ()), Ok(()));
+        }
+    }
+
+    /// A rotation that deletes a file holding checkpoints names the last of them, and the writer
+    /// started on what is left goes on from it.
+    /// Verifies: ADR-0041
+    #[test]
+    fn a_rotation_names_the_last_checkpoint_it_deleted() {
+        let dir = tempfile::tempdir().expect("dir");
+        let limits = Limits {
+            max_file_bytes: 2048,
+            keep_files: 2,
+        };
+        let fake = || Fake {
+            refuse: false,
+            delay: Duration::ZERO,
+            signed: Arc::default(),
+        };
+        let audit = AuditLog::start_signing(
+            Box::new(crate::fs::FsAuditStore::open(dir.path()).expect("store")),
+            limits,
+            clock(),
+            None,
+            None,
+            Some(signing_with(fake(), Duration::from_millis(50))),
+        )
+        .expect("start");
+        let audit_dir = dir.path().join(crate::fs::AUDIT);
+        let rotated = || {
+            crate::fs::audit_lines(&crate::fs::audit_files(&audit_dir).expect("files"))
+                .expect("lines")
+                .into_iter()
+                .filter_map(|(_, line)| serde_json::from_str::<Value>(&line).ok())
+                .filter(|value| {
+                    value["event"] == "audit.rotated" && value.get("checkpoint_seq").is_some()
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut n = 0u64;
+        until("a rotation that deleted a checkpoint", || {
+            n += 1;
+            audit
+                .record(Entry::new("host.admitted", "admitted").with("n", n))
+                .expect("record");
+            std::thread::sleep(Duration::from_millis(20));
+            !rotated().is_empty()
+        });
+        assert!(audit.close(Duration::from_secs(5)));
+        drop(audit);
+        let tip = crate::fs::last_audit_checkpoint(&audit_dir)
+            .expect("read")
+            .expect("a checkpoint");
+        let named = rotated();
+        let last = named.last().expect("named");
+        assert!(tip.checkpoint_seq > last["checkpoint_seq"].as_u64().expect("seq"));
     }
 }

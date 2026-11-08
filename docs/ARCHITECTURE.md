@@ -38,11 +38,11 @@ than anywhere else, and none beats one that has stopped being true.
 
 - **Operators** drive the fleet through the REST API on the Operator plane, guarded by
   `[rest.auth]` beyond the loopback; the bundled UI uses the same API
-  ([ADR-0026](adr/0026-admission-by-client-certificate-and-revocation.md)).
+  ([ADR-0040](adr/0040-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)).
 - **Clients** reach the Agent plane over OpAMP — WebSocket or plain HTTP — admitted by the client
   certificate in the TLS 1.3 handshake alone
   ([ADR-0012](adr/0012-tls-1-3-two-planes-and-bounded-input.md),
-  ADR-0026). A Client in Gateway Mode carries other Clients' Agents over its own upstream
+  ADR-0040). A Client in Gateway Mode carries other Clients' Agents over its own upstream
   connections and refuses what the Server revoked
   ([ADR-0016](adr/0016-client-modes-and-the-gateway.md)).
 - **Managed Processes** run on the Client's host under a Supervisor each; a Collector reports
@@ -100,7 +100,7 @@ Five crates in one workspace ([ADR-0008](adr/0008-five-crates-on-tokio-and-axum.
 - **`fleet-agent`** — the Client in all its modes, the program `supervisor`.
 - **`fleet-tools`** — the operator tool, the one program `opamp-fleetctl`: its `package` commands
   fetch, pack, hash and sign package artifacts — or sign a Package's signing file from the UI
-  (ADR-0034) — its `pki` commands make the fleet's certificates (ADR-0037).
+  (ADR-0034) — its `pki` commands make the fleet's certificates (ADR-0042).
 
 Inside the Server and the Client the code is ports and adapters
 ([ADR-0009](adr/0009-ports-and-adapters.md)): a **core** that holds the domain and owns its
@@ -161,7 +161,8 @@ no module.
   ([ADR-0025](adr/0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)).
   `instance` takes a lease, a row of `postgres::lease`, before either listener opens, renews it,
   proves it before every answer, and closes both planes while it cannot. Each lease it takes checks
-  the schema under the migrations' lock and records the instance's release, and a migration refuses
+  the schema under the migrations' lock and records the instance's release and its `[audit]
+  key_label`, refused while a live lease names another label, and a migration refuses
   while a live lease is of a release older than the schema it leaves needs, so two consecutive
   versions run side by side. A change that concerns a live session is one `NOTIFY` of
   `postgres::notify`, sent in the transaction that commits it, or right after the commit for a
@@ -187,10 +188,11 @@ no module.
   modules hold the state behind it: `enrolment`, the operator-opened window and the queue of
   requests an operator approves through `api`, and `throttle`, the per-address back-off after
   repeated failures, which both planes use
-  ([ADR-0026](adr/0026-admission-by-client-certificate-and-revocation.md)). `revocation`
-  holds the register of issued certificates, the revocation list and the Hosts — each with the
-  subject values of its certificate, its Gateway mark and the Agents bound to it — behind the
-  `LedgerStore` port ([ADR-0026](adr/0026-admission-by-client-certificate-and-revocation.md),
+  ([ADR-0040](adr/0040-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)).
+  `revocation` holds the register of issued certificates, the revocation list and the Hosts —
+  each with the subject values of its certificate, its Gateway mark and the Agents bound to it —
+  behind the `LedgerStore` port
+  ([ADR-0040](adr/0040-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md),
   [ADR-0030](adr/0030-the-fleet-record-of-agents-and-hosts.md)).
   `agent_rate` holds the token buckets that bound how often an admitted host, an Agent behind a
   marked Gateway, and the Gateway as a whole are heard, in the bounded tables of
@@ -219,8 +221,31 @@ no module.
   one transaction
   ([ADR-0023](adr/0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
   clause 12).
+  With `[audit.export]`, `audit_export` sends every line a store has accepted, the writer's and
+  those a lease's transaction writes, as an OTLP log record to the receiver it names: a queue of
+  its own, a thread that sends through `opentelemetry-otlp` over the TLS 1.3 *ring* client and
+  tries again until the receiver takes a batch, and the count of what the full queue dropped
+  written back as `audit.export_dropped`
+  ([ADR-0043](adr/0043-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one.md)
+  clause 9).
+  With `[audit] key_label`, the writer signs a checkpoint of every chain's head at its start,
+  each minute and at the shutdown's close. `checkpoint` owns the signer port `CheckpointSigner`,
+  which the token key of `pkcs11` implements, and the port `CheckpointSource`, which answers the
+  newest checkpoint and the heads to name: `checkpoint::OneChain` on the filesystem store, and
+  `postgres::checkpoint::Checkpoints` on PostgreSQL, which elects the signer by a session-level
+  advisory lock on a connection of its own. A thread `audit-sign` reads the heads and asks the
+  token, while the writer places the checkpoint and waits up to 2 seconds for its signature.
+  `AuditStore::append_checkpoint` writes it alone; on PostgreSQL it is written under a unique
+  index and the compare-and-set of the head row of migration 17. `checkpoint::Check` is what
+  `server audit-verify --audit-key` runs over either store
+  ([ADR-0041](adr/0041-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token.md)).
 - **Server ports beyond storage** — `fleet` owns `CertificateSigner`, which the local CA in `ca`
-  implements for the CSR flow and the renewal proof (ADR-0026), and
+  implements for the CSR flow and the renewal proof (ADR-0040), and the `UseCase` each signature
+  names. A CA key in `ca` is a key file or a key on the PKCS#11 token of `pkcs11`, which signs
+  through `rcgen`'s `SigningKey` from a pool of four sessions, one `cryptoki` context per module in
+  the process, and holds a place in the audit record before it signs
+  (ADR-0043);
+  `opamp-fleetctl`'s `token` makes the keys on it. It also owns
   `Clock`, which `clock::SystemClock` implements. It owns `Elapsed` too, the time that has passed
   as a lease and a sweep measure it: `PackageStore::with_backend` takes it, and `instance`'s
   `Lease::take_as`. `clock::Elapsed::monotonic` is the adapter on `std::time::Instant`, and

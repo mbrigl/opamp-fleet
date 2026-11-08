@@ -469,16 +469,16 @@ async fn renew(lease: &Renewing, taken: Taken) {
                     }
                     break;
                 }
-                // A schema migrated by a newer Server while this one held no lease: it stops, as
-                // at a failed start
+                // A schema migrated by a newer Server while this one held no lease, or a live
+                // lease that names another audit key: it stops, as at a failed start
                 // (ADR-0025
-                // clause 16).
+                // clause 16, and clause 14 of
+                // ADR-0043).
                 Err(e) if database.outdated().is_some() => {
                     error!(
                         lost = %instance_id,
                         error = %e,
-                        "a newer Server migrated the schema while this instance held no lease: \
-                         stopping"
+                        "a new lease was refused while this instance held none: stopping"
                     );
                     return;
                 }
@@ -539,7 +539,7 @@ fn lock_lost(lease: &Renewing, instance_id: &str) {
 /// (ADR-0025
 /// clauses 9 and 10): for each one announced, what its kind concerns is read again. A revocation, a
 /// Host or a register entry has the ledger read again, and the sessions check themselves against it
-/// (ADR-0026 clause 32); a floor has the floors read
+/// (ADR-0040 clause 32); a floor has the floors read
 /// again; an enrolment request or the window has the window and its queue read again, and the
 /// connections waiting on them answered; a Configuration, a Deployment or a Package has its store
 /// read again

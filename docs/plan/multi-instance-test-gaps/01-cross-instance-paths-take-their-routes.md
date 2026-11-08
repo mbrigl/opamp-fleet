@@ -32,7 +32,7 @@ Each gets a test through the route, beside or instead of the seam.
 
 ## Read first
 
-- ADR-0025 clauses 3, 9 and 10 and its Enforcement; ADR-0026 on the Gateways' list
+- ADR-0025 clauses 3, 9 and 10 and its Enforcement; ADR-0040 on the Gateways' list
 - Golden path: `tests/instances.rs` and its two-instance harness
 
 ## Blocked by

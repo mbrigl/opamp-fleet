@@ -47,7 +47,7 @@ pub const DEFAULT_STALE_AFTER: Duration = Duration::from_secs(90);
 /// The most Agent records the fleet holds when nothing configures a ceiling (see `server.toml`,
 /// `max_agents`). Generous enough that a real fleet never meets it, low enough that the in-memory
 /// map and the per-Agent files it mirrors to disk stay bounded when an unauthenticated endpoint is
-/// flooded with fresh, self-asserted UIDs (ADR-0026).
+/// flooded with fresh, self-asserted UIDs (ADR-0040).
 pub const DEFAULT_MAX_AGENTS: usize = 100_000;
 
 /// The heartbeat interval an Agent is held to where this Server offers none: the OpAMP default,
@@ -448,17 +448,52 @@ impl Elapsed {
     }
 }
 
-/// The CSR flow's port (ADR-0026): what signs an Agent's certificate signing request. The local
+/// What asked for a signature with a token key, as its audit entry names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UseCase {
+    /// A host certificate for a valid renewal proof.
+    Renewal,
+    /// A host certificate for an approved enrolment request.
+    EnrolmentApproval,
+    /// A host certificate for a member's CSR on its own connection.
+    MemberCsr,
+    /// A bootstrap certificate for an operator's request.
+    BootstrapIssue,
+}
+
+impl UseCase {
+    /// The name the audit entry gives it.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            UseCase::Renewal => "renewal",
+            UseCase::EnrolmentApproval => "enrolment_approval",
+            UseCase::MemberCsr => "member_csr",
+            UseCase::BootstrapIssue => "bootstrap_issue",
+        }
+    }
+}
+
+/// The CSR flow's port (ADR-0040): what signs an Agent's certificate signing request. The local
 /// CA ([`ClientCa`](crate::ca::ClientCa)) is the adapter the composition root wires when
 /// `[client_ca]` is configured.
 pub trait CertificateSigner: Send + Sync {
     /// The signed certificate, PEM, for a CSR in PEM, and what it says about itself. Its subject
     /// carries `subject` — the values copied from the bootstrap certificate or the predecessor
-    /// (ADR-0016 clause 23 and ADR-0027 clause 12) — and never the request's.
+    /// (ADR-0016 clause 23 and ADR-0027 clause 12) — and never the request's. `use_case` is what
+    /// asked for it, which the audit entry of a signature with a token key names
+    /// (ADR-0043
+    /// clause 6).
     ///
     /// # Errors
     /// Returns an error when the request does not parse or cannot be signed.
-    fn sign(&self, csr_pem: &str, host: &str, subject: &SubjectValues) -> Result<Signed, String>;
+    fn sign(
+        &self,
+        csr_pem: &str,
+        host: &str,
+        subject: &SubjectValues,
+        use_case: UseCase,
+    ) -> Result<Signed, String>;
 
     /// The certificate a CSR proves it renews, when it carries a renewal proof (ADR-0016
     /// clause 18); `Ok(None)` when it carries none.
@@ -474,7 +509,7 @@ pub trait CertificateSigner: Send + Sync {
     /// Returns the `BadRequest` text for a proof that does not parse.
     fn bootstrap_proof_id(&self, csr_pem: &str) -> Result<Option<CertId>, String>;
 
-    /// Checks the request's claims to an `instance_uid` against its sender's (ADR-0026).
+    /// Checks the request's claims to an `instance_uid` against its sender's (ADR-0040).
     ///
     /// # Errors
     /// Returns the `BadRequest` text for a request that claims another identity.
@@ -606,16 +641,16 @@ pub struct AppState {
     /// The packages offered to the fleet (ADR-0034); `None` offers nothing and leaves
     /// `OffersPackages` undeclared.
     packages: Option<PackageOffering>,
-    /// The authority that signs Agent CSRs (ADR-0026); `None` signs nothing and leaves
+    /// The authority that signs Agent CSRs (ADR-0040); `None` signs nothing and leaves
     /// `AcceptsConnectionSettingsRequest` undeclared.
     client_ca: Option<Box<dyn CertificateSigner>>,
-    /// The enrolment window and its queue (ADR-0026); `None` while `[enrolment]` is not set, and no
+    /// The enrolment window and its queue (ADR-0040); `None` while `[enrolment]` is not set, and no
     /// host enrols.
     enrolment: Option<Arc<Enrolment>>,
     /// The bootstrap certificates the Server issued (ADR-0027); `None` while `[enrolment]` is not
     /// set.
     bootstrap: Option<Arc<crate::bootstrap::BootstrapCertificates>>,
-    /// What the client CA signed and what is revoked (ADR-0026); `None` only where a test serves
+    /// What the client CA signed and what is revoked (ADR-0040); `None` only where a test serves
     /// without it.
     revocations: Option<Arc<Revocations>>,
     /// The floor of each Agent type (ADR-0035); `None` only where a test serves without it.
@@ -647,9 +682,9 @@ pub struct AppState {
     /// The most Agent records the fleet holds at once. A report bearing a new `instance_uid` past
     /// this ceiling is refused `Unavailable` rather than admitted, so a peer cycling fresh UIDs —
     /// each of which would pin an in-memory record and a persisted file — cannot exhaust memory or
-    /// disk (a self-asserted UID is free to mint, ADR-0026). Existing Agents keep reporting; only
+    /// disk (a self-asserted UID is free to mint, ADR-0040). Existing Agents keep reporting; only
     /// growth past the ceiling is refused. The real defence against a flood is admission by client
-    /// certificate (ADR-0026); this is the backstop that bounds what an admitted peer can do.
+    /// certificate (ADR-0040); this is the backstop that bounds what an admitted peer can do.
     max_agents: usize,
     /// How often an instance on a shared store writes the presence of the Agents it carries
     /// (ADR-0030 clause 4); zero where the store keeps none.
@@ -1240,7 +1275,7 @@ impl AppState {
     }
 
     /// Sets the most Agent records the fleet holds at once — the backstop against a peer minting
-    /// fresh UIDs to exhaust memory and disk (ADR-0026 clause 12).
+    /// fresh UIDs to exhaust memory and disk (ADR-0040 clause 12).
     #[must_use]
     pub fn with_max_agents(mut self, max_agents: usize) -> Self {
         self.max_agents = max_agents;
@@ -1320,7 +1355,7 @@ impl AppState {
         self
     }
 
-    /// Arms the CSR flow (ADR-0026); with it the Server declares
+    /// Arms the CSR flow (ADR-0040); with it the Server declares
     /// `AcceptsConnectionSettingsRequest` and signs the requests Agents send.
     #[must_use]
     pub fn with_client_ca(mut self, client_ca: Option<impl CertificateSigner + 'static>) -> Self {
@@ -1328,7 +1363,7 @@ impl AppState {
         self
     }
 
-    /// Arms enrolment (ADR-0026): a host with a bootstrap certificate may ask for its first one,
+    /// Arms enrolment (ADR-0040): a host with a bootstrap certificate may ask for its first one,
     /// and an operator decides.
     #[must_use]
     pub fn with_enrolment(mut self, enrolment: Option<Arc<Enrolment>>) -> Self {
@@ -1351,7 +1386,7 @@ impl AppState {
         self.bootstrap.as_ref()
     }
 
-    /// Arms the register and the revocation list (ADR-0026).
+    /// Arms the register and the revocation list (ADR-0040).
     #[must_use]
     pub fn with_revocations(mut self, revocations: Option<Arc<Revocations>>) -> Self {
         self.revocations = revocations;
@@ -1867,7 +1902,7 @@ impl AppState {
         ca: &dyn CertificateSigner,
         csr: &str,
         presented: Option<&Presented>,
-    ) -> Result<(Option<CertId>, String, SubjectValues), String> {
+    ) -> Result<(Option<CertId>, String, SubjectValues, UseCase), String> {
         let derived = |id: &CertId| fleet_core::host::derived(&id.issuer, &id.serial);
         if let Some(old) = ca.renewal_proof(csr)? {
             if self
@@ -1878,7 +1913,7 @@ impl AppState {
                 return Err("the certificate this request renews is revoked".to_string());
             }
             let host = old.host.clone().unwrap_or_else(|| derived(&old.id));
-            return Ok((Some(old.id), host, old.subject_values));
+            return Ok((Some(old.id), host, old.subject_values, UseCase::Renewal));
         }
         // A proof of the certificate presented is that certificate's renewal, and without a
         // certificate presented — `Admission::open`, which no Server serves — nothing is enrolled.
@@ -1914,12 +1949,14 @@ impl AppState {
                     Some(presented.id.clone()),
                     host,
                     presented.subject_values.clone(),
+                    UseCase::MemberCsr,
                 )
             }
             None => (
                 None,
                 InstanceUid::default().to_string(),
                 SubjectValues::default(),
+                UseCase::MemberCsr,
             ),
         })
     }
@@ -3852,7 +3889,7 @@ impl AppState {
     ///
     /// The reported `instance_uid` is taken at face value: admission proved fleet membership, not
     /// which Agent is speaking, so within an admitted fleet a report's identity is self-asserted and
-    /// not authorized against any other Agent (ADR-0026). The plain-HTTP path in particular offers
+    /// not authorized against any other Agent (ADR-0040). The plain-HTTP path in particular offers
     /// nothing to tell two pollers apart; the WebSocket duplicate-`instance_uid` rekey below is
     /// collision handling, not authorization.
     pub fn process(
@@ -4130,10 +4167,10 @@ impl AppState {
         };
 
         // Admitting a genuinely new Agent past the ceiling would let a peer cycling self-asserted
-        // UIDs (ADR-0026) grow the in-memory map and its per-Agent disk mirror without bound. Known
+        // UIDs (ADR-0040) grow the in-memory map and its per-Agent disk mirror without bound. Known
         // Agents keep reporting; only a *new* UID at capacity is refused, `Unavailable` so a Client
         // that legitimately raced in retries rather than gives up. The real gate is admission
-        // (ADR-0026); this bounds the damage while the endpoint is open. On a shared store the
+        // (ADR-0040); this bounds the damage while the endpoint is open. On a shared store the
         // ceiling bounds the records stored, counted by the store as it creates this one, so it
         // holds for the fleet and not for one instance. A record stored already passes none: it
         // is another instance's, which the read before the lock missed, and this report goes on
@@ -4418,7 +4455,7 @@ impl AppState {
         }
         let record = fleet.get_mut(&uid).expect("the record was just written");
 
-        // The Agent asked to be issued a client certificate (ADR-0026); it is signed once the
+        // The Agent asked to be issued a client certificate (ADR-0040); it is signed once the
         // fleet lock is let go.
         let request = msg
             .connection_settings_request
@@ -4680,7 +4717,7 @@ impl AppState {
         processed
     }
 
-    /// Signs and records the certificate a report asked for (ADR-0026): signing it here, on the
+    /// Signs and records the certificate a report asked for (ADR-0040): signing it here, on the
     /// connection it arrived over, is the whole of the approval, since admission already required
     /// every proof this endpoint asks of any message, which is what the Baseline's flow means by
     /// awaiting one. A request the Server refuses, or one whose record cannot be written, which
@@ -4703,10 +4740,11 @@ impl AppState {
             Some(ca) => match String::from_utf8(csr)
                 .map_err(|_| "the certificate signing request is not PEM".to_string())
                 .and_then(|csr| {
-                    // The message's own instance_uid, before any re-key (ADR-0026).
+                    // The message's own instance_uid, before any re-key (ADR-0040).
                     ca.check_claims(&csr, sender)?;
-                    let (predecessor, host, subject) = self.renews(ca.as_ref(), &csr, presented)?;
-                    Ok((ca.sign(&csr, &host, &subject)?, predecessor))
+                    let (predecessor, host, subject, use_case) =
+                        self.renews(ca.as_ref(), &csr, presented)?;
+                    Ok((ca.sign(&csr, &host, &subject, use_case)?, predecessor))
                 }) {
                 Err(e) => Ok(Err(e)),
                 Ok((signed, predecessor)) => self
@@ -5029,7 +5067,7 @@ impl AppState {
     /// The connection-settings offer for one Agent, or `None` when it cannot accept one or its
     /// reported hash says it already runs (or refused) exactly this offer.
     ///
-    /// `issued` is a certificate just signed for this Agent (ADR-0026). It overrides the hash gate
+    /// `issued` is a certificate just signed for this Agent (ADR-0040). It overrides the hash gate
     /// — the Agent asked for it in this very exchange — and rides whatever else the standing offer
     /// carries, so one message can hand over a certificate and the endpoint or heartbeat that go
     /// with it, exactly as the Baseline describes.
@@ -6916,7 +6954,7 @@ mod tests {
     /// Every `Unavailable` — a full enrolment queue, the record ceiling, an audit record that cannot
     /// be written — tells the Agent when to ask again, so it retries instead of giving up or
     /// hammering (ADR-0027 clause 9, ADR-0028 clause 5).
-    /// Verifies: ADR-0026, ADR-0028, ADR-0012
+    /// Verifies: ADR-0040, ADR-0028, ADR-0012
     #[test]
     fn unavailable_tells_the_agent_when_to_retry() {
         let reply = unavailable(&[7; 16], "busy");
@@ -6932,7 +6970,7 @@ mod tests {
     }
 
     /// A new `instance_uid` past the record ceiling is refused `Unavailable` and leaves no record,
-    /// so a peer minting fresh self-asserted UIDs (ADR-0026) cannot grow the fleet — and its
+    /// so a peer minting fresh self-asserted UIDs (ADR-0040) cannot grow the fleet — and its
     /// in-memory map and per-Agent disk mirror — without bound. Agents already known keep reporting.
     #[test]
     fn a_new_agent_past_the_ceiling_is_refused() {
@@ -8073,7 +8111,7 @@ mod tests {
 
     /// A certificate of one host does not speak for another host's Agent: the reporter is re-keyed
     /// to an identity of its own, and the Agent it claimed keeps its record.
-    /// Verifies: ADR-0026, G-17
+    /// Verifies: ADR-0040, G-17
     #[test]
     fn a_host_cannot_report_for_another_hosts_agent() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -8221,7 +8259,7 @@ mod tests {
 
     /// A report refused at the record ceiling binds no `instance_uid` to the host that sent it,
     /// so it cannot speak for that Agent once there is room — nor lock out the host it belongs to.
-    /// Verifies: ADR-0026, ADR-0030
+    /// Verifies: ADR-0040, ADR-0030
     #[test]
     fn a_report_refused_at_the_ceiling_binds_nothing() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -9232,7 +9270,8 @@ mod tests {
         }
         let ca = crate::ca::ClientCa::from_config(&crate::config::ClientCaConfig {
             cert_file,
-            key_file,
+            key_file: Some(key_file),
+            key_label: None,
             validity_days: 30,
         })
         .expect("client CA");

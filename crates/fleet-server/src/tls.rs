@@ -1,4 +1,4 @@
-//! The listeners' TLS material (ADR-0012, ADR-0026), read from the files `[tls]`,
+//! The listeners' TLS material (ADR-0012, ADR-0040), read from the files `[tls]`,
 //! `[rest.tls]` and `[enrolment]` name and handed to `opamp`'s listener (ADR-0008).
 //!
 //! What is the Server's here is which material and why. The Agent plane requires a client
@@ -22,7 +22,7 @@ pub struct PlaneTls {
     pub agent: ServerTls,
     pub operator: ServerTls,
     pub issuers: Issuers,
-    /// The CAs whose certificates can be revoked (ADR-0026 clause 27).
+    /// The CAs whose certificates can be revoked (ADR-0040 clause 27).
     pub authorities: Vec<Authority>,
 }
 
@@ -39,7 +39,7 @@ pub struct Issuers {
     bootstrap: Vec<Ca>,
 }
 
-/// What the certificate a connection carries makes it (ADR-0026).
+/// What the certificate a connection carries makes it (ADR-0040).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Peer {
     /// A certificate from the client CA: a member of the fleet.
@@ -88,15 +88,7 @@ impl Issuers {
         if !self.bootstrap.iter().any(|ca| ca.issued(&parsed)) {
             return Err("its certificate was not issued by the bootstrap CA".to_string());
         }
-        // As webpki checks an end-entity certificate for client authentication: no CA, and an
-        // extended key usage that, where present, includes clientAuth.
-        let leaf = parsed
-            .basic_constraints()
-            .is_ok_and(|constraints| !constraints.is_some_and(|c| c.value.ca));
-        let client_auth = parsed
-            .extended_key_usage()
-            .is_ok_and(|usage| usage.is_none_or(|usage| usage.value.client_auth));
-        if !(leaf && client_auth) {
+        if !is_client_auth_leaf(&parsed) {
             return Err("its certificate is no client-authentication leaf".to_string());
         }
         if !parsed.validity().is_valid() {
@@ -104,6 +96,19 @@ impl Issuers {
         }
         Ok(enrolling(certificate))
     }
+}
+
+/// Whether `certificate` is an end-entity certificate for client authentication, as webpki checks
+/// one: no CA, and an extended key usage that, where present, includes clientAuth.
+#[must_use]
+pub fn is_client_auth_leaf(certificate: &X509Certificate<'_>) -> bool {
+    let leaf = certificate
+        .basic_constraints()
+        .is_ok_and(|constraints| !constraints.is_some_and(|c| c.value.ca));
+    let client_auth = certificate
+        .extended_key_usage()
+        .is_ok_and(|usage| usage.is_none_or(|usage| usage.value.client_auth));
+    leaf && client_auth
 }
 
 /// What a bootstrap certificate (DER) makes the request it carries or proves: its subject, the
@@ -327,6 +332,7 @@ mod tests {
         let enrolment = EnrolmentConfig {
             bootstrap_ca_file: path("bootstrap-ca.pem", &pem(bootstrap)),
             bootstrap_ca_key_file: None,
+            bootstrap_ca_key_label: None,
             max_pending_per_bootstrap: crate::enrolment::DEFAULT_MAX_PENDING_PER_BOOTSTRAP,
         };
         server_tls(&tls, None, Some(&enrolment))
@@ -406,8 +412,8 @@ mod tests {
 
     /// A bootstrap certificate issued through an intermediate is still no member: with a bootstrap
     /// CA configured, membership is a certificate issued directly by the client CA, and nothing
-    /// else (ADR-0026 clause 17).
-    /// Verifies: ADR-0026
+    /// else (ADR-0040 clause 17).
+    /// Verifies: ADR-0040
     #[test]
     fn a_certificate_not_issued_by_the_client_ca_only_enrols() {
         let (client_der, client_subject, client_key) = ca("client CA", None);
@@ -442,8 +448,8 @@ mod tests {
 
     /// An intermediate below the bootstrap CA that copies the client CA's name issues nothing a
     /// member holds: membership is what the client CA's key signed, not a name an issuer can
-    /// take (ADR-0026 clause 17).
-    /// Verifies: ADR-0026
+    /// take (ADR-0040 clause 17).
+    /// Verifies: ADR-0040
     #[test]
     fn an_intermediate_named_like_the_client_ca_only_enrols() {
         let (client_der, _, client_key) = ca("client CA", None);

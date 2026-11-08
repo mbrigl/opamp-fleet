@@ -18,8 +18,9 @@ fn usage() -> ! {
     eprintln!(
         "Usage: server [--config <server.toml>] [--version]\n       \
          server hash-credential --basic   (reads the password from standard input)\n       \
-         server audit-verify <data_dir>/audit\n       \
-         server audit-verify --config <server.toml> [--archive <old data_dir>/audit]\n       \
+         server audit-verify <data_dir>/audit [--audit-key <PEM file> [--since <file>]]\n       \
+         server audit-verify --config <server.toml> [--archive <old data_dir>/audit]\n          \
+                             [--audit-key <PEM file> [--since <file>]]\n       \
          server pki status [--config <server.toml>]\n       \
          server migrate --config-dir <old> --packages-dir <old> --data-dir <new>\n       \
          server migrate-to-postgres --from <data_dir> [--data-dir <new>] [--config <server.toml>]\n       \
@@ -32,42 +33,56 @@ fn usage() -> ! {
 /// names the first entry whose `prev` does not match the entry before it. `server audit-verify
 /// --config <server.toml> [--archive <dir>]` walks every chain of the record in the database
 /// instead, lists the open ones, and checks the archive a move from files left
-/// (ADR-0029 clauses 5 and 6).
+/// (ADR-0029 clauses 5 and 6). Either form, given `--audit-key <PEM file>`, checks every chain
+/// against the signed checkpoints too, from the saved checkpoint line in the file `--since` names
+/// where one is given, and prints the newest checkpoint's line after `checkpoint: `
+/// (ADR-0041 clause 4).
 fn audit_verify(mut args: impl Iterator<Item = String>) -> ! {
-    let Some(first) = args.next() else { usage() };
-    if first != "--config" && first != "--archive" {
-        audit_verify_files(&first);
-    }
-    let (mut config, mut archive) = (None, None);
-    let mut flag = Some(first);
-    while let Some(name) = flag {
-        let slot = match name.as_str() {
+    let (mut dir, mut config, mut archive, mut key, mut since) = (None, None, None, None, None);
+    while let Some(arg) = args.next() {
+        let slot = match arg.as_str() {
             "--config" => &mut config,
             "--archive" => &mut archive,
+            "--audit-key" => &mut key,
+            "--since" => &mut since,
+            _ if !arg.starts_with("--") && dir.is_none() => {
+                dir = Some(PathBuf::from(arg));
+                continue;
+            }
             _ => usage(),
         };
         match args.next() {
             Some(path) if slot.is_none() => *slot = Some(PathBuf::from(path)),
             _ => usage(),
         }
-        flag = args.next();
     }
-    let Some(config) = config else { usage() };
-    let config = load_config(Some(config)).config;
-    let Some(database) = config.database.postgres() else {
-        eprintln!(
-            "the configuration names no database — with [database] store = \"fs\" verify the \
-             files: server audit-verify <data_dir>/audit"
-        );
-        std::process::exit(1);
+    if since.is_some() && key.is_none() {
+        usage();
+    }
+    let read = |what: &str, path: &PathBuf| {
+        std::fs::read(path).unwrap_or_else(|e| {
+            eprintln!("cannot read {what} {}: {e}", path.display());
+            std::process::exit(1);
+        })
     };
-    match fleet_server::postgres::audit::verify_on(database, archive.as_deref()) {
-        Ok(verified) => {
-            for line in &verified.lines {
-                println!("{line}");
-            }
-            std::process::exit(i32::from(verified.failed));
-        }
+    let check = key.map(|key| {
+        let key = fleet_server::checkpoint::AuditKey::from_pem(&read("the audit key", &key))
+            .unwrap_or_else(|e| {
+                eprintln!("{e}");
+                std::process::exit(1);
+            });
+        let since = since.map(|since| {
+            String::from_utf8_lossy(&read("the saved checkpoint", &since)).into_owned()
+        });
+        fleet_server::checkpoint::Check::new(key, since)
+    });
+    let verified = match (dir, config) {
+        (Some(dir), None) if archive.is_none() => audit_verify_files(&dir, check),
+        (None, Some(config)) => audit_verify_database(&config, archive.as_deref(), check),
+        _ => usage(),
+    };
+    match verified {
+        Ok(never) => match never {},
         Err(e) => {
             eprintln!("{e}");
             std::process::exit(1);
@@ -75,26 +90,79 @@ fn audit_verify(mut args: impl Iterator<Item = String>) -> ! {
     }
 }
 
+/// Prints what the check against the checkpoints found, or that none was made.
+fn print_checked(report: Option<&fleet_server::checkpoint::Report>) {
+    match report {
+        None => {
+            println!("no signature was checked: without --audit-key the chains alone were checked")
+        }
+        Some(report) => {
+            for line in &report.lines {
+                println!("{line}");
+            }
+            if let Some(newest) = &report.newest {
+                println!("checkpoint: {newest}");
+            }
+        }
+    }
+}
+
+/// `server audit-verify --config <server.toml>`: every chain of the record in the database.
+fn audit_verify_database(
+    config: &std::path::Path,
+    archive: Option<&std::path::Path>,
+    check: Option<fleet_server::checkpoint::Check>,
+) -> Result<std::convert::Infallible, String> {
+    let checked = check.is_some();
+    let config = load_config(Some(config.to_path_buf())).config;
+    let Some(database) = config.database.postgres() else {
+        return Err(
+            "the configuration names no database — with [database] store = \"fs\" verify the \
+             files: server audit-verify <data_dir>/audit"
+                .to_string(),
+        );
+    };
+    let verified =
+        fleet_server::postgres::audit::verify_checked_on(database, None, archive, check)?;
+    for line in &verified.lines {
+        println!("{line}");
+    }
+    if checked {
+        if let Some(newest) = &verified.newest_checkpoint {
+            println!("checkpoint: {newest}");
+        }
+    } else {
+        print_checked(None);
+    }
+    std::process::exit(i32::from(verified.failed));
+}
+
 /// `server audit-verify <dir>`: the files of the filesystem store, or an archive. A repair without
 /// a link is named, and the chain still holds.
-fn audit_verify_files(dir: &str) -> ! {
-    match fleet_server::fs::verify_audit(std::path::Path::new(dir)) {
-        Ok((files, Ok(held))) => {
+fn audit_verify_files(
+    dir: &std::path::Path,
+    check: Option<fleet_server::checkpoint::Check>,
+) -> Result<std::convert::Infallible, String> {
+    let (files, verified) = fleet_server::fs::verify_audit(dir)?;
+    let mut failed = false;
+    match verified {
+        Ok(held) => {
             for line in held.unlinked_lines() {
                 println!("{line}");
             }
             println!("{} entries in {files} files, the chain holds", held.entries);
-            std::process::exit(0);
-        }
-        Ok((_, Err(e))) => {
-            eprintln!("the chain breaks at {e}");
-            std::process::exit(1);
         }
         Err(e) => {
-            eprintln!("{e}");
-            std::process::exit(1);
+            eprintln!("the chain breaks at {e}");
+            failed = true;
         }
     }
+    let report = check
+        .map(|check| fleet_server::fs::check_audit_checkpoints(dir, check))
+        .transpose()?;
+    print_checked(report.as_ref());
+    failed |= report.as_ref().is_some_and(|report| report.failed);
+    std::process::exit(i32::from(failed));
 }
 
 /// The configuration every command that reads one reads (ADR-0024 clause 2): the file `--config`
@@ -122,9 +190,9 @@ fn load_config(named: Option<PathBuf>) -> Layered {
     layered
 }
 
-/// `server pki status [--config <server.toml>]` (ADR-0037 clause 22): when each certificate the
+/// `server pki status [--config <server.toml>]` (ADR-0042 clause 22): when each certificate the
 /// Server host depends on ends. The commands that make certificates are the operator tool's
-/// (ADR-0037); the Server binary makes none.
+/// (ADR-0042); the Server binary makes none.
 fn pki(mut args: impl Iterator<Item = String>) -> ! {
     use fleet_server::pki;
     let named = match (
@@ -157,6 +225,19 @@ fn pki(mut args: impl Iterator<Item = String>) -> ! {
             ending.subject,
             ending.file.display()
         );
+    }
+    // The audit key's public half, for the operator to keep where the Server cannot rewrite it
+    // (ADR-0041 clause 3).
+    match pki::audit_key(&config) {
+        Ok(None) => {}
+        Ok(Some((label, pem, sha256))) => {
+            println!("audit key {label:?}  SHA-256 {sha256}  — keep this public key where the Server cannot rewrite it:");
+            print!("{pem}");
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
     }
     std::process::exit(pki::exit_code(&endings, now));
 }
@@ -346,7 +427,7 @@ fn blobs_to_s3(mut args: impl Iterator<Item = String>) -> ! {
 type Hasher = fn(&str) -> Result<String, String>;
 
 /// The hash `server hash-credential` makes for a scheme: Basic, for an operator's password in
-/// `[rest.auth]`, and nothing else — the Agent plane has no credential (ADR-0026 clause 21).
+/// `[rest.auth]`, and nothing else — the Agent plane has no credential (ADR-0040 clause 21).
 fn hasher(scheme: Option<&str>) -> Option<Hasher> {
     match scheme {
         Some("--basic") => Some(fleet_server::credentials::hash_basic),
@@ -354,7 +435,7 @@ fn hasher(scheme: Option<&str>) -> Option<Hasher> {
     }
 }
 
-/// `server hash-credential --basic` (ADR-0026 clause 21): reads the password from standard input —
+/// `server hash-credential --basic` (ADR-0040 clause 21): reads the password from standard input —
 /// without echo on a terminal — and prints the entry `server.toml` keeps instead of it.
 fn hash_credential(scheme: Option<String>) -> ! {
     let Some(hash) = hasher(scheme.as_deref()) else {
@@ -559,7 +640,7 @@ async fn serve() {
     let Layered { config, origin, .. } = load_config(parse_args());
 
     // The TLS material first: a Server that cannot serve it does not start, and admission needs
-    // to know which CA issued what (ADR-0012, ADR-0026).
+    // to know which CA issued what (ADR-0012, ADR-0040).
     let planes = match config
         .tls
         .as_ref()
@@ -609,7 +690,7 @@ async fn serve() {
         info!(database = %database.name(), "keeping the records in PostgreSQL");
     }
     let clock: Arc<dyn fleet_server::fleet::Clock> = Arc::new(fleet_server::clock::SystemClock);
-    // ADR-0026: closed until an operator opens it; the window and its queue survive a restart
+    // ADR-0040: closed until an operator opens it; the window and its queue survive a restart
     // (ADR-0023 clause 8).
     let enrolment = match config.enrolment.as_ref().map(|section| {
         info!("hosts with a bootstrap certificate may enrol while an operator opens the window");
@@ -634,15 +715,40 @@ async fn serve() {
         // ADR-0013.
         info!("offering connection settings to the fleet");
     }
+    // The token the CA keys and the audit key may live on, opened before any key is read from it;
+    // a module, token, PIN or key that is not there fails startup, naming it
+    // (ADR-0043
+    // clause 1).
+    let (token, audit_key) = match config
+        .pkcs11
+        .as_ref()
+        .map(fleet_server::pkcs11::Token::open)
+        .transpose()
+        .and_then(|token| {
+            let audit_key = match (&token, &config.audit.key_label) {
+                (Some(token), Some(label)) => Some(token.key("[audit] key_label", label)?),
+                _ => None,
+            };
+            Ok((token, audit_key))
+        }) {
+        Ok(opened) => opened,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
+    // A renewal proof may come from any CA of `client_ca_file`, so a host renews across a move to
+    // new CA keys (clause 13 of the same ADR).
     let client_ca = match config
         .client_ca
         .as_ref()
-        .map(fleet_server::ca::ClientCa::from_config)
+        .zip(config.tls.as_ref())
+        .map(|(section, tls)| fleet_server::ca::ClientCa::for_server(section, tls, token.as_ref()))
         .transpose()
     {
         Ok(ca) => {
             if let Some(ca) = &ca {
-                // ADR-0026.
+                // ADR-0040.
                 info!(
                     validity_days = ca.validity_days(),
                     "signing client certificates for Agents that ask"
@@ -657,20 +763,21 @@ async fn serve() {
     };
     // The bootstrap CA's key, when the Server issues bootstrap certificates (ADR-0027).
     let bootstrap = match config.enrolment.as_ref().map(|enrolment| {
-        fleet_server::ca::BootstrapCa::from_config(enrolment, config.client_ca.as_ref()).and_then(
-            |signer| {
-                if signer.is_some() {
-                    info!("issuing bootstrap certificates on an operator's request");
-                }
-                fleet_server::bootstrap::BootstrapCertificates::on(
-                    signer.map(|ca| {
-                        Box::new(ca) as Box<dyn fleet_server::bootstrap::BootstrapSigner>
-                    }),
-                    &records,
-                    clock.clone(),
-                )
-            },
+        fleet_server::ca::BootstrapCa::from_config_on(
+            enrolment,
+            config.client_ca.as_ref(),
+            token.as_ref(),
         )
+        .and_then(|signer| {
+            if signer.is_some() {
+                info!("issuing bootstrap certificates on an operator's request");
+            }
+            fleet_server::bootstrap::BootstrapCertificates::on(
+                signer.map(|ca| Box::new(ca) as Box<dyn fleet_server::bootstrap::BootstrapSigner>),
+                &records,
+                clock.clone(),
+            )
+        })
     }) {
         None => None,
         Some(Ok(record)) => Some(Arc::new(record)),
@@ -681,7 +788,7 @@ async fn serve() {
     };
     // What the Server serves, trusts and signs with until it restarts, read right after the files
     // above were: the warnings below judge these, not whatever the files hold later
-    // (ADR-0037 clause 21).
+    // (ADR-0042 clause 21).
     let watched = fleet_server::pki::loaded(&fleet_server::pki::depended_on(&config));
     if let Some(notice) = uploaded_artifacts_notice(client_ca.is_some()) {
         // ADR-0030 clause 16.
@@ -696,7 +803,7 @@ async fn serve() {
         // ADR-0017.
         info!("offering the fleet somewhere to send its own telemetry");
     }
-    // What the client CA signed and what is revoked (ADR-0026), kept beside the fleet's records.
+    // What the client CA signed and what is revoked (ADR-0040), kept beside the fleet's records.
     let revocations = match records.ledger().and_then(|store| {
         fleet_server::revocation::Revocations::open(store, clock.clone(), planes.3.clone())
     }) {
@@ -770,6 +877,22 @@ async fn serve() {
             std::process::exit(1);
         }
     };
+    // The audit record's export, where `[audit.export]` names a receiver: started before the
+    // lease, whose first entry it carries too (clause 9 of ADR-0043). Without the section
+    // the Server opens no such connection.
+    let export = match config.audit.export.as_ref().map(|export| {
+        fleet_server::audit_export::AuditExport::start(export, tokio::runtime::Handle::current())
+    }) {
+        None => None,
+        Some(Ok(export)) => Some(Arc::new(export)),
+        Some(Err(e)) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
+    if let (fleet_server::Records::Postgres(database), Some(export)) = (&records, &export) {
+        database.export_audit_to(export.sink());
+    }
     // With PostgreSQL, a lease before anything is decided and before either listener opens
     // (clauses 1 to 3 of
     // ADR-0025):
@@ -824,28 +947,60 @@ async fn serve() {
     // The audit record (ADR-0028), opened before anything is decided: one chain in files, or on
     // PostgreSQL the chain of each lease
     // (ADR-0029).
+    let sink = export.as_ref().map(|export| export.sink());
+    // With the audit key, the heads of every chain are signed about once a minute and at the
+    // shutdown's close; without it the chains alone are the record, and the Server says so
+    // (ADR-0041 clauses 2 and 5).
+    if audit_key.is_none() {
+        tracing::warn!(
+            "the heads of the audit record are not signed: [audit] key_label names no audit key \
+             on a token, so the chains alone are the record"
+        );
+    }
+    let signing = |source: Box<dyn fleet_server::checkpoint::CheckpointSource>| {
+        audit_key.clone().map(|key| {
+            fleet_server::audit_log::Signing::new(
+                Arc::new(key) as Arc<dyn fleet_server::checkpoint::CheckpointSigner>,
+                source,
+            )
+        })
+    };
     let started = match (&records, &lease) {
         (fleet_server::Records::Postgres(database), Some(lease)) => {
-            fleet_server::audit_log::AuditLog::start_under(
+            fleet_server::audit_log::AuditLog::start_signing(
                 Box::new(fleet_server::postgres::audit::PgAuditStore::new(
                     database.clone(),
                     lease.held(),
                 )),
                 config.audit.limits(),
                 clock.clone(),
-                lease.held(),
-                Some(lease.proof()),
+                Some((lease.held(), Some(lease.proof()))),
+                sink,
+                signing(Box::new(
+                    fleet_server::postgres::checkpoint::Checkpoints::new(
+                        database.clone(),
+                        lease.held(),
+                    ),
+                )),
             )
         }
         _ => config
             .data_dir()
             .ok_or_else(|| "the audit record in files needs data_dir".to_string())
-            .and_then(fleet_server::fs::FsAuditStore::open)
-            .and_then(|store| {
-                fleet_server::audit_log::AuditLog::start(
+            .and_then(|root| {
+                let store = fleet_server::fs::FsAuditStore::open(root)?;
+                let tip = if audit_key.is_some() {
+                    fleet_server::fs::last_audit_checkpoint(&root.join(fleet_server::fs::AUDIT))?
+                } else {
+                    None
+                };
+                fleet_server::audit_log::AuditLog::start_signing(
                     Box::new(store),
                     config.audit.limits(),
                     clock.clone(),
+                    None,
+                    sink,
+                    signing(Box::new(fleet_server::checkpoint::OneChain::new(tip))),
                 )
             }),
     };
@@ -857,6 +1012,16 @@ async fn serve() {
         }
     };
     let audit: Arc<dyn fleet_server::audit::Audit> = audit_log.clone();
+    // What the export's queue dropped is written into the record about once a minute.
+    if let Some(export) = &export {
+        export.report_every(audit.clone());
+    }
+    // The token's signatures are written to the record, and a software token says so at every
+    // start (clauses 6 and 7 of ADR-0043).
+    if let Some(token) = &token {
+        token.set_audit(audit.clone());
+        token.warn_if_software(audit.as_ref());
+    }
     // On PostgreSQL the record goes back `[audit] retain_days`: pruned at startup and once a day
     // after (ADR-0023 clause 12).
     if let (fleet_server::Records::Postgres(database), Some(lease)) = (&records, &lease) {
@@ -893,7 +1058,7 @@ async fn serve() {
         enrolment.set_audit(audit.clone());
     }
     // Before a certificate the Server depends on ends, say so: at startup and once a day
-    // (ADR-0037 clause 21). Nothing stops; the hosts decide for themselves.
+    // (ADR-0042 clause 21). Nothing stops; the hosts decide for themselves.
     fleet_server::pki::warn_endings(
         &watched,
         Some(audit.as_ref()),
@@ -965,7 +1130,7 @@ async fn serve() {
             std::process::exit(1);
         }
     }
-    // The certificate is the whole of admission (ADR-0026): the configuration was refused at load
+    // The certificate is the whole of admission (ADR-0040): the configuration was refused at load
     // without the client CA.
     info!("the OpAMP endpoint admits by client certificate");
     // Two planes, two listeners (ADR-0012): Agents reach the OpAMP endpoint and the package
@@ -1000,7 +1165,7 @@ async fn serve() {
         }
     };
     if operator_auth.is_some() {
-        // ADR-0026. Both planes serve TLS, so the password never crosses a network in clear
+        // ADR-0040. Both planes serve TLS, so the password never crosses a network in clear
         // (ADR-0012).
         info!("the REST API and the UI require authentication");
     }
@@ -1089,7 +1254,24 @@ async fn serve() {
     // released only once it is, so that a chain left open is closed by the instance that takes
     // over the lapsed lease (clause 3 of
     // ADR-0029).
+    // The export's count of what it dropped is written once more before the record closes, and
+    // what the record holds then is given its five seconds to reach the receiver.
+    if let Some(export) = &export {
+        export.report_dropped(audit_log.as_ref());
+    }
     let closed = audit_log.close(std::time::Duration::from_secs(5));
+    // What is dropped after the last count, or still waiting when the five seconds run out,
+    // reaches neither the receiver nor a count in the record, which is closed by now; it is logged.
+    if let Some(export) = &export {
+        let left = export.finish(std::time::Duration::from_secs(5));
+        if left.dropped > 0 || left.waiting > 0 {
+            error!(
+                dropped = left.dropped,
+                waiting = left.waiting,
+                "audit entries did not reach the export's receiver before shutdown"
+            );
+        }
+    }
     if let Some(lease) = lease {
         if closed {
             lease.release().await;
@@ -1327,7 +1509,7 @@ mod tests {
 
     /// `hash-credential` makes an operator's Basic entry and nothing else: the Agent plane has no
     /// credential to hash.
-    /// Verifies: ADR-0026
+    /// Verifies: ADR-0040
     #[test]
     fn hash_credential_hashes_a_basic_password_alone() {
         let basic = hasher(Some("--basic")).expect("--basic is a scheme");

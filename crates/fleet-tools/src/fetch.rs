@@ -1,5 +1,5 @@
 //! `opamp-fleetctl package fetch` — turns an agent release into package artifacts this fleet can
-//! install, and optionally uploads them (ADR-0034, ADR-0037).
+//! install, and optionally uploads them (ADR-0034, ADR-0042).
 //!
 //! Getting a real agent into the fleet is a research task before it is a command: which repository
 //! publishes the binaries, what the assets are called this month, which checksum file goes with
@@ -16,7 +16,7 @@
 //!   host stays unbroken. Every artifact is verified against the checksum *upstream* published
 //!   before anything else happens to it.
 //! - **Repacked only where it must be.** An agent whose upstream publishes no archive a Client can
-//!   install is repacked deterministically, from its own tree alone (ADR-0037). That is the one
+//!   install is repacked deterministically, from its own tree alone (ADR-0042). That is the one
 //!   place the bytes change, and the tool says so.
 //!
 //! Interactive by default; every prompt has a flag, so the same tool serves a pipeline:
@@ -905,7 +905,7 @@ fn parse_sums(text: &str, artifact: &Path) -> Option<String> {
 }
 
 /// Packs a directory as a `.tar.gz` a Client can install as a tree — deterministically, with every
-/// link resolved, and with nothing from outside the tree (ADR-0037).
+/// link resolved, and with nothing from outside the tree (ADR-0042).
 ///
 /// Determinism is not tidiness: the fleet decides whether to distribute by content hash, so an
 /// artifact that differed by when it was packed would be a rollout nobody asked for. Times, owners
@@ -1701,9 +1701,9 @@ mod tests {
     }
 
     /// The release also carries the operator tool's archives, named like the Client's
-    /// (ADR-0037 clause 3); they are selected by stem, never by version and platform alone, so none
+    /// (ADR-0042 clause 3); they are selected by stem, never by version and platform alone, so none
     /// of them becomes the `supervisor` Package's entry for its platform (ADR-0039 clause 5).
-    // Verifies: ADR-0037
+    // Verifies: ADR-0042
     #[test]
     fn the_supervisor_passes_over_the_operator_tools_archives() {
         let assets = vec![
@@ -1817,7 +1817,7 @@ mod tests {
     /// names left which one to directory-read order. A cycle is still not followed, and a link
     /// pointing at nothing is dropped.
     ///
-    /// Verifies: ADR-0037
+    /// Verifies: ADR-0042
     #[cfg(unix)]
     #[test]
     fn a_linked_directory_is_packed_under_both_names_and_a_cycle_does_not_hang() {
@@ -1861,7 +1861,7 @@ mod tests {
     /// the root is the first ancestor of the walk, so a link right under it to `..` or to the root
     /// packs no second copy of the tree; each such link is packed as an empty directory.
     ///
-    /// Verifies: ADR-0037
+    /// Verifies: ADR-0042
     #[cfg(unix)]
     #[test]
     fn a_link_to_the_root_is_not_followed() {
@@ -1924,7 +1924,7 @@ mod tests {
     /// exception. The error names each such link by its path in the tree and its target, quoted,
     /// in the order of their paths, and only those.
     ///
-    /// Verifies: ADR-0037
+    /// Verifies: ADR-0042
     #[cfg(unix)]
     #[test]
     fn a_link_out_of_the_tree_fails_the_repack_naming_it() {
@@ -1985,7 +1985,7 @@ mod tests {
     /// A name from upstream reaches the operator's terminal quoted and escaped, so a control
     /// character in it cannot rewrite what the operator reads.
     ///
-    /// Verifies: ADR-0037
+    /// Verifies: ADR-0042
     #[cfg(unix)]
     #[test]
     fn a_link_out_of_the_tree_is_named_escaped() {
@@ -2012,7 +2012,7 @@ mod tests {
     /// read from outside the tree, so either, and a link to one, fails it, named, before anything
     /// is written.
     ///
-    /// Verifies: ADR-0037
+    /// Verifies: ADR-0042
     #[cfg(unix)]
     #[test]
     fn a_member_that_is_neither_file_nor_directory_fails_the_repack() {
@@ -2044,7 +2044,7 @@ mod tests {
     /// names far more than 10 000 members, and the repack stops at the cap instead of walking
     /// them all — without the bound, this walk would not end in any time a test waits.
     ///
-    /// Verifies: ADR-0037
+    /// Verifies: ADR-0042
     #[cfg(unix)]
     #[test]
     fn a_tree_whose_links_multiply_it_stops_at_the_member_cap() {
@@ -2071,7 +2071,7 @@ mod tests {
     /// A repack that fails while it writes takes back what it wrote, since half an artifact is one
     /// somebody might sign. A member the walk saw but that cannot be read is the failure here.
     ///
-    /// Verifies: ADR-0037
+    /// Verifies: ADR-0042
     #[cfg(unix)]
     #[test]
     fn a_repack_that_fails_while_writing_leaves_no_artifact() {
@@ -2100,7 +2100,7 @@ mod tests {
     /// through other links on the way, and one that names nothing inside the tree is dropped —
     /// however it climbs, as long as it does not climb out.
     ///
-    /// Verifies: ADR-0037
+    /// Verifies: ADR-0042
     #[cfg(unix)]
     #[test]
     fn a_link_inside_the_tree_is_packed_under_its_name() {
@@ -2145,7 +2145,7 @@ mod tests {
     /// The bytes of a repack are the tree's alone: the same tree packed twice, and a copy of it
     /// packed from elsewhere on the host, give the same artifact.
     ///
-    /// Verifies: ADR-0037
+    /// Verifies: ADR-0042
     #[cfg(unix)]
     #[test]
     fn the_same_tree_repacks_to_the_same_bytes() {

@@ -36,8 +36,16 @@ if [[ -z "$named" ]]; then
 fi
 command -v cargo >/dev/null || { echo "cargo is required (rust-toolchain.toml names the toolchain)" >&2; exit 1; }
 
+# The tests of several instances on one token run against SoftHSM2, as scripts/check-rust.sh
+# runs the others.
+# shellcheck source-path=SCRIPTDIR source=lib/softhsm.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/softhsm.sh"
+SOFTHSM_DIR=""
+if [[ "$1" == "postgres" ]]; then
+  softhsm_env
+fi
 log="$(mktemp)"
-trap 'rm -f "$log"' EXIT
+trap 'rm -rf "$log" ${SOFTHSM_DIR:+"$SOFTHSM_DIR"}' EXIT
 cargo test -p fleet-server --lib --locked "$filter" -- --nocapture 2>&1 | tee "$log"
 # Several Server instances on one database, each through its real listeners, and a Server on
 # PostgreSQL and S3 that keeps nothing on its disk: integration tests of their own, against the same
@@ -49,6 +57,9 @@ if [[ "$1" == "postgres" ]]; then
     echo "the test of a Server on PostgreSQL and S3 was skipped: name a bucket too" >&2
     exit 1
   fi
+fi
+if softhsm_skipped "$log"; then
+  exit 1
 fi
 if grep -q "$skipped" "$log"; then
   echo "a $1 test was skipped although a store is named" >&2

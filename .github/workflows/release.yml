@@ -2,7 +2,7 @@ name: Release
 
 # Builds the Client for every target it ships on and publishes one `.tar.gz` per target
 # (ADR-0039, the container and the artifact name included), and the operator tool `opamp-fleetctl`
-# for Linux and macOS beside it (ADR-0037).
+# for Linux and macOS beside it (ADR-0042).
 #
 # The version comes from `[workspace.package] version` in Cargo.toml and this workflow creates the
 # `version/*` tag from it (ADR-0038) — *before* it builds, so ADR-0038's `build.rs` finds a tag on
@@ -12,7 +12,7 @@ name: Release
 # The artifacts are packed by this project's own `opamp-fleetctl package pack`, so each Client archive
 # is also a valid package artifact for a fleet self-update (ADR-0034, ADR-0019) — the file an operator
 # downloads is the file they hand the Server. The operator tool's archives are not packages of the
-# fleet: they are downloaded, never uploaded (ADR-0037 clause 4).
+# fleet: they are downloaded, never uploaded (ADR-0042 clause 4).
 #
 # Every published asset is a subject of one build-provenance attestation, made and verified in
 # `publish` before the release exists, and each shipped program has a CycloneDX SBOM per target
@@ -51,7 +51,7 @@ env:
   # one published Set serve every variant build. They live in crates/fleet-agent/Cargo.toml and
   # packaging/windows/supervisor.wxs, not here.
   ARTIFACT: supervisor
-  # The operator tool's program and the stem of its archives (ADR-0037 clause 3).
+  # The operator tool's program and the stem of its archives (ADR-0042 clause 3).
   OPERATOR_TOOL: opamp-fleetctl
   # The Server's image, tagged with the exact version and nothing else (ADR-0039 clause 18).
   IMAGE: ghcr.io/mbrigl/opamp-fleet-server
@@ -264,7 +264,7 @@ jobs:
       matrix:
         include:
           # `operator_tool`: this row also builds and publishes `opamp-fleetctl` for its target
-          # (ADR-0037 clause 2). Every row builds it for its runner as the packer.
+          # (ADR-0042 clause 2). Every row builds it for its runner as the packer.
           - { target: x86_64-unknown-linux-gnu, runner: ubuntu-latest, os: linux, arch: amd64, suffix: "", native: true, operator_tool: true }
           - { target: aarch64-unknown-linux-gnu, runner: ubuntu-24.04-arm, os: linux, arch: arm64, suffix: "", native: true, operator_tool: true }
           - { target: aarch64-apple-darwin, runner: macos-latest, os: darwin, arch: arm64, suffix: "", native: true, operator_tool: true }
@@ -273,7 +273,7 @@ jobs:
           # the version assertions below are skipped for this one row.
           - { target: x86_64-apple-darwin, runner: macos-latest, os: darwin, arch: amd64, suffix: "", native: false, operator_tool: true }
           # No operator tool for Windows: it would need its own way to keep a key readable by its
-          # owner alone (ADR-0037).
+          # owner alone (ADR-0042).
           - { target: x86_64-pc-windows-msvc, runner: windows-latest, os: windows, arch: amd64, suffix: ".exe", native: true, operator_tool: false }
     steps:
       - uses: actions/checkout@v7
@@ -291,7 +291,7 @@ jobs:
       # A host build: it runs here, on this runner, to pack the artifacts.
       - name: Build the packer
         run: cargo build --release -p fleet-tools --bin opamp-fleetctl --locked
-      # A target build: the program this row publishes (ADR-0037 clause 2).
+      # A target build: the program this row publishes (ADR-0042 clause 2).
       - name: Build the operator tool
         if: matrix.operator_tool
         run: cargo build --release -p fleet-tools --bin opamp-fleetctl --target ${{ matrix.target }} --locked
@@ -358,7 +358,7 @@ jobs:
           # (ADR-0039 clause 3).
           echo "STEM=${name%.tar.gz}" >> "$GITHUB_ENV"
 
-      # ---- ADR-0037: the operator tool, one archive per target, named like the Client's. ----
+      # ---- ADR-0042: the operator tool, one archive per target, named like the Client's. ----
       - name: Pack the operator tool
         id: pack_tool
         if: matrix.operator_tool
@@ -735,7 +735,7 @@ jobs:
           \`${{ needs.version.outputs.version }}\`, for \`linux/amd64\` and \`linux/arm64\`.
 
           The assets come in five kinds, and picking the wrong one is the only way to get this wrong
-          (ADR-0020, ADR-0037, ADR-0039):
+          (ADR-0020, ADR-0042, ADR-0039):
 
           | you want to | take |
           |---|---|
@@ -752,7 +752,7 @@ jobs:
           arm64. It is downloaded, never uploaded to a Server: it is not a package of the fleet, and
           no Client installs it. \`${{ env.OPERATOR_TOOL }} pki\` makes the fleet's certificates and
           \`${{ env.OPERATOR_TOOL }} package\` fetches, packs and signs packages; the keys they make belong
-          on this machine, not on the Server host (ADR-0037).
+          on this machine, not on the Server host (ADR-0042).
 
           \`\`\`console
           tar xzf ${{ env.OPERATOR_TOOL }}_${{ needs.version.outputs.version }}_linux_amd64.tar.gz

@@ -9,11 +9,13 @@ pub mod agent_rate;
 pub mod agent_store;
 pub mod api;
 pub mod audit;
+pub mod audit_export;
 pub mod audit_log;
 pub mod blobs;
 pub mod bootstrap;
 pub mod bridge;
 pub mod ca;
+pub mod checkpoint;
 pub mod clock;
 pub mod config;
 pub mod configs;
@@ -29,6 +31,7 @@ pub mod listen;
 pub mod listing;
 pub mod migrate;
 pub mod packages;
+pub mod pkcs11;
 pub mod pki;
 pub mod postgres;
 pub mod revocation;
@@ -48,14 +51,20 @@ use fleet::{AppState, PackageOffering};
 use fs::{FsAgentStore, FsBlobStore, FsConfigBackend, FsDeploymentBackend, FsPackageBackend};
 
 /// Whether an instance on PostgreSQL must be alone on its database, and the key that makes it so:
-/// blobs kept as files, or a CA key in a file
+/// blobs kept as files, or a CA key in a file. A CA key named by its label on a token makes it
+/// alone no more
 /// (ADR-0025
-/// clause 2).
+/// clause 2, ADR-0043
+/// clause 14).
 #[must_use]
 pub fn exclusive(config: &config::ServerConfig) -> postgres::Exclusive {
     if config.blobs.s3().is_none() {
         postgres::Exclusive::Alone("[blobs] store = \"fs\"".to_string())
-    } else if config.client_ca.is_some() {
+    } else if config
+        .client_ca
+        .as_ref()
+        .is_some_and(|client_ca| client_ca.key_file.is_some())
+    {
         postgres::Exclusive::Alone("[client_ca] key_file".to_string())
     } else if config
         .enrolment
@@ -104,10 +113,9 @@ impl Records {
                 if let Some(data_dir) = data_dir {
                     fs::open_data_dir_beside_database(data_dir).map_err(named)?;
                 }
-                Ok(Records::Postgres(postgres::Database::open(
-                    database,
-                    exclusive(config),
-                )?))
+                let opened = postgres::Database::open(database, exclusive(config))?;
+                opened.set_audit_key_label(config.audit.key_label.clone());
+                Ok(Records::Postgres(opened))
             }
         }
     }
@@ -404,9 +412,9 @@ impl bootstrap::BootstrapCertificates {
     }
 }
 
-/// The **Agent plane** (ADR-0012): the OpAMP endpoint, guarded by Admission (ADR-0026), and the
+/// The **Agent plane** (ADR-0012): the OpAMP endpoint, guarded by Admission (ADR-0040), and the
 /// package download route beside it — behind the same handshake, and reached only with a
-/// certificate of the fleet (ADR-0026 clause 18).
+/// certificate of the fleet (ADR-0040 clause 18).
 ///
 /// The download lives here rather than with the rest of `/api/v1` because the split between the
 /// two planes is by *audience*, not by path: this route is the one an Agent calls, and its
@@ -423,7 +431,7 @@ pub fn agent_app(state: Arc<AppState>, admission: transport::Admission) -> Route
 
 /// The **Operator plane** (ADR-0012): the REST API, its OpenAPI document and docs page, and the
 /// bundled UI — on their own listener, guarded as a whole by `[rest.auth]` when one is configured
-/// (ADR-0026). Without it the plane is open, which is what its loopback default is for.
+/// (ADR-0040). Without it the plane is open, which is what its loopback default is for.
 pub fn operator_app(state: Arc<AppState>, auth: Option<api::OperatorAuth>) -> Router {
     api::router(state, auth)
 }

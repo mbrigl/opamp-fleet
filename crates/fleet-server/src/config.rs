@@ -17,7 +17,7 @@ use crate::fleet::{ConnectionOffer, TelemetryOffer};
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:4320";
 
 /// The default Operator-plane address (ADR-0012): the port above the protocol's, on loopback.
-/// Loopback because that plane is open until `[rest.auth]` guards it (ADR-0026) — until then its
+/// Loopback because that plane is open until `[rest.auth]` guards it (ADR-0040) — until then its
 /// reachability *is* its protection, so publishing it is a line an operator writes deliberately.
 pub const DEFAULT_REST_LISTEN: &str = "127.0.0.1:4321";
 
@@ -48,11 +48,11 @@ pub struct ServerConfig {
     /// `Option` only so that its absence can be named.
     pub tls: Option<TlsConfig>,
     /// Refused at startup: the Agent plane admits by client certificate alone and has no credential
-    /// of its own (ADR-0026 clause 1). Read only so that a leftover section can be named.
+    /// of its own (ADR-0040 clause 1). Read only so that a leftover section can be named.
     pub auth: Option<IgnoredAny>,
     /// Optional connection settings offered to the fleet (ADR-0013); absent means none.
     pub connection_offer: Option<ConnectionOfferConfig>,
-    /// Optional certificate authority for signing Agent CSRs (ADR-0026); absent means the Server
+    /// Optional certificate authority for signing Agent CSRs (ADR-0040); absent means the Server
     /// issues nothing and does not declare `AcceptsConnectionSettingsRequest`.
     pub client_ca: Option<ClientCaConfig>,
     /// Optional destinations for the Agents' own telemetry (ADR-0017); absent means none is
@@ -98,9 +98,9 @@ pub struct ServerConfig {
     #[serde(default = "default_stale_after_secs")]
     pub stale_after_secs: u64,
     /// The most Agent records the fleet holds at once. A report bearing a new `instance_uid` past
-    /// this ceiling is refused `Unavailable`, so a peer minting fresh self-asserted UIDs (ADR-0026)
+    /// this ceiling is refused `Unavailable`, so a peer minting fresh self-asserted UIDs (ADR-0040)
     /// cannot exhaust memory or disk; existing Agents keep reporting. The real defence against an
-    /// anonymous flood is admission by client certificate (ADR-0026) — this is the backstop behind
+    /// anonymous flood is admission by client certificate (ADR-0040) — this is the backstop behind
     /// it. `0` is refused at load: a fleet that can hold no Agent is a misconfiguration, not a
     /// limit.
     #[serde(default = "default_max_agents")]
@@ -121,15 +121,20 @@ pub struct ServerConfig {
     /// clause 3).
     #[serde(default = "default_drain_secs")]
     pub drain_secs: u64,
-    /// The bootstrap CA a host enrols with (ADR-0026 clause 17); absent means no host enrols, and
+    /// The bootstrap CA a host enrols with (ADR-0040 clause 17); absent means no host enrols, and
     /// an operator provisions every certificate.
     pub enrolment: Option<EnrolmentConfig>,
-    /// How repeated admission failures from one peer address are throttled (ADR-0026 clause 19).
+    /// How repeated admission failures from one peer address are throttled (ADR-0040 clause 19).
     #[serde(default)]
     pub admission_throttle: AdmissionThrottleConfig,
-    /// How large the audit record grows and how much of it is kept (ADR-0028).
+    /// How large the audit record grows and how much of it is kept (ADR-0028), and the audit key
+    /// on the token.
     #[serde(default)]
     pub audit: AuditConfig,
+    /// The PKCS#11 token the CA keys and the audit key may live on
+    /// (ADR-0043);
+    /// absent, every CA key is a file and there is no audit key.
+    pub pkcs11: Option<Pkcs11Config>,
     /// How often an admitted peer may be heard on the Agent plane (ADR-0012).
     #[serde(default)]
     pub agent_rate_limit: AgentRateLimitConfig,
@@ -211,6 +216,64 @@ pub struct AuditConfig {
     pub keep_files: Option<usize>,
     /// On PostgreSQL, how many days an entry is kept before it is pruned.
     pub retain_days: Option<u64>,
+    /// The label of the audit key on the `[pkcs11]` token, which signs the heads of the audit
+    /// chains. Every instance on one database names the same one, or none.
+    pub key_label: Option<String>,
+    /// Where every entry is exported to as an OTLP log record; absent, nothing is exported.
+    pub export: Option<AuditExportConfig>,
+}
+
+/// The `[audit.export]` section
+/// (ADR-0043
+/// clause 9): the OTLP/HTTP endpoint every entry of the audit record is sent to as a log record,
+/// over TLS 1.3, plaintext to a loopback IP literal alone. The Server authenticates to it with
+/// nothing beyond TLS.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuditExportConfig {
+    /// The full OTLP/HTTP URL of the logs, its path included: `https://`, or `http://` to
+    /// 127.0.0.1 or ::1 alone.
+    pub endpoint: String,
+    /// One PEM root for a receiver whose certificate no public root signs.
+    pub ca_file: Option<PathBuf>,
+}
+
+impl AuditExportConfig {
+    fn check(&self) -> Result<(), String> {
+        // Q-1: the record is never sent unencrypted beyond the loopback.
+        let endpoint = &self.endpoint;
+        match endpoint.split_once("://").map(|(scheme, _)| scheme) {
+            Some("https") => Ok(()),
+            Some("http")
+                if opamp::endpoint::is_loopback_literal(opamp::endpoint::host_of(endpoint)) =>
+            {
+                Ok(())
+            }
+            Some("http") => Err(format!(
+                "[audit.export] endpoint {endpoint}: plaintext is for 127.0.0.1 and ::1 alone — \
+                 use https://"
+            )),
+            _ => Err(format!(
+                "[audit.export] endpoint {endpoint} must start with https:// (http:// only to \
+                 127.0.0.1 or ::1)"
+            )),
+        }
+    }
+}
+
+/// The `[pkcs11]` section
+/// (ADR-0043
+/// clause 1): the module the Server loads, the token it signs on, and the file of the user PIN.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Pkcs11Config {
+    /// The path of the PKCS#11 library.
+    pub module: PathBuf,
+    /// The label of the token.
+    pub token_label: String,
+    /// The file holding the user PIN, readable by its owner and group alone and written by its
+    /// owner alone. The PIN is never written into `server.toml`.
+    pub pin_file: PathBuf,
 }
 
 /// How many days an entry is kept on PostgreSQL where `[audit] retain_days` is not set.
@@ -276,7 +339,9 @@ impl AuditConfig {
                  longest the record is kept"
             ));
         }
-        Ok(())
+        self.export
+            .as_ref()
+            .map_or(Ok(()), AuditExportConfig::check)
     }
 }
 
@@ -832,18 +897,22 @@ impl crate::packages::SignatureVerifier for Ed25519Verifier {
     }
 }
 
-/// The `[enrolment]` section (ADR-0026 clause 17).
+/// The `[enrolment]` section (ADR-0040 clause 17).
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EnrolmentConfig {
     /// PEM certificate of the CA that issues bootstrap certificates. A certificate from it can
     /// only enrol: it needs an open enrolment window and an operator's approval.
     pub bootstrap_ca_file: PathBuf,
-    /// PEM PKCS#8 key of that CA. With it the Server issues bootstrap certificates on an
-    /// operator's request; without it enrolment works with bootstrap certificates made elsewhere
-    /// (ADR-0026 clause 17).
+    /// PEM PKCS#8 key of that CA. With it, or with `bootstrap_ca_key_label`, the Server issues
+    /// bootstrap certificates on an operator's request; without either enrolment works with
+    /// bootstrap certificates made elsewhere (ADR-0040 clause 17).
     #[serde(default)]
     pub bootstrap_ca_key_file: Option<PathBuf>,
+    /// The label of that CA's private key on the `[pkcs11]` token, in place of
+    /// `bootstrap_ca_key_file`.
+    #[serde(default)]
+    pub bootstrap_ca_key_label: Option<String>,
     /// The most requests of one bootstrap certificate the pending queue holds at once, 1 to
     /// [`MAX_PENDING`](crate::enrolment::MAX_PENDING) (ADR-0027).
     #[serde(default = "default_max_pending_per_bootstrap")]
@@ -854,7 +923,7 @@ fn default_max_pending_per_bootstrap() -> usize {
     crate::enrolment::DEFAULT_MAX_PENDING_PER_BOOTSTRAP
 }
 
-/// The `[admission_throttle]` section (ADR-0026 clause 19).
+/// The `[admission_throttle]` section (ADR-0040 clause 19).
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct AdmissionThrottleConfig {
@@ -897,7 +966,7 @@ pub struct RestConfig {
     /// Address and port the REST API, the API docs, and the bundled UI bind.
     #[serde(default = "default_rest_listen")]
     pub listen: SocketAddr,
-    /// Optional Basic authentication over the whole plane (ADR-0026); required off the loopback.
+    /// Optional Basic authentication over the whole plane (ADR-0040); required off the loopback.
     pub auth: Option<RestAuthConfig>,
     /// The connections the Operator plane holds at once (ADR-0012). `0` is refused at load.
     #[serde(default = "default_rest_max_connections")]
@@ -929,12 +998,12 @@ impl Default for RestConfig {
     }
 }
 
-/// The `[rest.auth]` section (ADR-0026): who may reach the Operator plane. Basic only — the
+/// The `[rest.auth]` section (ADR-0040): who may reach the Operator plane. Basic only — the
 /// audience is a browser and `curl`, and Basic is the one scheme both speak without a login page.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RestAuthConfig {
-    /// Accepted Basic credentials, `user = "<Argon2id hash>"` (ADR-0026 clause 21). Several allow
+    /// Accepted Basic credentials, `user = "<Argon2id hash>"` (ADR-0040 clause 21). Several allow
     /// a rotation, or an individual operator's credential to be withdrawn on its own.
     #[serde(default)]
     pub basic_users: BTreeMap<String, String>,
@@ -953,7 +1022,7 @@ impl std::fmt::Debug for RestAuthConfig {
 }
 
 impl RestAuthConfig {
-    /// The check the Operator plane runs on every request (ADR-0026 clause 2).
+    /// The check the Operator plane runs on every request (ADR-0040 clause 2).
     ///
     /// # Errors
     /// Returns an error naming an entry that is not a hash this Server keeps.
@@ -992,7 +1061,7 @@ impl RestAuthConfig {
 /// The `[connection_offer]` section (ADR-0013 clause 1): what every Agent declaring
 /// `AcceptsOpAMPConnectionSettings` is offered — a heartbeat interval, an endpoint. Either or both,
 /// but never neither. It carries no credential: the Agent plane admits by client certificate alone
-/// (ADR-0026), so an offered credential would be one nothing reads.
+/// (ADR-0040), so an offered credential would be one nothing reads.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConnectionOfferConfig {
@@ -1114,14 +1183,14 @@ pub struct TlsConfig {
     /// PEM private key.
     pub key_file: PathBuf,
     /// PEM bundle of the certificate authorities a **client** certificate must chain to, required
-    /// (ADR-0026). The Agent plane asks for the certificate in the TLS handshake, so a peer without
+    /// (ADR-0040). The Agent plane asks for the certificate in the TLS handshake, so a peer without
     /// one, or with one this bundle (or the bootstrap CA of `[enrolment]`) does not verify, never
     /// reaches a route — the package download included. An `Option` only so its absence can be
     /// named at startup.
     pub client_ca_file: Option<PathBuf>,
 }
 
-/// The `[client_ca]` section (ADR-0026): the certificate authority this Server signs Agent CSRs
+/// The `[client_ca]` section (ADR-0040): the certificate authority this Server signs Agent CSRs
 /// with. Present is what arms the CSR flow — `AcceptsConnectionSettingsRequest` is declared only
 /// while it is, the same "declare what is actually armed" rule `[connection_offer]` follows.
 ///
@@ -1133,10 +1202,12 @@ pub struct TlsConfig {
 pub struct ClientCaConfig {
     /// PEM certificate of the issuing CA.
     pub cert_file: PathBuf,
-    /// PEM private key of the issuing CA.
-    pub key_file: PathBuf,
+    /// PEM private key of the issuing CA; exactly one of it and `key_label` is set.
+    pub key_file: Option<PathBuf>,
+    /// The label of the issuing CA's private key on the `[pkcs11]` token.
+    pub key_label: Option<String>,
     /// How long an issued certificate is valid. Short is the point: validity plus renewal bounds a
-    /// certificate nobody noticed was stolen, and revocation ends one that was (ADR-0026).
+    /// certificate nobody noticed was stolen, and revocation ends one that was (ADR-0040).
     #[serde(default = "default_validity_days")]
     pub validity_days: u32,
 }
@@ -1148,7 +1219,12 @@ impl ClientCaConfig {
         if self.validity_days == 0 {
             return Err("[client_ca] validity_days must be greater than zero".to_string());
         }
-        for path in [&self.cert_file, &self.key_file] {
+        if self.key_file.is_some() == self.key_label.is_some() {
+            return Err(
+                "[client_ca] names its key as exactly one of key_file and key_label".to_string(),
+            );
+        }
+        for path in std::iter::once(&self.cert_file).chain(&self.key_file) {
             if !path.exists() {
                 return Err(format!("[client_ca] {} does not exist", path.display()));
             }
@@ -1194,7 +1270,7 @@ fn default_max_message_size() -> usize {
 }
 
 /// Long enough that a host offline over a holiday still comes back on a valid certificate, short
-/// enough that a certificate is not a permanent grant (ADR-0026).
+/// enough that a certificate is not a permanent grant (ADR-0040).
 /// Three times the Baseline's own default heartbeat of 30 seconds (ADR-0030): one missed beat is a
 /// lost packet, and a fleet view that flickers is one nobody trusts.
 fn default_stale_after_secs() -> u64 {
@@ -1202,7 +1278,7 @@ fn default_stale_after_secs() -> u64 {
 }
 
 /// A month: short enough that a certificate stolen unnoticed is good for weeks, not a quarter;
-/// long enough that a host offline for a fortnight still renews on its own (ADR-0026 clause 8).
+/// long enough that a host offline for a fortnight still renews on its own (ADR-0040 clause 8).
 fn default_validity_days() -> u32 {
     30
 }
@@ -1252,6 +1328,7 @@ impl Default for ServerConfig {
             enrolment: None,
             admission_throttle: AdmissionThrottleConfig::default(),
             audit: AuditConfig::default(),
+            pkcs11: None,
             agent_rate_limit: AgentRateLimitConfig::default(),
         }
     }
@@ -1393,7 +1470,7 @@ impl ServerConfig {
 
     /// The startup checks every layered document passes, its source aside.
     fn check(&self) -> Result<(), String> {
-        // The Agent plane has no credential of its own (ADR-0026 clause 1). A leftover section is
+        // The Agent plane has no credential of its own (ADR-0040 clause 1). A leftover section is
         // refused rather than ignored: an operator is present at a Server upgrade, and a section
         // that silently did nothing would tell them the fleet still needs it.
         if self.auth.is_some() {
@@ -1463,7 +1540,7 @@ impl ServerConfig {
         }
         // Mutual TLS needs a TLS listener to happen on: `client_ca_file` lives inside `[tls]`, so
         // this can only be a `[client_ca]` without one — issuing certificates for a channel that
-        // will never ask for them (ADR-0026).
+        // will never ask for them (ADR-0040).
         if self.client_ca.is_some() && self.tls.is_none() {
             return Err(
                 "[client_ca] issues client certificates, which only a TLS listener can ask \
@@ -1524,6 +1601,26 @@ impl ServerConfig {
         self.check_secure()
     }
 
+    /// The settings that name a key on the `[pkcs11]` token, each with its label.
+    #[must_use]
+    pub fn token_labels(&self) -> Vec<String> {
+        let mut named = Vec::new();
+        if let Some(label) = self.client_ca.as_ref().and_then(|ca| ca.key_label.as_ref()) {
+            named.push(format!("[client_ca] key_label {label:?}"));
+        }
+        if let Some(label) = self
+            .enrolment
+            .as_ref()
+            .and_then(|enrolment| enrolment.bootstrap_ca_key_label.as_ref())
+        {
+            named.push(format!("[enrolment] bootstrap_ca_key_label {label:?}"));
+        }
+        if let Some(label) = &self.audit.key_label {
+            named.push(format!("[audit] key_label {label:?}"));
+        }
+        named
+    }
+
     /// A warning when one host cannot report for all the Agents it may speak for at the fleet's
     /// heartbeat (ADR-0012 clause 23): `messages_per_sec` times the offered heartbeat interval, or
     /// the Baseline's 30 s, below 256. A limit set too low costs availability, not security, so
@@ -1558,7 +1655,7 @@ impl ServerConfig {
                     .to_string(),
             );
         };
-        // The certificate is the whole of admission (ADR-0026 clauses 5 and 6).
+        // The certificate is the whole of admission (ADR-0040 clauses 5 and 6).
         if tls.client_ca_file.is_none() {
             return Err(
                 "[tls] client_ca_file is required — every Agent presents a client certificate in \
@@ -1572,6 +1669,15 @@ impl ServerConfig {
             );
         }
         if let Some(enrolment) = &self.enrolment {
+            if enrolment.bootstrap_ca_key_file.is_some()
+                && enrolment.bootstrap_ca_key_label.is_some()
+            {
+                return Err(
+                    "[enrolment] names the bootstrap CA's key as one of bootstrap_ca_key_file and \
+                     bootstrap_ca_key_label, not both"
+                        .to_string(),
+                );
+            }
             let max = crate::enrolment::MAX_PENDING;
             if !(1..=max).contains(&enrolment.max_pending_per_bootstrap) {
                 return Err(format!(
@@ -1581,6 +1687,14 @@ impl ServerConfig {
             }
         }
         self.audit.check(&self.database.store)?;
+        if self.pkcs11.is_none() {
+            if let Some(key) = self.token_labels().first() {
+                return Err(format!(
+                    "{key} names a key on a token, and [pkcs11] is not set — add [pkcs11], or \
+                     name the key by its file"
+                ));
+            }
+        }
         let throttle = &self.admission_throttle;
         if throttle.max_failures == 0 || throttle.window_secs == 0 || throttle.backoff_secs == 0 {
             return Err(
@@ -2151,9 +2265,9 @@ mod tests {
     }
 
     /// No credential in `server.toml` authenticates on its own: an operator's password in clear is
-    /// refused at startup, the section and the user named and the value never echoed (ADR-0026
+    /// refused at startup, the section and the user named and the value never echoed (ADR-0040
     /// clause 21).
-    /// Verifies: ADR-0026
+    /// Verifies: ADR-0040
     #[test]
     fn a_plaintext_credential_is_refused_naming_its_entry() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2180,8 +2294,8 @@ mod tests {
     }
 
     /// The Agent plane has no credential of its own: a leftover `[auth]` is refused at startup,
-    /// named, with the reason, whatever it holds (ADR-0026 clause 1).
-    /// Verifies: ADR-0026
+    /// named, with the reason, whatever it holds (ADR-0040 clause 1).
+    /// Verifies: ADR-0040
     #[test]
     fn an_auth_section_is_refused_at_startup() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2204,7 +2318,7 @@ mod tests {
         ServerConfig::load(&path).expect("no [auth], no refusal");
     }
 
-    /// Verifies: ADR-0026
+    /// Verifies: ADR-0040
     #[test]
     fn a_weak_argon2id_hash_is_refused() {
         use argon2::password_hash::PasswordHasher as _;
@@ -2222,9 +2336,9 @@ mod tests {
         assert!(err.contains("cheaper"), "{err}");
     }
 
-    /// The Operator plane's own credentials (ADR-0026), precomputed into the header values that
+    /// The Operator plane's own credentials (ADR-0040), precomputed into the header values that
     /// authenticate, with the challenge that makes a browser ask rather than give up.
-    /// Verifies: ADR-0026
+    /// Verifies: ADR-0040
     #[test]
     fn rest_auth_verifies_its_hashes_and_carries_the_basic_challenge() {
         let cfg: ServerConfig = toml::from_str(&format!(
@@ -2248,7 +2362,7 @@ mod tests {
 
     /// A section that authenticates nobody locks the operator out of their own Server, and a
     /// half-written credential is a mistake rather than an intent — both fail at startup.
-    /// Verifies: ADR-0026
+    /// Verifies: ADR-0040
     #[test]
     fn an_unusable_rest_auth_section_is_rejected() {
         let empty: RestAuthConfig = toml::from_str("").expect("parses; emptiness is semantic");
@@ -2262,7 +2376,7 @@ mod tests {
         let err = ServerConfig::load(&path).expect_err("an empty section must fail startup");
         assert!(err.contains("[rest.auth.basic_users]"), "{err}");
 
-        // Bearer is not a scheme this plane has, and a typo fails loudly (ADR-0008, ADR-0026).
+        // Bearer is not a scheme this plane has, and a typo fails loudly (ADR-0008, ADR-0040).
         assert!(toml::from_str::<ServerConfig>("[rest.auth]\nbearer_tokens = [\"tok\"]").is_err());
     }
 
@@ -2352,7 +2466,7 @@ mod tests {
 
     /// The certificate is the whole of admission: a Server without the client CA does not start,
     /// and neither does an `[enrolment]` without a CA to sign what it approves.
-    /// Verifies: ADR-0026, Q-1
+    /// Verifies: ADR-0040, Q-1
     #[test]
     fn the_client_ca_is_required_at_startup() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2511,7 +2625,7 @@ mod tests {
         assert_eq!(cfg.listen, "127.0.0.1:4320".parse().expect("address"));
     }
 
-    /// Verifies: ADR-0012, ADR-0026, Q-1
+    /// Verifies: ADR-0012, ADR-0040, Q-1
     #[test]
     fn a_server_without_tls_is_refused_at_startup() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2524,7 +2638,7 @@ mod tests {
         assert!(err.contains("[tls] is required"), "{err}");
     }
 
-    /// Verifies: ADR-0012, ADR-0026
+    /// Verifies: ADR-0012, ADR-0040
     #[test]
     fn the_operator_plane_requires_authentication_off_the_loopback() {
         let tls = TLS;
@@ -3134,6 +3248,97 @@ mod tests {
         }
     }
 
+    /// CA keys named by their labels on the token leave an instance free to share its database
+    /// with others.
+    /// Verifies: ADR-0043
+    #[test]
+    fn keys_on_the_token_do_not_make_an_instance_alone() {
+        let toml = "[blobs]\nstore = \"s3\"\n[blobs.s3]\nendpoint = \"https://s3.example\"\n\
+                    bucket = \"fleet\"\nregion = \"eu\"\n\
+                    [pkcs11]\nmodule = \"m.so\"\ntoken_label = \"fleet\"\npin_file = \"pin\"\n\
+                    [client_ca]\ncert_file = \"ca.pem\"\nkey_label = \"client-ca\"\n\
+                    [enrolment]\nbootstrap_ca_file = \"b.pem\"\nbootstrap_ca_key_label = \"b\"\n";
+        let config = toml::from_str::<ServerConfig>(&format!("{TLS}{toml}")).expect("parse");
+        assert_eq!(
+            crate::exclusive(&config),
+            crate::postgres::Exclusive::Shared
+        );
+    }
+
+    /// `[client_ca]` names its key as exactly one of a file and a label; a label, there or in
+    /// `[enrolment]` or `[audit]`, needs `[pkcs11]`; a key file alone starts without a token on
+    /// either store.
+    /// Verifies: ADR-0043, ADR-0040
+    #[test]
+    fn a_ca_key_is_a_file_or_a_label_and_a_label_needs_the_token() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for file in ["ca.pem", "ca-key.pem", "b.pem"] {
+            std::fs::write(dir.path().join(file), "x").expect("write");
+        }
+        let at = |file: &str| dir.path().join(file);
+        let load = |keys: String| {
+            let path = dir.path().join("server.toml");
+            std::fs::write(&path, format!("{TLS}{keys}")).expect("write");
+            ServerConfig::load(&path)
+        };
+        let client_ca = |key: &str| format!("[client_ca]\ncert_file = {:?}\n{key}", at("ca.pem"));
+        let key_file = format!("key_file = {:?}\n", at("ca-key.pem"));
+        let pkcs11 = "[pkcs11]\nmodule = \"m.so\"\ntoken_label = \"fleet\"\npin_file = \"pin\"\n";
+        for postgres in [
+            "",
+            "[database]\nstore = \"postgres\"\n[database.postgres]\nhost = \"127.0.0.1\"\n\
+             dbname = \"fleet\"\nuser = \"fleet\"\npassword_file = \"pw\"\ntls = false\n",
+        ] {
+            assert!(
+                load(format!("{postgres}{}", client_ca(&key_file))).is_ok(),
+                "a key file alone starts without a token"
+            );
+        }
+        let both =
+            load(client_ca(&format!("{key_file}key_label = \"client-ca\"\n"))).expect_err("both");
+        assert!(
+            both.contains("key_file") && both.contains("key_label"),
+            "{both}"
+        );
+        let neither = load(client_ca("")).expect_err("neither");
+        assert!(
+            neither.contains("key_file") && neither.contains("key_label"),
+            "{neither}"
+        );
+        let no_token = load(client_ca("key_label = \"client-ca\"\n")).expect_err("no token");
+        assert!(
+            no_token.contains("[client_ca] key_label") && no_token.contains("[pkcs11]"),
+            "{no_token}"
+        );
+        assert!(load(format!(
+            "{pkcs11}{}",
+            client_ca("key_label = \"client-ca\"\n")
+        ))
+        .is_ok());
+        let audit = load("[audit]\nkey_label = \"audit\"\n".to_string()).expect_err("audit");
+        assert!(
+            audit.contains("[audit] key_label") && audit.contains("[pkcs11]"),
+            "{audit}"
+        );
+        let enrolment = format!(
+            "{}[enrolment]\nbootstrap_ca_file = {:?}\nbootstrap_ca_key_label = \"b\"\n",
+            client_ca(&key_file),
+            at("b.pem")
+        );
+        let err = load(enrolment.clone()).expect_err("a bootstrap label without the token");
+        assert!(err.contains("[enrolment] bootstrap_ca_key_label"), "{err}");
+        assert!(load(format!("{pkcs11}{enrolment}")).is_ok());
+        let err = load(format!(
+            "{pkcs11}{enrolment}bootstrap_ca_key_file = {:?}\n",
+            at("ca-key.pem")
+        ))
+        .expect_err("both bootstrap keys");
+        assert!(
+            err.contains("bootstrap_ca_key_file") && err.contains("bootstrap_ca_key_label"),
+            "{err}"
+        );
+    }
+
     /// An instance must be alone on its database while it keeps its blobs as files or a CA key in a
     /// file, and names the key; with the blobs in S3 and no CA key on the Server it shares it.
     /// Verifies: ADR-0025
@@ -3360,6 +3565,54 @@ mod tests {
         ] {
             let err = load(&text).expect_err(named);
             assert!(err.contains(&format!("[audit] {named}")), "{named}: {err}");
+        }
+    }
+
+    /// `[audit.export]` is off unless named; it names an `https://` endpoint, or an `http://` one
+    /// on a loopback IP literal, and a `ca_file`. Plaintext elsewhere, another scheme and any other
+    /// key fail startup naming the section.
+    /// Verifies: ADR-0043, ADR-0012
+    #[test]
+    fn the_audit_export_is_off_unless_named_and_never_plaintext_off_the_loopback() {
+        let load = |text: &str| {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("server.toml");
+            std::fs::write(&path, format!("{TLS}{text}")).expect("write");
+            ServerConfig::load(&path)
+        };
+        assert!(load("").expect("defaults").audit.export.is_none());
+        assert!(load("[audit]\nkeep_files = 3\n")
+            .expect("set")
+            .audit
+            .export
+            .is_none());
+        for endpoint in [
+            "https://collector.example:4318/v1/logs",
+            "http://127.0.0.1:4318/v1/logs",
+            "http://[::1]:4318/v1/logs",
+        ] {
+            let config = load(&format!(
+                "[audit.export]\nendpoint = \"{endpoint}\"\nca_file = \"/etc/root.pem\"\n"
+            ))
+            .expect(endpoint);
+            let export = config.audit.export.expect("named");
+            assert_eq!(export.endpoint, endpoint);
+            assert_eq!(export.ca_file, Some(PathBuf::from("/etc/root.pem")));
+        }
+        for text in [
+            "[audit.export]\nendpoint = \"http://collector.example:4318/v1/logs\"\n",
+            "[audit.export]\nendpoint = \"http://localhost:4318/v1/logs\"\n",
+            "[audit.export]\nendpoint = \"grpc://127.0.0.1:4317\"\n",
+            "[audit.export]\nendpoint = \"https://c.example/v1/logs\"\nheaders_file = \"/x\"\n",
+            "[audit.export]\nca_file = \"/etc/root.pem\"\n",
+        ] {
+            let err = load(text).expect_err(text);
+            assert!(
+                err.contains("[audit.export]")
+                    || err.contains("headers_file")
+                    || err.contains("endpoint"),
+                "{text}: {err}"
+            );
         }
     }
 

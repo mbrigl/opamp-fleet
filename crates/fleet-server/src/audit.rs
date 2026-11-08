@@ -13,6 +13,9 @@ pub enum Field {
     Signed(i64),
     /// A yes or no, written as JSON's `true` or `false`.
     Flag(bool),
+    /// A JSON value as its text, written as that value: what the writer builds itself, such as the
+    /// heads a checkpoint names; never what a peer sent.
+    Json(String),
 }
 
 /// What can be a field; `None` is no field at all.

@@ -99,9 +99,11 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             ("throttle", Core),
             ("api", Adapter),
             ("api::paging", Adapter),
+            ("audit_export", Adapter),
             ("audit_log", Adapter),
             ("bridge", Adapter),
             ("ca", Adapter),
+            ("checkpoint", Adapter),
             ("clock", Adapter),
             ("config", Adapter),
             ("credentials", Adapter),
@@ -119,10 +121,12 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             ("listen", Adapter),
             ("migrate", Adapter),
             ("pki", Adapter),
+            ("pkcs11", Adapter),
             ("postgres", Adapter),
             ("postgres::agent_page", Adapter),
             ("postgres::agents", Adapter),
             ("postgres::bootstrap", Adapter),
+            ("postgres::checkpoint", Adapter),
             ("postgres::configs", Adapter),
             ("postgres::deployments", Adapter),
             ("postgres::enrolment", Adapter),
@@ -219,13 +223,14 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
     (
         "fleet-tools",
         &[
-            // One command-line program and no library (ADR-0037): nothing here is core, and a
+            // One command-line program and no library (ADR-0042): nothing here is core, and a
             // module added to the crate has to be given a role like anywhere else.
             ("main", Root),
             ("fetch", Adapter),
             ("package", Adapter),
             ("pki", Adapter),
             ("signing", Adapter),
+            ("token", Adapter),
         ],
     ),
 ];

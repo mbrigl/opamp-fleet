@@ -2384,7 +2384,7 @@ fn install_args(root: &Path, port: u16, fleet_files: &Path, password_file: &Path
 /// neither the `bootstrap.p12`, its password nor its key is in any file under the root. The
 /// service started then reaches the Server on the issued certificate: the Server takes it into the
 /// fleet as the Host that certificate names, and has issued no other.
-/// Verifies: ADR-0027, ADR-0020, ADR-0026
+/// Verifies: ADR-0027, ADR-0020, ADR-0040
 #[test]
 #[ignore = "installs a real system service; run with --ignored in the service-smoke job"]
 fn an_install_enrols_with_a_bootstrap_p12_and_the_service_runs_on_the_issued_certificate() {

@@ -12,7 +12,7 @@ the keys it makes are the ones to keep off that host.
 |---|---|
 | **[`package fetch`](#package-fetch)** | fetch a release of a known agent — the OpenTelemetry Collector or this fleet's own Client — verify it, and hand it to the Server with its default configuration |
 | **[`package pack`, `sha256`, `keygen`, `sign`, `floor`, `public-key`](#packing-and-signing)** | build, hash, and sign a package artifact out of *any* program you have, sign the floor below which no package of a type is taken, and make the package signing key |
-| **[`pki init`, `server-cert`, `bootstrap-ca`, `status`, `p12-extract`](#pki)** | make the fleet's certificate authorities and the Server's or a Gateway's certificate, replace the bootstrap CA, say when the server CA ends, and turn a `bootstrap.p12` into its PEM pair |
+| **[`pki init`, `token-init`, `server-cert`, `bootstrap-ca`, `status`, `p12-extract`](#pki)** | make the fleet's certificate authorities, on the Server's PKCS#11 token where it has one, and the Server's or a Gateway's certificate, replace the bootstrap CA, say when the server CA ends, and turn a `bootstrap.p12` into its PEM pair |
 
 Reach for `package fetch` first: for the agents it knows, it replaces every step of building an
 artifact by hand. The other `package` commands serve everything else — your own agent, an internal
@@ -373,8 +373,10 @@ The fleet's certificates, made without `openssl` or any other tool.
 | `pki` command | What it does |
 |---|---|
 | `init --server-dir <dir> --offline-dir <dir> --name <dns\|ip>…` | makes the three CAs, the Server's certificate and the package signing key, the certificates named for `--product` (default `OpAMP Fleet`) and, with `--organization` and `--organizational-unit`, for your organization, split into what the Server host needs — the bootstrap CA's key among it — and what stays offline — the server CA's key and the package signing key — with a configuration fragment for each side |
+| `init … --ca-keys-on-token` | makes neither the client CA nor the bootstrap CA, and its `server.toml.fragment` names `[tls]` alone; `token-init` makes both on the Server host |
+| `token-init --pkcs11-module <path> --token-label <label> --pin-file <file> --out <dir>` | run on the Server host: makes the client CA's, the bootstrap CA's and the audit key on the [PKCS#11 token](server.md#ca-keys-on-a-pkcs11-token), labelled `client-ca`, `bootstrap-ca` and `audit`, none of them extractable; signs both CA certificates through the token and writes `client-ca.pem`, `bootstrap-ca.pem` and `token.toml.fragment` to `--out`; takes `--product`, `--organization`, `--organizational-unit`, `--ca-days` and `--bootstrap-ca-days`; writes no key file and refuses a label the token holds already |
 | `server-cert --offline-dir <dir> --name <dns\|ip>… --out <dir>` | makes another server certificate from the offline server CA, for the Server or a Gateway; it carries the CA's organization unless `--organization` or `--organizational-unit` replaces it |
-| `bootstrap-ca --product <name> --out <dir>` | makes a new bootstrap CA, valid for a year, to replace the Server's `[enrolment]` files |
+| `bootstrap-ca --product <name> --out <dir>` | makes a new bootstrap CA, valid for a year, to replace the Server's `[enrolment]` files; with `--pkcs11-module`, `--token-label` and `--pin-file`, run on the Server host, its key is made on the token under a new label, which the command prints for `bootstrap_ca_key_label`, and only `bootstrap-ca.pem` is written |
 | `status --offline-dir <dir>` | says when the server CA in the offline directory ends; exits `0`, `1` when it is ending, `2` when it has ended |
 | `p12-extract <bootstrap.p12> --out <dir> [--password-file <file>]` | writes the file's certificate as `bootstrap.pem` and its key, unencrypted and owner-only, as `bootstrap-key.pem`, the pair a Client's install takes; asks for the password with input hidden, or reads it from the first line of `--password-file`; overwrites neither file |
 

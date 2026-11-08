@@ -19,6 +19,7 @@ pub mod agents;
 pub mod audit;
 pub mod audit_prune;
 pub mod bootstrap;
+pub mod checkpoint;
 pub mod configs;
 pub mod deployments;
 pub mod enrolment;
@@ -163,6 +164,16 @@ pub struct Database {
     /// (ADR-0025
     /// clause 16).
     outdated: std::sync::Mutex<Option<String>>,
+    /// The `[audit] key_label` this instance names, which its lease records and every other live
+    /// lease must name too
+    /// (ADR-0043
+    /// clause 14).
+    audit_key_label: std::sync::Mutex<Option<String>>,
+    /// Where the lines a lease's transaction writes into a chain are exported to, set once where
+    /// `[audit.export]` names a receiver
+    /// (ADR-0043
+    /// clause 9).
+    audit_export: std::sync::OnceLock<crate::audit_export::Sink>,
     /// The notifications of the calls whose answer was lost, which the listener hands on
     /// ([`notify::Unsure`]).
     unsure: Arc<notify::Unsure>,
@@ -378,6 +389,8 @@ impl Database {
             ),
             release: schema::server_version(),
             outdated: std::sync::Mutex::new(None),
+            audit_key_label: std::sync::Mutex::new(None),
+            audit_export: std::sync::OnceLock::new(),
             unsure: Arc::default(),
             afterwards: Arc::default(),
             bridge,
@@ -401,6 +414,29 @@ impl Database {
     #[must_use]
     pub fn outdated(&self) -> Option<String> {
         self.outdated
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Names the `[audit] key_label` the leases of this instance record, `None` for none.
+    pub fn set_audit_key_label(&self, label: Option<String>) {
+        *self
+            .audit_key_label
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = label;
+    }
+
+    /// Hands every line a lease's transaction writes into a chain to `sink` as well, from now on;
+    /// a second sink is ignored.
+    pub fn export_audit_to(&self, sink: crate::audit_export::Sink) {
+        let _ = self.audit_export.set(sink);
+    }
+
+    /// The `[audit] key_label` the leases of this instance record.
+    #[must_use]
+    pub fn audit_key_label(&self) -> Option<String> {
+        self.audit_key_label
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()

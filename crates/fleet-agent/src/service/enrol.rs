@@ -2,7 +2,7 @@
 //! first certificate before its service is registered, with the bootstrap pair where it lies, or
 //! the identity a `bootstrap.p12` opened to, in memory (ADR-0027).
 //!
-//! Nothing here is a second enrolment. It is the Client's own upstream connection (ADR-0026) —
+//! Nothing here is a second enrolment. It is the Client's own upstream connection (ADR-0040) —
 //! the same CSR, the same pending key, the same acceptance of the offered certificate into the
 //! state directory — run with the Client's own Agent alone and ended the moment that certificate
 //! is stored. The instance identity it creates in the state directory is the one the service then

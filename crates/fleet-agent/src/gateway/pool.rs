@@ -149,7 +149,7 @@ impl Pool {
     /// Opens one upstream connection and starts its reader and writer tasks.
     async fn open(&self, uid: InstanceUid) -> Result<mpsc::Sender<Message>, String> {
         // This Gateway's own identity, and no `Authorization`: a downstream peer's is never
-        // forwarded, and nothing is sent in its place (ADR-0016 clause 11, ADR-0026).
+        // forwarded, and nothing is sent in its place (ADR-0016 clause 11, ADR-0040).
         let mut upstream = crate::transport::connection(&self.config)?;
         upstream.max_message_size = self.limit;
         // An upstream that sends nothing for a heartbeat interval, not even the pong to a ping

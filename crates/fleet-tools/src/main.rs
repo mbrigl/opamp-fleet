@@ -1,4 +1,4 @@
-//! `opamp-fleetctl` — the operator tool (ADR-0037): what an operator makes before a fleet does
+//! `opamp-fleetctl` — the operator tool (ADR-0042): what an operator makes before a fleet does
 //! anything useful, on the operator's own machine. `package` fetches, packs, hashes and signs
 //! package artifacts and makes the signing key; `pki` makes the fleet's certificates and says when
 //! they end. Neither the Server nor a Client depends on it, and a managed host never runs it.
@@ -12,6 +12,7 @@ mod fetch;
 mod package;
 mod pki;
 mod signing;
+mod token;
 
 use std::process::ExitCode;
 
@@ -71,7 +72,7 @@ mod tests {
             .collect()
     }
 
-    // Verifies: ADR-0037, ADR-0035
+    // Verifies: ADR-0042, ADR-0035
     #[test]
     fn the_program_has_two_trees_holding_the_operator_commands() {
         let cli = Cli::command();
@@ -94,6 +95,7 @@ mod tests {
             subcommands(tree("pki")),
             [
                 "init",
+                "token-init",
                 "server-cert",
                 "bootstrap-ca",
                 "status",
@@ -106,7 +108,7 @@ mod tests {
         );
     }
 
-    // Verifies: ADR-0037
+    // Verifies: ADR-0042
     #[test]
     fn the_version_flag_reports_the_baked_version() {
         let err = Cli::try_parse_from(["opamp-fleetctl", "--version"])

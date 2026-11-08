@@ -235,7 +235,7 @@ pub enum BootstrapFiles {
     Pkcs12(PathBuf),
 }
 
-/// The bootstrap identity (ADR-0026) the Client enrols with. Asked for only while the Client is
+/// The bootstrap identity (ADR-0040) the Client enrols with. Asked for only while the Client is
 /// not enrolled, and never copied or written into the file: the questionnaire's enrolment presents
 /// it once, to obtain the certificate the Server issues (ADR-0027 clause 16).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -653,7 +653,7 @@ pub fn ask(
         None
     };
 
-    // The bootstrap identity (ADR-0026) a host not yet enrolled enrols with: a PEM certificate and
+    // The bootstrap identity (ADR-0040) a host not yet enrolled enrols with: a PEM certificate and
     // its key, or a PKCS#12 file and its password (ADR-0027 clause 16). There is no answer without
     // one, and no question asks for a credential (ADR-0027) — the password opens a file on this
     // host and is sent nowhere. An enrolled host renews what it was issued and is not asked.

@@ -205,7 +205,7 @@ fn start_log_file(config: &crate::config::ClientConfig) {
 /// reconstruct from the command line of a service they did not start.
 ///
 /// **The second line is the trust and the identity in force**, resolved through the same two
-/// accessors the transports build their TLS from (ADR-0012, ADR-0026) rather than read off the
+/// accessors the transports build their TLS from (ADR-0012, ADR-0040) rather than read off the
 /// configuration — so it states what *will* be presented, including a Server-issued certificate
 /// that no `supervisor.toml` mentions. Without it, a handshake that fails because the identity is
 /// not the one anybody assumed is diagnosed from the peer's error message, which is written by the
@@ -239,7 +239,7 @@ fn announce(config: &ClientConfig, config_path: &std::path::Path) {
 ///
 /// Its own function because it makes a claim worth a test: the certificate named here is whichever
 /// [`ClientConfig::client_identity`] resolves to, which prefers the **Server-issued** one in the
-/// state directory over anything `[tls]` names (ADR-0026). A line that reported the configured
+/// state directory over anything `[tls]` names (ADR-0040). A line that reported the configured
 /// certificate while the connection presented the issued one would be worse than no line at all.
 fn tls_posture(config: &ClientConfig) -> (String, String) {
     let trust = config.ca_file().map_or_else(
@@ -322,7 +322,7 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
     // A certificate swap a crash cut short is completed before the identity in force is read.
     crate::csr::recover(&config.state_dir)?;
     // Without a client certificate the Server refuses this Client; it says so and stops rather
-    // than retrying for ever (ADR-0026).
+    // than retrying for ever (ADR-0040).
     config
         .check_admission()
         .map_err(|e| format!("{}: {e}", spec.config_path.display()))?;
@@ -333,7 +333,7 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
     // file* — a log whose opening line is already about work in progress starts one step too late.
     announce(&config, &spec.config_path);
     // Once per start, not per reconnect: a leftover [auth] is ignored and nothing from it is sent
-    // (ADR-0026 clause 3).
+    // (ADR-0040 clause 3).
     if let Some(notice) = config.leftover_auth_notice() {
         tracing::warn!(config = %spec.config_path.display(), "{notice}");
     }
@@ -935,7 +935,7 @@ mod tests {
     }
 
     /// And it reports what will actually be presented: a Server-issued pair in the state directory
-    /// outranks the configured one (ADR-0026), so the line has to name the issued one — that is the
+    /// outranks the configured one (ADR-0040), so the line has to name the issued one — that is the
     /// whole reason it resolves the identity instead of printing `[tls] cert_file`.
     #[test]
     fn the_tls_line_names_the_issued_certificate_over_the_configured_one() {

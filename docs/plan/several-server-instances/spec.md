@@ -187,17 +187,17 @@ The plan lands on `main` in three stages, each a release of its own.
    core busy hold exactly the Agents, and a row left held could not be reproduced. The failover
    counts the held rows of the Gateway's Agents and of the single-Agent hosts apart, and that
    count is the sensor for such a row. The lists page and name the holder, two versions run side
-   by side, the manual runs three instances, and the load test decides G-20, which lands with it.
+   by side, the manual runs three instances, and the load test decides G-20, which the
+   specification holds.
    Its ADRs are ADR-0025, ADR-0031, ADR-0015, ADR-0023, ADR-0028, ADR-0029 and ADR-0027.
 3. **The keys on a token.** Tickets 12, 16 and 17. The CA keys live on a PKCS#11 token, so
    instances holding a CA run side by side, the heads of the audit chains are signed, and the
-   record may be exported. Its four drafts are on the branch `feat/multi-instance-stage-3`,
-   not on this one, so that the pull request of stage 2 numbers only its own:
-   `draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one.md`,
-   `draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token.md`,
-   `draft-the-operator-program-opamp-fleetctl.md`, which supersedes ADR-0037, and
-   `draft-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md`,
-   which supersedes ADR-0026. They are accepted together.
+   record may be exported. Its four ADRs, accepted together, are
+   `0043-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one.md`,
+   `0041-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token.md`,
+   `0042-the-operator-program-opamp-fleetctl.md`, which supersedes ADR-0037, and
+   `0040-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md`,
+   which supersedes ADR-0026.
 
 ## How the remaining work runs
 
@@ -209,14 +209,6 @@ The plan lands on `main` in three stages, each a release of its own.
 - **Review rounds.** Each ticket is worked in a worktree of its own and reviewed by a session that
   did not write it. A fix round gets another review only when it changed code for a blocker or a
   should-fix; a nit goes into the hand-off's doubts, and a ticket in review takes no new scope.
-- **Open before stage 2 starts:**
-  - Ticket 23: an approval whose decision fails to commit has already recorded its certificate,
-    so approving the request again signs a second one; stage one ships it as a bound. It blocks
-    G-20.
-  - Tickets 24 to 32: the correctness findings of stage 1's hand-offs and reviews, on presence,
-    deleted members, the sweep, the lease across a suspend, a commit whose answer is lost, one
-    snapshot per read, a queued restart, the audit record's leases and the revocation list's
-    version. They block G-20. The other findings are tickets in plan directories of their own.
 - **Beside `feat/core-repack`.** That branch carries the `supervisor.*` label rule of the fleet
   record's clause 20 and the operator program's kept-link rule, both left out of the drafts here.
   Whichever of the two reaches `main` second takes the other's rule into its restatement.
@@ -225,16 +217,15 @@ The plan lands on `main` in three stages, each a release of its own.
 
 - Binding ADRs in force: 0002 (tests cite decisions), 0004 (the Dev Container, where SoftHSM2 is
   installed), 0006 (this plan), 0007 (the harness: nothing is worked unattended), 0008 and 0009
-  (crates, ports and adapters), 0015, 0025, 0026, 0027, 0028, 0030 and 0032, the four of stage 1
-  in force, ADR-0026, ADR-0039, ADR-0030 and ADR-0012, and the seven of stage 2, ADR-0028 to
-  ADR-0027.
-- Implemented here and accepted: the seven ADRs of stage 2 named under *Stages*; the four drafts
-  of stage 3 are implemented on `feat/multi-instance-stage-3`. ADR-0031 adds to the fleet
-  record's port and to the stores' columns without restating either. On that branch the PKCS#11
-  draft adds the audit export under the open outbound rule of ADR-0012 clause 21, decides the
-  module's own connection under that clause's rule for a library the Server loads, and the token's
-  keys beside the alone rule of ADR-0025 clause 2. Each restatement supersedes the ADR
-  it restates when the human accepts it.
-- The specification change G-20 is drafted on this branch and lands with stage 2; only the human
-  lands it.
+  (crates, ports and adapters), and 0016, 0024, 0032, 0033, 0034 and 0035; three of stage 1,
+  ADR-0012, ADR-0030 and ADR-0039, its fourth, ADR-0026, superseded by ADR-0040; the seven of
+  stage 2, ADR-0015, ADR-0023, ADR-0025, ADR-0027, ADR-0028, ADR-0029 and ADR-0031; and the four of
+  stage 3, ADR-0040 to ADR-0043.
+- Implemented here and accepted: the seven ADRs of stage 2 and the four of stage 3, named under
+  *Stages*. ADR-0031 adds to the fleet record's port and to the stores' columns without restating
+  either. ADR-0043 adds the audit export under the open outbound rule of ADR-0012 clause 21,
+  decides the module's own connection under that clause's rule for a library the Server loads, and
+  the token's keys beside the alone rule of ADR-0025 clause 2. ADR-0040 supersedes ADR-0026, and
+  ADR-0042 supersedes ADR-0037.
+- G-20 is in the specification; this plan drafts no other specification change.
 - No new ADR is needed beyond these.

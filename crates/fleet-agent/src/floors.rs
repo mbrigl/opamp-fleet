@@ -235,7 +235,7 @@ impl crate::supervisor::ports::PackageFloors for FloorFile {
 }
 
 /// One fetch of the floors from `config`'s endpoint, with this Client's own certificate and no
-/// `Authorization` (ADR-0026 clause 3): the body, bounded, or why there is none.
+/// `Authorization` (ADR-0040 clause 3): the body, bounded, or why there is none.
 ///
 /// # Errors
 /// Returns an error naming the URL when the endpoint cannot be reached, answers anything but a

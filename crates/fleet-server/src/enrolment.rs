@@ -1,4 +1,4 @@
-//! Enrolment: how a host gets its first client certificate (ADR-0026 clause 17, ADR-0023 clause 8
+//! Enrolment: how a host gets its first client certificate (ADR-0040 clause 17, ADR-0023 clause 8
 //! and ADR-0027 clauses 9 and 10).
 //!
 //! A host enrols with a bootstrap certificate from a CA of its own. Such a connection is admitted
@@ -537,7 +537,7 @@ pub trait EnrolmentStore: Send + Sync {
 
     /// Withdraws every waiting request whose bootstrap certificate is `serial` under one of
     /// `issuers`, and answers how many: what the revocation of a bootstrap certificate withdraws in
-    /// the queue every instance shares (ADR-0026 clause 28).
+    /// the queue every instance shares (ADR-0040 clause 28).
     ///
     /// # Errors
     /// Returns an error when the store cannot be read or written.
@@ -956,7 +956,7 @@ impl Enrolment {
     /// back: decided with the certificate signed here, the approval stands.
     ///
     /// The bootstrap certificate the request came with is checked against `revoked` under the same
-    /// lock that signs, so a revocation that lands before the approval always wins (ADR-0026
+    /// lock that signs, so a revocation that lands before the approval always wins (ADR-0040
     /// clause 28); such a request is withdrawn and answered [`DecisionError::Revoked`].
     pub fn approve(
         &self,
@@ -992,7 +992,12 @@ impl Enrolment {
             std::cell::RefCell::new(None);
         let mut sign = || -> Result<Signing, DecisionError> {
             let signed = signer
-                .sign(&csr_pem, host, &subject)
+                .sign(
+                    &csr_pem,
+                    host,
+                    &subject,
+                    crate::fleet::UseCase::EnrolmentApproval,
+                )
                 .map_err(DecisionError::Sign)?;
             let approved = recorder.signed(&signed, id, &instance_uid, &bootstrap)?;
             let decision = Decision::Approved(signed.pem.clone());
@@ -1199,7 +1204,7 @@ impl Enrolment {
     }
 
     /// Withdraws every waiting request whose bootstrap certificate `revoked` names, and answers how
-    /// many: a revoked certificate opens nothing, a request it carried included (ADR-0026
+    /// many: a revoked certificate opens nothing, a request it carried included (ADR-0040
     /// clause 28). A decided request is left: an approved one was signed and recorded already, and
     /// dropping it would revoke nothing — the connection of this certificate is refused, and only
     /// one holding the same key can collect it.
@@ -1227,7 +1232,7 @@ impl Enrolment {
 
     /// Withdraws every waiting request whose bootstrap certificate is `serial` under one of
     /// `issuers`, held here or by another instance in the store, and answers how many: what the
-    /// revocation of a bootstrap certificate does to the queue (ADR-0026 clause 28).
+    /// revocation of a bootstrap certificate does to the queue (ADR-0040 clause 28).
     pub fn withdraw_revoked(&self, issuers: &[String], serial: &str) -> usize {
         let named =
             |bootstrap: &CertId| bootstrap.serial == serial && issuers.contains(&bootstrap.issuer);
@@ -1361,6 +1366,7 @@ pub(crate) mod tests {
             csr_pem: &str,
             _host: &str,
             subject: &SubjectValues,
+            _use_case: crate::fleet::UseCase,
         ) -> Result<Signed, String> {
             Ok(Signed {
                 pem: format!("issued for {csr_pem}"),
@@ -1497,6 +1503,7 @@ pub(crate) mod tests {
             csr_pem: &str,
             host: &str,
             subject: &SubjectValues,
+            _use_case: crate::fleet::UseCase,
         ) -> Result<Signed, String> {
             let serial = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
             Ok(Signed {
@@ -1837,7 +1844,7 @@ pub(crate) mod tests {
         assert!(!enrolment.is_rejected("a"));
     }
 
-    /// Verifies: ADR-0026
+    /// Verifies: ADR-0040
     #[test]
     fn the_window_is_closed_by_default_and_bounded() {
         let (enrolment, clock) = enrolment();
@@ -1854,7 +1861,7 @@ pub(crate) mod tests {
         assert!(!enrolment.is_open(), "the window closes on its own");
     }
 
-    /// Verifies: ADR-0026
+    /// Verifies: ADR-0040
     #[test]
     fn a_request_waits_for_an_operator_and_is_answered_once_decided() {
         let (enrolment, _) = enrolment();
@@ -1901,7 +1908,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// Verifies: ADR-0026
+    /// Verifies: ADR-0040
     #[test]
     fn closing_the_window_expires_every_request() {
         let (enrolment, clock) = enrolment();
@@ -1918,7 +1925,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// Verifies: ADR-0026
+    /// Verifies: ADR-0040
     #[test]
     fn the_queue_is_bounded() {
         let (enrolment, _) = enrolment();
@@ -2006,6 +2013,7 @@ pub(crate) mod tests {
             _csr_pem: &str,
             _host: &str,
             _subject: &SubjectValues,
+            _use_case: crate::fleet::UseCase,
         ) -> Result<Signed, String> {
             panic!("a request that must not be signed reached the signer");
         }
@@ -2029,7 +2037,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// Verifies: ADR-0026
+    /// Verifies: ADR-0040
     #[test]
     fn a_request_whose_bootstrap_certificate_is_revoked_is_withdrawn_unsigned() {
         let (enrolment, _clock) = enrolment();
@@ -2094,7 +2102,7 @@ pub(crate) mod tests {
         assert_eq!(enrolment.pending().len(), 1, "the request still waits");
     }
 
-    /// Verifies: ADR-0026
+    /// Verifies: ADR-0040
     #[test]
     fn withdrawing_takes_only_the_waiting_requests_of_a_revoked_certificate() {
         let (enrolment, _clock) = enrolment();

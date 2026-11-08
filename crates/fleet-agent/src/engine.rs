@@ -118,7 +118,7 @@ pub struct Engine {
     /// The sampling targets, shared with the own-telemetry sampler (ADR-0017), which runs beside
     /// a transport that holds this Engine mutably for the whole of a connection.
     sampling: Arc<Mutex<Vec<SamplingTarget>>>,
-    /// The certificate request last queued on this connection (ADR-0026): a new one goes out at
+    /// The certificate request last queued on this connection (ADR-0040): a new one goes out at
     /// once, the same one again only with the next report.
     last_csr: Option<Vec<u8>>,
     /// The high-water marks every Supervisor of this Client shares (ADR-0035 clause 8), kept so a
@@ -311,7 +311,7 @@ impl Engine {
     }
 
     /// Asks the Server for a client certificate when it signs them and this Client needs one
-    /// (ADR-0026). Driven by capability rather than configuration: a Server that declares nothing
+    /// (ADR-0040). Driven by capability rather than configuration: a Server that declares nothing
     /// is never asked, and one that does hands this host an identity before mutual TLS is switched
     /// on, which is what makes switching it on uneventful.
     ///
@@ -936,7 +936,7 @@ mod tests {
     /// A new certificate request is owed at once, so it never waits for a heartbeat; the same one
     /// re-sent while it waits for an operator rides the next report, so it never answers every
     /// answer (ADR-0027 clause 9).
-    /// Verifies: ADR-0026
+    /// Verifies: ADR-0040
     #[test]
     fn a_new_certificate_request_is_owed_at_once_and_a_repeated_one_is_not() {
         let dir = tempfile::tempdir().expect("tempdir");

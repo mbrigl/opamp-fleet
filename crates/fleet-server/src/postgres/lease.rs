@@ -96,6 +96,8 @@ impl Database {
         let files = self.archive_offered();
         let host = host.to_string();
         let release = self.release();
+        let audit_key = self.audit_key_label();
+        let export = self.audit_export.get().cloned();
         let taking = self.run_within(bound, move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
@@ -120,7 +122,8 @@ impl Database {
             }
             let live = transaction
                 .query(
-                    "SELECT instance_id::text, must_be_alone FROM leases WHERE expires_at > now()",
+                    "SELECT instance_id::text, must_be_alone, audit_key_label FROM leases \
+                     WHERE expires_at > now()",
                     &[],
                 )
                 .await
@@ -164,6 +167,29 @@ impl Database {
                     }
                 }
             }
+            // Every live lease that is not taken over names the same audit key as this one, or
+            // none as this one does; at a start and at a new lease after a lapse alike, a
+            // differing one stops the instance
+            // (ADR-0043
+            // clause 14).
+            if let Some(theirs) = live
+                .iter()
+                .filter(|row| !row.get::<_, bool>(1))
+                .map(|row| row.get::<_, Option<String>>(2))
+                .find(|theirs| *theirs != audit_key)
+            {
+                let name = |label: &Option<String>| {
+                    label
+                        .as_ref()
+                        .map_or_else(|| "none".to_string(), |label| format!("{label:?}"))
+                };
+                return Ok(Err(format!(
+                    "[audit] key_label is {} here and {} on a live lease of another instance — \
+                     every instance on one database names the same audit key, or none",
+                    name(&audit_key),
+                    name(&theirs)
+                )));
+            }
             // A lease that has not lapsed is taken over only as that of a holder that had to be
             // alone and whose process is gone.
             let removed: Vec<(String, bool)> = transaction
@@ -198,22 +224,24 @@ impl Database {
             transaction
                 .execute(
                     "INSERT INTO leases \
-                     (instance_id, host, must_be_alone, taken_at, renewed_at, expires_at, release) \
+                     (instance_id, host, must_be_alone, taken_at, renewed_at, expires_at, release, \
+                     audit_key_label) \
                      VALUES ($1::text::uuid, $2, $3, now(), now(), \
-                     now() + make_interval(secs => $4), $5)",
+                     now() + make_interval(secs => $4), $5, $6)",
                     &[
                         &instance_id,
                         &host,
                         &exclusive.alone(),
                         &lapse.as_secs_f64(),
                         &release,
+                        &audit_key,
                     ],
                 )
                 .await
                 .map_err(sql)?;
             transaction.commit().await.map_err(sql)?;
             for line in &written {
-                line.emit();
+                line.emit(export.as_ref());
             }
             Ok(Ok((instance_id, taken_over)))
         })?;
@@ -280,6 +308,7 @@ impl Database {
         bound: Duration,
     ) -> Result<Vec<String>, String> {
         let id = instance_id.to_string();
+        let export = self.audit_export.get().cloned();
         self.run_within(bound, move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
@@ -308,7 +337,7 @@ impl Database {
             }
             transaction.commit().await.map_err(sql)?;
             for line in &written {
-                line.emit();
+                line.emit(export.as_ref());
             }
             Ok(lapsed)
         })
@@ -377,6 +406,58 @@ mod tests {
         assert_ne!(a, b);
         assert_eq!(a.len(), 36);
         assert_eq!(&a[14..15], "4");
+    }
+
+    /// Every instance on one database names the same `[audit] key_label`, or none: a lease
+    /// records it, and an instance whose label differs from a live lease's, a label against none
+    /// included, is refused naming the key, at its start and at a new lease after a lapse alike,
+    /// and the refusal is kept, so the instance stops.
+    /// Verifies: ADR-0043
+    #[test]
+    fn instances_on_one_database_name_the_same_audit_key() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let labelled = |label: Option<&str>| {
+            let database = test.shared();
+            database.set_audit_key_label(label.map(str::to_string));
+            database
+        };
+        // Two without one both start.
+        let (a, b) = (labelled(None), labelled(None));
+        let first = a.take_lease("host-a", LAPSE).expect("a");
+        let second = b.take_lease("host-b", LAPSE).expect("b");
+        let err = labelled(Some("audit"))
+            .take_lease("host-c", LAPSE)
+            .expect_err("a label against none");
+        assert!(err.contains("[audit] key_label"), "{err}");
+        assert!(err.contains("\"audit\" here and none"), "{err}");
+        a.release_lease(&first.instance_id).expect("release");
+        b.release_lease(&second.instance_id).expect("release");
+
+        let a = labelled(Some("audit"));
+        let first = a.take_lease("host-a", LAPSE).expect("a with a label");
+        assert_eq!(
+            test.rows(&format!(
+                "SELECT audit_key_label FROM leases WHERE instance_id = '{}'",
+                first.instance_id
+            )),
+            vec![vec![Some("audit".to_string())]],
+            "the lease records the label"
+        );
+        let differing = labelled(Some("other"));
+        let err = differing
+            .take_lease("host-b", LAPSE)
+            .expect_err("a differing label");
+        assert!(err.contains("\"other\" here and \"audit\""), "{err}");
+        assert_eq!(differing.outdated(), Some(err), "the refusal is kept");
+        let err = labelled(None)
+            .take_lease("host-b", LAPSE)
+            .expect_err("none against a label");
+        assert!(err.contains("none here and \"audit\""), "{err}");
+        labelled(Some("audit"))
+            .take_lease("host-b", LAPSE)
+            .expect("the same label");
     }
 
     /// Two instances that share the database each take a lease of their own and renew it; a lease

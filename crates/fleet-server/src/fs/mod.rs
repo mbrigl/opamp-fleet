@@ -19,7 +19,8 @@ mod revocation;
 
 pub use agents::FsAgentStore;
 pub use audit::{
-    files_in as audit_files, read_lines as audit_lines, tail_in as audit_tail,
+    check_checkpoints as check_audit_checkpoints, files_in as audit_files,
+    last_checkpoint as last_audit_checkpoint, read_lines as audit_lines, tail_in as audit_tail,
     verify_in as verify_audit, FsAuditStore,
 };
 pub use blobs::FsBlobStore;
