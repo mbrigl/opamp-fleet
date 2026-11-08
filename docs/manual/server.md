@@ -1964,6 +1964,43 @@ store, and `[audit] retain_days` (365, at least 1) how far back it goes on Postg
 applies to its own store alone: one set for the other store stops the Server at startup, naming
 the key.
 
+### Exporting the record
+
+A chain shows a rewrite only against a copy the Server cannot reach. `[audit.export]` sends every
+entry, once the store has written it, as an OTLP log record to a receiver of your own, such as an
+OpenTelemetry Collector that forwards it to write-once storage. It is off by default: without the
+section the Server opens no such connection, whatever `OTEL_*` variables its environment holds.
+
+```toml
+[audit.export]
+endpoint = "https://collector.example:4318/v1/logs"
+ca_file = "/etc/opamp-fleet/collector-root.pem"
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `endpoint` | — | Required. The full OTLP/HTTP URL of the logs, its path included: the Server appends no `/v1/logs`. `https://`, or `http://` to `127.0.0.1` or `::1` alone; any other fails startup naming the section. |
+| `ca_file` | unset | One PEM root for a receiver whose certificate no public root signs. |
+
+The connection is TLS 1.3 on the public roots and `ca_file`, follows no redirect, and takes no
+proxy. The Server presents no credential to the receiver: a request carries no header but
+`Content-Type` and `Content-Encoding`, and no `OTEL_EXPORTER_OTLP_*` variable changes its
+protocol, headers, compression or timeout. Each record's body is the line exactly as the store
+holds it, with its `seq`, `time` and `prev`, so the receiver's copy can be checked link by link;
+its attribute `audit.event` names the event, and its resource's `service.name` is
+`opamp-fleet-server`. On PostgreSQL an entry held to try again after its lease lapsed is exported
+once it is written into the next chain, and `audit.chain_opened` and the closing of a lapsed chain
+are exported as well.
+
+A receiver that is down or slow never holds up a decision. The export keeps up to 2048 entries
+waiting and sends a batch it could not deliver again, until the receiver takes it. An entry that
+finds the queue full is dropped and counted: the record says how many as `audit.export_dropped`
+with `count`, about once a minute while any were dropped, and once more at shutdown. At shutdown
+the export has five seconds after the record closes to deliver what is still waiting. What it
+drops after the last count, and what is still waiting when the five seconds run out, reaches
+neither the receiver nor a count in the record: the Server logs both numbers at `error`, and the
+receiver sees a gap in `seq`.
+
 ### The audit record on PostgreSQL
 
 On PostgreSQL the record is one chain per lease: each instance opens a chain of its own with each

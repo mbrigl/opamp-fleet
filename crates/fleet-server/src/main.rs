@@ -795,6 +795,22 @@ async fn serve() {
             std::process::exit(1);
         }
     };
+    // The audit record's export, where `[audit.export]` names a receiver: started before the
+    // lease, whose first entry it carries too (clause 9 of the token draft). Without the section
+    // the Server opens no such connection.
+    let export = match config.audit.export.as_ref().map(|export| {
+        fleet_server::audit_export::AuditExport::start(export, tokio::runtime::Handle::current())
+    }) {
+        None => None,
+        Some(Ok(export)) => Some(Arc::new(export)),
+        Some(Err(e)) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
+    if let (fleet_server::Records::Postgres(database), Some(export)) = (&records, &export) {
+        database.export_audit_to(export.sink());
+    }
     // With PostgreSQL, a lease before anything is decided and before either listener opens
     // (clauses 1 to 3 of
     // ADR-0025):
@@ -849,17 +865,18 @@ async fn serve() {
     // The audit record (ADR-0028), opened before anything is decided: one chain in files, or on
     // PostgreSQL the chain of each lease
     // (ADR-0029).
+    let sink = export.as_ref().map(|export| export.sink());
     let started = match (&records, &lease) {
         (fleet_server::Records::Postgres(database), Some(lease)) => {
-            fleet_server::audit_log::AuditLog::start_under(
+            fleet_server::audit_log::AuditLog::start_exporting(
                 Box::new(fleet_server::postgres::audit::PgAuditStore::new(
                     database.clone(),
                     lease.held(),
                 )),
                 config.audit.limits(),
                 clock.clone(),
-                lease.held(),
-                Some(lease.proof()),
+                Some((lease.held(), Some(lease.proof()))),
+                sink,
             )
         }
         _ => config
@@ -867,10 +884,12 @@ async fn serve() {
             .ok_or_else(|| "the audit record in files needs data_dir".to_string())
             .and_then(fleet_server::fs::FsAuditStore::open)
             .and_then(|store| {
-                fleet_server::audit_log::AuditLog::start(
+                fleet_server::audit_log::AuditLog::start_exporting(
                     Box::new(store),
                     config.audit.limits(),
                     clock.clone(),
+                    None,
+                    sink,
                 )
             }),
     };
@@ -882,6 +901,10 @@ async fn serve() {
         }
     };
     let audit: Arc<dyn fleet_server::audit::Audit> = audit_log.clone();
+    // What the export's queue dropped is written into the record about once a minute.
+    if let Some(export) = &export {
+        export.report_every(audit.clone());
+    }
     // The token's signatures are written to the record, and a software token says so at every
     // start (clauses 6 and 7 of the token draft).
     if let Some(token) = &token {
@@ -1120,7 +1143,24 @@ async fn serve() {
     // released only once it is, so that a chain left open is closed by the instance that takes
     // over the lapsed lease (clause 3 of
     // ADR-0029).
+    // The export's count of what it dropped is written once more before the record closes, and
+    // what the record holds then is given its five seconds to reach the receiver.
+    if let Some(export) = &export {
+        export.report_dropped(audit_log.as_ref());
+    }
     let closed = audit_log.close(std::time::Duration::from_secs(5));
+    // What is dropped after the last count, or still waiting when the five seconds run out,
+    // reaches neither the receiver nor a count in the record, which is closed by now; it is logged.
+    if let Some(export) = &export {
+        let left = export.finish(std::time::Duration::from_secs(5));
+        if left.dropped > 0 || left.waiting > 0 {
+            error!(
+                dropped = left.dropped,
+                waiting = left.waiting,
+                "audit entries did not reach the export's receiver before shutdown"
+            );
+        }
+    }
     if let Some(lease) = lease {
         if closed {
             lease.release().await;

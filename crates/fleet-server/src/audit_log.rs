@@ -320,7 +320,7 @@ impl AuditLog {
         limits: Limits,
         clock: Arc<dyn Clock>,
     ) -> Result<Self, String> {
-        Self::start_with(store, limits, clock, None)
+        Self::start_with(store, limits, clock, None, None)
     }
 
     /// [`start`](Self::start) for a store of one chain per lease: each decision is marked with
@@ -337,7 +337,24 @@ impl AuditLog {
         held: crate::instance::Held,
         proof: Option<crate::instance::Proof>,
     ) -> Result<Self, String> {
-        Self::start_with(store, limits, clock, Some((held, proof)))
+        Self::start_with(store, limits, clock, Some((held, proof)), None)
+    }
+
+    /// [`start`](Self::start), or with `held` [`start_under`](Self::start_under), and every line
+    /// the store accepts handed to `export` as well
+    /// (ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one
+    /// clause 9).
+    ///
+    /// # Errors
+    /// Returns an error when the store cannot be read.
+    pub fn start_exporting(
+        store: Box<dyn AuditStore>,
+        limits: Limits,
+        clock: Arc<dyn Clock>,
+        held: Option<(crate::instance::Held, Option<crate::instance::Proof>)>,
+        export: Option<crate::audit_export::Sink>,
+    ) -> Result<Self, String> {
+        Self::start_with(store, limits, clock, held, export)
     }
 
     fn start_with(
@@ -345,6 +362,7 @@ impl AuditLog {
         limits: Limits,
         clock: Arc<dyn Clock>,
         held: Option<(crate::instance::Held, Option<crate::instance::Proof>)>,
+        export: Option<crate::audit_export::Sink>,
     ) -> Result<Self, String> {
         let chain = store.chain();
         let per_lease = chain != Chain::One;
@@ -380,6 +398,7 @@ impl AuditLog {
             per_lease,
             closed: closed.clone(),
             pending: pending.clone(),
+            export,
             chain: match chain {
                 Chain::Lease(id) => Some(id),
                 Chain::One | Chain::Unleased => None,
@@ -695,6 +714,15 @@ pub(crate) fn emit(seq: u64, event: &str, outcome: &str, text: &str) {
     info!(target: "audit", seq, event = %event, outcome = %outcome, "{}", text);
 }
 
+/// What follows once the store has accepted `line`: its `tracing` event, and its export where
+/// there is one.
+fn accepted(export: Option<&crate::audit_export::Sink>, line: &Line) {
+    emit(line.seq, &line.entry.event, &line.entry.outcome, &line.text);
+    if let Some(export) = export {
+        export.offer(&line.entry.event, &line.text, line.time_ms);
+    }
+}
+
 /// The writer task's state.
 struct Writer {
     store: Box<dyn AuditStore>,
@@ -722,6 +750,8 @@ struct Writer {
     pending: Arc<AtomicUsize>,
     /// The chain the batch's lines are given their place in, where the store keeps one per lease.
     chain: Option<String>,
+    /// Where each line the store accepted is exported to, where `[audit.export]` names a receiver.
+    export: Option<crate::audit_export::Sink>,
 }
 
 /// One line of the batch.
@@ -872,7 +902,7 @@ impl Writer {
             self.batch_bytes = 0;
             self.failing.store(false, Ordering::SeqCst);
             for line in std::mem::take(&mut self.batch) {
-                emit(line.seq, &line.entry.event, &line.entry.outcome, &line.text);
+                accepted(self.export.as_ref(), &line);
             }
         }
         landed
@@ -1023,7 +1053,7 @@ impl Writer {
                 .take_while(|(line, stored)| line.text == **stored)
                 .count();
             for line in self.batch.drain(..landed) {
-                emit(line.seq, &line.entry.event, &line.entry.outcome, &line.text);
+                accepted(self.export.as_ref(), &line);
             }
         }
         let (seq, prev) = match self.store.tail()? {
@@ -1092,7 +1122,7 @@ impl Writer {
                 self.batch_bytes = 0;
                 self.failing.store(false, Ordering::SeqCst);
                 for line in &batch {
-                    emit(line.seq, &line.entry.event, &line.entry.outcome, &line.text);
+                    accepted(self.export.as_ref(), line);
                 }
             }
             Err(e) => {
@@ -1732,6 +1762,48 @@ mod tests {
         assert!(lines[1].contains("\"seq\":2"), "{}", lines[1]);
         assert!(lines[1].contains("\"unrecorded_before\":5"), "{}", lines[1]);
         assert_eq!(chain_of(&memory), Ok(2));
+    }
+
+    /// The export is handed every line once the store has accepted it, as the store holds it, in
+    /// the order of the chain; the lines of a batch the store refused are lost, and none of them is
+    /// exported.
+    /// Verifies: ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one, ADR-0028
+    #[test]
+    fn the_export_is_handed_each_line_the_store_accepted_as_it_holds_it() {
+        let memory = Memory::default();
+        let (sink, taken) = crate::audit_export::test_sink();
+        let audit = AuditLog::start_exporting(
+            Box::new(memory.clone()),
+            Limits::default(),
+            clock(),
+            None,
+            Some(sink),
+        )
+        .expect("start");
+        audit
+            .record(Entry::new("admission.admitted", "admitted"))
+            .expect("record");
+        written(&audit);
+        assert_eq!(taken.lines(), memory.lines());
+
+        let held = memory.0.lock().expect("lock");
+        for n in 0..3 {
+            audit
+                .record(Entry::new("admission.admitted", "admitted").with("n", n))
+                .expect("record");
+        }
+        memory.1.store(true, Ordering::SeqCst);
+        drop(held);
+        assert!(!audit.drain(Duration::from_secs(10)));
+        assert!(taken.lines().is_empty(), "a refused line was exported");
+
+        memory.1.store(false, Ordering::SeqCst);
+        until("the writer never retried", || memory.lines().len() >= 2);
+        audit
+            .record(Entry::new("admission.admitted", "admitted").with("n", 9))
+            .expect("record");
+        written(&audit);
+        assert_eq!(taken.lines(), memory.lines()[1..].to_vec());
     }
 
     /// Verifies: ADR-0028

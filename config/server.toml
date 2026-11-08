@@ -311,6 +311,14 @@ client_ca_file = "client-ca.pem"
 # keep_files = 16             # files: the oldest past this is deleted, its last hash recorded first
 # retain_days = 365           # PostgreSQL: entries older than this are pruned, 1 to 36500
 # key_label = "audit"         # the audit key on the [pkcs11] token; every instance names the same
+#
+# Off by default: every entry, once written, also sent as an OTLP log record to a receiver the
+# Server cannot rewrite. The endpoint is the full OTLP/HTTP URL WITH PATH, https:// (http:// to
+# 127.0.0.1 or ::1 alone). A receiver that is down never holds up a decision: what does not fit
+# the export's queue is dropped, and the count is written into the record as audit.export_dropped.
+# [audit.export]
+# endpoint = "https://collector.example:4318/v1/logs"
+# ca_file = "/etc/opamp-fleet/collector-root.pem"   # one PEM root no public root store holds
 
 # Optional connection settings offered to the fleet: every Agent declaring
 # AcceptsOpAMPConnectionSettings is offered these, verifies them by actually connecting, and

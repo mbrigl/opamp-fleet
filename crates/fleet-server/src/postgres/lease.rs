@@ -97,6 +97,7 @@ impl Database {
         let host = host.to_string();
         let release = self.release();
         let audit_key = self.audit_key_label();
+        let export = self.audit_export.get().cloned();
         let taking = self.run_within(bound, move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
@@ -240,7 +241,7 @@ impl Database {
                 .map_err(sql)?;
             transaction.commit().await.map_err(sql)?;
             for line in &written {
-                line.emit();
+                line.emit(export.as_ref());
             }
             Ok(Ok((instance_id, taken_over)))
         })?;
@@ -307,6 +308,7 @@ impl Database {
         bound: Duration,
     ) -> Result<Vec<String>, String> {
         let id = instance_id.to_string();
+        let export = self.audit_export.get().cloned();
         self.run_within(bound, move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
@@ -335,7 +337,7 @@ impl Database {
             }
             transaction.commit().await.map_err(sql)?;
             for line in &written {
-                line.emit();
+                line.emit(export.as_ref());
             }
             Ok(lapsed)
         })

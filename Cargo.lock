@@ -1041,6 +1041,7 @@ name = "fleet-server"
 version = "0.8.1"
 dependencies = [
  "argon2",
+ "async-trait",
  "axum",
  "base64 0.23.1",
  "constant_time_eq",
@@ -1054,6 +1055,10 @@ dependencies = [
  "libc",
  "object_store",
  "opamp",
+ "opentelemetry",
+ "opentelemetry-http",
+ "opentelemetry-otlp",
+ "opentelemetry_sdk",
  "prost",
  "rcgen",
  "reqwest",

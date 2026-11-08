@@ -99,6 +99,7 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             ("throttle", Core),
             ("api", Adapter),
             ("api::paging", Adapter),
+            ("audit_export", Adapter),
             ("audit_log", Adapter),
             ("bridge", Adapter),
             ("ca", Adapter),

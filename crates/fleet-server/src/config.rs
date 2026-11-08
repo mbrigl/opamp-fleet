@@ -219,6 +219,46 @@ pub struct AuditConfig {
     /// The label of the audit key on the `[pkcs11]` token, which signs the heads of the audit
     /// chains. Every instance on one database names the same one, or none.
     pub key_label: Option<String>,
+    /// Where every entry is exported to as an OTLP log record; absent, nothing is exported.
+    pub export: Option<AuditExportConfig>,
+}
+
+/// The `[audit.export]` section
+/// (ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one
+/// clause 9): the OTLP/HTTP endpoint every entry of the audit record is sent to as a log record,
+/// over TLS 1.3, plaintext to a loopback IP literal alone. The Server authenticates to it with
+/// nothing beyond TLS.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuditExportConfig {
+    /// The full OTLP/HTTP URL of the logs, its path included: `https://`, or `http://` to
+    /// 127.0.0.1 or ::1 alone.
+    pub endpoint: String,
+    /// One PEM root for a receiver whose certificate no public root signs.
+    pub ca_file: Option<PathBuf>,
+}
+
+impl AuditExportConfig {
+    fn check(&self) -> Result<(), String> {
+        // Q-1: the record is never sent unencrypted beyond the loopback.
+        let endpoint = &self.endpoint;
+        match endpoint.split_once("://").map(|(scheme, _)| scheme) {
+            Some("https") => Ok(()),
+            Some("http")
+                if opamp::endpoint::is_loopback_literal(opamp::endpoint::host_of(endpoint)) =>
+            {
+                Ok(())
+            }
+            Some("http") => Err(format!(
+                "[audit.export] endpoint {endpoint}: plaintext is for 127.0.0.1 and ::1 alone — \
+                 use https://"
+            )),
+            _ => Err(format!(
+                "[audit.export] endpoint {endpoint} must start with https:// (http:// only to \
+                 127.0.0.1 or ::1)"
+            )),
+        }
+    }
 }
 
 /// The `[pkcs11]` section
@@ -299,7 +339,9 @@ impl AuditConfig {
                  longest the record is kept"
             ));
         }
-        Ok(())
+        self.export
+            .as_ref()
+            .map_or(Ok(()), AuditExportConfig::check)
     }
 }
 
@@ -3523,6 +3565,54 @@ mod tests {
         ] {
             let err = load(&text).expect_err(named);
             assert!(err.contains(&format!("[audit] {named}")), "{named}: {err}");
+        }
+    }
+
+    /// `[audit.export]` is off unless named; it names an `https://` endpoint, or an `http://` one
+    /// on a loopback IP literal, and a `ca_file`. Plaintext elsewhere, another scheme and any other
+    /// key fail startup naming the section.
+    /// Verifies: ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one, ADR-0012
+    #[test]
+    fn the_audit_export_is_off_unless_named_and_never_plaintext_off_the_loopback() {
+        let load = |text: &str| {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("server.toml");
+            std::fs::write(&path, format!("{TLS}{text}")).expect("write");
+            ServerConfig::load(&path)
+        };
+        assert!(load("").expect("defaults").audit.export.is_none());
+        assert!(load("[audit]\nkeep_files = 3\n")
+            .expect("set")
+            .audit
+            .export
+            .is_none());
+        for endpoint in [
+            "https://collector.example:4318/v1/logs",
+            "http://127.0.0.1:4318/v1/logs",
+            "http://[::1]:4318/v1/logs",
+        ] {
+            let config = load(&format!(
+                "[audit.export]\nendpoint = \"{endpoint}\"\nca_file = \"/etc/root.pem\"\n"
+            ))
+            .expect(endpoint);
+            let export = config.audit.export.expect("named");
+            assert_eq!(export.endpoint, endpoint);
+            assert_eq!(export.ca_file, Some(PathBuf::from("/etc/root.pem")));
+        }
+        for text in [
+            "[audit.export]\nendpoint = \"http://collector.example:4318/v1/logs\"\n",
+            "[audit.export]\nendpoint = \"http://localhost:4318/v1/logs\"\n",
+            "[audit.export]\nendpoint = \"grpc://127.0.0.1:4317\"\n",
+            "[audit.export]\nendpoint = \"https://c.example/v1/logs\"\nheaders_file = \"/x\"\n",
+            "[audit.export]\nca_file = \"/etc/root.pem\"\n",
+        ] {
+            let err = load(text).expect_err(text);
+            assert!(
+                err.contains("[audit.export]")
+                    || err.contains("headers_file")
+                    || err.contains("endpoint"),
+                "{text}: {err}"
+            );
         }
     }
 

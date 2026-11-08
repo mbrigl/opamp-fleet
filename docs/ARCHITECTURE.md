@@ -220,6 +220,13 @@ no module.
   one transaction
   ([ADR-0023](adr/0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
   clause 12).
+  With `[audit.export]`, `audit_export` sends every line a store has accepted, the writer's and
+  those a lease's transaction writes, as an OTLP log record to the receiver it names: a queue of
+  its own, a thread that sends through `opentelemetry-otlp` over the TLS 1.3 *ring* client and
+  tries again until the receiver takes a batch, and the count of what the full queue dropped
+  written back as `audit.export_dropped`
+  ([ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one](adr/draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one.md)
+  clause 9).
 - **Server ports beyond storage** — `fleet` owns `CertificateSigner`, which the local CA in `ca`
   implements for the CSR flow and the renewal proof (ADR-0026), and the `UseCase` each signature
   names. A CA key in `ca` is a key file or a key on the PKCS#11 token of `pkcs11`, which signs

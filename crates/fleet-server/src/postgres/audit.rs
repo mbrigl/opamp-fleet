@@ -222,12 +222,19 @@ pub(crate) struct Written {
     seq: u64,
     event: &'static str,
     line: String,
+    time_ms: u64,
 }
 
 impl Written {
-    /// Emits the `tracing` copy of the line (ADR-0028 clause 6).
-    pub(crate) fn emit(&self) {
+    /// Emits the `tracing` copy of the line (ADR-0028 clause 6), and hands it to `export` where
+    /// `[audit.export]` names a receiver
+    /// (ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one
+    /// clause 9).
+    pub(crate) fn emit(&self, export: Option<&crate::audit_export::Sink>) {
         crate::audit_log::emit(self.seq, self.event, "recorded", &self.line);
+        if let Some(export) = export {
+            export.offer(self.event, &self.line, self.time_ms);
+        }
     }
 }
 
@@ -284,7 +291,8 @@ pub(crate) async fn open_chain(
                 .with("predecessor_hash", row.get::<_, String>(1));
         }
     }
-    let line = render(1, now_ms(), &entry, GENESIS);
+    let time_ms = now_ms();
+    let line = render(1, time_ms, &entry, GENESIS);
     transaction
         .execute(
             "INSERT INTO audit_chains (id, host, opened_at) VALUES ($1::text::uuid, $2, now())",
@@ -303,6 +311,7 @@ pub(crate) async fn open_chain(
         seq: 1,
         event: "audit.chain_opened",
         line,
+        time_ms,
     })
 }
 
@@ -364,7 +373,8 @@ pub(crate) async fn close_lapsed(
         .with("chain", chain)
         .with("reason", ended.reason())
         .with("closed_by", closed_by);
-    let line = render(super::unsigned(seq + 1), now_ms(), &entry, &prev);
+    let time_ms = now_ms();
+    let line = render(super::unsigned(seq + 1), time_ms, &entry, &prev);
     transaction
         .execute(
             "INSERT INTO audit_entries (chain, seq, line) VALUES ($1::text::uuid, $2, $3)",
@@ -383,6 +393,7 @@ pub(crate) async fn close_lapsed(
         seq: super::unsigned(seq + 1),
         event: "audit.chain_closed",
         line,
+        time_ms,
     }))
 }
 
@@ -1167,6 +1178,62 @@ mod tests {
 
         let verified = verify(&a.database, None).expect("verify");
         assert!(!verified.failed, "{:?}", verified.lines);
+    }
+
+    /// On PostgreSQL the export is handed every line once it is in a chain: the lines a lease's
+    /// transaction writes, `audit.chain_opened` and the closing of a lapsed chain, as well as the
+    /// writer's. An entry held to try again after its lease lapsed is exported once, as it is
+    /// written into the next chain, and not before.
+    /// Verifies: ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one, ADR-0029
+    #[test]
+    fn the_export_is_handed_every_line_once_it_is_in_a_chain() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let (sink, taken) = crate::audit_export::test_sink();
+        let database = shared(&test);
+        database.export_audit_to(sink.clone());
+        let old = database
+            .take_lease("host-a", LAPSE)
+            .expect("lease")
+            .instance_id;
+        let (held, watched) = watch::channel(Some(old.clone()));
+        let audit = AuditLog::start_exporting(
+            Box::new(PgAuditStore::new(database.clone(), watched.clone())),
+            Limits::default(),
+            Arc::new(crate::clock::SystemClock),
+            Some((watched, None)),
+            Some(sink),
+        )
+        .expect("start");
+        audit.record(admitted(1)).expect("record");
+        assert!(audit.drain(Duration::from_secs(10)));
+        assert_eq!(taken.lines(), lines(&test, &old));
+
+        lapse(&test, &old);
+        audit.record(admitted(2)).expect("queued");
+        assert!(!audit.drain(Duration::from_secs(10)));
+        assert!(
+            taken.lines().is_empty(),
+            "a line no chain holds was exported"
+        );
+
+        let new = database
+            .take_lease("host-a", LAPSE)
+            .expect("new lease")
+            .instance_id;
+        held.send_replace(Some(new.clone()));
+        assert!(audit.drain(Duration::from_secs(10)));
+        let mut exported = taken.lines();
+        let mut stored = lines(&test, &old)[2..].to_vec();
+        stored.extend(lines(&test, &new));
+        assert!(
+            stored.iter().any(|line| line.contains("\"n\":2")),
+            "{stored:#?}"
+        );
+        exported.sort();
+        stored.sort();
+        assert_eq!(exported, stored);
     }
 
     /// A decision recorded while the instance holds no lease — none named, or the one named lapsed
