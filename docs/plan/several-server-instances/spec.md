@@ -187,7 +187,8 @@ The plan lands on `main` in three stages, each a release of its own.
    core busy hold exactly the Agents, and a row left held could not be reproduced. The failover
    counts the held rows of the Gateway's Agents and of the single-Agent hosts apart, and that
    count is the sensor for such a row. The lists page and name the holder, two versions run side
-   by side, the manual runs three instances, and the load test decides G-20, which lands with it.
+   by side, the manual runs three instances, and the load test decides G-20, which the
+   specification holds.
    Its ADRs are ADR-0025, ADR-0031, ADR-0015, ADR-0023, ADR-0028, ADR-0029 and ADR-0027.
 3. **The keys on a token.** Tickets 12, 16 and 17. The CA keys live on a PKCS#11 token, so
    instances holding a CA run side by side, the heads of the audit chains are signed, and the
@@ -208,14 +209,6 @@ The plan lands on `main` in three stages, each a release of its own.
 - **Review rounds.** Each ticket is worked in a worktree of its own and reviewed by a session that
   did not write it. A fix round gets another review only when it changed code for a blocker or a
   should-fix; a nit goes into the hand-off's doubts, and a ticket in review takes no new scope.
-- **Open before stage 2 starts:**
-  - Ticket 23: an approval whose decision fails to commit has already recorded its certificate,
-    so approving the request again signs a second one; stage one ships it as a bound. It blocks
-    G-20.
-  - Tickets 24 to 32: the correctness findings of stage 1's hand-offs and reviews, on presence,
-    deleted members, the sweep, the lease across a suspend, a commit whose answer is lost, one
-    snapshot per read, a queued restart, the audit record's leases and the revocation list's
-    version. They block G-20. The other findings are tickets in plan directories of their own.
 - **Beside `feat/core-repack`.** That branch carries the `supervisor.*` label rule of the fleet
   record's clause 20 and the operator program's kept-link rule, both left out of the drafts here.
   Whichever of the two reaches `main` second takes the other's rule into its restatement.
@@ -234,6 +227,5 @@ The plan lands on `main` in three stages, each a release of its own.
   decides the module's own connection under that clause's rule for a library the Server loads, and
   the token's keys beside the alone rule of ADR-0025 clause 2. ADR-0040 supersedes ADR-0026, and
   ADR-0042 supersedes ADR-0037.
-- The specification change G-20 is drafted on this branch and lands with stage 2; only the human
-  lands it.
+- G-20 is in the specification; this plan drafts no other specification change.
 - No new ADR is needed beyond these.
