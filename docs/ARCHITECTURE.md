@@ -71,7 +71,9 @@ Five crates in one workspace ([ADR-0008](adr/0008-five-crates-on-tokio-and-axum.
   ([ADR-0008](adr/0008-five-crates-on-tokio-and-axum.md)). Always the
   generated types, framing and the endpoint's body rules. Behind `client`, an Agent's protocol state
   machine, the two transports, and `client::connection`, which builds a connection, its TLS and its
-  HTTP client from a `Connection` the application fills in. The WebSocket driver ends a
+  HTTP client from a `Connection` the application fills in, and every other HTTPS client of the
+  Client through `ClientTls::https_client`: TLS 1.3, no redirect followed, bounded by its
+  `Timeouts`. The WebSocket driver ends a
   connection on which nothing arrived for one heartbeat interval (`client::ws::Silence`), and
   draws its reconnects and its waits after an `Unavailable` from `client::backoff`
   ([ADR-0015](adr/0015-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended.md)).

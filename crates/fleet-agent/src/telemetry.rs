@@ -667,21 +667,11 @@ fn exporter_client(
         Some(cert) => crate::tls::client_tls_for(config, Some(cert)),
         None => crate::tls::trust(config),
     };
-    let builder = tls
-        .and_then(|tls| {
-            tls.apply(
-                // The timeout belongs here rather than on the exporter: `opentelemetry-otlp` keeps
-                // its own for the client it would have built, and never applies it to this one.
-                reqwest::Client::builder()
-                    .use_rustls_tls()
-                    .redirect(reqwest::redirect::Policy::none())
-                    .timeout(EXPORT_TIMEOUT),
-            )
-        })
+    // The timeout belongs here rather than on the exporter: `opentelemetry-otlp` keeps its own for
+    // the client it would have built, and never applies it to this one.
+    let client = tls
+        .and_then(|tls| tls.https_client(opamp::client::Timeouts::Total(EXPORT_TIMEOUT)))
         .map_err(|e| format!("{field}: {e}"))?;
-    let client = builder
-        .build()
-        .map_err(|e| format!("{field}: cannot build the OTLP client: {e}"))?;
     // Captured here, on the runtime thread that applies the offer — the exporter thread this is
     // handed to has no runtime of its own to ask.
     let handle = tokio::runtime::Handle::try_current().map_err(|_| {
