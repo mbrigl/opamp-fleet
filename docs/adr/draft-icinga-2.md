@@ -196,7 +196,8 @@ the artifact's reach.
 
 11. **The Icinga master is the only CA; the fleet transports, never signs.** The fleet Server holds
     no `TicketSalt`, signs nothing, and never sees a private key; the OpAMP PKI of
-    [ADR-0026](0026-admission-by-client-certificate-and-revocation.md) and Icinga's never touch. It
+    [ADR-0040](0040-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)
+    and Icinga's never touch. It
     carries two artefacts that are not keys, each a Configuration with `role = "supplementary"`
     that lands as a file the Supervisor reads and the daemon is never pointed at: the **ticket**
     (useless for any other CN) and the **parent's certificate** (public).
@@ -280,7 +281,7 @@ the artifact's reach.
     daemon is taken from `usr/lib`, not the `/usr/sbin` shell wrapper. The container is
     **`.tar.gz`**, which carries the executable bit. Packing is
     the deterministic repack of
-    [ADR-0037](0037-the-operator-program-opamp-fleetctl.md) clause 27, with the normalized file
+    [ADR-0042](0042-the-operator-program-opamp-fleetctl.md) clause 27, with the normalized file
     modes of
     [ADR-draft-the-operator-program-opamp-fleetctl](draft-the-operator-program-opamp-fleetctl.md)
     clause 27. The artifact is uploaded as
@@ -342,7 +343,7 @@ the artifact's reach.
       resolved inside the directory they were unpacked into together, so a link in one package
       may name a file of another, as `libstdc++6`'s documentation names `gcc-12-base`'s; a link
       that leads out of that directory fails the repack naming it
-      ([ADR-0037](0037-the-operator-program-opamp-fleetctl.md)).
+      ([ADR-0042](0042-the-operator-program-opamp-fleetctl.md)).
 
     The tool prints the library packages and the highest `libc6` floor any package of the tree
     states before any package is downloaded: that floor is the artifact's reach.
@@ -458,7 +459,7 @@ block there is refused when it is checked and when it starts, naming `--no-proce
 - **Repack the newest suite.** Quietly excludes the hosts most likely to run an old agent.
 - **Copy the libraries the build host resolves (`ldd`).** Rejected: the tree's content would be
   whatever that host has installed, from wherever it came, which
-  [ADR-0037](0037-the-operator-program-opamp-fleetctl.md) clause 27 rules out for a repack; `ldd`
+  [ADR-0042](0042-the-operator-program-opamp-fleetctl.md) clause 27 rules out for a repack; `ldd`
   runs the host's loader on the program; and the build host's distribution would become the reach,
   so a repack for another suite would need a container of that suite with the right libraries
   installed.
