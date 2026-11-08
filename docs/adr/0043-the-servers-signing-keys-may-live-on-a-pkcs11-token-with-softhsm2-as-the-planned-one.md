@@ -1,7 +1,7 @@
 # ADR-0043: The Server's signing keys may live on a PKCS#11 token, with SoftHSM2 as the planned one
 
-- **Status:** 🟡 proposed
-- **Date:** 2026-10-22
+- **Status:** 🟢 accepted
+- **Date:** 2026-11-08
 - **Deciders:** Markus Brigl
 - **Applies to:** the `CertificateSigner` port in `crates/fleet-server/src/fleet.rs` and the local CA in `crates/fleet-server/src/ca.rs` and every PKCS#11 adapter beside it, the signing of bootstrap certificates in `crates/fleet-server/src/bootstrap.rs`, the audit record's checkpoints and export in `crates/fleet-server/src/audit_log.rs`, `audit.rs` and `audit_export.rs`, the `[client_ca]`, `[enrolment]`, `[audit]` and `[pkcs11]` sections of `server.toml` and their parsing in `crates/fleet-server/src/config.rs`, `config/server.toml`, the audit key label each lease records and its startup check in the PostgreSQL adapters, the `pki init`, `pki token-init` and `pki bootstrap-ca` commands in `crates/fleet-tools/src/pki.rs`, `server audit-verify` and `server pki status` in `crates/fleet-server/src/main.rs`, the `cryptoki` dependency of the Server and of `crates/fleet-tools` in `Cargo.toml` and `deny.toml`, the OpenTelemetry crates the export adds to the Server in `crates/fleet-server/Cargo.toml`, SoftHSM2 with its `softhsm2.conf` and token directory in the Dev Container and on the CI runner, `docs/ARCHITECTURE.md`, and every document that tells an operator where the CA keys live
 

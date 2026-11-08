@@ -3,7 +3,7 @@
 //!
 //! The Server never sees a downstream certificate — the Gateway terminates that handshake and
 //! presents its own upstream — so the Server hands its Gateways the revoked certificates of the
-//! fleet's client CA instead, chains already resolved (ADR-0026 clause 34). The Gateway fetches the
+//! fleet's client CA instead, chains already resolved (ADR-0040 clause 34). The Gateway fetches the
 //! list over its own upstream origin, with its own certificate, keeps it in memory,
 //! and refuses what it names. While it holds no list young enough to trust, it admits nobody: a
 //! Gateway whose Server is away forwards nothing anyway, and a list kept for ever would admit a
@@ -237,7 +237,7 @@ async fn fetch_within(
         .apply(builder)?
         .build()
         .map_err(|e| format!("cannot build the client: {e}"))?;
-    // Admitted by this Gateway's certificate alone: no `Authorization` (ADR-0026 clause 3).
+    // Admitted by this Gateway's certificate alone: no `Authorization` (ADR-0040 clause 3).
     let mut request = client.get(&url);
     if let Some(etag) = list.etag() {
         request = request.header(reqwest::header::IF_NONE_MATCH, etag);
@@ -302,7 +302,7 @@ mod tests {
 
     /// The Gateway fetches the list with its own identity and no `Authorization`, even when
     /// `supervisor.toml` still holds an `[auth]` section from an earlier version.
-    /// Verifies: ADR-0016, ADR-0026
+    /// Verifies: ADR-0016, ADR-0040
     #[tokio::test]
     async fn the_revocation_list_is_fetched_without_authorization() {
         opamp::tls::install_ring_provider();
@@ -352,7 +352,7 @@ mod tests {
     /// A list body larger than the bound is refused as an unreadable one is, whether it says its
     /// length up front or streams without one: the Gateway keeps what it held, and with nothing
     /// held it still admits nobody.
-    /// Verifies: ADR-0016, ADR-0026
+    /// Verifies: ADR-0016, ADR-0040
     #[tokio::test]
     async fn an_oversized_revocation_list_is_refused_like_an_unreadable_one() {
         const LIMIT: usize = 4096;

@@ -145,7 +145,7 @@ pub fn merge(
             destination_endpoint: pick(|s| !s.destination_endpoint.is_empty())
                 .map(|s| s.destination_endpoint)
                 .unwrap_or_default(),
-            // The issued client identity (ADR-0026). Folded like every other field: a later offer
+            // The issued client identity (ADR-0040). Folded like every other field: a later offer
             // that says nothing about the certificate leaves the one in force alone, which is what
             // makes an endpoint move safe for a fleet already on mutual TLS.
             certificate: pick(|s| s.certificate.is_some()).and_then(|s| s.certificate),
@@ -170,7 +170,7 @@ pub fn merge(
 /// verification — `insecure_skip_verify` would let a Server switch off the check that proves it is
 /// the Server — and trust here is an operator's file (ADR-0012). `ProxyConnectionSettings` has
 /// nothing on this Client to configure. Offered `headers` have no reader on the Agent plane, which
-/// admits by client certificate alone (ADR-0026): an applied one would be a value the Server plants
+/// admits by client certificate alone (ADR-0040): an applied one would be a value the Server plants
 /// on every connection of the fleet. They are named by their keys, never their values — the
 /// message travels to the Server and into the log file.
 pub fn unhonoured(settings: &OpAmpConnectionSettings) -> Result<(), String> {
@@ -660,7 +660,7 @@ mod tests {
 
     /// The verification connect carries no `Authorization` on either transport — not one an offer
     /// planted in its `headers`, and not one a leftover `[auth]` in the file still names.
-    /// Verifies: ADR-0013, ADR-0026
+    /// Verifies: ADR-0013, ADR-0040
     #[tokio::test]
     async fn verify_sends_no_authorization_even_when_one_is_offered() {
         // The `http` probe builds a reqwest client, which needs a process-wide provider.

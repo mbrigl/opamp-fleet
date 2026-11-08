@@ -934,7 +934,7 @@ async fn forgetting_what_is_not_there_is_reported() {
 /// page can fire them without a preflight. Fetch Metadata refuses the cross-site ones — a browser
 /// stamps `Sec-Fetch-Site` and cannot let a page forge it — while same-origin and non-browser
 /// callers pass. The guard runs before the handler, so it decides regardless of the target.
-/// Verifies: ADR-0026
+/// Verifies: ADR-0040
 #[tokio::test]
 async fn a_cross_site_state_changing_post_is_refused() {
     let server = spawn().await;
@@ -994,7 +994,7 @@ async fn a_cross_site_state_changing_post_is_refused() {
 /// A browser that sends no Fetch Metadata still sends `Origin` on a `POST`. An `Origin` that is
 /// not the plane's own marks a cross-site caller and is refused, while the plane's own origin and
 /// a caller with neither header pass the guard.
-/// Verifies: ADR-0026
+/// Verifies: ADR-0040
 #[tokio::test]
 async fn a_post_from_a_foreign_origin_without_fetch_metadata_is_refused() {
     let server = spawn().await;
@@ -2190,7 +2190,7 @@ async fn the_ui_and_the_enrolment_api_share_their_names() {
 /// in the browser — so a cross-site page must not be able to fire it. Both enrolment decisions are
 /// body-less `POST`s behind the same Fetch Metadata guard as `restart`, which answers before the
 /// handler, whether or not enrolment is configured.
-/// Verifies: ADR-0026
+/// Verifies: ADR-0040
 #[tokio::test]
 async fn a_cross_site_enrolment_decision_is_refused() {
     let server = spawn().await;

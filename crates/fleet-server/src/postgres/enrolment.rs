@@ -1203,8 +1203,8 @@ mod tests {
 
     /// A request whose bootstrap certificate another instance revoked is withdrawn when it is
     /// approved, and nothing is signed, whatever the approving instance holds in memory
-    /// (ADR-0026 clause 28).
-    /// Verifies: ADR-0026
+    /// (ADR-0040 clause 28).
+    /// Verifies: ADR-0040
     #[test]
     fn an_approval_whose_bootstrap_certificate_the_list_names_signs_nothing() {
         let Some(test) = TestDatabase::named() else {
@@ -2035,7 +2035,7 @@ mod tests {
     /// A register entry that its write refuses in the transaction that decides the request, here
     /// because another instance revoked the bootstrap certificate while the request was signed,
     /// rolls the decision back with it: nothing is registered or decided, the request is
-    /// withdrawn, and the signature is recorded as rolled back (ADR-0023 clause 9, ADR-0026
+    /// withdrawn, and the signature is recorded as rolled back (ADR-0023 clause 9, ADR-0040
     /// clause 28).
     /// Verifies: ADR-0023
     #[test]

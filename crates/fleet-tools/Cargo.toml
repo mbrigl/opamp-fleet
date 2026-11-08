@@ -1,6 +1,6 @@
 [package]
 name = "fleet-tools"
-description = "opamp-fleetctl, the OpAMP Fleet operator tool: package artifacts and the fleet's certificates (ADR-0037)"
+description = "opamp-fleetctl, the OpAMP Fleet operator tool: package artifacts and the fleet's certificates (ADR-0042)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,7 +8,7 @@ license.workspace = true
 publish.workspace = true
 
 # One binary, `opamp-fleetctl`, and no library: nothing in this workspace depends on this crate —
-# the arrow points the other way (ADR-0037 clause 1, ADR-0008).
+# the arrow points the other way (ADR-0042 clause 1, ADR-0008).
 [[bin]]
 name = "opamp-fleetctl"
 path = "src/main.rs"
@@ -40,7 +40,7 @@ hex.workspace = true
 # Client needs the same crate for its interactive install (ADR-0020), so this is one workspace
 # dependency serving two crates rather than a second prompt library.
 dialoguer.workspace = true
-# ADR-0037: the `pki` commands make the fleet's certificates with rcgen, on the dates `time` speaks,
+# ADR-0042: the `pki` commands make the fleet's certificates with rcgen, on the dates `time` speaks,
 # and read a certificate's end back with x509-parser — the crates the Server's client CA uses.
 rcgen.workspace = true
 # `pki token-init` and `pki bootstrap-ca --pkcs11-module` make keys on the Server's PKCS#11 token
@@ -67,6 +67,6 @@ zeroize.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
-# ADR-0037: the end-to-end test runs the real Server and the real Client in-process on what
+# ADR-0042: the end-to-end test runs the real Server and the real Client in-process on what
 # `pki init` wrote, reading the fragments as their configuration files are read.
 fleet-server = { path = "../fleet-server" }

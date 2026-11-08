@@ -223,7 +223,7 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
     (
         "fleet-tools",
         &[
-            // One command-line program and no library (ADR-0037): nothing here is core, and a
+            // One command-line program and no library (ADR-0042): nothing here is core, and a
             // module added to the crate has to be given a role like anywhere else.
             ("main", Root),
             ("fetch", Adapter),

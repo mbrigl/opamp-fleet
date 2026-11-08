@@ -146,7 +146,7 @@ fn carry_register(config_dir: &Path, data_dir: &Path, report: &mut Report) -> Re
     let list = old.join("revocations.json");
     if list.exists() {
         // Byte for byte: the Server reads the list as it always has, and drops a credential entry
-        // it may still hold on its first load (ADR-0026 clause 29).
+        // it may still hold on its first load (ADR-0040 clause 29).
         match copy_owner_only(&list, &data_dir.join(fs::REVOCATIONS)) {
             Ok(()) => report.line("carried: the revocation list"),
             Err(e) => report.failed(format!("the revocation list: {e}")),

@@ -592,7 +592,7 @@ impl AgentState {
         }
     }
 
-    /// Queues a certificate signing request for the next report (ADR-0026).
+    /// Queues a certificate signing request for the next report (ADR-0040).
     pub fn request_certificate(&mut self, csr: Vec<u8>) {
         self.protocol.request_certificate(csr);
     }

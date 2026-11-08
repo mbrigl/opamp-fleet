@@ -1,7 +1,7 @@
 # ADR-0042: The operator program `opamp-fleetctl`
 
-- **Status:** 🟡 proposed
-- **Date:** 2026-10-27
+- **Status:** 🟢 accepted
+- **Date:** 2026-11-08
 - **Deciders:** Markus Brigl
 - **Applies to:** `crates/fleet-tools/` (the one program it builds, its `pki` commands in `src/pki.rs`, `pki token-init` among them, `p12-extract`, and the deterministic repack of `package fetch` in `src/fetch.rs`, `pack_tree` and `collect_members`), the dependencies of `crates/fleet-tools/Cargo.toml`, `cryptoki` among them, and their entries in `deny.toml`, the Server's `pki status` command in `crates/fleet-server/src/main.rs` and the module that carries it, the expiry warnings of the running Server, the leaf naming of host and bootstrap certificates in `crates/fleet-server/src/ca.rs` and its startup check, how the Server holds its CA keys, in a file or on a PKCS#11 token, the ending rule and the naming rule in `crates/fleet-core/`, the operator-tool build and its archives in `.github/workflows/release.yml`, the release notes, `scripts/dev-pki.sh` and what reads its output (`scripts/seed_test_configs.sh`, `.vscode/launch.json`, `.vscode/tasks.json`, the startup message of `crates/fleet-server/src/config.rs` that names it), every kind whose upstream tree the repack packs, and every document that names an operator command, tells an operator how to make, inspect or convert a certificate, or says what a repacked package carries
 - **Supersedes:** [ADR-0037](0037-the-operator-program-opamp-fleetctl.md)

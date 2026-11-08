@@ -5,7 +5,7 @@
 //! certificate into a PKCS#12 file under that password, keeps the file and hands it out on request
 //! until the certificate ends or is revoked; the password it keeps nowhere (ADR-0027). The Server
 //! keeps the certificate's facts, never its key in the clear, so it can list what is valid and an
-//! operator can revoke one by its serial (ADR-0026 clause 27). A bootstrap certificate opens
+//! operator can revoke one by its serial (ADR-0040 clause 27). A bootstrap certificate opens
 //! nothing on its own: it needs an open enrolment window and an operator's approval (ADR-0023 clause 8 and ADR-0027 clause 9).
 //!
 //! The signing is the [`BootstrapSigner`] port, the bootstrap CA in [`crate::ca`] its adapter; the
@@ -20,10 +20,10 @@ use zeroize::Zeroizing;
 use crate::fleet::Clock;
 use crate::revocation::{CertId, SubjectValues};
 
-/// A bootstrap certificate's life when the request names none (ADR-0037 clause 14).
+/// A bootstrap certificate's life when the request names none (ADR-0042 clause 14).
 pub const DEFAULT_VALIDITY_DAYS: u32 = 10;
 
-/// The longest life a request may ask for (ADR-0037 clause 14).
+/// The longest life a request may ask for (ADR-0042 clause 14).
 pub const MAX_VALIDITY_DAYS: u32 = 90;
 
 /// The valid bootstrap certificates the record holds at most (ADR-0023 clause 11).
@@ -292,7 +292,7 @@ impl std::fmt::Debug for Pair {
 /// The port that signs a bootstrap certificate: the bootstrap CA with its key.
 pub trait BootstrapSigner: Send + Sync {
     /// The common name a bootstrap certificate carries, derived from the bootstrap CA's
-    /// (ADR-0037 clause 19).
+    /// (ADR-0042 clause 19).
     fn leaf_common_name(&self) -> String;
 
     /// When the bootstrap CA ends, in milliseconds since the epoch.
@@ -499,7 +499,7 @@ impl BootstrapCertificates {
     }
 
     /// Issues one bootstrap certificate and records it before answering (ADR-0027 clauses 1 and 3,
-    /// ADR-0037 clause 14 and ADR-0023 clause 11).
+    /// ADR-0042 clause 14 and ADR-0023 clause 11).
     ///
     /// # Errors
     /// See [`IssueError`].
@@ -529,7 +529,7 @@ impl BootstrapCertificates {
         if signer.ca_not_after_ms() <= now {
             return Err(IssueError::CaEnded);
         }
-        // Never past the CA (ADR-0037 clause 14).
+        // Never past the CA (ADR-0042 clause 14).
         let not_after = (now + u64::from(days) * DAY_MS).min(signer.ca_not_after_ms());
         // Outside the record's lock: sealing a PKCS#12 file derives three keys of 600 000
         // iterations, and the list and the download must not wait for it (ADR-0027).
@@ -938,7 +938,7 @@ mod tests {
         assert!(store.1.lock().unwrap().is_empty(), "no file kept");
     }
 
-    /// Verifies: ADR-0037
+    /// Verifies: ADR-0042
     #[test]
     fn a_certificate_lives_ten_days_by_default_at_most_ninety_and_never_past_its_ca() {
         let (record, _, _) = fixture(u64::MAX);
@@ -960,7 +960,7 @@ mod tests {
     }
 
     /// A CA that has ended signs nothing: its certificate would be dead on arrival.
-    /// Verifies: ADR-0037
+    /// Verifies: ADR-0042
     #[test]
     fn an_ended_ca_issues_nothing() {
         let (record, _, _) = fixture(1_000);
@@ -969,7 +969,7 @@ mod tests {
 
     /// After the bootstrap CA is replaced, what the old one issued no longer passes the
     /// handshake, so it is no longer listed.
-    /// Verifies: ADR-0037
+    /// Verifies: ADR-0042
     #[test]
     fn what_a_replaced_ca_issued_is_forgotten() {
         let (record, clock, store) = fixture(u64::MAX);

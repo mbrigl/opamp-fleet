@@ -39,14 +39,14 @@ Stated first so the list below is not read as a list of absences. On this link t
 has:
 
 - TLS on both transports, on both ends, with a private CA supported on the Client (ADR-0012).
-- **One proof on the Agent plane, required in the handshake** (ADR-0026,
+- **One proof on the Agent plane, required in the handshake** (ADR-0040,
   `transport::Admission`): a client certificate the client CA issued, valid and not revoked. No
   configuration admits a peer without one. The plane has no credential: `server.toml` refuses an
   `[auth]` section and a credential key in `[connection_offer]` at startup, and `/v1/opamp` and the
   download route read no `Authorization` header. The Client sends none, and nothing in
   `supervisor.toml` admits a host; its only secret on the Agent plane is its private key.
 - Basic authentication over the **whole** Operator plane, the UI included (`[rest.auth]`,
-  ADR-0026), required beyond the loopback, on a listener that is loopback until an operator
+  ADR-0040), required beyond the loopback, on a listener that is loopback until an operator
   publishes it (ADR-0012). A verification that succeeded is remembered by the SHA-256 of the
   header and compared in constant time (`credentials.rs`).
 - Client certificates the Server issues itself through the Baseline's CSR flow, with the Agent
@@ -62,7 +62,7 @@ has:
   provider carries the three TLS 1.3 suites and no other, every configuration pins TLS 1.3, and a
   peer offering only TLS 1.2 fails the handshake. Plaintext is accepted on `127.0.0.1` and `::1`
   alone and refused at startup anywhere else.
-- **A certificate in the handshake, and enrolment by approval** (ADR-0026, ADR-0016): every
+- **A certificate in the handshake, and enrolment by approval** (ADR-0040, ADR-0016): every
   Agent presents a client certificate the Agent plane and every Gateway ask for in the TLS
   handshake. A fresh host enrols with a bootstrap certificate from a CA of its own, only inside an
   operator-opened window, and only once an operator approves its request, which proves the
@@ -85,31 +85,31 @@ has:
 - Package content hashed and Ed25519-verified always, with no unsigned posture: without a
   verification key, or for an offer without a signature, nothing is downloaded. Archive members are
   validated before anything is written.
-- **Revocation that ends sessions** (ADR-0026): the Server keeps a persisted
+- **Revocation that ends sessions** (ADR-0040): the Server keeps a persisted
   list of revoked certificates, by issuing CA and serial — at most 20 octets, as RFC 5280 allows,
   so the list stays within what a Gateway reads — and extended along every renewal it signed.
   Admission refuses them on both transports and on the
   download, a revocation closes exactly the WebSocket sessions it concerns with `1008`, every
   session ends when the certificate that admitted it expires, and a kept-alive connection is
   refused on both transports and on the download once its certificate has expired.
-- **A Gateway refuses what the Server revoked** (ADR-0016, ADR-0026): a host marked as a Gateway
+- **A Gateway refuses what the Server revoked** (ADR-0016, ADR-0040): a host marked as a Gateway
   fetches the revoked certificates of the client CA every 30 s and refuses them downstream, closing
   the sessions they hold with `1008`; while it holds no list younger than 300 s it admits nobody.
   It forwards no `Authorization` upstream, and every upstream connection carries its own
   certificate alone. A Gateway that trusts the bootstrap CA lets a peer of it relay one plain-HTTP
   enrolment request and nothing else — no WebSocket, no binding, no offer, no download — and the
   Server checks the request's proof against its own bootstrap CA and revocation list (ADR-0016).
-- **A CSR's claim to an `instance_uid` is checked** (ADR-0026): a CSR naming any
+- **A CSR's claim to an `instance_uid` is checked** (ADR-0040): a CSR naming any
   `instance_uid` but its sender's is answered `BadRequest` before it is signed or queued — the
   Baseline's conditional MUST.
 - **A certificate names its host, and a host speaks only for its own Agents** (ADR-0027 clause 11,
-  ADR-0026 clause 12, and ADR-0016 clause 18): the Server puts a host of its own in every
+  ADR-0040 clause 12, and ADR-0016 clause 18): the Server puts a host of its own in every
   certificate it signs; an
   `instance_uid` first reported with one host's certificate is not spoken for by another's — such a
   reporter is re-keyed — and a host holds at most three valid certificates. A renewal proves the
   certificate it renews with that certificate's key, so it keeps its host and chain through a
   Gateway too. An operator marks a Gateway, whose certificate then speaks for any Agent.
-- **Key material and configuration readable by their owner alone** (ADR-0026 clause 7, ADR-0020
+- **Key material and configuration readable by their owner alone** (ADR-0040 clause 7, ADR-0020
   clause 25): on Unix the private key, the stored connection settings and `supervisor.toml` are
   written `0600` in `0700` directories, a state directory `0710` that the process account's group
   only passes through where one is registered (ADR-0021). On Windows a system-scope install gives
@@ -205,7 +205,7 @@ has:
   name lies in a directory only root writes, each step acting on the name and following no link.
   A test holds the modules these steps run in to no path-based write, removal, rename or mode
   change outside a justified list (`privileged_steps_follow_no_link.rs`).
-- **No credential in `server.toml` authenticates on its own** (ADR-0026 clause 21): an operator's
+- **No credential in `server.toml` authenticates on its own** (ADR-0040 clause 21): an operator's
   Basic password is kept as an Argon2id hash of at least the OWASP minimum, and a value in clear is
   refused at startup without being echoed. The Server offers no credential (ADR-0013).
 - **An audit record of every security decision** (ADR-0028): admissions and refusals, enrolment,
@@ -213,7 +213,7 @@ has:
   admission without its record, refusals aggregated per peer before they are queued and kept to
   half the queue so they cannot crowd out any other record, and no `Authorization` value in any
   line, not even as a hash.
-- **Certificates live 30 days by default** (ADR-0026 clause 8) and are renewed at two thirds of
+- **Certificates live 30 days by default** (ADR-0040 clause 8) and are renewed at two thirds of
   that; a test with lives of seconds watches three generations each replace the one before it
   expires (`certificate_renewal_e2e.rs`). A soak on real hosts before a rollout is the operator's.
 - **An offered move to another TLS endpoint needs the Client's own CA file** (ADR-0013 clause 5),
@@ -262,7 +262,7 @@ one listener and not on its neighbour is the failure mode worth seeing at a glan
     certificate (ADR-0016)
 - **Operator plane** — `127.0.0.1:4321` until an operator publishes it (ADR-0012).
   - ✅ TLS handshake ≤ 10 s · ✅ headers ≤ 30 s · ✅ Basic over the whole plane, required beyond the
-    loopback (ADR-0026) ·
+    loopback (ADR-0040) ·
     ✅ Fetch-Metadata CSRF guard on the body-less `POST` routes, by `Origin` where a browser sends
     no Fetch Metadata
   - ✅ a Content-Security-Policy that names the UI's inline scripts by hash and forbids framing ·

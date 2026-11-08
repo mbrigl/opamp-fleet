@@ -412,9 +412,9 @@ impl bootstrap::BootstrapCertificates {
     }
 }
 
-/// The **Agent plane** (ADR-0012): the OpAMP endpoint, guarded by Admission (ADR-0026), and the
+/// The **Agent plane** (ADR-0012): the OpAMP endpoint, guarded by Admission (ADR-0040), and the
 /// package download route beside it — behind the same handshake, and reached only with a
-/// certificate of the fleet (ADR-0026 clause 18).
+/// certificate of the fleet (ADR-0040 clause 18).
 ///
 /// The download lives here rather than with the rest of `/api/v1` because the split between the
 /// two planes is by *audience*, not by path: this route is the one an Agent calls, and its
@@ -431,7 +431,7 @@ pub fn agent_app(state: Arc<AppState>, admission: transport::Admission) -> Route
 
 /// The **Operator plane** (ADR-0012): the REST API, its OpenAPI document and docs page, and the
 /// bundled UI — on their own listener, guarded as a whole by `[rest.auth]` when one is configured
-/// (ADR-0026). Without it the plane is open, which is what its loopback default is for.
+/// (ADR-0040). Without it the plane is open, which is what its loopback default is for.
 pub fn operator_app(state: Arc<AppState>, auth: Option<api::OperatorAuth>) -> Router {
     api::router(state, auth)
 }

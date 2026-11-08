@@ -536,7 +536,7 @@ pub trait AgentStore: Send + Sync {
 
     /// Creates the record of an Agent first heard of, unless the store holds `max_records` records
     /// already. A shared store counts them where they are stored, in the step that creates it, so
-    /// the bound holds for every Server on it, however many create at once (ADR-0026 clause 12).
+    /// the bound holds for every Server on it, however many create at once (ADR-0040 clause 12).
     /// A record stored already is answered as it is stored, written nothing, and passes no bound.
     /// A store whose one Server holds every record bounds them in memory, and creates it.
     ///

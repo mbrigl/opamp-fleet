@@ -57,7 +57,7 @@ pub struct ClientConfig {
     /// Optional TLS trust override for `wss://` / `https://` endpoints.
     pub tls: Option<TlsConfig>,
     /// An `[auth]` section a file written for an earlier version still holds. The Client sends
-    /// no credential (ADR-0026 clause 3): the section is read only so that it does not fail the
+    /// no credential (ADR-0040 clause 3): the section is read only so that it does not fail the
     /// load — whatever keys it has — and nothing in it is kept. Its presence is what
     /// [`leftover_auth_notice`](Self::leftover_auth_notice) reports, once, at startup.
     #[serde(default, rename = "auth")]
@@ -540,7 +540,7 @@ fn take_integer(table: &mut toml::Table, key: &str) -> Result<Option<i64>, Strin
 
 /// Keys whose values are secrets: `[packages]`'s `archive_key`, and the `bearer_token` and
 /// `password` a leftover `[auth]` section may still hold — the Client ignores the section
-/// (ADR-0026 clause 3), but the file's text is reported as it stands, so its values stay masked.
+/// (ADR-0040 clause 3), but the file's text is reported as it stands, so its values stay masked.
 /// Paths and public keys are not on the list — a path locates a secret, it is not one, and the
 /// `verification_key` is the *public* half of the signing pair.
 pub(crate) const SECRET_KEYS: &[&str] = &["bearer_token", "password", "archive_key"];
@@ -880,7 +880,7 @@ pub struct TlsConfig {
     /// PEM CA bundle that *replaces* the built-in webpki roots — the self-signed-deployment case.
     /// Optional, so a `[tls]` section can carry a client identity alone and keep the public roots.
     pub ca_file: Option<PathBuf>,
-    /// PEM client certificate chain this Client presents (ADR-0026), for a fleet whose Server
+    /// PEM client certificate chain this Client presents (ADR-0040), for a fleet whose Server
     /// demands mutual TLS. Together with [`key_file`](Self::key_file), and useless without it.
     ///
     /// This is the operator-provisioned identity, including the **bootstrap certificate** a host
@@ -1228,7 +1228,7 @@ impl ClientConfig {
         self.attributes.clone()
     }
 
-    /// The one startup notice a leftover `[auth]` section earns (ADR-0026 clause 3), or `None`
+    /// The one startup notice a leftover `[auth]` section earns (ADR-0040 clause 3), or `None`
     /// when the file has none. The section is ignored and nothing from it is sent; it is not a
     /// reason to refuse the file, since a Client the Server updated must keep connecting.
     #[must_use]
@@ -2235,7 +2235,7 @@ mod tests {
     /// took then. It loads — a Client the Server updated must keep connecting — the notice names
     /// the section, and nothing from it reaches the connection: no `Authorization` value, and the
     /// effective configuration reported upstream carries none of its secrets.
-    /// Verifies: ADR-0026, ADR-0020, ADR-0027
+    /// Verifies: ADR-0040, ADR-0020, ADR-0027
     #[test]
     fn a_leftover_auth_section_is_ignored_with_a_notice() {
         let dir = tempfile::tempdir().expect("tempdir");

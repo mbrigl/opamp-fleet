@@ -1,4 +1,4 @@
-//! The Server as a local certificate authority (ADR-0026).
+//! The Server as a local certificate authority (ADR-0040).
 //!
 //! The Baseline's CSR flow lets an Agent keep its private key and ask for a certificate over the
 //! connection it already has: it sends a PEM certificate signing request, and the Server "creates a
@@ -8,7 +8,7 @@
 //!
 //! Nothing here decides *who* may enrol. A CSR from an Agent holding a certificate of the client
 //! CA is a renewal and is signed at once; a CSR on an enrolment connection waits until an operator
-//! approves it ([`crate::enrolment`], ADR-0026).
+//! approves it ([`crate::enrolment`], ADR-0040).
 
 use fleet_core::x509::issue::{random_serial, CLOCK_SKEW};
 use rcgen::{
@@ -35,7 +35,7 @@ pub struct ClientCa {
     /// (ADR-0043
     /// clause 13).
     trusted: Vec<Vec<u8>>,
-    /// The common name every certificate it signs carries, derived from the CA's (ADR-0037
+    /// The common name every certificate it signs carries, derived from the CA's (ADR-0042
     /// clause 19).
     leaf_name: String,
     validity_days: u32,
@@ -46,7 +46,7 @@ pub struct ClientCa {
 impl ClientCa {
     /// Loads the CA from `[client_ca]`, its key from a file. Either file being unreadable, or a key
     /// that is not PKCS#8, fails startup rather than the first enrolment (ADR-0008), and so does a
-    /// CA whose name gives its certificates a common name longer than 64 characters (ADR-0037
+    /// CA whose name gives its certificates a common name longer than 64 characters (ADR-0042
     /// clause 19). Whether the key belongs to the certificate is not checked here.
     ///
     /// # Errors
@@ -131,7 +131,7 @@ impl ClientCa {
     /// must carry exactly those values, or nothing is handed out.
     /// Nor is it bound to anything the Agent reports. Binding a certificate to an `instance_uid`
     /// would mean it dies the moment the Server re-keys that Agent through `AgentIdentification` —
-    /// an outage of the Server's own making (ADR-0026).
+    /// an outage of the Server's own making (ADR-0040).
     ///
     /// What the request may *not* dictate either is the shape of the certificate. `rcgen` carries the
     /// CSR's `basicConstraints`, `keyUsage`, `extendedKeyUsage`, and SANs into the signed output,
@@ -153,7 +153,7 @@ impl ClientCa {
     ) -> Result<Signed, String> {
         let (_, mut request) = read(csr_pem)?;
         // The life starts now, less a few minutes for clocks that disagree: a start in the past
-        // would put a fresh certificate into its renewal window at once (ADR-0026 clause 10), and
+        // would put a fresh certificate into its renewal window at once (ADR-0040 clause 10), and
         // would lengthen what a stolen one is good for.
         // A life shorter than the skew allowance keeps a tenth of itself as its allowance, or it
         // would start out in its renewal window.
@@ -188,7 +188,7 @@ impl ClientCa {
                 .map_err(|e| format!("cannot name the host {host:?}: {e}"))?,
         ));
         // A serial of its own for every certificate, so two certificates from one key are two
-        // revocable things (ADR-0026 clause 26). rcgen would derive it from the key.
+        // revocable things (ADR-0040 clause 26). rcgen would derive it from the key.
         request.params.serial_number = Some(random_serial()?);
         // A token key signs only with a place for its entry held in the record
         // (ADR-0043
@@ -219,7 +219,7 @@ impl ClientCa {
     }
 
     /// Issues certificates that live `validity` instead of `validity_days` — seconds, for a test
-    /// that watches renewal happen before expiry (ADR-0026 clause 8).
+    /// that watches renewal happen before expiry (ADR-0040 clause 8).
     #[must_use]
     pub fn with_validity(mut self, validity: time::Duration) -> Self {
         self.validity = Some(validity);
@@ -535,7 +535,7 @@ fn distinguished_name(
     Ok(name)
 }
 
-/// Checks a CSR's claims to an `instance_uid` against its sender's (ADR-0026): every canonical
+/// Checks a CSR's claims to an `instance_uid` against its sender's (ADR-0040): every canonical
 /// UUID in the subject or in a requested SAN that carries text must be `sender`.
 ///
 /// # Errors
@@ -551,7 +551,7 @@ pub fn check_claims(csr_pem: &str, sender: &[u8]) -> Result<(), String> {
     for san in &request.params.subject_alt_names {
         match san {
             SanType::DnsName(name) => values.push(name.as_str().to_string()),
-            // A renewal proof is base64 this project wrote, never a claim (ADR-0026).
+            // A renewal proof is base64 this project wrote, never a claim (ADR-0040).
             SanType::URI(uri) if uri.as_str().starts_with(fleet_core::renewal::URI_PREFIX) => {}
             // So is a bootstrap proof (ADR-0016).
             SanType::URI(uri)
@@ -579,7 +579,7 @@ pub fn check_claims(csr_pem: &str, sender: &[u8]) -> Result<(), String> {
 }
 
 /// Every canonical UUID text — 8-4-4-4-12 hex digits, either case — in `value`, standing alone or
-/// inside a longer value, but not as part of a longer run of hex digits (ADR-0026 clause 22).
+/// inside a longer value, but not as part of a longer run of hex digits (ADR-0040 clause 22).
 fn uuid_claims(value: &str) -> Vec<[u8; 16]> {
     const GROUPS: [usize; 5] = [8, 4, 4, 4, 12];
     let bytes = value.as_bytes();
@@ -710,7 +710,7 @@ fn dn_text(value: &rcgen::DnValue) -> String {
         rcgen::DnValue::PrintableString(s) => s.as_str().to_string(),
         rcgen::DnValue::Ia5String(s) => s.as_str().to_string(),
         rcgen::DnValue::TeletexString(s) => s.as_str().to_string(),
-        // Read as text, so a claim in either is found as in any other (ADR-0026 clause 23).
+        // Read as text, so a claim in either is found as in any other (ADR-0040 clause 23).
         rcgen::DnValue::BmpString(s) => String::from_utf16_lossy(
             &s.as_bytes()
                 .as_chunks::<2>()
@@ -762,7 +762,7 @@ impl crate::fleet::CertificateSigner for ClientCa {
 /// (ADR-0027). Loaded once at startup from `[enrolment]`.
 pub struct BootstrapCa {
     issuer: Issuer<'static, CaKey>,
-    /// The common name every bootstrap certificate carries (ADR-0037 clause 19).
+    /// The common name every bootstrap certificate carries (ADR-0042 clause 19).
     leaf_name: String,
     not_after_ms: u64,
     key_fingerprint: String,
@@ -773,8 +773,8 @@ impl BootstrapCa {
     ///
     /// # Errors
     /// Refuses a file that cannot be read, a key that is not PKCS#8, a key that does not belong
-    /// to `bootstrap_ca_file`, a key that is the client CA's (ADR-0026 clause 17), and a CA whose
-    /// name gives its certificates a common name longer than 64 characters (ADR-0037 clause 19).
+    /// to `bootstrap_ca_file`, a key that is the client CA's (ADR-0040 clause 17), and a CA whose
+    /// name gives its certificates a common name longer than 64 characters (ADR-0042 clause 19).
     pub fn from_config(
         enrolment: &crate::config::EnrolmentConfig,
         client_ca: Option<&ClientCaConfig>,
@@ -1022,7 +1022,7 @@ impl rcgen::SigningKey for CaKey {
     }
 }
 
-/// The common name a CA's certificates carry (ADR-0037 clause 19), from the CA's own common name,
+/// The common name a CA's certificates carry (ADR-0042 clause 19), from the CA's own common name,
 /// or its whole subject when it has none.
 ///
 /// # Errors
@@ -1258,8 +1258,8 @@ mod tests {
     }
 
     /// A host certificate's subject is the Server's: the common name derived from the client CA's
-    /// and nothing of the request's (ADR-0027 clause 11 and ADR-0037 clause 19).
-    /// Verifies: ADR-0037
+    /// and nothing of the request's (ADR-0027 clause 11 and ADR-0042 clause 19).
+    /// Verifies: ADR-0042
     #[test]
     fn a_host_certificate_is_named_by_its_ca_not_by_its_request() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1284,8 +1284,8 @@ mod tests {
     }
 
     /// A CA whose certificates' name would exceed 64 characters stops the Server at startup
-    /// (ADR-0037 clause 19).
-    /// Verifies: ADR-0037
+    /// (ADR-0042 clause 19).
+    /// Verifies: ADR-0042
     #[test]
     fn a_ca_whose_certificates_name_is_too_long_is_refused() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1305,8 +1305,8 @@ mod tests {
         assert!(ClientCa::from_config(&client_ca_config(dir.path(), &cert_pem, &key_pem)).is_ok());
     }
 
-    /// The bootstrap CA names its certificates as the client CA does (ADR-0037 clause 19).
-    /// Verifies: ADR-0037
+    /// The bootstrap CA names its certificates as the client CA does (ADR-0042 clause 19).
+    /// Verifies: ADR-0042
     #[test]
     fn a_bootstrap_certificate_is_named_by_its_ca() {
         use crate::bootstrap::BootstrapSigner as _;
@@ -1341,7 +1341,7 @@ mod tests {
             .expect("csr pem")
     }
 
-    /// Verifies: ADR-0026
+    /// Verifies: ADR-0040
     #[test]
     fn signs_a_request_into_a_certificate() {
         let issued = client_ca(90)
@@ -1362,7 +1362,7 @@ mod tests {
     /// to choose the certificate's powers (a CA cert chaining to the fleet CA could mint more). The
     /// issued certificate must be non-CA, carry only `clientAuth`, and none of the CSR's SANs — only
     /// its host.
-    /// Verifies: ADR-0026
+    /// Verifies: ADR-0040
     #[test]
     fn the_request_cannot_dictate_the_certificates_powers() {
         let issued = client_ca(90)
@@ -1441,7 +1441,7 @@ mod tests {
 
     /// The Baseline makes this a MUST on the Server: a request it cannot act on is answered with a
     /// `BadRequest` error response, which is what the caller does with this `Err`.
-    /// Verifies: ADR-0026
+    /// Verifies: ADR-0040
     #[test]
     fn refuses_a_request_that_does_not_parse() {
         let error = client_ca(90)
@@ -1455,7 +1455,7 @@ mod tests {
         assert!(error.contains("does not parse"), "{error}");
     }
 
-    /// Verifies: ADR-0026
+    /// Verifies: ADR-0040
     #[test]
     fn two_certificates_from_one_key_have_two_serials() {
         let ca = client_ca(90);
@@ -1488,7 +1488,7 @@ mod tests {
 
     /// The register knows a certificate's key by the fingerprint its request was listed and
     /// approved by, which is also the one the Client logs: one key, one fingerprint.
-    /// Verifies: ADR-0026
+    /// Verifies: ADR-0040
     #[test]
     fn a_certificate_carries_the_key_fingerprint_of_its_request() {
         let request = csr("edge-01");
@@ -1510,7 +1510,7 @@ mod tests {
         hex::decode(UID.replace('-', "")).expect("hex")
     }
 
-    /// Verifies: ADR-0026
+    /// Verifies: ADR-0040
     #[test]
     fn a_canonical_uuid_anywhere_in_a_value_is_a_claim() {
         let upper = UID.to_uppercase();
@@ -1530,7 +1530,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0026
+    /// Verifies: ADR-0040
     #[test]
     fn hex_without_hyphens_is_no_claim() {
         assert!(uuid_claims(&UID.replace('-', "")).is_empty());
@@ -1551,7 +1551,7 @@ mod tests {
             .expect("csr pem")
     }
 
-    /// Verifies: ADR-0026
+    /// Verifies: ADR-0040
     #[test]
     fn a_san_is_read_for_claims() {
         let other = "0192a3b4-c5d6-7e8f-9a0b-000000000000";
@@ -1568,7 +1568,7 @@ mod tests {
     }
 
     /// A claim in a subject attribute of another string type is read as any other.
-    /// Verifies: ADR-0026
+    /// Verifies: ADR-0040
     #[test]
     fn a_claim_in_a_bmp_or_universal_string_is_read() {
         let other = "0192a3b4-c5d6-7e8f-9a0b-000000000000";
@@ -1624,7 +1624,7 @@ mod tests {
     /// A renewal proof names the certificate it renews and its host; a proof signed with another
     /// key, or over a certificate of another CA, does not hold, and the issued certificate names
     /// its host and nothing the request asked for.
-    /// Verifies: ADR-0026
+    /// Verifies: ADR-0040
     #[test]
     fn a_renewal_proof_names_the_certificate_and_its_host() {
         let ca = client_ca(30);
@@ -1735,7 +1735,7 @@ mod tests {
     /// request into one of the attacker's, with that request after it — behind a prefix one PEM
     /// reader skips and another does not, or as a second block — is refused on every path, never
     /// read as the victim's proof over the attacker's key; and the copy alone does not hold.
-    /// Verifies: ADR-0026
+    /// Verifies: ADR-0040
     /// Verifies: ADR-0016
     #[test]
     fn a_proof_and_the_key_it_signs_come_from_one_pem_block() {
@@ -1788,7 +1788,7 @@ mod tests {
     /// with a reader of its own but `fleet_core::csr::der`: a request is decoded there alone, so
     /// two readers cannot read two requests from one. A certificate's PEM is read by
     /// `opamp::tls::certificates`, which no request reaches.
-    /// Verifies: ADR-0026
+    /// Verifies: ADR-0040
     #[test]
     fn no_code_reads_a_request_through_another_pem_reader() {
         fn walk(dir: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {
@@ -1852,7 +1852,7 @@ mod tests {
     }
 
     /// The Server refuses a bootstrap CA key that is not the certificate's, or that is the client
-    /// CA's; without a key it issues nothing (ADR-0026 clause 17).
+    /// CA's; without a key it issues nothing (ADR-0040 clause 17).
     /// Verifies: ADR-0027
     #[test]
     fn a_bootstrap_ca_key_must_be_its_own_and_its_certificates() {

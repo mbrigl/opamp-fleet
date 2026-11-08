@@ -38,11 +38,11 @@ than anywhere else, and none beats one that has stopped being true.
 
 - **Operators** drive the fleet through the REST API on the Operator plane, guarded by
   `[rest.auth]` beyond the loopback; the bundled UI uses the same API
-  ([ADR-0026](adr/0026-admission-by-client-certificate-and-revocation.md)).
+  ([ADR-0040](adr/0040-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)).
 - **Clients** reach the Agent plane over OpAMP — WebSocket or plain HTTP — admitted by the client
   certificate in the TLS 1.3 handshake alone
   ([ADR-0012](adr/0012-tls-1-3-two-planes-and-bounded-input.md),
-  ADR-0026). A Client in Gateway Mode carries other Clients' Agents over its own upstream
+  ADR-0040). A Client in Gateway Mode carries other Clients' Agents over its own upstream
   connections and refuses what the Server revoked
   ([ADR-0016](adr/0016-client-modes-and-the-gateway.md)).
 - **Managed Processes** run on the Client's host under a Supervisor each; a Collector reports
@@ -100,7 +100,7 @@ Five crates in one workspace ([ADR-0008](adr/0008-five-crates-on-tokio-and-axum.
 - **`fleet-agent`** — the Client in all its modes, the program `supervisor`.
 - **`fleet-tools`** — the operator tool, the one program `opamp-fleetctl`: its `package` commands
   fetch, pack, hash and sign package artifacts — or sign a Package's signing file from the UI
-  (ADR-0034) — its `pki` commands make the fleet's certificates (ADR-0037).
+  (ADR-0034) — its `pki` commands make the fleet's certificates (ADR-0042).
 
 Inside the Server and the Client the code is ports and adapters
 ([ADR-0009](adr/0009-ports-and-adapters.md)): a **core** that holds the domain and owns its
@@ -188,10 +188,11 @@ no module.
   modules hold the state behind it: `enrolment`, the operator-opened window and the queue of
   requests an operator approves through `api`, and `throttle`, the per-address back-off after
   repeated failures, which both planes use
-  ([ADR-0026](adr/0026-admission-by-client-certificate-and-revocation.md)). `revocation`
-  holds the register of issued certificates, the revocation list and the Hosts — each with the
-  subject values of its certificate, its Gateway mark and the Agents bound to it — behind the
-  `LedgerStore` port ([ADR-0026](adr/0026-admission-by-client-certificate-and-revocation.md),
+  ([ADR-0040](adr/0040-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)).
+  `revocation` holds the register of issued certificates, the revocation list and the Hosts —
+  each with the subject values of its certificate, its Gateway mark and the Agents bound to it —
+  behind the `LedgerStore` port
+  ([ADR-0040](adr/0040-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md),
   [ADR-0030](adr/0030-the-fleet-record-of-agents-and-hosts.md)).
   `agent_rate` holds the token buckets that bound how often an admitted host, an Agent behind a
   marked Gateway, and the Gateway as a whole are heard, in the bounded tables of
@@ -239,7 +240,7 @@ no module.
   `server audit-verify --audit-key` runs over either store
   ([ADR-0041](adr/0041-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token.md)).
 - **Server ports beyond storage** — `fleet` owns `CertificateSigner`, which the local CA in `ca`
-  implements for the CSR flow and the renewal proof (ADR-0026), and the `UseCase` each signature
+  implements for the CSR flow and the renewal proof (ADR-0040), and the `UseCase` each signature
   names. A CA key in `ca` is a key file or a key on the PKCS#11 token of `pkcs11`, which signs
   through `rcgen`'s `SigningKey` from a pool of four sessions, one `cryptoki` context per module in
   the process, and holds a place in the audit record before it signs

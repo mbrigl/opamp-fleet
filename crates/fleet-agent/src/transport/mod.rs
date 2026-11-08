@@ -154,7 +154,7 @@ async fn flush_owed<S: ReportSink>(engine: &mut Engine, sink: &mut S) -> Result<
 /// 1. A connection-settings offer (ADR-0013) — verified OpAMP settings end the
 ///    connection; an offer applied in place owes its acknowledgement now.
 /// 2. Ask for a certificate, now that the Server's capabilities are known and an offered
-///    certificate is in force (ADR-0026).
+///    certificate is in force (ADR-0040).
 /// 3. The floors are fetched when they are due — at the first reply, once an hour, and within the
 ///    minute before an offer is decided — and a queued download below its floor is refused
 ///    (ADR-0035 clause 17). Offered packages are downloaded and verified (ADR-0034).
@@ -406,7 +406,7 @@ pub async fn process_connection_offer(
             return OfferOutcome::Applied;
         }
         // The issued certificate is stored only now, after connecting with it proved it works — the
-        // old one stays in force until here (ADR-0026).
+        // old one stays in force until here (ADR-0040).
         if let Some(certificate) = &settings.certificate {
             if let Err(e) = crate::csr::accept(&config.state_dir, &certificate.cert) {
                 tracing::warn!(error = %e, "cannot store the issued certificate");
@@ -453,7 +453,7 @@ pub async fn process_connection_offer(
 }
 
 /// The upstream connection `supervisor.toml` describes, with the client identity in force
-/// (ADR-0026).
+/// (ADR-0040).
 ///
 /// # Errors
 /// Returns an error when a TLS file cannot be read.
@@ -464,7 +464,7 @@ pub fn connection(config: &ClientConfig) -> Result<Connection, String> {
 /// The same connection with other TLS material — a candidate certificate under test.
 ///
 /// It carries no `Authorization`: the Server admits by the client certificate alone, and this
-/// Client sends no credential upstream (ADR-0026 clause 3).
+/// Client sends no credential upstream (ADR-0040 clause 3).
 #[must_use]
 pub fn connection_with(config: &ClientConfig, tls: ClientTls) -> Connection {
     Connection {

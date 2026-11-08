@@ -547,7 +547,7 @@ async fn tls_origin(
 /// This Client's certificate goes to its own Server's origin and to no other: the download from it
 /// presents the certificate, and a redirect to another host is refused before that host is reached
 /// (ADR-0034 clause 51).
-/// Verifies: ADR-0026, ADR-0034
+/// Verifies: ADR-0040, ADR-0034
 #[tokio::test]
 async fn the_client_certificate_goes_to_the_servers_origin_alone() {
     opamp::tls::install_ring_provider();

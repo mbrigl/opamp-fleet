@@ -48,7 +48,7 @@ impl PgLedgerStore {
 
 /// Moves the list's version on, inside the caller's transaction, and answers the new one
 /// (ADR-0023 clause 10). A revocation added or widened and a lift move it, the prune's removal of
-/// a revocation among them, and so does every change to the register: what ADR-0026 clause 28
+/// a revocation among them, and so does every change to the register: what ADR-0040 clause 28
 /// revokes depends on the register too, so an instance that missed an entry's notification finds
 /// the version moved, and never takes its own next write of the list as naming a register it does
 /// not hold.
@@ -1803,8 +1803,8 @@ mod tests {
 
     /// An approval whose bootstrap certificate the list names registers nothing, and neither
     /// does its Host: the register's write reads the list it holds, so a revocation another
-    /// instance committed first wins (ADR-0026 clause 28).
-    /// Verifies: ADR-0026
+    /// instance committed first wins (ADR-0040 clause 28).
+    /// Verifies: ADR-0040
     #[test]
     fn an_approval_of_a_revoked_bootstrap_certificate_registers_nothing() {
         let Some(test) = TestDatabase::named() else {
@@ -2005,8 +2005,8 @@ mod tests {
     /// renewal. A holds the same version before it reads the ledger again and after, and its
     /// `ETag`s still differ by the body's hash, so a Gateway that fetched the first is answered in
     /// full by either instance once both hold the renewal
-    /// (ADR-0026 clauses 28 and 34, ADR-0023 clause 10).
-    /// Verifies: ADR-0026, ADR-0023
+    /// (ADR-0040 clauses 28 and 34, ADR-0023 clause 10).
+    /// Verifies: ADR-0040, ADR-0023
     #[test]
     fn one_list_version_never_names_two_gateway_bodies() {
         let Some(test) = TestDatabase::named() else {
@@ -2150,8 +2150,8 @@ mod tests {
     /// version. A prunes X once it expired, X' expired too and X'' still valid, and X stays, so a
     /// revocation of X still revokes X'', and A holds no version until it reads the ledger again.
     /// Once X'' has expired too, all three go, and A holds the version its removals left
-    /// (ADR-0023 clause 10, ADR-0026 clause 28).
-    /// Verifies: ADR-0023, ADR-0026
+    /// (ADR-0023 clause 10, ADR-0040 clause 28).
+    /// Verifies: ADR-0023, ADR-0040
     #[test]
     fn the_prune_keeps_an_entry_a_valid_renewal_in_the_database_descends_from() {
         let Some(test) = TestDatabase::named() else {
@@ -2720,7 +2720,7 @@ mod tests {
     /// A register entry another instance writes reaches an instance that follows, without a
     /// restart, and a revocation of its chain's root revokes it there: B learns of A's renewal from
     /// its notification alone, and then refuses it once the root is revoked
-    /// (ADR-0026 clause 28).
+    /// (ADR-0040 clause 28).
     /// Verifies: ADR-0025
     #[test]
     fn a_renewal_another_instance_registers_is_revoked_with_its_root_on_an_instance_that_follows() {

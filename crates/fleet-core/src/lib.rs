@@ -1,6 +1,6 @@
 //! What the Server and the Client implement identically that is this project's own rather than
 //! OpAMP's (ADR-0008): the version this build reports and its grammar, the platform vocabulary,
-//! when a certificate counts as ending and what a certificate is called (ADR-0037), and the
+//! when a certificate counts as ending and what a certificate is called (ADR-0042), and the
 //! bootstrap certificate's PKCS#12 file (ADR-0027), and the host a certificate that names none is
 //! taken for (ADR-0016), and the proofs a renewal and an enrolment request carry in their CSR
 //! (ADR-0016 clauses 18, 20 and 21), what a package signature and a floor signature cover

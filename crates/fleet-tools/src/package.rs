@@ -1,5 +1,5 @@
 //! `opamp-fleetctl package` — fetching, building, hashing and signing OpAMP Fleet packages
-//! (ADR-0034, ADR-0037).
+//! (ADR-0034, ADR-0042).
 //!
 //! Package signatures are **raw Ed25519** over a statement of what the artifact is — its Agent
 //! type, its version and its SHA-256 (`fleet_core::package::statement`, ADR-0034) — verified by
@@ -10,7 +10,7 @@
 //! Supervisor will look for it, and its tests open what it wrote with that same module.
 //!
 //! It is part of the operator tool, which lives in its own crate for that reason (ADR-0008,
-//! ADR-0037): nothing the Server or Client runtime does depends on it, and a managed host never
+//! ADR-0042): nothing the Server or Client runtime does depends on it, and a managed host never
 //! runs it. `fetch` is [`crate::fetch`]; the rest is here.
 //!
 //! Typical use — build an artifact, upload it, sign its entry (ADR-0034):

@@ -103,7 +103,7 @@ pub async fn serve(
     serve_guarded(state, admission, None).await
 }
 
-/// The same two planes, with the Operator plane's credential check active (ADR-0026).
+/// The same two planes, with the Operator plane's credential check active (ADR-0040).
 #[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
 pub async fn serve_guarded(
     state: Arc<AppState>,

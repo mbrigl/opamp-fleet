@@ -539,7 +539,7 @@ fn lock_lost(lease: &Renewing, instance_id: &str) {
 /// (ADR-0025
 /// clauses 9 and 10): for each one announced, what its kind concerns is read again. A revocation, a
 /// Host or a register entry has the ledger read again, and the sessions check themselves against it
-/// (ADR-0026 clause 32); a floor has the floors read
+/// (ADR-0040 clause 32); a floor has the floors read
 /// again; an enrolment request or the window has the window and its queue read again, and the
 /// connections waiting on them answered; a Configuration, a Deployment or a Package has its store
 /// read again

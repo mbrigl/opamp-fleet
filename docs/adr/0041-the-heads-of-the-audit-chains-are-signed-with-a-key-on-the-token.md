@@ -1,7 +1,7 @@
 # ADR-0041: The heads of the audit chains are signed with a key on the token
 
-- **Status:** 🟡 proposed
-- **Date:** 2026-10-28
+- **Status:** 🟢 accepted
+- **Date:** 2026-11-08
 - **Deciders:** Markus Brigl
 - **Applies to:** the checkpoints of the audit record in `crates/fleet-server/src/audit_log.rs` and `audit.rs`, their filesystem adapter in `crates/fleet-server/src/fs/audit.rs` and every database adapter beside it, the checkpoints' column, index and head row in the PostgreSQL schema, the signer port for checkpoints and its PKCS#11 adapter, the advisory lock that elects the signer on PostgreSQL and the connection it is held on, the `[audit] key_label` key of `server.toml` and its parsing in `crates/fleet-server/src/config.rs`, `config/server.toml`, `server audit-verify` and `server pki status` in `crates/fleet-server/src/main.rs`, and every document that tells an operator how to check the record or what to keep of it
 

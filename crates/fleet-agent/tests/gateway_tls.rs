@@ -1,4 +1,4 @@
-//! The downstream hop's TLS (ADR-0016, ADR-0026): a Gateway serves the downstream endpoint over
+//! The downstream hop's TLS (ADR-0016, ADR-0040): a Gateway serves the downstream endpoint over
 //! mutual TLS 1.3 only, and *requires* a downstream Agent to present a certificate that chains to
 //! `client_ca_file`. Without the full `[gateway.tls]` section it does not start. That handshake is
 //! the admission: nothing a downstream peer presents beyond it travels upstream.
@@ -221,7 +221,7 @@ fn client(pki: &Pki, identity: Option<(String, String)>) -> reqwest::Client {
 /// With a client CA configured, a downstream Agent that presents a certificate reaches the Server
 /// through the Gateway over TLS — and its reply comes back addressed to it. This is the hop working
 /// end to end, encrypted, with the CA accepting a valid peer.
-/// Verifies: ADR-0016, ADR-0026, G-15, G-17
+/// Verifies: ADR-0016, ADR-0040, G-15, G-17
 #[tokio::test]
 async fn a_downstream_agent_with_a_certificate_reaches_the_server_over_tls() {
     let (server, state, _server_dir) = spawn_server().await;
@@ -305,7 +305,7 @@ async fn downstream_peers_with_different_certificates_share_one_upstream_connect
 /// A downstream peer that sends an `Authorization` header is admitted by its certificate as any
 /// other, and the Server receives no `Authorization` from the Gateway: not that one, and none in
 /// its place.
-/// Verifies: ADR-0016, ADR-0026
+/// Verifies: ADR-0016, ADR-0040
 #[tokio::test]
 async fn a_downstream_authorization_header_is_ignored_and_not_forwarded() {
     let (server, state, seen, _server_dir) = spawn_watched_server().await;
@@ -345,7 +345,7 @@ async fn a_downstream_authorization_header_is_ignored_and_not_forwarded() {
 /// The same on the other transport: a downstream WebSocket peer whose upgrade carries an
 /// `Authorization` header is admitted by its certificate and answered, and the Server receives no
 /// `Authorization` from the Gateway.
-/// Verifies: ADR-0016, ADR-0026
+/// Verifies: ADR-0016, ADR-0040
 #[tokio::test]
 async fn a_downstream_websocket_authorization_header_is_ignored_and_not_forwarded() {
     use futures_util::{SinkExt as _, StreamExt as _};
@@ -418,7 +418,7 @@ async fn a_downstream_websocket_authorization_header_is_ignored_and_not_forwarde
 
 /// A peer presenting *no* certificate is turned away at the handshake.
 ///
-/// Verifies: ADR-0016, ADR-0026
+/// Verifies: ADR-0016, ADR-0040
 #[tokio::test]
 async fn a_downstream_peer_without_a_certificate_is_refused() {
     let (server, _state, _server_dir) = spawn_server().await;

@@ -190,9 +190,9 @@ fn load_config(named: Option<PathBuf>) -> Layered {
     layered
 }
 
-/// `server pki status [--config <server.toml>]` (ADR-0037 clause 22): when each certificate the
+/// `server pki status [--config <server.toml>]` (ADR-0042 clause 22): when each certificate the
 /// Server host depends on ends. The commands that make certificates are the operator tool's
-/// (ADR-0037); the Server binary makes none.
+/// (ADR-0042); the Server binary makes none.
 fn pki(mut args: impl Iterator<Item = String>) -> ! {
     use fleet_server::pki;
     let named = match (
@@ -427,7 +427,7 @@ fn blobs_to_s3(mut args: impl Iterator<Item = String>) -> ! {
 type Hasher = fn(&str) -> Result<String, String>;
 
 /// The hash `server hash-credential` makes for a scheme: Basic, for an operator's password in
-/// `[rest.auth]`, and nothing else — the Agent plane has no credential (ADR-0026 clause 21).
+/// `[rest.auth]`, and nothing else — the Agent plane has no credential (ADR-0040 clause 21).
 fn hasher(scheme: Option<&str>) -> Option<Hasher> {
     match scheme {
         Some("--basic") => Some(fleet_server::credentials::hash_basic),
@@ -435,7 +435,7 @@ fn hasher(scheme: Option<&str>) -> Option<Hasher> {
     }
 }
 
-/// `server hash-credential --basic` (ADR-0026 clause 21): reads the password from standard input —
+/// `server hash-credential --basic` (ADR-0040 clause 21): reads the password from standard input —
 /// without echo on a terminal — and prints the entry `server.toml` keeps instead of it.
 fn hash_credential(scheme: Option<String>) -> ! {
     let Some(hash) = hasher(scheme.as_deref()) else {
@@ -640,7 +640,7 @@ async fn serve() {
     let Layered { config, origin, .. } = load_config(parse_args());
 
     // The TLS material first: a Server that cannot serve it does not start, and admission needs
-    // to know which CA issued what (ADR-0012, ADR-0026).
+    // to know which CA issued what (ADR-0012, ADR-0040).
     let planes = match config
         .tls
         .as_ref()
@@ -690,7 +690,7 @@ async fn serve() {
         info!(database = %database.name(), "keeping the records in PostgreSQL");
     }
     let clock: Arc<dyn fleet_server::fleet::Clock> = Arc::new(fleet_server::clock::SystemClock);
-    // ADR-0026: closed until an operator opens it; the window and its queue survive a restart
+    // ADR-0040: closed until an operator opens it; the window and its queue survive a restart
     // (ADR-0023 clause 8).
     let enrolment = match config.enrolment.as_ref().map(|section| {
         info!("hosts with a bootstrap certificate may enrol while an operator opens the window");
@@ -738,7 +738,7 @@ async fn serve() {
         }
     };
     // A renewal proof may come from any CA of `client_ca_file`, so a host renews across a move to
-    // new CA keys (clause 13 of the same draft).
+    // new CA keys (clause 13 of the same ADR).
     let client_ca = match config
         .client_ca
         .as_ref()
@@ -748,7 +748,7 @@ async fn serve() {
     {
         Ok(ca) => {
             if let Some(ca) = &ca {
-                // ADR-0026.
+                // ADR-0040.
                 info!(
                     validity_days = ca.validity_days(),
                     "signing client certificates for Agents that ask"
@@ -788,7 +788,7 @@ async fn serve() {
     };
     // What the Server serves, trusts and signs with until it restarts, read right after the files
     // above were: the warnings below judge these, not whatever the files hold later
-    // (ADR-0037 clause 21).
+    // (ADR-0042 clause 21).
     let watched = fleet_server::pki::loaded(&fleet_server::pki::depended_on(&config));
     if let Some(notice) = uploaded_artifacts_notice(client_ca.is_some()) {
         // ADR-0030 clause 16.
@@ -803,7 +803,7 @@ async fn serve() {
         // ADR-0017.
         info!("offering the fleet somewhere to send its own telemetry");
     }
-    // What the client CA signed and what is revoked (ADR-0026), kept beside the fleet's records.
+    // What the client CA signed and what is revoked (ADR-0040), kept beside the fleet's records.
     let revocations = match records.ledger().and_then(|store| {
         fleet_server::revocation::Revocations::open(store, clock.clone(), planes.3.clone())
     }) {
@@ -878,7 +878,7 @@ async fn serve() {
         }
     };
     // The audit record's export, where `[audit.export]` names a receiver: started before the
-    // lease, whose first entry it carries too (clause 9 of the token draft). Without the section
+    // lease, whose first entry it carries too (clause 9 of ADR-0043). Without the section
     // the Server opens no such connection.
     let export = match config.audit.export.as_ref().map(|export| {
         fleet_server::audit_export::AuditExport::start(export, tokio::runtime::Handle::current())
@@ -1017,7 +1017,7 @@ async fn serve() {
         export.report_every(audit.clone());
     }
     // The token's signatures are written to the record, and a software token says so at every
-    // start (clauses 6 and 7 of the token draft).
+    // start (clauses 6 and 7 of ADR-0043).
     if let Some(token) = &token {
         token.set_audit(audit.clone());
         token.warn_if_software(audit.as_ref());
@@ -1058,7 +1058,7 @@ async fn serve() {
         enrolment.set_audit(audit.clone());
     }
     // Before a certificate the Server depends on ends, say so: at startup and once a day
-    // (ADR-0037 clause 21). Nothing stops; the hosts decide for themselves.
+    // (ADR-0042 clause 21). Nothing stops; the hosts decide for themselves.
     fleet_server::pki::warn_endings(
         &watched,
         Some(audit.as_ref()),
@@ -1130,7 +1130,7 @@ async fn serve() {
             std::process::exit(1);
         }
     }
-    // The certificate is the whole of admission (ADR-0026): the configuration was refused at load
+    // The certificate is the whole of admission (ADR-0040): the configuration was refused at load
     // without the client CA.
     info!("the OpAMP endpoint admits by client certificate");
     // Two planes, two listeners (ADR-0012): Agents reach the OpAMP endpoint and the package
@@ -1165,7 +1165,7 @@ async fn serve() {
         }
     };
     if operator_auth.is_some() {
-        // ADR-0026. Both planes serve TLS, so the password never crosses a network in clear
+        // ADR-0040. Both planes serve TLS, so the password never crosses a network in clear
         // (ADR-0012).
         info!("the REST API and the UI require authentication");
     }
@@ -1509,7 +1509,7 @@ mod tests {
 
     /// `hash-credential` makes an operator's Basic entry and nothing else: the Agent plane has no
     /// credential to hash.
-    /// Verifies: ADR-0026
+    /// Verifies: ADR-0040
     #[test]
     fn hash_credential_hashes_a_basic_password_alone() {
         let basic = hasher(Some("--basic")).expect("--basic is a scheme");

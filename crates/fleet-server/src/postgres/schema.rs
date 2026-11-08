@@ -906,7 +906,7 @@ mod tests {
         assert_eq!(
             MIGRATIONS.len(),
             17,
-            "migrations 11 to 17 name 0.8.0, the audit key's label of the token draft and the \
+            "migrations 11 to 17 name 0.8.0, the audit key's label of ADR-0043 and the \
              checkpoints of the audit record among them"
         );
         assert!(

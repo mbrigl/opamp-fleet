@@ -1,4 +1,4 @@
-//! What the Server signed, and what it no longer trusts (ADR-0026).
+//! What the Server signed, and what it no longer trusts (ADR-0040).
 //!
 //! The **register** holds every certificate the client CA signed, with the certificate it renewed
 //! as its predecessor, so a revocation reaches every renewal made after the certificate it names.
@@ -57,7 +57,7 @@ impl CertId {
 
 pub use fleet_core::x509::{name_hash, normalize_serial, MAX_SERIAL_HEX};
 
-/// A CA whose certificates can be revoked: the client CA or the bootstrap CA (ADR-0026 clause 27).
+/// A CA whose certificates can be revoked: the client CA or the bootstrap CA (ADR-0040 clause 27).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Authority {
     /// `client` or `bootstrap` — what an operator names.
@@ -346,7 +346,7 @@ pub trait LedgerStore: Send + Sync {
     /// approval names the bootstrap certificate its request came with, `bootstrap`: a store that
     /// other instances share refuses it as [`Registered::BootstrapRevoked`] when the list it reads
     /// in the write names it, so a revocation another instance committed before the approval wins
-    /// (ADR-0026 clause 28); a store that is its only writer leaves that to the list in memory.
+    /// (ADR-0040 clause 28); a store that is its only writer leaves that to the list in memory.
     ///
     /// # Errors
     /// Returns an error when it cannot be written; the register and the Hosts are then as they
@@ -663,7 +663,7 @@ pub(crate) fn add_to(list: &mut Vec<Revocation>, entry: &Revocation, bound: usiz
 
 /// The entry `held` under the issuers of both it and `entry`, when `entry`, of the same id, names
 /// an issuer `held` does not: a serial revoked under one CA of a rotation and again under the CA
-/// file of both is revoked under both (ADR-0026
+/// file of both is revoked under both (ADR-0040
 /// clause 27). `None` when `held` covers `entry` already. It keeps the time `held` was revoked.
 #[must_use]
 pub fn widened(held: &Revocation, entry: &Revocation) -> Option<Revocation> {
@@ -849,7 +849,7 @@ impl State {
         named_in(&self.revocations)
     }
 
-    /// Every revoked certificate (ADR-0026 clause 28), built once after the list or the register
+    /// Every revoked certificate (ADR-0040 clause 28), built once after the list or the register
     /// changed.
     fn revoked(&mut self) -> &BTreeSet<CertId> {
         let revoked = match self.revoked.take() {
@@ -1037,7 +1037,7 @@ impl Revocations {
     /// leaves neither (ADR-0023 clause 9). The bounds are checked against what this instance
     /// holds; the write counts them again. The bootstrap certificate the request came with,
     /// `bootstrap`, is checked against the list: a revoked one is refused with
-    /// [`BOOTSTRAP_REVOKED`], here and in the write (ADR-0026 clause 28).
+    /// [`BOOTSTRAP_REVOKED`], here and in the write (ADR-0040 clause 28).
     ///
     /// # Errors
     /// Returns an error when the register is full, when the host holds as many valid
@@ -1733,7 +1733,7 @@ impl Revocations {
     }
 
     /// Revokes the certificate with `serial` from the CA of `authority` — `client` or
-    /// `bootstrap` (ADR-0026 clause 27).
+    /// `bootstrap` (ADR-0040 clause 27).
     ///
     /// # Errors
     /// Refuses an authority this Server does not have, a serial that is not hex, a full list, and
@@ -1820,7 +1820,7 @@ impl Revocations {
         Ok(entry)
     }
 
-    /// The list, oldest first (ADR-0026 clause 30).
+    /// The list, oldest first (ADR-0040 clause 30).
     #[must_use]
     pub fn list(&self) -> Vec<Revocation> {
         self.state
@@ -1830,7 +1830,7 @@ impl Revocations {
             .clone()
     }
 
-    /// Lifts one revocation; `Ok(false)` for an unknown id (ADR-0026 clause 30). It takes effect at
+    /// Lifts one revocation; `Ok(false)` for an unknown id (ADR-0040 clause 30). It takes effect at
     /// the next connection and reopens nothing, so it is not announced.
     ///
     /// # Errors
@@ -1851,7 +1851,7 @@ impl Revocations {
         Ok(lifted)
     }
 
-    /// Whether `certificate`, or a certificate it renewed, is revoked (ADR-0026 clause 28).
+    /// Whether `certificate`, or a certificate it renewed, is revoked (ADR-0040 clause 28).
     #[must_use]
     pub fn is_certificate_revoked(&self, certificate: &CertId) -> bool {
         self.state
@@ -1863,7 +1863,7 @@ impl Revocations {
 
     /// Every certificate of the CAs of `role` that is revoked, itself or through a certificate it
     /// renewed, with its chain already resolved: what a Gateway refuses
-    /// (ADR-0026 clause 34). A certificate the register never held is on it as revoked.
+    /// (ADR-0040 clause 34). A certificate the register never held is on it as revoked.
     #[must_use]
     pub fn revoked_certificates(&self, role: &str) -> BTreeSet<CertId> {
         let issuers: BTreeSet<&str> = self
@@ -1942,7 +1942,7 @@ impl Revocations {
     /// (ADR-0025
     /// clause 19). The revocation list is read again too, and announced when it changed, so every
     /// open session checks itself against what is stored
-    /// (ADR-0026 clause 32).
+    /// (ADR-0040 clause 32).
     ///
     /// The store is read outside the lock, so no revocation check, `speaks_for` or report waits for
     /// the read, only for the swap. A read that began before an act of this instance's own
@@ -2260,7 +2260,7 @@ mod tests {
 
     /// A host holds a bounded number of valid certificates, an Agent is spoken for by the host
     /// that first reported it alone, a re-key keeps its host, and a Gateway speaks for any Agent.
-    /// Verifies: ADR-0026
+    /// Verifies: ADR-0040
     #[test]
     fn a_host_is_bounded_and_speaks_only_for_its_own_agents() {
         let store = Memory::default();
@@ -2762,7 +2762,7 @@ mod tests {
     }
 
     /// A host the prune forgets but cannot write fails neither an issuance nor a start.
-    /// Verifies: ADR-0026
+    /// Verifies: ADR-0040
     #[test]
     fn a_failed_write_of_forgotten_hosts_fails_no_issuance_or_start() {
         let memory = Memory::default();
@@ -2843,7 +2843,7 @@ mod tests {
     }
 
     /// A revocation check does not wait for the host register to reach the disk.
-    /// Verifies: ADR-0026
+    /// Verifies: ADR-0040
     #[test]
     fn a_check_does_not_wait_for_a_host_write() {
         let (writing, written) = std::sync::mpsc::sync_channel(1);
@@ -2880,7 +2880,7 @@ mod tests {
     }
 
     /// A revocation check does not wait for the hosts a prune forgot to reach the disk.
-    /// Verifies: ADR-0026
+    /// Verifies: ADR-0040
     #[test]
     fn a_check_does_not_wait_for_a_prune_to_write_the_hosts() {
         let memory = Memory::default();
@@ -2926,7 +2926,7 @@ mod tests {
         assert!(!memory.0.lock().expect("lock").hosts.contains_key("old"));
     }
 
-    /// Verifies: ADR-0026
+    /// Verifies: ADR-0040
     #[test]
     fn a_revocation_follows_every_renewal() {
         let (revocations, _) = open(&Memory::default());
@@ -2960,8 +2960,8 @@ mod tests {
     }
 
     /// An approval whose request came with a revoked bootstrap certificate registers nothing: the
-    /// list wins over the approval (ADR-0026 clause 28).
-    /// Verifies: ADR-0026
+    /// list wins over the approval (ADR-0040 clause 28).
+    /// Verifies: ADR-0040
     #[test]
     fn an_approval_of_a_revoked_bootstrap_certificate_registers_nothing() {
         let store = Memory::default();
@@ -3004,7 +3004,7 @@ mod tests {
         assert!(revocations.hosts().iter().any(|(host, _, _)| host == "h6"));
     }
 
-    /// What ADR-0026 clause 28 answers for `id`, worked out from the list and the register as they
+    /// What ADR-0040 clause 28 answers for `id`, worked out from the list and the register as they
     /// are listed: named on the list, itself or a predecessor in its register chain.
     fn expected_revoked(revocations: &Revocations, id: &CertId) -> bool {
         let named: BTreeSet<CertId> = revocations
@@ -3069,7 +3069,7 @@ mod tests {
 
     /// The answer for every certificate follows the list and the register through revocations,
     /// renewals, lifts, an expiry and a restart.
-    /// Verifies: ADR-0026
+    /// Verifies: ADR-0040
     #[test]
     fn a_revocation_answers_the_same_through_every_change() {
         let store = Memory::default();
@@ -3123,7 +3123,7 @@ mod tests {
 
     /// Checking a certificate does not build the revoked set again: it is built when the list
     /// changes, however many sessions check themselves against it.
-    /// Verifies: ADR-0026
+    /// Verifies: ADR-0040
     #[test]
     fn a_check_does_not_rebuild_the_revoked_set() {
         let (revocations, _) = open(&Memory::default());
@@ -3153,7 +3153,7 @@ mod tests {
 
     /// The revoked ancestor of a valid renewal outlives its own expiry, and so does every link
     /// between them.
-    /// Verifies: ADR-0026
+    /// Verifies: ADR-0040
     #[test]
     fn a_renewal_stays_revoked_after_its_revoked_ancestor_expires() {
         let (revocations, clock) = open(&Memory::default());
@@ -3180,7 +3180,7 @@ mod tests {
         assert_eq!(revocations.list().len(), 1);
     }
 
-    /// Verifies: ADR-0026
+    /// Verifies: ADR-0040
     #[test]
     fn the_list_survives_a_restart_and_can_be_lifted() {
         let store = Memory::default();
@@ -3203,7 +3203,7 @@ mod tests {
         assert!(reopened.list().is_empty());
     }
 
-    /// Verifies: ADR-0026
+    /// Verifies: ADR-0040
     #[test]
     fn the_list_and_the_register_are_bounded() {
         let store = Memory::default();
@@ -3248,7 +3248,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0026
+    /// Verifies: ADR-0040
     #[test]
     fn an_expired_register_entry_is_dropped_with_its_revocation() {
         let (revocations, clock) = open(&Memory::default());
@@ -3296,7 +3296,7 @@ mod tests {
     }
 
     /// A reload finds every chain's root from its links, whatever order the entries load in.
-    /// Verifies: ADR-0026
+    /// Verifies: ADR-0040
     #[test]
     fn a_reload_keeps_each_chain_under_its_root() {
         let store = Memory::default();
@@ -4088,7 +4088,7 @@ mod tests {
     /// A Host's bound counts the bindings this instance is writing: a report of another Agent
     /// of a Host one short of its bound, made while the last binding is written, is refused, and
     /// so it is after a reload swapped in meanwhile, which carries the count over.
-    /// Verifies: ADR-0026
+    /// Verifies: ADR-0040
     #[test]
     fn a_binding_being_written_counts_against_the_hosts_bound() {
         let (revocations, store, hooked) = hooked_register();

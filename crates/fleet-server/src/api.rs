@@ -55,14 +55,14 @@ use paging::Asked;
                                               thing rolled out (ADR-0034, ADR-0033)"),
         (name = "enrolment", description = "How a host gets its first certificate: a window an \
                                             operator opens, and requests an operator decides \
-                                            (ADR-0026)"),
+                                            (ADR-0040)"),
         (name = "revocation", description = "What the client CA signed, and the certificates the \
-                                             Server no longer admits (ADR-0026)")
+                                             Server no longer admits (ADR-0040)")
     )
 )]
 struct ApiDoc;
 
-/// The Operator plane's credential check (ADR-0026), precomputed from `[rest.auth]`. Basic only,
+/// The Operator plane's credential check (ADR-0040), precomputed from `[rest.auth]`. Basic only,
 /// and it guards the whole plane — the API, its document, the docs page, and the UI — because a
 /// browser answers a Basic challenge by itself, which is what spares the rudimentary UI a login
 /// page and a session.
@@ -86,7 +86,7 @@ impl OperatorAuth {
         self
     }
 
-    /// Counts this plane's failures in a table of its own (ADR-0026 clause 19).
+    /// Counts this plane's failures in a table of its own (ADR-0040 clause 19).
     #[must_use]
     pub fn with_throttle(mut self, throttle: Arc<crate::throttle::Throttle>) -> Self {
         self.1 = Some(throttle);
@@ -169,7 +169,7 @@ async fn authenticate(
         }
     }
     // The attempt counts before the password is hashed, so attempts sent at once cannot all pass
-    // the back-off check first (ADR-0026 clause 2).
+    // the back-off check first (ADR-0040 clause 2).
     let _attempt = match (&auth.1, peer) {
         (Some(throttle), Some(peer)) => match throttle.begin(peer) {
             Some(attempt) => Some(attempt),
@@ -288,7 +288,7 @@ pub fn router(state: Arc<AppState>, auth: Option<OperatorAuth>) -> Router {
     };
     let router = match auth {
         // Outside every route, so the guard covers every route on this listener — including the
-        // UI and the API docs, which are as much of the plane as `/api/v1` is (ADR-0026).
+        // UI and the API docs, which are as much of the plane as `/api/v1` is (ADR-0040).
         Some(auth) => router.layer(middleware::from_fn_with_state(Arc::new(auth), authenticate)),
         None => router,
     };
@@ -481,7 +481,7 @@ fn agent_response(state: &AppState, uid: &InstanceUid) -> Response {
 /// scripts from setting it, so a value other than `same-origin` (the bundled UI) or `none` (a
 /// user-initiated load) marks a cross-site caller, which is refused. A non-browser client — `curl`,
 /// a portal — sends no such header and is unaffected, which is why this needs no token and no change
-/// to any API client. It is not authentication (that is a separate decision, ADR-0026); it only
+/// to any API client. It is not authentication (that is a separate decision, ADR-0040); it only
 /// keeps a browser from being turned into a confused deputy.
 ///
 /// A browser without Fetch Metadata still sends `Origin` on a `POST`, so without `Sec-Fetch-Site`
@@ -2902,7 +2902,7 @@ struct PendingEnrolment {
 }
 
 /// What an operator asks a bootstrap certificate for (ADR-0027 clauses 1 and 3 and
-/// ADR-0037 clause 14).
+/// ADR-0042 clause 14).
 #[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 struct IssueBootstrapRequest {
@@ -3645,14 +3645,14 @@ struct CertificateRef {
     serial: String,
 }
 
-/// What to revoke: a certificate (ADR-0026 clause 27).
+/// What to revoke: a certificate (ADR-0040 clause 27).
 #[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 struct RevokeRequest {
     certificate: CertificateRef,
 }
 
-/// One revocation (ADR-0026 clause 30).
+/// One revocation (ADR-0040 clause 30).
 #[derive(Serialize, ToSchema)]
 struct RevocationView {
     /// What `DELETE` names.
@@ -4033,7 +4033,7 @@ async fn list_revocations(State(state): State<Arc<AppState>>, RawQuery(raw): Raw
 
 /// Revokes a certificate, and every renewal of it. Every session it admitted ends at once, and no
 /// new one is admitted. There is no credential to revoke: the Agent plane admits by client
-/// certificate alone (ADR-0026 clause 29).
+/// certificate alone (ADR-0040 clause 29).
 #[utoipa::path(
     post,
     path = "/api/v1/revocations",
@@ -4088,7 +4088,7 @@ async fn revoke(
             } = &entry.revoked;
             let mut withdrawn = 0;
             if authority == "bootstrap" {
-                // The requests it carried wait no longer, on every instance (ADR-0026 clause 28);
+                // The requests it carried wait no longer, on every instance (ADR-0040 clause 28);
                 // approving one is refused either way.
                 withdrawn = state
                     .enrolment()

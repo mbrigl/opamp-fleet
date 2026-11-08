@@ -44,7 +44,7 @@
   // System packages the base image does not carry, installed once when the container is created.
   //
   // All four are *developer tooling* — nothing shipped depends on them, which is why the first
-  // three need no ADR (AGENTS.md §3.6); the fourth is the token draft's below — and each earns
+  // three need no ADR (AGENTS.md §3.6); the fourth is ADR-0043's below — and each earns
   // its place:
   //
   //   shellcheck  the shell lint, from the base image's signed Debian archive, so the pre-push

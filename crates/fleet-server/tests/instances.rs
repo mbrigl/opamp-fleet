@@ -834,7 +834,7 @@ async fn eventually(within: Duration, condition: impl Fn() -> bool) -> bool {
 /// Two instances on one database both hold a live lease and both answer the probe on the Agent
 /// plane; a revocation committed on A ends the session of that certificate on B within one
 /// renewal interval, and no other session.
-/// Verifies: ADR-0025, ADR-0026
+/// Verifies: ADR-0025, ADR-0040
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_revocation_on_one_instance_ends_the_session_on_the_other() {
     let Some(schema) = Schema::named() else {
@@ -1580,7 +1580,7 @@ fn database_address(schema: &Schema) -> SocketAddr {
 /// An instance whose listening connection is cut and restored acts as if everything had changed:
 /// a revocation committed on A while B heard nothing ends B's session of that certificate once B
 /// listens again.
-/// Verifies: ADR-0025, ADR-0026
+/// Verifies: ADR-0025, ADR-0040
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_revocation_committed_while_the_listening_connection_was_cut_ends_its_session_once_back()
 {
@@ -1649,7 +1649,7 @@ async fn a_notification_of_an_unknown_kind_has_everything_read_again() {
 
 /// The `ETag` of the Gateways' revocation list one instance answered is answered `304` by
 /// another, and a revocation on either moves it on both.
-/// Verifies: ADR-0025, ADR-0026
+/// Verifies: ADR-0025, ADR-0040
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_etag_one_instance_answered_is_answered_304_by_another() {
     let Some(schema) = Schema::named() else {
@@ -2555,7 +2555,7 @@ async fn a_binding_whose_notice_after_its_commit_is_lost_is_taken_up_at_the_next
 
 /// A renewal registered by another writer, whose notification never arrives while the listening
 /// connection stays up, is taken up by the next lease renewal: so a revocation of the certificate
-/// it renewed, committed by this instance afterwards, refuses the renewal too (ADR-0026 clause 28,
+/// it renewed, committed by this instance afterwards, refuses the renewal too (ADR-0040 clause 28,
 /// ADR-0023 clause 10).
 /// Verifies: ADR-0025, ADR-0023
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2865,7 +2865,7 @@ async fn a_restart_requested_through_one_instance_stays_until_the_carrying_insta
 
 /// The ceiling on Agent records holds for the fleet: with room for one, an Agent first heard of
 /// through B is refused once A stored another, and the one A stored keeps reporting through B.
-/// Verifies: ADR-0025, ADR-0026
+/// Verifies: ADR-0025, ADR-0040
 #[test]
 fn the_ceiling_on_agent_records_holds_across_instances() {
     use fleet_server::fleet::{AppState, Transport};
@@ -4008,7 +4008,7 @@ async fn a_peer_whose_first_reports_wait_keeps_its_agents_identities_on_its_new_
 /// on two Gateways' connections, whose certificates bind no Agent, and on two connections that
 /// present no host, by the duplicate detection; on two hosts' connections by the binding of the
 /// identity to the host that reported it first. The incumbent keeps its identity each time.
-/// Verifies: ADR-0025, ADR-0026
+/// Verifies: ADR-0025, ADR-0040
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_duplicate_on_live_connections_of_different_peers_is_rekeyed() {
     use futures_util::SinkExt;

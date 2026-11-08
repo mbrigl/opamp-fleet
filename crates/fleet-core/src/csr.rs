@@ -111,7 +111,7 @@ mod tests {
     /// One block with whitespace around it is read; text before or after it or on a boundary's
     /// line, a second block, another label, a header, and content that is no request are refused — what makes every
     /// reader of a request read the same one (ADR-0016 clauses 18 and 21).
-    /// Verifies: ADR-0026
+    /// Verifies: ADR-0040
     /// Verifies: ADR-0016
     #[test]
     fn a_request_is_exactly_one_pem_block() {
