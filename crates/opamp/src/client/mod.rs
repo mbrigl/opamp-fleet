@@ -25,7 +25,7 @@ pub mod protocol;
 pub mod ws;
 
 pub use backoff::Backoff;
-pub use connection::{ClientTls, Connection};
+pub use connection::{ClientTls, Connection, Timeouts};
 
 /// The application's side of one connection, carrying any number of Agents. A driver never calls
 /// two of these at once.
