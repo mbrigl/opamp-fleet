@@ -1950,10 +1950,11 @@ mod tests {
                 csr_pem: &str,
                 host: &str,
                 subject: &crate::revocation::SubjectValues,
+                _use_case: crate::fleet::UseCase,
             ) -> Result<crate::revocation::Signed, String> {
                 self.signing.send(()).expect("signing");
                 self.go.lock().expect("go").recv().expect("let go");
-                self.signs.sign(csr_pem, host, subject)
+                self.signs.sign(csr_pem, host, subject, _use_case)
             }
             fn check_claims(&self, csr_pem: &str, sender: &[u8]) -> Result<(), String> {
                 self.signs.check_claims(csr_pem, sender)
@@ -2062,6 +2063,7 @@ mod tests {
                 csr_pem: &str,
                 host: &str,
                 subject: &crate::revocation::SubjectValues,
+                _use_case: crate::fleet::UseCase,
             ) -> Result<crate::revocation::Signed, String> {
                 let bootstrap = requester().bootstrap;
                 crate::revocation::LedgerStore::add_revocation(
@@ -2078,7 +2080,7 @@ mod tests {
                     100,
                 )
                 .expect("revoked elsewhere");
-                self.0.sign(csr_pem, host, subject)
+                self.0.sign(csr_pem, host, subject, _use_case)
             }
             fn check_claims(&self, csr_pem: &str, sender: &[u8]) -> Result<(), String> {
                 self.0.check_claims(csr_pem, sender)

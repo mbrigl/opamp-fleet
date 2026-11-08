@@ -25,6 +25,9 @@ use opamp::proto::{AgentCapabilities, AgentToServer};
 use opamp::uid::InstanceUid;
 use rcgen::{CertificateParams, IsCa, Issuer, KeyPair};
 
+#[path = "support/token.rs"]
+mod token;
+
 /// A lease short enough for a test to watch it lapse.
 const TIMES: LeaseTimes = LeaseTimes {
     renew: Duration::from_secs(1),
@@ -289,11 +292,16 @@ struct Pki {
 
 impl Pki {
     fn new() -> Self {
+        Self::named("opamp-fleet-test-ca")
+    }
+
+    /// A CA whose common name is `name`.
+    fn named(name: &str) -> Self {
         let key = KeyPair::generate().expect("ca key");
         let mut params = CertificateParams::new(Vec::<String>::new()).expect("ca params");
         params
             .distinguished_name
-            .push(rcgen::DnType::CommonName, "opamp-fleet-test-ca");
+            .push(rcgen::DnType::CommonName, name);
         params.is_ca = IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
         let cert = params.self_signed(&key).expect("ca");
         Pki {
@@ -325,6 +333,20 @@ impl Pki {
     }
 }
 
+/// The CAs of instances whose client CA key is on a token: that CA's certificate, its key named
+/// by its label, a bootstrap CA in a file, and the token's settings
+/// (ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one).
+struct Signing<'a> {
+    token: &'a token::TestToken,
+    client_ca_pem: String,
+    bootstrap: Pki,
+}
+
+impl Signing<'_> {
+    /// The key label of the client CA on the token.
+    const CLIENT_CA: &'static str = "client-ca";
+}
+
 /// One running instance, as the binary composes it.
 struct Instance {
     state: Arc<fleet_server::fleet::AppState>,
@@ -342,6 +364,8 @@ struct Instance {
     /// host, which the clock counts though the process did not run.
     suspended: Arc<AtomicU64>,
     stop: Option<tokio::sync::oneshot::Sender<()>>,
+    /// Every entry the instance's signatures with a token key wrote, where it signs with one.
+    audit: Option<Arc<token::Recorded>>,
     _dir: tempfile::TempDir,
 }
 
@@ -354,7 +378,29 @@ impl Instance {
     /// [`start`](Self::start), taking up nothing another instance commits until
     /// [`follow`](Self::follow) is called: what it hears is held back until then.
     async fn start_deaf(pki: &Pki, schema: &Schema, config: PostgresConfig) -> Self {
-        Self::start_with(pki, schema, config, true, false, None, None, None).await
+        Self::start_with(pki, schema, config, true, false, None, None, None, None).await
+    }
+
+    /// [`start`](Self::start), its client CA's key on the token `signing` names, opened by this
+    /// instance as the Server opens it, and enrolment with `signing`'s bootstrap CA.
+    async fn start_signing(
+        pki: &Pki,
+        schema: &Schema,
+        config: PostgresConfig,
+        signing: &Signing<'_>,
+    ) -> Self {
+        Self::start_with(
+            pki,
+            schema,
+            config,
+            true,
+            true,
+            None,
+            None,
+            None,
+            Some(signing),
+        )
+        .await
     }
 
     /// [`start`](Self::start), its Agent plane's admission counted by a throttle of `limits`, as
@@ -365,7 +411,18 @@ impl Instance {
         config: PostgresConfig,
         limits: fleet_server::throttle::Limits,
     ) -> Self {
-        Self::start_with(pki, schema, config, true, true, Some(limits), None, None).await
+        Self::start_with(
+            pki,
+            schema,
+            config,
+            true,
+            true,
+            Some(limits),
+            None,
+            None,
+            None,
+        )
+        .await
     }
 
     /// Starts taking up what other instances commit, for an instance started deaf.
@@ -382,7 +439,7 @@ impl Instance {
         config: PostgresConfig,
         renewals: bool,
     ) -> Self {
-        Self::start_with(pki, schema, config, renewals, true, None, None, None).await
+        Self::start_with(pki, schema, config, renewals, true, None, None, None, None).await
     }
 
     /// [`start`](Self::start), its package blobs on the filesystem in `blobs`, which other
@@ -393,7 +450,18 @@ impl Instance {
         config: PostgresConfig,
         blobs: &std::path::Path,
     ) -> Self {
-        Self::start_with(pki, schema, config, true, true, None, Some(blobs), None).await
+        Self::start_with(
+            pki,
+            schema,
+            config,
+            true,
+            true,
+            None,
+            Some(blobs),
+            None,
+            None,
+        )
+        .await
     }
 
     /// [`start`](Self::start), as a Server of `release` whose schema is `migrations`: one of two
@@ -414,14 +482,15 @@ impl Instance {
             None,
             None,
             Some((release, migrations)),
+            None,
         )
         .await
     }
 
     /// [`start_following`](Self::start_following), following other instances where `follows`
     /// says so, its admission throttled where `throttle` names limits, its package blobs in
-    /// `blobs` where it names a directory, and as the release and schema `version` names, or
-    /// this build's.
+    /// `blobs` where it names a directory, as the release and schema `version` names, or this
+    /// build's, and with its client CA's key on a token where `signing` names one.
     #[allow(clippy::too_many_arguments)]
     async fn start_with(
         pki: &Pki,
@@ -432,6 +501,7 @@ impl Instance {
         throttle: Option<fleet_server::throttle::Limits>,
         blobs: Option<&std::path::Path>,
         version: Option<(&'static str, &'static [Migration])>,
+        signing: Option<&Signing<'_>>,
     ) -> Self {
         opamp::tls::install_ring_provider();
         let dir = tempfile::tempdir().expect("tempdir");
@@ -458,6 +528,51 @@ impl Instance {
         let floors = Arc::new(PackageFloors::open(records.floors()).expect("floors"));
         let enrolment =
             Arc::new(Enrolment::open_on(clock.clone(), records.enrolment()).expect("enrolment"));
+        // The handshake trusts the test's CA and, where the client CA's key is on a token, that
+        // CA too; with it, a bootstrap CA lets a host enrol.
+        let client_ca_pem = format!(
+            "{}{}",
+            pki.ca_pem,
+            signing.map_or("", |signing| signing.client_ca_pem.as_str())
+        );
+        std::fs::write(dir.path().join("ca.pem"), &client_ca_pem).expect("write");
+        let enrolment_config = signing.map(|signing| {
+            let file = dir.path().join("bootstrap-ca.pem");
+            std::fs::write(&file, &signing.bootstrap.ca_pem).expect("write");
+            fleet_server::config::EnrolmentConfig {
+                bootstrap_ca_file: file,
+                bootstrap_ca_key_file: None,
+                bootstrap_ca_key_label: None,
+                max_pending_per_bootstrap:
+                    fleet_server::enrolment::DEFAULT_MAX_PENDING_PER_BOOTSTRAP,
+            }
+        });
+        let audit = signing.map(|_| Arc::new(token::Recorded::default()));
+        let client_ca = signing.map(|signing| {
+            let file = dir.path().join("client-ca.pem");
+            std::fs::write(&file, &signing.client_ca_pem).expect("write");
+            let token = signing.token.open();
+            token.set_audit(audit.clone().expect("the record"));
+            // As the binary wires it: a renewal proof from any CA of client_ca_file holds.
+            let tls = toml::from_str::<fleet_server::config::TlsConfig>(&format!(
+                "cert_file = {:?}\nkey_file = {:?}\nclient_ca_file = {:?}\n",
+                dir.path().join("server-cert.pem").display().to_string(),
+                dir.path().join("server-key.pem").display().to_string(),
+                dir.path().join("ca.pem").display().to_string(),
+            ))
+            .expect("tls config");
+            fleet_server::ca::ClientCa::for_server(
+                &fleet_server::config::ClientCaConfig {
+                    cert_file: file,
+                    key_file: None,
+                    key_label: Some(Signing::CLIENT_CA.to_string()),
+                    validity_days: 30,
+                },
+                &tls,
+                Some(&token),
+            )
+            .expect("the client CA on the token")
+        });
         let (packages, _) = fleet_server::packages::PackageStore::open_on(
             &records,
             Some(blobs.unwrap_or(dir.path())),
@@ -474,13 +589,18 @@ impl Instance {
                 ))
                 .with_revocations(Some(revocations.clone()))
                 .with_floors(Some(floors.clone()))
-                .with_enrolment(Some(enrolment.clone())),
+                .with_enrolment(Some(enrolment.clone()))
+                .with_client_ca(client_ca)
+                .with_audit(
+                    audit
+                        .clone()
+                        .map(|audit| audit as Arc<dyn fleet_server::audit::Audit>),
+                ),
         );
         let (server_cert, server_key) = pki.issue("localhost");
         for (file, pem) in [
             ("server-cert.pem", &server_cert),
             ("server-key.pem", &server_key),
-            ("ca.pem", &pki.ca_pem),
         ] {
             std::fs::write(dir.path().join(file), pem).expect("write");
         }
@@ -491,11 +611,15 @@ impl Instance {
             dir.path().join("ca.pem").display().to_string(),
         ))
         .expect("tls config");
-        let planes = fleet_server::tls::server_tls(&tls, None, None).expect("server material");
+        let planes = fleet_server::tls::server_tls(&tls, None, enrolment_config.as_ref())
+            .expect("server material");
         let throttle = throttle
             .map(|limits| Arc::new(fleet_server::throttle::Throttle::new(limits, clock.clone())));
         let mut admission = fleet_server::transport::Admission::new(true)
             .with_revocations(Some(revocations.clone()));
+        if signing.is_some() {
+            admission = admission.with_enrolment(planes.issuers, Some(enrolment.clone()));
+        }
         if let Some(throttle) = &throttle {
             admission = admission.with_throttle(throttle.clone());
         }
@@ -574,6 +698,7 @@ impl Instance {
             held,
             suspended,
             stop: Some(stop),
+            audit,
             _dir: dir,
         }
     }
@@ -1653,6 +1778,7 @@ impl fleet_server::fleet::CertificateSigner for Issuing {
         _csr_pem: &str,
         host: &str,
         _subject: &fleet_server::revocation::SubjectValues,
+        _use_case: fleet_server::pkcs11::UseCase,
     ) -> Result<fleet_server::revocation::Signed, String> {
         let pki = Pki {
             ca_pem: self.ca_pem.clone(),
@@ -1766,69 +1892,263 @@ impl fleet_server::enrolment::Recorder for Registering<'_> {
     }
 }
 
-/// An enrolment request waiting on B, approved on A, is answered with its certificate on B, which
-/// wakes the connection that asked: B takes up the window A opened and the decision A took.
-/// Verifies: ADR-0025, ADR-0027
+/// A bootstrap certificate, carrying the organisation and unit an approval carries on, and its
+/// key.
+fn issue_bootstrap(bootstrap: &Pki) -> (String, String) {
+    let ca_key = KeyPair::from_pem(&bootstrap.ca_key_pem).expect("ca key");
+    let issuer = Issuer::from_ca_cert_pem(&bootstrap.ca_pem, ca_key).expect("issuer");
+    let key = KeyPair::generate().expect("key");
+    let mut params = CertificateParams::new(Vec::<String>::new()).expect("params");
+    params
+        .distinguished_name
+        .push(rcgen::DnType::OrganizationName, "Kunde GmbH");
+    params
+        .distinguished_name
+        .push(rcgen::DnType::OrganizationalUnitName, "Werk Nord");
+    params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ClientAuth];
+    let cert = params.signed_by(&key, &issuer).expect("signed");
+    (cert.pem(), key.serialize_pem())
+}
+
+/// A report of `uid` that asks for a certificate for `csr`.
+fn csr_report(uid: &InstanceUid, csr: String) -> AgentToServer {
+    use opamp::proto::{
+        CertificateRequest, ConnectionSettingsRequest, OpAmpConnectionSettingsRequest,
+    };
+    AgentToServer {
+        instance_uid: uid.as_bytes().to_vec(),
+        sequence_num: 1,
+        capabilities: AgentCapabilities::ReportsStatus as u64,
+        connection_settings_request: Some(ConnectionSettingsRequest {
+            opamp: Some(OpAmpConnectionSettingsRequest {
+                certificate_request: Some(CertificateRequest {
+                    csr: csr.into_bytes(),
+                }),
+            }),
+        }),
+        ..Default::default()
+    }
+}
+
+/// A CSR for a fresh key, with no proof, and that key.
+fn fresh_csr() -> (String, KeyPair) {
+    let key = KeyPair::generate().expect("key");
+    let csr = CertificateParams::new(Vec::<String>::new())
+        .expect("params")
+        .serialize_request(&key)
+        .expect("csr")
+        .pem()
+        .expect("pem");
+    (csr, key)
+}
+
+/// A CSR for a fresh key that proves it renews `old_pem`, whose key is `old_key`, and that key.
+fn renewing(old_pem: &str, old_key: &KeyPair) -> (String, KeyPair) {
+    use base64::Engine as _;
+    use rcgen::{PublicKeyData as _, SigningKey as _};
+    use sha2::{Digest, Sha256};
+    let new_key = KeyPair::generate().expect("new key");
+    let old_der = opamp::tls::certificates(old_pem.as_bytes()).expect("pem")[0]
+        .as_ref()
+        .to_vec();
+    let signature = old_key
+        .sign(&fleet_core::renewal::statement(&Sha256::digest(
+            new_key.subject_public_key_info(),
+        )))
+        .expect("sign");
+    let proof = format!(
+        "{}{}",
+        fleet_core::renewal::URI_PREFIX,
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(fleet_core::renewal::encode(&old_der, &signature))
+    );
+    let mut params = CertificateParams::new(Vec::<String>::new()).expect("params");
+    params
+        .subject_alt_names
+        .push(rcgen::SanType::URI(proof.try_into().expect("uri")));
+    let csr = params
+        .serialize_request(&new_key)
+        .expect("csr")
+        .pem()
+        .expect("pem");
+    (csr, new_key)
+}
+
+/// Sends `report` on `socket` and waits for the certificate the Server hands out on it.
+async fn certificate_for(socket: &mut Socket, report: &AgentToServer, within: Duration) -> String {
+    use futures_util::SinkExt;
+    use tokio_tungstenite::tungstenite::Message as Ws;
+    let framed = opamp::frame::encode_within(report, usize::MAX).expect("frame");
+    socket.send(Ws::Binary(framed.into())).await.expect("send");
+    let deadline = tokio::time::Instant::now() + within;
+    loop {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let message = next_message(socket, left)
+            .await
+            .expect("a certificate in time");
+        if let Some(certificate) = message
+            .connection_settings
+            .and_then(|settings| settings.opamp)
+            .and_then(|opamp| opamp.certificate)
+        {
+            return String::from_utf8(certificate.cert).expect("PEM");
+        }
+    }
+}
+
+/// Whether the certificate `pem` was signed by the key of the CA `ca_pem`.
+fn signed_by(pem: &str, ca_pem: &str) -> bool {
+    use x509_parser::prelude::{FromDer, X509Certificate};
+    let der = |pem: &str| {
+        opamp::tls::certificates(pem.as_bytes()).expect("pem")[0]
+            .as_ref()
+            .to_vec()
+    };
+    let (leaf, ca) = (der(pem), der(ca_pem));
+    let (_, leaf) = X509Certificate::from_der(&leaf).expect("leaf");
+    let (_, ca) = X509Certificate::from_der(&ca).expect("ca");
+    leaf.verify_signature(Some(ca.public_key())).is_ok()
+}
+
+/// Two instances whose client CA is named by its label on one token, each having opened it in
+/// this process, so one `cryptoki` context serves both, and that CA's certificate.
+async fn on_one_token(
+    schema: &Schema,
+    pki: &Pki,
+    test: &token::TestToken,
+    dir: &std::path::Path,
+) -> (Instance, Instance, String) {
+    let opened = test.open();
+    let (client_ca_pem, _) = test.ca(&opened, Signing::CLIENT_CA, "OpAMP Fleet Client CA", dir);
+    let signing = Signing {
+        token: test,
+        client_ca_pem: client_ca_pem.clone(),
+        bootstrap: Pki::named("OpAMP Fleet Bootstrap CA"),
+    };
+    let a =
+        Instance::start_signing(pki, schema, schema.config_on(schema.config.port), &signing).await;
+    let b =
+        Instance::start_signing(pki, schema, schema.config_on(schema.config.port), &signing).await;
+    (a, b, client_ca_pem)
+}
+
+/// Two instances whose client CA's key is named by its label on one SoftHSM2 token both start and
+/// both sign renewals: a host renews on A and another on B, each to a certificate the token's key
+/// signed, and each signature is in that instance's record. The hosts' certificates come from the
+/// CA beside it in `client_ca_file`, so each moves to the token's key at its renewal.
+/// Verifies: ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_enrolment_approved_on_one_instance_is_handed_out_by_the_other() {
-    use fleet_server::enrolment::Submitted;
+async fn two_instances_on_one_token_both_sign_renewals() {
     let Some(schema) = Schema::named() else {
         return;
     };
+    let Some(test) = token::TestToken::named() else {
+        return;
+    };
     let pki = Pki::new();
-    let a = Instance::start(&pki, &schema, schema.config_on(schema.config.port)).await;
-    let b = Instance::start(&pki, &schema, schema.config_on(schema.config.port)).await;
+    let dir = tempfile::tempdir().expect("dir");
+    let (a, b, client_ca_pem) = on_one_token(&schema, &pki, &test, dir.path()).await;
+    for (instance, host) in [(&a, "host-a"), (&b, "host-b")] {
+        let (cert, key) = pki.issue_to_host(host);
+        let old_key = KeyPair::from_pem(&key).expect("key");
+        let mut socket = websocket(instance, &pki, &cert, &key).await;
+        let (csr, _) = renewing(&cert, &old_key);
+        let renewed = certificate_for(
+            &mut socket,
+            &csr_report(&InstanceUid::default(), csr),
+            Duration::from_secs(10),
+        )
+        .await;
+        assert!(signed_by(&renewed, &client_ca_pem), "{host}: {renewed}");
+        let signed = instance
+            .audit
+            .as_ref()
+            .expect("record")
+            .events("pkcs11.signed");
+        assert_eq!(signed.len(), 1, "{host}: {signed:?}");
+        assert_eq!(signed[0]["use_case"], "renewal");
+        assert_eq!(signed[0]["key_label"], Signing::CLIENT_CA);
+    }
+}
+
+/// A host enrols through B's Agent plane, over its WebSocket, while A opened the window; it is
+/// approved on A, whose client CA's key is on the token both share, and B hands the certificate to
+/// the connection that asked. The host is admitted on both.
+/// Verifies: ADR-0025, ADR-0027, ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_enrolment_approved_on_one_instance_is_handed_out_by_the_other() {
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let Some(test) = token::TestToken::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let dir = tempfile::tempdir().expect("dir");
+    let opened = test.open();
+    let (client_ca_pem, _) = test.ca(
+        &opened,
+        Signing::CLIENT_CA,
+        "OpAMP Fleet Client CA",
+        dir.path(),
+    );
+    let signing = Signing {
+        token: &test,
+        client_ca_pem: client_ca_pem.clone(),
+        bootstrap: Pki::named("OpAMP Fleet Bootstrap CA"),
+    };
+    let a = Instance::start_signing(
+        &pki,
+        &schema,
+        schema.config_on(schema.config.port),
+        &signing,
+    )
+    .await;
+    let b = Instance::start_signing(
+        &pki,
+        &schema,
+        schema.config_on(schema.config.port),
+        &signing,
+    )
+    .await;
     a.enrolment.open(600).expect("A opens the window");
     assert!(
         eventually(Duration::from_secs(10), || b.enrolment.is_open()).await,
         "B never took up the window A opened"
     );
-    let (request, requester) = enrolment_request("k1");
-    let mut asking = b.enrolment.subscribe();
-    asking.borrow_and_update();
-    let on_b = b.enrolment.clone();
-    let (sent, by) = (request.clone(), requester.clone());
-    assert_eq!(
-        tokio::task::spawn_blocking(move || on_b.submit(sent, by))
-            .await
-            .expect("submit"),
-        Submitted::Waiting
-    );
-
-    assert!(
-        eventually(Duration::from_secs(10), || a
-            .enrolment
-            .pending()
-            .iter()
-            .any(|pending| pending.id == "k1"))
-        .await,
-        "A never listed the request B took in"
-    );
-    approve(&a, &pki, "k1");
-    // What the connection that asked does: it waits for a change, then asks again.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    let issued = loop {
-        assert!(
-            tokio::time::timeout_at(deadline, asking.changed())
+    let (bootstrap_cert, bootstrap_key) = issue_bootstrap(&signing.bootstrap);
+    let mut enrolling = websocket(&b, &pki, &bootstrap_cert, &bootstrap_key).await;
+    let (csr, host_key) = fresh_csr();
+    let asked = csr_report(&InstanceUid::default(), csr);
+    let approving = {
+        let a_state = a.state.clone();
+        let a_enrolment = a.enrolment.clone();
+        tokio::spawn(async move {
+            assert!(
+                eventually(Duration::from_secs(10), || !a_enrolment
+                    .pending()
+                    .is_empty())
+                .await,
+                "A never listed the request B took in"
+            );
+            let id = a_enrolment.pending()[0].id.clone();
+            tokio::task::spawn_blocking(move || a_state.approve_enrolment(&id))
                 .await
-                .is_ok(),
-            "B's waiting connection was never woken"
-        );
-        let on_b = b.enrolment.clone();
-        let (sent, by) = (request.clone(), requester.clone());
-        match tokio::task::spawn_blocking(move || on_b.submit(sent, by))
-            .await
-            .expect("submit")
-        {
-            Submitted::Issued(pem) => break pem,
-            Submitted::Waiting => continue,
-            other => panic!("B answered {other:?}"),
-        }
+                .expect("approve")
+                .expect("approved on A");
+        })
     };
-    assert!(
-        issued.starts_with("-----BEGIN CERTIFICATE-----"),
-        "{issued}"
-    );
+    let issued = certificate_for(&mut enrolling, &asked, Duration::from_secs(20)).await;
+    approving.await.expect("approved");
+    assert!(signed_by(&issued, &client_ca_pem), "{issued}");
+    let signed = a.audit.as_ref().expect("record").events("pkcs11.signed");
+    assert_eq!(signed.len(), 1, "{signed:?}");
+    assert_eq!(signed[0]["use_case"], "enrolment_approval");
+    // A member now, on either instance.
+    for instance in [&a, &b] {
+        let mut member = websocket(instance, &pki, &issued, &host_key.serialize_pem()).await;
+        exchange(&mut member).await;
+    }
 }
 
 /// During an enrolment wave on A, A reads nothing again for its own notifications, and B takes up
@@ -3825,6 +4145,7 @@ fn mark_gateway(instance: &Instance, pki: &Pki, dir: &std::path::Path) {
             &csr,
             "gateway-host",
             &fleet_server::revocation::SubjectValues::default(),
+            fleet_server::pkcs11::UseCase::MemberCsr,
         )
         .expect("sign");
     let host = signed.facts.host.clone().expect("a host");

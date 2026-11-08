@@ -173,7 +173,24 @@ pub const MIGRATIONS: &[Migration] = &[
         oldest_server: "0.8.0",
         sql: ENROLMENT_REJECTED,
     },
+    // A column only added, without a default. A Server of 0.8.0 writes no label into it, so its
+    // lease names none, and an instance of this release with an audit key refuses to start beside
+    // it
+    // (ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one
+    // clause 14).
+    Migration {
+        version: 16,
+        oldest_server: "0.8.0",
+        sql: LEASE_AUDIT_KEY,
+    },
 ];
+
+/// The `[audit] key_label` of the instance that holds each lease, null for none
+/// (ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one
+/// clause 14).
+const LEASE_AUDIT_KEY: &str = "
+ALTER TABLE leases ADD COLUMN audit_key_label text;
+";
 
 /// The rejected keys, each the id of the request it refuses, with when it was rejected
 /// (ADR-0027
@@ -858,8 +875,8 @@ mod tests {
         }
         assert_eq!(
             MIGRATIONS.len(),
-            15,
-            "migrations 11 to 15 are this release's"
+            16,
+            "migrations 11 to 16 name 0.8.0, the audit key's label of the token draft among them"
         );
         assert!(
             LEASE_RELEASE.contains(&format!("DEFAULT '{RELEASE_BEFORE_THE_RECORD}'")),

@@ -448,17 +448,52 @@ impl Elapsed {
     }
 }
 
+/// What asked for a signature with a token key, as its audit entry names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UseCase {
+    /// A host certificate for a valid renewal proof.
+    Renewal,
+    /// A host certificate for an approved enrolment request.
+    EnrolmentApproval,
+    /// A host certificate for a member's CSR on its own connection.
+    MemberCsr,
+    /// A bootstrap certificate for an operator's request.
+    BootstrapIssue,
+}
+
+impl UseCase {
+    /// The name the audit entry gives it.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            UseCase::Renewal => "renewal",
+            UseCase::EnrolmentApproval => "enrolment_approval",
+            UseCase::MemberCsr => "member_csr",
+            UseCase::BootstrapIssue => "bootstrap_issue",
+        }
+    }
+}
+
 /// The CSR flow's port (ADR-0026): what signs an Agent's certificate signing request. The local
 /// CA ([`ClientCa`](crate::ca::ClientCa)) is the adapter the composition root wires when
 /// `[client_ca]` is configured.
 pub trait CertificateSigner: Send + Sync {
     /// The signed certificate, PEM, for a CSR in PEM, and what it says about itself. Its subject
     /// carries `subject` — the values copied from the bootstrap certificate or the predecessor
-    /// (ADR-0016 clause 23 and ADR-0027 clause 12) — and never the request's.
+    /// (ADR-0016 clause 23 and ADR-0027 clause 12) — and never the request's. `use_case` is what
+    /// asked for it, which the audit entry of a signature with a token key names
+    /// (ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one
+    /// clause 6).
     ///
     /// # Errors
     /// Returns an error when the request does not parse or cannot be signed.
-    fn sign(&self, csr_pem: &str, host: &str, subject: &SubjectValues) -> Result<Signed, String>;
+    fn sign(
+        &self,
+        csr_pem: &str,
+        host: &str,
+        subject: &SubjectValues,
+        use_case: UseCase,
+    ) -> Result<Signed, String>;
 
     /// The certificate a CSR proves it renews, when it carries a renewal proof (ADR-0016
     /// clause 18); `Ok(None)` when it carries none.
@@ -1867,7 +1902,7 @@ impl AppState {
         ca: &dyn CertificateSigner,
         csr: &str,
         presented: Option<&Presented>,
-    ) -> Result<(Option<CertId>, String, SubjectValues), String> {
+    ) -> Result<(Option<CertId>, String, SubjectValues, UseCase), String> {
         let derived = |id: &CertId| fleet_core::host::derived(&id.issuer, &id.serial);
         if let Some(old) = ca.renewal_proof(csr)? {
             if self
@@ -1878,7 +1913,7 @@ impl AppState {
                 return Err("the certificate this request renews is revoked".to_string());
             }
             let host = old.host.clone().unwrap_or_else(|| derived(&old.id));
-            return Ok((Some(old.id), host, old.subject_values));
+            return Ok((Some(old.id), host, old.subject_values, UseCase::Renewal));
         }
         // A proof of the certificate presented is that certificate's renewal, and without a
         // certificate presented — `Admission::open`, which no Server serves — nothing is enrolled.
@@ -1914,12 +1949,14 @@ impl AppState {
                     Some(presented.id.clone()),
                     host,
                     presented.subject_values.clone(),
+                    UseCase::MemberCsr,
                 )
             }
             None => (
                 None,
                 InstanceUid::default().to_string(),
                 SubjectValues::default(),
+                UseCase::MemberCsr,
             ),
         })
     }
@@ -4705,8 +4742,9 @@ impl AppState {
                 .and_then(|csr| {
                     // The message's own instance_uid, before any re-key (ADR-0026).
                     ca.check_claims(&csr, sender)?;
-                    let (predecessor, host, subject) = self.renews(ca.as_ref(), &csr, presented)?;
-                    Ok((ca.sign(&csr, &host, &subject)?, predecessor))
+                    let (predecessor, host, subject, use_case) =
+                        self.renews(ca.as_ref(), &csr, presented)?;
+                    Ok((ca.sign(&csr, &host, &subject, use_case)?, predecessor))
                 }) {
                 Err(e) => Ok(Err(e)),
                 Ok((signed, predecessor)) => self
@@ -9232,7 +9270,8 @@ mod tests {
         }
         let ca = crate::ca::ClientCa::from_config(&crate::config::ClientCaConfig {
             cert_file,
-            key_file,
+            key_file: Some(key_file),
+            key_label: None,
             validity_days: 30,
         })
         .expect("client CA");

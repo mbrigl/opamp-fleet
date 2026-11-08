@@ -29,6 +29,7 @@ pub mod listen;
 pub mod listing;
 pub mod migrate;
 pub mod packages;
+pub mod pkcs11;
 pub mod pki;
 pub mod postgres;
 pub mod revocation;
@@ -48,14 +49,20 @@ use fleet::{AppState, PackageOffering};
 use fs::{FsAgentStore, FsBlobStore, FsConfigBackend, FsDeploymentBackend, FsPackageBackend};
 
 /// Whether an instance on PostgreSQL must be alone on its database, and the key that makes it so:
-/// blobs kept as files, or a CA key in a file
+/// blobs kept as files, or a CA key in a file. A CA key named by its label on a token makes it
+/// alone no more
 /// (ADR-0025
-/// clause 2).
+/// clause 2, ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one
+/// clause 14).
 #[must_use]
 pub fn exclusive(config: &config::ServerConfig) -> postgres::Exclusive {
     if config.blobs.s3().is_none() {
         postgres::Exclusive::Alone("[blobs] store = \"fs\"".to_string())
-    } else if config.client_ca.is_some() {
+    } else if config
+        .client_ca
+        .as_ref()
+        .is_some_and(|client_ca| client_ca.key_file.is_some())
+    {
         postgres::Exclusive::Alone("[client_ca] key_file".to_string())
     } else if config
         .enrolment
@@ -104,10 +111,9 @@ impl Records {
                 if let Some(data_dir) = data_dir {
                     fs::open_data_dir_beside_database(data_dir).map_err(named)?;
                 }
-                Ok(Records::Postgres(postgres::Database::open(
-                    database,
-                    exclusive(config),
-                )?))
+                let opened = postgres::Database::open(database, exclusive(config))?;
+                opened.set_audit_key_label(config.audit.key_label.clone());
+                Ok(Records::Postgres(opened))
             }
         }
     }

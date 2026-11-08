@@ -188,6 +188,9 @@ struct Setup<'a> {
     floors: bool,
     /// The Agent records' store, opened on the data directory; the filesystem's when `None`.
     agents: Option<OpenAgents>,
+    /// A second client CA in `client_ca_file`, after the test's own: the old and the new CA of a
+    /// move to new CA keys.
+    also_trusted: Option<&'a Pki>,
 }
 
 /// Opens an Agent records' store on a data directory.
@@ -267,6 +270,7 @@ async fn serve(pki: &Pki, setup: Setup<'_>) -> Served {
         fleet_server::config::EnrolmentConfig {
             bootstrap_ca_file: file,
             bootstrap_ca_key_file: key_file,
+            bootstrap_ca_key_label: None,
             max_pending_per_bootstrap: fleet_server::enrolment::DEFAULT_MAX_PENDING_PER_BOOTSTRAP,
         }
     });
@@ -340,7 +344,15 @@ async fn serve(pki: &Pki, setup: Setup<'_>) -> Served {
     let ca_file = dir.path().join("ca.pem");
     std::fs::write(&cert_file, &server_cert).expect("write cert");
     std::fs::write(&key_file, &server_key).expect("write key");
-    std::fs::write(&ca_file, &pki.ca_pem).expect("write ca");
+    std::fs::write(
+        &ca_file,
+        format!(
+            "{}{}",
+            pki.ca_pem,
+            setup.also_trusted.map_or("", |other| other.ca_pem.as_str())
+        ),
+    )
+    .expect("write ca");
     let tls = toml::from_str::<fleet_server::config::TlsConfig>(&format!(
         "cert_file = {:?}\nkey_file = {:?}\nclient_ca_file = {:?}\n",
         cert_file.display().to_string(),
@@ -576,6 +588,47 @@ async fn a_member_is_admitted_on_its_certificate_alone() {
         .await
         .expect("admitted on the upgrade");
     exchange(&mut socket, &InstanceUid::default()).await;
+}
+
+/// Two client CAs of one name in `client_ca_file`, as `pki token-init` beside `pki init` makes
+/// them for a move to new CA keys: a leaf of each is admitted as a member, on both transports,
+/// with `[enrolment]` set, so each is told apart from a bootstrap certificate by its issuer's
+/// name and key.
+/// Verifies: ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one
+#[tokio::test]
+async fn a_leaf_of_either_of_two_same_named_client_cas_is_admitted() {
+    let old = Pki::new();
+    let new = Pki::new();
+    let bootstrap = Pki::named("opamp-fleet-test-bootstrap-ca");
+    let served = serve(
+        &old,
+        Setup {
+            bootstrap: Some(&bootstrap),
+            also_trusted: Some(&new),
+            ..Setup::default()
+        },
+    )
+    .await;
+    for (ca, name) in [(&old, "edge-old"), (&new, "edge-new")] {
+        let (cert, key) = ca.issue(name);
+        let uid = InstanceUid::default();
+        let http = client(&served.ca_pem, Some((&cert, &key)));
+        let response = post(&http, &served.endpoint, report(&uid)).await;
+        assert!(
+            response.status().is_success(),
+            "{name}: {:?}",
+            response.status()
+        );
+        let mut socket = websocket(&served, &cert, &key, None)
+            .await
+            .expect("admitted on the upgrade");
+        exchange(&mut socket, &uid).await;
+    }
+    assert_eq!(
+        served.state.snapshot().len(),
+        2,
+        "both are members of the fleet, not enrolling hosts"
+    );
 }
 
 /// An `Authorization` header is never read on the Agent plane: whatever it holds, a member is
@@ -1056,6 +1109,7 @@ fn a_bootstrap_ca_sharing_its_subject_with_the_client_ca_is_refused() {
     let enrolment = fleet_server::config::EnrolmentConfig {
         bootstrap_ca_file: file("bootstrap-ca.pem", &twin.ca_pem).into(),
         bootstrap_ca_key_file: None,
+        bootstrap_ca_key_label: None,
         max_pending_per_bootstrap: fleet_server::enrolment::DEFAULT_MAX_PENDING_PER_BOOTSTRAP,
     };
     let Err(err) = fleet_server::tls::server_tls(&tls, None, Some(&enrolment)) else {

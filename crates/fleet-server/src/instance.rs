@@ -469,16 +469,16 @@ async fn renew(lease: &Renewing, taken: Taken) {
                     }
                     break;
                 }
-                // A schema migrated by a newer Server while this one held no lease: it stops, as
-                // at a failed start
+                // A schema migrated by a newer Server while this one held no lease, or a live
+                // lease that names another audit key: it stops, as at a failed start
                 // (ADR-0025
-                // clause 16).
+                // clause 16, and clause 14 of
+                // ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one).
                 Err(e) if database.outdated().is_some() => {
                     error!(
                         lost = %instance_id,
                         error = %e,
-                        "a newer Server migrated the schema while this instance held no lease: \
-                         stopping"
+                        "a new lease was refused while this instance held none: stopping"
                     );
                     return;
                 }

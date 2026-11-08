@@ -992,7 +992,12 @@ impl Enrolment {
             std::cell::RefCell::new(None);
         let mut sign = || -> Result<Signing, DecisionError> {
             let signed = signer
-                .sign(&csr_pem, host, &subject)
+                .sign(
+                    &csr_pem,
+                    host,
+                    &subject,
+                    crate::fleet::UseCase::EnrolmentApproval,
+                )
                 .map_err(DecisionError::Sign)?;
             let approved = recorder.signed(&signed, id, &instance_uid, &bootstrap)?;
             let decision = Decision::Approved(signed.pem.clone());
@@ -1361,6 +1366,7 @@ pub(crate) mod tests {
             csr_pem: &str,
             _host: &str,
             subject: &SubjectValues,
+            _use_case: crate::fleet::UseCase,
         ) -> Result<Signed, String> {
             Ok(Signed {
                 pem: format!("issued for {csr_pem}"),
@@ -1497,6 +1503,7 @@ pub(crate) mod tests {
             csr_pem: &str,
             host: &str,
             subject: &SubjectValues,
+            _use_case: crate::fleet::UseCase,
         ) -> Result<Signed, String> {
             let serial = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
             Ok(Signed {
@@ -2006,6 +2013,7 @@ pub(crate) mod tests {
             _csr_pem: &str,
             _host: &str,
             _subject: &SubjectValues,
+            _use_case: crate::fleet::UseCase,
         ) -> Result<Signed, String> {
             panic!("a request that must not be signed reached the signer");
         }

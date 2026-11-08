@@ -1156,6 +1156,7 @@ async fn a_client_behind_a_marked_gateway_receives_an_uploaded_artifact_through_
                     &csr,
                     host,
                     &fleet_server::revocation::SubjectValues::default(),
+                    fleet_server::pkcs11::UseCase::MemberCsr,
                 )
                 .expect("sign"),
             key.serialize_pem(),

@@ -128,6 +128,7 @@ impl Fleet {
                 &csr,
                 "gateway-host",
                 &fleet_server::revocation::SubjectValues::default(),
+                fleet_server::pkcs11::UseCase::MemberCsr,
             )
             .expect("sign");
         std::fs::write(pki.join("gateway-cert.pem"), &signed.pem).expect("write");

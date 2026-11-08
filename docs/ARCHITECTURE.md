@@ -161,7 +161,8 @@ no module.
   ([ADR-0025](adr/0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)).
   `instance` takes a lease, a row of `postgres::lease`, before either listener opens, renews it,
   proves it before every answer, and closes both planes while it cannot. Each lease it takes checks
-  the schema under the migrations' lock and records the instance's release, and a migration refuses
+  the schema under the migrations' lock and records the instance's release and its `[audit]
+  key_label`, refused while a live lease names another label, and a migration refuses
   while a live lease is of a release older than the schema it leaves needs, so two consecutive
   versions run side by side. A change that concerns a live session is one `NOTIFY` of
   `postgres::notify`, sent in the transaction that commits it, or right after the commit for a
@@ -220,7 +221,12 @@ no module.
   ([ADR-0023](adr/0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
   clause 12).
 - **Server ports beyond storage** — `fleet` owns `CertificateSigner`, which the local CA in `ca`
-  implements for the CSR flow and the renewal proof (ADR-0026), and
+  implements for the CSR flow and the renewal proof (ADR-0026), and the `UseCase` each signature
+  names. A CA key in `ca` is a key file or a key on the PKCS#11 token of `pkcs11`, which signs
+  through `rcgen`'s `SigningKey` from a pool of four sessions, one `cryptoki` context per module in
+  the process, and holds a place in the audit record before it signs
+  (ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one);
+  `opamp-fleetctl`'s `token` makes the keys on it. It also owns
   `Clock`, which `clock::SystemClock` implements. It owns `Elapsed` too, the time that has passed
   as a lease and a sweep measure it: `PackageStore::with_backend` takes it, and `instance`'s
   `Lease::take_as`. `clock::Elapsed::monotonic` is the adapter on `std::time::Instant`, and

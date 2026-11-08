@@ -12,6 +12,7 @@ mod fetch;
 mod package;
 mod pki;
 mod signing;
+mod token;
 
 use std::process::ExitCode;
 
@@ -94,6 +95,7 @@ mod tests {
             subcommands(tree("pki")),
             [
                 "init",
+                "token-init",
                 "server-cert",
                 "bootstrap-ca",
                 "status",

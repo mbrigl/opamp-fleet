@@ -119,6 +119,7 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             ("listen", Adapter),
             ("migrate", Adapter),
             ("pki", Adapter),
+            ("pkcs11", Adapter),
             ("postgres", Adapter),
             ("postgres::agent_page", Adapter),
             ("postgres::agents", Adapter),
@@ -226,6 +227,7 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             ("package", Adapter),
             ("pki", Adapter),
             ("signing", Adapter),
+            ("token", Adapter),
         ],
     ),
 ];

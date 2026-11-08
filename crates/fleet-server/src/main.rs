@@ -634,10 +634,34 @@ async fn serve() {
         // ADR-0013.
         info!("offering connection settings to the fleet");
     }
+    // The token the CA keys and the audit key may live on, opened before any key is read from it;
+    // a module, token, PIN or key that is not there fails startup, naming it
+    // (ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one
+    // clause 1).
+    let token = match config
+        .pkcs11
+        .as_ref()
+        .map(fleet_server::pkcs11::Token::open)
+        .transpose()
+        .and_then(|token| {
+            if let (Some(token), Some(label)) = (&token, &config.audit.key_label) {
+                token.key("[audit] key_label", label)?;
+            }
+            Ok(token)
+        }) {
+        Ok(token) => token,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
+    // A renewal proof may come from any CA of `client_ca_file`, so a host renews across a move to
+    // new CA keys (clause 13 of the same draft).
     let client_ca = match config
         .client_ca
         .as_ref()
-        .map(fleet_server::ca::ClientCa::from_config)
+        .zip(config.tls.as_ref())
+        .map(|(section, tls)| fleet_server::ca::ClientCa::for_server(section, tls, token.as_ref()))
         .transpose()
     {
         Ok(ca) => {
@@ -657,20 +681,21 @@ async fn serve() {
     };
     // The bootstrap CA's key, when the Server issues bootstrap certificates (ADR-0027).
     let bootstrap = match config.enrolment.as_ref().map(|enrolment| {
-        fleet_server::ca::BootstrapCa::from_config(enrolment, config.client_ca.as_ref()).and_then(
-            |signer| {
-                if signer.is_some() {
-                    info!("issuing bootstrap certificates on an operator's request");
-                }
-                fleet_server::bootstrap::BootstrapCertificates::on(
-                    signer.map(|ca| {
-                        Box::new(ca) as Box<dyn fleet_server::bootstrap::BootstrapSigner>
-                    }),
-                    &records,
-                    clock.clone(),
-                )
-            },
+        fleet_server::ca::BootstrapCa::from_config_on(
+            enrolment,
+            config.client_ca.as_ref(),
+            token.as_ref(),
         )
+        .and_then(|signer| {
+            if signer.is_some() {
+                info!("issuing bootstrap certificates on an operator's request");
+            }
+            fleet_server::bootstrap::BootstrapCertificates::on(
+                signer.map(|ca| Box::new(ca) as Box<dyn fleet_server::bootstrap::BootstrapSigner>),
+                &records,
+                clock.clone(),
+            )
+        })
     }) {
         None => None,
         Some(Ok(record)) => Some(Arc::new(record)),
@@ -857,6 +882,12 @@ async fn serve() {
         }
     };
     let audit: Arc<dyn fleet_server::audit::Audit> = audit_log.clone();
+    // The token's signatures are written to the record, and a software token says so at every
+    // start (clauses 6 and 7 of the token draft).
+    if let Some(token) = &token {
+        token.set_audit(audit.clone());
+        token.warn_if_software(audit.as_ref());
+    }
     // On PostgreSQL the record goes back `[audit] retain_days`: pruned at startup and once a day
     // after (ADR-0023 clause 12).
     if let (fleet_server::Records::Postgres(database), Some(lease)) = (&records, &lease) {

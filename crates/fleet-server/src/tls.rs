@@ -88,15 +88,7 @@ impl Issuers {
         if !self.bootstrap.iter().any(|ca| ca.issued(&parsed)) {
             return Err("its certificate was not issued by the bootstrap CA".to_string());
         }
-        // As webpki checks an end-entity certificate for client authentication: no CA, and an
-        // extended key usage that, where present, includes clientAuth.
-        let leaf = parsed
-            .basic_constraints()
-            .is_ok_and(|constraints| !constraints.is_some_and(|c| c.value.ca));
-        let client_auth = parsed
-            .extended_key_usage()
-            .is_ok_and(|usage| usage.is_none_or(|usage| usage.value.client_auth));
-        if !(leaf && client_auth) {
+        if !is_client_auth_leaf(&parsed) {
             return Err("its certificate is no client-authentication leaf".to_string());
         }
         if !parsed.validity().is_valid() {
@@ -104,6 +96,19 @@ impl Issuers {
         }
         Ok(enrolling(certificate))
     }
+}
+
+/// Whether `certificate` is an end-entity certificate for client authentication, as webpki checks
+/// one: no CA, and an extended key usage that, where present, includes clientAuth.
+#[must_use]
+pub fn is_client_auth_leaf(certificate: &X509Certificate<'_>) -> bool {
+    let leaf = certificate
+        .basic_constraints()
+        .is_ok_and(|constraints| !constraints.is_some_and(|c| c.value.ca));
+    let client_auth = certificate
+        .extended_key_usage()
+        .is_ok_and(|usage| usage.is_none_or(|usage| usage.value.client_auth));
+    leaf && client_auth
 }
 
 /// What a bootstrap certificate (DER) makes the request it carries or proves: its subject, the
@@ -327,6 +332,7 @@ mod tests {
         let enrolment = EnrolmentConfig {
             bootstrap_ca_file: path("bootstrap-ca.pem", &pem(bootstrap)),
             bootstrap_ca_key_file: None,
+            bootstrap_ca_key_label: None,
             max_pending_per_bootstrap: crate::enrolment::DEFAULT_MAX_PENDING_PER_BOOTSTRAP,
         };
         server_tls(&tls, None, Some(&enrolment))

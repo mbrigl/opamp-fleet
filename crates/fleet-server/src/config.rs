@@ -127,9 +127,14 @@ pub struct ServerConfig {
     /// How repeated admission failures from one peer address are throttled (ADR-0026 clause 19).
     #[serde(default)]
     pub admission_throttle: AdmissionThrottleConfig,
-    /// How large the audit record grows and how much of it is kept (ADR-0028).
+    /// How large the audit record grows and how much of it is kept (ADR-0028), and the audit key
+    /// on the token.
     #[serde(default)]
     pub audit: AuditConfig,
+    /// The PKCS#11 token the CA keys and the audit key may live on
+    /// (ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one);
+    /// absent, every CA key is a file and there is no audit key.
+    pub pkcs11: Option<Pkcs11Config>,
     /// How often an admitted peer may be heard on the Agent plane (ADR-0012).
     #[serde(default)]
     pub agent_rate_limit: AgentRateLimitConfig,
@@ -211,6 +216,24 @@ pub struct AuditConfig {
     pub keep_files: Option<usize>,
     /// On PostgreSQL, how many days an entry is kept before it is pruned.
     pub retain_days: Option<u64>,
+    /// The label of the audit key on the `[pkcs11]` token, which signs the heads of the audit
+    /// chains. Every instance on one database names the same one, or none.
+    pub key_label: Option<String>,
+}
+
+/// The `[pkcs11]` section
+/// (ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one
+/// clause 1): the module the Server loads, the token it signs on, and the file of the user PIN.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Pkcs11Config {
+    /// The path of the PKCS#11 library.
+    pub module: PathBuf,
+    /// The label of the token.
+    pub token_label: String,
+    /// The file holding the user PIN, readable by its owner and group alone and written by its
+    /// owner alone. The PIN is never written into `server.toml`.
+    pub pin_file: PathBuf,
 }
 
 /// How many days an entry is kept on PostgreSQL where `[audit] retain_days` is not set.
@@ -839,11 +862,15 @@ pub struct EnrolmentConfig {
     /// PEM certificate of the CA that issues bootstrap certificates. A certificate from it can
     /// only enrol: it needs an open enrolment window and an operator's approval.
     pub bootstrap_ca_file: PathBuf,
-    /// PEM PKCS#8 key of that CA. With it the Server issues bootstrap certificates on an
-    /// operator's request; without it enrolment works with bootstrap certificates made elsewhere
-    /// (ADR-0026 clause 17).
+    /// PEM PKCS#8 key of that CA. With it, or with `bootstrap_ca_key_label`, the Server issues
+    /// bootstrap certificates on an operator's request; without either enrolment works with
+    /// bootstrap certificates made elsewhere (ADR-0026 clause 17).
     #[serde(default)]
     pub bootstrap_ca_key_file: Option<PathBuf>,
+    /// The label of that CA's private key on the `[pkcs11]` token, in place of
+    /// `bootstrap_ca_key_file`.
+    #[serde(default)]
+    pub bootstrap_ca_key_label: Option<String>,
     /// The most requests of one bootstrap certificate the pending queue holds at once, 1 to
     /// [`MAX_PENDING`](crate::enrolment::MAX_PENDING) (ADR-0027).
     #[serde(default = "default_max_pending_per_bootstrap")]
@@ -1133,8 +1160,10 @@ pub struct TlsConfig {
 pub struct ClientCaConfig {
     /// PEM certificate of the issuing CA.
     pub cert_file: PathBuf,
-    /// PEM private key of the issuing CA.
-    pub key_file: PathBuf,
+    /// PEM private key of the issuing CA; exactly one of it and `key_label` is set.
+    pub key_file: Option<PathBuf>,
+    /// The label of the issuing CA's private key on the `[pkcs11]` token.
+    pub key_label: Option<String>,
     /// How long an issued certificate is valid. Short is the point: validity plus renewal bounds a
     /// certificate nobody noticed was stolen, and revocation ends one that was (ADR-0026).
     #[serde(default = "default_validity_days")]
@@ -1148,7 +1177,12 @@ impl ClientCaConfig {
         if self.validity_days == 0 {
             return Err("[client_ca] validity_days must be greater than zero".to_string());
         }
-        for path in [&self.cert_file, &self.key_file] {
+        if self.key_file.is_some() == self.key_label.is_some() {
+            return Err(
+                "[client_ca] names its key as exactly one of key_file and key_label".to_string(),
+            );
+        }
+        for path in std::iter::once(&self.cert_file).chain(&self.key_file) {
             if !path.exists() {
                 return Err(format!("[client_ca] {} does not exist", path.display()));
             }
@@ -1252,6 +1286,7 @@ impl Default for ServerConfig {
             enrolment: None,
             admission_throttle: AdmissionThrottleConfig::default(),
             audit: AuditConfig::default(),
+            pkcs11: None,
             agent_rate_limit: AgentRateLimitConfig::default(),
         }
     }
@@ -1524,6 +1559,26 @@ impl ServerConfig {
         self.check_secure()
     }
 
+    /// The settings that name a key on the `[pkcs11]` token, each with its label.
+    #[must_use]
+    pub fn token_labels(&self) -> Vec<String> {
+        let mut named = Vec::new();
+        if let Some(label) = self.client_ca.as_ref().and_then(|ca| ca.key_label.as_ref()) {
+            named.push(format!("[client_ca] key_label {label:?}"));
+        }
+        if let Some(label) = self
+            .enrolment
+            .as_ref()
+            .and_then(|enrolment| enrolment.bootstrap_ca_key_label.as_ref())
+        {
+            named.push(format!("[enrolment] bootstrap_ca_key_label {label:?}"));
+        }
+        if let Some(label) = &self.audit.key_label {
+            named.push(format!("[audit] key_label {label:?}"));
+        }
+        named
+    }
+
     /// A warning when one host cannot report for all the Agents it may speak for at the fleet's
     /// heartbeat (ADR-0012 clause 23): `messages_per_sec` times the offered heartbeat interval, or
     /// the Baseline's 30 s, below 256. A limit set too low costs availability, not security, so
@@ -1572,6 +1627,15 @@ impl ServerConfig {
             );
         }
         if let Some(enrolment) = &self.enrolment {
+            if enrolment.bootstrap_ca_key_file.is_some()
+                && enrolment.bootstrap_ca_key_label.is_some()
+            {
+                return Err(
+                    "[enrolment] names the bootstrap CA's key as one of bootstrap_ca_key_file and \
+                     bootstrap_ca_key_label, not both"
+                        .to_string(),
+                );
+            }
             let max = crate::enrolment::MAX_PENDING;
             if !(1..=max).contains(&enrolment.max_pending_per_bootstrap) {
                 return Err(format!(
@@ -1581,6 +1645,14 @@ impl ServerConfig {
             }
         }
         self.audit.check(&self.database.store)?;
+        if self.pkcs11.is_none() {
+            if let Some(key) = self.token_labels().first() {
+                return Err(format!(
+                    "{key} names a key on a token, and [pkcs11] is not set — add [pkcs11], or \
+                     name the key by its file"
+                ));
+            }
+        }
         let throttle = &self.admission_throttle;
         if throttle.max_failures == 0 || throttle.window_secs == 0 || throttle.backoff_secs == 0 {
             return Err(
@@ -3132,6 +3204,97 @@ mod tests {
             let err = load(keys).expect_err(named);
             assert!(err.contains(named), "{named}: {err}");
         }
+    }
+
+    /// CA keys named by their labels on the token leave an instance free to share its database
+    /// with others.
+    /// Verifies: ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one
+    #[test]
+    fn keys_on_the_token_do_not_make_an_instance_alone() {
+        let toml = "[blobs]\nstore = \"s3\"\n[blobs.s3]\nendpoint = \"https://s3.example\"\n\
+                    bucket = \"fleet\"\nregion = \"eu\"\n\
+                    [pkcs11]\nmodule = \"m.so\"\ntoken_label = \"fleet\"\npin_file = \"pin\"\n\
+                    [client_ca]\ncert_file = \"ca.pem\"\nkey_label = \"client-ca\"\n\
+                    [enrolment]\nbootstrap_ca_file = \"b.pem\"\nbootstrap_ca_key_label = \"b\"\n";
+        let config = toml::from_str::<ServerConfig>(&format!("{TLS}{toml}")).expect("parse");
+        assert_eq!(
+            crate::exclusive(&config),
+            crate::postgres::Exclusive::Shared
+        );
+    }
+
+    /// `[client_ca]` names its key as exactly one of a file and a label; a label, there or in
+    /// `[enrolment]` or `[audit]`, needs `[pkcs11]`; a key file alone starts without a token on
+    /// either store.
+    /// Verifies: ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one, ADR-draft-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token
+    #[test]
+    fn a_ca_key_is_a_file_or_a_label_and_a_label_needs_the_token() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for file in ["ca.pem", "ca-key.pem", "b.pem"] {
+            std::fs::write(dir.path().join(file), "x").expect("write");
+        }
+        let at = |file: &str| dir.path().join(file);
+        let load = |keys: String| {
+            let path = dir.path().join("server.toml");
+            std::fs::write(&path, format!("{TLS}{keys}")).expect("write");
+            ServerConfig::load(&path)
+        };
+        let client_ca = |key: &str| format!("[client_ca]\ncert_file = {:?}\n{key}", at("ca.pem"));
+        let key_file = format!("key_file = {:?}\n", at("ca-key.pem"));
+        let pkcs11 = "[pkcs11]\nmodule = \"m.so\"\ntoken_label = \"fleet\"\npin_file = \"pin\"\n";
+        for postgres in [
+            "",
+            "[database]\nstore = \"postgres\"\n[database.postgres]\nhost = \"127.0.0.1\"\n\
+             dbname = \"fleet\"\nuser = \"fleet\"\npassword_file = \"pw\"\ntls = false\n",
+        ] {
+            assert!(
+                load(format!("{postgres}{}", client_ca(&key_file))).is_ok(),
+                "a key file alone starts without a token"
+            );
+        }
+        let both =
+            load(client_ca(&format!("{key_file}key_label = \"client-ca\"\n"))).expect_err("both");
+        assert!(
+            both.contains("key_file") && both.contains("key_label"),
+            "{both}"
+        );
+        let neither = load(client_ca("")).expect_err("neither");
+        assert!(
+            neither.contains("key_file") && neither.contains("key_label"),
+            "{neither}"
+        );
+        let no_token = load(client_ca("key_label = \"client-ca\"\n")).expect_err("no token");
+        assert!(
+            no_token.contains("[client_ca] key_label") && no_token.contains("[pkcs11]"),
+            "{no_token}"
+        );
+        assert!(load(format!(
+            "{pkcs11}{}",
+            client_ca("key_label = \"client-ca\"\n")
+        ))
+        .is_ok());
+        let audit = load("[audit]\nkey_label = \"audit\"\n".to_string()).expect_err("audit");
+        assert!(
+            audit.contains("[audit] key_label") && audit.contains("[pkcs11]"),
+            "{audit}"
+        );
+        let enrolment = format!(
+            "{}[enrolment]\nbootstrap_ca_file = {:?}\nbootstrap_ca_key_label = \"b\"\n",
+            client_ca(&key_file),
+            at("b.pem")
+        );
+        let err = load(enrolment.clone()).expect_err("a bootstrap label without the token");
+        assert!(err.contains("[enrolment] bootstrap_ca_key_label"), "{err}");
+        assert!(load(format!("{pkcs11}{enrolment}")).is_ok());
+        let err = load(format!(
+            "{pkcs11}{enrolment}bootstrap_ca_key_file = {:?}\n",
+            at("ca-key.pem")
+        ))
+        .expect_err("both bootstrap keys");
+        assert!(
+            err.contains("bootstrap_ca_key_file") && err.contains("bootstrap_ca_key_label"),
+            "{err}"
+        );
     }
 
     /// An instance must be alone on its database while it keeps its blobs as files or a CA key in a

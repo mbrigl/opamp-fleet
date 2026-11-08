@@ -100,6 +100,11 @@ argon2 = { version = "0.6", default-features = false, features = ["alloc", "pass
 # as a local CA. Pinned to the `ring` backend — the provider ADR-0012 already installs, whose C is
 # already compiled in this build — rather than `aws_lc_rs`, which would add cmake and more C.
 # `x509-parser` is what reads a CSR back, and a certificate's validity for the renewal window.
+# The Server's signing keys on a PKCS#11 token, and `opamp-fleetctl pki token-init` making them
+# (ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one).
+# It loads the module at runtime through `libloading` from pre-generated bindings: no `bindgen`,
+# no system header, and no C library linked at build time.
+cryptoki = "0.12.1"
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring", "pem", "x509-parser"] }
 # The dates rcgen speaks in. It takes and returns `time::OffsetDateTime` for a certificate's
 # validity but re-exports none of it, so "now plus ninety days" needs the crate itself — already in

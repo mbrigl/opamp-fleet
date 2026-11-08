@@ -40,6 +40,9 @@ x509-parser = { workspace = true, features = ["verify"] }
 # The configuration the listener of `opamp` serves with (ADR-0008).
 rustls.workspace = true
 rcgen.workspace = true
+# The CA keys and the audit key on a PKCS#11 token, signing through rcgen's `SigningKey`
+# (ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one).
+cryptoki.workspace = true
 time.workspace = true
 utoipa.workspace = true
 utoipa-axum.workspace = true
