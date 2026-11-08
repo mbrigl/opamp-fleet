@@ -1,4 +1,4 @@
-# ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one: The Server's signing keys may live on a PKCS#11 token, with SoftHSM2 as the planned one
+# ADR-0043: The Server's signing keys may live on a PKCS#11 token, with SoftHSM2 as the planned one
 
 - **Status:** 🟡 proposed
 - **Date:** 2026-10-22
@@ -60,7 +60,7 @@ key files whichever store holds the records, and plan, build and test it against
    ([ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
    clause 24); one that others may read, or its group may write, fails startup naming it. The PIN is
    never written into `server.toml`
-   ([ADR-draft-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token](draft-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)
+   ([ADR-0040](0040-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)
    clause 21). The Server loads the module at startup through `cryptoki` and keeps a pool of
    four sessions on the token, opened as they are needed; no setting changes the number. PKCS#11
    initialises a module once per process, so instances that share a process, as tests run them,
@@ -68,12 +68,12 @@ key files whichever store holds the records, and plan, build and test it against
    token that is not found or a PIN that is refused fails startup, naming the key.
 
 2. **Clause 8 of
-   [ADR-draft-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token](draft-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)
+   [ADR-0040](0040-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)
    decides it: The Server signs CSRs as a local CA while
    `[client_ca]` is configured.**
 
 3. **Clause 17 of
-   [ADR-draft-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token](draft-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)
+   [ADR-0040](0040-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)
    decides it: Enrolment has a CA of its own.**
 
 4. **The token is optional, whichever store holds the records.** With `[pkcs11]` set, each key may
@@ -139,7 +139,7 @@ key files whichever store holds the records, and plan, build and test it against
    token that signs checkpoints of the heads of every audit chain. What a checkpoint holds, when
    and by which process it is signed, where it is kept and how `server audit-verify` checks it are
    decided by
-   [ADR-draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token](draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token.md).
+   [ADR-0041](0041-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token.md).
 
 9. **The audit record may be exported, off by default.** `[audit.export]` names an OTLP/HTTP
    endpoint. The Server sends every entry to it as an OTLP log record. The export is an outbound
@@ -173,17 +173,17 @@ key files whichever store holds the records, and plan, build and test it against
    cannot rewrite is the only anchor that holds against a compromised Server.
 
 10. **Clauses 7 and 8 of
-    [ADR-draft-the-operator-program-opamp-fleetctl](draft-the-operator-program-opamp-fleetctl.md)
+    [ADR-0042](0042-the-operator-program-opamp-fleetctl.md)
     decide it: `init` writes two directories, and the
     keys on the token are made by `pki token-init` on the Server host.**
 
 11. **Clause 12 of
-    [ADR-draft-the-operator-program-opamp-fleetctl](draft-the-operator-program-opamp-fleetctl.md)
+    [ADR-0042](0042-the-operator-program-opamp-fleetctl.md)
     decides it: A new bootstrap CA replaces the
     Server's.**
 
 12. **Clause 16 of
-    [ADR-draft-the-operator-program-opamp-fleetctl](draft-the-operator-program-opamp-fleetctl.md)
+    [ADR-0042](0042-the-operator-program-opamp-fleetctl.md)
     decides it: Key files are stored unencrypted; token
     keys never leave the token.**
 
@@ -215,7 +215,7 @@ key files whichever store holds the records, and plan, build and test it against
       a failed start, as it does on a schema it does not understand
       ([ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
       clause 16). The audit key has no file form
-      ([ADR-draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token](draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token.md)
+      ([ADR-0041](0041-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token.md)
       clause 5).
 
 **Out of scope:** the server CA's key and the package signing key, which stay offline with the
@@ -295,7 +295,7 @@ the Client; what the OTLP export's receiver does with the entries.
 ## Enforcement
 
 Tests that carry `Verifies:
-ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one`,
+ADR-0043`,
 against SoftHSM2 where a token is needed:
 
 - A host certificate and a bootstrap certificate signed through a SoftHSM2 token verify against

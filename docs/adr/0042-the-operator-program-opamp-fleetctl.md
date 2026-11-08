@@ -1,4 +1,4 @@
-# ADR-draft-the-operator-program-opamp-fleetctl: The operator program `opamp-fleetctl`
+# ADR-0042: The operator program `opamp-fleetctl`
 
 - **Status:** 🟡 proposed
 - **Date:** 2026-10-27
@@ -10,7 +10,7 @@
 
 An Agent proves fleet membership with a client certificate in the TLS handshake and nothing else,
 and the Server presents a certificate of its own on both planes
-([ADR-draft-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token](draft-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md),
+([ADR-0040](0040-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md),
 [ADR-0012](0012-tls-1-3-two-planes-and-bounded-input.md)).
 That takes three certificate authorities, each with one job: a server CA that signs the Server's
 certificate and a Gateway's downstream certificate, the client CA the Server signs every host's
@@ -64,7 +64,7 @@ The forces:
   client checks a server certificate's names against its subject alternative names
   (RFC 9525 section 2), and the Server tells an enrolment connection from a member's by its
   issuer, names a host by the SAN URI it puts in and decides a renewal by its proof
-  ([ADR-draft-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token](draft-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md),
+  ([ADR-0040](0040-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md),
   [ADR-0016](0016-client-modes-and-the-gateway.md)). The subject is free to say what an auditor
   needs, and the name an operator wants there is that of their own installation, which no build
   constant knows.
@@ -111,7 +111,7 @@ This serves **G-17** (the connection is secured and the Agent is identified), **
 
 This ADR restates [ADR-0037](0037-the-operator-program-opamp-fleetctl.md) in full. Its clauses 5
 to 8, 12, 13 and 16 to 18 and its out-of-scope list carry the decision of
-[ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one](draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one.md):
+[ADR-0043](0043-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one.md):
 `pki token-init`, `pki bootstrap-ca --pkcs11-module`, `pki init --ca-keys-on-token`, the flags of
 `token-init` and `cryptoki`. It is accepted together with that ADR.
 
@@ -162,7 +162,7 @@ step of setting up or running a fleet needs `openssl` or another external tool.
    `pkcs12_identity`, and so through `fleet_core::pkcs12::file` and `p12-keystore` (ADR-0027).
    `pki token-init` and `pki bootstrap-ca --pkcs11-module` reach a PKCS#11 token through `cryptoki`,
    the wrapper the Server uses for the same token
-   ([ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one](draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one.md)
+   ([ADR-0043](0043-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one.md)
    clause 1). Every key is ECDSA P-256. A key written to a file is PKCS#8 PEM, the form
    `[client_ca]` loads; a key made on a token stays on it. Every certificate is PEM. Every serial is
    16 random bytes, as the client CA's are.
@@ -176,7 +176,7 @@ step of setting up or running a fleet needs `openssl` or another external tool.
    end, and `server pki status` says when those of the Server host end. The Server's command runs
    and exits like `hash-credential` and `audit-verify`, before the Server starts serving. The Server
    binary carries no code that makes a CA or a server certificate. It signs host certificates
-   ([ADR-draft-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token](draft-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md))
+   ([ADR-0040](0040-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md))
    and bootstrap certificates
    ([ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)).
    When a certificate counts as ending (clause 21) is one rule in `fleet-core`, plain date
@@ -209,7 +209,7 @@ step of setting up or running a fleet needs `openssl` or another external tool.
    `opamp-fleetctl pki token-init --pkcs11-module <path> --token-label <label> --pin-file <file>
    --out <dir>`, run on the Server host, generates the client CA's, the bootstrap CA's and the
    audit key on the token of
-   [ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one](draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one.md)
+   [ADR-0043](0043-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one.md)
    with `CKA_EXTRACTABLE` false and `CKA_SENSITIVE` true, signs each CA certificate through the
    token with its own key, and writes to `--out` `client-ca.pem`, `bootstrap-ca.pem` and
    `token.toml.fragment`, which names `[pkcs11]`, `[client_ca]` with `key_label`, `[enrolment]`
@@ -220,7 +220,7 @@ step of setting up or running a fleet needs `openssl` or another external tool.
 9. **The CAs are told apart by role and sign no CA.** The three CAs are `CN=<product> Server CA`,
    `CN=<product> Client CA` and `CN=<product> Bootstrap CA` (clause 17), so the bootstrap CA never
    shares a subject with the client CA
-   ([ADR-draft-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token](draft-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)).
+   ([ADR-0040](0040-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)).
    Each CA certificate is `CA:TRUE` with a path length of 0, `keyCertSign` and `cRLSign`.
 
 10. **A server certificate names what is dialled in its SAN and its role in its subject.**
@@ -246,7 +246,7 @@ step of setting up or running a fleet needs `openssl` or another external tool.
     operator copies both to the Server host in place of `[enrolment]`'s files. With it, and with
     `--token-label` and `--pin-file`, the command runs on the Server host, and the key is generated
     on the token of
-    [ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one](draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one.md)
+    [ADR-0043](0043-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one.md)
     under a new label, `bootstrap-ca.pem` is written to `<dir>`, and the command prints the label,
     which the operator names in `bootstrap_ca_key_label`. It never overwrites a file or a token
     object. The operator restarts the Server. Bootstrap certificates from the old CA stop passing
@@ -260,7 +260,7 @@ step of setting up or running a fleet needs `openssl` or another external tool.
     later than the server CA that signs it, and one asked to outlive it is cut to the CA's end with
     a notice. Bootstrap certificates live as clause 14 states. Host certificates are the running
     Server's, signed for `[client_ca] validity_days` as
-    [ADR-draft-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token](draft-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)
+    [ADR-0040](0040-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)
     states.
 
 14. **A bootstrap certificate lives 10 days by default, at most 90, never past its CA.**
@@ -277,7 +277,7 @@ step of setting up or running a fleet needs `openssl` or another external tool.
     CA key from a file, it reads it unattended; that file and the offline keys are protected by
     where they are kept and by their mode, as every other key of the project is. A key on the token
     of
-    [ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one](draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one.md)
+    [ADR-0043](0043-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one.md)
     is created non-extractable and is used only through `C_Sign`; the Server never reads it. The
     secrets left on the Server's host are the PIN file, the TLS listener's key, and with SoftHSM2
     its token directory, which with the PIN is a copy of every key on the token.
@@ -392,7 +392,7 @@ passphrase prompt; a token for the server CA's key or the package signing key, w
 with the operator; replacing the server CA, which every host's configuration follows; replacing the
 client CA, which every host's enrolment follows, but for the move of a fleet onto a token, whose new
 client CA `pki token-init` makes and which
-[ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one](draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one.md)
+[ADR-0043](0043-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one.md)
 clause 13 rolls out; and holding two bootstrap CAs at once while one replaces the other; enforcing a
 CA's end in the handshake, or limiting the running Server's signatures to its CA's end; certificate
 revocation lists or OCSP; ACME and certificates from a public CA, which the Server reads as they
@@ -471,7 +471,7 @@ and the trust in the extracted tree's origin, which the hash of what was downloa
   side channel, and a route would let the operator credential alone mint a member.
 - **Limit every signature of the running Server to its CA's end, and refuse renewals under an ended
   CA.** It belongs with how the Server signs
-  ([ADR-draft-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token](draft-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md));
+  ([ADR-0040](0040-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md));
   this decision warns instead (clauses 21 and 22).
 - **Encrypt the offline CA keys with a passphrase.** It needs an encryption crate beyond clause 5
   and a prompt the commands must handle; kept out of scope, not ruled out.
@@ -498,7 +498,7 @@ and the trust in the extracted tree's origin, which the hash of what was downloa
   protected at rest. But the Client's install reads the pair in the clear
   ([ADR-0020](0020-the-installed-service-and-its-state.md)), and neither `rustls` nor `rcgen`
   reads an encrypted key. Owner-only permissions are what every other key is given
-  ([ADR-draft-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token](draft-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)).
+  ([ADR-0040](0040-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)).
 - **`p12-extract` writes the certificate only.** The key never leaves the file. Not chosen: the
   operator asked for the key, and the PEM pair is a form the Client takes.
 - **Read any PKCS#12 file (other schemes, several certificates).** This is more general, but needs
@@ -588,7 +588,7 @@ and the trust in the extracted tree's origin, which the hash of what was downloa
   from Debian packages leaves links pointing at files no tree carries. Whether any of them is
   absolute is not verified.
 - This project's own requirements:
-  [ADR-draft-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token](draft-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)
+  [ADR-0040](0040-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)
   on admission, the client CA and how the Server signs;
   [ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)
   on the bootstrap CA, the crates issuance adds, the `bootstrap.p12` file and its reader;
@@ -652,7 +652,7 @@ and the trust in the extracted tree's origin, which the hash of what was downloa
 
 ## Enforcement
 
-Tests that carry `Verifies: ADR-draft-the-operator-program-opamp-fleetctl`:
+Tests that carry `Verifies: ADR-0042`:
 
 - `pki init` writes exactly the files of clause 7 into the two directories: the bootstrap CA's key
   into `--server-dir`, no server-CA key and no package signing key into it,
@@ -726,7 +726,7 @@ Tests that carry `Verifies: ADR-draft-the-operator-program-opamp-fleetctl`:
 - Packing the same tree twice yields byte-identical artifacts (clause 27).
 - Clauses 5 to 8, 12, 13 and 16 to 18 as they stand here, the keys generated on a token included,
   are verified by the tests
-  [ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one](draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one.md)
+  [ADR-0043](0043-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one.md)
   names.
 
 The test of the command tree, `opamp-fleetctl --help`, `package --help` and `pki --help`, verifies

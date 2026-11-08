@@ -1,4 +1,4 @@
-# ADR-draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token: The heads of the audit chains are signed with a key on the token
+# ADR-0041: The heads of the audit chains are signed with a key on the token
 
 - **Status:** 🟡 proposed
 - **Date:** 2026-10-28
@@ -20,7 +20,7 @@ The append-only audit record
 ([ADR-0028](0028-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again.md))
 rejects signing entries because the key would live on the same host as the record, and whoever can
 rewrite the record could read the key and re-sign. A key on a PKCS#11 token cannot be read
-([ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one](draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one.md)):
+([ADR-0043](0043-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one.md)):
 whoever holds the store but not the token cannot sign. That ADR names the audit key,
 `[audit] key_label`, and a signer port for checkpoints; this ADR decides the checkpoints' format,
 where they are kept and which instance signs them. With several Server instances on one database
@@ -83,7 +83,7 @@ newest checkpoint it finds or is given.
 2. **One process signs, every 60 seconds and at an orderly shutdown.**
    - On the filesystem store the Server signs. On PostgreSQL the instance that holds a session-level
      advisory lock signs; every instance names the same `[audit] key_label`
-     ([ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one](draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one.md)
+     ([ADR-0043](0043-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one.md)
      clause 14) and tries to take it at every interval, and a lock that ends with its connection
      passes to the next instance that tries. The lock is held on one connection of its own per
      instance, outside the pool, which the signer checks at every interval; an instance signs only
@@ -219,7 +219,7 @@ route to read checkpoints; a configurable interval.
 ## Enforcement
 
 Tests that carry `Verifies:
-ADR-draft-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token`, against SoftHSM2
+ADR-0041`, against SoftHSM2
 where a token is needed:
 
 - With `[audit] key_label` on the filesystem store, a checkpoint is written within an interval

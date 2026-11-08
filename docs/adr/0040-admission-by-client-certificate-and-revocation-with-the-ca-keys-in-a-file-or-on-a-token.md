@@ -1,4 +1,4 @@
-# ADR-draft-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token: Admission by a client certificate alone, a guarded Operator plane, and a revocation list that follows renewal, with the CA keys in a file or on a token
+# ADR-0040: Admission by a client certificate alone, a guarded Operator plane, and a revocation list that follows renewal, with the CA keys in a file or on a token
 
 - **Status:** 🟡 proposed
 - **Date:** 2026-11-02
@@ -124,7 +124,7 @@ Three facts shape the revocation list:
 This ADR restates
 [ADR-0026](0026-admission-by-client-certificate-and-revocation.md)
 in full and keeps its numbering. Its clauses 8 and 17 take up the CA keys on a token of
-[ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one](draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one.md).
+[ADR-0043](0043-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one.md).
 
 ## Decision
 
@@ -845,7 +845,7 @@ Where a test below also covers a clause another ADR carries, that ADR is named b
   document carries the field (the pending list,
   [ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)).
 - Clauses 8 and 17 as they stand here are verified by the tests
-  [ADR-draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one](draft-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one.md)
+  [ADR-0043](0043-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one.md)
   names, and clauses 32 and 34 by those of
   [ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md).
 
