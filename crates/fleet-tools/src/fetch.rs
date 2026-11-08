@@ -2011,7 +2011,7 @@ fn apply_alternatives(deb: &Path, staging: &Path, extracted: &Path) -> Result<()
 /// Whether `to`, a path inside the unpacked payload `extracted`, is free for an alternative:
 /// nothing is there, not even a link. A directory on the way that is a link fails the repack naming
 /// it, since a copy to `to` would write wherever that link leads, the host's file system included
-/// (ADR-0037).
+/// (ADR-0042).
 fn unoccupied(extracted: &Path, to: &Path) -> Result<bool, String> {
     let inside = to
         .strip_prefix(extracted)
@@ -2025,7 +2025,7 @@ fn unoccupied(extracted: &Path, to: &Path) -> Result<bool, String> {
             Ok(meta) if meta.file_type().is_symlink() => {
                 return Err(format!(
                     "an alternative names {}, below the link {}, and a repack follows no link to \
-                     write (ADR-0037)",
+                     write (ADR-0042)",
                     to.display(),
                     at.display()
                 ));
@@ -2037,7 +2037,7 @@ fn unoccupied(extracted: &Path, to: &Path) -> Result<bool, String> {
 }
 
 /// Where an absolute path of the installed system lies inside an unpacked payload, refused when it
-/// is not absolute or names anything but plain components — `..` above all (ADR-0037).
+/// is not absolute or names anything but plain components — `..` above all (ADR-0042).
 fn inside_payload(extracted: &Path, installed: &str) -> Result<PathBuf, String> {
     use std::path::Component;
     let path = Path::new(installed);
@@ -2132,7 +2132,7 @@ const LIBRARY_DIRS: [&str; 4] = [
 /// host's dynamic loader on the program and answer with the host's files. A soname the packages do
 /// not hold fails the repack naming it and who needs it, since a tree missing one would ship and
 /// die on its first start; one is copied as the file its link resolves to inside the directory
-/// its package was unpacked into, with the packages unpacked beside it (ADR-0037).
+/// its package was unpacked into, with the packages unpacked beside it (ADR-0042).
 fn bundle_libraries(programs: &[PathBuf], lib_dir: &Path, roots: &[&Path]) -> Result<(), String> {
     std::fs::create_dir_all(lib_dir)
         .map_err(|e| format!("cannot create {}: {e}", lib_dir.display()))?;
@@ -2357,7 +2357,7 @@ fn copy_file(from: &Path, to: &Path) -> Result<(), String> {
 }
 
 /// Copies `from`, a file or directory of the tree `root` was unpacked into, to `to`, resolving
-/// every link inside that tree alone (ADR-0037): a link that leads out of it fails the repack
+/// every link inside that tree alone (ADR-0042): a link that leads out of it fails the repack
 /// naming it, one that names nothing inside it is left out, and the copy carries no link
 /// (ADR-0034).
 fn copy_from_tree(root: &Path, from: &Path, to: &Path) -> Result<(), String> {
@@ -2387,7 +2387,7 @@ fn copy_from_tree(root: &Path, from: &Path, to: &Path) -> Result<(), String> {
         Resolution::Nothing => Ok(()),
         Resolution::LeadsOut => Err(format!(
             "{} leads out of the tree it was unpacked into, and a repack follows no link out of \
-             its tree (ADR-0037)",
+             its tree (ADR-0042)",
             from.display()
         )),
         Resolution::Special => Err(format!(
@@ -3255,7 +3255,7 @@ echo done
     }
 
     /// What a maintainer script names is a path of the installed system, and inside the payload it
-    /// stays: a `..` or a relative path is refused rather than joined (ADR-0037).
+    /// stays: a `..` or a relative path is refused rather than joined (ADR-0042).
     /// Verifies: ADR-draft-icinga-2
     #[test]
     fn an_alternative_names_only_a_place_inside_the_payload() {
@@ -3283,7 +3283,7 @@ echo done
     /// An alternative is written only where nothing is, and never through a link: a name the
     /// payload already holds — as a file or as a link, dangling or not — is left as it is, and a
     /// directory link on the way fails the repack naming it rather than being written through
-    /// (ADR-0037).
+    /// (ADR-0042).
     /// Verifies: ADR-draft-icinga-2
     #[cfg(unix)]
     #[test]
@@ -4112,7 +4112,7 @@ Section: libs
     /// the programs need is followed through the libraries gathered for them, a link resolves to
     /// its file inside its package's tree, glibc stays behind — and a library the packages do not
     /// hold fails the repack naming it and who needs it, even where the host has it, as does a
-    /// link that would reach into the host for it (ADR-draft-icinga-2 clause 18, ADR-0037).
+    /// link that would reach into the host for it (ADR-draft-icinga-2 clause 18, ADR-0042).
     /// Verifies: ADR-draft-icinga-2
     #[cfg(unix)]
     #[test]
@@ -4184,15 +4184,15 @@ Section: libs
         let refused =
             super::bundle_libraries(&[wants_more], &dir.path().join("third/lib"), &[&packages])
                 .expect_err("a link into the host");
-        assert!(refused.contains("ADR-0037"), "{refused}");
+        assert!(refused.contains("ADR-0042"), "{refused}");
     }
 
     use super::*;
 
     /// What the Icinga 2 repack copies out of an unpacked vendor package is resolved inside that
-    /// tree alone (ADR-0037): a link to a file of the tree is copied as that file, a link into the
+    /// tree alone (ADR-0042): a link to a file of the tree is copied as that file, a link into the
     /// host's file system fails the repack naming it, and a link to nothing is left out.
-    /// Verifies: ADR-0037
+    /// Verifies: ADR-0042
     #[cfg(unix)]
     #[test]
     fn a_copy_out_of_an_unpacked_package_follows_no_link_out_of_it() {
@@ -4226,7 +4226,7 @@ Section: libs
         let err = copy_from_tree(&unpacked, &plugins, &dir.path().join("again"))
             .expect_err("a link into the host");
         assert!(
-            err.contains("check_host") && err.contains("ADR-0037"),
+            err.contains("check_host") && err.contains("ADR-0042"),
             "{err}"
         );
         std::fs::remove_file(plugins.join("check_host")).expect("remove");
