@@ -1,8 +1,9 @@
 name: Checks
 
 # Enforces the repository's rules as CI. Pure bash + coreutils — nothing is installed but the Rust
-# toolchain of the Rust jobs and the stores the two store jobs start (ShellCheck, used by the shell
-# job, ships preinstalled on the GitHub-hosted runner image).
+# toolchain of the Rust jobs, the stores the two store jobs start, and SoftHSM2, the PKCS#11 token
+# the rust job and the PostgreSQL store job test the Server's keys on a token against
+# (ShellCheck, used by the shell job, ships preinstalled on the GitHub-hosted runner image).
 # scripts/check-all.sh is the local equivalent; check 9 of scripts/check-docs.sh holds its list,
 # the jobs of this workflow, and the required checks named in CONTRIBUTING.md together. A job runs
 # each check after its self-test where it has one, and each script's header says what it checks
@@ -229,6 +230,10 @@ jobs:
           persist-credentials: false
       # rustup honours rust-toolchain.toml (the pinned release + rustfmt + clippy) on first use.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # The token the tests of the Server's keys on a PKCS#11 token run against; check-rust.sh
+      # gives it a configuration of its own and fails a CI run without it.
+      - name: Install SoftHSM2
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends softhsm2
       - name: Build, test and lint the workspace
         run: bash scripts/check-rust.sh
 
@@ -329,6 +334,9 @@ jobs:
         with:
           persist-credentials: false
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # The token the tests of several instances on one PKCS#11 token run against.
+      - name: Install SoftHSM2
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends softhsm2
       - name: Start PostgreSQL with TLS
         # The connection the Server makes: TLS 1.3, the database's certificate verified against
         # the CA made here and its name checked (ADR-0023 clause 24). Started by `docker run`
