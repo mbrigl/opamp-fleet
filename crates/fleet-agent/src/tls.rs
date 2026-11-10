@@ -47,7 +47,7 @@ pub fn client_tls_for(
     config: &ClientConfig,
     candidate_cert: Option<&[u8]>,
 ) -> Result<ClientTls, String> {
-    let ca_pem = config.ca_file().map(certificates_file).transpose()?;
+    let ca_pem = trust_pem(config)?;
     let identity = match candidate_cert {
         Some(cert) => {
             // An offered certificate belongs to the key this Client generated for its request;
@@ -107,9 +107,17 @@ pub fn client_tls_for(
 /// Returns an error naming the CA file that cannot be read or holds no certificate.
 pub fn trust(config: &ClientConfig) -> Result<ClientTls, String> {
     Ok(ClientTls {
-        ca_pem: config.ca_file().map(certificates_file).transpose()?,
+        ca_pem: trust_pem(config)?,
         identity: None,
     })
+}
+
+/// The certificates of `[tls] ca_file`: those an enrolment read into memory, else the file's.
+fn trust_pem(config: &ClientConfig) -> Result<Option<Vec<u8>>, String> {
+    match &config.ca_pem {
+        Some(pem) => Ok(Some(pem.clone())),
+        None => config.ca_file().map(certificates_file).transpose(),
+    }
 }
 
 /// A PEM file of certificates, parsed here so that a bad one is named by its path.
@@ -117,7 +125,7 @@ pub(crate) fn certificates_file(path: &Path) -> Result<Vec<u8>, String> {
     certificates_in(path, read(path)?)
 }
 
-fn certificates_in(path: &Path, pem: Vec<u8>) -> Result<Vec<u8>, String> {
+pub(crate) fn certificates_in(path: &Path, pem: Vec<u8>) -> Result<Vec<u8>, String> {
     opamp::tls::certificates(&pem).map_err(|e| format!("{}: {e}", path.display()))?;
     Ok(pem)
 }
@@ -128,7 +136,7 @@ pub(crate) fn key_file(path: &Path) -> Result<Zeroizing<Vec<u8>>, String> {
     key_in(path, read(path)?)
 }
 
-fn key_in(path: &Path, pem: Vec<u8>) -> Result<Zeroizing<Vec<u8>>, String> {
+pub(crate) fn key_in(path: &Path, pem: Vec<u8>) -> Result<Zeroizing<Vec<u8>>, String> {
     let pem = Zeroizing::new(pem);
     opamp::tls::private_key(&pem)
         .map(Zeroizing::new)
@@ -201,8 +209,70 @@ pub(crate) fn pem_block(label: &str, der: &[u8]) -> Zeroizing<String> {
     pem
 }
 
+/// A file `[tls]` names, read by its path: the run-time Client's own files, which its operator
+/// may reach through a link. A privileged enrolment reads them through
+/// [`crate::service::enrol`] instead, and never by this path (ADR-0021 clause 11).
 fn read(path: &Path) -> Result<Vec<u8>, String> {
-    std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))
+    read_bounded(path)
+        .map(|mut bytes| std::mem::take(&mut *bytes))
+        .map_err(|why| format!("cannot read {}: {why}", path.display()))
+}
+
+/// The most a PEM file of certificates or a key may hold: a bundle of many certificates is far
+/// below it.
+pub(crate) const MAX_PEM_BYTES: u64 = 1 << 20;
+
+/// The bytes of the regular file at `path`, of at most [`MAX_PEM_BYTES`], in a buffer wiped when
+/// it is dropped (ADR-0014). The error says why, and leaves naming the file to the caller.
+///
+/// Anything but a regular file is refused before it is opened, and again by what was opened, so
+/// a FIFO or a device at the name — `/dev/zero` — is never read. On Unix the open does not block,
+/// so a FIFO swapped in between the two looks is refused as well.
+///
+/// # Errors
+/// Returns why the file was not read.
+pub(crate) fn read_bounded(path: &Path) -> Result<Zeroizing<Vec<u8>>, String> {
+    let before = std::fs::metadata(path).map_err(|e| e.to_string())?;
+    check_regular(&before)?;
+    let mut open = std::fs::OpenOptions::new();
+    open.read(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::custom_flags(&mut open, libc::O_NONBLOCK);
+    read_opened(open.open(path).map_err(|e| e.to_string())?)
+}
+
+/// What the opened `file` holds, where it is a regular file of at most [`MAX_PEM_BYTES`].
+///
+/// # Errors
+/// Returns why the file was not read.
+pub(crate) fn read_opened(file: std::fs::File) -> Result<Zeroizing<Vec<u8>>, String> {
+    use std::io::Read as _;
+    let meta = file.metadata().map_err(|e| e.to_string())?;
+    check_regular(&meta)?;
+    // Read at its size, so no grown buffer is left behind unwiped; a file that grew past the
+    // bound since is refused.
+    let mut bytes = Zeroizing::new(Vec::with_capacity(
+        usize::try_from(meta.len()).unwrap_or_default(),
+    ));
+    file.take(MAX_PEM_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    if bytes.len() as u64 > MAX_PEM_BYTES {
+        return Err(not_regular());
+    }
+    Ok(bytes)
+}
+
+fn check_regular(meta: &std::fs::Metadata) -> Result<(), String> {
+    if meta.is_file() && meta.len() <= MAX_PEM_BYTES {
+        Ok(())
+    } else {
+        Err(not_regular())
+    }
+}
+
+fn not_regular() -> String {
+    format!("not a regular file of at most {MAX_PEM_BYTES} bytes")
 }
 
 /// A file of the state directory, never read through a link: an install reads it as root, and the
@@ -214,6 +284,36 @@ fn state_file(path: &Path) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The run-time Client reads a `[tls]` file only as a regular file within the bound: a file
+    /// over it is refused, naming it, and so is a FIFO, without waiting for a writer.
+    #[test]
+    fn a_tls_file_is_read_only_as_a_regular_file_within_the_bound() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let large = dir.path().join("large.pem");
+        std::fs::File::create(&large)
+            .expect("large")
+            .set_len(MAX_PEM_BYTES + 1)
+            .expect("size");
+        let refused = certificates_file(&large).expect_err("over the bound");
+        assert!(refused.contains("large.pem"), "{refused}");
+        assert!(refused.contains("at most"), "{refused}");
+
+        #[cfg(unix)]
+        {
+            let fifo = dir.path().join("fifo.pem");
+            let name = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).expect("name");
+            // SAFETY: `name` is a valid NUL-terminated path.
+            assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0, "mkfifo");
+            let (done, wait) = std::sync::mpsc::channel();
+            std::thread::spawn(move || done.send(key_file(&fifo).err()));
+            let refused = wait
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .expect("the FIFO held the read up")
+                .expect("refused");
+            assert!(refused.contains("not a regular file"), "{refused}");
+        }
+    }
 
     /// A `bootstrap.p12` opens to PEM in memory and stands in for the configured identity until
     /// the Server's certificate is stored; a file over the bound is refused unread (ADR-0027

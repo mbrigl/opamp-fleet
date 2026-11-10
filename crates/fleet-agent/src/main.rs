@@ -620,7 +620,7 @@ fn install(
         // Before anything is staged or registered (ADR-0020 clause 26): an enrolment that is stopped
         // leaves the answered file and nothing else.
         if let Some(bootstrap) = &written.bootstrap {
-            enrol::run(&config, bootstrap)?;
+            enrol::run(&config, bootstrap, &[&data_root, &layout_root])?;
         }
         // And held to what the Client needs at startup. A packaged install registers the service
         // even so — it has an endpoint and no client identity to write — but never starts it, and
@@ -866,7 +866,7 @@ fn configure(
     let state_dir = config.service_state_dir(&roots)?;
     config.state_dir.clone_from(&state_dir);
     if let Some(bootstrap) = &written.bootstrap {
-        enrol::run(&config, bootstrap)?;
+        enrol::run(&config, bootstrap, &[&data_root, &roots.layout])?;
     }
     // What this run created belongs to whoever owns the configuration — the service's account when
     // it runs as one (ADR-0021 clause 1) — not to the administrator who ran it.

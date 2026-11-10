@@ -108,6 +108,11 @@ pub struct ClientConfig {
     /// certificate; set by the install, never by the file.
     #[serde(skip)]
     pub bootstrap_identity: Option<BootstrapIdentity>,
+    /// The certificates of `[tls] ca_file`, read once by a privileged enrolment and held in memory
+    /// (ADR-0021 clause 11): while set, they are the trust, and the file is not read again. Set by
+    /// the install, never by the file.
+    #[serde(skip)]
+    pub ca_pem: Option<Vec<u8>>,
     /// The process account's primary group, where a process account is registered (ADR-0021
     /// clause 21): what the Client shares with the Managed Processes belongs to it. Set by the run
     /// from the `--process-uid` its registration names, never by the file.
@@ -1001,6 +1006,7 @@ impl Default for ClientConfig {
             path: None,
             state_dir_as_written: default_state_dir(),
             bootstrap_identity: None,
+            ca_pem: None,
             process_account_group: None,
             max_message_size_bytes: default_max_message_size(),
             max_artifact_size_bytes: default_max_artifact_size(),

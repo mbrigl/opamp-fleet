@@ -151,20 +151,12 @@ const ALLOWED: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "src/tls.rs",
-        "read",
-        "fs::read(",
-        "the files `[tls]` names, by the path `supervisor.toml` gives; among them the CA copy \
-         `service install` put in the data root, which the account owns, so a link the account \
-         placed there is followed: an open gap, backlog measure H21 in `docs/HARDENING.md`; \
-         what the state directory holds is read through `state_file`",
-    ),
-    (
-        "src/config_init.rs",
-        "read_certificates",
+        "read_bounded",
         "OpenOptions::new(",
-        "opens the CA file the answer names to read it, never to change it, and without blocking: \
-         what it opened is used only when it is a regular file, and only its certificates are \
-         copied",
+        "opens a file to read it, never to change it, and without blocking, used only when it is \
+         a regular file of at most 1 MiB: in a privileged step, the CA file an answer names, of \
+         which only the certificates are copied; the enrolment reads through held directories \
+         (`service::enrol`)",
     ),
     (
         "src/main.rs",

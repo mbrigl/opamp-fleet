@@ -203,10 +203,18 @@ has:
   a root is created one held directory at a time; and the `current` pointer is switched in the
   held layout root on Windows, while on Unix it is switched by name in the layout root, whose own
   name lies in a directory only root writes, each step acting on the name and following no link.
-  A privileged step reads `supervisor.toml` through the held data root too. A test holds the
-  modules these steps run in to no path-based read, write, removal, rename or mode change outside
-  a justified list (`privileged_steps_follow_no_link.rs`). Not yet: the files `[tls]` names, which
-  the enrolment in `service config` reads by path (H21).
+  A privileged step reads `supervisor.toml` through the held data root too. The enrolment of
+  `service install` and `service config` reads the CA file and the bootstrap pair once, before it
+  connects, and holds them in memory: each only as a regular file of at most 1 MiB, so a device or
+  a FIFO is refused unread, and each by its name in a held directory, refusing a link there. The
+  path is resolved one component at a time, `..` and every link on it included: a root or the
+  state directory it passes must hold the file directly, and a path that goes on beneath one is
+  refused, except the state directory directly in a root, which is held by its name without
+  following a link there. Elsewhere a link on the administrator's path is followed.
+  A test holds the modules these steps run in to no path-based read, write, removal, rename or mode
+  change outside a justified list (`privileged_steps_follow_no_link.rs`). Not yet: the enrolment
+  takes `endpoint` and the `[tls]` paths from `supervisor.toml` as it reads it back, which the
+  account can rewrite (H21).
 - **No credential in `server.toml` authenticates on its own** (ADR-0040 clause 21): an operator's
   Basic password is kept as an Argon2id hash of at least the OWASP minimum, and a value in clear is
   refused at startup without being echoed. The Server offers no credential (ADR-0013).
@@ -355,24 +363,20 @@ whose self-update rests on the package signature.
 
 ## The privileged install
 
-🔴 **H21 — A privileged enrolment reads the `[tls]` files bounded, and trusts no file the account
-could have changed.** `service config` enrols as root or an Administrator and reads the files
-`[tls]` names — `ca_file`, `cert_file`, `key_file` — by path, with no check that each is a regular
-file and no bound on its size. The paths come from `supervisor.toml`, and the CA copy
-`service install` puts beside it lies in the data root; both are in a directory the service's
-account owns. An account that is taken over can so make the privileged step read a device without
-end (`/dev/zero`), read a file only root may read, or follow a link at the CA copy and trust a
-Server of its choosing for the enrolment. Reading the copy without following a link alone does not
-close it: the account owns the copy's bytes and can rewrite the `[tls]` paths and `endpoint` in
-`supervisor.toml`. Two steps are open, and they do not exclude each other: each `[tls]` file is read
-only as a regular file under a size cap, and through the held directory where it lies in the data
-root or the state directory; and a run that copied the CA itself enrols with the certificates it
-copied, rather than reading back what the account may have changed.
-**Cost:** small for the bounded read, which `config_init`'s reading of the CA file already does; a
-change to the enrolment's interface for the copied trust.
+🟡 **H21 — A privileged enrolment trusts no file the account could have changed.** `service
+config` and `service install` enrol as root or an Administrator. The files `[tls]` names are read
+bounded and through no link in the account's directories (see
+[What already holds](#what-already-holds)). What remains: the enrolment takes `endpoint` and the
+`[tls]` paths from `supervisor.toml` as it reads the file back after writing it, and the file lies
+in a directory the service's account owns. An account that is taken over can rewrite the file in
+between, or the CA copy beside it, and so make the privileged step enrol with a Server of its
+choosing. The step that is open: a run that answered the questionnaire, and copied the CA itself,
+enrols with the `endpoint` and the certificates it holds in memory, rather than reading back what
+the account may have changed.
+**Cost:** a change to what the questionnaire hands the enrolment.
 **To work out:** whether a privileged step may take `endpoint` and the `[tls]` paths from a file in
-the account's directory at all, which would be a clause of
-[ADR-0021](adr/0021-the-accounts-the-service-runs-under.md); and the size cap.
+the account's directory at all, which would be a clause beside
+[ADR-0021](adr/0021-the-accounts-the-service-runs-under.md).
 
 ## The channels that put code on the host
 
@@ -444,6 +448,5 @@ with the measure when it moves up into [What already holds](#what-already-holds)
   X25519MLKEM768, and one with a peer that offers only X25519 still connects. The signatures: a
   package and a floor signed both ways verify on a Client that knows only Ed25519 and on one that
   knows ML-DSA. The certificates: a peer that verifies only classical chains still connects.
-- **H21** — a `[tls]` path in `supervisor.toml` that names a device or a file over the cap makes
-  `service config` refuse it, naming it, without reading it whole; a link the account placed at the
-  CA copy in the data root is not followed by the enrolment.
+- **H21** — a `supervisor.toml` the account rewrites between the questionnaire's write and the
+  enrolment changes neither the endpoint nor the trust that `service config` enrols with.

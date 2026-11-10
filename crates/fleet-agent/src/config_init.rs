@@ -377,46 +377,15 @@ pub fn copy_ca_beside(answers: Answers, config: &Path) -> Result<(Answers, Vec<P
     ))
 }
 
-/// The most a CA file may hold: a bundle of many certificates is far below it.
-const MAX_CA_BYTES: u64 = 1 << 20;
-
-/// The certificates of the CA file at `path`, a regular file, encoded again as PEM: what the
-/// copy holds is these and nothing else the file had beside them. A file without a certificate is
-/// refused, and the refusal never repeats what the file holds.
+/// The certificates of the CA file at `path`, encoded again as PEM: what the copy holds is these
+/// and nothing else the file had beside them. A file without a certificate is refused, and the
+/// refusal never repeats what the file holds.
 ///
-/// Anything but a regular file is refused before it is opened, and again by what was opened: a
-/// FIFO or a device the service's account placed at the name never holds this step up. On Unix
-/// the open does not block, so a FIFO swapped in between the two looks is refused as well.
+/// The file is read as [`crate::tls::read_bounded`] reads it: anything but a regular file of at
+/// most [`crate::tls::MAX_PEM_BYTES`] is refused unread, so a FIFO or a device the service's
+/// account placed at the name never holds this step up.
 fn read_certificates(path: &Path) -> Result<Vec<u8>, String> {
-    use std::io::Read as _;
-    let not_a_file = || {
-        format!(
-            "{} is not a CA file: not a regular file of at most {MAX_CA_BYTES} bytes",
-            path.display()
-        )
-    };
-    let regular = |meta: &std::fs::Metadata| meta.is_file() && meta.len() <= MAX_CA_BYTES;
-    let before =
-        std::fs::metadata(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    if !regular(&before) {
-        return Err(not_a_file());
-    }
-    let mut open = std::fs::OpenOptions::new();
-    open.read(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::custom_flags(&mut open, libc::O_NONBLOCK);
-    let file = open
-        .open(path)
-        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    let meta = file
-        .metadata()
-        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    if !regular(&meta) {
-        return Err(not_a_file());
-    }
-    let mut bytes = zeroize::Zeroizing::new(Vec::new());
-    file.take(MAX_CA_BYTES)
-        .read_to_end(&mut bytes)
+    let bytes = crate::tls::read_bounded(path)
         .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     let certificates = opamp::tls::certificates(&bytes).map_err(|_| {
         format!(

@@ -315,8 +315,12 @@ no module.
   `supervisor.toml` is read by a privileged step through `ClientConfig::load_held` and rewritten,
   by an install and by a Server-driven apply alike, through `config_file::replace`, in the held
   directory, which on Windows refuses a configuration directory that is a reparse point for the
-  apply too; the run-time Client reads it by path with `load`. What else runs under the Client's
-  or the process account — the self-update's and a Supervisor's program staging through
+  apply too; the run-time Client reads it by path with `load`. The privileged enrolment
+  (`service::enrol`) reads the CA file and the bootstrap pair once, before it connects, into
+  `ClientConfig::ca_pem` and `bootstrap_identity`: a regular file of at most 1 MiB, opened by its
+  name in a held directory. The path is resolved one component at a time, and a root or the state
+  directory it passes must hold the file directly. What else runs under the
+  Client's or the process account — the self-update's and a Supervisor's program staging through
   `install`, the Gateway's package cache, and the second service's purge on Windows, which goes
   by path — works by path in directories that account owns and no other account may write.
 - **Client configuration** — `config` is what `supervisor.toml` may say and the rules it must meet
