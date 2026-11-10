@@ -16,12 +16,9 @@ use std::path::{Path, PathBuf};
 /// # Errors
 /// Names what failed: `gpgv` missing, a signature that does not match, none by a pinned key, or a
 /// run `gpgv` failed.
-#[cfg_attr(
-    any(not(test), not(target_os = "linux")),
-    expect(
-        dead_code,
-        reason = "only a kind whose upstream signs with OpenPGP verifies a signature"
-    )
+#[allow(
+    dead_code,
+    reason = "a kind whose upstream signs with OpenPGP verifies with it, and the core carries none"
 )]
 pub(crate) fn verify_detached(
     signature: &[u8],
@@ -51,12 +48,9 @@ pub(crate) fn verify_detached(
 ///
 /// # Errors
 /// As [`verify_detached`], and a signed part that is not UTF-8 text.
-#[cfg_attr(
-    any(not(test), not(target_os = "linux")),
-    expect(
-        dead_code,
-        reason = "only a kind whose upstream signs with OpenPGP verifies a signature"
-    )
+#[allow(
+    dead_code,
+    reason = "a kind whose upstream signs with OpenPGP verifies with it, and the core carries none"
 )]
 pub(crate) fn verify_clearsigned(
     signed: &[u8],
@@ -85,12 +79,9 @@ pub(crate) fn verify_clearsigned(
 
 /// Runs `with` in a home of this process's own holding `keyring`, and removes the home after it,
 /// whatever `with` answered.
-#[cfg_attr(
-    any(not(test), not(target_os = "linux")),
-    expect(
-        dead_code,
-        reason = "only a kind whose upstream signs with OpenPGP verifies a signature"
-    )
+#[allow(
+    dead_code,
+    reason = "a kind whose upstream signs with OpenPGP verifies with it, and the core carries none"
 )]
 fn in_own_home<T>(
     keyring: &[u8],
@@ -106,12 +97,9 @@ fn in_own_home<T>(
 /// Runs `gpgv` in `home` against `keyring` with `args` after its options, and answers its status
 /// lines and whether it succeeded. Every path is absolute: `gpgv` reads a bare keyring name from
 /// its home.
-#[cfg_attr(
-    any(not(test), not(target_os = "linux")),
-    expect(
-        dead_code,
-        reason = "only a kind whose upstream signs with OpenPGP verifies a signature"
-    )
+#[allow(
+    dead_code,
+    reason = "a kind whose upstream signs with OpenPGP verifies with it, and the core carries none"
 )]
 fn gpgv(home: &Path, keyring: &Path, args: &[&std::ffi::OsStr]) -> Result<(String, bool), String> {
     let output = std::process::Command::new("gpgv")
@@ -139,12 +127,9 @@ fn gpgv(home: &Path, keyring: &Path, args: &[&std::ffi::OsStr]) -> Result<(Strin
 /// `primaries`. A subkey that has expired since it signed is still its primary's (`EXPKEYSIG`
 /// beside the `VALIDSIG`). A signature by a key the keyring does not hold (`ERRSIG`) is no
 /// evidence either way, since an archive may sign with several keys at once, and does not decide.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "only a kind whose upstream signs with OpenPGP verifies a signature"
-    )
+#[allow(
+    dead_code,
+    reason = "a kind whose upstream signs with OpenPGP verifies with it, and the core carries none"
 )]
 fn verdict(status: &str, primaries: &[&str]) -> Result<(), String> {
     let statuses: Vec<&str> = status
@@ -177,12 +162,9 @@ fn verdict(status: &str, primaries: &[&str]) -> Result<(), String> {
 /// The verdict on a detached signature: [`verdict`]'s, and a run `gpgv` calls a success. A file
 /// beside an artifact carries the one signature its upstream made, so a failing run has nothing
 /// beside a good signature to excuse it.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "only a kind whose upstream signs with OpenPGP verifies a signature"
-    )
+#[allow(
+    dead_code,
+    reason = "a kind whose upstream signs with OpenPGP verifies with it, and the core carries none"
 )]
 fn detached_verdict(status: &str, succeeded: bool, primaries: &[&str]) -> Result<(), String> {
     verdict(status, primaries)?;
@@ -196,12 +178,9 @@ fn detached_verdict(status: &str, succeeded: bool, primaries: &[&str]) -> Result
 
 /// A directory of this process's own under the system's temporary directory, owner-only, for
 /// `gpgv`'s home.
-#[cfg_attr(
-    any(not(test), not(target_os = "linux")),
-    expect(
-        dead_code,
-        reason = "only a kind whose upstream signs with OpenPGP verifies a signature"
-    )
+#[allow(
+    dead_code,
+    reason = "a kind whose upstream signs with OpenPGP verifies with it, and the core carries none"
 )]
 fn own_home() -> Result<PathBuf, String> {
     // The clock and a count: two verifications in one process within one clock tick get two.
@@ -226,12 +205,9 @@ fn own_home() -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-#[cfg_attr(
-    any(not(test), not(target_os = "linux")),
-    expect(
-        dead_code,
-        reason = "only a kind whose upstream signs with OpenPGP verifies a signature"
-    )
+#[allow(
+    dead_code,
+    reason = "a kind whose upstream signs with OpenPGP verifies with it, and the core carries none"
 )]
 fn write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     std::fs::write(path, bytes).map_err(|e| format!("cannot write {}: {e}", path.display()))

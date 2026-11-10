@@ -91,9 +91,9 @@ to push.
 
 ## 2. Build the artifact
 
-**For the Collector this step and the next two are one command.**
-[`opamp-fleetctl package fetch`](tools.md#package-fetch) knows where the OpenTelemetry Collector
-(`otelcol`, `otelcol-contrib`) publishes, and asks what it cannot
+**For an agent `package fetch` knows, this step and the next two are one command.**
+[`opamp-fleetctl package fetch`](tools.md#package-fetch) knows where each publishes, the
+OpenTelemetry Collector (`otelcol`, `otelcol-contrib`) among them, and asks what it cannot
 know — which agent, which of the last five versions, which platforms, and where to upload:
 
 ```console

@@ -665,8 +665,8 @@ impl InstallTarget {
 /// by a check (ADR-0018).
 #[derive(Debug, Clone)]
 pub struct Staged {
-    /// The staged tree's root, or the staged file's directory. `${staged}` in a
-    /// [`Preflight`]'s environment resolves to this.
+    /// The staged tree's root, or the staged file's directory. [`STAGED`] in a [`Preflight`]
+    /// resolves to this.
     root: PathBuf,
     /// The program itself, inside the staged tree.
     program: PathBuf,
@@ -680,24 +680,49 @@ pub struct Staged {
 /// library the host does not have and a libc too old for the build in one go, and the dynamic
 /// linker's own message — *"version `GLIBC_2.39' not found"* — is what the fleet gets told
 /// (ADR-0018). Whatever is run must be cheap and must not touch state; `--version` is the shape.
+///
+/// [`STAGED`] resolves to the staged tree's root wherever it appears — in an argument, in a value
+/// of the environment, in the working directory — so a tree carrying its own libraries, or a
+/// program that is handed paths into its own tree, is checked against **those** rather than
+/// against the ones the running version happens to leave behind
+/// (ADR-draft-supervisor-mode-and-its-kinds clause 56).
 pub struct Preflight {
     pub args: Vec<String>,
-    /// Environment for the check. `${staged}` in a value resolves to the staged tree's root, so a
-    /// tree carrying its own libraries is checked against **those** rather than against the ones
-    /// the running version happens to leave behind.
+    /// Environment for the check.
     pub env: Vec<(String, String)>,
+    /// Where the check starts. `None` inherits, as the version probe does; a kind whose program
+    /// needs its tree root names `Some(STAGED)`, as it names the live root for the start.
+    pub working_dir: Option<String>,
 }
+
+/// What a [`Preflight`] writes for the staged tree's root, which nobody knows before the package
+/// is staged.
+pub const STAGED: &str = "${staged}";
+
+/// The health status while `build` yields no process. It carries no reason of its own — the Runner
+/// does not know why — so a kind that does may add one on its way to the core (ADR-0018).
+pub const AWAITING_CONFIGURATION: &str = "awaiting configuration";
 
 /// How to ask a Managed Process for its own version — the program to run and the arguments that
 /// make it print one. `None` on a Runner whose plugin has no such convention.
+#[derive(Clone)]
 pub struct VersionProbe {
     pub program: PathBuf,
     pub args: Vec<String>,
+    /// Where the probe starts; `None` inherits. A kind whose program needs its tree root to run at
+    /// all names it here as it does for the start, or the probe asks a program that is not the
+    /// one the Supervisor runs (ADR-draft-supervisor-mode-and-its-kinds clause 56).
+    pub working_dir: Option<PathBuf>,
     /// How to read a version out of what the program printed. `None` is [`find_semver`], the strict
     /// Semantic Versioning read. A program whose version banner is not SemVer, such as
     /// `r2.14.6-1`, would report none at all, so a kind that knows its program's convention says
     /// so here (ADR-0018).
     pub parse: Option<fn(&str) -> Option<String>>,
+    /// Environment for the probe, empty by default. A kind whose start hands its program an
+    /// environment it needs to run at all — a tree's own library path — hands the probe the same,
+    /// or the probe asks a program that cannot start
+    /// (ADR-draft-supervisor-mode-and-its-kinds clause 56).
+    pub env: Vec<(String, String)>,
 }
 
 /// The adapter task driving one Managed Process. The plugin supplies `build`: the current
@@ -710,7 +735,9 @@ pub const ENDPOINT_TOKEN_ENV: &str = "OPAMP_SUPERVISOR_TOKEN";
 pub struct Runner {
     pub name: String,
     /// Handed to the Managed Process as [`ENDPOINT_TOKEN_ENV`] (ADR-0016); wiped when it is
-    /// dropped (ADR-0014).
+    /// dropped (ADR-0014). Empty where the kind declares that its program gets no token, because
+    /// it never connects to the Supervisor Endpoint, and an empty one is not set
+    /// (ADR-draft-client-modes-and-the-gateway clause 28).
     pub endpoint_token: zeroize::Zeroizing<String>,
     pub stop_timeout: Duration,
     /// How long a freshly (re)started process must survive before `ApplyConfig` is acknowledged
@@ -1616,9 +1643,7 @@ impl Runner {
             tokio::spawn(probe_version(
                 self.spawner.clone(),
                 self.name.clone(),
-                probe.program.clone(),
-                probe.args.clone(),
-                probe.parse,
+                probe.clone(),
                 self.events.clone(),
             ));
         }
@@ -1673,7 +1698,7 @@ impl Runner {
         let Some(spec) = (self.build)() else {
             self.events
                 .send(ProcessEvent::Health(unhealthy(
-                    "awaiting configuration".to_string(),
+                    AWAITING_CONFIGURATION.to_string(),
                     String::new(),
                 )))
                 .await;
@@ -1788,9 +1813,9 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 /// covers a Client that was down when a deadline elapsed.
 const SWEEP_INTERVAL: Duration = Duration::from_secs(600);
 
-/// Runs `<program> <args>` once and reports the Managed Process's version as a Description
-/// event, if the output contains one. Best effort by design: a missing binary, a hang, or
-/// versionless output is logged and otherwise ignored — probing must never break supervision.
+/// Runs the probe's `<program> <args>` once and reports the Managed Process's version as a
+/// Description event, if the output contains one. Best effort by design: a missing binary, a hang,
+/// or versionless output is logged and otherwise ignored — probing must never break supervision.
 ///
 /// A later self-report through the Supervisor Endpoint replaces the probed value.
 ///
@@ -1799,17 +1824,22 @@ const SWEEP_INTERVAL: Duration = Duration::from_secs(600);
 pub async fn probe_version(
     spawner: Spawner,
     supervisor: String,
-    program: PathBuf,
-    args: Vec<String>,
-    parse: Option<fn(&str) -> Option<String>>,
+    probe: VersionProbe,
     events: EventSender,
 ) {
+    let VersionProbe {
+        program,
+        args,
+        working_dir,
+        parse,
+        env,
+    } = probe;
     let launch = Launch {
         program: program.clone(),
         args,
-        env: Vec::new(),
+        env,
         endpoint_token: None,
-        working_dir: None,
+        working_dir,
         own_process_group: false,
     };
     let output = match spawner.output(&supervisor, &launch).await {
@@ -1899,21 +1929,21 @@ async fn run_preflight(
     staged: &Staged,
     preflight: &Preflight,
 ) -> Preflighted {
+    let root = staged.root.to_string_lossy();
+    let resolve = |value: &str| value.replace(STAGED, &root);
     let launch = Launch {
         program: staged.program.clone(),
-        args: preflight.args.clone(),
+        args: preflight.args.iter().map(|arg| resolve(arg)).collect(),
         env: preflight
             .env
             .iter()
-            .map(|(key, value)| {
-                (
-                    key.clone(),
-                    value.replace("${staged}", &staged.root.to_string_lossy()),
-                )
-            })
+            .map(|(key, value)| (key.clone(), resolve(value)))
             .collect(),
         endpoint_token: None,
-        working_dir: None,
+        working_dir: preflight
+            .working_dir
+            .as_deref()
+            .map(|dir| PathBuf::from(resolve(dir))),
         own_process_group: false,
     };
     let output = match spawner.output(supervisor, &launch).await {
@@ -1988,18 +2018,18 @@ enum Reloaded {
 /// for an agent that re-reads its configuration on `SIGHUP` (ADR-0018). Off Unix the Runner then
 /// applies by restarting, so one block serves every platform.
 #[cfg(unix)]
-#[expect(
+#[allow(
     dead_code,
-    reason = "only the wrapped kinds that reload by signal call it"
+    reason = "only a wrapped kind that reloads by signal calls it, and the core carries none"
 )]
 pub(crate) fn sighup() -> Option<i32> {
     Some(libc::SIGHUP)
 }
 
 #[cfg(not(unix))]
-#[expect(
+#[allow(
     dead_code,
-    reason = "only the wrapped kinds that reload by signal call it"
+    reason = "only a wrapped kind that reloads by signal calls it, and the core carries none"
 )]
 pub(crate) fn sighup() -> Option<i32> {
     None
@@ -2504,6 +2534,7 @@ mod tests {
         runner.preflight = Some(Preflight {
             args: Vec::new(),
             env: Vec::new(),
+            working_dir: None,
         });
         let mut s = Supervision {
             child: None,
@@ -3364,21 +3395,28 @@ mod tests {
     }
 
     /// With a process account registered, the version probe is run by the second service, not by
-    /// the Client — the program it names is not even on this host — and what the service relays
-    /// of its output is what the version is read from (ADR-0021 clause 18).
-    /// Verifies: ADR-0021
+    /// the Client — the program it names is not even on this host — in the working directory and
+    /// with the environment its kind names, and what the service relays of its output is what the
+    /// version is read from
+    /// (ADR-0021 clause 18, ADR-draft-supervisor-mode-and-its-kinds clause 56).
+    /// Verifies: ADR-0021, ADR-draft-supervisor-mode-and-its-kinds
     #[cfg(unix)]
     #[tokio::test]
     async fn the_version_probe_runs_through_the_second_service() {
         use crate::supervisor::channel::Stream;
         let (peer, mut asked) = answering(Stream::Stdout, "agent version 1.2.3", 0).await;
         let (event_tx, mut events) = mpsc::channel(4);
+        let env = vec![("LD_LIBRARY_PATH".to_string(), "/nowhere/lib".to_string())];
         probe_version(
             Spawner::Channel(peer.channel.clone()),
             "test".to_string(),
-            PathBuf::from("/nowhere/agent"),
-            vec!["--version".to_string()],
-            None,
+            VersionProbe {
+                program: PathBuf::from("/nowhere/agent"),
+                args: vec!["--version".to_string()],
+                working_dir: Some(PathBuf::from("/nowhere")),
+                parse: None,
+                env: env.clone(),
+            },
             EventSender::new(0, event_tx),
         )
         .await;
@@ -3387,6 +3425,11 @@ mod tests {
             .expect("the probe was asked of the service");
         assert_eq!(launch.program, PathBuf::from("/nowhere/agent"));
         assert_eq!(launch.args, vec!["--version".to_string()]);
+        assert_eq!(launch.working_dir, Some(PathBuf::from("/nowhere")));
+        assert_eq!(
+            launch.env, env,
+            "the probe runs with its kind's environment"
+        );
         let (_, event) = events.try_recv().expect("a probed version");
         let ProcessEvent::Description(description) = event else {
             panic!("expected a Description event, got {event:?}");
@@ -3404,9 +3447,10 @@ mod tests {
     }
 
     /// With a process account registered, the preflight of a staged package is run by the second
-    /// service, with `${staged}` resolved in its environment, and what the program said through the
-    /// service is the reason it is refused (ADR-0021 clause 18).
-    /// Verifies: ADR-0021
+    /// service, with `${staged}` resolved in its arguments, its environment and its working
+    /// directory, and what the program said through the service is the reason it is refused
+    /// (ADR-0021 clause 18, ADR-draft-supervisor-mode-and-its-kinds clause 56).
+    /// Verifies: ADR-0021, ADR-draft-supervisor-mode-and-its-kinds
     #[cfg(unix)]
     #[tokio::test]
     async fn the_preflight_runs_through_the_second_service() {
@@ -3417,8 +3461,9 @@ mod tests {
             temp: PathBuf::from("/nowhere/program/.staging"),
         };
         let preflight = Preflight {
-            args: vec!["--version".to_string()],
+            args: vec!["-I${staged}/lib".to_string(), "--version".to_string()],
             env: vec![("LD_LIBRARY_PATH".to_string(), "${staged}/lib".to_string())],
+            working_dir: Some(STAGED.to_string()),
         };
 
         let (peer, mut asked) = answering(Stream::Stdout, "agent 2.0.0", 0).await;
@@ -3434,6 +3479,14 @@ mod tests {
             .try_recv()
             .expect("the preflight was asked of the service");
         assert_eq!(launch.program, staged.program);
+        assert_eq!(
+            launch.args,
+            vec![
+                "-I/nowhere/program/.staging/lib".to_string(),
+                "--version".to_string()
+            ]
+        );
+        assert_eq!(launch.working_dir, Some(staged.root.clone()));
         assert_eq!(
             launch.env,
             vec![(
@@ -3459,8 +3512,9 @@ mod tests {
 
     /// What the Client asks the second service to start carries no environment of the Client's:
     /// the block's `env` and the Supervisor Endpoint's token, last, and nothing else — the program
-    /// takes the rest from the second service (ADR-0021 clause 22).
-    /// Verifies: ADR-0021
+    /// takes the rest from the second service (ADR-0021 clause 22). A Runner holding no token sets
+    /// none.
+    /// Verifies: ADR-0021, ADR-draft-client-modes-and-the-gateway
     #[cfg(unix)]
     #[tokio::test]
     async fn a_start_through_the_second_service_carries_only_the_blocks_env_and_the_token() {
@@ -3498,6 +3552,17 @@ mod tests {
             launch.endpoint_token.as_deref().map(String::as_str),
             Some("the token")
         );
+
+        // A Runner holding no token, as a kind whose program never connects to the Supervisor
+        // Endpoint builds it, sets none (ADR-draft-client-modes-and-the-gateway clause 28).
+        let (peer, mut asked) = answering(Stream::Stdout, "", 0).await;
+        runner.endpoint_token = zeroize::Zeroizing::default();
+        runner.spawner = Spawner::Channel(peer.channel.clone());
+        runner.try_spawn().await.expect("started");
+        let launch = asked
+            .try_recv()
+            .expect("the start was asked of the service");
+        assert!(launch.endpoint_token.is_none());
     }
 
     /// Where a process account is registered, a tree is staged in a directory its group reads, so
@@ -3760,6 +3825,7 @@ mod tests {
         let preflight = Preflight {
             args: vec!["--version".to_string()],
             env: Vec::new(),
+            working_dir: None,
         };
         let outcome = run_preflight(&Spawner::Channel(channel), "test", &staged, &preflight).await;
         let Preflighted::Unreached(e) = outcome else {

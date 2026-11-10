@@ -100,7 +100,7 @@ The checks beyond these, each for what the plain build cannot show:
 | Check | Command | When, and what it needs |
 |---|---|---|
 | `opamp` per feature | `for f in "" client server; do cargo clippy -p opamp --all-targets --no-default-features --features "$f" -- -D warnings; done` | each feature stands alone (ADR-0008); run by `check-rust.sh` |
-| fewer Supervisor kinds | `cargo clippy -p fleet-agent --all-targets --no-default-features -- -D warnings && cargo test -p fleet-agent --no-default-features` | a build leaving a wrapped kind out compiles and refuses its `type` (ADR-0018); run by `check-rust.sh` |
+| fewer Supervisor kinds | `cargo clippy -p fleet-agent --all-targets --no-default-features -- -D warnings`, the same with `--features <kind>` for each feature of its `[features]` table but `default`, and `cargo test -p fleet-agent --no-default-features` | each wrapped kind is a feature, all on by default, so only these show that a build leaving one out compiles and refuses its `type` (ADR-0018); run by `check-rust.sh` |
 | Windows build | `cargo xwin clippy -p fleet-agent --all-targets --target x86_64-pc-windows-msvc -- -D warnings` | on a change to platform-gated code; needs `cargo install cargo-xwin` and `rustup target add x86_64-pc-windows-msvc`; CI builds the Client on Windows |
 | supply chain | `cargo deny check` | as [`deny.toml`](deny.toml) sets it; needs `cargo install cargo-deny`; the `Security audit` workflow runs it weekly and on lockfile changes |
 | fuzzing | `cargo +nightly fuzz run <target> fuzz/corpus/<target> fuzz/seeds/<target>` | the targets are in [`fuzz/Cargo.toml`](fuzz/Cargo.toml); needs `cargo install cargo-fuzz` and nightly; the `Fuzz` workflow runs them daily |
