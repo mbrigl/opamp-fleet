@@ -271,7 +271,7 @@ $ sig=$(opamp-fleetctl package sign --key fleet-signing.pk8 --agent-type promtai
 
 | `package` command | What it prints | Use it for |
 |---|---|---|
-| `keygen --out <file>` | the **public** key (hex) | the value for every Client's `[packages] verification_key`, and optionally the Server's; the private key goes in the file, ideally not on the Server host |
+| `keygen --out <file>` | the **public** key (hex) | the value for every Client's `[packages] verification_key`, and optionally the Server's; the private key goes in the file, ideally not on the Server host. The file is created owner-only (`0600` on Linux and macOS), and one that exists is refused rather than replaced: move it away or delete it first. |
 | `pack <program> --out <file>` | the artifact's SHA-256 (hex) | building a one-file artifact; `--format tar.gz\|7z`, `--program-name <name>`, `--archive-key <key>` |
 | `sign --key <file> --agent-type <type> --version <version> <artifact>` | the signature (hex) | the body of the entry's signature route, `PUT /api/v1/packages/{agent_type}/{version}/entries/{os}/{arch}/signature`. It covers the type, the version and the artifact's SHA-256 together, so it holds for that Package alone |
 | `floor --key <file> --agent-type <type> --version <version>` | the signature (hex) | the body of `PUT /api/v1/package-floors/{agent_type}`, with the version: no Client takes a package of the type below it any more, its own update included — see [Keeping old builds off the fleet](#keeping-old-builds-off-the-fleet) |
