@@ -89,8 +89,10 @@ Five crates in one workspace ([ADR-0008](adr/0008-five-crates-on-tokio-and-axum.
   ([ADR-0035](adr/0035-package-versions-high-water-mark-and-floor.md)), the
   renewal proof and
   the bootstrap proof a CSR carries — read from a CSR by the adapter `csr` — the host a
-  certificate that names none is taken for, when a certificate counts as ending, what a
-  certificate is called, the token buckets the Server and a Gateway count a sender in (`rate`),
+  certificate that names none is taken for, when a certificate counts as ending, with its end
+  read and put in the line `pki status` prints by the adapter `ending::read`, for both programs
+  and the running Server, what a certificate is called, the token buckets the Server and a Gateway
+  count a sender in (`rate`),
   what a client certificate is known by on the Server and on a Gateway alike — its host, its issuer
   and serial, and the 20-octet bound on its serial — whose rule is the core `x509`, read with
   `x509-parser` by the adapter `x509::read`, with the random serial and the clock skew every issued

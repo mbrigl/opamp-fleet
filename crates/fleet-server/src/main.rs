@@ -212,19 +212,7 @@ fn pki(mut args: impl Iterator<Item = String>) -> ! {
     });
     let now = time::OffsetDateTime::now_utc();
     for ending in &endings {
-        let standing = match ending.standing(now) {
-            fleet_core::ending::Standing::Fine => "ok",
-            fleet_core::ending::Standing::Ending => "ENDS SOON",
-            fleet_core::ending::Standing::Ended => "ENDED",
-        };
-        println!(
-            "{standing:9} {} days  {}  serial {}  {}  ({})",
-            ending.days_left(now),
-            ending.not_after.date(),
-            ending.serial,
-            ending.subject,
-            ending.file.display()
-        );
+        println!("{}", ending.line(now));
     }
     // The audit key's public half, for the operator to keep where the Server cannot rewrite it
     // (ADR-0041 clause 3).
