@@ -10,11 +10,8 @@
 //! CA is a renewal and is signed at once; a CSR on an enrolment connection waits until an operator
 //! approves it ([`crate::enrolment`], ADR-0040).
 
-use fleet_core::x509::issue::{random_serial, CLOCK_SKEW};
-use rcgen::{
-    CertificateSigningRequestParams, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
-    KeyUsagePurpose, SanType,
-};
+use fleet_core::x509::issue::{self, Role, CLOCK_SKEW};
+use rcgen::{CertificateSigningRequestParams, Issuer, KeyPair, SanType};
 use x509_parser::prelude::{FromDer, X509Certificate};
 use zeroize::Zeroizing;
 
@@ -174,10 +171,10 @@ impl ClientCa {
         request.params.distinguished_name = distinguished_name(
             &crate::bootstrap::carried_attributes(subject, &self.leaf_name),
         )?;
-        // Never trust the request for the certificate's powers: force a client-auth leaf.
-        request.params.is_ca = IsCa::ExplicitNoCa;
-        request.params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
-        request.params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+        // Never trust the request for the certificate's powers: force a client-auth leaf, with a
+        // serial of its own, so two certificates from one key are two revocable things (ADR-0040
+        // clause 26). rcgen would derive the serial from the key.
+        issue::leaf(&mut request.params, Role::Client)?;
         // None of the request's names — one could name another host. The one name this Server
         // puts in is the host the certificate is issued to (ADR-0027 clause 11), which a renewal
         // carries on.
@@ -187,9 +184,6 @@ impl ClientCa {
                 .try_into()
                 .map_err(|e| format!("cannot name the host {host:?}: {e}"))?,
         ));
-        // A serial of its own for every certificate, so two certificates from one key are two
-        // revocable things (ADR-0040 clause 26). rcgen would derive it from the key.
-        request.params.serial_number = Some(random_serial()?);
         // A token key signs only with a place for its entry held in the record
         // (ADR-0043
         // clause 6).
@@ -882,10 +876,7 @@ impl crate::bootstrap::BootstrapSigner for BootstrapCa {
         let mut params = rcgen::CertificateParams::default();
         params.distinguished_name = distinguished_name(subject)?;
         // A client-authentication leaf and nothing more (ADR-0027 clause 3).
-        params.is_ca = IsCa::ExplicitNoCa;
-        params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
-        params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
-        params.serial_number = Some(random_serial()?);
+        issue::leaf(&mut params, Role::Client)?;
         params.not_before = at_ms(now_ms)? - CLOCK_SKEW;
         params.not_after = at_ms(not_after_ms)?;
         let permit = self.issuer.key().reserve()?;
@@ -1067,6 +1058,7 @@ fn at_ms(ms: u64) -> Result<time::OffsetDateTime, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rcgen::{ExtendedKeyUsagePurpose, KeyUsagePurpose};
 
     /// A CA and a Client, end to end: the Client's key never leaves it, and what comes back is a
     /// certificate the CA signed over the public half it was sent.

@@ -18,10 +18,10 @@ use clap::Subcommand;
 use fleet_core::ending::Standing;
 use fleet_core::naming;
 // The serial and the start every certificate gets, as the client CA's (ADR-0042 clause 5).
-use fleet_core::x509::issue::{random_serial, CLOCK_SKEW};
+use fleet_core::x509::issue::{self, random_serial, Role, CLOCK_SKEW};
 use rcgen::{
-    BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa,
-    Issuer, KeyPair, KeyUsagePurpose, SanType,
+    BasicConstraints, CertificateParams, DistinguishedName, DnType, IsCa, Issuer, KeyPair,
+    KeyUsagePurpose, SanType,
 };
 use time::{Duration, OffsetDateTime};
 use x509_parser::prelude::{FromDer, X509Certificate};
@@ -903,11 +903,8 @@ impl Ending {
 /// Returns the message to print when the file cannot be read or holds no certificate.
 pub fn read_ending(file: &Path) -> Result<Ending, String> {
     let pem = std::fs::read(file).map_err(|e| format!("cannot read {}: {e}", file.display()))?;
-    let der = opamp::tls::certificates(&pem)
-        .map_err(|e| format!("cannot read {}: {e}", file.display()))?
-        .into_iter()
-        .next()
-        .ok_or_else(|| format!("{} holds no certificate", file.display()))?;
+    let der = opamp::tls::first_certificate(&pem)
+        .map_err(|e| format!("cannot read {}: {e}", file.display()))?;
     let (_, cert) = X509Certificate::from_der(der.as_ref())
         .map_err(|e| format!("cannot read {}: {e}", file.display()))?;
     Ok(Ending {
@@ -1018,19 +1015,15 @@ fn server_certificate(
             params.subject_alt_names.push(san);
         }
     }
-    params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
     leaf(params, ca, days)
 }
 
-/// Signs a leaf: `CA:FALSE`, `digitalSignature`, a random serial, and a life that never reaches
-/// past the CA's end (ADR-0042 clause 13).
+/// Signs a server certificate's leaf: `CA:FALSE`, `digitalSignature`, `serverAuth`, a random
+/// serial, and a life that never reaches past the CA's end (ADR-0042 clause 13).
 fn leaf(mut params: CertificateParams, ca: &Authority, days: u32) -> Result<Made, String> {
     let key = KeyPair::generate().map_err(|e| format!("cannot make a key: {e}"))?;
     let (not_before, not_after, cut) = life(days, Some(ca.end))?;
-    let serial = random_serial()?;
-    params.is_ca = IsCa::ExplicitNoCa;
-    params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
-    params.serial_number = Some(serial.clone());
+    let serial = issue::leaf(&mut params, Role::Server)?;
     params.not_before = not_before;
     params.not_after = not_after;
     let cert = params
@@ -1075,20 +1068,13 @@ fn cut_notice(made: &Made, ca: &Authority) -> Option<String> {
 fn load_authority(dir: &Path, stem: &str) -> Result<Authority, String> {
     let cert_file = dir.join(format!("{stem}.pem"));
     let key_file = dir.join(format!("{stem}-key.pem"));
-    let cert_pem = std::fs::read_to_string(&cert_file)
+    let cert_pem = std::fs::read(&cert_file)
         .map_err(|e| format!("cannot read {}: {e}", cert_file.display()))?;
-    let key_pem = std::fs::read_to_string(&key_file)
-        .map(Zeroizing::new)
-        .map_err(|e| format!("cannot read {}: {e}", key_file.display()))?;
-    let key = KeyPair::from_pem(&key_pem)
-        .map_err(|e| format!("cannot read {}: {e}", key_file.display()))?;
+    let der = opamp::tls::first_certificate(&cert_pem)
+        .map_err(|e| format!("cannot read {}: {e}", cert_file.display()))?;
+    let issuer = issue::authority(&cert_file, &der, &key_file)?;
     let ending = read_ending(&cert_file)?;
     let (common_name, organization) = {
-        let der = opamp::tls::certificates(cert_pem.as_bytes())
-            .map_err(|e| format!("cannot read {}: {e}", cert_file.display()))?
-            .into_iter()
-            .next()
-            .ok_or_else(|| format!("{} holds no certificate", cert_file.display()))?;
         let (_, cert) = X509Certificate::from_der(der.as_ref())
             .map_err(|e| format!("cannot read {}: {e}", cert_file.display()))?;
         let first = |values: Vec<&x509_parser::x509::AttributeTypeAndValue<'_>>| {
@@ -1105,8 +1091,6 @@ fn load_authority(dir: &Path, stem: &str) -> Result<Authority, String> {
         };
         (common_name, organization)
     };
-    let issuer = Issuer::from_ca_cert_pem(&cert_pem, key)
-        .map_err(|e| format!("cannot use {} as a CA: {e}", cert_file.display()))?;
     Ok(Authority {
         issuer,
         end: ending.not_after,
@@ -1278,7 +1262,7 @@ fn create_private_dir(dir: &Path) -> Result<(), String> {
 }
 
 /// Writes a new file; a key is `0600` from the moment it exists, and an existing file is never
-/// replaced. The one writer of every private key the tool makes (ADR-0037). A write that fails
+/// replaced. The one writer of every private key the tool makes (ADR-0042). A write that fails
 /// part-way removes what it wrote, so nothing is left half written to be refused as existing.
 pub(crate) fn write_file(path: &Path, contents: &[u8], key: bool) -> Result<(), String> {
     use std::io::Write as _;
