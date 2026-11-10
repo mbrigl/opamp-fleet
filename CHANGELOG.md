@@ -14,6 +14,25 @@ once its tag exists.
 > rest — is not backfilled here; it is in the git log and in the ADRs. The first four releases were
 > all cut on 2026-08-09, so the dates below say less than the order does.
 
+## [Unreleased]
+
+### Added
+
+- **`opamp-fleetctl package fetch --repack <n>` numbers a later repack of one version**
+  ([ADR-draft-the-operator-program-opamp-fleetctl](docs/adr/draft-the-operator-program-opamp-fleetctl.md)
+  clause 28), for an agent whose artifact the tool repacks. The second repack of `2.14.3` is
+  uploaded as Package `2.14.4-0.r.2`, above every earlier repack and below the next release, and
+  `r.10` orders above `r.9`. `--repack 1`, the default, is the version itself.
+  **What to do:** nothing.
+
+### Changed
+
+- **Every repack `opamp-fleetctl package fetch` makes stores normalized modes**
+  ([ADR-draft-the-operator-program-opamp-fleetctl](docs/adr/draft-the-operator-program-opamp-fleetctl.md)
+  clause 27): `0o755` for directories and executables and `0o644` for every other file, so no group
+  or world write bit and no setuid bit upstream set reaches the signed artifact.
+  **What to do:** nothing.
+
 ## [0.8.2]
 
 ### Added
