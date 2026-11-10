@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;
 
 use crate::config::ClientConfig;
-use crate::config_init::Bootstrap;
+use crate::config_init::{Answered, Bootstrap, Written};
 use crate::engine::{Engine, EngineAgent};
 use crate::service::runtime;
 use crate::shutdown::{shutdown_channel, Shutdown};
@@ -44,6 +44,9 @@ pub fn written(state_dir: &Path) -> Vec<PathBuf> {
 /// Enrol on a runtime of its own, until the issued certificate is stored or Ctrl-C ends the wait.
 ///
 /// `config` is the configuration the service will run with, its `state_dir` the service's.
+/// `written` is what this run asked and wrote: an endpoint and trust it answered replace the
+/// file's, and an endpoint named over a kept file holds the file to it
+/// (ADR-draft-a-privileged-enrolment-connects-where-its-own-run-answered).
 /// `roots` are the data root and the layout root. The CA file and the bootstrap pair are read
 /// once, before anything connects; one in a root or the state directory, which the service's
 /// account owns, is read through that directory, never through a link at its name.
@@ -51,8 +54,13 @@ pub fn written(state_dir: &Path) -> Vec<PathBuf> {
 /// # Errors
 /// Returns an error when the CA file or the bootstrap pair cannot be read, when the state
 /// directory cannot be prepared, or when the wait is interrupted before a certificate arrived.
-pub fn run(config: &ClientConfig, bootstrap: &Bootstrap, roots: &[&Path]) -> Result<(), String> {
-    let config = prepare(config, bootstrap, roots)?;
+pub fn run(
+    config: &ClientConfig,
+    bootstrap: &Bootstrap,
+    written: &Written,
+    roots: &[&Path],
+) -> Result<(), String> {
+    let config = prepare(config, bootstrap, written, roots)?;
     runtime::daemon_runtime()?.block_on(async move {
         let (stop, shutdown) = shutdown_channel();
         tokio::spawn(async move {
@@ -162,16 +170,60 @@ async fn connect(mut config: ClientConfig, mut shutdown: Shutdown) -> Result<(),
     }
 }
 
-/// `config` as the enrolment connects with it: the CA file and the bootstrap pair read once,
-/// before anything connects, never again by a path the account gave (ADR-0021 clause 11).
+/// `config` as the enrolment connects with it: what the run answered in place of what the file
+/// says (ADR-draft-a-privileged-enrolment-connects-where-its-own-run-answered),
+/// and the CA file and the bootstrap pair read once, before anything connects, never again by a
+/// path the account gave (ADR-0021 clause 11).
 fn prepare(
     config: &ClientConfig,
     bootstrap: &Bootstrap,
+    written: &Written,
     roots: &[&Path],
 ) -> Result<ClientConfig, String> {
     let mut config = config.clone();
+    if let Some(answered) = &written.answered {
+        take_answered(&mut config, answered);
+    }
+    holds_to_named(&config, written)?;
     read_once(&mut config, bootstrap, roots)?;
     Ok(config)
+}
+
+/// Refuses the enrolment where `--endpoint` named, over a file the install kept, another endpoint
+/// than the file's: such a run answered nothing, and the file stands for the service
+/// (ADR-draft-a-privileged-enrolment-connects-where-its-own-run-answered).
+///
+/// # Errors
+/// Returns an error naming both endpoints.
+pub fn holds_to_named(config: &ClientConfig, written: &Written) -> Result<(), String> {
+    match &written.named_over_kept {
+        Some(named) if *named != config.endpoint => Err(format!(
+            "not enrolling: --endpoint names {named}, and the configuration kept names {}. \
+             Correct the configuration or the flag, and install again",
+            config.endpoint
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// Puts what the run answered in place of what `config` read from the file: the endpoint, and the
+/// CA copy with the certificates written into it, or no CA where none was answered
+/// (ADR-draft-a-privileged-enrolment-connects-where-its-own-run-answered).
+fn take_answered(config: &mut ClientConfig, answered: &Answered) {
+    config.endpoint.clone_from(&answered.endpoint);
+    let ca_file = answered.ca.as_ref().map(|(copy, _)| copy.clone());
+    config.ca_pem = answered.ca.as_ref().map(|(_, pem)| pem.clone());
+    match &mut config.tls {
+        Some(tls) => tls.ca_file = ca_file,
+        None if ca_file.is_some() => {
+            config.tls = Some(crate::config::TlsConfig {
+                ca_file,
+                cert_file: None,
+                key_file: None,
+            });
+        }
+        None => {}
+    }
 }
 
 /// Reads what a privileged enrolment connects with, once, into `config`: the certificates of
@@ -403,7 +455,9 @@ mod tests {
     /// seconds read something it should have refused.
     fn refusal(config: ClientConfig, bootstrap: Bootstrap, account: PathBuf) -> String {
         let (done, wait) = std::sync::mpsc::channel();
-        std::thread::spawn(move || done.send(run(&config, &bootstrap, &[&account]).err()));
+        std::thread::spawn(move || {
+            done.send(run(&config, &bootstrap, &Written::default(), &[&account]).err())
+        });
         wait.recv_timeout(std::time::Duration::from_secs(10))
             .expect("the enrolment read what it should have refused")
             .expect("refused")
@@ -689,5 +743,117 @@ mod tests {
         let tls = crate::tls::client_tls(&config).expect("built from memory");
         assert_eq!(tls.ca_pem.as_deref(), Some(ca.as_bytes()));
         assert!(tls.identity.is_some());
+    }
+
+    /// The run that answered enrols with its answers: a `supervisor.toml` rewritten after the
+    /// write, to another endpoint and another CA, changes neither the endpoint the enrolment
+    /// connects to nor the trust it connects with, and the rewritten CA is not read at all.
+    /// Verifies: ADR-draft-a-privileged-enrolment-connects-where-its-own-run-answered
+    #[test]
+    fn a_run_that_answered_enrols_with_its_answers_whatever_the_file_says_by_now() {
+        let account = tempfile::tempdir().expect("account");
+        let admin = tempfile::tempdir().expect("admin");
+        let (answered_ca, _) = pair();
+        let copy = account.path().join(crate::config_init::SERVER_CA_FILE);
+        let answered = Answered {
+            endpoint: "wss://fleet.example.com/v1/opamp".to_string(),
+            ca: Some((copy.clone(), answered_ca.clone().into_bytes())),
+        };
+        // What the account rewrote: another endpoint, and a CA that is no file to read.
+        let mut rewritten = config(account.path(), Path::new("/dev/zero"));
+        rewritten.endpoint = "wss://theirs.example.net/v1/opamp".to_string();
+
+        let prepared = prepare(
+            &rewritten,
+            &bootstrap(admin.path()),
+            &Written {
+                answered: Some(answered.clone()),
+                ..Written::default()
+            },
+            &[account.path()],
+        )
+        .expect("prepared from the answers");
+        assert_eq!(prepared.endpoint, answered.endpoint);
+        assert_eq!(prepared.ca_file(), Some(copy.as_path()));
+        let tls = crate::tls::client_tls(&prepared).expect("built");
+        assert_eq!(tls.ca_pem.as_deref(), Some(answered_ca.as_bytes()));
+
+        // An answer without a CA leaves the built-in roots, whatever the file names.
+        let without = Answered {
+            ca: None,
+            ..answered.clone()
+        };
+        let prepared = prepare(
+            &rewritten,
+            &bootstrap(admin.path()),
+            &Written {
+                answered: Some(without),
+                ..Written::default()
+            },
+            &[account.path()],
+        )
+        .expect("prepared from the answers");
+        assert_eq!(prepared.ca_file(), None);
+        assert_eq!(
+            crate::tls::client_tls(&prepared).expect("built").ca_pem,
+            None
+        );
+    }
+
+    /// A run that answered nothing takes the endpoint and the CA from the file: the residual the
+    /// decision names.
+    /// Verifies: ADR-draft-a-privileged-enrolment-connects-where-its-own-run-answered
+    #[test]
+    fn a_run_that_answered_nothing_enrols_with_what_the_file_says() {
+        let account = tempfile::tempdir().expect("account");
+        let admin = tempfile::tempdir().expect("admin");
+        let (ca, _) = pair();
+        let copy = account.path().join(crate::config_init::SERVER_CA_FILE);
+        std::fs::write(&copy, &ca).expect("ca");
+        let mut file = config(account.path(), &copy);
+        file.endpoint = "wss://in-the-file.example.com/v1/opamp".to_string();
+
+        let prepared = prepare(
+            &file,
+            &bootstrap(admin.path()),
+            &Written::default(),
+            &[account.path()],
+        )
+        .expect("prepared from the file");
+        assert_eq!(prepared.endpoint, file.endpoint);
+        assert_eq!(prepared.ca_pem.as_deref(), Some(ca.as_bytes()));
+    }
+
+    /// `--endpoint` over a kept file that names another endpoint refuses the enrolment, naming
+    /// both; where the two are the same, the run enrols with what the file says.
+    /// Verifies: ADR-draft-a-privileged-enrolment-connects-where-its-own-run-answered
+    #[test]
+    fn an_endpoint_named_over_a_kept_file_that_names_another_refuses_the_enrolment() {
+        let account = tempfile::tempdir().expect("account");
+        let admin = tempfile::tempdir().expect("admin");
+        let (ca, _) = pair();
+        let copy = account.path().join(crate::config_init::SERVER_CA_FILE);
+        std::fs::write(&copy, &ca).expect("ca");
+        let mut kept = config(account.path(), &copy);
+        kept.endpoint = "wss://theirs.example.net/v1/opamp".to_string();
+        let named = "wss://fleet.example.com/v1/opamp";
+        let written = Written {
+            named_over_kept: Some(named.to_string()),
+            ..Written::default()
+        };
+
+        let refused = prepare(&kept, &bootstrap(admin.path()), &written, &[account.path()])
+            .expect_err("another endpoint");
+        assert!(refused.contains(named), "{refused}");
+        assert!(
+            refused.contains("wss://theirs.example.net/v1/opamp"),
+            "{refused}"
+        );
+
+        kept.endpoint = named.to_string();
+        let prepared = prepare(&kept, &bootstrap(admin.path()), &written, &[account.path()])
+            .expect("the same endpoint");
+        assert_eq!(prepared.endpoint, named);
+        assert_eq!(prepared.ca_pem.as_deref(), Some(ca.as_bytes()));
     }
 }

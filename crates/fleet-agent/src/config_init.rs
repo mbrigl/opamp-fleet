@@ -268,6 +268,24 @@ pub struct Written {
     pub copies: Vec<PathBuf>,
     /// The identity to enrol with; `None` on an enrolled Client, which was not asked.
     pub bootstrap: Option<Bootstrap>,
+    /// What this run answered and wrote; `None` where it kept the file as it was.
+    pub answered: Option<Answered>,
+    /// The endpoint `--endpoint` named over a file this run kept: no answer, but an enrolment
+    /// refuses a kept file that names another
+    /// (ADR-draft-a-privileged-enrolment-connects-where-its-own-run-answered).
+    pub named_over_kept: Option<String>,
+}
+
+/// The endpoint and the trust a run answered, held in memory: a privileged enrolment connects
+/// with these, never with what it would read back from the file the service's account owns
+/// (ADR-draft-a-privileged-enrolment-connects-where-its-own-run-answered).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Answered {
+    /// The endpoint answered.
+    pub endpoint: String,
+    /// The CA copy beside the configuration and the certificates written into it; `None` where
+    /// no CA was answered, which leaves the built-in roots.
+    pub ca: Option<(PathBuf, Vec<u8>)>,
 }
 
 /// Ask, write, and report — the whole of `--interactive` and `service config` (ADR-0020).
@@ -316,10 +334,8 @@ pub fn run(
     }
     beside.report();
     let (answers, bootstrap) = ask(current, enrolled, beside, password)?;
-    let (answers, copies) = copy_ca_beside(answers, path)?;
-    for copy in &copies {
-        println!("copied {}", copy.display());
-    }
+    let (answers, answered) = copy_ca_beside(answers, path)?;
+    let copies = copies(&answered);
     if existing {
         // The file may hold `[packages] archive_key`: the text read and the text written are wiped
         // when they are dropped; what `toml_edit` keeps while it edits is its own (ADR-0014).
@@ -332,11 +348,27 @@ pub fn run(
         write_new(path, &render(&answers))?;
     }
     println!("wrote {}", path.display());
-    Ok(Written { copies, bootstrap })
+    Ok(Written {
+        copies,
+        bootstrap,
+        answered: Some(answered),
+        named_over_kept: None,
+    })
+}
+
+/// The copy `answered` names, as a list of the files written beside the configuration, each
+/// reported.
+fn copies(answered: &Answered) -> Vec<PathBuf> {
+    let copies: Vec<PathBuf> = answered.ca.iter().map(|(copy, _)| copy.clone()).collect();
+    for copy in &copies {
+        println!("copied {}", copy.display());
+    }
+    copies
 }
 
 /// Copy the answered CA into the directory of the configuration at `config`, under
-/// [`SERVER_CA_FILE`], and return the answers naming the copy together with the copy's path.
+/// [`SERVER_CA_FILE`], and return the answers naming the copy together with what was answered:
+/// the endpoint, and the copy's path with the certificates written into it.
 ///
 /// The configuration then depends on nothing outside its own directory for its trust: the copy
 /// survives the removal of wherever the operator brought the CA from, and it lives where the file
@@ -354,9 +386,10 @@ pub fn run(
 /// # Errors
 /// Returns an error naming the file that could not be read or written, or that holds no
 /// certificate.
-pub fn copy_ca_beside(answers: Answers, config: &Path) -> Result<(Answers, Vec<PathBuf>), String> {
+pub fn copy_ca_beside(answers: Answers, config: &Path) -> Result<(Answers, Answered), String> {
     let Some(ca) = &answers.ca_file else {
-        return Ok((answers, Vec::new()));
+        let endpoint = answers.endpoint.clone();
+        return Ok((answers, Answered { endpoint, ca: None }));
     };
     let dir = std::path::absolute(config)
         .map_err(|e| format!("cannot resolve {}: {e}", config.display()))?
@@ -368,12 +401,16 @@ pub fn copy_ca_beside(answers: Answers, config: &Path) -> Result<(Answers, Vec<P
     let bytes = read_certificates(ca)?;
     held.write(SERVER_CA_FILE, &bytes, 0o600)
         .map_err(|e| format!("cannot write {}: {e}", to.display()))?;
+    let answered = Answered {
+        endpoint: answers.endpoint.clone(),
+        ca: Some((to.clone(), bytes)),
+    };
     Ok((
         Answers {
-            ca_file: Some(to.clone()),
+            ca_file: Some(to),
             ..answers
         },
-        vec![to],
+        answered,
     ))
 }
 
@@ -497,6 +534,9 @@ fn table<'a>(
 /// program (ADR-0027 clause 18); a file written without one fails the install's validation and
 /// stays on disk to be completed (ADR-0020).
 ///
+/// Returns the copy it wrote and what it answered; a file it kept answers nothing, and the
+/// endpoint named over it is returned for the enrolment to hold the file to.
+///
 /// # Errors
 /// Returns an error if the endpoint is not one the loader would accept, or if the file cannot be
 /// created.
@@ -505,10 +545,13 @@ pub fn run_with_endpoint(
     endpoint: &str,
     self_update: bool,
     beside: &Beside,
-) -> Result<Vec<PathBuf>, String> {
+) -> Result<Written, String> {
     beside.report();
     if keeping_existing(path) {
-        return Ok(Vec::new());
+        return Ok(Written {
+            named_over_kept: Some(endpoint.trim().to_string()),
+            ..Written::default()
+        });
     }
     // Before the file is created, not after: an install that wrote an unusable file and then failed
     // to load it would leave the operator correcting a file they never typed.
@@ -526,13 +569,16 @@ pub fn run_with_endpoint(
     if let Some(key) = &answers.verification_key {
         println!("took the package verification key {key} from beside the program");
     }
-    let (answers, copies) = copy_ca_beside(answers, path)?;
-    for copy in &copies {
-        println!("copied {}", copy.display());
-    }
+    let (answers, answered) = copy_ca_beside(answers, path)?;
+    let copies = copies(&answered);
     write_new(path, &render(&answers))?;
     println!("wrote {} for {}", path.display(), answers.endpoint);
-    Ok(copies)
+    Ok(Written {
+        copies,
+        bootstrap: None,
+        answered: Some(answered),
+        named_over_kept: None,
+    })
 }
 
 /// Whether a configuration is already there — in which case an installer's answer keeps it.
@@ -1410,6 +1456,67 @@ mod tests {
         assert_eq!(edited.cert_file, text(BOOTSTRAP_CERT_FILE));
     }
 
+    /// What an `--endpoint` install answered is handed on: the endpoint as given, and the copy
+    /// with the certificates written into it; a loopback endpoint answers no CA, and a file kept
+    /// answers nothing.
+    /// Verifies: ADR-draft-a-privileged-enrolment-connects-where-its-own-run-answered
+    #[test]
+    fn what_an_endpoint_install_answered_is_handed_on() {
+        let program = tempfile::tempdir().expect("tempdir");
+        fleet_files(program.path());
+        let beside = Beside::in_dir(program.path());
+        let data = tempfile::tempdir().expect("tempdir");
+        let path = data.path().join(FILE_NAME);
+        let endpoint = "wss://fleet.example.com/v1/opamp";
+
+        let answered = run_with_endpoint(&path, endpoint, true, &beside)
+            .expect("write")
+            .answered
+            .expect("answered");
+        let copy = data.path().join(SERVER_CA_FILE);
+        assert_eq!(
+            answered,
+            Answered {
+                endpoint: endpoint.to_string(),
+                ca: Some((copy.clone(), std::fs::read(&copy).expect("the copy"))),
+            }
+        );
+        assert!(certificates_in(&copy) == certificates_in(&program.path().join(SERVER_CA_FILE)));
+
+        let kept = run_with_endpoint(&path, "wss://other.example.com/v1/opamp", true, &beside)
+            .expect("kept");
+        assert_eq!(kept.answered, None);
+        assert_eq!(
+            kept.named_over_kept.as_deref(),
+            Some("wss://other.example.com/v1/opamp")
+        );
+
+        let loopback = tempfile::tempdir().expect("tempdir");
+        let answered = run_with_endpoint(
+            &loopback.path().join(FILE_NAME),
+            "ws://127.0.0.1:4320/v1/opamp",
+            true,
+            &beside,
+        )
+        .expect("write")
+        .answered
+        .expect("answered");
+        assert_eq!(answered.endpoint, "ws://127.0.0.1:4320/v1/opamp");
+        assert_eq!(answered.ca, None);
+    }
+
+    /// Answers without a CA are handed on with their endpoint and no CA, and nothing is copied.
+    /// Verifies: ADR-draft-a-privileged-enrolment-connects-where-its-own-run-answered
+    #[test]
+    fn answers_without_a_ca_hand_on_their_endpoint_and_no_ca() {
+        let to = tempfile::tempdir().expect("tempdir");
+        let (_, answered) =
+            copy_ca_beside(answers(), &to.path().join(FILE_NAME)).expect("nothing to copy");
+        assert_eq!(answered.endpoint, answers().endpoint);
+        assert_eq!(answered.ca, None);
+        assert!(!to.path().join(SERVER_CA_FILE).exists());
+    }
+
     /// `--endpoint` writes the CA and the verification key it finds beside the program, the CA as
     /// a copy beside the file; a loopback `ws://` takes neither, and a file that exists is kept
     /// (ADR-0027 clause 17).
@@ -1423,7 +1530,8 @@ mod tests {
         let path = data.path().join(FILE_NAME);
 
         let copies = run_with_endpoint(&path, "wss://fleet.example.com/v1/opamp", true, &beside)
-            .expect("write");
+            .expect("write")
+            .copies;
         let copy = data.path().join(SERVER_CA_FILE);
         assert_eq!(copies, vec![copy.clone()]);
         let loaded = ClientConfig::load(&path).expect("loads");
@@ -1444,14 +1552,16 @@ mod tests {
         assert!(
             run_with_endpoint(&path, "wss://other.example.com/v1/opamp", true, &beside)
                 .expect("kept")
+                .copies
                 .is_empty()
         );
         assert_eq!(std::fs::read(&path).expect("read"), before);
 
         let loopback = tempfile::tempdir().expect("tempdir");
         let path = loopback.path().join(FILE_NAME);
-        let copies =
-            run_with_endpoint(&path, "ws://127.0.0.1:4320/v1/opamp", true, &beside).expect("write");
+        let copies = run_with_endpoint(&path, "ws://127.0.0.1:4320/v1/opamp", true, &beside)
+            .expect("write")
+            .copies;
         assert!(copies.is_empty());
         let loaded = ClientConfig::load(&path).expect("loads");
         assert!(loaded.tls.and_then(|t| t.ca_file).is_none());
@@ -1560,7 +1670,8 @@ mod tests {
             true,
             &named,
         )
-        .expect("write");
+        .expect("write")
+        .copies;
         assert_eq!(copies, vec![data.path().join(SERVER_CA_FILE)]);
 
         let missing = dir.path().join("no such directory");
@@ -1672,7 +1783,7 @@ mod tests {
         let ca = from.path().join("my-ca.pem");
         std::fs::write(&ca, ca_pem()).expect("write");
         let path = to.path().join(FILE_NAME);
-        let (copied, copies) = copy_ca_beside(
+        let (copied, answered) = copy_ca_beside(
             Answers {
                 ca_file: Some(ca.clone()),
                 ..answers()
@@ -1682,7 +1793,11 @@ mod tests {
         .expect("copy");
 
         let expected = to.path().join(SERVER_CA_FILE);
-        assert_eq!(copies, vec![expected.clone()]);
+        assert_eq!(answered.endpoint, answers().endpoint);
+        let (copy, held) = answered.ca.expect("a CA was answered");
+        assert_eq!(copy, expected);
+        // What the run holds is what it wrote.
+        assert_eq!(held, std::fs::read(&expected).expect("read the copy"));
         assert_eq!(certificates_in(&expected), certificates_in(&ca));
         #[cfg(unix)]
         {

@@ -474,8 +474,7 @@ fn install(
         // it — standing unless this install was told to withdraw it (ADR-0019) — and so do the CA
         // and the verification key beside the program (ADR-0027 clause 17).
         let self_update = !args.no_self_update;
-        written.copies =
-            config_init::run_with_endpoint(&config_path, endpoint, self_update, &beside)?;
+        written = config_init::run_with_endpoint(&config_path, endpoint, self_update, &beside)?;
     } else if !config_path.exists() {
         // Not an error — automation must not break — but never silent: without this file the
         // service refuses to start.
@@ -489,6 +488,11 @@ fn install(
     // Fail on a broken configuration now, not at the service's first start. After the write, so
     // that a file just answered into existence is held to the same rule as any other.
     let mut config = ClientConfig::load_held(&config_path)?;
+    // An enrolment held to an endpoint the kept file does not name fails here, before anything is
+    // stopped, and again where it would connect.
+    if unasked.is_some() {
+        enrol::holds_to_named(&config, &written)?;
+    }
     // The state directory the service will run with — where an issued certificate counts. Asked
     // again of the file as it is now, which the service's account may have rewritten meanwhile.
     let state_dir = config.service_state_dir(&roots)?;
@@ -620,7 +624,7 @@ fn install(
         // Before anything is staged or registered (ADR-0020 clause 26): an enrolment that is stopped
         // leaves the answered file and nothing else.
         if let Some(bootstrap) = &written.bootstrap {
-            enrol::run(&config, bootstrap, &[&data_root, &layout_root])?;
+            enrol::run(&config, bootstrap, &written, &[&data_root, &layout_root])?;
         }
         // And held to what the Client needs at startup. A packaged install registers the service
         // even so — it has an endpoint and no client identity to write — but never starts it, and
@@ -866,7 +870,7 @@ fn configure(
     let state_dir = config.service_state_dir(&roots)?;
     config.state_dir.clone_from(&state_dir);
     if let Some(bootstrap) = &written.bootstrap {
-        enrol::run(&config, bootstrap, &[&data_root, &roots.layout])?;
+        enrol::run(&config, bootstrap, &written, &[&data_root, &roots.layout])?;
     }
     // What this run created belongs to whoever owns the configuration — the service's account when
     // it runs as one (ADR-0021 clause 1) — not to the administrator who ran it.

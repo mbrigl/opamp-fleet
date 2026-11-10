@@ -212,9 +212,16 @@ has:
   refused, except the state directory directly in a root, which is held by its name without
   following a link there. Elsewhere a link on the administrator's path is followed.
   A test holds the modules these steps run in to no path-based read, write, removal, rename or mode
-  change outside a justified list (`privileged_steps_follow_no_link.rs`). Not yet: the enrolment
-  takes `endpoint` and the `[tls]` paths from `supervisor.toml` as it reads it back, which the
-  account can rewrite (H21).
+  change outside a justified list (`privileged_steps_follow_no_link.rs`).
+- **A privileged enrolment connects where its own run answered**
+  ([ADR-draft-a-privileged-enrolment-connects-where-its-own-run-answered](adr/draft-a-privileged-enrolment-connects-where-its-own-run-answered.md)):
+  a run that answered the questionnaire or `--endpoint` enrols with the endpoint and the CA
+  certificates it answered, held in memory, and does not read them back from `supervisor.toml`,
+  which the service's account can rewrite meanwhile. An answer without a CA leaves the built-in
+  roots. `--endpoint` over a file the install keeps answers nothing, and the install refuses to
+  enrol where the kept file names another endpoint, naming both. Residual: a run that answered
+  nothing, such as an upgrade over an existing file, takes the endpoint and the CA from the file,
+  read once as above; under a matching `--endpoint`, the CA still comes from the file.
 - **No credential in `server.toml` authenticates on its own** (ADR-0040 clause 21): an operator's
   Basic password is kept as an Argon2id hash of at least the OWASP minimum, and a value in clear is
   refused at startup without being echoed. The Server offers no credential (ADR-0013).
@@ -361,23 +368,6 @@ signature) and
 aws-lc-rs), and touch [ADR-0019](adr/0019-the-client-updates-itself-from-a-signed-package.md),
 whose self-update rests on the package signature.
 
-## The privileged install
-
-🟡 **H21 — A privileged enrolment trusts no file the account could have changed.** `service
-config` and `service install` enrol as root or an Administrator. The files `[tls]` names are read
-bounded and through no link in the account's directories (see
-[What already holds](#what-already-holds)). What remains: the enrolment takes `endpoint` and the
-`[tls]` paths from `supervisor.toml` as it reads the file back after writing it, and the file lies
-in a directory the service's account owns. An account that is taken over can rewrite the file in
-between, or the CA copy beside it, and so make the privileged step enrol with a Server of its
-choosing. The step that is open: a run that answered the questionnaire, and copied the CA itself,
-enrols with the `endpoint` and the certificates it holds in memory, rather than reading back what
-the account may have changed.
-**Cost:** a change to what the questionnaire hands the enrolment.
-**To work out:** whether a privileged step may take `endpoint` and the `[tls]` paths from a file in
-the account's directory at all, which would be a clause beside
-[ADR-0021](adr/0021-the-accounts-the-service-runs-under.md).
-
 ## The channels that put code on the host
 
 Remote configuration and package delivery are the paths by which the Server causes code to run on an
@@ -448,5 +438,3 @@ with the measure when it moves up into [What already holds](#what-already-holds)
   X25519MLKEM768, and one with a peer that offers only X25519 still connects. The signatures: a
   package and a floor signed both ways verify on a Client that knows only Ed25519 and on one that
   knows ML-DSA. The certificates: a peer that verifies only classical chains still connects.
-- **H21** — a `supervisor.toml` the account rewrites between the questionnaire's write and the
-  enrolment changes neither the endpoint nor the trust that `service config` enrols with.
