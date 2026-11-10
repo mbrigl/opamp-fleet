@@ -121,7 +121,7 @@ x509-parser = "0.18"
 # so the Client refuses what `p12-keystore` would accept beyond PBES2 with PBKDF2-HMAC-SHA-2 and
 # AES-CBC under a SHA-2 MAC — the same versions it already pulls in.
 p12-keystore = { version = "=0.4.1", default-features = false }
-pkcs12 = "=0.2.0-pre.0"
+pkcs12 = "=0.2.0-rc.0"
 pkcs5 = { version = "0.8", features = ["pbes2"] }
 der = "0.8"
 # The Agent's own telemetry (ADR-0017): the standard's own implementation, not a second copy of its
