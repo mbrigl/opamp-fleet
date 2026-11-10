@@ -27,6 +27,19 @@ once its tag exists.
 
 ### Changed
 
+- **A single-file package installs one regular file, never a directory, and an archive holding
+  its program twice is refused**
+  ([ADR-draft-packages-signatures-and-delivery](docs/adr/draft-packages-signatures-and-delivery.md)
+  clause 55). The Client took the first entry whose file name was the program's, so an archive
+  that also held a directory or another file of that name installed whichever came first. It now
+  takes only a regular file, never a directory, a link or a 7z anti-item, and refuses an archive in
+  which the program matches more than once, naming every place it found it, as `InstallFailed`. A
+  kind may name where its archive holds the program, matched by trailing path components as
+  `program_path` is. A `.tar.gz` is read to its end to find a second match, and what is read past
+  the program counts toward the 2 GiB the Client unpacks at most.
+  **What to do:** nothing, unless a package of yours holds its program twice: repack it to hold it
+  once.
+
 - **Every repack `opamp-fleetctl package fetch` makes stores normalized modes**
   ([ADR-draft-the-operator-program-opamp-fleetctl](docs/adr/draft-the-operator-program-opamp-fleetctl.md)
   clause 27): `0o755` for directories and executables and `0o644` for every other file, so no group

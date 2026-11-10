@@ -38,8 +38,11 @@ Reading them first is cheaper than discovering them at rollout time.
   program. Only `.7z` may be encrypted; an encrypted `.zip` is refused rather than opened. A
   `.tar.gz` is the right container for a tree that runs on Unix, because it is the one that
   carries file modes.
-- **The member name must match the configured program.** The Client looks inside the archive for
-  the file name its `[[supervisor]]` block names, wherever the archive keeps it.
+- **The member is one regular file of the configured program's name.** The Client looks inside
+  the archive for the file name its `[[supervisor]]` block names, wherever the archive keeps it,
+  or, for a kind that names where its archive holds the program, for that place. Only a regular
+  file counts, never a directory or a link, and an archive holding the program more than once is
+  refused, naming each place.
 
 ## 1. Configure the Supervisor
 
