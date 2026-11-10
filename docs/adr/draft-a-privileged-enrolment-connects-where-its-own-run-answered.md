@@ -1,6 +1,6 @@
 # ADR-draft-a-privileged-enrolment-connects-where-its-own-run-answered: A privileged enrolment connects where its own run answered
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-11-10
 - **Deciders:** Markus Brigl
 - **Applies to:** the enrolment `service install` and `service config` run in `crates/fleet-agent/src/main.rs` and `crates/fleet-agent/src/service/enrol.rs`, and what the questionnaire and `--endpoint` hand it in `crates/fleet-agent/src/config_init.rs`
