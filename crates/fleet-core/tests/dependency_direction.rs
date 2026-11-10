@@ -227,6 +227,7 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             // module added to the crate has to be given a role like anywhere else.
             ("main", Root),
             ("fetch", Adapter),
+            ("gpgv", Adapter),
             ("package", Adapter),
             ("pki", Adapter),
             ("signing", Adapter),
