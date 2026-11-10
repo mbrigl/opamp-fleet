@@ -66,6 +66,7 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             ("platform", Core),
             ("rate", Core),
             ("renewal", Core),
+            ("tree", Core),
             ("version", Core),
             // What a client certificate is known by; read with `x509-parser`, and issued with
             // `ring` and `rcgen`.

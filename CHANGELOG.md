@@ -52,6 +52,16 @@ once its tag exists.
   or world write bit and no setuid bit upstream set reaches the signed artifact.
   **What to do:** nothing.
 
+- **A tree package may keep the absolute links its Supervisor's kind names, and no other link**
+  ([ADR-draft-packages-signatures-and-delivery](docs/adr/draft-packages-signatures-and-delivery.md)
+  clause 57,
+  [ADR-draft-the-operator-program-opamp-fleetctl](docs/adr/draft-the-operator-program-opamp-fleetctl.md)
+  clause 27). A kind may name a link by its exact path in the tree and its exact absolute target;
+  `opamp-fleetctl package fetch` packs it as that link, and the Client creates it when it unpacks
+  a `.tar.gz` tree for that kind. Every other link still fails the repack, and still refuses the
+  archive on the Client, which now names the link and its target. No kind of the core names one.
+  **What to do:** nothing.
+
 ## [0.8.2]
 
 ### Added

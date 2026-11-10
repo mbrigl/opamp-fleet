@@ -544,8 +544,12 @@ impl InstallTarget {
         };
         match self {
             InstallTarget::Binary { path, member } => single(path, *member),
-            InstallTarget::Tree { root, program_path } => {
-                let staging = stage_tree(artifact, root, program_path, archive_key, group)?;
+            InstallTarget::Tree {
+                root,
+                program_path,
+                links,
+            } => {
+                let staging = stage_tree(artifact, root, program_path, links, archive_key, group)?;
                 Ok(Staged {
                     program: staging.join(program_path),
                     root: staging.clone(),
@@ -2143,6 +2147,7 @@ fn stage_tree(
     artifact: &std::path::Path,
     root: &std::path::Path,
     program_path: &std::path::Path,
+    links: &[fleet_core::tree::KeptLink],
     archive_key: Option<&str>,
     group: Option<crate::storage::ProcessAccountGroup>,
 ) -> Result<PathBuf, String> {
@@ -2171,7 +2176,7 @@ fn stage_tree(
                 return Ok(());
             }
             crate::archive::Kind::TarGz => {
-                crate::archive::extract_tree_tar_gz(artifact, program_path, staging)?
+                crate::archive::extract_tree_tar_gz(artifact, program_path, links, staging)?
             }
             crate::archive::Kind::SevenZ => {
                 crate::archive::extract_tree_7z(artifact, program_path, staging, archive_key)?
@@ -2192,7 +2197,8 @@ fn stage_tree(
     }
 
     let program = staging.join(program_path);
-    if !program.is_file() {
+    // Asked of the member itself: a link the kind keeps is never the program.
+    if !std::fs::symlink_metadata(&program).is_ok_and(|meta| meta.is_file()) {
         let _ = std::fs::remove_dir_all(&staging);
         return Err(format!(
             "the unpacked package holds no file at {}",
@@ -3279,6 +3285,7 @@ mod tests {
             InstallTarget::Tree {
                 root: dir.path().join("tree-root"),
                 program_path: PathBuf::from("bin/prog"),
+                links: &[],
             },
         ];
         for target in targets {
@@ -3587,6 +3594,7 @@ mod tests {
         let target = InstallTarget::Tree {
             root: root.clone(),
             program_path: PathBuf::from("bin/agent"),
+            links: &[],
         };
         target.prepare(Some(group)).expect("prepare");
         assert_eq!(mode(&root), (0o750, group.0));
@@ -3777,6 +3785,7 @@ mod tests {
         let target = InstallTarget::Tree {
             root: dir.path().join("program"),
             program_path: PathBuf::from("bin/agent"),
+            links: &[],
         };
         target.prepare(Some(group)).expect("prepare");
         let staged = target.stage(&artifact, None, Some(group)).expect("staged");
