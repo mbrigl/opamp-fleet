@@ -20,7 +20,8 @@ once its tag exists.
 
 - **`opamp-fleetctl package fetch --repack <n>` numbers a later repack of one version**
   ([ADR-draft-the-operator-program-opamp-fleetctl](docs/adr/draft-the-operator-program-opamp-fleetctl.md)
-  clause 28), for an agent whose artifact the tool repacks. The second repack of `2.14.3` is
+  clause 28), for an agent whose artifact the tool repacks; an agent the tool uploads as upstream
+  publishes it refuses a number above 1. The second repack of `2.14.3` is
   uploaded as Package `2.14.4-0.r.2`, above every earlier repack and below the next release, and
   `r.10` orders above `r.9`. `--repack 1`, the default, is the version itself.
   **What to do:** nothing.
@@ -32,6 +33,17 @@ once its tag exists.
   **What to do:** nothing.
 
 ### Changed
+
+- **A Supervisor reports the version of the Package it installed, and the Server holds the next
+  Package against it**
+  ([ADR-draft-deployments-and-rollouts](docs/adr/draft-deployments-and-rollouts.md) clauses 14 and
+  25). A Supervisor-backed Agent reports `supervisor.package.version` once its Supervisor has
+  installed a Package, and the Server's candidate, reach count, fleet view and rollout act compare
+  a Package with it, falling back to `service.version` where it is not reported. A host that
+  installed a repack, whose program reports the upstream version, is no longer a candidate for the
+  same Package on every press, and a program numbered below its Package can no longer be moved
+  backwards once its Supervisor installed one.
+  **What to do:** nothing.
 
 - **A single-file package installs one regular file, never a directory, and an archive holding
   its program twice is refused**
@@ -51,6 +63,26 @@ once its tag exists.
   clause 27): `0o755` for directories and executables and `0o644` for every other file, so no group
   or world write bit and no setuid bit upstream set reaches the signed artifact.
   **What to do:** nothing.
+
+- **Breaking: the Client refuses an `[attributes]` key in the `supervisor.` namespace**
+  ([ADR-0017](docs/adr/0017-what-an-agent-reports-about-itself.md) clause 10). The namespace is
+  the Supervisor's own statement. A `supervisor.kind.*` entry made every Agent of the host look
+  like a Client's own Agent to the Server. A `supervisor.package.version` entry chose the version
+  the next Package is held against: on a Supervisor's Agent until its first install, and on the
+  Client's own Agent, which reports none of its own, for as long as the entry stood, so its
+  self-update Packages were held against it. Startup now fails with a message naming the key,
+  whether the file quotes it (`"supervisor.kind.x"`), writes it dotted (`supervisor.kind.x`), or
+  puts it under `[attributes.supervisor]`. **What to do:** remove every such entry from
+  `supervisor.toml` before upgrading, or the Client does not start.
+
+- **The Server refuses a label in the `supervisor.` namespace**
+  ([ADR-0030](docs/adr/0030-the-fleet-record-of-agents-and-hosts.md) clause 20).
+  `PUT /api/v1/agents/{uid}/labels`, which the UI's label editor uses, answers `400` naming the
+  key, as it does for `fleet.`: a Selector would otherwise match such a label as if a Supervisor
+  had stated it. A label already stored in that namespace is ignored: no Selector and no package
+  match reads it, nothing inherits it, and the fleet row lists it in `ignored_labels`. The next
+  label set put without it, as the UI's label editor puts one, removes it. **What to do:**
+  nothing.
 
 - **A tree package may keep the absolute links its Supervisor's kind names, and no other link**
   ([ADR-draft-packages-signatures-and-delivery](docs/adr/draft-packages-signatures-and-delivery.md)

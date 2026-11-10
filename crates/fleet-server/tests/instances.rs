@@ -4838,6 +4838,78 @@ async fn an_agent_inherits_the_labels_of_its_client_agent_that_another_instance_
     );
 }
 
+/// A label in the Supervisor's space the database already holds matches nothing in the list read
+/// from it: a Selector on it admits no Agent, an Agent placed under the Client Agent that holds it
+/// does not inherit it, and the label beside it still matches and is inherited.
+/// Verifies: ADR-0030, ADR-0031
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stored_label_in_the_supervisors_space_matches_nothing_in_the_list() {
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let a = Instance::start(&pki, &schema, schema.config_on(schema.config.port)).await;
+    let (cert, key) = pki.issue_to_host("h1");
+    let (client, agent) = (InstanceUid([0x35; 16]), InstanceUid([0x36; 16]));
+    let mut client_session = websocket(&a, &pki, &cert, &key).await;
+    report_as(
+        &mut client_session,
+        client,
+        1,
+        0,
+        (
+            &[("service.name", "fleet-agent")],
+            &[("supervisor.kind.otelcol", "true")],
+        ),
+        true,
+    )
+    .await;
+    let mut session = websocket(&a, &pki, &cert, &key).await;
+    report_as(&mut session, agent, 1, 0, PACKAGED, true).await;
+    schema.sql(&format!(
+        "UPDATE agents SET labels = '{{\"supervisor.kind.x\":\"true\",\"ring\":\"early\"}}'::json \
+         WHERE instance_uid = '{client}'"
+    ));
+    let listed = |key: &'static str, value: &'static str| {
+        let on_a = a.state.clone();
+        async move {
+            tokio::task::spawn_blocking(move || {
+                on_a.list_agents(&fleet_server::fleet::AgentQuery {
+                    filter: fleet_server::listing::AgentFilter {
+                        selector: std::collections::BTreeMap::from([(
+                            key.to_string(),
+                            value.to_string(),
+                        )]),
+                        ..Default::default()
+                    },
+                    limit: 100,
+                    ..fleet_server::fleet::AgentQuery::default()
+                })
+                .expect("a page")
+                .agents
+            })
+            .await
+            .expect("list")
+        }
+    };
+    assert!(
+        listed("supervisor.kind.x", "true").await.is_empty(),
+        "a stored label in the Supervisor's space admits no Agent"
+    );
+    let ring = listed("ring", "early").await;
+    let uids: Vec<&str> = ring.iter().map(|view| view.instance_uid.as_str()).collect();
+    assert_eq!(uids.len(), 2, "the label beside it matches both: {uids:?}");
+    let placed = ring
+        .iter()
+        .find(|view| view.instance_uid == agent.to_string())
+        .expect("the Agent under the Client Agent");
+    assert_eq!(
+        placed.inherited_labels,
+        std::collections::BTreeMap::from([("ring".to_string(), "early".to_string())]),
+        "only the label outside the reserved spaces is inherited"
+    );
+}
+
 /// The list of Agents as `instance` answers it: those `filter` admits, by name, a page of `limit`
 /// after `after`.
 fn page_on(

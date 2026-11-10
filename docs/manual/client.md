@@ -1381,6 +1381,14 @@ region = "eu-central"
 These describe the **host**, and every Agent this Client presents carries them — including a fresh
 one, in its very first message, before the Server has ever seen it.
 
+A key that starts with `supervisor.` fails startup with a message naming it, whether it is quoted
+(`"supervisor.kind.x" = "true"`), dotted (`supervisor.kind.x = "true"`), or under
+`[attributes.supervisor]`. That namespace is the Supervisor's own statement — the kinds the Client
+carries (`supervisor.kind.*`) and the version of the Package a Supervisor installed
+(`supervisor.package.version`) — and an entry there could make every Agent of the host look like a
+Client's own Agent, or choose the version the next Package is held against. The Server refuses a
+label in that namespace for the same reason.
+
 To tag **one** Agent among several on a host, use a Server **label** instead
 (`PUT /api/v1/agents/<uid>/labels`): it is keyed by that Agent's `instance_uid`, matched by the
 same Selectors, and takes effect at once without editing a file on the host. A label on the
@@ -1392,7 +1400,9 @@ Every Agent additionally reports, without configuration, everything the protocol
 an Agent and where it runs: `service.name`, `service.instance.name`, `service.instance.id`,
 `os.type`, `os.name`, `os.version`, `os.description`, `host.name`, `host.arch`, and `host.id` — plus
 `service.version`, which for the Client's own Agent is the Client's baked-in version and for a
-Supervisor-backed Agent is whatever the Managed Process reports about itself.
+Supervisor-backed Agent is whatever the Managed Process reports about itself. A Supervisor-backed
+Agent also reports `supervisor.package.version`, the version of the Package its Supervisor last
+installed, once it has installed one; the Server holds the next Package against it.
 
 A Managed Process states only its own `service.*` attributes, such as its version, which replaces
 what the Supervisor reports. It never states the Agent's type: `service.name` is the Supervisor's,

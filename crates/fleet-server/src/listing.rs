@@ -478,9 +478,10 @@ pub type Placed = (Option<InstanceUid>, bool, BTreeMap<String, String>);
 
 /// Where the Agents that arrived over one Host place each other (ADR-0030 clause 19): on a direct
 /// connection they are one group, behind a Gateway one group per machine they report. A group with
-/// exactly one Client Agent places the others under it, and they inherit its labels; one with more
-/// places nobody and marks every member ambiguous. Answers, per Agent of a group, its Client Agent,
-/// whether it is ambiguous, and the labels it inherits.
+/// exactly one Client Agent places the others under it, and they inherit its labels but those in a
+/// reserved space (clause 20); one with more places nobody and marks every member ambiguous.
+/// Answers, per Agent of a group, its Client Agent, whether it is ambiguous, and the labels it
+/// inherits.
 #[must_use]
 pub fn place_on_host(
     gateway: bool,
@@ -517,7 +518,7 @@ pub fn place_on_host(
         for i in members {
             let (uid, _, _) = agents[*i];
             let inherited = match client {
-                Some(c) if c != *i => agents[c].2.clone(),
+                Some(c) if c != *i => crate::labels::inheritable(agents[c].2),
                 _ => BTreeMap::new(),
             };
             placed.insert(

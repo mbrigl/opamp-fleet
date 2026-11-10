@@ -2576,15 +2576,25 @@ outlived its binary, a self-update that staged and did not take effect — is of
 the claim used to refuse it as a downgrade and strand the host for good. The `409` names the
 version that decided and says that the claim was not consulted.
 
+**Where a Supervisor reports what it installed, that decides.** A Supervisor-backed Agent
+reports `supervisor.package.version`, the version of the Package its Supervisor last installed,
+and the Package must be greater than that; neither `service.version` nor the package status is
+read beside it. A repacked Package carries a version its program does not report: the second
+repack of an upstream 2.14.3 is Package `2.14.4-0.r.2`, and the program still says `2.14.3`. Held
+against the program, a host that installed the repack would stay a candidate for it on every
+press; held against what its Supervisor installed, it is offered the repack once. An Agent
+reports none before its Supervisor's first install, and the Client's own Agent reports none, so
+for those the rules above apply. The `409` says that the Supervisor's installed version decided.
+
 **What this costs, and whom it touches.** Where a program reports a version *above* the Package that
 carries it, no Package below that number reaches it any more, and where it reports one below, a
 Package between the two can move its package backwards — a Collector calling itself `0.98.0` under
 an `otelcol` Package at `2.0.0` can be assigned a `1.5.0`. Nothing moves on its own: a rollout is
 an explicit act and you see the version you press. This reaches only Agents that report a
-`service.version` of their own — the Client itself, and an OpAMP-aware Managed Process such as a
-Collector carrying `opampextension`. A program that reports none keeps its Packages matched on
-the package status alone. **Number a Package the way the program it carries
-numbers itself**, and neither case arises.
+`service.version` of their own and no installed Package's version — the Client itself, and a
+Managed Process before its Supervisor's first install. Once a Supervisor has installed a Package,
+the Package's version decides and the program's number is not read. **Number a Package the way
+the program it carries numbers itself**, and neither case arises.
 
 Versions are still kept side by side — a new version is a new Package, and the older artifact
 stays in the store — but **taking a bad version back is not a rollout**:
@@ -2768,7 +2778,13 @@ comes from.
 If an Agent *starts* reporting a key that was labelled earlier, the reported value wins and the
 fleet row marks the label as shadowed — set, and matching nothing.
 
-**A label whose key starts with `fleet.` is refused with `400`.** That space is the Server's own.
+**A label whose key starts with `fleet.` or `supervisor.` is refused with `400`,** naming the key.
+`fleet.` is the Server's own space. `supervisor.` is a Supervisor's: the kinds its Client carries
+and the version of the Package it installed, which a label must not let a Selector match as if the
+Supervisor had stated them. A label the Agent's record already holds in either space is ignored:
+no Selector and no package match reads it, no Agent inherits it, and the fleet row lists it in
+`ignored_labels`, which the Agents tab shows as an amber *ignored* chip. The UI's label editor
+leaves it out, so the next label set saved removes it; nothing else needs doing.
 
 **Label the Client once.** A Client presents an Agent for itself — the one that reports
 `supervisor.kind.*` — and one per Supervisor. The labels set on the Client's own Agent hold for its

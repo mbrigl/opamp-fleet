@@ -185,7 +185,8 @@ pub(super) fn derive_missing(database: &Database) -> Result<(), String> {
 
 /// Every row of `agents` with what is joined at read time: whether a connection carries it, its
 /// holder under a live lease, its Host, and the Client Agent of its group with the labels it
-/// passes on (ADR-0030 clause 19). A group is a Host the Agent arrived over directly, or a
+/// passes on (ADR-0030 clause 19), none in the `fleet.` or `supervisor.` space, which nothing
+/// inherits (ADR-0030 clause 20). A group is a Host the Agent arrived over directly, or a
 /// Gateway's Host and the machine the Agent reports.
 const PLACED: &str = r#"
 WITH g AS (
@@ -207,8 +208,11 @@ v AS (
         (a.connected AND l.instance_id IS NOT NULL) AS live,
         l.instance_id::text AS holder_id, l.host AS holder_host,
         coalesce(c.clients, 0) AS clients, c.client_uid,
-        CASE WHEN c.clients = 1 AND c.client_uid <> a.instance_uid THEN ca.labels END
-            AS inherited
+        CASE WHEN c.clients = 1 AND c.client_uid <> a.instance_uid THEN
+            (SELECT coalesce(json_object_agg(e.key, e.value), '{}'::json)
+             FROM json_each_text(ca.labels) AS e
+             WHERE NOT starts_with(e.key, 'fleet.') AND NOT starts_with(e.key, 'supervisor.'))
+        END AS inherited
     FROM agents AS a
     JOIN g ON g.instance_uid = a.instance_uid
     LEFT JOIN hosts AS h ON h.host = a.host
@@ -312,6 +316,13 @@ fn conditions(query: &PageQuery<'_>) -> Conditions {
             continue;
         }
         let k = c.bind(key.clone());
+        // A label in the Supervisor's space matches nothing, so only what is reported can
+        // (ADR-0030 clause 20).
+        if key.starts_with(opamp::attributes::SUPERVISOR_PREFIX) {
+            c.clauses
+                .push(format!("coalesce(v.reported ->> {k} = {v}, false)"));
+            continue;
+        }
         c.clauses.push(format!(
             "coalesce(CASE WHEN v.reported -> {k} IS NOT NULL THEN v.reported ->> {k} = {v} \
              ELSE coalesce(v.labels ->> {k}, v.inherited ->> {k}) = {v} END, false)"
