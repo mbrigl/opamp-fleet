@@ -1476,6 +1476,9 @@ mod tests {
             Some(("65s".to_string(), "1min".to_string())),
             "a sweep's session waits 60 s: its statement_timeout and lock_timeout"
         );
+        // The sweep the refused upload starts waits for the lock too; it need not wait the whole
+        // of SWEEP_WAIT for a hold this test lets go of.
+        database.wait_for_sweeps(std::time::Duration::from_millis(200));
         // While it holds, an upload's transaction waits its session's lock_timeout and is refused.
         let refused = store
             .put_entry(

@@ -1075,6 +1075,29 @@ mod tests {
         approvals(&|| Box::new(PgEnrolmentStore::new(database.clone())));
     }
 
+    /// Holds the approver that signs until the other one has met the request: it waits for the
+    /// request's row, or it has answered. Where both sign, a defect, neither waits for the other.
+    fn other_approver_met(
+        test: &TestDatabase,
+        signing: &std::sync::atomic::AtomicUsize,
+        finished: &std::sync::atomic::AtomicUsize,
+    ) {
+        use std::sync::atomic::Ordering::SeqCst;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while signing.load(SeqCst) < 2
+            && finished.load(SeqCst) == 0
+            && test.sessions(
+                "wait_event_type = 'Lock' AND query LIKE 'SELECT request FROM enrolment_requests%'",
+            ) == 0
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the other approver never met the request"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
     /// Of two instances approving one request, one signs and records it and the other finds it
     /// decided, signing nothing: the request's row is held from before the signature until the
     /// decision is written. The other finds it still being decided instead when it waited out
@@ -1097,26 +1120,30 @@ mod tests {
                 .take(&request(&id, "1"), 1_000, 100, 100)
                 .expect("take");
             let signed = std::sync::atomic::AtomicUsize::new(0);
+            let finished = std::sync::atomic::AtomicUsize::new(0);
             let barrier = std::sync::Barrier::new(2);
             let answers: Vec<Approval> = std::thread::scope(|scope| {
                 let racers: Vec<_> = stores
                     .iter()
                     .map(|store| {
-                        let (barrier, id, signed) = (&barrier, id.clone(), &signed);
+                        let (barrier, id, signed, finished, test) =
+                            (&barrier, id.clone(), &signed, &finished, &test);
                         scope.spawn(move || {
                             barrier.wait();
-                            store
+                            let answer = store
                                 .approve(
                                     &id,
                                     &bootstrap("1"),
                                     &mut || {
                                         signed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                                        std::thread::sleep(std::time::Duration::from_millis(20));
+                                        other_approver_met(test, signed, finished);
                                         Ok((Decision::Approved(format!("pem {id}")), None))
                                     },
                                     &crate::enrolment::tests::kept(),
                                 )
-                                .expect("approve")
+                                .expect("approve");
+                            finished.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            answer
                         })
                     })
                     .collect();
@@ -1294,9 +1321,10 @@ mod tests {
             assert_eq!(a.submit(submitted(&key), requester()), Submitted::Waiting);
             assert_eq!(b.submit(submitted(&key), requester()), Submitted::Waiting);
             let recorded = std::sync::atomic::AtomicUsize::new(0);
+            let finished = std::sync::atomic::AtomicUsize::new(0);
             let record = |_: &crate::revocation::Signed, _: &[u8], _: &CertId| {
                 recorded.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                std::thread::sleep(std::time::Duration::from_millis(20));
+                other_approver_met(&test, &recorded, &finished);
                 Ok(())
             };
             let barrier = std::sync::Barrier::new(2);
@@ -1304,16 +1332,19 @@ mod tests {
                 let racers: Vec<_> = [&a, &b]
                     .into_iter()
                     .map(|enrolment| {
-                        let (barrier, key, record) = (&barrier, key.clone(), &record);
+                        let (barrier, key, record, finished) =
+                            (&barrier, key.clone(), &record, &finished);
                         scope.spawn(move || {
                             barrier.wait();
-                            enrolment.approve(
+                            let answer = enrolment.approve(
                                 &key,
                                 &Echo,
                                 "host",
                                 &crate::enrolment::tests::Recording::new(record),
                                 &|_| false,
-                            )
+                            );
+                            finished.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            answer
                         })
                     })
                     .collect();
@@ -1367,7 +1398,18 @@ mod tests {
             .expect("closing");
         let taken = std::thread::scope(|scope| {
             let taker = scope.spawn(|| store.take(&request("late", "1"), 1_000, 8, 8));
-            std::thread::sleep(std::time::Duration::from_millis(300));
+            // The taker waits for the window's row, which the close holds.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while test.sessions(
+                "wait_event_type = 'Lock' AND query LIKE 'SELECT until_ms FROM enrolment_window%'",
+            ) == 0
+            {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the take never waited for the window's row"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
             database
                 .run(move |_| async move {
                     closing

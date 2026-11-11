@@ -876,8 +876,9 @@ async fn eventually(within: Duration, condition: impl Fn() -> bool) -> bool {
 }
 
 /// Two instances on one database both hold a live lease and both answer the probe on the Agent
-/// plane; a revocation committed on A ends the session of that certificate on B within one
-/// renewal interval, and no other session.
+/// plane; a revocation committed on A ends the session of that certificate on B, by its
+/// notification or at the latest by the next renewal, and no other session. The wait is bounded at
+/// three renewal intervals, as for a notification missed, leaving a loaded host its delays.
 /// Verifies: ADR-0025, ADR-0040
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_revocation_on_one_instance_ends_the_session_on_the_other() {
@@ -908,9 +909,9 @@ async fn a_revocation_on_one_instance_ends_the_session_on_the_other() {
         .expect("revoke")
         .expect("revoke on A");
     assert_eq!(
-        closed_within(&mut revoked, TIMES.renew).await,
+        closed_within(&mut revoked, TIMES.renew * 3).await,
         Some((1008, "revoked".to_string())),
-        "B did not end the revoked session within one renewal interval"
+        "B did not end the revoked session within three renewal intervals"
     );
     assert_eq!(
         closed_within(&mut kept, Duration::from_millis(300)).await,

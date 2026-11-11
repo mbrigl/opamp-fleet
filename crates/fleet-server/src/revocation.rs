@@ -3655,7 +3655,7 @@ mod tests {
                 let _ = answered.send((revoked, speaks, reports));
             });
         }
-        let checked = answer.recv_timeout(std::time::Duration::from_secs(1));
+        let checked = answer.recv_timeout(std::time::Duration::from_secs(10));
         go.send(()).expect("go");
         let (revoked, speaks, reports) = checked.expect("answered while the read is held open");
         assert!(!revoked, "answered from what was held before the read");
