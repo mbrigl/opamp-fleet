@@ -366,6 +366,8 @@ struct Instance {
     stop: Option<tokio::sync::oneshot::Sender<()>>,
     /// Every entry the instance's signatures with a token key wrote, where it signs with one.
     audit: Option<Arc<token::Recorded>>,
+    /// The database the instance listens through, where it is not [`database`](Self::database).
+    listening: Option<Arc<Database>>,
     _dir: tempfile::TempDir,
 }
 
@@ -428,6 +430,23 @@ impl Instance {
     /// Starts taking up what other instances commit, for an instance started deaf.
     fn follow(&mut self) {
         self.following = fleet_server::instance::follow(&self.database, self.state.clone(), None);
+    }
+
+    /// [`follow`](Self::follow), listening through a connection of its own on `config`: what
+    /// happens to that connection, such as a cut, leaves the lease and every other connection of
+    /// the instance as they are. Unlike the Server, the listener is not the database the instance
+    /// writes through: it hears the instance's own commits as another's, and not the notices of
+    /// commits that database could not confirm. Without the renewals' comparison.
+    async fn follow_through(&mut self, schema: &Schema, config: PostgresConfig) {
+        let name = schema.name.clone();
+        let listening = tokio::task::spawn_blocking(move || {
+            Database::open_in(&config, Exclusive::Shared, Some(&name))
+        })
+        .await
+        .expect("open")
+        .expect("open the listening connection's database");
+        self.following = fleet_server::instance::follow(&listening, self.state.clone(), None);
+        self.listening = Some(listening);
     }
 
     /// [`start`](Self::start), its lease renewals compared with the list's version only where
@@ -699,6 +718,7 @@ impl Instance {
             suspended,
             stop: Some(stop),
             audit,
+            listening: None,
             _dir: dir,
         }
     }
@@ -1590,8 +1610,11 @@ async fn a_revocation_committed_while_the_listening_connection_was_cut_ends_its_
     let pki = Pki::new();
     let network = Cuttable::to(database_address(&schema));
     let a = Instance::start(&pki, &schema, schema.config_on(schema.config.port)).await;
-    // Without the renewals' comparison, which would catch the revocation on its own.
-    let b = Instance::start_following(&pki, &schema, schema.config_on(network.port), false).await;
+    // Only B's listening connection goes through the cut, so the cut cannot cost B its lease. It
+    // follows without the renewals' comparison, which would catch the revocation on its own.
+    let mut b = Instance::start_deaf(&pki, &schema, schema.config_on(schema.config.port)).await;
+    b.follow_through(&schema, schema.config_on(network.port))
+        .await;
     assert!(b.has_read(1).await, "B never listened");
 
     let (cert, key) = pki.issue("edge-01");
