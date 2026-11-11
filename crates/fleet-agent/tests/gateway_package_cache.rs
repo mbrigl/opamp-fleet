@@ -379,9 +379,15 @@ async fn get_now(client: &reqwest::Client, gateway: SocketAddr, path: &str) -> r
 
 /// A request asked again while the Gateway answers that it is fetching the artifact, as a Client
 /// would after `Retry-After` — what it is answered once no fetch runs.
+///
+/// It asks again at most as often as the host's bucket refills ([`ask_again`]), so the re-asks of a
+/// fetch that takes its time never run out the Gateway's rate limit and turn into a `429` this
+/// test did not mean to provoke.
 async fn get(client: &reqwest::Client, gateway: SocketAddr, path: &str) -> reqwest::Response {
+    let mut pace = tokio::time::interval(ask_again());
     tokio::time::timeout(DEADLINE, async {
         loop {
+            pace.tick().await;
             let response = get_now(client, gateway, path).await;
             let fetching = response.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE
                 && response
@@ -392,11 +398,17 @@ async fn get(client: &reqwest::Client, gateway: SocketAddr, path: &str) -> reqwe
             if !fetching {
                 break response;
             }
-            tokio::task::yield_now().await;
         }
     })
     .await
     .expect("no fetch runs any more")
+}
+
+/// How long [`get`] waits before it asks again: the time the default bucket of a downstream host
+/// takes to gain one token (ADR-0022), so asking at this pace never runs it out. It holds while
+/// [`spawn_gateway`] sets no `[gateway.rate_limit]` of its own.
+fn ask_again() -> Duration {
+    Duration::from_secs(1) / fleet_agent::config::GatewayRateLimitConfig::default().messages_per_sec
 }
 
 /// The body of the Gateway's `503` while it fetches.
