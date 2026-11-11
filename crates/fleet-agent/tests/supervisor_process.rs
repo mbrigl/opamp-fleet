@@ -153,6 +153,15 @@ struct Harness {
     _service: Option<AgentsService>,
 }
 
+/// The apply grace of a test whose program is meant to fail within it: a crasher dies at once, so
+/// a long grace costs such a test nothing, and a loaded host cannot make a crash outlast it.
+const CRASH_GRACE: Duration = Duration::from_secs(30);
+
+/// The apply grace of a test where a program meant to stay up must also survive it, which the test
+/// then waits out: long enough for a crasher on a loaded host to die within it, short enough not
+/// to hold the test up.
+const GATE_GRACE: Duration = Duration::from_secs(2);
+
 /// A `Runner` with everything the test does not care about filled in. `install` and `apply_grace`
 /// are what the package tests vary; `version_probe` is set only where the probe is the subject.
 fn runner(
@@ -1041,7 +1050,7 @@ async fn a_process_that_dies_on_the_reload_signal_is_restarted_instead(via: Via)
     let mut harness = runner_full(
         via,
         None,
-        Duration::from_millis(300),
+        GATE_GRACE,
         Duration::ZERO,
         None,
         None,
@@ -1194,9 +1203,7 @@ async fn a_process_surviving_the_apply_grace_is_acknowledged_applied(via: Via) {
 both!(a_process_surviving_the_apply_grace_is_acknowledged_applied);
 
 async fn a_process_exiting_within_the_grace_fails_the_apply_and_stays_supervised(via: Via) {
-    let mut harness = start_with_grace(via, Duration::from_millis(500), || {
-        Some(spec(&stub_crasher()))
-    });
+    let mut harness = start_with_grace(via, CRASH_GRACE, || Some(spec(&stub_crasher())));
     apply(&harness, b"h1").await;
     let (hash, result) = next_ack(&mut harness.events).await;
     assert_eq!(hash, b"h1".to_vec());
@@ -1480,7 +1487,7 @@ async fn a_package_that_will_not_stay_up_is_rolled_back_and_fails(via: Via) {
         std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).expect("chmod");
     }
 
-    let mut harness = binary_harness(via, &binary, Duration::from_millis(500));
+    let mut harness = binary_harness(via, &binary, CRASH_GRACE);
     let _ = next_health(&mut harness.events).await;
 
     // A binary that exits at once: it fails the grace and must be rolled back.
@@ -1505,7 +1512,7 @@ async fn a_first_install_that_will_not_start_is_kept_not_discarded(via: Via) {
     let dir = tempfile::tempdir().expect("tempdir");
     let binary = dir.path().join(program_name("agent"));
     // Nothing on disk yet: a first install onto an empty program directory.
-    let mut harness = binary_harness(via, &binary, Duration::from_millis(200));
+    let mut harness = binary_harness(via, &binary, CRASH_GRACE);
 
     let staged = dir.path().join("downloaded.staged");
     let crasher = bytes_of(&stub_crasher());
@@ -1535,7 +1542,7 @@ both!(a_first_install_that_will_not_start_is_kept_not_discarded);
 async fn a_program_that_keeps_crashing_is_held_not_looped(via: Via) {
     let dir = tempfile::tempdir().expect("tempdir");
     let binary = dir.path().join(program_name("agent"));
-    let mut harness = binary_harness(via, &binary, Duration::from_millis(100));
+    let mut harness = binary_harness(via, &binary, CRASH_GRACE);
 
     // Install a crasher as a first install: kept (no predecessor), and it keeps crashing.
     let staged = dir.path().join("downloaded.staged");
@@ -1592,7 +1599,7 @@ async fn a_failed_package_counts_towards_the_hold_of_a_predecessor_that_fails_to
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).expect("chmod");
     }
-    let mut harness = binary_harness(via, &binary, Duration::from_millis(300));
+    let mut harness = binary_harness(via, &binary, CRASH_GRACE);
     // The predecessor keeps crashing from the start, and is held.
     loop {
         let health = next_health(&mut harness.events).await;
@@ -1638,7 +1645,7 @@ async fn a_failed_package_starts_its_predecessor_exactly_once(via: Via) {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).expect("chmod");
     }
-    let mut harness = binary_harness(via, &binary, Duration::from_millis(300));
+    let mut harness = binary_harness(via, &binary, CRASH_GRACE);
     let running = next_health(&mut harness.events).await;
     assert_eq!(running.status, "running", "{running:?}");
 
@@ -1768,7 +1775,7 @@ fn tree_harness(via: Via, root: &Path) -> Harness {
             root: root.to_path_buf(),
             program_path: inside,
         }),
-        Duration::from_millis(200),
+        GATE_GRACE,
         None,
         move || Some(spec(&program)),
     )
@@ -2323,7 +2330,7 @@ mod an_apply_while_the_second_service_is_away {
     /// Verifies: ADR-0021
     #[tokio::test]
     async fn a_package_waits_staged_while_the_service_is_away_and_is_swapped_in_once_it_is_back() {
-        let (mut away, service) = running(&stub_agent(), Duration::from_millis(500)).await;
+        let (mut away, service) = running(&stub_agent(), CRASH_GRACE).await;
         let good = bytes_of(&stub_agent());
         the_service_goes(&mut away, service).await;
 
@@ -2792,7 +2799,7 @@ mod an_apply_while_the_second_service_is_away {
     /// Verifies: ADR-0021
     #[tokio::test]
     async fn a_failed_package_does_not_fail_the_configuration_its_predecessor_runs() {
-        let (mut away, service) = running(&stub_agent(), Duration::from_millis(500)).await;
+        let (mut away, service) = running(&stub_agent(), GATE_GRACE).await;
         the_service_goes(&mut away, service).await;
         apply(&away.harness, b"cfg").await;
         the_apply_finds_it_away(&mut away).await;

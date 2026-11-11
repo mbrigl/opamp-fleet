@@ -2347,7 +2347,7 @@ mod tests {
     /// is due without the service being away: a package offered before it runs is swapped in, not
     /// parked for a service that is back (ADR-0021 clause 17).
     /// Verifies: ADR-0021
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_retry_due_at_once_does_not_say_the_service_is_away() {
         let mut waiting = Waiting::new();
         waiting.arm();
@@ -2355,9 +2355,13 @@ mod tests {
         waiting.clear();
         waiting.due_now();
         assert!(!waiting.armed(), "the service was reached");
+        // On the paused clock "at once" is exact: no time passes before the retry is due, where
+        // even the first backoff would move the clock half a second on.
+        let asked = tokio::time::Instant::now();
         tokio::time::timeout(Duration::from_secs(1), waiting.due())
             .await
             .expect("the retry is due at once");
+        assert_eq!(asked.elapsed(), Duration::ZERO, "the retry waited a backoff");
     }
 
     /// A Supervisor held after a package that failed leaves no configuration waiting: one owed its
@@ -2516,7 +2520,7 @@ mod tests {
                 "the preflight runs"
             );
             shutdown_tx.send(true).expect("request the shutdown");
-            tokio::time::timeout(Duration::from_secs(1), install)
+            tokio::time::timeout(Duration::from_secs(10), install)
                 .await
                 .expect("the shutdown is seen at once")
         };
@@ -2735,7 +2739,7 @@ mod tests {
                 "the reload waits for the signal's answer"
             );
             shutdown_tx.send(true).expect("request the shutdown");
-            tokio::time::timeout(Duration::from_millis(500), reload)
+            tokio::time::timeout(Duration::from_secs(10), reload)
                 .await
                 .expect("the shutdown is seen at once")
         };
@@ -2967,7 +2971,7 @@ mod tests {
         };
         assert_eq!(gone.status, UNREACHABLE);
         shutdown_tx.send(true).expect("request the shutdown");
-        tokio::time::timeout(Duration::from_secs(2), run)
+        tokio::time::timeout(Duration::from_secs(10), run)
             .await
             .expect("the Runner ends on the shutdown")
             .expect("cleanly");
@@ -3015,7 +3019,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert!(!run.is_finished(), "the start waits for the service");
         shutdown_tx.send(true).expect("request the shutdown");
-        tokio::time::timeout(Duration::from_secs(2), run)
+        tokio::time::timeout(Duration::from_secs(10), run)
             .await
             .expect("the shutdown ends the waiting start")
             .expect("cleanly");

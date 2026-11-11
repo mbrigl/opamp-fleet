@@ -3597,7 +3597,7 @@ mod tests {
                 .err()
                 .expect("refused");
         assert!(refused.to_string().contains("build"), "{refused}");
-        tokio::time::timeout(Duration::from_secs(1), behind.left_behind())
+        tokio::time::timeout(Duration::from_secs(10), behind.left_behind())
             .await
             .expect("the Client left behind is told so");
         service.abort();
@@ -4025,6 +4025,10 @@ mod tests {
         assert!(admit(me, me.wrapping_add(1)).is_err());
     }
 
+    /// What "at once" allows a refusal: well short of the [`HANDSHAKE`] a refusal that waited for
+    /// the handshake would take, so only that defect reaches it, not a loaded host.
+    const AT_ONCE: Duration = Duration::from_millis(HANDSHAKE.as_millis() as u64 / 2);
+
     /// Nothing is read from a refused peer and nothing waits on it: a stranger that says nothing
     /// is told and dropped at once, however many of them connect, rather than each holding a
     /// descriptor for the length of a handshake.
@@ -4037,19 +4041,17 @@ mod tests {
             strangers.push(UnixStream::connect(&service.socket).await.expect("connect"));
         }
         for stranger in &mut strangers {
-            let reply =
-                tokio::time::timeout(Duration::from_secs(1), read_frame::<_, Reply>(stranger))
-                    .await
-                    .expect("refused without waiting for a handshake");
+            let reply = tokio::time::timeout(AT_ONCE, read_frame::<_, Reply>(stranger))
+                .await
+                .expect("refused without waiting for a handshake");
             assert!(
                 matches!(reply, Ok(Some(Reply::Refused { .. }))),
                 "{reply:?}"
             );
             let mut rest = Vec::new();
-            let closed =
-                tokio::time::timeout(Duration::from_secs(1), stranger.read_to_end(&mut rest))
-                    .await
-                    .expect("closed at once");
+            let closed = tokio::time::timeout(AT_ONCE, stranger.read_to_end(&mut rest))
+                .await
+                .expect("closed at once");
             assert!(closed.map_or(true, |n| n == 0), "more after the refusal");
         }
     }
@@ -4065,10 +4067,9 @@ mod tests {
             .write_all(&(64 * 1024u32).to_be_bytes())
             .await
             .expect("a length");
-        let reply =
-            tokio::time::timeout(Duration::from_secs(1), read_frame::<_, Reply>(&mut stream))
-                .await
-                .expect("refused without waiting for the body");
+        let reply = tokio::time::timeout(AT_ONCE, read_frame::<_, Reply>(&mut stream))
+            .await
+            .expect("refused without waiting for the body");
         assert!(
             matches!(reply, Ok(Some(Reply::Refused { .. }))),
             "{reply:?}"

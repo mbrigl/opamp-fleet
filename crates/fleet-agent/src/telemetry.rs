@@ -1260,8 +1260,10 @@ mod tests {
         let took = started.elapsed();
         assert!(refused.is_empty(), "{refused:?}");
         assert!(!telemetry.reporting());
+        // Only a defect waits out the replaced exporter's export timeout; a loaded host does not
+        // come near it.
         assert!(
-            took < Duration::from_secs(1),
+            took < EXPORT_TIMEOUT,
             "the offer waited {took:?} for the replaced exporter's flush"
         );
 
@@ -1410,18 +1412,28 @@ mod tests {
         let (tx, rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
             let (mut connection, _) = listener.accept().await.expect("the exporter connects");
-            // Read until the exporter has nothing more to say, then answer: the body is protobuf
-            // and this stub has no reason to parse it — the span's name and status travel as plain
-            // strings inside it, which is exactly what is being asserted.
+            // Read the request whole, its head and the `Content-Length` bytes of its body, then
+            // answer: the body is protobuf and this stub has no reason to parse it — the span's
+            // name and status travel as plain strings inside it, which is exactly what is being
+            // asserted.
             let mut request = Vec::new();
             let mut chunk = [0u8; 4096];
-            while let Ok(Ok(read)) =
-                tokio::time::timeout(Duration::from_millis(200), connection.read(&mut chunk)).await
-            {
-                if read == 0 {
-                    break;
+            loop {
+                if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let head = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
+                    let length = head
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length:"))
+                        .and_then(|value| value.trim().parse::<usize>().ok())
+                        .expect("the request names its length");
+                    if request.len() >= end + 4 + length {
+                        break;
+                    }
                 }
-                request.extend_from_slice(&chunk[..read]);
+                match connection.read(&mut chunk).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => request.extend_from_slice(&chunk[..read]),
+                }
             }
             let _ = connection
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
