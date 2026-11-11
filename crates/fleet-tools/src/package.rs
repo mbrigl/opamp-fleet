@@ -794,8 +794,9 @@ mod tests {
 
     /// `keygen` leaves the key file owner-only and nothing beside it, and refuses to replace a file
     /// that exists, leaving it as it was. That the mode holds from the file's creation, and that a
-    /// process killed part-way leaves no half-written key, no test decides: both follow from the
-    /// key being written `0600` in a temporary directory and linked into place (`pki::write_key`).
+    /// process killed part-way leaves no half-written key at the target, only a staging directory
+    /// beside it, no test decides: both follow from the key being written `0600` in a temporary
+    /// directory and placed only once complete (`pki::write_key`).
     /// Verifies: ADR-0042
     #[test]
     fn keygen_writes_the_key_owner_only_and_never_replaces_one() {

@@ -101,11 +101,12 @@ mod tests {
         (cert_file, cert.der().to_vec(), key_file)
     }
 
-    /// The authority a CA's files load to signs a leaf that verifies under that CA, and a key file
-    /// that cannot be read or holds no key is refused, naming it.
+    /// The authority a CA's certificate and key make signs a leaf that verifies under that CA; a key
+    /// file that cannot be read or holds no key, and a certificate that cannot serve as a CA, are
+    /// refused, naming their file.
     /// Verifies: ADR-0042
     #[test]
-    fn an_authority_loaded_from_its_files_signs_what_its_certificate_verifies() {
+    fn an_authority_signs_what_its_certificate_verifies_and_a_key_file_is_named_when_refused() {
         use x509_parser::prelude::{FromDer as _, X509Certificate};
         let dir = tempfile::tempdir().expect("tempdir");
         let (cert_file, cert_der, key_file) = ca(dir.path());

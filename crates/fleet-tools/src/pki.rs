@@ -1264,7 +1264,9 @@ fn create_private_dir(dir: &Path) -> Result<(), String> {
 /// Writes the private key `contents` at `path` by the rule [`write_all`] keeps (ADR-0042 clause
 /// 15): refused when `path` exists, written `0600` into a new temporary directory beside it, and
 /// linked into place only once complete, so a process killed part-way leaves no half-written key at
-/// `path`. The link, unlike a rename, refuses a file that appeared at `path` in the meantime.
+/// `path`, only the staging directory. The link, unlike a rename, refuses a file that appeared at
+/// `path` in the meantime; where the file system has no links, such as FAT, the key is renamed
+/// into place once `path` is found free again. The directory `path` names must exist.
 pub(crate) fn write_key(path: &Path, contents: &[u8]) -> Result<(), String> {
     let never_replaced = || {
         format!(
@@ -1283,16 +1285,26 @@ pub(crate) fn write_key(path: &Path, contents: &[u8]) -> Result<(), String> {
         return Err(never_replaced());
     }
     let temp = dir.join(format!(".pki-{}", hex::encode(nonce()?)));
-    create_private_dir(&temp)?;
+    // `mut` is used only by the Unix block below; on Windows there is nothing to set.
+    #[cfg_attr(not(unix), allow(unused_mut))]
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        builder.mode(0o700);
+    }
+    builder
+        .create(&temp)
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
     let staged = temp.join(name);
     let placed = write_file(&staged, contents, true).and_then(|()| {
-        std::fs::hard_link(&staged, path).map_err(|e| {
-            if e.kind() == std::io::ErrorKind::AlreadyExists {
-                never_replaced()
-            } else {
-                format!("cannot place {}: {e}", path.display())
-            }
-        })
+        match std::fs::hard_link(&staged, path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(never_replaced()),
+            Err(_) if path.exists() => Err(never_replaced()),
+            Err(_) => std::fs::rename(&staged, path)
+                .map_err(|e| format!("cannot place {}: {e}", path.display())),
+        }
     });
     let _ = std::fs::remove_file(&staged);
     let _ = std::fs::remove_dir(&temp);
@@ -1313,16 +1325,9 @@ fn write_file(path: &Path, contents: &[u8], key: bool) -> Result<(), String> {
     }
     #[cfg(not(unix))]
     let _ = key;
-    let mut file = options.open(path).map_err(|e| {
-        if key && e.kind() == std::io::ErrorKind::AlreadyExists {
-            format!(
-                "{} exists, and a private key is never replaced: move it away or delete it first",
-                path.display()
-            )
-        } else {
-            format!("cannot write {}: {e}", path.display())
-        }
-    })?;
+    let mut file = options
+        .open(path)
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
     file.write_all(contents)
         .and_then(|()| file.sync_all())
         .map_err(|e| {
