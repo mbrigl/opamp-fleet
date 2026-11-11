@@ -475,13 +475,17 @@ mod tests {
         )
         .expect("endpoint starts");
         shutdown_tx.send(true).expect("signal shutdown");
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        assert!(
-            tokio_tungstenite::connect_async(format!("ws://{addr}/v1/opamp"))
+        // The endpoint's task ends on its own schedule: asked until it refuses, within seconds.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while tokio_tungstenite::connect_async(format!("ws://{addr}/v1/opamp"))
                 .await
-                .is_err(),
-            "a stopped endpoint accepts no connections"
-        );
+                .is_ok()
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("a stopped endpoint accepts no connections");
     }
 
     /// A connection that completes the upgrade and is answered: the endpoint is serving.

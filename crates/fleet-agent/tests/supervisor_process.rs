@@ -1645,8 +1645,20 @@ async fn a_failed_package_starts_its_predecessor_exactly_once(via: Via) {
     offer_package(&harness, dir.path(), &bytes_of(&stub_crasher()), "9.9.9").await;
     let (_, result) = next_package_ack(&mut harness.events).await;
     assert!(result.is_err(), "{result:?}");
-    // Longer than the backoff a second respawn would have waited.
-    let mut healths = Vec::new();
+    // The predecessor starts again, waited for within seconds; then nothing more for longer
+    // than the backoff a second respawn would have waited.
+    let restarted = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match harness.events.recv().await {
+                Some((_, ProcessEvent::Health(health))) => break health.status,
+                Some(_) => {}
+                None => panic!("the events ended"),
+            }
+        }
+    })
+    .await
+    .expect("the predecessor starts again");
+    let mut healths = vec![restarted];
     let until = tokio::time::Instant::now() + Duration::from_millis(2500);
     while let Ok(Some((_, event))) = tokio::time::timeout_at(until, harness.events.recv()).await {
         if let ProcessEvent::Health(health) = event {

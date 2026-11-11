@@ -4592,8 +4592,23 @@ mod tests {
             assert!(std::time::Instant::now() < deadline, "the flood never ran");
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        // Long enough for the flood to fill the socket and every queue in front of it.
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        // Every queue is full once the socket holds output the service no longer adds to and the
+        // flood sleeps in its write: neither alone says so, since `yes` outruns any reader.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut unread = unread_bytes(&stream);
+        loop {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let now = unread_bytes(&stream);
+            if now > 0 && now == unread && writing_blocked(&marker) {
+                break;
+            }
+            unread = now;
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the flood never filled its queues"
+            );
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
         for request in [
             Request::Start {
                 id: 2,
@@ -4644,6 +4659,32 @@ mod tests {
                     .split(|b| *b == 0)
                     .any(|word| word == arg.as_bytes())
             }) && alive(pid)
+        })
+    }
+
+    /// The bytes the service sent on `stream` that the test has not read.
+    #[cfg(target_os = "linux")]
+    fn unread_bytes(stream: &impl std::os::fd::AsRawFd) -> libc::c_int {
+        let mut unread: libc::c_int = 0;
+        // SAFETY: FIONREAD writes one c_int through the pointer, which outlives the call.
+        let done = unsafe { libc::ioctl(stream.as_raw_fd(), libc::FIONREAD, &mut unread) };
+        assert_eq!(done, 0, "FIONREAD on the connection");
+        unread
+    }
+
+    /// Whether a live process with `arg` among its arguments sleeps in a write to a full pipe.
+    #[cfg(target_os = "linux")]
+    fn writing_blocked(arg: &str) -> bool {
+        let Ok(entries) = std::fs::read_dir("/proc") else {
+            return false;
+        };
+        entries.flatten().any(|entry| {
+            std::fs::read(entry.path().join("cmdline")).is_ok_and(|cmdline| {
+                cmdline
+                    .split(|b| *b == 0)
+                    .any(|word| word == arg.as_bytes())
+            }) && std::fs::read_to_string(entry.path().join("wchan"))
+                .is_ok_and(|wchan| wchan.contains("pipe_write"))
         })
     }
 

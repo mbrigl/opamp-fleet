@@ -2068,6 +2068,15 @@ mod tests {
         });
 
         reap_tombstones(&root, service.clone());
+        let asked = async {
+            while service.asked.lock().expect("lock").is_empty() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(10), asked)
+            .await
+            .expect("the reap asks the second service");
+        // Time for a reap that did not wait for the answer to remove it anyway.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         assert!(tomb.is_dir(), "removed before the second service answered");
         assert_eq!(*service.asked.lock().expect("lock"), vec!["earlier"]);
