@@ -272,13 +272,13 @@ pub struct Written {
     pub answered: Option<Answered>,
     /// The endpoint `--endpoint` named over a file this run kept: no answer, but an enrolment
     /// refuses a kept file that names another
-    /// (ADR-draft-a-privileged-enrolment-connects-where-its-own-run-answered).
+    /// (ADR-0044).
     pub named_over_kept: Option<String>,
 }
 
 /// The endpoint and the trust a run answered, held in memory: a privileged enrolment connects
 /// with these, never with what it would read back from the file the service's account owns
-/// (ADR-draft-a-privileged-enrolment-connects-where-its-own-run-answered).
+/// (ADR-0044).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Answered {
     /// The endpoint answered.
@@ -1473,7 +1473,7 @@ mod tests {
     /// What an `--endpoint` install answered is handed on: the endpoint as given, and the copy
     /// with the certificates written into it; a loopback endpoint answers no CA, and a file kept
     /// answers nothing.
-    /// Verifies: ADR-draft-a-privileged-enrolment-connects-where-its-own-run-answered
+    /// Verifies: ADR-0044
     #[test]
     fn what_an_endpoint_install_answered_is_handed_on() {
         let program = tempfile::tempdir().expect("tempdir");
@@ -1520,7 +1520,7 @@ mod tests {
     }
 
     /// Answers without a CA are handed on with their endpoint and no CA, and nothing is copied.
-    /// Verifies: ADR-draft-a-privileged-enrolment-connects-where-its-own-run-answered
+    /// Verifies: ADR-0044
     #[test]
     fn answers_without_a_ca_hand_on_their_endpoint_and_no_ca() {
         let to = tempfile::tempdir().expect("tempdir");

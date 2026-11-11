@@ -215,7 +215,7 @@ has:
   A test holds the modules these steps run in to no path-based read, write, removal, rename or mode
   change outside a justified list (`privileged_steps_follow_no_link.rs`).
 - **A privileged enrolment connects where its own run answered**
-  ([ADR-draft-a-privileged-enrolment-connects-where-its-own-run-answered](adr/draft-a-privileged-enrolment-connects-where-its-own-run-answered.md)):
+  ([ADR-0044](adr/0044-a-privileged-enrolment-connects-where-its-own-run-answered.md)):
   a run that answered the questionnaire or `--endpoint` enrols with the endpoint and the CA
   certificates it answered, held in memory, and does not read them back from `supervisor.toml`,
   which the service's account can rewrite meanwhile. An answer without a CA leaves the built-in
