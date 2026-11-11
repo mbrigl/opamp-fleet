@@ -276,15 +276,18 @@ check "a passing check keeps a line that says it skipped something" \
 out="$(bash "$d/scripts/check-all.sh" --verbose 2>&1)"
 check "--verbose shows a sensor's report in full" grep -qF "RAN $sensor" <<< "$out"
 
-# at_once <dir> <jobs> — the most checks the runner had running at once with CHECK_ALL_JOBS at
-# jobs: each stub notes a directory of its own while it runs, and how many there are.
+# at_once <dir> <jobs> [wait] — the most checks the runner had running at once with
+# CHECK_ALL_JOBS at jobs: each stub notes a directory of its own while it runs, and how many there
+# are. With wait, a stub stays until that many run at once, or 5 s have passed: the stub that
+# makes the count notes it as it starts, whatever the load, and only a runner that runs the checks
+# one after another waits the bound out.
 at_once() {
-  local s
+  local s want="${3:-0}"
   mkdir -p "$1/running"
   for s in "${scripts[@]}"; do
     # shellcheck disable=SC2016 # the stub's variables, not this script's
-    printf 'mkdir "%s/running/$$"; ls "%s/running" | wc -l >> "%s/counts"; sleep 0.1; rmdir "%s/running/$$"\n' \
-      "$1" "$1" "$1" "$1" >> "$1/$s"
+    printf 'mkdir "%s/running/$$"; ls "%s/running" | wc -l >> "%s/counts"; i=0; while [ "$(ls "%s/running" | wc -l)" -lt %s ] && [ $i -lt 100 ]; do sleep 0.05; i=$((i + 1)); done; sleep 0.1; rmdir "%s/running/$$"\n' \
+      "$1" "$1" "$1" "$1" "$want" "$1" >> "$1/$s"
   done
   : > "$1/counts"
   CHECK_ALL_JOBS="$2" bash "$1/scripts/check-all.sh" > /dev/null 2>&1
@@ -294,7 +297,7 @@ at_once() {
 d="$(repo capped)"
 check "CHECK_ALL_JOBS=2 runs no more than two checks at once" test "$(at_once "$d" 2)" -le 2
 d="$(repo uncapped)"
-check "the checks run side by side" test "$(at_once "$d" "${#scripts[@]}")" -gt 2
+check "the checks run side by side" test "$(at_once "$d" "${#scripts[@]}" 3)" -gt 2
 
 d="$(repo jobs-zero)"
 CHECK_ALL_JOBS=0 expect_exit "CHECK_ALL_JOBS=0 exits 2" 2 "$d"
