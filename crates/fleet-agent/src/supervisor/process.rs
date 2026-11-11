@@ -2361,7 +2361,11 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), waiting.due())
             .await
             .expect("the retry is due at once");
-        assert_eq!(asked.elapsed(), Duration::ZERO, "the retry waited a backoff");
+        assert_eq!(
+            asked.elapsed(),
+            Duration::ZERO,
+            "the retry waited a backoff"
+        );
     }
 
     /// A Supervisor held after a package that failed leaves no configuration waiting: one owed its
