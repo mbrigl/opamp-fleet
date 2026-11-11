@@ -1,4 +1,4 @@
-# ADR-draft-a-privileged-enrolment-connects-where-its-own-run-answered: A privileged enrolment connects where its own run answered
+# ADR-0044: A privileged enrolment connects where its own run answered
 
 - **Status:** 🟢 accepted
 - **Date:** 2026-11-10
