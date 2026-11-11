@@ -1261,10 +1261,48 @@ fn create_private_dir(dir: &Path) -> Result<(), String> {
         .map_err(|e| format!("cannot create {}: {e}", dir.display()))
 }
 
+/// Writes the private key `contents` at `path` by the rule [`write_all`] keeps (ADR-0042 clause
+/// 15): refused when `path` exists, written `0600` into a new temporary directory beside it, and
+/// linked into place only once complete, so a process killed part-way leaves no half-written key at
+/// `path`. The link, unlike a rename, refuses a file that appeared at `path` in the meantime.
+pub(crate) fn write_key(path: &Path, contents: &[u8]) -> Result<(), String> {
+    let never_replaced = || {
+        format!(
+            "{} exists, and a private key is never replaced: move it away or delete it first",
+            path.display()
+        )
+    };
+    let name = path
+        .file_name()
+        .ok_or_else(|| format!("{} names no file", path.display()))?;
+    let dir = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    if path.exists() {
+        return Err(never_replaced());
+    }
+    let temp = dir.join(format!(".pki-{}", hex::encode(nonce()?)));
+    create_private_dir(&temp)?;
+    let staged = temp.join(name);
+    let placed = write_file(&staged, contents, true).and_then(|()| {
+        std::fs::hard_link(&staged, path).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                never_replaced()
+            } else {
+                format!("cannot place {}: {e}", path.display())
+            }
+        })
+    });
+    let _ = std::fs::remove_file(&staged);
+    let _ = std::fs::remove_dir(&temp);
+    placed
+}
+
 /// Writes a new file; a key is `0600` from the moment it exists, and an existing file is never
-/// replaced. The one writer of every private key the tool makes (ADR-0042). A write that fails
-/// part-way removes what it wrote, so nothing is left half written to be refused as existing.
-pub(crate) fn write_file(path: &Path, contents: &[u8], key: bool) -> Result<(), String> {
+/// replaced (ADR-0042 clause 15). The one writer of every private key the tool makes, through
+/// [`write_all`] or [`write_key`]. A write that fails part-way removes what it wrote.
+fn write_file(path: &Path, contents: &[u8], key: bool) -> Result<(), String> {
     use std::io::Write as _;
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
