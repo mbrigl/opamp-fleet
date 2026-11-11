@@ -918,6 +918,7 @@ fn ask(
         in_service.is_enrolled(),
         beside,
         password,
+        (&[&roots.data, &roots.layout], &in_service.state_dir),
     )
 }
 

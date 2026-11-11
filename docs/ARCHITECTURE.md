@@ -322,7 +322,7 @@ no module.
   directory it passes must hold the file directly. A run that answered the questionnaire or
   `--endpoint` hands the enrolment the endpoint and the CA certificates it copied
   (`config_init::Answered`), which stand in for what the file says by then; the answered CA file
-  itself is read by its path, bounded, and only its certificates are kept. `--endpoint` over a
+  itself is read as the enrolment reads one, and only its certificates are kept. `--endpoint` over a
   kept file refuses the enrolment where the file names another endpoint. What else runs under the
   Client's or the process account — the self-update's and a Supervisor's program staging through
   `install`, the Gateway's package cache, and the second service's purge on Windows, which goes

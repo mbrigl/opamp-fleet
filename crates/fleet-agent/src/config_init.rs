@@ -300,7 +300,8 @@ pub struct Answered {
 /// question (ADR-0027 clause 16).
 ///
 /// The answered CA is copied beside the file first, and the file names the copy
-/// ([`copy_ca_beside`]).
+/// ([`copy_ca_beside`]). `account` is the roots and the state directory, which the service's
+/// account owns: the answered CA is read through no link it placed there.
 ///
 /// # Errors
 /// Returns an error when stdin is not a terminal, when a prompt fails, or when a file cannot be
@@ -311,6 +312,7 @@ pub fn run(
     enrolled: bool,
     beside: &Beside,
     password: Option<&str>,
+    account: (&[&Path], &Path),
 ) -> Result<Written, String> {
     if !std::io::stdin().is_terminal() {
         return Err(format!(
@@ -334,7 +336,7 @@ pub fn run(
     }
     beside.report();
     let (answers, bootstrap) = ask(current, enrolled, beside, password)?;
-    let (answers, answered) = copy_ca_beside(answers, path)?;
+    let (answers, answered) = copy_ca_beside(answers, path, account.0, Some(account.1))?;
     let copies = copies(&answered);
     if existing {
         // The file may hold `[packages] archive_key`: the text read and the text written are wiped
@@ -386,7 +388,12 @@ fn copies(answered: &Answered) -> Vec<PathBuf> {
 /// # Errors
 /// Returns an error naming the file that could not be read or written, or that holds no
 /// certificate.
-pub fn copy_ca_beside(answers: Answers, config: &Path) -> Result<(Answers, Answered), String> {
+pub fn copy_ca_beside(
+    answers: Answers,
+    config: &Path,
+    roots: &[&Path],
+    state_dir: Option<&Path>,
+) -> Result<(Answers, Answered), String> {
     let Some(ca) = &answers.ca_file else {
         let endpoint = answers.endpoint.clone();
         return Ok((answers, Answered { endpoint, ca: None }));
@@ -398,7 +405,7 @@ pub fn copy_ca_beside(answers: Answers, config: &Path) -> Result<(Answers, Answe
         .ok_or_else(|| format!("{} names no directory", config.display()))?;
     let held = crate::config_file::held_dir(&dir)?;
     let to = dir.join(SERVER_CA_FILE);
-    let bytes = read_certificates(ca)?;
+    let bytes = read_certificates(ca, roots, state_dir)?;
     held.write(SERVER_CA_FILE, &bytes, 0o600)
         .map_err(|e| format!("cannot write {}: {e}", to.display()))?;
     let answered = Answered {
@@ -418,12 +425,17 @@ pub fn copy_ca_beside(answers: Answers, config: &Path) -> Result<(Answers, Answe
 /// and nothing else the file had beside them. A file without a certificate is refused, and the
 /// refusal never repeats what the file holds.
 ///
-/// The file is read as [`crate::tls::read_bounded`] reads it: anything but a regular file of at
-/// most [`crate::tls::MAX_PEM_BYTES`] is refused unread, so a FIFO or a device the service's
-/// account placed at the name never holds this step up.
-fn read_certificates(path: &Path) -> Result<Vec<u8>, String> {
-    let bytes = crate::tls::read_bounded(path)
-        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+/// The file is read as a privileged enrolment reads one, with `roots` and `state_dir` as the
+/// account's: a regular file of at most [`crate::tls::MAX_PEM_BYTES`], so a FIFO or a device the
+/// service's account placed at the name never holds this step up, and through no link the account
+/// placed in its directories, such as one at the copy an earlier answer left in the data root
+/// (ADR-0021 clause 11).
+fn read_certificates(
+    path: &Path,
+    roots: &[&Path],
+    state_dir: Option<&Path>,
+) -> Result<Vec<u8>, String> {
+    let bytes = crate::service::enrol::read_privileged(path, roots, state_dir)?;
     let certificates = opamp::tls::certificates(&bytes).map_err(|_| {
         format!(
             "{} is not a CA file: it holds no PEM certificate",
@@ -569,7 +581,8 @@ pub fn run_with_endpoint(
     if let Some(key) = &answers.verification_key {
         println!("took the package verification key {key} from beside the program");
     }
-    let (answers, answered) = copy_ca_beside(answers, path)?;
+    // The CA beside the program is the administrator's, in none of the account's directories.
+    let (answers, answered) = copy_ca_beside(answers, path, &[], None)?;
     let copies = copies(&answered);
     write_new(path, &render(&answers))?;
     println!("wrote {} for {}", path.display(), answers.endpoint);
@@ -1334,6 +1347,7 @@ mod tests {
             false,
             &Beside::default(),
             None,
+            (&[], dir.path()),
         )
         .expect_err("no terminal, no questionnaire");
         assert!(err.contains("needs a terminal"), "{err}");
@@ -1510,8 +1524,8 @@ mod tests {
     #[test]
     fn answers_without_a_ca_hand_on_their_endpoint_and_no_ca() {
         let to = tempfile::tempdir().expect("tempdir");
-        let (_, answered) =
-            copy_ca_beside(answers(), &to.path().join(FILE_NAME)).expect("nothing to copy");
+        let (_, answered) = copy_ca_beside(answers(), &to.path().join(FILE_NAME), &[], None)
+            .expect("nothing to copy");
         assert_eq!(answered.endpoint, answers().endpoint);
         assert_eq!(answered.ca, None);
         assert!(!to.path().join(SERVER_CA_FILE).exists());
@@ -1789,6 +1803,8 @@ mod tests {
                 ..answers()
             },
             &path,
+            &[],
+            None,
         )
         .expect("copy");
 
@@ -1841,6 +1857,8 @@ mod tests {
                 ..answers()
             },
             &path,
+            &[],
+            None,
         )
         .expect("copy onto itself");
         assert_eq!(certificates_in(&copy), before);
@@ -1853,6 +1871,8 @@ mod tests {
                 ..answers()
             },
             &path,
+            &[],
+            None,
         )
         .expect("copy");
         assert_eq!(certificates_in(&copy), certificates_in(&elsewhere));
@@ -1877,6 +1897,8 @@ mod tests {
                 ..answers()
             },
             &path,
+            &[],
+            None,
         )
         .expect_err("refused");
         assert!(
@@ -1898,12 +1920,44 @@ mod tests {
                 ..answers()
             },
             &path,
+            &[],
+            None,
         )
         .expect("copy");
         let copied = std::fs::read_to_string(&copy).expect("read");
         assert!(copied.contains("BEGIN CERTIFICATE"), "{copied}");
         assert!(!copied.contains("PRIVATE KEY"), "the key is not copied");
         assert!(!copied.contains("secret"), "nor the text beside it");
+    }
+
+    /// The answered CA — on a re-run the copy an earlier answer left in the data root — is read
+    /// through no link the service's account placed there: a link at the copy is refused, though
+    /// it leads to a file of certificates, and nothing is written.
+    /// Verifies: ADR-0021
+    #[cfg(unix)]
+    #[test]
+    fn a_link_at_the_ca_copy_is_not_followed_by_the_answer() {
+        let data = tempfile::tempdir().expect("data");
+        let elsewhere = tempfile::tempdir().expect("elsewhere");
+        let theirs = elsewhere.path().join("theirs.pem");
+        std::fs::write(&theirs, ca_pem()).expect("theirs");
+        let copy = data.path().join(SERVER_CA_FILE);
+        std::os::unix::fs::symlink(&theirs, &copy).expect("link at the copy");
+
+        let refused = copy_ca_beside(
+            Answers {
+                ca_file: Some(copy.clone()),
+                ..answers()
+            },
+            &data.path().join(FILE_NAME),
+            &[data.path()],
+            None,
+        )
+        .expect_err("a link at the copy");
+        assert!(refused.contains("is a link"), "{refused}");
+        assert!(std::fs::symlink_metadata(&copy)
+            .expect("still there")
+            .is_symlink());
     }
 
     #[cfg(unix)]
@@ -1924,7 +1978,7 @@ mod tests {
                 ..answers()
             };
             let at = path.clone();
-            std::thread::spawn(move || done.send(copy_ca_beside(answers, &at).err()));
+            std::thread::spawn(move || done.send(copy_ca_beside(answers, &at, &[], None).err()));
             let refused = wait
                 .recv_timeout(std::time::Duration::from_secs(10))
                 .unwrap_or_else(|_| panic!("{} held the copy up", named.display()))

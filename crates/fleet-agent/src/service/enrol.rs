@@ -240,7 +240,7 @@ fn read_once(
     roots: &[&Path],
 ) -> Result<(), String> {
     let state_dir = config.state_dir.clone();
-    let read = |path: &Path| read_privileged(path, roots, &state_dir);
+    let read = |path: &Path| read_privileged(path, roots, Some(&state_dir));
     if let (None, Some(ca)) = (&config.ca_pem, config.ca_file()) {
         config.ca_pem = Some(crate::tls::certificates_in(ca, read(ca)?.to_vec())?);
     }
@@ -254,6 +254,9 @@ fn read_once(
     });
     Ok(())
 }
+
+/// The most links a privileged read follows on an administrator's path, as Linux's `ELOOP` bound.
+const MAX_LINKS: usize = 40;
 
 /// The file at `path`, read by a privileged step: a regular file of at most
 /// [`crate::tls::MAX_PEM_BYTES`], opened without blocking, so a device or a FIFO is never read.
@@ -272,22 +275,26 @@ fn read_once(
 ///   the account put in place.
 /// - **Anywhere else** the path is the administrator's, and a link on it is followed, at most
 ///   [`MAX_LINKS`]. The file is opened by its name in the directory the walk ends in, held.
-fn read_privileged(
+pub(crate) fn read_privileged(
     path: &Path,
     roots: &[&Path],
-    state_dir: &Path,
+    state_dir: Option<&Path>,
 ) -> Result<zeroize::Zeroizing<Vec<u8>>, String> {
     let named = |why: String| format!("cannot read {}: {why}", path.display());
     // The roots as resolved; the state directory by its resolved parent and its own name, not
     // followed, so it counts as the account's even where it is missing or a link.
     let state = state_dir
-        .parent()
-        .zip(state_dir.file_name())
+        .and_then(|dir| dir.parent().zip(dir.file_name()))
         .and_then(|(parent, name)| Some(std::fs::canonicalize(parent).ok()?.join(name)));
     let owned: Vec<(PathBuf, &Path, bool)> = roots
         .iter()
         .filter_map(|root| Some((std::fs::canonicalize(root).ok()?, *root, true)))
-        .chain(state.clone().map(|form| (form, state_dir, false)))
+        .chain(
+            state
+                .clone()
+                .zip(state_dir)
+                .map(|(form, dir)| (form, dir, false)),
+        )
         .collect();
     let absolute = std::path::absolute(path).map_err(|e| named(e.to_string()))?;
     let mut pending: std::collections::VecDeque<Part> =
@@ -332,8 +339,8 @@ fn read_privileged(
             if let (2, Some(Part::Name(sub)), Some(Part::Name(name))) =
                 (pending.len(), pending.front(), pending.back())
             {
-                if state.as_ref() == Some(&real.join(sub)) {
-                    return read_in(crate::nofollow::HeldDir::open(state_dir), name, &named);
+                if let (Some(dir), true) = (state_dir, state.as_ref() == Some(&real.join(sub))) {
+                    return read_in(crate::nofollow::HeldDir::open(dir), name, &named);
                 }
             }
             let (1, Some(Part::Name(name))) = (pending.len(), pending.front()) else {
@@ -393,9 +400,6 @@ fn read_in(
         .map_err(|e| named(e.to_string()))?;
     crate::tls::read_opened(file).map_err(named)
 }
-
-/// The most links a privileged read follows on an administrator's path, as Linux's `ELOOP` bound.
-const MAX_LINKS: usize = 40;
 
 /// `path` as its directory and its file name, which must be UTF-8.
 fn split(path: &Path) -> Result<(&Path, &str), String> {

@@ -154,9 +154,9 @@ const ALLOWED: &[(&str, &str, &str, &str)] = &[
         "read_bounded",
         "OpenOptions::new(",
         "opens a file to read it, never to change it, and without blocking, used only when it is \
-         a regular file of at most 1 MiB: in a privileged step, the CA file an answer names, of \
-         which only the certificates are copied; the enrolment reads through held directories \
-         (`service::enrol`)",
+         a regular file of at most 1 MiB: the run-time Client's reads of the files `[tls]` names, \
+         in its own account's directories; a privileged step reads them, and an answered CA, \
+         through `service::enrol::read_privileged`",
     ),
     (
         "src/main.rs",

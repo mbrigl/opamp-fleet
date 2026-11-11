@@ -210,7 +210,8 @@ has:
   path is resolved one component at a time, `..` and every link on it included: a root or the
   state directory it passes must hold the file directly, and a path that goes on beneath one is
   refused, except the state directory directly in a root, which is held by its name without
-  following a link there. Elsewhere a link on the administrator's path is followed.
+  following a link there. Elsewhere a link on the administrator's path is followed. The
+  questionnaire reads an answered CA the same way, the copy an earlier answer left included.
   A test holds the modules these steps run in to no path-based read, write, removal, rename or mode
   change outside a justified list (`privileged_steps_follow_no_link.rs`).
 - **A privileged enrolment connects where its own run answered**
