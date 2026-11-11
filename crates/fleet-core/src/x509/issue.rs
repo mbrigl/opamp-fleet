@@ -7,7 +7,7 @@ use std::path::Path;
 
 use rcgen::{
     CertificateParams, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair, KeyUsagePurpose,
-    SerialNumber,
+    SerialNumber, SigningKey,
 };
 use zeroize::Zeroizing;
 
@@ -69,19 +69,17 @@ pub fn read_key(key_file: &Path) -> Result<KeyPair, String> {
     KeyPair::from_pem(&key_pem).map_err(|e| format!("cannot read {}: {e}", key_file.display()))
 }
 
-/// The authority that signs with the key in `key_file` under the CA certificate `cert_der`, which
-/// the caller read as the first certificate of `cert_file`. Whether the key belongs to the
-/// certificate is not checked here.
+/// The authority that signs with `key` under the CA certificate `cert_der`, which the caller read
+/// as the first certificate of `cert_file`: a key from a file ([`read_key`]) or one that signs
+/// elsewhere, such as on a token. Whether the key belongs to the certificate is not checked here.
 ///
 /// # Errors
-/// Returns an error naming the file when the key cannot be read, or the certificate cannot serve
-/// as a CA.
-pub fn authority(
+/// Returns an error naming `cert_file` when the certificate cannot serve as a CA.
+pub fn authority<K: SigningKey>(
     cert_file: &Path,
     cert_der: &[u8],
-    key_file: &Path,
-) -> Result<Issuer<'static, KeyPair>, String> {
-    let key = read_key(key_file)?;
+    key: K,
+) -> Result<Issuer<'static, K>, String> {
     Issuer::from_ca_cert_der(&cert_der.to_vec().into(), key)
         .map_err(|e| format!("cannot use {} as a CA: {e}", cert_file.display()))
 }
@@ -111,7 +109,8 @@ mod tests {
         use x509_parser::prelude::{FromDer as _, X509Certificate};
         let dir = tempfile::tempdir().expect("tempdir");
         let (cert_file, cert_der, key_file) = ca(dir.path());
-        let issuer = authority(&cert_file, &cert_der, &key_file).expect("authority");
+        let key = read_key(&key_file).expect("key");
+        let issuer = authority(&cert_file, &cert_der, key).expect("authority");
         let mut params = CertificateParams::new(Vec::<String>::new()).expect("params");
         leaf(&mut params, Role::Client).expect("leaf");
         let signed = params
@@ -124,12 +123,15 @@ mod tests {
             .expect("signed by the CA's key");
 
         let missing = dir.path().join("none.pem");
-        let error = authority(&cert_file, &cert_der, &missing).expect_err("refused");
+        let error = read_key(&missing).expect_err("refused");
         assert!(error.contains("none.pem"), "{error}");
         let not_a_key = dir.path().join("not-a-key.pem");
         std::fs::write(&not_a_key, "not a key").expect("write");
-        let error = authority(&cert_file, &cert_der, &not_a_key).expect_err("not a key");
+        let error = read_key(&not_a_key).expect_err("not a key");
         assert!(error.contains("not-a-key.pem"), "{error}");
+        let key = KeyPair::generate().expect("key");
+        let error = authority(&cert_file, b"not a certificate", key).expect_err("no CA");
+        assert!(error.contains("ca.pem"), "{error}");
     }
 
     /// A leaf is what its role says and nothing more, whatever the parameters asked for.

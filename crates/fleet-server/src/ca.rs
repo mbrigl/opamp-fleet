@@ -94,20 +94,13 @@ impl ClientCa {
         config: &ClientCaConfig,
         token: Option<&std::sync::Arc<crate::pkcs11::Token>>,
     ) -> Result<Self, String> {
-        let cert_pem = std::fs::read_to_string(&config.cert_file)
-            .map_err(|e| format!("cannot read {}: {e}", config.cert_file.display()))?;
+        let ca_der = first_certificate(&config.cert_file)?;
         let key = CaKey::load(
             ("[client_ca] key_file", config.key_file.as_deref()),
             ("[client_ca] key_label", config.key_label.as_deref()),
             token,
         )?;
-        let issuer = Issuer::from_ca_cert_pem(&cert_pem, key)
-            .map_err(|e| format!("cannot use {} as a CA: {e}", config.cert_file.display()))?;
-        let ca_der = opamp::tls::certificates(cert_pem.as_bytes())
-            .map_err(|e| format!("cannot read {}: {e}", config.cert_file.display()))?
-            .first()
-            .map(|der| der.as_ref().to_vec())
-            .ok_or_else(|| format!("{} holds no certificate", config.cert_file.display()))?;
+        let issuer = issue::authority(&config.cert_file, &ca_der, key)?;
         let leaf_name = leaf_name(&config.cert_file, &ca_der)?;
         Ok(ClientCa {
             issuer,
@@ -794,8 +787,7 @@ impl BootstrapCa {
             (None, Some(label)) => format!("[enrolment] bootstrap_ca_key_label {label:?}"),
             (None, None) => return Ok(None),
         };
-        let cert_pem = std::fs::read_to_string(&enrolment.bootstrap_ca_file)
-            .map_err(|e| format!("cannot read {}: {e}", enrolment.bootstrap_ca_file.display()))?;
+        let der = first_certificate(&enrolment.bootstrap_ca_file)?;
         let key = CaKey::load(
             (
                 "[enrolment] bootstrap_ca_key_file",
@@ -807,7 +799,6 @@ impl BootstrapCa {
             ),
             token,
         )?;
-        let der = first_certificate(&enrolment.bootstrap_ca_file, &cert_pem)?;
         let (_, cert) = X509Certificate::from_der(&der)
             .map_err(|e| format!("cannot read {}: {e}", enrolment.bootstrap_ca_file.display()))?;
         if cert.public_key().raw != key.subject_public_key_info().as_slice() {
@@ -836,12 +827,7 @@ impl BootstrapCa {
         let not_after_ms = u64::try_from(cert.validity().not_after.timestamp())
             .unwrap_or(0)
             .saturating_mul(1000);
-        let issuer = Issuer::from_ca_cert_pem(&cert_pem, key).map_err(|e| {
-            format!(
-                "cannot use {} as a CA: {e}",
-                enrolment.bootstrap_ca_file.display()
-            )
-        })?;
+        let issuer = issue::authority(&enrolment.bootstrap_ca_file, &der, key)?;
         Ok(Some(BootstrapCa {
             issuer,
             leaf_name,
@@ -932,16 +918,7 @@ impl CaKey {
         token: Option<&std::sync::Arc<crate::pkcs11::Token>>,
     ) -> Result<Self, String> {
         match (file, label) {
-            (Some(file), _) => {
-                // Wiped when it is dropped; what `rcgen` and `ring` keep of it is theirs
-                // (ADR-0014).
-                let pem = std::fs::read_to_string(file)
-                    .map(Zeroizing::new)
-                    .map_err(|e| format!("cannot read {}: {e}", file.display()))?;
-                KeyPair::from_pem(&pem)
-                    .map(|key| CaKey::File(Box::new(key)))
-                    .map_err(|e| format!("cannot read {}: {e}", file.display()))
-            }
+            (Some(file), _) => issue::read_key(file).map(|key| CaKey::File(Box::new(key))),
             (None, Some(label)) => token
                 .ok_or_else(|| {
                     format!("{label_key} {label:?} names a key on a token, and [pkcs11] is not set")
@@ -1040,13 +1017,12 @@ fn leaf_name(path: &std::path::Path, ca_der: &[u8]) -> Result<String, String> {
     Ok(name)
 }
 
-/// The first certificate of a PEM file, DER.
-fn first_certificate(path: &std::path::Path, pem: &str) -> Result<Vec<u8>, String> {
-    opamp::tls::certificates(pem.as_bytes())
-        .map_err(|e| format!("cannot read {}: {e}", path.display()))?
-        .first()
+/// The first certificate of the CA file at `path`, DER, by the reader the operator tool uses.
+fn first_certificate(path: &std::path::Path) -> Result<Vec<u8>, String> {
+    let pem = std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    opamp::tls::first_certificate(&pem)
         .map(|der| der.as_ref().to_vec())
-        .ok_or_else(|| format!("{} holds no certificate", path.display()))
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))
 }
 
 /// Milliseconds since the epoch, in the time type rcgen speaks.
