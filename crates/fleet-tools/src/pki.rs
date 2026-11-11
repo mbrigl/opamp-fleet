@@ -1072,7 +1072,7 @@ fn load_authority(dir: &Path, stem: &str) -> Result<Authority, String> {
         .map_err(|e| format!("cannot read {}: {e}", cert_file.display()))?;
     let der = opamp::tls::first_certificate(&cert_pem)
         .map_err(|e| format!("cannot read {}: {e}", cert_file.display()))?;
-    let issuer = issue::authority(&cert_file, &der, &key_file)?;
+    let issuer = issue::authority(&cert_file, &der, issue::read_key(&key_file)?)?;
     let ending = read_ending(&cert_file)?;
     let (common_name, organization) = {
         let (_, cert) = X509Certificate::from_der(der.as_ref())
