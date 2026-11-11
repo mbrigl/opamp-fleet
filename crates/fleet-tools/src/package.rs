@@ -180,7 +180,7 @@ pub fn run(command: Command) -> Result<(), String> {
             .block_on(crate::fetch::run(args)),
         Command::Keygen { out } => {
             let (pkcs8, public_key) = signing_key()?;
-            crate::pki::write_file(&out, &pkcs8, true)?;
+            crate::pki::write_key(&out, &pkcs8)?;
             eprintln!(
                 "wrote the private key to {} (keep it secret)",
                 out.display()
@@ -792,8 +792,10 @@ mod tests {
         );
     }
 
-    /// `keygen` creates the key file owner-only from the moment it exists, through the writer `pki
-    /// init` uses, and refuses to replace a file that exists, leaving it as it was.
+    /// `keygen` leaves the key file owner-only and nothing beside it, and refuses to replace a file
+    /// that exists, leaving it as it was. That the mode holds from the file's creation, and that a
+    /// process killed part-way leaves no half-written key, no test decides: both follow from the
+    /// key being written `0600` in a temporary directory and linked into place (`pki::write_key`).
     /// Verifies: ADR-0042
     #[test]
     fn keygen_writes_the_key_owner_only_and_never_replaces_one() {
@@ -812,6 +814,11 @@ mod tests {
                 .mode();
             assert_eq!(mode & 0o777, 0o600, "{mode:o}");
         }
+        let beside: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("read_dir")
+            .map(|entry| entry.expect("entry").file_name())
+            .collect();
+        assert_eq!(beside, [std::ffi::OsString::from("signing.pk8")]);
         let written = std::fs::read(&keyfile).expect("read");
         let err = run(Command::Keygen {
             out: keyfile.clone(),
