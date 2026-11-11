@@ -58,15 +58,39 @@ struct Slot;
 static SLOTS: (std::sync::Mutex<usize>, std::sync::Condvar) =
     (std::sync::Mutex::new(0), std::sync::Condvar::new());
 
+/// How long a test waits for a place before it fails: far past the longest a test of this file
+/// holds one, so only a wait that cannot end reaches it.
+const SLOT_WAIT: Duration = Duration::from_secs(300);
+
 impl Slot {
-    /// Waits until fewer than [`SCHEMAS_AT_ONCE`] tests work in a schema, and takes a place.
+    /// Waits until fewer than [`SCHEMAS_AT_ONCE`] tests work in a schema, and takes a place. A
+    /// thread a test spawned, which the harness does not name, is refused at once: it would wait
+    /// for a place beside the one its test holds, for ever once every place is taken.
     fn take() -> Slot {
+        assert!(
+            std::thread::current().name().is_some(),
+            "a test schema is opened on a thread the test spawned: it takes one of the \
+             SCHEMAS_AT_ONCE ({SCHEMAS_AT_ONCE}) places beside any its test holds and can \
+             wait for it for ever — open it on the test's own thread"
+        );
         let (taken, freed) = &SLOTS;
-        let mut taken = freed
-            .wait_while(taken.lock().expect("slots"), |taken| {
-                *taken >= SCHEMAS_AT_ONCE
-            })
-            .expect("slots");
+        let (mut taken, waited) = freed
+            .wait_timeout_while(
+                taken
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+                SLOT_WAIT,
+                |taken| *taken >= SCHEMAS_AT_ONCE,
+            )
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if waited.timed_out() {
+            // Released first, so the failure poisons no lock the next test takes.
+            drop(taken);
+            panic!(
+            "no place among the SCHEMAS_AT_ONCE ({SCHEMAS_AT_ONCE}) test schemas came free within \
+             {SLOT_WAIT:?}"
+            );
+        }
         *taken += 1;
         Slot
     }

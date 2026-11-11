@@ -2960,7 +2960,9 @@ mod tests {
     /// rather than holding the row the first needs next. The first is held at a gate in the
     /// database after its first row; the gate opens once the second waits for that row's lock, or
     /// has reached the gate itself, which only a release that writes in the order given does, and
-    /// then the two would deadlock.
+    /// then the two would deadlock. Each update sets its session's `lock_timeout` aside before it
+    /// waits for a row, so the second, parked behind the first, outlasts a loaded host's delays in
+    /// opening the gate; the session's `statement_timeout` still bounds it.
     /// Verifies: ADR-0025
     #[test]
     fn two_releases_over_the_same_agents_in_opposite_orders_both_commit() {
@@ -2983,7 +2985,11 @@ mod tests {
              WHILE NOT (SELECT open FROM fleet_test_gate) LOOP PERFORM pg_sleep(0.01); \
              END LOOP; RETURN NEW; END $$; \
              CREATE TRIGGER fleet_test_wait AFTER UPDATE ON agents \
-             FOR EACH ROW EXECUTE FUNCTION fleet_test_wait();",
+             FOR EACH ROW EXECUTE FUNCTION fleet_test_wait(); \
+             CREATE FUNCTION fleet_test_lock_untimed() RETURNS trigger LANGUAGE plpgsql AS $$ \
+             BEGIN PERFORM set_config('lock_timeout', '0', true); RETURN NULL; END $$; \
+             CREATE TRIGGER fleet_test_lock_untimed BEFORE UPDATE ON agents \
+             FOR EACH STATEMENT EXECUTE FUNCTION fleet_test_lock_untimed();",
         );
         let sessions = |condition: &str| test.sessions(condition);
         let at_gate = || sessions("wait_event = 'PgSleep' AND query LIKE 'UPDATE agents%'");

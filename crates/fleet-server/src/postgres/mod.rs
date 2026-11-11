@@ -1274,18 +1274,42 @@ pub(crate) mod testing {
         took: bool,
     }
 
+    /// How long a test waits for a place before it fails: far past the longest a test of this
+    /// crate holds one, so only a wait that cannot end reaches it.
+    const SLOT_WAIT: std::time::Duration = std::time::Duration::from_secs(300);
+
     impl Slot {
         /// Waits until fewer than [`SCHEMAS_AT_ONCE`] test threads work in a schema, and takes a
-        /// place, unless this thread holds one.
+        /// place, unless this thread holds one. A thread a test spawned, which the harness does
+        /// not name, is refused at once: it would wait for a place beside the one its test holds,
+        /// for ever once every place is taken.
         fn take() -> Slot {
             let took = HELD.get() == 0;
             if took {
+                assert!(
+                    std::thread::current().name().is_some(),
+                    "a test schema is opened on a thread the test spawned: it takes one of the \
+                     SCHEMAS_AT_ONCE ({SCHEMAS_AT_ONCE}) places beside any its test holds and \
+                     can wait for it for ever — open it on the test's own thread"
+                );
                 let (taken, freed) = &SLOTS;
-                let mut taken = freed
-                    .wait_while(taken.lock().expect("slots"), |taken| {
-                        *taken >= SCHEMAS_AT_ONCE
-                    })
-                    .expect("slots");
+                let (mut taken, waited) = freed
+                    .wait_timeout_while(
+                        taken
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner),
+                        SLOT_WAIT,
+                        |taken| *taken >= SCHEMAS_AT_ONCE,
+                    )
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if waited.timed_out() {
+                    // Released first, so the failure poisons no lock the next test takes.
+                    drop(taken);
+                    panic!(
+                    "no place among the SCHEMAS_AT_ONCE ({SCHEMAS_AT_ONCE}) test schemas came free \
+                     within {SLOT_WAIT:?}"
+                    );
+                }
                 *taken += 1;
             }
             HELD.set(HELD.get() + 1);
@@ -1987,6 +2011,26 @@ mod tests {
                 let _ = to.shutdown(std::net::Shutdown::Both);
             });
         }
+    }
+
+    /// A test schema opened on a thread the test spawned fails at once, naming the cap on test
+    /// schemas, rather than wait for a place beside the one its test holds, which never comes
+    /// once every place is taken.
+    #[test]
+    fn a_schema_opened_on_a_thread_the_test_spawned_fails_naming_the_cap() {
+        let Some(_held) = TestDatabase::named() else {
+            return;
+        };
+        let started = std::time::Instant::now();
+        let refused = std::thread::spawn(|| TestDatabase::named().map(|test| test.schema.clone()))
+            .join()
+            .expect_err("refused");
+        let message = refused
+            .downcast_ref::<String>()
+            .cloned()
+            .unwrap_or_default();
+        assert!(message.contains("SCHEMAS_AT_ONCE"), "{message}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
     }
 
     /// A database that stops answering while the Server runs fails the one call that needs it
