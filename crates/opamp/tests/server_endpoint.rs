@@ -322,7 +322,14 @@ async fn a_websocket_carries_replies_and_pushes() {
     drop(pusher);
     handler.pushers.lock().unwrap().clear();
     assert!(matches!(next_reply(&mut socket).await, Message::Close(_)));
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // The close callback runs as the session ends, after the frame the client read.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while handler.closed.lock().unwrap().is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the close callback ran");
     assert_eq!(*handler.closed.lock().unwrap(), [Transport::WebSocket]);
 }
 
