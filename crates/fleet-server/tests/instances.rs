@@ -4501,8 +4501,12 @@ fn a_configuration_pinned_through_one_instance_is_not_deleted_through_another() 
 
 /// Whether `answer` is the refusal `refusal`, as a database adapter answers it: the database named
 /// before it.
-fn refused_with<T: std::fmt::Debug>(answer: Result<T, String>, refusal: &str) -> bool {
-    answer.expect_err("refused").ends_with(refusal)
+fn refused_with<T: std::fmt::Debug>(
+    answer: Result<T, fleet_server::packages::PackageError>,
+    refusal: &fleet_server::packages::PackageError,
+) -> bool {
+    let refused = answer.expect_err("refused");
+    refused.refusal == refusal.refusal && refused.message.ends_with(&refusal.message)
 }
 
 /// A Package pinned through one instance is not changed or deleted through another that holds no

@@ -29,7 +29,9 @@ use crate::configs::{ConfigBackend, ConfigStore, Configuration, DesiredConfig, R
 use crate::deployments::{self, deployment_for, Deployment, DeploymentError, DeploymentStore};
 use crate::enrolment::{DecisionError, Enrolment, Recorder, Registrar};
 use crate::labels::{LabelError, Sources};
-use crate::packages::{InstalledVersions, PackageId, PackageStore, Platform, SignatureState};
+use crate::packages::{
+    InstalledVersions, PackageError, PackageId, PackageStore, Platform, Refusal, SignatureState,
+};
 use crate::revocation::{CertId, Facts, Presented, Revocations, Signed, SpeaksFor, SubjectValues};
 
 /// The package upload limit in force when nothing configures one — roomy, because a real agent
@@ -5219,8 +5221,15 @@ impl AppState {
         Ok(deleted)
     }
 
+    /// The package store for a route of the Package REST API, or a `404` where package delivery is
+    /// not configured.
+    fn packages_for_a_route(&self) -> Result<&PackageStore, PackageError> {
+        self.package_store()
+            .map_err(|e| PackageError::refused(Refusal::NotFound, e))
+    }
+
     /// The refusal every write to an assigned Package answers with (ADR-0033 clause 13).
-    fn refuse_if_assigned(&self, id: &PackageId) -> Result<(), String> {
+    fn refuse_if_assigned(&self, id: &PackageId) -> Result<(), PackageError> {
         if self.package_set_assigned(id) {
             return Err(crate::packages::assigned(id));
         }
@@ -5230,8 +5239,8 @@ impl AppState {
     /// Creates a Package (ADR-0034). **Nothing is distributed** (ADR-0033), and there is nothing
     /// to update: a Package is its identity and its entries, so creating one that exists is the
     /// same request arriving twice.
-    pub fn create_package_set(&self, id: &PackageId) -> Result<(), String> {
-        self.package_store()?.create(id)?;
+    pub fn create_package_set(&self, id: &PackageId) -> Result<(), PackageError> {
+        self.packages_for_a_route()?.create(id)?;
         info!(package = %id, "package stored — nothing distributed");
         Ok(())
     }
@@ -5244,9 +5253,10 @@ impl AppState {
         id: &PackageId,
         platform: &Platform,
         bytes: &mut dyn std::io::Read,
-    ) -> Result<(), String> {
+    ) -> Result<(), PackageError> {
         self.refuse_if_assigned(id)?;
-        self.package_store()?.put_entry_from(id, platform, bytes)?;
+        self.packages_for_a_route()?
+            .put_entry_from(id, platform, bytes)?;
         info!(set = %id, platform = %format!("{}-{}", platform.os, platform.arch), "package entry stored");
         Ok(())
     }
@@ -5254,9 +5264,9 @@ impl AppState {
     /// Whether an upload for one entry of `id` may begin: the Package exists and is not assigned
     /// to an Agent (ADR-0033 clause 13), so a refused upload is refused before its bytes are
     /// streamed.
-    pub fn check_package_upload(&self, id: &PackageId) -> Result<(), String> {
+    pub fn check_package_upload(&self, id: &PackageId) -> Result<(), PackageError> {
         self.refuse_if_assigned(id)?;
-        self.package_store()?.writable(id)
+        self.packages_for_a_route()?.writable(id)
     }
 
     /// Writes the operator's signature onto one entry of a Package (ADR-0034), and answers what the
@@ -5268,10 +5278,10 @@ impl AppState {
         id: &PackageId,
         platform: &Platform,
         signature: Vec<u8>,
-    ) -> Result<SignatureState, String> {
+    ) -> Result<SignatureState, PackageError> {
         self.refuse_if_assigned(id)?;
         let state = self
-            .package_store()?
+            .packages_for_a_route()?
             .put_signature(id, platform, signature)?;
         info!(set = %id, platform = %platform.tag(), state = state.as_str(), "package entry signed");
         Ok(state)
@@ -5283,9 +5293,11 @@ impl AppState {
         &self,
         id: &PackageId,
         platform: &Platform,
-    ) -> Result<bool, String> {
+    ) -> Result<bool, PackageError> {
         self.refuse_if_assigned(id)?;
-        let removed = self.package_store()?.remove_signature(id, platform)?;
+        let removed = self
+            .packages_for_a_route()?
+            .remove_signature(id, platform)?;
         if removed {
             info!(set = %id, platform = %platform.tag(), "package entry signature removed");
         }
@@ -5298,9 +5310,9 @@ impl AppState {
         &self,
         id: &PackageId,
         platform: &Platform,
-    ) -> Result<bool, String> {
+    ) -> Result<bool, PackageError> {
         self.refuse_if_assigned(id)?;
-        let deleted = self.package_store()?.delete_entry(id, platform)?;
+        let deleted = self.packages_for_a_route()?.delete_entry(id, platform)?;
         if deleted {
             info!(set = %id, "package entry deleted");
         }
@@ -5315,18 +5327,22 @@ impl AppState {
     /// The fleet lock is held across the check and the delete, so a rollout of this Server cannot
     /// pin it in between; a store that other Servers write too counts the stored assignments again
     /// in the act that deletes, and takes it out of every Deployment in that act too.
-    pub fn delete_package_set(&self, id: &PackageId) -> Result<bool, String> {
+    pub fn delete_package_set(&self, id: &PackageId) -> Result<bool, PackageError> {
         let fleet = self.fleet.lock().expect("fleet lock");
         let pinning = self.agent_store.pinning(Pin::Package(id));
         if pinning > 0 {
             return Err(crate::packages::pinned(id, pinning));
         }
-        let packages = self.package_store()?;
+        let packages = self.packages_for_a_route()?;
         let sweep = packages.remove_set(id)?;
         let deleted = sweep.is_some();
         let dropped = if deleted {
             self.deployment_store()
-                .map(|store| store.drop_package(id).map_err(|e| e.to_string()))
+                .map(|store| {
+                    store
+                        .drop_package(id)
+                        .map_err(|e| PackageError::from(e.to_string()))
+                })
                 .transpose()
         } else {
             Ok(None)
@@ -6705,6 +6721,32 @@ impl Recorder for Approving<'_> {
 #[cfg(test)]
 mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// Without package delivery every write of the Package routes is a `404`, the signature's
+    /// included: what each route's contract names, whatever the text.
+    /// Verifies: ADR-0034
+    #[test]
+    fn without_package_delivery_every_package_write_is_not_found() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = AppState::new(dir.path().join("configs")).expect("state");
+        let id = PackageId::new("otelcol", "1.0.0").expect("id");
+        let linux = Platform::new("linux", "amd64").expect("platform");
+        let kinds = [
+            state.create_package_set(&id).map(|_| ()),
+            state.check_package_upload(&id),
+            state.put_package_entry(&id, &linux, &mut &b"bytes"[..]),
+            state
+                .put_package_entry_signature(&id, &linux, vec![1; 64])
+                .map(|_| ()),
+            state
+                .remove_package_entry_signature(&id, &linux)
+                .map(|_| ()),
+            state.delete_package_entry(&id, &linux).map(|_| ()),
+            state.delete_package_set(&id).map(|_| ()),
+        ]
+        .map(|answer| answer.expect_err("not configured").refusal);
+        assert_eq!(kinds, [Some(Refusal::NotFound); 7]);
+    }
 
     /// The host derived for a certificate that names none is the one this Server derived before
     /// the derivation moved into `fleet-core`: hosts already in the register keep their ids.
@@ -8993,7 +9035,7 @@ mod tests {
         fn load(&self) -> Result<Vec<crate::packages::Package>, String> {
             self.inner.load()
         }
-        fn create(&self, id: &PackageId) -> Result<(), String> {
+        fn create(&self, id: &PackageId) -> Result<(), crate::packages::PackageError> {
             self.inner.create(id)
         }
         fn put_entry(
@@ -9001,7 +9043,7 @@ mod tests {
             id: &PackageId,
             entry: &crate::packages::Entry,
             stored: crate::packages::Stored,
-        ) -> Result<(), String> {
+        ) -> Result<(), crate::packages::PackageError> {
             self.inner.put_entry(id, entry, stored)
         }
         fn sign(
@@ -9010,13 +9052,17 @@ mod tests {
             platform: &Platform,
             content_hash: &[u8],
             signature: Option<&[u8]>,
-        ) -> Result<crate::packages::Signed, String> {
+        ) -> Result<crate::packages::Signed, crate::packages::PackageError> {
             self.inner.sign(id, platform, content_hash, signature)
         }
-        fn remove_entry(&self, id: &PackageId, platform: &Platform) -> Result<(), String> {
+        fn remove_entry(
+            &self,
+            id: &PackageId,
+            platform: &Platform,
+        ) -> Result<(), crate::packages::PackageError> {
             self.inner.remove_entry(id, platform)
         }
-        fn remove(&self, id: &PackageId) -> Result<(), String> {
+        fn remove(&self, id: &PackageId) -> Result<(), crate::packages::PackageError> {
             self.inner.remove(id)
         }
         fn hold_blobs(&self) -> Result<crate::blobs::BlobHold, String> {
@@ -9186,7 +9232,7 @@ mod tests {
             Err(DeleteError::Pinned(why)) if why.contains("1 Agent")
         ));
         let refused = state.delete_package_set(&id).expect_err("pinned");
-        assert!(refused.contains("1 Agent"), "{refused}");
+        assert!(refused.message.contains("1 Agent"), "{refused}");
         assert!(matches!(
             state.delete_deployment("stable"),
             Err(DeploymentError::Conflict(why)) if why.contains("1 Agent")

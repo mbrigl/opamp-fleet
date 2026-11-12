@@ -13,8 +13,8 @@ use super::notify::{notify, PACKAGE};
 use super::{blob_lock_refused, BLOB_LOCK};
 use super::{client, signed, sql, unsigned, Database};
 use crate::packages::{
-    assigned, pinned, Entry, Package, PackageBackend, PackageId, Platform, Signed, Stored,
-    ED25519_SIGNATURE_LEN, REMOVED_WHILE_UPLOADED,
+    assigned, no_set, pinned, removed_while_uploaded, Entry, Package, PackageBackend, PackageError,
+    PackageId, Platform, Signed, Stored, ED25519_SIGNATURE_LEN,
 };
 
 /// The Packages in `packages` and `package_entries`.
@@ -38,9 +38,9 @@ impl PackageBackend for PgPackageBackend {
         })
     }
 
-    fn create(&self, id: &PackageId) -> Result<(), String> {
+    fn create(&self, id: &PackageId) -> Result<(), PackageError> {
         let id = id.clone();
-        self.database.run(move |pool| async move {
+        Ok(self.database.run(move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
             let created = transaction
@@ -55,7 +55,7 @@ impl PackageBackend for PgPackageBackend {
                 notify(&transaction, PACKAGE, &id.to_string()).await?;
             }
             transaction.commit().await.map_err(sql)
-        })
+        })?)
     }
 
     /// The entry's row alone, inserted or replaced, while no stored assignment pins the Package
@@ -65,7 +65,7 @@ impl PackageBackend for PgPackageBackend {
     /// (ADR-0023 clause 14). A blob a sweep marked is refused before the store is asked: that
     /// sweep may still delete it once its lock is gone. The lock goes with the
     /// transaction, its session's end included, which writes no entry.
-    fn put_entry(&self, id: &PackageId, entry: &Entry, stored: Stored) -> Result<(), String> {
+    fn put_entry(&self, id: &PackageId, entry: &Entry, stored: Stored) -> Result<(), PackageError> {
         let (id, entry) = (id.clone(), entry.clone());
         // Set while the blob store is asked: a call that loses its bound then has waited for the
         // bucket, not for the database, and says so.
@@ -90,7 +90,7 @@ impl PackageBackend for PgPackageBackend {
                 .map_err(sql)?
                 .is_some()
             {
-                return Err(REMOVED_WHILE_UPLOADED.to_string());
+                return Ok(Err(removed_while_uploaded()));
             }
             // The blob store is asked off the database's runtime, as its calls block, and before
             // the Package's row is locked, so no act on the row waits for the bucket: the shared
@@ -102,10 +102,12 @@ impl PackageBackend for PgPackageBackend {
             asked.store(false, std::sync::atomic::Ordering::SeqCst);
             let found = found.map_err(|e| format!("the check for the artifact ended: {e}"))??;
             if !found {
-                return Err(REMOVED_WHILE_UPLOADED.to_string());
+                return Ok(Err(removed_while_uploaded()));
             }
-            if !hold_unassigned(&transaction, &id, |id, _| assigned(id)).await? {
-                return Err(format!("no package set {id}"));
+            match hold_unassigned(&transaction, &id, |id, _| assigned(id)).await? {
+                Ok(true) => {}
+                Ok(false) => return Ok(Err(no_set(&id))),
+                Err(refused) => return Ok(Err(refused)),
             }
             transaction
                 .execute(
@@ -126,9 +128,9 @@ impl PackageBackend for PgPackageBackend {
                 .await
                 .map_err(sql)?;
             notify(&transaction, PACKAGE, &id.to_string()).await?;
-            transaction.commit().await.map_err(sql)
+            transaction.commit().await.map_err(sql).map(Ok)
         });
-        put.map_err(|e| {
+        let put = put.map_err(|e| {
             if asking.load(std::sync::atomic::Ordering::SeqCst) {
                 format!(
                     "the blob store's bucket did not answer the check for the artifact in time — \
@@ -137,7 +139,8 @@ impl PackageBackend for PgPackageBackend {
             } else {
                 e
             }
-        })
+        });
+        put?
     }
 
     /// One statement on the entry's row, conditioned on the bytes it names, while no stored
@@ -150,13 +153,15 @@ impl PackageBackend for PgPackageBackend {
         platform: &Platform,
         content_hash: &[u8],
         signature: Option<&[u8]>,
-    ) -> Result<Signed, String> {
+    ) -> Result<Signed, PackageError> {
         let (id, platform) = (id.clone(), platform.clone());
         let (sha256, signature) = (hex::encode(content_hash), signature.map(<[u8]>::to_vec));
         self.database.run(move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
-            hold_unassigned(&transaction, &id, |id, _| assigned(id)).await?;
+            if let Err(refused) = hold_unassigned(&transaction, &id, |id, _| assigned(id)).await? {
+                return Ok(Err(refused));
+            }
             let updated = transaction
                 .execute(
                     "UPDATE package_entries SET signature = $6 WHERE agent_type = $1 \
@@ -189,17 +194,19 @@ impl PackageBackend for PgPackageBackend {
                 Signed::Changed(stored.as_ref().map(entry).transpose()?.map(|(_, e)| e))
             };
             transaction.commit().await.map_err(sql)?;
-            Ok(signed)
-        })
+            Ok(Ok(signed))
+        })?
     }
 
     /// The entry's row alone, while no stored assignment pins the Package ([`hold_unassigned`]).
-    fn remove_entry(&self, id: &PackageId, platform: &Platform) -> Result<(), String> {
+    fn remove_entry(&self, id: &PackageId, platform: &Platform) -> Result<(), PackageError> {
         let (id, platform) = (id.clone(), platform.clone());
         self.database.run(move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
-            hold_unassigned(&transaction, &id, |id, _| assigned(id)).await?;
+            if let Err(refused) = hold_unassigned(&transaction, &id, |id, _| assigned(id)).await? {
+                return Ok(Err(refused));
+            }
             let removed = transaction
                 .execute(
                     "DELETE FROM package_entries WHERE agent_type = $1 AND version = $2 \
@@ -211,21 +218,23 @@ impl PackageBackend for PgPackageBackend {
             if removed > 0 {
                 notify(&transaction, PACKAGE, &id.to_string()).await?;
             }
-            transaction.commit().await.map_err(sql)
-        })
+            transaction.commit().await.map_err(sql).map(Ok)
+        })?
     }
 
     /// The Package and its entries go in one statement, the entries by cascade, while no stored
     /// assignment pins it ([`hold_unassigned`]), and it leaves every Deployment that holds it in
     /// the same transaction. A Package that is not stored is left as a Configuration that is not
     /// is: nothing is written and nothing announced.
-    fn remove(&self, id: &PackageId) -> Result<(), String> {
+    fn remove(&self, id: &PackageId) -> Result<(), PackageError> {
         let id = id.clone();
         self.database.run(move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
-            if !hold_unassigned(&transaction, &id, pinned).await? {
-                return transaction.commit().await.map_err(sql);
+            match hold_unassigned(&transaction, &id, pinned).await? {
+                Ok(true) => {}
+                Ok(false) => return transaction.commit().await.map_err(sql).map(Ok),
+                Err(refused) => return Ok(Err(refused)),
             }
             transaction
                 .execute(
@@ -240,8 +249,8 @@ impl PackageBackend for PgPackageBackend {
             )
             .await?;
             notify(&transaction, PACKAGE, &id.to_string()).await?;
-            transaction.commit().await.map_err(sql)
-        })
+            transaction.commit().await.map_err(sql).map(Ok)
+        })?
     }
 
     /// On a connection of its own (ADR-0023 clause 14).
@@ -349,8 +358,8 @@ impl PgPackageBackend {
 async fn hold_unassigned(
     client: &impl GenericClient,
     id: &PackageId,
-    refusal: fn(&PackageId, usize) -> String,
-) -> Result<bool, String> {
+    refusal: fn(&PackageId, usize) -> PackageError,
+) -> Result<Result<bool, PackageError>, String> {
     if client
         .query_opt(
             "SELECT 1 FROM packages WHERE agent_type = $1 AND version = $2 FOR UPDATE",
@@ -360,7 +369,7 @@ async fn hold_unassigned(
         .map_err(sql)?
         .is_none()
     {
-        return Ok(false);
+        return Ok(Ok(false));
     }
     let pinning: i64 = client
         .query_one(
@@ -371,9 +380,12 @@ async fn hold_unassigned(
         .map_err(sql)?
         .get(0);
     if pinning > 0 {
-        return Err(refusal(id, usize::try_from(pinning).unwrap_or(usize::MAX)));
+        return Ok(Err(refusal(
+            id,
+            usize::try_from(pinning).unwrap_or(usize::MAX),
+        )));
     }
-    Ok(true)
+    Ok(Ok(true))
 }
 
 /// Every Package with its entries. A row that does not decode — an identity or platform a write
@@ -756,12 +768,45 @@ mod tests {
             .put_entry(&package.id, &entry, silent)
             .expect_err("the bucket did not answer");
         database.bound_calls_by(crate::postgres::CALL_TIMEOUT);
-        assert!(err.contains("bucket"), "{err}");
-        assert!(!err.starts_with("no answer within"), "{err}");
+        assert!(err.message.contains("bucket"), "{err}");
+        assert!(!err.message.starts_with("no answer within"), "{err}");
         assert_eq!(
             test.rows("SELECT sha256 FROM package_entries"),
             Vec::<Vec<Option<String>>>::new()
         );
+    }
+
+    /// On PostgreSQL an entry whose blob went while it was uploaded is refused as an invalid
+    /// request and one for a Package that is not stored as not found, whatever the database
+    /// wrote around the message: what the REST API answers `400` and `404`, as on the filesystem.
+    /// Verifies: ADR-0034
+    #[test]
+    fn an_entry_refused_on_postgres_keeps_its_kind() {
+        use crate::packages::Refusal;
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let store = PgPackageBackend::new(test.open());
+        let package = package("1.2.3", &[("linux", "amd64", 1)]);
+        let entry = package.entries.values().next().expect("an entry").clone();
+        let unknown = store
+            .put_entry(&package.id, &entry, present())
+            .expect_err("no such Package");
+        assert_eq!(unknown.refusal, Some(Refusal::NotFound), "{unknown}");
+        store.create(&package.id).expect("create");
+        let gone: Stored = Arc::new(|| Ok(false));
+        let removed = store
+            .put_entry(&package.id, &entry, gone)
+            .expect_err("the blob went");
+        assert_eq!(removed.refusal, Some(Refusal::Invalid), "{removed}");
+        let failed = store
+            .put_entry(
+                &package.id,
+                &entry,
+                Arc::new(|| Err("cannot ask".to_string())),
+            )
+            .expect_err("the store failed");
+        assert_eq!(failed.refusal, None, "{failed}");
     }
 
     /// A bucket that answers the check with an error is reported by that error, not as silent.
@@ -779,8 +824,11 @@ mod tests {
         let err = store
             .put_entry(&package.id, &entry, refusing)
             .expect_err("refused");
-        assert!(err.contains("cannot ask bucket fleet: 403"), "{err}");
-        assert!(!err.contains("in time"), "{err}");
+        assert!(
+            err.message.contains("cannot ask bucket fleet: 403"),
+            "{err}"
+        );
+        assert!(!err.message.contains("in time"), "{err}");
     }
 
     /// A deletion of a Package through B while a rollout through A that pins it has not yet
@@ -826,7 +874,9 @@ mod tests {
         assert_eq!(rollout.join().expect("A").map(|wrote| wrote.len()), Ok(1));
         let refused = deletion.join().expect("B").expect_err("refused");
         assert!(
-            refused.ends_with(&pinned(&PackageId::new("otelcol", "1.2.3").expect("id"), 1)),
+            refused
+                .message
+                .ends_with(&pinned(&PackageId::new("otelcol", "1.2.3").expect("id"), 1).message),
             "{refused}"
         );
         assert_eq!(
@@ -992,7 +1042,7 @@ mod tests {
         match upload {
             Ok(()) => {}
             Err(refused) => {
-                assert!(refused.contains("upload it again"), "{refused}");
+                assert!(refused.message.contains("upload it again"), "{refused}");
                 b.put_entry(&second, &linux, b"the same bytes".to_vec())
                     .expect("uploaded again once the sweep is done");
             }
@@ -1261,7 +1311,7 @@ mod tests {
         go.send(()).expect("go on");
         starting.join().expect("A").expect("A starts");
         if let Err(refused) = upload {
-            assert!(refused.contains("upload it again"), "{refused}");
+            assert!(refused.message.contains("upload it again"), "{refused}");
             b_store
                 .put_entry(&id, &linux, b"the same bytes".to_vec())
                 .expect("uploaded again once A's sweep is done");
@@ -1515,7 +1565,7 @@ mod tests {
         drop(instance(&database, dir.path()));
         go.send(()).expect("go on");
         let refused = uploading.join().expect("A").expect_err("refused");
-        assert!(refused.contains("upload it again"), "{refused}");
+        assert!(refused.message.contains("upload it again"), "{refused}");
         assert!(
             test.rows("SELECT 1 FROM package_entries").is_empty(),
             "no entry is written"
@@ -1553,8 +1603,8 @@ mod tests {
                 b"an artifact".to_vec(),
             )
             .expect_err("refused while a sweep holds the lock");
-        assert!(refused.contains("blob store's lock"), "{refused}");
-        assert!(refused.contains("lock timeout"), "{refused}");
+        assert!(refused.message.contains("blob store's lock"), "{refused}");
+        assert!(refused.message.contains("lock timeout"), "{refused}");
         drop(hold);
     }
 
@@ -1631,7 +1681,7 @@ mod tests {
             .expect("A")
             .expect_err("its transaction does not commit");
         assert!(
-            !failed.contains("no answer within"),
+            !failed.message.contains("no answer within"),
             "it failed with its session, not its bound: {failed}"
         );
         assert!(

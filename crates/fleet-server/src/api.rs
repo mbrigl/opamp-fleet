@@ -29,7 +29,7 @@ use crate::credentials::Credentials;
 use crate::deployments::{Deployment, DeploymentError, DeploymentStore};
 use crate::fleet::{self, AppState, DeleteError, ForgetError, RestartError, RolloutError};
 use crate::labels::LabelError;
-use crate::packages::{PackageId, PackageSummary, Platform, SignatureState};
+use crate::packages::{PackageError, PackageId, PackageSummary, Platform, SignatureState};
 
 mod paging;
 
@@ -1581,21 +1581,14 @@ fn set_response(state: &AppState, id: &PackageId) -> Response {
 
 /// Maps a store refusal onto the status the REST contract names: immutability and emptiness are
 /// conflicts with the Package's current state (`409`), absence is `404`, bad input `400`.
-fn package_error(e: String) -> Response {
-    if e.contains("not configured") || e.starts_with("no package set") || e.starts_with("no entry")
-    {
-        error(StatusCode::NOT_FOUND, e)
-    } else if e.contains("immutable")
-        || e.contains("holds no entries")
-        || e.contains("is pinned")
-        || e.contains("has changed since")
-    {
-        error(StatusCode::CONFLICT, e)
-    } else if e.starts_with("invalid") || e.starts_with("the ") || e.contains("empty") {
-        error(StatusCode::BAD_REQUEST, e)
-    } else {
-        error(StatusCode::INTERNAL_SERVER_ERROR, e)
-    }
+fn package_error(e: PackageError) -> Response {
+    let status = match e.refusal {
+        Some(crate::packages::Refusal::NotFound) => StatusCode::NOT_FOUND,
+        Some(crate::packages::Refusal::Conflict) => StatusCode::CONFLICT,
+        Some(crate::packages::Refusal::Invalid) => StatusCode::BAD_REQUEST,
+        None => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    error(status, e.message)
 }
 
 /// All stored Packages, in identity order — Agent type, then version — and never the artifact
@@ -1729,7 +1722,7 @@ async fn delete_package_set(
         move || state.delete_package_set(&id)
     })
     .await
-    .unwrap_or_else(|e| Err(format!("the deletion ended: {e}")));
+    .unwrap_or_else(|e| Err(PackageError::from(format!("the deletion ended: {e}"))));
     match deleted {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => error(StatusCode::NOT_FOUND, format!("no package set {id}")),
@@ -1827,9 +1820,11 @@ async fn put_package_entry(
         }
     };
     drop(chunks);
-    let committed = store
-        .await
-        .unwrap_or_else(|e| Err(format!("the upload could not be stored: {e}")));
+    let committed = store.await.unwrap_or_else(|e| {
+        Err(PackageError::from(format!(
+            "the upload could not be stored: {e}"
+        )))
+    });
     // Stored now, or gone: either way the store counts it from here, and the upload no longer.
     drop(reservation);
     match committed {
@@ -1878,7 +1873,7 @@ async fn delete_package_entry(
         move || state.delete_package_entry(&id, &platform)
     })
     .await
-    .unwrap_or_else(|e| Err(format!("the deletion ended: {e}")));
+    .unwrap_or_else(|e| Err(PackageError::from(format!("the deletion ended: {e}"))));
     match deleted {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => error(
@@ -4506,34 +4501,39 @@ mod tests {
         );
     }
 
-    /// A store refusal of the Package routes is answered with the status the REST contract names
-    /// for it — among them the signature write onto an entry another instance replaced, a
-    /// conflict with the entry's stored state, whose message also begins as a `400`'s does.
+    /// A store refusal of the Package routes is answered with the status its kind names, whatever
+    /// its text: a refusal whose message a database prefixed keeps its status, and a failure whose
+    /// message begins as a refusal's does is a `500`.
     /// Verifies: ADR-0034
     #[test]
     fn a_package_refusal_is_answered_with_its_status() {
+        use crate::packages::Refusal;
         for (refusal, status) in [
-            ("no package set otelcol@1.0.0", StatusCode::NOT_FOUND),
             (
-                "no entry linux-amd64 in set otelcol@1.0.0",
+                PackageError::refused(
+                    Refusal::NotFound,
+                    "database fleet on db:5432: no package set otelcol@1.0.0",
+                ),
                 StatusCode::NOT_FOUND,
             ),
             (
-                "set otelcol@1.0.0 is assigned to an Agent and its entries are immutable",
+                PackageError::refused(Refusal::Conflict, "set otelcol@1.0.0 is assigned"),
                 StatusCode::CONFLICT,
             ),
             (
-                "the entry linux-amd64 in set otelcol@1.0.0 has changed since this Server read \
-                 it — read the Package again and sign what it holds",
-                StatusCode::CONFLICT,
+                PackageError::refused(
+                    Refusal::Invalid,
+                    "database fleet on db:5432: the artifact was removed while it was uploaded",
+                ),
+                StatusCode::BAD_REQUEST,
             ),
-            ("the signature is empty", StatusCode::BAD_REQUEST),
+            (
+                PackageError::from("the deletion ended: panicked".to_string()),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
         ] {
-            assert_eq!(
-                package_error(refusal.to_string()).status(),
-                status,
-                "{refusal}"
-            );
+            let text = refusal.message.clone();
+            assert_eq!(package_error(refusal).status(), status, "{text}");
         }
     }
 }
