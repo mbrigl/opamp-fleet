@@ -13746,6 +13746,67 @@ mod tests {
         );
     }
 
+    /// The same request taken up after a missed notification, which names no Agent, is not lost
+    /// either: the take-up of every Agent reads a restart the store queues under the Agent's own
+    /// lock, waits for the delivery, and holds the request, which is sent next.
+    /// Verifies: ADR-0030, ADR-0045
+    #[test]
+    fn a_restart_requested_between_a_deliverys_clear_and_its_end_is_sent_after_a_missed_notification(
+    ) {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let hooked = Hooked::new(Box::new(crate::postgres::agents::PgAgentStore::new(
+            database.clone(),
+        )));
+        let after_clear = hooked.after_clear.clone();
+        let a = Arc::new(on_postgres(&database, Box::new(hooked)));
+        let b = Arc::new(on_postgres(
+            &database,
+            Box::new(crate::postgres::agents::PgAgentStore::new(database.clone())),
+        ));
+        let uid = InstanceUid([0x96; 16]);
+        a.process(restartable(&uid, 1), Transport::WebSocket, Some(1));
+        assert!(a.request_restart(&uid).is_ok(), "queued");
+
+        let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let waits_before = a.agent_lock_waits();
+        let (answered, answering) = std::sync::mpsc::channel();
+        {
+            let (on, b, finished) = (Arc::downgrade(&a), b.clone(), finished.clone());
+            *after_clear.lock().expect("hook lock") = Some(Box::new(move || {
+                let a = on.upgrade().expect("A");
+                let (again, done) = (a.clone(), finished.clone());
+                std::thread::spawn(move || {
+                    let requested = b.request_restart(&uid).is_ok();
+                    // The announcement is missed: every Agent is taken up, as a notice does then.
+                    let taken = again.take_up_agents(TakeUp::Everything).is_ok()
+                        && again.take_up_restarts(TakeUp::Everything).is_ok();
+                    done.store(true, Ordering::SeqCst);
+                    let _ = answered.send(requested && taken);
+                });
+                until("the take-up waits for the delivery or is done", || {
+                    a.agent_lock_waits() > waits_before || finished.load(Ordering::SeqCst)
+                });
+            }));
+        }
+        assert!(
+            a.restart_command_for(&uid, 1).is_some(),
+            "the first restart is delivered"
+        );
+        assert!(
+            answering
+                .recv_timeout(Duration::from_secs(30))
+                .expect("the request and its take-up are answered"),
+            "requested and taken up"
+        );
+        assert!(
+            a.restart_command_for(&uid, 1).is_some(),
+            "the request made between the clear and the delivery's end is sent next"
+        );
+    }
+
     /// A restart requested through one instance while the instance that carries the Agent
     /// delivers the one queued before is not lost, however the two meet: where the request came
     /// before the delivery's clear, the restart sent is both; where it came after, it stays queued

@@ -738,17 +738,16 @@ impl AppState {
     /// (ADR-0045
     /// clause 8).
     ///
-    /// A request announced of an Agent held here is read under the Agent's own lock and held: a
-    /// delivery clears a restart in the store under that lock before it takes the clear into
-    /// memory, and a request committed between the two is otherwise taken out of memory with it.
+    /// A request of an Agent held here, announced or found after a missed notification, is read
+    /// under the Agent's own lock and held: a delivery clears a restart in the store under that
+    /// lock before it takes the clear into memory, and a request committed between the two is
+    /// otherwise taken out of memory with it.
     ///
     /// # Errors
     /// Returns an error when a record cannot be read; what is kept stays kept.
     pub fn take_up_restarts(&self, take_up: TakeUp<'_>) -> Result<(), String> {
         let uids = take_up.named();
-        if let Some(uids) = uids {
-            self.hold_announced_restarts(uids)?;
-        }
+        self.hold_restarts(uids)?;
         let _fleet = self.fleet.lock().expect("fleet lock");
         let mut kept = self.unput_restarts.lock().expect("restarts lock");
         match uids {
@@ -769,15 +768,36 @@ impl AppState {
         Ok(())
     }
 
-    /// Holds the restart the store queues for each Agent of `uids` held here, read under its own
-    /// lock ([`take_up_restarts`](Self::take_up_restarts)).
-    fn hold_announced_restarts(&self, uids: &HashSet<InstanceUid>) -> Result<(), String> {
-        let held: HashSet<InstanceUid> = {
+    /// Holds the restart the store queues for each Agent of `uids` held here, every one where
+    /// `None`, read under its own lock ([`take_up_restarts`](Self::take_up_restarts)).
+    ///
+    /// Where `uids` is `None`, the Agents held are read first without their locks, and only those
+    /// whose record queues a restart are read again under theirs, so the take-up does not wait for
+    /// every lock. A request is committed before the first read it races, so that read finds it
+    /// queued, unless a delivery cleared it since, which sent it.
+    fn hold_restarts(&self, uids: Option<&HashSet<InstanceUid>>) -> Result<(), String> {
+        let held: Vec<InstanceUid> = {
             let fleet = self.fleet.lock().expect("fleet lock");
-            uids.iter()
-                .filter(|uid| fleet.contains_key(uid))
-                .copied()
-                .collect()
+            match uids {
+                None => fleet.keys().copied().collect(),
+                Some(uids) => uids
+                    .iter()
+                    .filter(|uid| fleet.contains_key(uid))
+                    .copied()
+                    .collect(),
+            }
+        };
+        let held: HashSet<InstanceUid> = match uids {
+            Some(_) => held.into_iter().collect(),
+            None if held.is_empty() => HashSet::new(),
+            // One read of them all, without their locks.
+            None => self
+                .agent_store
+                .get_many(&held)?
+                .into_iter()
+                .filter(|(_, stored)| stored.restart_pending)
+                .map(|(uid, _)| uid)
+                .collect(),
         };
         if held.is_empty() {
             return Ok(());

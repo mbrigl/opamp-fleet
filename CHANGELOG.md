@@ -48,7 +48,8 @@ once its tag exists.
 - **A restart requested through one instance while another delivers one is sent**
   ([ADR-0025](docs/adr/0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)).
   A request that landed between the delivery's clear and its end stayed queued in the database
-  until a later take-up; the carrying instance now holds it when its announcement arrives.
+  until a later take-up; the carrying instance now holds it when its announcement arrives, and
+  when it takes up every Agent after a missed notification.
   **What to do:** nothing.
 - **The blob and prune locks are let go when their holder ends**
   ([ADR-0025](docs/adr/0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)).
