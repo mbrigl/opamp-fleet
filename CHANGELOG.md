@@ -16,6 +16,17 @@ once its tag exists.
 
 ## [0.8.3]
 
+### Changed
+
+- **A Server with `[blobs] store = "s3"` refuses to start with `max_package_size_bytes` above
+  5 GiB**
+  ([ADR-0023](docs/adr/0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)).
+  An upload is placed in the bucket with one copy, and S3 copies at most 5 GiB (5368709120 bytes)
+  at once, so a larger bound named an artifact the Server could not place. The refusal names the
+  key and the bound.
+  **What to do:** before the upgrade, lower `max_package_size_bytes` to at most 5368709120 where
+  the blobs are on S3.
+
 ### Fixed
 
 - **An Agent inherits the labels of a Client Agent that another instance binds or takes at once**
@@ -28,6 +39,42 @@ once its tag exists.
   Gateway's groups again. The fleet view, the reach counts and what a rollout releases read the
   database and were not affected. An instance of 0.8.2 or earlier beside this release reads
   everything again at each such arrival, as for any notice it does not know.
+  **What to do:** nothing.
+- **A Host's bound of 256 Agents holds across instances**
+  ([ADR-0025](docs/adr/0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)).
+  Two instances binding new Agents of one Host at once could pass it; the binding's own
+  transaction now counts it.
+  **What to do:** nothing.
+- **A restart requested through one instance while another delivers one is sent**
+  ([ADR-0025](docs/adr/0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)).
+  A request that landed between the delivery's clear and its end stayed queued in the database
+  until a later take-up; the carrying instance now holds it when its announcement arrives.
+  **What to do:** nothing.
+- **The blob and prune locks are let go when their holder ends**
+  ([ADR-0025](docs/adr/0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)).
+  A dropped blob hold, or a prune round cut off by its bound, kept its lock until its database
+  session ended.
+  **What to do:** nothing.
+- **A deletion on a shared store is decided by the database, not by an instance's pin cache**
+  ([ADR-0025](docs/adr/0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)).
+  A Configuration, a Deployment or a Package an instance's stale cache held pinned was refused
+  although no assignment pinned it any more.
+  **What to do:** nothing.
+- **A Package refusal on PostgreSQL keeps its status**
+  ([ADR-0034](docs/adr/0034-packages-signatures-and-delivery.md)).
+  The REST API answers a missing, conflicting or invalid Package by its kind (`404`, `409`,
+  `400`), where on PostgreSQL it could answer by the wording of the message.
+  **What to do:** nothing.
+- **A plain-HTTP Client told to wait zero backs off**
+  ([ADR-0016](docs/adr/0016-client-modes-and-the-gateway.md)).
+  After `Unavailable`, `503` or `429` it waits the named wait or its next backoff step, whichever
+  is longer, where a wait of zero had it ask again at once.
+  **What to do:** nothing.
+- **A Client reconnecting on verified connection settings waits up to 1.5 s for the Server's
+  close**
+  ([ADR-0016](docs/adr/0016-client-modes-and-the-gateway.md)).
+  So the Server ends the connection the Client leaves before the new one arrives, and an Agent
+  without a host is not re-keyed by its own reconnect.
   **What to do:** nothing.
 
 ## [0.8.2] - 2026-11-08
