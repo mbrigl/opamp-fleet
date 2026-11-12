@@ -1563,6 +1563,18 @@ impl ServerConfig {
         if self.max_package_size_bytes == 0 {
             return Err("max_package_size_bytes must be greater than zero".to_string());
         }
+        if self.blobs.s3().is_some()
+            && u64::try_from(self.max_package_size_bytes).unwrap_or(u64::MAX)
+                > crate::s3::LARGEST_COPY
+        {
+            return Err(format!(
+                "max_package_size_bytes is {} with [blobs] store = \"s3\", past the {} bytes \
+                 (5 GiB) one copy in the bucket moves, which an upload is placed with — lower it \
+                 to at most that",
+                self.max_package_size_bytes,
+                crate::s3::LARGEST_COPY
+            ));
+        }
         if self.max_total_package_bytes == 0 {
             return Err(
                 "max_total_package_bytes must be greater than zero — it bounds the store, not a \
@@ -3083,6 +3095,30 @@ mod tests {
         );
     }
 
+    /// With S3 an artifact past what one copy in the bucket moves (5 GiB) could never be placed:
+    /// `max_package_size_bytes` past it fails startup naming the key; at it, it starts.
+    /// Verifies: ADR-0023
+    #[test]
+    fn max_package_size_bytes_past_one_copy_in_the_bucket_is_refused() {
+        let load = |max: u64| {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("server.toml");
+            std::fs::write(
+                &path,
+                format!(
+                    "max_package_size_bytes = {max}\n{TLS}[blobs]\nstore = \"s3\"\n[blobs.s3]\n\
+                     bucket = \"fleet\"\nregion = \"eu-1\"\nendpoint = \"https://s3.example\"\n"
+                ),
+            )
+            .expect("write");
+            ServerConfig::load(&path)
+        };
+        // 5 GiB, as S3 bounds one copy.
+        assert!(load(5_368_709_120).is_ok());
+        let refused = load(5_368_709_121).map(|_| ()).expect_err("past one copy");
+        assert!(refused.contains("max_package_size_bytes"), "{refused}");
+        assert!(refused.contains("5 GiB"), "{refused}");
+    }
     /// `[blobs]`: the filesystem by default; `"s3"` with its bucket; any other store, a bucket
     /// beside the filesystem, a plaintext endpoint off the loopback, and half a key pair each fail
     /// startup naming the key — with no store to reach (ADR-0023 clauses 14, 17 and 18).

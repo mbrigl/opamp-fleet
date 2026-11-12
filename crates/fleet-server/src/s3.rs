@@ -82,6 +82,10 @@ const LIMITS: Limits = Limits {
     retry_for: Duration::from_secs(60),
 };
 
+/// The largest object one copy in the bucket moves, as S3 bounds `CopyObject`: what a staged upload
+/// is placed under its name with, so no larger artifact can be stored.
+pub(crate) const LARGEST_COPY: u64 = 5 * 1024 * 1024 * 1024;
+
 /// The longest a call to the store may take under [`LIMITS`]: a retry started at the end of
 /// `retry_for`, its connection, and its silence.
 pub(crate) const LONGEST_CALL: Duration = Duration::from_secs(

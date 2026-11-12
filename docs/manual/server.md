@@ -262,7 +262,7 @@ configures the Server.
 | `drain_secs` | `20` | How long a stop spreads the closing of the WebSocket sessions over, from `0` to `300`; `0` closes them all at once. What is still open 2 seconds after it is cut. An orchestrator's stop timeout must be longer, or the fleet's records are not written. |
 | `data_dir` | `"fleet-data"` | Where the Server keeps **all** of its state, one directory per domain: see [Where the Server keeps its state](#where-the-server-keeps-its-state). Created owner-only when missing. `config_dir` and `packages_dir` are gone: a file naming either fails startup and names `server migrate` ([Upgrading to one data directory](#upgrading-to-one-data-directory)). |
 | `max_message_size_bytes` | `67108864` (64 MiB) | The largest OpAMP message accepted or sent, in either direction and on either transport. The protocol requires a limit and recommends this value; a fleet of status reports needs far less. An oversized HTTP request is answered `413`, an oversized WebSocket message closes the connection with `1009`. A request or message that has begun and delivers less than 64 KiB in a minute is answered `408`, or closes its connection with `1008`. |
-| `max_package_size_bytes` | `1073741824` (1 GiB) | The largest artifact the package-upload route accepts. A package is a program, not a message — an `otelcol-contrib` binary is a few hundred megabytes — so this bound is far larger, and it applies to that one route. The upload has no deadline, but like every request body it must deliver 64 KiB in each minute once it has begun, or it is answered `408`. |
+| `max_package_size_bytes` | `1073741824` (1 GiB) | The largest artifact the package-upload route accepts. A package is a program, not a message — an `otelcol-contrib` binary is a few hundred megabytes — so this bound is far larger, and it applies to that one route. The upload has no deadline, but like every request body it must deliver 64 KiB in each minute once it has begun, or it is answered `408`. With `[blobs] store = "s3"` it is at most `5368709120` (5 GiB), what one copy in the bucket moves, which places every upload; past it, startup fails naming the key. |
 | `max_total_package_bytes` | `17179869184` (16 GiB) | The total size of all stored artifacts before a new upload is refused `507`. Where `max_package_size_bytes` bounds one artifact, this bounds the whole store, so no caller fills the disk by uploading many artifacts under distinct names. Identical bytes are stored once and counted once. `0` is refused at startup. |
 | `max_agents` | `100000` | The most Agent records the fleet holds at once. A report bearing a **new** `instance_uid` past this ceiling is answered `Unavailable` rather than admitted, so an admitted peer minting fresh self-asserted UIDs cannot exhaust memory and disk; Agents already known keep reporting. With PostgreSQL it bounds the records in the database, counted as each is created, so it holds for all instances together; set it alike on each. The defence against an anonymous flood is [admission](#authentication) by client certificate; this is the backstop behind it. `0` is refused at startup. |
 | `stale_after_secs` | `90` | How long an Agent that declares `ReportsHeartbeat` may be silent before the fleet view marks it **stale**. Ignored when `[connection_offer]` names a heartbeat interval — then the budget is three of those. With PostgreSQL the budget adds `[database] presence_interval_secs`. Only heartbeating Agents can go stale: one that promised no periodic report is never late. |
@@ -399,30 +399,31 @@ deletes at a time. It decides from the entries the database stores, so it keeps 
 entry written through another instance names. An upload takes the same lock shared in the
 transaction that writes its entry, and checks there that its artifact is stored, so no sweep runs
 between the check and the commit; an upload whose artifact a sweep deleted first is refused: upload
-it again. A sweep marks in the database, on the session that holds its lock, each artifact it is
-about to delete, and renews each mark there right before its deletion; an upload of a marked
-artifact is refused too, until the sweep is done and has taken its marks away. When a sweep's
-session ends, as at a database failover, its lock is gone with it: the sweep deletes nothing more
-and logs it, and what it would have deleted stays until a later sweep. Marks a sweep could not take
-away, as while the database did not answer, its instance tries again every `lease_renew_secs`. The
-marks of an instance whose lease is no longer live, or of a start that took none yet, go with the
-next sweep on any instance once they were last renewed more than 130 seconds before: the 15 seconds
-a renewal may take to answer, the 100 seconds the one call to the bucket after it may take, and 15
-seconds to spare. Three cases are not covered, and in each the next start fails naming an entry
-whose artifact a sweep deleted, which is then uploaded again. A sweep deletes nothing more once more
-than 15 seconds have passed since it renewed the mark of the artifact it deletes next, a suspend of
-its host included; but an instance suspended for longer than 130 seconds while a call to the bucket
-is in flight may still delete an artifact whose mark another instance took away meanwhile, since
-that call goes on once the host runs. A failover to a replica the marks had not reached, with
-asynchronous replication, leaves the new primary without them: across a failover the marks hold only
-with synchronous replication. And an instance of 0.8.0 beside this release neither marks nor reads a
-mark, so while both releases run a sweep through it can still delete an artifact an upload just
-stored. An upload waits for the lock up to 5 seconds, a sweep up to 60. Each sweep in progress holds
-the lock on a database session of its own, beside the pool's `pool_size`, which the database's
-`max_connections` must allow for. The lock is taken on PostgreSQL with the filesystem blob store
-too, where the instance is alone and it decides nothing. A start whose sweep cannot have the lock
-fails, naming the lock; a sweep after an act logs it, and what it would have deleted stays until the
-next start.
+it again. A `DELETE` of a Package or of one of its entries answers only once its sweep is done,
+which waits up to 60 seconds for the lock while another instance sweeps. A sweep marks in the
+database, on the session that holds its lock, each artifact it is about to delete, and renews each
+mark there right before its deletion; an upload of a marked artifact is refused too, until the sweep
+is done and has taken its marks away. When a sweep's session ends, as at a database failover, its
+lock is gone with it: the sweep deletes nothing more and logs it, and what it would have deleted
+stays until a later sweep. Marks a sweep could not take away, as while the database did not answer,
+its instance tries again every `lease_renew_secs`. The marks of an instance whose lease is no longer
+live, or of a start that took none yet, go with the next sweep on any instance once they were last
+renewed more than 130 seconds before: the 15 seconds a renewal may take to answer, the 100 seconds
+the one call to the bucket after it may take, and 15 seconds to spare. Three cases are not covered,
+and in each the next start fails naming an entry whose artifact a sweep deleted, which is then
+uploaded again. A sweep deletes nothing more once more than 15 seconds have passed since it renewed
+the mark of the artifact it deletes next, a suspend of its host included; but an instance suspended
+for longer than 130 seconds while a call to the bucket is in flight may still delete an artifact
+whose mark another instance took away meanwhile, since that call goes on once the host runs. A
+failover to a replica the marks had not reached, with asynchronous replication, leaves the new
+primary without them: across a failover the marks hold only with synchronous replication. And an
+instance of 0.8.0 beside this release neither marks nor reads a mark, so while both releases run a
+sweep through it can still delete an artifact an upload just stored. An upload waits for the lock up
+to 5 seconds, a sweep up to 60. Each sweep in progress holds the lock on a database session of its
+own, beside the pool's `pool_size`, which the database's `max_connections` must allow for. The lock
+is taken on PostgreSQL with the filesystem blob store too, where the instance is alone and it
+decides nothing. A start whose sweep cannot have the lock fails, naming the lock; a sweep after an
+act logs it, and what it would have deleted stays until the next start.
 
 An instance that stops while an upload streams leaves the parts of an unfinished multipart upload,
 which are not objects: the Server neither lists nor deletes them. Expire them with a lifecycle rule
@@ -556,6 +557,13 @@ milliseconds it ends every session and closes both listeners, and it opens them 
 lease and a new instance id, as after losing the database. A virtual machine that its hypervisor
 pauses without the guest's clocks counting the pause is not covered: such an instance serves on
 until its next renewal, at most `lease_renew_secs` later, finds its lease lapsed.
+
+A lease's expiry is the database's own time. A step forward of the database's clock past what is
+left of a lease lapses it: its instance can no longer renew it, so it ends every session, closes
+both listeners and takes a new lease under a new instance id, as after losing the database, and
+another instance may take the lapsed lease over and close its audit chain. A step longer than
+`lease_secs` does this to every instance at once, so the database's clock is to be slewed, not
+stepped, while the Servers run.
 
 Each line an instance logs begins with `instance_id=<id>`, so the logs of several instances say
 which one acted. The instance makes its id as soon as its configuration names PostgreSQL, before
@@ -888,15 +896,18 @@ spread over `drain_secs` and 30 seconds more. Each instance takes at most
 `max_new_connections_per_sec` new connections a second and answers the rest `503` with a
 `Retry-After`, after which they come back.
 
-Once its sessions are ended, the instance writes where its Agents are, closes its audit chain,
-waiting up to 5 seconds for the record to be written out, and releases its lease. A stop
-therefore takes `drain_secs` and a few seconds more, and whatever stops the instance must wait
-longer before it sends `SIGKILL`: Docker's default of 10 seconds is too short, which
-`--stop-timeout 30` mends ([In a container](#in-a-container)); an orchestrator's grace period,
-30 seconds by default in Kubernetes, fits the default `drain_secs`. Raise the two together. An
-instance killed before it is done ends as one that ends without stopping: its Agents read as
-connected through it until its lease lapses, and the instance that takes the lease over closes its
-chain.
+Once its sessions are ended, the instance writes where its Agents are: it waits for the batch
+being written and writes one last one, each bounded by one call's bound, 15 seconds and 20
+milliseconds for each Agent it writes. Then it closes its audit chain, waiting up to 5 seconds for
+the record to be written out, and releases its lease. Where the database answers, these writes take
+well under a second, and a stop takes `drain_secs` and a few seconds more; a database that answers
+slowly can hold each write to its bound. Whatever stops the instance must wait longer before it
+sends `SIGKILL`: Docker's default of 10 seconds is too short, which `--stop-timeout 30` mends for
+a database that answers ([In a container](#in-a-container)); an orchestrator's grace period, 30
+seconds by default in Kubernetes, likewise fits the default `drain_secs`. Raise them with
+`drain_secs`, and past the bounds above where the database may answer slowly at a stop. An instance
+killed before it is done ends as one that ends without stopping: its Agents read as connected
+through it until its lease lapses, and the instance that takes the lease over closes its chain.
 
 ### The database and the bucket
 
@@ -1977,13 +1988,17 @@ certificate's `issuer` and `serial`, and the `use_case` — `renewal`, `enrolmen
 `member_csr` or `bootstrap_issue`. Its place in the record is held before the token is asked, so
 the token signs nothing the record cannot take. A Server on a software token writes
 `pkcs11.software_token` at every start.
-`[audit] key_label` names the audit key on the token, which signs the heads of the record's
-chains ([Signed checkpoints](#signed-checkpoints-of-the-chain-heads)). Every instance on one
-database names the same one, or none.
-`[audit] max_file_bytes` (64 MiB) and `keep_files` (16) bound the space it takes on the filesystem
-store, and `[audit] retain_days` (365, at least 1) how far back it goes on PostgreSQL. Each key
-applies to its own store alone: one set for the other store stops the Server at startup, naming
-the key.
+The `[audit]` keys:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `max_file_bytes` | `67108864` (64 MiB) | With `[database] store = "fs"` alone: a file reaching this size is closed and the next one started. At least 1. |
+| `keep_files` | `16` | With `[database] store = "fs"` alone: how many files are kept; the oldest past it is deleted. At least 1. |
+| `retain_days` | `365` | With `[database] store = "postgres"` alone: how many days an entry is kept before it is pruned, from 1 to 36 500. |
+| `key_label` | none | The label of the audit key on the `[pkcs11]` token, which signs the heads of the record's chains ([Signed checkpoints](#signed-checkpoints-of-the-chain-heads)). Every instance on one database names the same one, or none. |
+
+A key of one record store set beside the other stops the Server at startup, naming the key.
+`[audit.export]` is described [below](#exporting-the-record).
 
 ### Exporting the record
 
@@ -2071,21 +2086,23 @@ day after, each instance removes from its own chain the entries the database sto
 many days ago, as far as every entry from the chain's start is that old; one instance at a time,
 whichever holds the prune lock, does the same for every closed chain, and another that finds the
 lock held leaves them to the next day. A chain that is still open because no instance took over its
-lapsed lease is pruned once it is closed. Before anything goes, the instance writes an
-`audit.pruned` into its own chain for each chain it prunes, naming it as `pruned_chain` with the
-`seq` and hash of the last entry removed (`last_seq`, `last_hash`); `audit-verify --config` checks
-that what is left of each chain begins right after that entry. A closed chain with no entries left
-keeps its record, listed as `0 entries, closed`, and its closing hash must be one an `audit.pruned`
-names. An `audit.pruned` is pruned in its turn: the prune that removes one records the links still
-needed again, and carries on the archive's predecessor once the first chain's `audit.chain_opened`
-is gone. A prune runs in rounds of at most 100 000 entries, one right after the other until nothing
-old is left, so a large record, such as the first prune after an upgrade, drains in one go. Each
-round deletes from all its chains in one transaction, in batches of a few thousand entries, and
-writes its own `audit.pruned` entries first, so a round that stops part-way deletes nothing and the
-record verifies after every round. A round that does not end within five minutes is rolled back, the
-prune stops with `cannot prune the audit record` in the log, and the next start or day goes on from
-there. A day is 24 hours, whatever the database's time zone. A Server before 0.8.0 does not know
-`audit.pruned`, and its `audit-verify --config` reports every pruned chain as broken.
+lapsed lease is pruned once it is closed. A chain with a gap where the prune would cut it is left
+whole and warned about, naming it, at every prune until the record is repaired. Before anything
+goes, the instance writes an `audit.pruned` into its own chain for each chain it prunes, naming it
+as `pruned_chain` with the `seq` and hash of the last entry removed (`last_seq`, `last_hash`);
+`audit-verify --config` checks that what is left of each chain begins right after that entry. A
+closed chain with no entries left keeps its record, listed as `0 entries, closed`, and its closing
+hash must be one an `audit.pruned` names. An `audit.pruned` is pruned in its turn: the prune that
+removes one records the links still needed again, and carries on the archive's predecessor once the
+first chain's `audit.chain_opened` is gone. A prune runs in rounds of at most 100 000 entries, one
+right after the other until nothing old is left, so a large record, such as the first prune after an
+upgrade, drains in one go. Each round deletes from all its chains in one transaction, in batches of
+a few thousand entries, and writes its own `audit.pruned` entries first, so a round that stops
+part-way deletes nothing and the record verifies after every round. A round that does not end within
+five minutes is rolled back, the prune stops with `cannot prune the audit record` in the log, and
+the next start or day goes on from there. A day is 24 hours, whatever the database's time zone. A
+Server before 0.8.0 does not know `audit.pruned`, and its `audit-verify --config` reports every
+pruned chain as broken.
 
 A Server that was on PostgreSQL before 0.8.0 kept its audit record in files under
 `data_dir/audit/`. At its first start, before the database holds any chain or archive, it records
