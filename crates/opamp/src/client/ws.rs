@@ -40,6 +40,10 @@ pub struct Settings {
     pub heartbeat: Option<Duration>,
 }
 
+/// How long a reconnect on verified settings waits for the Server to answer the close of the
+/// connection it leaves.
+const CLOSE_ANSWER: Duration = Duration::from_millis(1500);
+
 /// How long a connection may stay silent: a WebSocket ping goes out once nothing has arrived for
 /// `ping_after`, and the connection ends once nothing has arrived for `end_after`
 /// (ADR-0015).
@@ -554,6 +558,19 @@ async fn serve<S: Session, X: StopSignal>(
                             AfterReply::Continue => {}
                             AfterReply::Reconnect => {
                                 let _ = socket.close(None).await;
+                                // The Server's close, its frame or the connection's end, before
+                                // the next connection reports: else the Server may still hold the
+                                // Agents carried here and take the next one for another peer
+                                // (ADR-0025 clause 8). A Server that does not answer within the
+                                // bound does not hold the Client back.
+                                let _ = tokio::time::timeout(CLOSE_ANSWER, async {
+                                    while let Some(Ok(message)) = socket.next().await {
+                                        if matches!(message, Message::Close(_)) {
+                                            break;
+                                        }
+                                    }
+                                })
+                                .await;
                                 return Served::Reconnect;
                             }
                             // End *cleanly*: stop what the Agents run and send the goodbyes over
@@ -840,6 +857,124 @@ mod tests {
             back >= Duration::from_millis(drawn),
             "back after {back:?}, before the {drawn} ms drawn"
         );
+    }
+
+    /// A session that asks to reconnect after its first reply, as one does on verified connection
+    /// settings.
+    struct Reconnecting;
+
+    impl Session for Reconnecting {
+        fn connected(&mut self) -> Vec<AgentToServer> {
+            vec![AgentToServer::default()]
+        }
+        fn routine(&mut self) -> Vec<AgentToServer> {
+            Vec::new()
+        }
+        fn owed(&mut self) -> Vec<AgentToServer> {
+            Vec::new()
+        }
+        fn on_reply(&mut self, _: &ServerToAgent) -> Option<Duration> {
+            None
+        }
+        async fn after_reply<K: ReportSink>(&mut self, _: &mut K) -> AfterReply {
+            AfterReply::Reconnect
+        }
+        async fn changed(&mut self) {
+            std::future::pending().await
+        }
+        fn exchange_failed(&mut self) {}
+        async fn stop(&mut self) {}
+        fn goodbyes(&mut self) -> Vec<AgentToServer> {
+            Vec::new()
+        }
+    }
+
+    /// Serves one connection that answers the first report and, once the Client's close arrives,
+    /// answers it after `answer`, or never where `answer` is `None`; answers when the close came
+    /// and when it was answered.
+    async fn closing_server(
+        listener: tokio::net::TcpListener,
+        answer: Option<Duration>,
+    ) -> (std::time::Instant, Option<std::time::Instant>) {
+        let (stream, _) = listener.accept().await.expect("accept");
+        let mut socket = accept_async(stream).await.expect("handshake");
+        let _ = socket.next().await;
+        let reply = crate::frame::encode_within(&ServerToAgent::default(), 4096).expect("encode");
+        socket
+            .send(Message::Binary(reply.into()))
+            .await
+            .expect("reply");
+        loop {
+            match socket.next().await {
+                Some(Ok(Message::Close(_))) => break,
+                Some(Ok(_)) => {}
+                other => panic!("no close from the Client: {other:?}"),
+            }
+        }
+        let closed = std::time::Instant::now();
+        let Some(answer) = answer else {
+            // Never answered: held open past the test's bound.
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            return (closed, None);
+        };
+        tokio::time::sleep(answer).await;
+        let answered = std::time::Instant::now();
+        let _ = socket.close(None).await;
+        (closed, Some(answered))
+    }
+
+    fn reconnecting_settings(addr: std::net::SocketAddr) -> Settings {
+        Settings {
+            endpoint: format!("ws://{addr}/v1/opamp"),
+            headers: HeaderMap::new(),
+            connector: None,
+            max_message_size: 4096,
+            heartbeat: None,
+        }
+    }
+
+    /// On verified connection settings the Client leaves the connection only once the Server
+    /// answered its close, here 300 ms after it: the next connection is dialled after that, so the
+    /// Server has ended the session before the next one reports.
+    /// Verifies: ADR-0025
+    #[tokio::test]
+    async fn a_reconnect_on_verified_settings_waits_for_the_servers_close() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let server = tokio::spawn(closing_server(listener, Some(Duration::from_millis(300))));
+        let ended = run(&reconnecting_settings(addr), &mut Reconnecting, &mut Never)
+            .await
+            .expect("run");
+        let left = std::time::Instant::now();
+        assert!(matches!(ended, Ended::Reconnect));
+        let (_, answered) = server.await.expect("server");
+        let answered = answered.expect("answered");
+        assert!(
+            left >= answered,
+            "the Client left before the Server answered its close"
+        );
+    }
+
+    /// A Server that never answers the close holds the Client back no longer than the bound.
+    /// Verifies: ADR-0025
+    #[tokio::test]
+    async fn a_reconnect_waits_no_longer_than_the_bound_for_a_silent_server() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let server = tokio::spawn(closing_server(listener, None));
+        let started = std::time::Instant::now();
+        let ended = run(&reconnecting_settings(addr), &mut Reconnecting, &mut Never)
+            .await
+            .expect("run");
+        let took = started.elapsed();
+        assert!(matches!(ended, Ended::Reconnect));
+        assert!(took >= CLOSE_ANSWER, "{took:?}");
+        assert!(took < CLOSE_ANSWER + Duration::from_secs(3), "{took:?}");
+        server.abort();
     }
 
     /// A session whose Server is throttling it: every reply asks it to stay away `wait`.
