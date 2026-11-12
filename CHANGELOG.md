@@ -30,7 +30,7 @@ once its tag exists.
 ### Fixed
 
 - **An Agent inherits the labels of a Client Agent that another instance binds or takes at once**
-  ([ADR-draft-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once](docs/adr/draft-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
+  ([ADR-0045](docs/adr/0045-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
   clauses 8 and 9). On PostgreSQL, an instance that placed an Agent before another instance bound
   the Client Agent of its Host, or before the Client Agent first arrived behind the same Gateway on
   another instance, held the Agent without the Client Agent's labels in its memory until the group

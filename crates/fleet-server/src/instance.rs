@@ -1670,7 +1670,7 @@ mod tests {
     /// concerns read again and nothing else
     /// (ADR-0025
     /// clauses 9 and 19).
-    /// Verifies: ADR-0025, ADR-draft-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once
+    /// Verifies: ADR-0025, ADR-0045
     #[tokio::test]
     async fn what_is_heard_at_once_is_answered_by_one_read_of_what_it_concerns() {
         assert_eq!(

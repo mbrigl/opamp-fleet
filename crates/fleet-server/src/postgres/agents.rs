@@ -3454,7 +3454,7 @@ mod tests {
     /// it, named by the Host, after the write commits: where that notice is lost, as when the
     /// instance ends between the commit and the `NOTIFY`, another instance hears nothing, and a
     /// write that names no arrival announces nothing.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once
+    /// Verifies: ADR-0045
     #[test]
     fn a_client_agent_arriving_over_a_gateway_is_announced_after_its_commit() {
         use super::super::notify::{Heard, Notice};

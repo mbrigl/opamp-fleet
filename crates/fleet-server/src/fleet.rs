@@ -11721,7 +11721,7 @@ mod tests {
     /// A fellow Agent B placed before the binding of its Host's Client Agent through A reached B
     /// inherits the Client Agent's labels in B's memory once the binding's notice reaches B. The
     /// notice is held back from B, as one still on its way is, until the test sends it.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once, ADR-0030
+    /// Verifies: ADR-0045, ADR-0030
     #[test]
     fn a_fellow_agent_inherits_once_the_notice_of_its_client_agents_binding_arrives() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -11762,7 +11762,7 @@ mod tests {
 
     /// A fellow Agent behind a Gateway that B placed inherits in B's memory the labels of its
     /// Client Agent that arrives behind the same Gateway through A afterwards.
-    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once, ADR-0030
+    /// Verifies: ADR-0045, ADR-0030
     #[test]
     fn a_fellow_agent_behind_a_gateway_inherits_from_a_client_agent_arriving_on_another_instance() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
