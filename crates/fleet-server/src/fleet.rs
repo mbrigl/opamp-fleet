@@ -9098,6 +9098,8 @@ mod tests {
         after_take: Arc<Mutex<Option<Act>>>,
         /// What runs once after a re-key committed, before it is answered.
         after_rekey: Arc<Mutex<Option<Act>>>,
+        /// What runs once after a queued restart was cleared, before the clear is answered.
+        after_clear: Arc<Mutex<Option<Act>>>,
     }
 
     /// What [`Hooked`] runs once after a read.
@@ -9140,6 +9142,7 @@ mod tests {
                 probe: Arc::new(Mutex::new(None)),
                 after_take: Arc::new(Mutex::new(None)),
                 after_rekey: Arc::new(Mutex::new(None)),
+                after_clear: Arc::new(Mutex::new(None)),
             }
         }
     }
@@ -9244,7 +9247,14 @@ mod tests {
                     return Err("the restart is held back".to_string());
                 }
             }
-            self.inner.set_restart_pending(uid, pending)
+            let set = self.inner.set_restart_pending(uid, pending);
+            if !pending {
+                let after = self.after_clear.lock().expect("hook lock").take();
+                if let Some(after) = after {
+                    after();
+                }
+            }
+            set
         }
         fn remove(&self, uid: &InstanceUid) -> Result<(), String> {
             self.inner.remove(uid)
@@ -13427,6 +13437,149 @@ mod tests {
             state.restart_command_for(&uid, 1).is_some(),
             "the second restart is sent next"
         );
+    }
+
+    /// A restart requested through one instance after the carrying instance cleared the one it
+    /// delivers, but before it took the clear into memory, is not lost: the take-up of its
+    /// announcement waits for the delivery, which holds the Agent's own lock, and then holds the
+    /// request, which is sent next.
+    /// Verifies: ADR-0030, ADR-0025
+    #[test]
+    fn a_restart_requested_between_a_deliverys_clear_and_its_end_is_sent_next() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let hooked = Hooked::new(Box::new(crate::postgres::agents::PgAgentStore::new(
+            database.clone(),
+        )));
+        let after_clear = hooked.after_clear.clone();
+        let a = Arc::new(on_postgres(&database, Box::new(hooked)));
+        let b = Arc::new(on_postgres(
+            &database,
+            Box::new(crate::postgres::agents::PgAgentStore::new(database.clone())),
+        ));
+        let uid = InstanceUid([0x99; 16]);
+        a.process(restartable(&uid, 1), Transport::WebSocket, Some(1));
+        assert!(a.request_restart(&uid).is_ok(), "queued");
+
+        let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let waits_before = a.agent_lock_waits();
+        let (answered, answering) = std::sync::mpsc::channel();
+        {
+            let (on, b, finished) = (Arc::downgrade(&a), b.clone(), finished.clone());
+            *after_clear.lock().expect("hook lock") = Some(Box::new(move || {
+                let a = on.upgrade().expect("A");
+                let (again, done) = (a.clone(), finished.clone());
+                std::thread::spawn(move || {
+                    let requested = b.request_restart(&uid).is_ok();
+                    // The announcement, once the request committed.
+                    let named = HashSet::from([uid]);
+                    let taken = again.take_up_agents(TakeUp::Named(&named)).is_ok()
+                        && again.take_up_restarts(TakeUp::Named(&named)).is_ok();
+                    done.store(true, Ordering::SeqCst);
+                    let _ = answered.send(requested && taken);
+                });
+                until("the take-up waits for the delivery or is done", || {
+                    a.agent_lock_waits() > waits_before || finished.load(Ordering::SeqCst)
+                });
+            }));
+        }
+        assert!(
+            a.restart_command_for(&uid, 1).is_some(),
+            "the first restart is delivered"
+        );
+        assert!(
+            answering
+                .recv_timeout(Duration::from_secs(30))
+                .expect("the request and its take-up are answered"),
+            "requested and taken up"
+        );
+        assert!(
+            a.restart_command_for(&uid, 1).is_some(),
+            "the request made between the clear and the delivery's end is sent next"
+        );
+    }
+
+    /// A restart requested through one instance while the instance that carries the Agent
+    /// delivers the one queued before is not lost, however the two meet: where the request came
+    /// before the delivery's clear, the restart sent is both; where it came after, it stays queued
+    /// and is sent next, once the carrying instance takes the announcement up.
+    /// Verifies: ADR-0030, ADR-0025
+    #[test]
+    fn a_restart_requested_through_one_instance_while_another_delivers_one_stays_until_sent() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let on = || {
+            Arc::new(on_postgres(
+                &database,
+                Box::new(crate::postgres::agents::PgAgentStore::new(database.clone())),
+            ))
+        };
+        let (a, b) = (on(), on());
+        let uid = InstanceUid([0x97; 16]);
+        a.process(restartable(&uid, 1), Transport::WebSocket, Some(1));
+        let queued = || {
+            test.rows(&format!(
+                "SELECT restart_pending::text FROM agents WHERE instance_uid = '{uid}'"
+            ))[0][0]
+                .clone()
+                .expect("a value")
+                == "true"
+        };
+        let (mut merged, mut after) = (0, 0);
+        for round in 0..40u64 {
+            assert!(a.request_restart(&uid).is_ok(), "round {round}: queued");
+            let met = Arc::new(std::sync::Barrier::new(2));
+            let delivering = {
+                let (a, met) = (a.clone(), met.clone());
+                std::thread::spawn(move || {
+                    met.wait();
+                    // Later by a step each round, so the request meets the delivery before its
+                    // clear, during it, and after it.
+                    std::thread::sleep(Duration::from_micros(round * 25));
+                    a.restart_command_for(&uid, 1).is_some()
+                })
+            };
+            let requesting = {
+                let (a, b, met) = (a.clone(), b.clone(), met.clone());
+                std::thread::spawn(move || {
+                    met.wait();
+                    let requested = b.request_restart(&uid).is_ok();
+                    // The announcement reaches the carrying instance once the request committed,
+                    // which takes the Agent up and then its kept restarts, as a notice does.
+                    let named = HashSet::from([uid]);
+                    a.take_up_agents(TakeUp::Named(&named)).expect("taken up");
+                    a.take_up_restarts(TakeUp::Named(&named)).expect("taken up");
+                    requested
+                })
+            };
+            assert!(
+                delivering.join().expect("delivery"),
+                "round {round}: the first restart is delivered"
+            );
+            assert!(
+                requesting.join().expect("request"),
+                "round {round}: the second request is answered"
+            );
+            if queued() {
+                after += 1;
+                assert!(
+                    a.restart_command_for(&uid, 1).is_some(),
+                    "round {round}: the request that stayed queued is sent next"
+                );
+                assert!(!queued(), "round {round}: sending it cleared it");
+            } else {
+                merged += 1;
+                assert!(
+                    a.restart_command_for(&uid, 1).is_none(),
+                    "round {round}: a request the delivery took is not sent twice"
+                );
+            }
+        }
+        eprintln!("{merged} requests taken by the delivery, {after} queued after it");
     }
 
     /// A label set while a report reads the Agent's record from the store, before it holds it, is

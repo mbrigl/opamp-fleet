@@ -404,6 +404,7 @@ mod tests {
         );
     }
 
+    /// Verifies: ADR-0012
     #[tokio::test]
     async fn plaintext_off_the_loopback_is_refused_before_connecting() {
         let refused = connection("ws://192.0.2.1:9/v1/opamp", None);

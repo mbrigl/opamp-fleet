@@ -182,6 +182,27 @@ adr "$d" 0002 "🟢 accepted"
 mark "G-1 $(adr_id 1) $(adr_id 2)" > "$d/tests/t.txt"
 expect fail "marker citing a superseded ADR" "$d" "'$(adr_id 1)', which is superseded or rejected"
 
+d="$(repo named-test)"
+spec "$d" "**G-1** — it works."
+adr "$d" 0001 "🟢 accepted" "\`a_named_test_is_defined\` and \`a_setting_is_named\` decide it."
+{ mark "$(adr_id 1)"; mark G-1; echo "    async fn a_named_test_is_defined() {}"; } > "$d/tests/t.rs"
+printf 'struct C {\n    pub a_setting_is_named: u8,\n}\n' > "$d/tests/c.rs"
+expect pass "an Enforcement naming a test and a setting that are defined" "$d"
+
+d="$(repo named-test-missing)"
+spec "$d" "**G-1** — it works."
+adr "$d" 0001 "🟢 accepted" "\`a_test_that_is_gone\` decides it."
+{ mark "$(adr_id 1)"; mark G-1; echo "// fn a_test_that_is_gone() was renamed"; } > "$d/tests/t.rs"
+echo "# a_test_that_is_gone = 1" > "$d/tests/c.toml"
+echo "fn a_test_that_is_gone() {}" > "$d/tests/notes.md"
+expect fail "an Enforcement naming a test no file defines, a comment or Markdown naming it" "$d" "names 'a_test_that_is_gone', which no file defines"
+
+d="$(repo named-test-proposed)"
+spec "$d" "**G-1** — it works."
+adr "$d" 0001 "🟡 proposed" "\`a_test_still_to_come\` will decide it."
+mark G-1 > "$d/tests/t.rs"
+expect pass "a proposed ADR may name a test still to come" "$d"
+
 # Verifies: ADR-0002
 # A draft is cited by its draft identifier, assembled for the same reason as adr_id.
 draft_id() { printf 'ADR-%s-%s' draft "$1"; }

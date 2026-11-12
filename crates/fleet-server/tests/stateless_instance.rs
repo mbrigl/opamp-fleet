@@ -9,7 +9,8 @@
 //! with a schema of its name, which it drops afterwards. It runs against the database the
 //! `FLEET_TEST_POSTGRES_*` variables name and the bucket the `FLEET_TEST_S3_*` ones name, and skips,
 //! saying so, where either is not named. `scripts/check-store.sh postgres` runs it, and fails on a
-//! skip.
+//! skip. Beside them, a Server on PostgreSQL alone, its blobs in a data directory, takes its lease
+//! before it opens a listener (ADR-0023 clause 23).
 #![cfg(unix)]
 
 mod ports;
@@ -129,13 +130,59 @@ impl Role {
     /// Runs `statements` as the administrator, in the role's schema, and then `count`, a query of
     /// one number, answering it.
     fn query(&self, statements: &str, count: Option<String>) -> Option<i64> {
+        let statements = format!("SET search_path = {};{statements}", self.name);
+        let (pg, roots) = self.connection();
+        std::thread::spawn(move || {
+            session(pg, roots, |client| async move {
+                client.batch_execute(&statements).await.expect("sql");
+                match count {
+                    Some(query) => Some(
+                        client
+                            .query_one(query.as_str(), &[])
+                            .await
+                            .expect("count")
+                            .get::<_, i64>(0),
+                    ),
+                    None => None,
+                }
+            })
+        })
+        .join()
+        .expect("the statements' thread")
+    }
+
+    /// Runs `statements` as the administrator, in the role's schema, in a session held open until
+    /// the answer is dropped: what they lock stays locked until then.
+    fn hold(&self, statements: &str) -> Held {
+        let statements = format!("SET search_path = {};{statements}", self.name);
+        let (pg, roots) = self.connection();
+        let (ran, running) = mpsc::channel();
+        let (release, released) = tokio::sync::oneshot::channel::<()>();
+        let thread = std::thread::spawn(move || {
+            session(pg, roots, |client| async move {
+                client.batch_execute(&statements).await.expect("sql");
+                let _ = ran.send(());
+                let _ = released.await;
+            });
+        });
+        running
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the held statements ran");
+        Held {
+            release: Some(release),
+            thread: Some(thread),
+        }
+    }
+
+    /// How to reach the database as the administrator, and the roots its certificate is checked
+    /// against where it is reached over TLS.
+    fn connection(&self) -> (tokio_postgres::Config, Option<rustls::RootCertStore>) {
         let mut pg = tokio_postgres::Config::new();
         pg.host(&self.host)
             .port(self.port)
             .dbname(&self.dbname)
             .user(&self.user)
             .password(&self.password);
-        let statements = format!("SET search_path = {};{statements}", self.name);
         let roots = self.ca_file.as_ref().map(|path| {
             opamp::tls::root_store(&std::fs::read(path).expect("FLEET_TEST_POSTGRES_CA_FILE"))
                 .expect("roots")
@@ -143,46 +190,7 @@ impl Role {
         if roots.is_some() {
             pg.ssl_mode(tokio_postgres::config::SslMode::Require);
         }
-        std::thread::spawn(move || {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("runtime")
-                .block_on(async move {
-                    let client = match roots {
-                        Some(roots) => {
-                            opamp::tls::install_ring_provider();
-                            let tls = tokio_postgres_rustls::MakeRustlsConnect::new(
-                                opamp::tls::client_builder()
-                                    .with_root_certificates(roots)
-                                    .with_no_client_auth(),
-                            );
-                            let (client, connection) = pg.connect(tls).await.expect("db");
-                            tokio::spawn(connection);
-                            client
-                        }
-                        None => {
-                            let (client, connection) =
-                                pg.connect(tokio_postgres::NoTls).await.expect("db");
-                            tokio::spawn(connection);
-                            client
-                        }
-                    };
-                    client.batch_execute(&statements).await.expect("sql");
-                    match count {
-                        Some(query) => Some(
-                            client
-                                .query_one(query.as_str(), &[])
-                                .await
-                                .expect("count")
-                                .get::<_, i64>(0),
-                        ),
-                        None => None,
-                    }
-                })
-        })
-        .join()
-        .expect("the statements' thread")
+        (pg, roots)
     }
 
     /// `[database.postgres]` for the role, its password in a file under `dir`.
@@ -205,6 +213,57 @@ impl Role {
             password_file.display().to_string(),
         )
     }
+}
+
+/// A session of [`Role::hold`], closed on drop.
+struct Held {
+    release: Option<tokio::sync::oneshot::Sender<()>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        if let Some(release) = self.release.take() {
+            let _ = release.send(());
+        }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// Connects as `pg` says, over TLS where `roots` are given, and runs `act` on the client, on a
+/// runtime of its own.
+fn session<T, F, Fut>(pg: tokio_postgres::Config, roots: Option<rustls::RootCertStore>, act: F) -> T
+where
+    F: FnOnce(tokio_postgres::Client) -> Fut,
+    Fut: std::future::Future<Output = T>,
+{
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime")
+        .block_on(async move {
+            let client = match roots {
+                Some(roots) => {
+                    opamp::tls::install_ring_provider();
+                    let tls = tokio_postgres_rustls::MakeRustlsConnect::new(
+                        opamp::tls::client_builder()
+                            .with_root_certificates(roots)
+                            .with_no_client_auth(),
+                    );
+                    let (client, connection) = pg.connect(tls).await.expect("db");
+                    tokio::spawn(connection);
+                    client
+                }
+                None => {
+                    let (client, connection) = pg.connect(tokio_postgres::NoTls).await.expect("db");
+                    tokio::spawn(connection);
+                    client
+                }
+            };
+            act(client).await
+        })
 }
 
 impl Drop for Role {
@@ -691,4 +750,113 @@ fn an_instance_whose_lease_lapsed_on_a_newer_schema_exits_naming_both_versions()
         0,
         "no new lease"
     );
+}
+
+/// A Server on PostgreSQL takes its lease before it opens either listener: while the lock its
+/// lease is taken under is held elsewhere, it waits for it, and neither plane takes a connection;
+/// once the lock is let go it holds a lease and both planes serve
+/// (ADR-0023 clause 23).
+/// Its blobs lie in a data directory, so no bucket is needed.
+// Verifies: ADR-0023
+#[test]
+fn an_instance_takes_its_lease_before_it_opens_a_listener() {
+    opamp::tls::install_ring_provider();
+    let Some(role) = Role::named() else { return };
+    let files = tempfile::tempdir().expect("tempdir");
+    let cert = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_string()])
+        .expect("a self-signed certificate");
+    std::fs::write(files.path().join("cert.pem"), cert.cert.pem()).expect("write cert");
+    std::fs::write(
+        files.path().join("key.pem"),
+        cert.signing_key.serialize_pem(),
+    )
+    .expect("write key");
+    let (agent, operator) = (ports::spare_port(), ports::spare_port());
+    let config = files.path().join("server.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "listen = \"127.0.0.1:{agent}\"\ndata_dir = {data:?}\n\
+             [tls]\ncert_file = {cert:?}\nkey_file = {key:?}\nclient_ca_file = {cert:?}\n\
+             [rest]\nlisten = \"127.0.0.1:{operator}\"\n\
+             [database]\nstore = \"postgres\"\n{database}",
+            data = files.path().join("data").display().to_string(),
+            cert = files.path().join("cert.pem").display().to_string(),
+            key = files.path().join("key.pem").display().to_string(),
+            database = role.section(files.path()),
+        ),
+    )
+    .expect("write server.toml");
+    // The lock a lease is taken under, as the Server names it for the schema it works in.
+    let held = role.hold(
+        "SELECT pg_advisory_lock(hashtextextended('opamp-fleet-server-leases:' || \
+         coalesce(current_schema(), ''), 0));",
+    );
+
+    let mut server = ServerUnderTest(
+        Command::new(env!("CARGO_BIN_EXE_server"))
+            .arg("--config")
+            .arg(&config)
+            .current_dir(files.path())
+            .env("RUST_LOG", "info")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("start the server"),
+    );
+    let (lines, logged) = mpsc::channel();
+    let stderr = server.0.stderr.take().expect("stderr");
+    std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            if lines.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let takes = |port: u16| {
+        std::net::TcpStream::connect_timeout(
+            &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+            Duration::from_millis(200),
+        )
+        .is_ok()
+    };
+    // The Server's session waits for the lock: it is taking its lease. Its `lock_timeout` of five
+    // seconds bounds how long the lock may be held before its start fails.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while role.count(&format!(
+        "pg_locks l JOIN pg_stat_activity a USING (pid) \
+         WHERE l.locktype = 'advisory' AND NOT l.granted AND a.usename = '{}'",
+        role.name
+    )) == 0
+    {
+        assert!(
+            server.0.try_wait().expect("the server's status").is_none(),
+            "the server exited before it took its lease:\n{}",
+            logged.try_iter().collect::<Vec<_>>().join("\n")
+        );
+        assert!(
+            Instant::now() < deadline,
+            "the server never asked for its lease"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        !takes(agent) && !takes(operator),
+        "a plane took a connection before the lease was held"
+    );
+    assert_eq!(role.count("leases"), 0, "no lease yet");
+    drop(held);
+
+    let mut seen = Vec::new();
+    let came_up = loop {
+        match logged.recv_timeout(Duration::from_secs(60)) {
+            Ok(line) if line.contains("serving the REST API") => break true,
+            Ok(line) => seen.push(line),
+            Err(_) => break false,
+        }
+    };
+    assert!(came_up, "the server never came up:\n{}", seen.join("\n"));
+    assert_eq!(role.count("leases WHERE expires_at > now()"), 1, "a lease");
+    assert!(takes(agent) && takes(operator), "both planes serve");
 }

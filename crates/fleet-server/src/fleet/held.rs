@@ -737,11 +737,17 @@ impl AppState {
     /// (ADR-0025
     /// clause 8).
     ///
+    /// A request announced of an Agent held here is read under the Agent's own lock and held: a
+    /// delivery clears a restart in the store under that lock before it takes the clear into
+    /// memory, and a request committed between the two is otherwise taken out of memory with it.
+    ///
     /// # Errors
-    /// Returns an error when a record cannot be read after a missed notification; what is kept
-    /// stays kept.
+    /// Returns an error when a record cannot be read; what is kept stays kept.
     pub fn take_up_restarts(&self, take_up: TakeUp<'_>) -> Result<(), String> {
         let uids = take_up.named();
+        if let Some(uids) = uids {
+            self.hold_announced_restarts(uids)?;
+        }
         let _fleet = self.fleet.lock().expect("fleet lock");
         let mut kept = self.unput_restarts.lock().expect("restarts lock");
         match uids {
@@ -758,6 +764,44 @@ impl AppState {
                     }
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// Holds the restart the store queues for each Agent of `uids` held here, read under its own
+    /// lock ([`take_up_restarts`](Self::take_up_restarts)).
+    fn hold_announced_restarts(&self, uids: &HashSet<InstanceUid>) -> Result<(), String> {
+        let held: HashSet<InstanceUid> = {
+            let fleet = self.fleet.lock().expect("fleet lock");
+            uids.iter()
+                .filter(|uid| fleet.contains_key(uid))
+                .copied()
+                .collect()
+        };
+        if held.is_empty() {
+            return Ok(());
+        }
+        let _agents = self.agent_locks_of(Some(&held));
+        // One read of them all, so their locks are held for one round trip.
+        let queued: Vec<InstanceUid> = self
+            .agent_store
+            .get_many(&held.into_iter().collect::<Vec<_>>())?
+            .into_iter()
+            .filter(|(_, stored)| stored.restart_pending)
+            .map(|(uid, _)| uid)
+            .collect();
+        let mut fleet = self.fleet.lock().expect("fleet lock");
+        let mut moved = false;
+        for uid in queued {
+            if let Some(record) = fleet.get_mut(&uid).filter(|record| !record.restart_pending) {
+                record.restart_pending = true;
+                self.written.lock().expect("written lock").remove(&uid);
+                moved = true;
+            }
+        }
+        drop(fleet);
+        if moved {
+            self.push.send_modify(|rev| *rev += 1);
         }
         Ok(())
     }
