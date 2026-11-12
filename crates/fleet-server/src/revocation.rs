@@ -486,6 +486,9 @@ pub enum Bound {
     Taken(String),
     /// The Host asked for is marked as a Gateway, which is bound none (ADR-0030 clause 16).
     Gateway,
+    /// The Host asked for speaks for [`MAX_UIDS_PER_HOST`] Agents already, as the store counts
+    /// them in the transaction that would bind one more.
+    Full,
 }
 
 /// One act on the Hosts, written as one transaction on the rows it names by a store that writes
@@ -1492,6 +1495,9 @@ impl Revocations {
                 state.owners.retain(|_, owner| owner != host);
                 Ok(false)
             }
+            Bound::Full => Err(format!(
+                "this host already speaks for {MAX_UIDS_PER_HOST} Agents"
+            )),
         }
     }
 

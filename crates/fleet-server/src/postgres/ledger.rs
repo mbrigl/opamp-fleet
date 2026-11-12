@@ -307,7 +307,9 @@ impl LedgerStore for PgLedgerStore {
     /// `row` holds it, when the store has none, so no binding stands without its Host's row, and
     /// that row is held for the
     /// transaction: a Gateway mark committed before it is seen, and one that waits for it releases
-    /// what it bound. A Host whose row is marked as a Gateway is bound none (ADR-0030 clause 16).
+    /// what it bound. A Host whose row is marked as a Gateway is bound none (ADR-0030 clause 16),
+    /// and one that holds [`MAX_UIDS_PER_HOST`](crate::revocation::MAX_UIDS_PER_HOST) bindings
+    /// of other `instance_uid`s none more.
     /// The hold is one that conflicts with itself, so two binders of one Host wait for each other
     /// rather than both holding a share of the row they then write. The Hosts' arrays are neither
     /// read nor added to (see `unbind_in`). What it binds or makes is announced after the commit
@@ -329,6 +331,32 @@ impl LedgerStore for PgLedgerStore {
                 .get(0);
             if gateway {
                 return Ok(Bound::Gateway);
+            }
+            // A binding another Host holds is answered as such first, whatever this Host's count.
+            if let Some(holder) = transaction
+                .query_opt(
+                    "SELECT host FROM host_bindings WHERE instance_uid = $1 AND host <> $2",
+                    &[&instance_uid, &host],
+                )
+                .await
+                .map_err(sql)?
+            {
+                return Ok(Bound::Taken(holder.get(0)));
+            }
+            // The bound counted where it would be passed, under the Host's row lock every binder
+            // of the Host takes, so instances that have not taken up each other's bindings cannot
+            // bind past it together (ADR-0012, ADR-0025 clause 19).
+            let others: i64 = transaction
+                .query_one(
+                    "SELECT count(*) FROM host_bindings WHERE host = $1 AND instance_uid <> $2",
+                    &[&host, &instance_uid],
+                )
+                .await
+                .map_err(sql)?
+                .get(0);
+            if usize::try_from(others).unwrap_or(usize::MAX) >= crate::revocation::MAX_UIDS_PER_HOST
+            {
+                return Ok(Bound::Full);
             }
             let inserted = transaction
                 .execute(
@@ -1720,6 +1748,82 @@ mod tests {
                  WHERE h.gateway"
             ),
             Vec::<Vec<Option<String>>>::new()
+        );
+    }
+
+    /// A Host speaks for at most 256 Agents across instances: with 255 bindings made through A,
+    /// B, which took none of them up, binds one more and is refused the next, naming the bound.
+    /// Verifies: ADR-0012, ADR-0025
+    #[test]
+    fn a_hosts_bound_of_agents_is_counted_in_the_database() {
+        use crate::revocation::MAX_UIDS_PER_HOST;
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let (a, b) = (
+            PgLedgerStore::new(database.clone()),
+            PgLedgerStore::new(database),
+        );
+        for n in 0..MAX_UIDS_PER_HOST - 1 {
+            assert_eq!(a.bind(&format!("uid-{n}"), "h1"), Ok(Bound::Bound));
+        }
+        assert_eq!(b.bind("uid-last", "h1"), Ok(Bound::Bound), "the 256th");
+        assert_eq!(b.bind("uid-past", "h1"), Ok(Bound::Full), "past the bound");
+        assert_eq!(a.bind("uid-elsewhere", "h2"), Ok(Bound::Bound));
+        assert_eq!(
+            b.bind("uid-elsewhere", "h1"),
+            Ok(Bound::Taken("h2".to_string())),
+            "one another Host holds is answered as such, at the bound too"
+        );
+        assert_eq!(
+            b.bind("uid-last", "h1"),
+            Ok(Bound::Bound),
+            "one already bound stays bound"
+        );
+        assert_eq!(
+            test.rows("SELECT count(*)::text FROM host_bindings WHERE host = 'h1'"),
+            [[Some(MAX_UIDS_PER_HOST.to_string())]]
+        );
+    }
+
+    /// Two instances binding to one Host at once wait for each other on its row, so the database
+    /// holds the bound of bindings for it and no more.
+    /// Verifies: ADR-0012, ADR-0025
+    #[test]
+    fn two_instances_binding_to_one_host_at_once_stop_at_the_bound() {
+        use crate::revocation::MAX_UIDS_PER_HOST;
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let stores = [
+            PgLedgerStore::new(database.clone()),
+            PgLedgerStore::new(database),
+        ];
+        let bound: Vec<usize> = std::thread::scope(|scope| {
+            let binders: Vec<_> = stores
+                .iter()
+                .enumerate()
+                .map(|(i, store)| {
+                    scope.spawn(move || {
+                        (0..MAX_UIDS_PER_HOST)
+                            .filter(|n| {
+                                store.bind(&format!("uid-{i}-{n}"), "h1") == Ok(Bound::Bound)
+                            })
+                            .count()
+                    })
+                })
+                .collect();
+            binders
+                .into_iter()
+                .map(|b| b.join().expect("binder"))
+                .collect()
+        });
+        assert_eq!(bound.iter().sum::<usize>(), MAX_UIDS_PER_HOST, "{bound:?}");
+        assert_eq!(
+            test.rows("SELECT count(*)::text FROM host_bindings WHERE host = 'h1'"),
+            [[Some(MAX_UIDS_PER_HOST.to_string())]]
         );
     }
 
