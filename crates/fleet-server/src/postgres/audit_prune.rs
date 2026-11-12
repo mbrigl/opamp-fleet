@@ -147,6 +147,57 @@ fn predecessor_named(value: &Value, chain_key: &str) -> Option<Predecessor> {
     })
 }
 
+/// How often an instance prunes the record: at its start and once a day after
+/// (ADR-0023 clause 12).
+const PRUNE_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Prunes the record on `database` to `retain_days` at once and then once a day, for the chain
+/// `held` names at each prune, recording through `audit`; what each prune did is logged. What the
+/// Server on PostgreSQL runs from its start until it ends.
+pub fn prune_daily(
+    database: Arc<Database>,
+    audit: Arc<AuditLog>,
+    held: crate::instance::Held,
+    retain_days: u64,
+) -> tokio::task::JoinHandle<()> {
+    prune_every(PRUNE_EVERY, database, audit, held, retain_days)
+}
+
+/// [`prune_daily`], every `period` rather than once a day.
+fn prune_every(
+    period: Duration,
+    database: Arc<Database>,
+    audit: Arc<AuditLog>,
+    held: crate::instance::Held,
+    retain_days: u64,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut daily = tokio::time::interval(period);
+        loop {
+            daily.tick().await;
+            let (database, audit) = (database.clone(), audit.clone());
+            let own = held.borrow().clone();
+            let pruned =
+                tokio::task::spawn_blocking(move || prune(&database, audit, own, retain_days))
+                    .await;
+            match pruned {
+                Ok(Ok(rounds)) => tracing::info!(
+                    rounds = rounds.len(),
+                    chains = rounds.iter().map(|round| round.chains.len()).sum::<usize>(),
+                    carried = rounds
+                        .iter()
+                        .map(|round| round.carried.len())
+                        .sum::<usize>(),
+                    closed_chains = rounds.iter().any(|round| round.closed_chains),
+                    "pruned the audit record to {retain_days} days"
+                ),
+                Ok(Err(e)) => tracing::warn!(error = %e, "cannot prune the audit record"),
+                Err(e) => tracing::warn!(error = %e, "the audit record's prune stopped"),
+            }
+        }
+    })
+}
+
 /// Prunes the record on `database` for the instance whose chain is `own`, recording through
 /// `audit`, in rounds of at most [`ROUND_ENTRIES`] entries, one right after the other until a
 /// round finds nothing more to remove; answers what each round did.
@@ -1392,5 +1443,138 @@ mod tests {
             Some("t"),
             "a line that is no entry: {rows:?}"
         );
+    }
+
+    /// The database's clock stopped at `at`, for the connections of the answer alone, which work
+    /// in the time zone `zone`: a `now()` of the test's schema, which reads the instant the table
+    /// `fleet_test_now` holds, shadows the catalog's, as the search path names the schema before
+    /// `pg_catalog`. Every other connection reads the catalog's.
+    fn stopped_at(test: &TestDatabase, at: &str, zone: &str) -> Arc<Database> {
+        // The schema made and brought up to date first, with its defaults on the catalog's clock.
+        drop(shared(test));
+        test.sql(&format!(
+            "CREATE TABLE fleet_test_now (at timestamptz NOT NULL); \
+             INSERT INTO fleet_test_now VALUES (timestamptz '{at}'); \
+             CREATE FUNCTION {schema}.now() RETURNS timestamptz LANGUAGE sql STABLE \
+             AS $$ SELECT at FROM {schema}.fleet_test_now $$;",
+            schema = test.schema
+        ));
+        // `open_in` names its schema in the connection's options, `-c search_path=<schema>`; the
+        // catalog after it, and the time zone as a further option of the same string.
+        let path = format!("{},pg_catalog -c TimeZone={zone}", test.schema);
+        let database = Database::open_in(&test.config(), Exclusive::Shared, Some(&path))
+            .expect("a database on the stopped clock");
+        let (stopped, named) = database
+            .run_within(Duration::from_secs(30), |pool| async move {
+                let row = client(&pool)
+                    .await?
+                    .query_one(
+                        "SELECT now() = (SELECT at FROM fleet_test_now), \
+                         current_setting('TimeZone')",
+                        &[],
+                    )
+                    .await
+                    .map_err(sql)?;
+                Ok((row.get::<_, bool>(0), row.get::<_, String>(1)))
+            })
+            .expect("the stopped clock");
+        assert!(stopped, "the instance's connections read the stopped clock");
+        assert_eq!(named, zone, "the session's time zone");
+        database
+    }
+
+    /// The prune the Server runs, from its start on, keeps an entry stored exactly `retain_days`
+    /// periods of 24 hours ago and removes one stored a microsecond before, in a time zone whose
+    /// clocks change in that time, forward and back; the schedule prunes again at its next turn,
+    /// where the kept entry has become older than that. A day of the calendar instead would cut
+    /// at 23 hours across the change forward, removing the entry exactly a day old, and at 25
+    /// hours across the change back, keeping the one a microsecond older.
+    /// Verifies: ADR-0023
+    #[test]
+    fn the_scheduled_prune_cuts_at_retain_days_of_24_hours_across_a_change_of_daylight_saving_time()
+    {
+        // 2026-03-29 the clocks of Berlin go from 02:00 CET to 03:00 CEST, 2026-10-25 from 03:00
+        // CEST back to 02:00 CET: each instant is noon on the day of a change.
+        for (change, at) in [
+            ("forward", "2026-03-29 12:00:00+02"),
+            ("back", "2026-10-25 12:00:00+01"),
+        ] {
+            let Some(test) = TestDatabase::named() else {
+                return;
+            };
+            let database = stopped_at(&test, at, "Europe/Berlin");
+            let a = writing_on(database.clone(), "host-a");
+            // A closed chain: one entry older than a day of 24 hours, one exactly a day old, one
+            // 23 hours old, and its closing entry, stored now.
+            let chain = "00000000-0000-4000-8000-000000000032";
+            let ages = [
+                "interval '24 hours' + interval '1 microsecond'",
+                "interval '24 hours'",
+                "interval '23 hours'",
+                "interval '0 hours'",
+            ];
+            let (mut prev, mut values) = (crate::audit_log::GENESIS.to_string(), Vec::new());
+            for (seq, age) in (1..).zip(ages) {
+                let entry = match seq {
+                    1 => Entry::new("audit.chain_opened", "recorded"),
+                    4 => Entry::new("audit.chain_closed", "recorded").with("reason", "shutdown"),
+                    _ => Entry::new("admission.admitted", "admitted").with("n", seq),
+                };
+                let line = crate::audit_log::render(seq, 0, &entry.with("chain", chain), &prev);
+                prev = line_hash(&line);
+                values.push(format!(
+                    "('{chain}', {seq}, '{line}', timestamptz '{at}' - ({age}))"
+                ));
+            }
+            test.sql(&format!(
+                "INSERT INTO audit_chains (id, host, opened_at, closed_at, closed_hash) \
+                 VALUES ('{chain}', 'host-x', timestamptz '{at}' - interval '2 days', \
+                 timestamptz '{at}', '{prev}'); \
+                 INSERT INTO audit_entries (chain, seq, line, recorded_at) VALUES {};",
+                values.join(", ")
+            ));
+            let left = |test: &TestDatabase| -> Vec<u64> {
+                lines(test, chain).into_iter().map(|(seq, _)| seq).collect()
+            };
+            // Waits until a prune removed entry `first` and what came before it, at most.
+            let past = |test: &TestDatabase, first: u64| {
+                let deadline = std::time::Instant::now() + Duration::from_secs(120);
+                while left(test).first() == Some(&first) {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "across the change {change}: no prune removed entry {first}"
+                    );
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            };
+
+            let runtime = tokio::runtime::Runtime::new().expect("runtime");
+            let schedule = {
+                let _entered = runtime.enter();
+                prune_every(
+                    Duration::from_millis(500),
+                    database.clone(),
+                    a.audit.clone(),
+                    a._held.subscribe(),
+                    1,
+                )
+            };
+            // The deletion is one transaction: once entry 1 is gone, the prune has decided.
+            past(&test, 1);
+            assert_eq!(
+                left(&test),
+                [2, 3, 4],
+                "across the change {change}: the entry exactly a day old is kept"
+            );
+            held(&database);
+
+            // A microsecond on, entry 2 is older than a day, and the next turn removes it.
+            test.sql("UPDATE fleet_test_now SET at = at + interval '1 microsecond'");
+            past(&test, 2);
+            assert_eq!(left(&test), [3, 4], "across the change {change}");
+            schedule.abort();
+            drop(runtime);
+            held(&database);
+        }
     }
 }

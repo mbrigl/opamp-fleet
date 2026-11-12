@@ -221,11 +221,11 @@ no module.
   writer keeps a batch whose write failed and tries it again first
   ([ADR-0029](adr/0029-the-audit-record-is-one-hash-chain-per-lease-and-names-the-lease-each-decision-was-taken-under.md),
   [ADR-0028](adr/0028-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again.md)).
-  `postgres::audit_prune` bounds it by `[audit] retain_days`: a task `main` starts prunes at
-  startup and once a day, the instance's own chain always and the closed chains while it holds the
-  prune's advisory lock, recording each `audit.pruned` through the instance's writer and waiting
-  for it before it deletes, in rounds of a bounded number of entries, every chain of one round in
-  one transaction
+  `postgres::audit_prune` bounds it by `[audit] retain_days`: the task `main` starts with its
+  `prune_daily` prunes at startup and once a day, the instance's own chain always and the closed
+  chains while it holds the prune's advisory lock, recording each `audit.pruned` through the
+  instance's writer and waiting for it before it deletes, in rounds of a bounded number of entries,
+  every chain of one round in one transaction
   ([ADR-0023](adr/0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
   clause 12).
   With `[audit.export]`, `audit_export` sends every line a store has accepted, the writer's and

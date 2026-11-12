@@ -386,6 +386,18 @@ jobs:
           exit 1
       - name: Write the secret key file
         run: (umask 077 && printf '%s' fleet-ci-secret > "$RUNNER_TEMP/s3-secret")
+      # The image of packaging/container/Containerfile, around the binary of the tests' own
+      # profile, for the test that runs it read-only and with no volume (ADR-0023 clause 1). Its
+      # debug information is stripped, so the image stays small. It stays in the runner's Docker;
+      # nothing is pushed.
+      - name: Build the Server's image
+        run: |
+          set -euo pipefail
+          cargo build -p fleet-server --bin server --locked
+          mkdir -p "$RUNNER_TEMP/image"
+          strip -o "$RUNNER_TEMP/image/server-linux-amd64" target/debug/server
+          docker build --file packaging/container/Containerfile --tag opamp-fleet-server:ci \
+            "$RUNNER_TEMP/image"
       - name: Test against PostgreSQL
         # Over TLS against the CA above; each test works in a schema of its own
         # (ADR-0023 clause 25). Skipped is not passed: the database is named, so every PostgreSQL
@@ -401,4 +413,5 @@ jobs:
           FLEET_TEST_S3_BUCKET: fleet
           FLEET_TEST_S3_ACCESS_KEY_ID: fleet-ci
           FLEET_TEST_S3_SECRET_ACCESS_KEY_FILE: ${{ runner.temp }}/s3-secret
+          FLEET_TEST_SERVER_IMAGE: opamp-fleet-server:ci
         run: bash scripts/check-store.sh postgres
