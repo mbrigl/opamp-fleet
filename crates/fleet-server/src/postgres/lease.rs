@@ -158,10 +158,11 @@ impl Database {
                         .get(0);
                     if !free {
                         return Err(
-                            "another instance holds the database alone, because it keeps its \
-                             blobs as files ([blobs] store = \"fs\") or a CA key in a file \
-                             ([client_ca] key_file, [enrolment] bootstrap_ca_key_file) — stop \
-                             it first"
+                            "another process holds the database alone: an instance that keeps \
+                             its blobs as files ([blobs] store = \"fs\") or a CA key in a file \
+                             ([client_ca] key_file, [enrolment] bootstrap_ca_key_file), or a \
+                             `server migrate-to-postgres` or `server blobs-to-s3` still running \
+                             — stop the instance, or let the command finish, first"
                                 .to_string(),
                         );
                     }
@@ -544,8 +545,10 @@ mod tests {
             .map(|_| ())
             .expect_err("held alone");
         assert!(err.contains("holds the database alone"), "{err}");
+        assert!(err.contains("server blobs-to-s3"), "{err}");
         let err = other.take_lease("host-c", LAPSE).expect_err("held alone");
         assert!(err.contains("holds the database alone"), "{err}");
+        assert!(err.contains("server blobs-to-s3"), "{err}");
         let err = alone(&test, "[client_ca] key_file")
             .map(|_| ())
             .expect_err("the lock is held");

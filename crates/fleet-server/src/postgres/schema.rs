@@ -489,7 +489,8 @@ CREATE INDEX certificates_predecessor ON certificates (predecessor_issuer, prede
 /// (ADR-0025
 /// clause 19): its Packages keyed by Agent type, so it holds at most one of each, and its
 /// Configurations by name. They are filled from the `packages` and `configurations` columns of
-/// `deployments`, which stay and are written from these rows.
+/// `deployments`, which stay and are written from these rows. A Deployment it cannot split fails
+/// the migration naming it, and its one transaction keeps nothing.
 const DEPLOYMENT_MEMBERS: &str = r"
 CREATE TABLE deployment_packages (
     deployment text NOT NULL REFERENCES deployments (name) ON DELETE CASCADE,
@@ -502,6 +503,28 @@ CREATE TABLE deployment_configurations (
     configuration text NOT NULL,
     PRIMARY KEY (deployment, configuration)
 );
+DO $$
+DECLARE
+    refused record;
+BEGIN
+    SELECT name INTO refused FROM deployments, json_array_elements(packages) AS package
+        WHERE package->>'agent_type' IS NULL OR package->>'version' IS NULL
+        ORDER BY name LIMIT 1;
+    IF FOUND THEN
+        RAISE EXCEPTION 'the Deployment % holds a package without an agent_type or a version, '
+            'which migration 5 cannot carry over; nothing was changed — mend or remove the '
+            'Deployment with the Server it was written by, then start again', refused.name;
+    END IF;
+    SELECT name, package->>'agent_type' AS agent_type INTO refused
+        FROM deployments, json_array_elements(packages) AS package
+        GROUP BY name, package->>'agent_type' HAVING count(*) > 1
+        ORDER BY name LIMIT 1;
+    IF FOUND THEN
+        RAISE EXCEPTION 'the Deployment % holds two or more packages of the agent type %, where a '
+            'Deployment holds one of each; nothing was changed — mend or remove the Deployment '
+            'with the Server it was written by, then start again', refused.name, refused.agent_type;
+    END IF;
+END $$;
 INSERT INTO deployment_packages (deployment, agent_type, version)
     SELECT name, package->>'agent_type', package->>'version'
         FROM deployments, json_array_elements(packages) AS package;

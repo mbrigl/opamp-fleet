@@ -338,9 +338,9 @@ fn migrate_to_postgres(mut args: impl Iterator<Item = String>) -> ! {
         (Some(bucket), None) => (
             fleet_server::postgres::import::Blobs::Bucket(bucket),
             format!(
-                "copied into the database {} and the bucket {} — remove data_dir from \
-                 server.toml if it names one, keep [database] store = \"postgres\" and [blobs] \
-                 store = \"s3\", and start the Server; {} stays as the backup",
+                "copied into the database {} and the bucket {} — keep [database] store = \
+                 \"postgres\" and [blobs] store = \"s3\", and start the Server; {} stays as the \
+                 backup",
                 database.dbname,
                 bucket.bucket,
                 from.display()

@@ -1271,7 +1271,8 @@ start.
   its lease just after the newer release checked the leases. Releases after 0.8.0 close that gap
   themselves.
 - **From 0.7.1** every Server stops first. An instance that shares the database starts, and
-  migrates, only once no Server holds the database alone, as a Server of 0.7.1 does while it runs.
+  migrates, only once nothing holds the database alone, as a Server of 0.7.1 does while it runs,
+  and as `server migrate-to-postgres` and `server blobs-to-s3` do until they finish.
 - **Beside 0.8.0** four things differ from a fleet of one release. `max_agents` may be passed by
   the records the two releases create at the same moment, since 0.8.0 counts under a lock the newer
   release does not take. When both create the record of the same new Agent at the same moment, the

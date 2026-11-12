@@ -67,7 +67,11 @@ impl PackageBackend for PgPackageBackend {
     /// transaction, its session's end included, which writes no entry.
     fn put_entry(&self, id: &PackageId, entry: &Entry, stored: Stored) -> Result<(), String> {
         let (id, entry) = (id.clone(), entry.clone());
-        self.database.run(move |pool| async move {
+        // Set while the blob store is asked: a call that loses its bound then has waited for the
+        // bucket, not for the database, and says so.
+        let asking = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let asked = asking.clone();
+        let put = self.database.run(move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
             transaction
@@ -91,10 +95,13 @@ impl PackageBackend for PgPackageBackend {
             // The blob store is asked off the database's runtime, as its calls block, and before
             // the Package's row is locked, so no act on the row waits for the bucket: the shared
             // lock already keeps every sweep out until the commit.
-            if !tokio::task::spawn_blocking(move || stored())
-                .await
-                .map_err(|e| format!("the check for the artifact ended: {e}"))??
-            {
+            asked.store(true, std::sync::atomic::Ordering::SeqCst);
+            let found = tokio::task::spawn_blocking(move || stored()).await;
+            // Answered, with an error too: only a call cut off while it waits names the bucket's
+            // silence.
+            asked.store(false, std::sync::atomic::Ordering::SeqCst);
+            let found = found.map_err(|e| format!("the check for the artifact ended: {e}"))??;
+            if !found {
                 return Err(REMOVED_WHILE_UPLOADED.to_string());
             }
             if !hold_unassigned(&transaction, &id, |id, _| assigned(id)).await? {
@@ -120,6 +127,16 @@ impl PackageBackend for PgPackageBackend {
                 .map_err(sql)?;
             notify(&transaction, PACKAGE, &id.to_string()).await?;
             transaction.commit().await.map_err(sql)
+        });
+        put.map_err(|e| {
+            if asking.load(std::sync::atomic::Ordering::SeqCst) {
+                format!(
+                    "the blob store's bucket did not answer the check for the artifact in time — \
+                     the bucket or the network to it does not answer; nothing was written ({e})"
+                )
+            } else {
+                e
+            }
         })
     }
 
@@ -715,6 +732,55 @@ mod tests {
         test.sql("UPDATE package_entries SET sha256 = 'not-a-hash'");
         let err = store.load().map(|_| ()).expect_err("not a hash");
         assert!(err.contains("otelcol@1.2.3"), "{err}");
+    }
+
+    /// A check of the bucket that outlasts the call's bound fails the entry naming the bucket, not
+    /// the database, and writes nothing.
+    /// Verifies: ADR-0023
+    #[test]
+    fn a_bucket_that_does_not_answer_the_check_is_named() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let store = PgPackageBackend::new(database.clone());
+        let package = package("1.2.3", &[("linux", "amd64", 1)]);
+        store.create(&package.id).expect("create");
+        let entry = package.entries.values().next().expect("an entry").clone();
+        database.bound_calls_by(std::time::Duration::from_millis(500));
+        let silent: Stored = Arc::new(|| {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            Ok(true)
+        });
+        let err = store
+            .put_entry(&package.id, &entry, silent)
+            .expect_err("the bucket did not answer");
+        database.bound_calls_by(crate::postgres::CALL_TIMEOUT);
+        assert!(err.contains("bucket"), "{err}");
+        assert!(!err.starts_with("no answer within"), "{err}");
+        assert_eq!(
+            test.rows("SELECT sha256 FROM package_entries"),
+            Vec::<Vec<Option<String>>>::new()
+        );
+    }
+
+    /// A bucket that answers the check with an error is reported by that error, not as silent.
+    /// Verifies: ADR-0023
+    #[test]
+    fn a_bucket_that_refuses_the_check_is_not_called_silent() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let store = PgPackageBackend::new(test.open());
+        let package = package("1.2.3", &[("linux", "amd64", 1)]);
+        store.create(&package.id).expect("create");
+        let entry = package.entries.values().next().expect("an entry").clone();
+        let refusing: Stored = Arc::new(|| Err("cannot ask bucket fleet: 403".to_string()));
+        let err = store
+            .put_entry(&package.id, &entry, refusing)
+            .expect_err("refused");
+        assert!(err.contains("cannot ask bucket fleet: 403"), "{err}");
+        assert!(!err.contains("in time"), "{err}");
     }
 
     /// A deletion of a Package through B while a rollout through A that pins it has not yet

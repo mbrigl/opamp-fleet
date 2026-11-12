@@ -861,9 +861,10 @@ pub(crate) const EXCLUSIVE_LOCK: &str =
 /// Why an instance that shares the database neither migrates nor starts while another Server
 /// holds it alone (ADR-0023 clause 22).
 const HELD_ALONE_BEFORE_MIGRATING: &str = "another Server holds the database alone — a Server of \
-     0.7.1 or earlier, or an instance that keeps its blobs as files ([blobs] store = \"fs\") or a \
-     CA key in a file ([client_ca] key_file, [enrolment] bootstrap_ca_key_file); stop it before \
-     this instance starts, which changed nothing in the database";
+     0.7.1 or earlier, an instance that keeps its blobs as files ([blobs] store = \"fs\") or a CA \
+     key in a file ([client_ca] key_file, [enrolment] bootstrap_ca_key_file), or a `server \
+     migrate-to-postgres` or `server blobs-to-s3` still running; stop the instance, or let the \
+     command finish, before this one starts, which changed nothing in the database";
 
 /// The lock of the blob store (ADR-0023 clause 14), by the key
 /// its schema gives it: a sweep or a staging cleanup holds it alone, an upload shared in the
@@ -2361,6 +2362,44 @@ mod tests {
         );
     }
 
+    /// Migration 5 refuses a Deployment whose `packages` it cannot split into one row per Agent
+    /// type, naming the Deployment and why, and leaves the schema where it was.
+    /// Verifies: ADR-0023
+    #[test]
+    fn migration_5_names_a_deployment_it_cannot_split() {
+        for (packages, why) in [
+            (
+                r#"[{"agent_type":"otelcol","version":"1.0.0"},{"agent_type":"otelcol","version":"2.0.0"}]"#,
+                "two or more packages of the agent type otelcol",
+            ),
+            (
+                r#"[{"agent_type":"otelcol"}]"#,
+                "without an agent_type or a version",
+            ),
+        ] {
+            let Some(test) = TestDatabase::named() else {
+                return;
+            };
+            let database = Database::connect(&test.config(), Some(&test.schema)).expect("connect");
+            database
+                .apply_schema(&schema::MIGRATIONS[..4])
+                .expect("migrations 1 to 4");
+            test.sql(&format!(
+                "INSERT INTO deployments (name, selector, packages, configurations) \
+                 VALUES ('canary', '{{}}', '{packages}', '{{}}')"
+            ));
+            let err = database
+                .apply_schema(&schema::MIGRATIONS[..5])
+                .expect_err("refused");
+            assert!(err.contains("the Deployment canary holds"), "{err}");
+            assert!(err.contains(why), "{err}");
+            assert_eq!(
+                test.rows("SELECT max(version)::text FROM fleet_schema"),
+                [[Some("4".to_string())]]
+            );
+        }
+    }
+
     /// A Server of 0.7.1 takes the schema of migrations 1 and 2, which it knows, and refuses the
     /// schema once any migration of 0.8.0 is applied, naming 0.8.0 and changing nothing: it holds
     /// no lease, so it must not serve beside the instances of 0.8.0
@@ -2429,7 +2468,8 @@ mod tests {
             .map(|_| ())
             .expect_err("held alone");
         assert!(err.contains("holds the database alone"), "{err}");
-        assert!(err.contains("stop it before"), "{err}");
+        assert!(err.contains("server blobs-to-s3"), "{err}");
+        assert!(err.contains("before this one starts"), "{err}");
         assert!(
             err.contains(&format!("database {}", test.config.dbname)),
             "{err}"
