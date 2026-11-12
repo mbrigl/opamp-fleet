@@ -136,6 +136,18 @@ once its tag exists.
   **What to do:** nothing; while an old CA is in `client_ca_file`, the hosts it signed renew to
   the current client CA.
 
+### Fixed
+
+- **A configuration offered twice restarts its Managed Process once**
+  ([ADR-draft-supervisor-mode-and-its-kinds-and-a-repeated-offer-is-applied-once](docs/adr/draft-supervisor-mode-and-its-kinds-and-a-repeated-offer-is-applied-once.md)
+  clause 56). A heartbeat that left the Client before the Server's push of a rollout arrived still
+  named the old hash, the Server answered it with the offer again, and the Client applied both:
+  the Managed Process restarted once more after reporting `APPLIED`, and the Client's own Agent
+  applied its Supervisor set twice. An offer of the hash an Agent is applying or has applied is now
+  answered with the status it holds, and nothing is stored or restarted; a hash whose apply
+  `FAILED` is applied again when offered again. A restart on purpose stays the `Restart` command.
+  **What to do:** nothing; a rollout restarts each Managed Process once.
+
 ## [0.8.1] - 2026-11-07
 
 ### Added
