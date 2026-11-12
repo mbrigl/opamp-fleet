@@ -270,7 +270,9 @@ every change that concerns a live session by one `NOTIFY`.
    taken away, a Host forgotten, and every register entry keep their `NOTIFY` in their transaction.
    A notice sent after its commit that fails is logged and sent again a few times, and the call that
    wrote the change answers as it would without it; one never sent is taken up at the next lease
-   renewal (clause 10). Each instance listens on a connection of its own and acts on the sessions it
+   renewal (clause 10), but for the placement it asks for: a group a binding's or an arrival's lost
+   notice was to place again (clause 8) is placed again at the next event that places it. Each
+   instance listens on a connection of its own and acts on the sessions it
    holds: it composes a new offer, ends a revoked session (clause 11), offers an approved
    certificate, closes its enrolment connections, takes up an Agent's labels, or drops the Agent.
    There is no table of which instance holds which session, and no message addressed to one
@@ -289,6 +291,9 @@ every change that concerns a live session by one `NOTIFY`.
     clause 10) is newer than the one it holds. At every lease renewal it reads the ledger again
     besides, the Hosts and their bindings among it, so a notice sent after its commit that never
     arrived, as when its instance ended between the two (clause 9), is taken up within one renewal.
+    That reads the ledger, not the groups: a group such a notice was to place again (clause 8) waits
+    for the next event that places it, and a lost notice of an arrival over a Gateway's Host is not
+    taken up at a renewal at all.
     A write whose answer is lost counts as a notification of its own. Where a call that sent a
     `NOTIFY` fails, on a lost connection, its bound or an error of the database, the instance cannot
     tell whether it committed: it reads again what each notification of the call names, as it would
@@ -297,7 +302,8 @@ every change that concerns a live session by one `NOTIFY`.
     notice that would follow its commit (clause 9) is read again at once where its call fails, as
     the others are, but not heard once more, as none may be sent: a commit of it that lands after
     that read is taken up by the instance at its next report of the Agent, which the database
-    answers, and by every instance at its next lease renewal. A version that does not know the call
+    answers, and by every instance at its next lease renewal, but for the placement it asks for
+    (clause 9). A version that does not know the call
     a notification names reads past it. A re-key reads back where the row is before it answers:
     under a share lock on the old row, which waits for the transaction that moves it, and then the
     new one. Moved, the re-key stands. Where the read back fails, the instance keeps the pair, and
@@ -533,6 +539,11 @@ database cluster, which the operator runs.
 
 ## Alternatives considered
 
+- **A kept put-back follows a re-key through another instance.** The instance that keeps it cannot
+  learn the new identity: the store records no move, a notice names the old identity alone
+  (clause 9), and only the instance that made a re-key holds both. A record of the move, a notice
+  naming both, or the put-back on the Agent's row would each need a migration or a wider notice.
+  Rejected; the case stays not seen and is logged (clause 8).
 - **Leave a group to its next placement** (ADR-0025 as accepted). A fellow Agent then inherits a
   Client Agent bound or taken through another instance only once the group is placed again for a
   reason of its own: a label change, a report that changes, a missed notification. Its effective
@@ -636,7 +647,8 @@ clause 25), with two instances in one test process, or three where a bullet says
 - A fellow Agent B placed before A bound the Host's Client Agent inherits that Client Agent's
   labels in B's memory once the binding's notice reaches B; and a fellow Agent behind a Gateway
   that B placed inherits the labels of a Client Agent that A takes behind the same Gateway
-  afterwards, once that notice reaches B (clauses 8 and 9).
+  afterwards, once that notice reaches B (clauses 8 and 9). A Client Agent that first arrives over
+  a Gateway's Host is announced after its commit.
 - Every line A and B log carries the instance id of the one that wrote it, and when A takes
   over B's lapsed lease, A logs its own id and B's; a Server on the filesystem store logs no
   instance id.
