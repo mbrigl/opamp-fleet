@@ -148,11 +148,12 @@ fn predecessor_named(value: &Value, chain_key: &str) -> Option<Predecessor> {
 }
 
 /// Prunes the record on `database` for the instance whose chain is `own`, recording through
-/// `audit`, in rounds of [`prune_round`], one right after the other until a round finds nothing
-/// more to remove; answers what each round did.
+/// `audit`, in rounds of at most [`ROUND_ENTRIES`] entries, one right after the other until a
+/// round finds nothing more to remove; answers what each round did.
 ///
 /// # Errors
-/// As [`prune_round`]: the round that fails deleted nothing, and the rounds before it stand.
+/// Returns an error when a round cannot read or write the database, or cannot write its
+/// `audit.pruned` entries: the round that fails deleted nothing, and the rounds before it stand.
 pub fn prune(
     database: &Database,
     audit: Arc<AuditLog>,
@@ -198,7 +199,8 @@ fn prune_in_rounds_of(
 /// # Errors
 /// Returns an error when the database cannot be read or written, or when the `audit.pruned`
 /// entries could not be written; then nothing was deleted.
-pub fn prune_round(
+#[cfg(test)]
+pub(crate) fn prune_round(
     database: &Database,
     audit: Arc<AuditLog>,
     own: Option<String>,
@@ -207,7 +209,7 @@ pub fn prune_round(
     prune_round_of(database, audit, own, retain_days, ROUND_ENTRIES)
 }
 
-/// [`prune_round`] removing at most `budget` entries.
+/// One round of the prune removing at most `budget` entries.
 fn prune_round_of(
     database: &Database,
     audit: Arc<AuditLog>,
@@ -220,9 +222,31 @@ fn prune_round_of(
     database.run_within(PRUNE_TIMEOUT, move |pool| async move {
         // A connection of its own, taken from the pool, so that the session-level lock ends with
         // it whatever happens to this call.
-        let mut lock = deadpool_postgres::Object::take(client(&pool).await?);
-        round_on(&mut lock, audit, own, days, budget).await
+        let mut lock = Unlocking(Some(deadpool_postgres::Object::take(client(&pool).await?)));
+        let pruned = round_on(lock.0.as_mut().expect("held"), audit, own, days, budget).await;
+        // Run to its end, the round let go of the lock itself: nothing is left to the drop.
+        drop(lock.0.take());
+        pruned
     })
+}
+
+/// The connection of a prune round. A round cut off by its bound drops it before its own unlock
+/// ran, so its drop lets go of the prune lock on it rather than leave the lock until the session
+/// ends; a round that runs to its end takes the connection out first.
+struct Unlocking(Option<deadpool_postgres::ClientWrapper>);
+
+impl Drop for Unlocking {
+    fn drop(&mut self) {
+        let (Some(client), Ok(runtime)) = (self.0.take(), tokio::runtime::Handle::try_current())
+        else {
+            return;
+        };
+        runtime.spawn(async move {
+            let _ = client
+                .execute(&format!("SELECT pg_advisory_unlock({PRUNE_LOCK})"), &[])
+                .await;
+        });
+    }
 }
 
 /// [`prune_round_of`] on the connection `lock`, which takes the prune lock when it is free and lets
@@ -364,8 +388,8 @@ async fn plan(
     // What the chains planned so far remove, so that the checkpoints they hold count as gone.
     let (mut planned_chains, mut planned_ends): (Vec<String>, Vec<i64>) = (Vec::new(), Vec::new());
     for chain in chains {
+        // A budget spent marked the round capped where it was spent.
         if budget == 0 {
-            plan.capped = true;
             break;
         }
         let bounds = client

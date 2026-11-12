@@ -176,8 +176,9 @@ impl S3BlobStore {
     }
 
     /// The store, its uploads staged under `uploader`'s lease.
+    #[cfg(test)]
     #[must_use]
-    pub fn staged_by(mut self, uploader: Uploader) -> Self {
+    pub(crate) fn staged_by(mut self, uploader: Uploader) -> Self {
         self.uploader = Arc::new(OnceLock::from(uploader));
         self
     }

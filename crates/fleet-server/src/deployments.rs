@@ -497,8 +497,9 @@ impl DeploymentStore {
         Ok(left.into_iter().collect())
     }
 
-    /// Deletes a Deployment. Whether anything still names it is the fleet's business, not the
-    /// store's — the fleet refuses the delete while an assignment does.
+    /// Deletes a Deployment, refused while an assignment names it: the fleet refuses from what it
+    /// holds where it is the store's one writer, and a store other Servers write too counts the
+    /// stored assignments in the transaction that deletes, and refuses `Conflict`.
     pub fn delete(&self, name: &str) -> Result<bool, DeploymentError> {
         let mut deployments = self.deployments.write().expect("deployments lock");
         if !deployments.contains_key(name) {

@@ -746,6 +746,7 @@ impl Database {
             Ok(LockHold {
                 holding,
                 client: Arc::new(client),
+                runtime: tokio::runtime::Handle::current(),
                 #[cfg(test)]
                 settings,
             })
@@ -775,15 +776,31 @@ pub(crate) struct LockHold {
     /// The session that holds the lock: what a sweep marks the blobs it deletes on, so that a mark
     /// is written only while the lock holds (ADR-0023 clause 14).
     pub(crate) client: Arc<tokio_postgres::Client>,
+    /// The runtime the session runs on, which the hold's drop lets go of the lock on.
+    runtime: tokio::runtime::Handle,
     /// The session's `statement_timeout` and `lock_timeout` once it had the lock.
     #[cfg(test)]
     settings: (String, String),
 }
 
 impl Drop for LockHold {
+    /// Lets go of the lock on its session at once, so the next holder does not wait for the
+    /// session to end, which a clone of its client can put off. The session's end that follows
+    /// loses nothing.
     fn drop(&mut self) {
-        // Let go on purpose: the session's end that follows loses nothing.
         self.holding.store(false, Ordering::SeqCst);
+        let client = self.client.clone();
+        self.runtime.spawn(async move {
+            if let Err(e) = client
+                .execute(&format!("SELECT pg_advisory_unlock({BLOB_LOCK})"), &[])
+                .await
+            {
+                tracing::warn!(
+                    error = %sql(e),
+                    "{BLOB_LOCK_NAME} was not let go; it goes when its session ends"
+                );
+            }
+        });
     }
 }
 
@@ -2034,6 +2051,28 @@ mod tests {
         assert!(started.elapsed() < std::time::Duration::from_secs(5));
     }
 
+    /// A hold on the blob store's lock lets go of it as it is dropped, so the next holder has it at
+    /// once, though its session lives on in a clone of its client.
+    /// Verifies: ADR-0023
+    #[test]
+    fn a_blob_hold_dropped_frees_the_lock_before_its_session_ends() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let hold = database.hold_blobs().expect("the lock");
+        let session = hold
+            .held::<LockHold>()
+            .expect("a hold on PostgreSQL")
+            .client
+            .clone();
+        drop(hold);
+        let next =
+            (0..50).find_map(|_| database.hold_blobs_within(Duration::from_millis(100)).ok());
+        assert!(next.is_some(), "the lock stayed with the session");
+        drop(session);
+    }
+
     /// A database that stops answering while the Server runs fails the one call that needs it
     /// within that call's bound, and the call after it as fast; the Server is held no longer
     /// (ADR-0023 clause 24). The database is reached through a proxy that is frozen mid-run.
@@ -2642,10 +2681,10 @@ mod tests {
         let Some(test) = TestDatabase::named() else {
             return;
         };
-        const KEY: i64 = 4_711_000_161;
+        const KEY: i64 = 0x23_0002;
         let ahead = two_releases_on(
-            "SELECT pg_advisory_lock_shared(4711000161); \
-             SELECT pg_advisory_unlock_shared(4711000161); \
+            "SELECT pg_advisory_lock_shared(2293762); \
+             SELECT pg_advisory_unlock_shared(2293762); \
              CREATE TABLE fleet_test_ahead (n integer);",
         );
         let older = Database::open_as(
@@ -2741,7 +2780,7 @@ mod tests {
             return;
         };
         let other = TestDatabase::named().expect("a second schema");
-        let key = 4_711_000_151;
+        let key = 0x23_0001;
         other.sql("CREATE TABLE fleet_test_held (n integer)");
         let gate = test.gate(key);
         std::thread::scope(|scope| {

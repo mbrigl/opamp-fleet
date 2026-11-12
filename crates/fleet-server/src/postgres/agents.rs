@@ -3045,8 +3045,7 @@ mod tests {
              CREATE TRIGGER fleet_test_lock_untimed BEFORE UPDATE ON agents \
              FOR EACH STATEMENT EXECUTE FUNCTION fleet_test_lock_untimed();",
         );
-        let sessions = |condition: &str| test.sessions(condition);
-        let at_gate = || sessions("wait_event = 'PgSleep' AND query LIKE 'UPDATE agents%'");
+        let at_gate = || test.sessions("wait_event = 'PgSleep' AND query LIKE 'UPDATE agents%'");
         let until = |what: &str, done: &dyn Fn() -> bool| {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
             while !done() {
@@ -3072,7 +3071,7 @@ mod tests {
         let second = release("second", [low, high]);
         until("the second waits for the row, or reaches the gate", &|| {
             at_gate() == 2
-                || sessions("wait_event_type = 'Lock' AND query LIKE 'UPDATE agents%'") == 1
+                || test.sessions("wait_event_type = 'Lock' AND query LIKE 'UPDATE agents%'") == 1
         });
         test.sql("UPDATE fleet_test_gate SET open = true");
         first
@@ -3555,8 +3554,7 @@ mod tests {
              CREATE TRIGGER fleet_test_wait BEFORE UPDATE ON agents \
              FOR EACH ROW EXECUTE FUNCTION fleet_test_wait();",
         );
-        let sessions = |condition: &str| test.sessions(condition);
-        let at_gate = || sessions("wait_event = 'PgSleep'");
+        let at_gate = || test.sessions("wait_event = 'PgSleep'");
         let until = |what: &str, done: &dyn Fn() -> bool| {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
             while !done() {
@@ -3590,7 +3588,7 @@ mod tests {
         until("the first reaches the gate", &|| at_gate() == 1);
         let second = batch(second_holder, [low, high]);
         until("the second waits for a row, or reaches the gate", &|| {
-            at_gate() == 2 || sessions("wait_event_type = 'Lock'") == 1
+            at_gate() == 2 || test.sessions("wait_event_type = 'Lock'") == 1
         });
         test.sql("UPDATE fleet_test_gate SET open = true");
         first

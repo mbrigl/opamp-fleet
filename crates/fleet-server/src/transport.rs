@@ -469,7 +469,10 @@ async fn gateway_revocations(State(state): State<Arc<AppState>>, request: Reques
 /// as it would when a Server of 0.8.0 beside this one registered a renewal, which moves no version
 /// (ADR-0023 clause 10). Either way it changes with the list and survives a restart.
 #[must_use]
-pub fn gateway_list(certificates: &[serde_json::Value], version: Option<u64>) -> (String, String) {
+pub(crate) fn gateway_list(
+    certificates: &[serde_json::Value],
+    version: Option<u64>,
+) -> (String, String) {
     use sha2::Digest as _;
     let body = serde_json::json!({ "certificates": certificates }).to_string();
     let hash = hex::encode(sha2::Sha256::digest(body.as_bytes()));
@@ -482,7 +485,7 @@ pub fn gateway_list(certificates: &[serde_json::Value], version: Option<u64>) ->
 
 /// The Gateways' list of `revocations`, as [`gateway_list`] answers it.
 #[must_use]
-pub fn gateway_list_of(revocations: &Revocations) -> (String, String) {
+pub(crate) fn gateway_list_of(revocations: &Revocations) -> (String, String) {
     let (revoked, version) = revocations.revoked_certificates_at("client");
     let certificates: Vec<serde_json::Value> = revoked
         .into_iter()

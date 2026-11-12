@@ -818,9 +818,11 @@ mod tests {
              CREATE TRIGGER fleet_test_wait BEFORE INSERT ON deployment_packages \
              FOR EACH ROW EXECUTE FUNCTION fleet_test_wait();",
         );
-        let sessions = |condition: &str| test.sessions(condition);
-        let at_gate =
-            || sessions("wait_event = 'PgSleep' AND query LIKE 'INSERT INTO deployment_packages%'");
+        let at_gate = || {
+            test.sessions(
+                "wait_event = 'PgSleep' AND query LIKE 'INSERT INTO deployment_packages%'",
+            )
+        };
         let until = |what: &str, done: &dyn Fn() -> bool| {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
             while !done() {
@@ -841,7 +843,7 @@ mod tests {
         let second = add("2.0.0");
         until("the second waits for the row, or reaches the gate", &|| {
             at_gate() == 2
-                || sessions(
+                || test.sessions(
                     "wait_event_type = 'Lock' AND query LIKE \
                      'SELECT 1 FROM deployments WHERE name = $1 FOR UPDATE'",
                 ) == 1
