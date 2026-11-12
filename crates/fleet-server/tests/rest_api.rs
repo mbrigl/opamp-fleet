@@ -650,6 +650,44 @@ fn urlencoding(s: &str) -> String {
     s.replace(' ', "%20")
 }
 
+/// Every mutating act on the Operator plane is recorded before it runs and answers `503` when it
+/// cannot be (ADR-0028 clauses 1 and 5): every `POST`, `PUT`, `PATCH` and `DELETE` of the
+/// document names that answer as the Server gives it, plain text with a `Retry-After`, so a client
+/// generated from it knows it.
+/// Verifies: ADR-0028, ADR-0032
+#[tokio::test]
+async fn every_mutating_operation_of_the_document_names_its_503() {
+    let server = spawn().await;
+    let document: serde_json::Value = reqwest::Client::new()
+        .get(url(server.rest_addr, "/api/v1/openapi.json"))
+        .send()
+        .await
+        .expect("get")
+        .json()
+        .await
+        .expect("json");
+    let paths = document["paths"].as_object().expect("paths");
+    let mut mutating = 0;
+    let mut silent = Vec::new();
+    for (path, operations) in paths {
+        for (method, operation) in operations.as_object().into_iter().flatten() {
+            if !["post", "put", "patch", "delete"].contains(&method.as_str()) {
+                continue;
+            }
+            mutating += 1;
+            // As the Server answers it (`transport::busy`): plain text, with when to ask again.
+            let busy = &operation["responses"]["503"];
+            if busy["content"].get("text/plain").is_none()
+                || busy["headers"].get("Retry-After").is_none()
+            {
+                silent.push(format!("{} {path}", method.to_uppercase()));
+            }
+        }
+    }
+    assert!(mutating > 0, "the document names mutating operations");
+    assert!(silent.is_empty(), "no 503 as answered named by: {silent:?}");
+}
+
 /// Verifies: ADR-0032, ADR-0034, ADR-0033, ADR-0035, G-5
 #[tokio::test]
 async fn the_openapi_document_describes_the_contract() {
