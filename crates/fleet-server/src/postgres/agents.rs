@@ -15,8 +15,8 @@ use prost::Message;
 use super::notify::{notify, ASSIGNMENT, CONFIGURATION, FORGOTTEN, LABELS, RESTART, TAKEN};
 use super::{client, creating_client, signed, sql, unsigned, Database};
 use crate::agent_store::{
-    AgentPage, AgentStore, Creation, Holder, PageQuery, PersistedAgent, Pin, Presence, StoredAgent,
-    Taken,
+    AgentPage, AgentStore, Creation, Holder, PageQuery, PersistedAgent, Pin, Presence, Silenced,
+    StoredAgent, Taken,
 };
 use crate::configs::Pinned;
 use crate::fleet::{Assignment, Transport};
@@ -775,7 +775,7 @@ impl AgentStore for PgAgentStore {
         &self,
         uid: &InstanceUid,
         silent_before_ms: u64,
-    ) -> Result<Option<bool>, String> {
+    ) -> Result<Option<Silenced>, String> {
         let key = uid.to_string();
         let silent_before = signed(silent_before_ms);
         let forgotten = self.database.run(move |pool| async move {
@@ -795,17 +795,30 @@ impl AgentStore for PgAgentStore {
             };
             let (connected, last_seen): (bool, i64) = (row.get(0), row.get(1));
             if connected && unsigned(last_seen) >= unsigned(silent_before) {
-                return Ok(Some(false));
+                return Ok(Some(Silenced::Reporting));
             }
+            // What the stored assignment names, under the row's lock: no release changes it
+            // before the row goes.
+            let configurations = transaction
+                .query(
+                    "SELECT configuration FROM agent_assignment_configurations \
+                     WHERE instance_uid = $1 ORDER BY configuration",
+                    &[&key],
+                )
+                .await
+                .map_err(sql)?
+                .iter()
+                .map(|row| row.get(0))
+                .collect();
             transaction
                 .execute("DELETE FROM agents WHERE instance_uid = $1", &[&key])
                 .await
                 .map_err(sql)?;
             notify(&transaction, FORGOTTEN, &key).await?;
             transaction.commit().await.map_err(sql)?;
-            Ok(Some(true))
+            Ok(Some(Silenced::Forgotten(configurations)))
         })?;
-        if forgotten == Some(true) {
+        if matches!(forgotten, Some(Silenced::Forgotten(_))) {
             self.stored([(uid, None)]);
         }
         Ok(forgotten)
@@ -1807,6 +1820,47 @@ mod tests {
         assert_eq!(
             (one.pairs.as_slice(), one.service_names.as_slice()),
             (&expected.pairs[..1], &expected.service_names[..1])
+        );
+    }
+
+    /// An instance that does not hold an Agent another instance re-released counts its old pins
+    /// until it reads the whole fleet again, and its forget of that Agent answers the
+    /// Configurations the stored assignment named as it removed the record, not what it read.
+    /// Verifies: ADR-0025, ADR-0033
+    #[test]
+    fn a_forget_answers_what_the_stored_assignment_named() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        test.store_deployments(&["stable", "canary"]);
+        let (a, b) = (
+            PgAgentStore::new(database.clone()),
+            PgAgentStore::new(database),
+        );
+        let uid = InstanceUid::default();
+        a.put(&uid, &record()).expect("created");
+        b.load().expect("B reads the fleet");
+        assert_eq!(b.pinning(Pin::Configuration("base")), 1);
+
+        let mut re_released = record();
+        re_released.assignment = Some(Assignment {
+            deployment: "canary".to_string(),
+            package: None,
+            configurations: BTreeMap::from([("other".to_string(), "4567cdef".to_string())]),
+        });
+        a.release(&[], &[(uid, re_released)])
+            .expect("re-released through A");
+        assert_eq!(
+            b.pinning(Pin::Configuration("base")),
+            1,
+            "B still counts what it read"
+        );
+
+        assert_eq!(
+            b.remove_if_silent(&uid, u64::MAX / 2),
+            Ok(Some(Silenced::Forgotten(vec!["other".to_string()]))),
+            "what the stored assignment named, not what B read"
         );
     }
 
@@ -3107,19 +3161,21 @@ mod tests {
 
         assert_eq!(
             store.remove_if_silent(&one, 1_000),
-            Ok(Some(false)),
+            Ok(Some(Silenced::Reporting)),
             "still reporting"
         );
         assert_eq!(
             store.remove_if_silent(&one, 7_000),
-            Ok(Some(true)),
-            "silent"
+            Ok(Some(Silenced::Forgotten(vec!["base".to_string()]))),
+            "silent, with what its assignment named"
         );
         assert_eq!(store.remove_if_silent(&one, 7_000), Ok(None), "gone");
         test.sql(&format!("DELETE FROM leases WHERE instance_id = '{a}'"));
-        assert_eq!(
-            store.remove_if_silent(&two, 1_000),
-            Ok(Some(true)),
+        assert!(
+            matches!(
+                store.remove_if_silent(&two, 1_000),
+                Ok(Some(Silenced::Forgotten(_)))
+            ),
             "a holder without a live lease holds no connection"
         );
         let taken = store
@@ -3142,9 +3198,11 @@ mod tests {
             presence(three),
             [[Some("false".into()), None, Some("7000".into())]]
         );
-        assert_eq!(
-            store.remove_if_silent(&three, 1_000),
-            Ok(Some(true)),
+        assert!(
+            matches!(
+                store.remove_if_silent(&three, 1_000),
+                Ok(Some(Silenced::Forgotten(_)))
+            ),
             "disconnected"
         );
         assert!(store.load().expect("load").is_empty());

@@ -318,6 +318,15 @@ impl Pin<'_> {
     }
 }
 
+/// What [`AgentStore::remove_if_silent`] did with a record it found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Silenced {
+    /// Removed; the Configurations its stored assignment named.
+    Forgotten(Vec<String>),
+    /// Still reporting, and kept.
+    Reporting,
+}
+
 /// The storage port (ADR-0030, ADR-0023): the only thing the fleet logic knows about persistence. A
 /// database or an external store is a new implementation of these operations plus one wiring
 /// line — the rest of the Server is, by construction, unaffected.
@@ -665,7 +674,9 @@ pub trait AgentStore: Send + Sync {
     /// with a live lease holds its connection, or it was last heard from before `silent_before_ms`
     /// (ADR-0030 clause 11). The presence is read and the
     /// record removed in one step, so no report written meanwhile is forgotten unseen. Answers
-    /// `None` when there is no record, `Some(false)` when it is still reporting and is kept.
+    /// `None` when there is no record, and otherwise whether it was forgotten, with the
+    /// Configurations its stored assignment named, read in the same step: what the forget collects
+    /// the revisions of, whatever another instance released meanwhile.
     ///
     /// # Errors
     /// Returns an error when the record cannot be read or removed, and on a store that keeps no
@@ -674,7 +685,7 @@ pub trait AgentStore: Send + Sync {
         &self,
         uid: &InstanceUid,
         silent_before_ms: u64,
-    ) -> Result<Option<bool>, String> {
+    ) -> Result<Option<Silenced>, String> {
         let _ = (uid, silent_before_ms);
         Err("this store keeps no presence; its Server decides from what it holds".to_string())
     }

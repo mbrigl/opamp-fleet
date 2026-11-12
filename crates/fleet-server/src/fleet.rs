@@ -3035,33 +3035,23 @@ impl AppState {
         // (ADR-0030 clause 21). On a shared store the instance that carries the Agent may be
         // another, so what decides is the presence stored, read and removed in one step
         // (ADR-0030 clause 11).
-        // On a shared store an Agent this instance does not hold has its assignment read first, so
-        // the revisions only it pinned are collected once it is gone. A record that cannot be
-        // read, one that does not decode among them, is still forgotten, and what it pinned is
-        // left to the next collection of its Configurations: forgetting is how such a record goes.
-        let mut unheld_configurations = Vec::new();
+        // On a shared store the record's removal answers what its stored assignment named, read
+        // under the row's lock in the same step, so the revisions only it pinned are collected
+        // whatever another instance released meanwhile.
+        let mut stored_configurations = Vec::new();
         if self.agent_store.is_shared() {
-            if !fleet.contains_key(uid) {
-                match self.agent_store.get(uid) {
-                    Ok(stored) => {
-                        unheld_configurations = stored
-                            .and_then(|stored| stored.assignment)
-                            .map(|assignment| assignment.configurations.into_keys().collect())
-                            .unwrap_or_default();
-                    }
-                    Err(e) => {
-                        warn!(agent = %uid, error = %e, "cannot read the record to forget; forgetting it without collecting what it pinned");
-                    }
-                }
-            }
             let silent_before = now_ms.saturating_sub(budget.as_millis() as u64);
             match self
                 .agent_store
                 .remove_if_silent(uid, silent_before)
                 .map_err(ForgetError::Storage)?
             {
-                Some(true) => {}
-                Some(false) => return Err(ForgetError::StillReporting),
+                Some(crate::agent_store::Silenced::Forgotten(configurations)) => {
+                    stored_configurations = configurations;
+                }
+                Some(crate::agent_store::Silenced::Reporting) => {
+                    return Err(ForgetError::StillReporting)
+                }
                 // Held but not stored: forgotten or re-keyed through another instance, and not yet
                 // heard of here. What is held is forgotten.
                 None if fleet.contains_key(uid) => {}
@@ -3098,10 +3088,15 @@ impl AppState {
                 record.placement.group.clone(),
                 &mut Elsewhere::Now,
             );
-            // A pinned revision only this Agent referenced is unreferenced now (ADR-0033).
-            self.collect_revisions(record.assigned_configurations().keys().cloned());
+            // A pinned revision only this Agent referenced is unreferenced now (ADR-0033): what
+            // it held, and what the store named, which a release through another instance may
+            // have changed before its notification arrived here.
+            let mut configurations: BTreeSet<String> =
+                record.assigned_configurations().keys().cloned().collect();
+            configurations.extend(stored_configurations);
+            self.collect_revisions(configurations);
         } else {
-            self.collect_revisions(unheld_configurations);
+            self.collect_revisions(stored_configurations);
         }
         drop(fleet);
         self.push.send_modify(|rev| *rev += 1);
@@ -3349,7 +3344,7 @@ impl AppState {
                  them out through a Deployment without it, or forget them, before deleting it"
             ))
         };
-        let pinning = self.agent_store.pinning(Pin::Configuration(name));
+        let pinning = self.pinning(Pin::Configuration(name));
         if pinning > 0 {
             return Err(pinned(pinning));
         }
@@ -5166,6 +5161,18 @@ impl AppState {
         self.agent_store.pinning(Pin::Package(id)) > 0
     }
 
+    /// How many stored assignments pin `pin`, as the refusal before a deletion counts them: this
+    /// Server's count where it is the store's one writer. On a store other Servers write too, its
+    /// count of an Agent it does not hold may be stale after another instance re-released or
+    /// forgot it, so it refuses nothing from it, and leaves the refusal to the act, which counts the
+    /// stored assignments again in its own transaction.
+    fn pinning(&self, pin: Pin<'_>) -> usize {
+        if self.agent_store.is_shared() {
+            return 0;
+        }
+        self.agent_store.pinning(pin)
+    }
+
     /// Puts a Package into a channel (ADR-0034 clause 25). Not gated: adding one for an Agent type
     /// the channel does not hold surfaces as waiting on the Agents of that type, and replacing the
     /// one it holds is how a rollout proceeds — an Agent already rolled out to keeps the Package
@@ -5207,7 +5214,7 @@ impl AppState {
     pub fn delete_deployment(&self, name: &str) -> Result<bool, DeploymentError> {
         let store = self.deployment_store().ok_or(DeploymentError::NotFound)?;
         let fleet = self.fleet.lock().expect("fleet lock");
-        let pinning = self.agent_store.pinning(Pin::Deployment(name));
+        let pinning = self.pinning(Pin::Deployment(name));
         if pinning > 0 {
             return Err(DeploymentError::Conflict(deployments::pinned(
                 name, pinning,
@@ -5329,7 +5336,7 @@ impl AppState {
     /// in the act that deletes, and takes it out of every Deployment in that act too.
     pub fn delete_package_set(&self, id: &PackageId) -> Result<bool, PackageError> {
         let fleet = self.fleet.lock().expect("fleet lock");
-        let pinning = self.agent_store.pinning(Pin::Package(id));
+        let pinning = self.pinning(Pin::Package(id));
         if pinning > 0 {
             return Err(crate::packages::pinned(id, pinning));
         }
@@ -10405,7 +10412,7 @@ mod tests {
             &self,
             uid: &InstanceUid,
             silent_before_ms: u64,
-        ) -> Result<Option<bool>, String> {
+        ) -> Result<Option<crate::agent_store::Silenced>, String> {
             self.inner.remove_if_silent(uid, silent_before_ms)
         }
         fn take(
@@ -10928,6 +10935,11 @@ mod tests {
             return;
         };
         let database = test.open();
+        // The Deployment its assignment names is stored, so the store's own count decides.
+        test.sql(
+            "INSERT INTO deployments (name, selector, packages, configurations) \
+             VALUES ('stable', '{\"channel\": \"stable\"}', '[]', '{}')",
+        );
         let uid = InstanceUid([0x84; 16]);
         crate::postgres::agents::PgAgentStore::new(database.clone())
             .put(&uid, &crate::agent_store::tests::record())

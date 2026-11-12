@@ -4697,6 +4697,67 @@ async fn release_a_package(instance: &Instance) -> usize {
     .expect("release a package")
 }
 
+/// A Package that a release through B pinned, and that a later release through A moved the Agent
+/// off, is deleted through B, which does not carry the Agent: B's own count of the pin is stale,
+/// and the deletion decides from the stored assignments, not from it.
+/// Verifies: ADR-0025, ADR-0033
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_package_released_away_through_one_instance_is_deleted_through_another() {
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let blobs = tempfile::tempdir().expect("blobs");
+    let a = Instance::start_on_blobs(
+        &pki,
+        &schema,
+        schema.config_on(schema.config.port),
+        blobs.path(),
+    )
+    .await;
+    let b = Instance::start_on_blobs(
+        &pki,
+        &schema,
+        schema.config_on(schema.config.port),
+        blobs.path(),
+    )
+    .await;
+    let (cert, key) = pki.issue_to_host("h1");
+    let uid = InstanceUid([0x24; 16]);
+    let mut session = websocket(&a, &pki, &cert, &key).await;
+    report_as(&mut session, uid, 1, TAKES_PACKAGES, PACKAGED, true).await;
+    assert_eq!(release_a_package(&b).await, 1, "released through B");
+
+    let on_a = a.state.clone();
+    tokio::task::spawn_blocking(move || {
+        let next = fleet_server::packages::PackageId::new("otelcol", "2.0.0")?;
+        let linux = fleet_server::packages::Platform::new("linux", "amd64")?;
+        on_a.create_package_set(&next)?;
+        on_a.put_package_entry(&next, &linux, &mut &b"v2"[..])?;
+        on_a.put_package_entry_signature(&next, &linux, vec![2; 64])?;
+        on_a.put_deployment_package("stable", &next, true)
+            .map_err(|e| format!("{e:?}"))?;
+        on_a.rollout_deployment("stable")
+            .map_err(|e| format!("{e:?}"))
+    })
+    .await
+    .expect("release")
+    .expect("released 2.0.0 through A");
+
+    let on_b = b.state.clone();
+    let deleted = tokio::task::spawn_blocking(move || {
+        on_b.delete_package_set(&fleet_server::packages::PackageId::new("otelcol", "1.0.0")?)
+            .map_err(String::from)
+    })
+    .await
+    .expect("delete");
+    assert_eq!(
+        deleted,
+        Ok(true),
+        "B deletes the Package no stored assignment pins"
+    );
+}
+
 /// A restarted instance loads no Agent record and holds none until one reports to it, and reads
 /// an Agent another instance carries from the database: the fleet list, the Hosts list and the
 /// deployment reach through B name the Agent A carries with its labels, its assignment and A's
