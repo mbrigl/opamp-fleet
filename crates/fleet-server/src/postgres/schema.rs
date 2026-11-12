@@ -141,7 +141,7 @@ pub const MIGRATIONS: &[Migration] = &[
     },
     // A column only added, with a default. A Server of 0.8.0 writes no release into it, and every
     // lease taken before it is one of 0.8.0, which the default names
-    // (ADR-0025
+    // (ADR-0045
     // clause 16).
     Migration {
         version: 12,
@@ -294,7 +294,7 @@ CREATE INDEX blob_deletions_sweep ON blob_deletions (sweep);
 ";
 
 /// The release of the instance that holds each lease
-/// (ADR-0025
+/// (ADR-0045
 /// clause 16): what an instance compares with the oldest Server its migrations leave before it
 /// migrates.
 const LEASE_RELEASE: &str = "
@@ -442,7 +442,7 @@ CREATE TABLE package_floors (
 ";
 
 /// The lease of every instance on this database
-/// (ADR-0025
+/// (ADR-0045
 /// clauses 1 to 3). The times are the database's own, so every instance reads the same clock. A
 /// lease whose `expires_at` has passed is lapsed, whatever its row still says.
 const LEASES: &str = r"
@@ -458,7 +458,7 @@ CREATE TABLE leases (
 
 /// Which Host each `instance_uid` is bound to: one row per binding, the `instance_uid` its key, so
 /// no two Hosts hold one
-/// (ADR-0025
+/// (ADR-0045
 /// clause 19). It is filled from the arrays of the Hosts not marked as Gateways, as a Gateway's
 /// Host is bound none (ADR-0030 clause 16); an `instance_uid` two such Hosts' arrays hold fails the
 /// migration, naming it and the Hosts, and changes nothing, for the operator to decide. A renewal's
@@ -486,7 +486,7 @@ CREATE INDEX certificates_predecessor ON certificates (predecessor_issuer, prede
 ";
 
 /// The members of each Deployment, one row each
-/// (ADR-0025
+/// (ADR-0045
 /// clause 19): its Packages keyed by Agent type, so it holds at most one of each, and its
 /// Configurations by name. They are filled from the `packages` and `configurations` columns of
 /// `deployments`, which stay and are written from these rows. A Deployment it cannot split fails
@@ -581,7 +581,7 @@ ALTER TABLE agents ADD COLUMN holder uuid;
 ";
 
 /// How each Agent was taken
-/// (ADR-0025
+/// (ADR-0045
 /// clause 8): `takes` counts every take and every batch that names a holder anew, so an instance
 /// writes a disconnect only where the row still holds the count it was answered, with no clock
 /// compared; `holder_changes` holds when the holder changed, the latest eleven times, by the
@@ -732,7 +732,7 @@ fn needs_newer(needs: &str, ours: &str) -> String {
 /// Refuses the schema when it names an oldest Server newer than `ours`, naming both versions: what
 /// an instance checks under the migrations' lock before it migrates and in the transaction that
 /// takes each lease
-/// (ADR-0025
+/// (ADR-0045
 /// clause 16).
 ///
 /// # Errors
@@ -765,7 +765,7 @@ async fn leases_record_releases(client: &impl GenericClient) -> Result<bool, Str
 /// `None` when there is none. A lease of an instance that had to be alone counts as none: the
 /// caller holds the exclusive lock or found it free, so that lease's process is gone, and the
 /// next lease taken takes it over
-/// (ADR-0025
+/// (ADR-0045
 /// clauses 2 and 16).
 async fn lease_older_than(
     client: &impl GenericClient,
@@ -819,7 +819,7 @@ async fn lease_older_than(
 /// refused before anything is written, naming both versions, and so is every schema while a live
 /// lease names a release older than the oldest Server the schema names once `migrations` are
 /// applied, naming both releases, whether they are applied already or not
-/// (ADR-0025
+/// (ADR-0045
 /// clause 16).
 ///
 /// # Errors
@@ -894,7 +894,7 @@ mod tests {
     /// The migrations are numbered from 1 without a gap, and none names a Server newer than this
     /// one — a build that refused its own schema would never start. This release's own name 0.8.0.
     /// Verifies: ADR-0023
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn the_migrations_are_numbered_and_this_server_understands_them() {
         for (index, migration) in MIGRATIONS.iter().enumerate() {
@@ -917,7 +917,7 @@ mod tests {
         }
         // The first release to run beside another serves beside 0.8.0: its migrations name it, so
         // the instances of 0.8.0 that still run serve on the schema they leave
-        // (ADR-0025
+        // (ADR-0045
         // clause 16).
         for migration in &MIGRATIONS[10..] {
             assert_eq!(

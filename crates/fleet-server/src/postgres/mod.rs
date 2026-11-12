@@ -1,7 +1,7 @@
 //! The Server's records in one PostgreSQL database (ADR-0023): the connection every PostgreSQL
 //! adapter shares, the exclusive lock of an instance that must be alone on it, the leases every
 //! instance holds, the notifications they share, and the schema the Server applies itself
-//! (ADR-0025).
+//! (ADR-0045).
 //!
 //! The connection is TLS 1.3 on the *ring*-only client of `opamp::tls`, the database's
 //! certificate verified against the public roots or the root `ca_file` names and its host name
@@ -97,7 +97,7 @@ const APPLICATION_NAME: &str = "opamp-fleet-server";
 /// Whether an instance must be the only one on its database, and why.
 ///
 /// An instance whose blobs or CA keys are files must be alone
-/// (ADR-0025
+/// (ADR-0045
 /// clause 2): what it keeps on its own disk no other instance can reach.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Exclusive {
@@ -161,7 +161,7 @@ pub struct Database {
     release: &'static str,
     /// Set once a lease taken after a lost one found a schema that needs a newer Server: the
     /// refusal, naming both versions, and the instance stops
-    /// (ADR-0025
+    /// (ADR-0045
     /// clause 16).
     outdated: std::sync::Mutex<Option<String>>,
     /// The `[audit] key_label` this instance names, which its lease records and every other live
@@ -465,7 +465,7 @@ impl Database {
 
     /// Applies `migrations` in one transaction (ADR-0023 clause 22), once the schema and the
     /// releases of the live leases are checked under the migrations' lock
-    /// (ADR-0025
+    /// (ADR-0045
     /// clause 16).
     ///
     /// # Errors
@@ -623,7 +623,7 @@ impl Database {
             return Err(lost_lock(&self.name));
         }
         // What the call announced is counted as it is sent: where its answer is lost, it may have
-        // committed, and the instance reads again what it names (ADR-0025
+        // committed, and the instance reads again what it names (ADR-0045
         // clause 10).
         let call = notify::Call::new(self.afterwards.clone());
         let answer = self.bridge.run(notify::sending(
@@ -2289,7 +2289,7 @@ mod tests {
     /// A second instance that must be alone, against a database one already holds alone, fails
     /// startup naming the database and the key that makes it alone; once the first is gone, the
     /// lock is free again.
-    /// Verifies: ADR-0023, ADR-0025
+    /// Verifies: ADR-0023, ADR-0045
     #[test]
     fn a_second_instance_that_must_be_alone_fails_startup_naming_it() {
         let Some(test) = TestDatabase::named() else {
@@ -2558,9 +2558,9 @@ mod tests {
     /// A lease of 0.8.0 counts as 0.8.0 by the column's default; a lapsed lease, and the live one
     /// of an instance that had to be alone and whose lock is free, count as none; with no such
     /// lease the instance applies every migration it lacks
-    /// (ADR-0025
+    /// (ADR-0045
     /// clause 16).
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn an_instance_refuses_its_start_while_a_live_lease_is_older_than_the_schema_it_leaves() {
         let Some(test) = TestDatabase::named() else {
@@ -2642,7 +2642,7 @@ mod tests {
 
     /// An instance whose migrations name the oldest Server a live lease's release is, or older,
     /// serves beside it: a newer patch release of 0.8 beside a lease of 0.8.0.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_patch_release_serves_beside_a_lease_of_the_release_its_migrations_name() {
         let Some(test) = TestDatabase::named() else {
@@ -2672,10 +2672,10 @@ mod tests {
     /// Of a lease taken while a Server two releases on migrates, the later sees the earlier: the
     /// lease waits for the migrations' lock, then finds the schema that needs a newer Server and
     /// is refused, naming both versions, taking nothing and keeping the refusal
-    /// (ADR-0025
+    /// (ADR-0045
     /// clause 16). The other order, the lease first, is
     /// `an_instance_refuses_its_start_while_a_live_lease_is_older_than_the_schema_it_leaves`.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_lease_taken_while_a_newer_server_migrates_sees_its_schema_and_is_refused() {
         let Some(test) = TestDatabase::named() else {

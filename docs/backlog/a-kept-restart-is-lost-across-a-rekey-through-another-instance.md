@@ -6,7 +6,7 @@
 refused is kept for retry by the instance that sent it, keyed by the Agent's `instance_uid`
 (`put_back`, `retry_restarts` in `crates/fleet-server/src/fleet/held.rs`). When another instance
 re-keys the Agent before the retry, the retry finds the row gone, logs a warning naming the Agent
-and drops the put-back: the Operator's restart is lost. ADR-0025 clause 8 names this as a case not
+and drops the put-back: the Operator's restart is lost. ADR-0045 clause 8 names this as a case not
 seen, and the manual's restart route says so.
 
 The keeping instance cannot learn the new identity. `rekey` in `postgres/agents.rs` copies the row

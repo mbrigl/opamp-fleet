@@ -1,7 +1,7 @@
 //! Package records in PostgreSQL (ADR-0023 clause 6): the PostgreSQL adapter behind
 //! [`PackageBackend`](crate::packages::PackageBackend) — one row per Package and one per entry,
 //! each entry naming its artifact by hash, and each call one transaction on the rows it names
-//! (ADR-0025
+//! (ADR-0045
 //! clause 19). The bytes are the blob store's, with either.
 
 use std::collections::BTreeMap;
@@ -353,7 +353,7 @@ impl PgPackageBackend {
 /// 13). A rollout holds the row of each Package it pins `FOR KEY SHARE` until its assignments are
 /// committed, so the count waits for it and sees them, and no rollout pins the Package until this
 /// transaction ends
-/// (ADR-0025
+/// (ADR-0045
 /// clause 19). Answers whether the Package is stored.
 async fn hold_unassigned(
     client: &impl GenericClient,
@@ -834,7 +834,7 @@ mod tests {
     /// A deletion of a Package through B while a rollout through A that pins it has not yet
     /// committed waits for the rollout, and then refuses it from the assignment the rollout
     /// stored: the rollout holds the Package's row until it commits.
-    /// Verifies: ADR-0025, ADR-0033
+    /// Verifies: ADR-0045, ADR-0033
     #[test]
     fn a_deletion_waits_for_a_rollout_that_pins_the_package_and_is_refused() {
         use crate::agent_store::{tests::record, AgentStore as _};
@@ -1446,7 +1446,7 @@ mod tests {
     /// B deletes the one entry it holds of a blob; an entry written through A, which B has not
     /// read, names the same blob, and B's sweep keeps it: it reads the stored entries under the
     /// blob store's lock, not what B holds.
-    /// Verifies: ADR-0023, ADR-0025
+    /// Verifies: ADR-0023, ADR-0045
     #[test]
     fn a_sweep_keeps_a_blob_an_entry_stored_through_another_writer_names() {
         let Some(test) = TestDatabase::named() else {

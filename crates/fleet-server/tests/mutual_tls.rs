@@ -6641,7 +6641,7 @@ impl fleet_server::agent_store::AgentStore for HeldWrite {
 /// completes and its report is answered: the report runs off the runtime's workers, so the one
 /// worker of the Server's runtime here stays free, and the fleet lock is not held across the
 /// call.
-/// Verifies: ADR-0025
+/// Verifies: ADR-0045
 #[test]
 fn a_handshake_completes_and_a_report_is_answered_while_another_reports_store_call_waits() {
     let pki = Pki::new();
@@ -6715,7 +6715,7 @@ fn a_handshake_completes_and_a_report_is_answered_while_another_reports_store_ca
 /// An Agent whose report waits for its store call is answered a WebSocket ping on the same
 /// connection meanwhile, so a stall of the Server's handling ends no live connection for silence;
 /// its reply follows once the call is let go.
-/// Verifies: ADR-0025
+/// Verifies: ADR-0045
 #[test]
 fn a_ping_is_answered_on_a_connection_whose_report_waits_for_its_store_call() {
     let pki = Pki::new();

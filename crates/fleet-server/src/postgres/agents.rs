@@ -1752,7 +1752,7 @@ mod tests {
         assert_eq!(store.set_restart_pending(&three, false), Ok(Some(false)));
         assert_eq!(store.set_restart_pending(&three, true), Ok(Some(false)));
         // A restart taken for a send that failed is put back, and the next take finds it queued
-        // (ADR-0025
+        // (ADR-0045
         // clause 8).
         assert_eq!(store.set_restart_pending(&three, false), Ok(Some(true)));
         assert_eq!(store.set_restart_pending(&three, true), Ok(Some(false)));
@@ -1846,7 +1846,7 @@ mod tests {
     /// An instance that does not hold an Agent another instance re-released counts its old pins
     /// until it reads the whole fleet again, and its forget of that Agent answers the
     /// Configurations the stored assignment named as it removed the record, not what it read.
-    /// Verifies: ADR-0025, ADR-0033
+    /// Verifies: ADR-0045, ADR-0033
     #[test]
     fn a_forget_answers_what_the_stored_assignment_named() {
         let Some(test) = TestDatabase::named() else {
@@ -1887,7 +1887,7 @@ mod tests {
     /// A report's write on PostgreSQL leaves what the acts wrote through another instance: the
     /// labels, a queued restart and the assignment stay as they are stored, while what the report
     /// decides is written; a record that is not there is not written.
-    /// Verifies: ADR-0030, ADR-0025
+    /// Verifies: ADR-0030, ADR-0045
     #[test]
     fn a_report_written_on_postgres_keeps_what_the_acts_wrote() {
         let Some(test) = TestDatabase::named() else {
@@ -2661,7 +2661,7 @@ mod tests {
     /// until the read waits for it. A read in one statement waits before it reads anything, and
     /// reads what the rollout committed; `query` reads in a snapshot taken before it waits, and
     /// reads what was there before.
-    /// Verifies: ADR-0030, ADR-0025
+    /// Verifies: ADR-0030, ADR-0045
     #[test]
     fn an_agent_is_read_in_one_snapshot_whatever_commits_while_it_waits() {
         let Some(test) = TestDatabase::named() else {
@@ -2762,7 +2762,7 @@ mod tests {
     /// commits while the read is part-way, its Configurations held at a gate, is not read in part.
     /// The creation counts the rows of `agents` first, so the gate stands in the Configurations,
     /// behind a view in place of their table.
-    /// Verifies: ADR-0030, ADR-0025
+    /// Verifies: ADR-0030, ADR-0045
     #[test]
     fn a_creation_that_finds_the_agent_reads_it_in_one_snapshot() {
         let Some(test) = TestDatabase::named() else {
@@ -3039,7 +3039,7 @@ mod tests {
     /// then the two would deadlock. Each update sets its session's `lock_timeout` aside before it
     /// waits for a row, so the second, parked behind the first, outlasts a loaded host's delays in
     /// opening the gate; the session's `statement_timeout` still bounds it.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn two_releases_over_the_same_agents_in_opposite_orders_both_commit() {
         let Some(test) = TestDatabase::named() else {
@@ -3117,7 +3117,7 @@ mod tests {
     /// presence, and one under an earlier take leaves the presence a take wrote since. Forgetting decides from it: an Agent a live
     /// lease holds and that was heard from recently is kept; one whose holder holds no live lease
     /// reads as disconnected and goes, announced; one silent past the bound goes too.
-    /// Verifies: ADR-0030, ADR-0025
+    /// Verifies: ADR-0030, ADR-0045
     #[test]
     fn a_presence_batch_names_the_holder_and_forgetting_decides_from_it() {
         let Some(test) = TestDatabase::named() else {
@@ -3236,7 +3236,7 @@ mod tests {
     /// names its own instance over a row that names none, or an instance without a live lease, and
     /// one answered a count over such a row only while it still holds that count, never over a
     /// live holder.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_batch_read_before_another_instance_took_the_agent_does_not_undo_the_take() {
         let Some(test) = TestDatabase::named() else {
@@ -3370,7 +3370,7 @@ mod tests {
     /// the same millisecond is not written, although its `last_seen_ms` is the stored one. A batch
     /// that names its instance anew answers the count it raised, and a disconnect under that count
     /// is written.
-    /// Verifies: ADR-0030, ADR-0025
+    /// Verifies: ADR-0030, ADR-0045
     #[test]
     fn a_disconnect_is_written_under_the_take_it_was_carried_by_whatever_the_clocks_say() {
         let Some(test) = TestDatabase::named() else {
@@ -3501,7 +3501,7 @@ mod tests {
 
     /// A take that replaces another holder is announced, whether or not that holder's lease is
     /// live, and one that replaces none is not.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_take_that_replaces_another_holder_is_announced_whatever_its_lease() {
         let Some(test) = TestDatabase::named() else {
@@ -3550,7 +3550,7 @@ mod tests {
     /// The take that makes an Agent's holder change for the eleventh time within a minute, and no
     /// other, says it is likely a duplicate; a change more than a minute old counts no more, and a
     /// take that keeps the holder, or replaces none, is no change.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn the_eleventh_change_of_holder_within_a_minute_is_a_likely_duplicate() {
         let Some(test) = TestDatabase::named() else {
@@ -3680,7 +3680,7 @@ mod tests {
     /// The ceiling on records holds for every instance on the store: the store counts its rows as
     /// it creates one, so a record past it is not created through any of them, and one stored
     /// already passes none.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn the_records_are_bounded_where_they_are_stored() {
         let Some(test) = TestDatabase::named() else {

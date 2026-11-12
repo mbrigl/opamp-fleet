@@ -160,7 +160,7 @@ no module.
   [ADR-0023](adr/0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)).
 - **Server instances** — on PostgreSQL every Server is an instance, and several share one
   database and one bucket
-  ([ADR-0025](adr/0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)).
+  ([ADR-0045](adr/0045-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)).
   `instance` takes a lease, a row of `postgres::lease`, before either listener opens, renews it,
   proves it before every answer, and closes both planes while it cannot. Each lease it takes checks
   the schema under the migrations' lock and records the instance's release and its `[audit]
@@ -257,7 +257,7 @@ no module.
   as a lease and a sweep measure it: `PackageStore::with_backend` takes it, and `instance`'s
   `Lease::take_as`. `clock::Elapsed::monotonic` is the adapter on `std::time::Instant`, and
   `main.rs` hands both of them `CLOCK_BOOTTIME`, which counts a suspend of the host, on Linux
-  ([ADR-0025](adr/0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+  ([ADR-0045](adr/0045-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
   clause 3). The `[connection_offer]` and `[telemetry_offer]` sections become the fleet's offers in
   `config`.
 - **Server configuration** — `config` builds one TOML document from the defaults, `server.toml`
@@ -467,7 +467,7 @@ WebSockets after one heartbeat interval of silence. Each Agent reconnects after 
 Agent's record at its first report and takes it as its holder. Once the lost instance's lease has
 lapsed, the instance that removes it closes its audit chain. The others serve from what the lost
 instance committed to the database
-([ADR-0025](adr/0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)).
+([ADR-0045](adr/0045-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)).
 
 **A Supervisor starts its program.** Without a process account the runner starts the Managed
 Process, its version probe and a package's preflight as the Client. Where `service install

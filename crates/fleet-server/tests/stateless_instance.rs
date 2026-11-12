@@ -405,7 +405,7 @@ fn instance_id() -> String {
     )
 }
 
-// Verifies: ADR-0023, ADR-0025
+// Verifies: ADR-0023, ADR-0045
 #[test]
 fn a_server_on_postgresql_and_s3_serves_from_a_directory_it_cannot_write() {
     opamp::tls::install_ring_provider();
@@ -572,9 +572,9 @@ fn a_server_on_postgresql_and_s3_serves_from_a_directory_it_cannot_write() {
 /// the Server before it takes its lease: no lease row and no audit chain is left for another
 /// instance to count as live or to close as lapsed
 /// (ADR-0023 clause 16,
-/// ADR-0025
+/// ADR-0045
 /// clause 2).
-// Verifies: ADR-0023, ADR-0025
+// Verifies: ADR-0023, ADR-0045
 #[test]
 fn a_bucket_that_fails_startup_leaves_no_lease_behind() {
     opamp::tls::install_ring_provider();
@@ -648,9 +648,9 @@ fn a_bucket_that_fails_startup_leaves_no_lease_behind() {
 /// An instance whose lease lapsed while a newer Server migrated the schema stops at its new lease
 /// as at a failed start: it prints the refusal, naming the version the schema needs and its own,
 /// and exits with status 1
-/// (ADR-0025
+/// (ADR-0045
 /// clause 16).
-// Verifies: ADR-0025
+// Verifies: ADR-0045
 #[test]
 fn an_instance_whose_lease_lapsed_on_a_newer_schema_exits_naming_both_versions() {
     opamp::tls::install_ring_provider();

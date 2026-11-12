@@ -189,7 +189,7 @@ The plan lands on `main` in three stages, each a release of its own.
    count is the sensor for such a row. The lists page and name the holder, two versions run side
    by side, the manual runs three instances, and the load test decides G-20, which the
    specification holds.
-   Its ADRs are ADR-0025, ADR-0031, ADR-0015, ADR-0023, ADR-0028, ADR-0029 and ADR-0027.
+   Its ADRs are ADR-0045, ADR-0031, ADR-0015, ADR-0023, ADR-0028, ADR-0029 and ADR-0027.
 3. **The keys on a token.** Tickets 12, 16 and 17. The CA keys live on a PKCS#11 token, so
    instances holding a CA run side by side, the heads of the audit chains are signed, and the
    record may be exported. Its four ADRs, accepted together, are
@@ -219,13 +219,13 @@ The plan lands on `main` in three stages, each a release of its own.
   installed), 0006 (this plan), 0007 (the harness: nothing is worked unattended), 0008 and 0009
   (crates, ports and adapters), and 0016, 0024, 0032, 0033, 0034 and 0035; three of stage 1,
   ADR-0012, ADR-0030 and ADR-0039, its fourth, ADR-0026, superseded by ADR-0040; the seven of
-  stage 2, ADR-0015, ADR-0023, ADR-0025, ADR-0027, ADR-0028, ADR-0029 and ADR-0031; and the four of
+  stage 2, ADR-0015, ADR-0023, ADR-0045, ADR-0027, ADR-0028, ADR-0029 and ADR-0031; and the four of
   stage 3, ADR-0040 to ADR-0043.
 - Implemented here and accepted: the seven ADRs of stage 2 and the four of stage 3, named under
   *Stages*. ADR-0031 adds to the fleet record's port and to the stores' columns without restating
   either. ADR-0043 adds the audit export under the open outbound rule of ADR-0012 clause 21,
   decides the module's own connection under that clause's rule for a library the Server loads, and
-  the token's keys beside the alone rule of ADR-0025 clause 2. ADR-0040 supersedes ADR-0026, and
+  the token's keys beside the alone rule of ADR-0045 clause 2. ADR-0040 supersedes ADR-0026, and
   ADR-0042 supersedes ADR-0037.
 - G-20 is in the specification; this plan drafts no other specification change.
 - No new ADR is needed beyond these.

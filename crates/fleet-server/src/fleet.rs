@@ -131,7 +131,7 @@ pub struct AgentRecord {
     /// When the connection that carries it last carried a report of it, in milliseconds since the
     /// epoch — runtime-only. An older connection of its host takes it back once this is a
     /// heartbeat interval old
-    /// (ADR-0025
+    /// (ADR-0045
     /// clause 8).
     pub carried_ms: u64,
     /// Whether this Server heard the Agent report since it started — runtime-only. What it holds
@@ -147,7 +147,7 @@ pub struct AgentRecord {
     /// Where the Host and the Client Agent place this Agent — derived, never persisted.
     pub placement: Placement,
     /// The instance that holds it, as a shared store read it
-    /// (ADR-0025
+    /// (ADR-0045
     /// clause 13); `None` for what this Server holds in memory.
     pub holder: Option<crate::agent_store::Holder>,
     /// What the operator's last rollout released to this Agent (ADR-0033 clause 6). **Every offer
@@ -435,7 +435,7 @@ pub trait Clock: Send + Sync {
 }
 
 /// The port of the time that has passed, as a lease and a sweep measure it
-/// (ADR-0025
+/// (ADR-0045
 /// clause 3, ADR-0023 clause 14): a clock that counts the time the host was suspended, which the
 /// binary hands the lease and the package store (on Linux `CLOCK_BOOTTIME`). A reading is the time since an origin of the
 /// clock's own: two readings of one clock compare, readings of two clocks do not. The adapters'
@@ -833,14 +833,14 @@ struct Ending {
     disconnected: bool,
     /// It came on an older connection of the host whose newer one carries the Agent, which its
     /// goodbye does not end and a queued restart is not sent on
-    /// (ADR-0025
+    /// (ADR-0045
     /// clause 8).
     superseded: bool,
     identification: Option<AgentIdentification>,
     reply_flags: u64,
     /// The Gateway's Host the Agent first arrived over as a Client Agent with this report, which
     /// the write of its record announces
-    /// (ADR-0025
+    /// (ADR-0045
     /// clause 9).
     arrived: Option<String>,
 }
@@ -858,7 +858,7 @@ type ClientsByGroup = HashMap<Group, Vec<(InstanceUid, BTreeMap<String, String>)
 
 /// How a placement reads the Client Agents of a group that this instance does not hold
 /// (ADR-0030 clause 19,
-/// ADR-0025
+/// ADR-0045
 /// clause 8).
 enum Elsewhere {
     /// From the store as the group is placed, under the fleet lock.
@@ -898,7 +898,7 @@ impl AppState {
         //
         // On a shared store an instance holds only the Agents it carries, each loaded at its first
         // report here, and loads none at startup
-        // (ADR-0025
+        // (ADR-0045
         // clause 8).
         let mut fleet = HashMap::new();
         let mut written = HashMap::new();
@@ -1071,7 +1071,7 @@ impl AppState {
 
     /// Answers the messages of Agents only while `holds` answers that the lease is held by its
     /// clock
-    /// (ADR-0025
+    /// (ADR-0045
     /// clause 3). Set once; a later call is ignored.
     pub fn answer_while(&self, holds: impl Fn() -> bool + Send + Sync + 'static) {
         let _ = self.proof.set(Box::new(holds));
@@ -1243,7 +1243,7 @@ impl AppState {
     /// does. On a shared store the Client Agent of a Host may be carried by another instance, so
     /// the Agents the host register binds to the Host that this instance does not hold are read
     /// from the store, and a Client Agent among them counts as one of the group
-    /// (ADR-0025
+    /// (ADR-0045
     /// clause 8). Behind a Gateway, where the register binds no Agent, the Agents that arrived
     /// over the Gateway's Host are read instead ([`arrived_over`](Self::arrived_over)).
     ///
@@ -1327,7 +1327,7 @@ impl AppState {
     /// Places again every group of each of `hosts` that this instance holds members of: of a Host,
     /// the group under the Host, and of a Gateway's Host, every group behind it. What a notice that
     /// a binding of the Host changed, or that a Client Agent first arrived over it, calls for
-    /// (ADR-0025
+    /// (ADR-0045
     /// clause 8). Nothing on a store this Server alone writes, whose own acts place what they
     /// change.
     pub fn place_hosts_again(&self, hosts: &BTreeSet<String>) {
@@ -1352,7 +1352,7 @@ impl AppState {
     /// stored; none on a store this Server alone writes. Of a Host, those the host register binds
     /// to it; behind a Gateway, which the register binds none to, those that arrived over the
     /// Gateway's Host and report the group's machine, read through the port's `query_page`
-    /// (ADR-0025
+    /// (ADR-0045
     /// clause 8). One that cannot be read is logged, and the group is placed from what this
     /// instance holds.
     fn client_agents_elsewhere(
@@ -1916,7 +1916,7 @@ impl AppState {
 
     /// Reads the Configurations and, where package delivery is armed, the Deployments and the
     /// Packages again from their stores, as another instance changed them
-    /// (ADR-0025
+    /// (ADR-0045
     /// clause 12). Each one whose flag is set is dropped and read again whole.
     ///
     /// # Errors
@@ -2559,7 +2559,7 @@ impl AppState {
     /// queued again through [`unsent`](Self::unsent). It is handed out only to `conn`, the
     /// WebSocket connection asking, where that connection carries the Agent: an older connection
     /// of its host that still names it leaves the restart to the newer one
-    /// (ADR-0025
+    /// (ADR-0045
     /// clause 8).
     ///
     /// A delivery holds the Agent's own lock, and clears the restart in the store with the fleet
@@ -2739,12 +2739,12 @@ impl AppState {
     /// shutdown flush of another instance with a higher sequence number, as of an Agent that started
     /// again, may have written over it, and the next report writes it again. Once a count is
     /// answered, a report that changes nothing durable writes nothing again
-    /// (ADR-0025
+    /// (ADR-0045
     /// clause 8).
     ///
     /// `arrived` names the Gateway's Host the Agent first arrived over as a Client Agent with this
     /// record, which the store announces once the record is written
-    /// (ADR-0025
+    /// (ADR-0045
     /// clause 9). Such a record differs from the one written before, so it is written.
     fn persist(
         &self,
@@ -3066,7 +3066,7 @@ impl AppState {
         // comes back on a new connection of the host whose certificate its old connection
         // presented is not a duplicate of itself: the newest connection takes it, and the older
         // one's reports no longer take it back
-        // (ADR-0025
+        // (ADR-0045
         // clause 8).
         let arrived_over = self
             .revocations
@@ -3850,7 +3850,7 @@ impl AppState {
     /// On a shared store, loads the record of `uid` from it when this Server does not hold one, as
     /// at an Agent's first report here: another instance may have written it, and its labels, its
     /// assignment and its queued restart are what this report goes on from
-    /// (ADR-0025
+    /// (ADR-0045
     /// clause 8). Read before the fleet lock is taken, so no other report waits for it. Answers
     /// whether it loaded one; one that cannot be read is logged, and the report goes on as an
     /// Agent's first.
@@ -4404,7 +4404,7 @@ impl AppState {
 
     /// The REST view of the fleet (`GET /api/v1/agents`), read as [`read_fleet`](Self::read_fleet)
     /// reads it: on a shared store from the database, each Agent connected as its stored presence
-    /// says (ADR-0025
+    /// says (ADR-0045
     /// clause 13).
     ///
     /// # Errors
@@ -5085,7 +5085,7 @@ pub struct AgentView {
     /// Gateway's.
     pub host: String,
     /// The instance id of the instance that holds it under a live lease
-    /// (ADR-0025
+    /// (ADR-0045
     /// clause 13); empty without one, and always on the filesystem store.
     pub holder: String,
     /// The host name that instance's lease records; empty when `holder` is.
@@ -6419,7 +6419,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_restart_whose_send_failed_is_queued_again_on_files() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -6428,7 +6428,7 @@ mod tests {
         a_restart_whose_send_failed_is_queued_again(&state, &stored);
     }
 
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_restart_whose_send_failed_is_queued_again_on_postgres() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -6485,7 +6485,7 @@ mod tests {
     /// A kept put-back is one restart with a request made meanwhile, and with a delivery of a
     /// restart another instance queued meanwhile: once that one is delivered, retrying queues no
     /// second.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_kept_put_back_is_dropped_by_a_request_or_a_delivery_meanwhile() {
         let (state, failing, stored, _dir) = with_failing_restarts();
@@ -6534,7 +6534,7 @@ mod tests {
 
     /// A kept put-back goes with its Agent's forget, through this instance or one heard of from
     /// another: an Agent that comes back under the same identity is not restarted for it.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_kept_put_back_goes_with_its_agents_forget() {
         let (state, failing, stored, _dir) = with_failing_restarts();
@@ -6563,7 +6563,7 @@ mod tests {
 
     /// A try found due is not made once a request and its delivery dropped the put-back before
     /// the try took the fleet lock, so the Agent is not restarted a second time.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_try_found_due_is_not_made_once_a_request_and_its_delivery_dropped_it() {
         let (state, failing, stored, _dir) = with_failing_restarts();
@@ -6591,7 +6591,7 @@ mod tests {
     /// A request through another instance, taken up from its announcement, drops a put-back kept
     /// here, so its delivery there is the one restart; after a missed notification one whose
     /// record shows a restart queued is dropped, and one whose record shows none is kept.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_request_announced_by_another_instance_drops_a_kept_put_back() {
         let (state, failing, stored, _dir) = with_failing_restarts();
@@ -6654,7 +6654,7 @@ mod tests {
     /// On PostgreSQL the announcement of a request through another instance is what drops a
     /// put-back kept here: once it is taken up, the request's delivery there leaves nothing for a
     /// retry here to restart again.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_request_announced_by_another_instance_drops_a_kept_put_back_on_postgres() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -6717,7 +6717,7 @@ mod tests {
     /// A put-back the store does not take is kept and tried again, at intervals that double, until
     /// it holds; the Agent's next connection is then sent the restart. One whose Agent is
     /// forgotten meanwhile is dropped.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_put_back_the_store_refuses_is_tried_again_until_it_holds() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -6836,14 +6836,14 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_kept_put_back_follows_a_rekey_the_agent_asks_for_on_files() {
         let (state, failing, stored, _dir) = with_failing_restarts();
         a_kept_put_back_follows_a_rekey_the_agent_asks_for(&state, &failing, &stored);
     }
 
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_kept_put_back_follows_a_rekey_the_agent_asks_for_on_postgres() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -6863,7 +6863,7 @@ mod tests {
     /// A kept put-back follows a re-key whose answer was lost and whose read back failed, once a
     /// read again of what is held reads it back as moved: the retry queues the restart on the new
     /// identity.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_kept_put_back_follows_a_rekey_read_back_as_moved() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -6875,7 +6875,7 @@ mod tests {
     /// A try of a kept put-back that finds the row gone while a re-key of this instance's own is
     /// not read back yet keeps it, and the read back moves it: the restart is queued on the new
     /// identity, not dropped.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_kept_put_back_tried_before_its_rekey_is_read_back_follows_it() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -6936,7 +6936,7 @@ mod tests {
 
     /// A put-back whose Agent was re-keyed through another instance while this one retried finds
     /// its record gone: the restart is not tried again, and a warning names the Agent.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_kept_put_back_whose_row_another_instance_rekeyed_is_logged() {
         crate::test_support::logged();
@@ -6964,7 +6964,7 @@ mod tests {
 
     /// The re-key of a duplicate newcomer moves no row: a put-back kept for the Agent stays with
     /// it, the retry queues the restart on its identity, and the newcomer is sent none.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_kept_put_back_stays_with_its_agent_when_a_duplicate_is_rekeyed() {
         let (state, failing, stored, _dir) = with_failing_restarts();
@@ -8715,7 +8715,7 @@ mod tests {
     /// What another Server wrote to a held record is taken up from the store: a Client Agent's
     /// labels place its Client's other Agent again, so it inherits them, a queued restart is held,
     /// and a record the store no longer holds is dropped.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn what_another_server_wrote_is_taken_up_and_places_the_group_again() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -9492,7 +9492,7 @@ mod tests {
 
     /// An instance on PostgreSQL loads no Agent record when it starts, holds none until one
     /// reports to it, and reads again only the ones it holds when it reads everything again.
-    /// Verifies: ADR-0025, ADR-0023
+    /// Verifies: ADR-0045, ADR-0023
     #[test]
     fn an_instance_on_postgres_loads_no_fleet_and_reads_again_only_what_it_holds() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -9539,7 +9539,7 @@ mod tests {
     /// On PostgreSQL an Agent's view and a rollout to it read the Agent and the Agents bound to its
     /// Host, not the whole fleet, and the view inherits the labels of its Client Agent, which this
     /// instance does not hold either.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn an_agents_view_and_a_rollout_to_it_read_its_host_and_not_the_fleet() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -9693,7 +9693,7 @@ mod tests {
     /// B's memory too, and A, which has not taken up the deletions and still holds both in
     /// memory, is refused when it adds either to a Deployment: the add reads the member it adds
     /// in its own transaction and finds it gone, so no Deployment names it.
-    /// Verifies: ADR-0025, ADR-0033
+    /// Verifies: ADR-0045, ADR-0033
     #[test]
     fn a_member_deleted_through_one_instance_is_refused_by_another_that_has_not_taken_it_up() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -9748,7 +9748,7 @@ mod tests {
     /// row too, so the deletion waits for its commit, and then takes the member out of every
     /// Deployment in the transaction that deletes it. Whichever commits first, no Deployment names
     /// the deleted member once both have — for a Configuration and for a Package.
-    /// Verifies: ADR-0025, ADR-0033
+    /// Verifies: ADR-0045, ADR-0033
     #[test]
     fn an_add_held_while_another_instance_deletes_the_member_leaves_no_deployment_naming_it() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -9843,7 +9843,7 @@ mod tests {
     /// An Agent bound to a direct Host that reports over a Gateway since is placed by the Gateway
     /// it arrived over: the list, its view and a rollout to it all inherit the labels of the
     /// Client Agent behind that Gateway.
-    /// Verifies: ADR-0025, ADR-0030
+    /// Verifies: ADR-0045, ADR-0030
     #[test]
     fn an_agent_bound_to_a_direct_host_and_arriving_over_a_gateway_is_placed_by_the_gateway() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -10021,7 +10021,7 @@ mod tests {
     /// connection carries it and the move is logged; a report of the older connection is taken up
     /// and leaves it there, so the older one's close leaves it connected. On a connection of
     /// another host the same identity is a duplicate, re-keyed.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn an_agent_on_a_new_connection_of_its_host_is_carried_by_it_and_not_rekeyed() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -10149,7 +10149,7 @@ mod tests {
 
     /// A goodbye the older connection of a host delivers while a newer one carries the Agent does
     /// not end the Agent's connection: it stays connected on the newer one.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_goodbye_on_an_older_connection_of_the_host_leaves_the_agent_with_the_newer() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -10183,7 +10183,7 @@ mod tests {
 
     /// A queued restart is not sent on an older connection of the host while a newer one carries
     /// the Agent: it stays queued, and the newer connection's next report is sent it.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_queued_restart_is_not_sent_on_an_older_connection_of_the_host() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -10215,7 +10215,7 @@ mod tests {
     /// A queued restart pushed to every connection that named the Agent goes out only on the one
     /// that carries it: an older connection of its host that still names it, its peer likely
     /// gone, is handed none, and the restart stays queued for the newer one.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_pushed_restart_goes_out_only_on_the_connection_that_carries_the_agent() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -10248,7 +10248,7 @@ mod tests {
 
     /// A report of an older connection of the host does not use up the demand for the component
     /// map: the newer connection is asked for it.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn an_older_connection_of_the_host_is_not_asked_for_the_component_map() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -10317,7 +10317,7 @@ mod tests {
     /// older one is taken by its report there once the newer one has carried none of its reports
     /// for a heartbeat interval: it is asked for its component map there, and its goodbye there
     /// ends it.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_gateway_s_agent_moved_to_an_older_connection_is_taken_there_after_an_interval() {
         crate::test_support::logged();
@@ -10368,7 +10368,7 @@ mod tests {
 
     /// Within a heartbeat interval of the newer connection's last report of an Agent, a report on
     /// an older connection of the same Gateway does not take the Agent back.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn within_an_interval_an_older_connection_of_a_gateway_does_not_take_the_agent_back() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -10410,7 +10410,7 @@ mod tests {
     /// The interval this Server offers decides when a Gateway's newer connection is stale: at an
     /// offered 60 seconds, a report on the older connection 30 seconds after the newer one's last
     /// does not take the Agent, and one 60 seconds after does.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn the_offered_heartbeat_interval_decides_when_a_carrier_is_stale() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -10458,7 +10458,7 @@ mod tests {
     /// A newer connection whose report waited on the store for a heartbeat interval is as fresh as
     /// its report once it took the Agent: the older connection's next report does not take the
     /// Agent back.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_carrier_whose_report_waited_an_interval_is_not_stale_once_it_took_the_agent() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -10530,7 +10530,7 @@ mod tests {
 
     /// A report of an older connection of the host whose newer connection closes while the report
     /// is taken up is not left without a connection: the older one carries the Agent again.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn an_older_connection_takes_the_agent_back_when_the_newer_closes_meanwhile() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -10652,7 +10652,7 @@ mod tests {
     /// An instance that heard another took an Agent reads its holder under the Agent's own lock: a
     /// take of its own by the Agent's new connection here, made while the holder is read, waits
     /// for the read and keeps the Agent carried.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn an_agent_taken_back_here_while_its_holder_is_read_stays_carried() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -10702,7 +10702,7 @@ mod tests {
     /// On PostgreSQL a first report here whose read of the stored record failed goes on from the
     /// record another instance created, as it is stored: its labels are held, and a report the
     /// binding then refuses leaves it stored and its Agent carried where it is.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_record_another_instance_created_is_taken_as_stored_and_never_removed() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -10757,7 +10757,7 @@ mod tests {
     /// A label change made on A after A's take-up read the record, before it took the fleet lock,
     /// is not undone by what that read found: what differs is read again under the lock. A never
     /// hears its own announcement, so nothing else would correct it.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_take_up_never_undoes_a_newer_act_of_its_own_instance() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -10825,7 +10825,7 @@ mod tests {
 
     /// What differs is read again under the fleet lock in one read, however many records differ:
     /// the lock is held for one round trip, not one per record.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_take_up_reads_again_what_differs_in_one_read() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -11553,7 +11553,7 @@ mod tests {
     /// An Agent whose connecting take was written and whose answer was lost, and that disconnects
     /// before the next batch, has its row name no holder after that batch: the batch reads the
     /// row's holder and count first and writes the disconnect under the count it read, once.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn the_goodbye_of_an_agent_whose_take_lost_its_answer_is_written() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -11577,7 +11577,7 @@ mod tests {
     /// Of two Agents whose takes lost their answers, one B took since is not written by A's batch,
     /// and one A took again after the batch first looked at it and before it read the rows is left
     /// as that take wrote it.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_lost_take_whose_row_was_taken_since_writes_no_goodbye() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -11616,7 +11616,7 @@ mod tests {
 
     /// An Agent re-keyed on A that disconnects before A's next batch has the row under its new
     /// identity name no holder after that batch: what A wrote of its presence moves with it.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn the_goodbye_of_an_agent_rekeyed_is_written_under_its_new_identity() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -11899,7 +11899,7 @@ mod tests {
     /// A label set whose commit lands after its call lost its answer is held in the memory of the
     /// instance that carries the Agent once it lands, though its own notification is otherwise
     /// passed over.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_label_whose_answer_was_lost_is_taken_up_once_it_commits() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -11931,7 +11931,7 @@ mod tests {
 
     /// A floor set whose commit lands after its call lost its answer is served by the instance
     /// that set it once it lands.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_floor_whose_answer_was_lost_is_taken_up_once_it_commits() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -11961,7 +11961,7 @@ mod tests {
 
     /// A revocation whose commit lands after its call lost its answer is in the list of the
     /// instance that made it once it lands, renewals aside.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_revocation_whose_answer_was_lost_is_taken_up_once_it_commits() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -11984,7 +11984,7 @@ mod tests {
     /// A re-key whose commit lands after its call lost its answer is read back under a lock that
     /// waits for it: the Agent is assigned the identity its record moved to, one row names it,
     /// under that identity, and no record is created for the old one when it reports again.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_rekey_whose_answer_was_lost_is_read_back_and_stands() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -12055,7 +12055,7 @@ mod tests {
     /// A re-key whose answer was lost and whose read back failed is read back at the Agent's next
     /// report, whether it asks again or not, and assigns the identity the record moved to; no other
     /// is minted and no record is created for the old one.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_rekey_whose_read_back_failed_is_read_back_at_the_next_report() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -12127,7 +12127,7 @@ mod tests {
     /// holds moves to the new identity, the Agent's session not ended. A disconnect on that session
     /// under the old identity is written to the new row, and a report under the old identity, on a
     /// new connection, is assigned the new one; one row names the Agent throughout.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_rekey_whose_read_back_failed_is_taken_up_when_its_commit_lands() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -12266,7 +12266,7 @@ mod tests {
     /// meanwhile has its disconnect written to the row the move landed in, though a batch wrote
     /// it to the old row before, and the next report
     /// under the old identity is assigned the new one.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_rekey_whose_read_back_fails_at_its_notification_keeps_the_agent_until_it_holds() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -12306,7 +12306,7 @@ mod tests {
     /// A report whose write finds the old row gone, while the re-key that moved it is not known,
     /// keeps the Agent and its session and the pending re-key, and creates nothing; once the
     /// store answers, the next report is assigned the new identity.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_report_that_finds_the_old_row_gone_keeps_a_rekey_not_known() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -12340,7 +12340,7 @@ mod tests {
     /// The read back of a take still in flight waits for it: an Agent whose take's answer was lost
     /// and that disconnected has its disconnect written under the count that take commits, so the
     /// row names no holder once the batch ran.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn the_read_back_of_a_take_waits_for_a_take_still_in_flight() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -12388,7 +12388,7 @@ mod tests {
     /// comes back through B and reconnects to A, which takes it again, leaves the newer take's count kept, though
     /// the record counts from the start again and the batch answered a greater one: the Agent's
     /// goodbye is then written.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_batch_answered_after_a_newer_take_keeps_that_takes_count() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -12426,7 +12426,7 @@ mod tests {
     /// An Agent that A took and that B took since does not name A after A's batch: neither once B
     /// wrote its disconnect, before A heard of the take, nor while B, whose lease is not live,
     /// still names itself; A stops carrying both when it hears of the takes.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_batch_names_its_instance_over_no_take_counted_since_its_own() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -12470,7 +12470,7 @@ mod tests {
     /// An Agent that disconnected under a lease A then lost has its record flushed at A's
     /// shutdown, whether or not A wrote a batch under its new lease: the count of takes outlives
     /// the lease it was answered under.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn an_agent_disconnected_under_a_lost_lease_is_flushed_at_shutdown() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -12519,7 +12519,7 @@ mod tests {
     /// An Agent whose row named another holder when A's batch read it, and that connected to A
     /// again before the batch went on, with that take's answer lost too, and disconnected, stays
     /// unsure: A's next batch reads it again and writes its goodbye.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn an_agent_taken_again_after_the_batch_read_its_row_is_read_again() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -12556,7 +12556,7 @@ mod tests {
     /// not written, is named by A's next batch: a take that failed leaves A no count, so the batch
     /// takes back a row no instance holds whatever its count, and A, which carries the Agent, is
     /// named.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_connect_whose_take_was_not_written_is_named_by_the_next_batch() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -12589,7 +12589,7 @@ mod tests {
     /// An Agent whose take on A was not written, and that disconnected before A's next batch, has
     /// its last record written by A's shutdown flush: the batch read a row that names no holder
     /// and no take since, so what A heard of it last is the newest.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn the_shutdown_flush_writes_an_agent_whose_take_was_not_written() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -12628,7 +12628,7 @@ mod tests {
     /// An Agent whose take on A was not written, that B took and let go before A's next batch
     /// read the row, keeps what B flushed of it at A's shutdown flush: the row names no holder,
     /// but B's take counted since the one A was answered.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn the_shutdown_flush_of_a_lost_take_keeps_a_take_counted_since() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -12663,7 +12663,7 @@ mod tests {
     /// An Agent first heard on A, whose record A created and whose take was not written, and that
     /// disconnected before A's next batch, has its last record written by A's shutdown flush: the
     /// record counted no take when A created it.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn the_shutdown_flush_writes_an_agent_created_here_whose_take_was_not_written() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -12748,7 +12748,7 @@ mod tests {
     /// An Agent another instance with a live lease holds is not taken by a report of A, whose take
     /// was not written: the report is written, and the holder and its count stay. The holder's
     /// shutdown flush, as it stops, writes no lower sequence number over A's report.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_report_whose_take_was_not_written_takes_no_agent_a_live_instance_holds() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -12808,7 +12808,7 @@ mod tests {
     /// started again and is carried by A with a take that was not written, has A's record again at
     /// A's next report, though B's shutdown flush wrote its older record over A's: A, answered no
     /// count for the Agent, writes every report of it.
-    /// Verifies: ADR-0030, ADR-0025
+    /// Verifies: ADR-0030, ADR-0045
     #[test]
     fn a_record_an_older_flush_wrote_over_a_restarted_agent_heals_at_its_next_report() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -12872,7 +12872,7 @@ mod tests {
     /// An Agent that B, stopping, still holds with a live lease, that started again and is carried
     /// by A with a take that was not written, has A's record again at A's next report, though B's
     /// shutdown flush wrote its older record over A's.
-    /// Verifies: ADR-0030, ADR-0025
+    /// Verifies: ADR-0030, ADR-0045
     #[test]
     fn a_record_a_stopping_holders_flush_wrote_over_a_restarted_agent_heals_at_its_next_report() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -12905,7 +12905,7 @@ mod tests {
     /// carries with a take that was not written, keeps what A wrote of it at B's shutdown flush:
     /// the count B was answered of the record created again is the one stored, but the row holds
     /// the higher sequence number of A's report.
-    /// Verifies: ADR-0030, ADR-0025
+    /// Verifies: ADR-0030, ADR-0045
     #[test]
     fn the_shutdown_flush_keeps_a_newer_carriers_record_after_a_record_created_again() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -12948,7 +12948,7 @@ mod tests {
 
     /// An Agent whose take was written under A's old lease and whose answer was lost is named by
     /// A's batch under its new lease: A keeps no count from before the lost take to refuse it with.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_lost_take_under_an_old_lease_is_named_by_the_batch_under_the_new_one() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -12981,7 +12981,7 @@ mod tests {
     /// A batch never names its instance over a live take whose count equals its own: an Agent
     /// forgotten through B and created again there counts its takes from the start, and A, which
     /// has not heard of the forget, writes nothing of it.
-    /// Verifies: ADR-0030, ADR-0025
+    /// Verifies: ADR-0030, ADR-0045
     #[test]
     fn a_batch_never_names_its_instance_over_a_live_take_of_a_record_created_again() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -13006,7 +13006,7 @@ mod tests {
     /// it was answered: the Agent it named anew under the lease before is named again under the
     /// next one. Each batch takes back the row its instance's previous lease, now not live, holds
     /// under the count it was answered.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_batch_that_meets_a_change_of_lease_keeps_the_counts_it_was_answered() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -13047,7 +13047,7 @@ mod tests {
     /// marked closed meanwhile, goes on under the identity it assigned rather than start again
     /// from the message: a next round would mint a second identity and leave the first record
     /// behind. The Agent stays disconnected, as the closed connection left it.
-    /// Verifies: ADR-0025, ADR-0030
+    /// Verifies: ADR-0045, ADR-0030
     #[test]
     fn a_report_that_rekeyed_its_agent_does_not_start_again() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -13226,7 +13226,7 @@ mod tests {
     /// its group's Client Agents another instance carries, the write of what it reported, and a
     /// re-key it asks for with the move of its binding are each made with the lock free, so no
     /// other report waits for them.
-    /// Verifies: ADR-0025, ADR-0030
+    /// Verifies: ADR-0045, ADR-0030
     #[test]
     fn a_report_holds_the_fleet_lock_across_no_call_to_the_database() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -13310,7 +13310,7 @@ mod tests {
 
     /// While one Agent's report waits for a call to its store, another Agent's report is answered:
     /// what the fleet lock guards is applied before and after the call, never across it.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn another_agents_report_is_answered_while_one_agents_write_waits() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -13367,7 +13367,7 @@ mod tests {
     /// Agent in memory stops carrying it once it hears of that take: hearing of it waits for the
     /// report under way here, so it reads the holder after this instance holds the Agent, and the
     /// newest connection keeps the Agent.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn an_instance_whose_take_is_overtaken_before_it_holds_the_agent_stops_carrying_it() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -13432,7 +13432,7 @@ mod tests {
     /// a rollout then releases nothing and a restart is refused, since the record names neither a
     /// description nor a capability before the report that created it is written, and what is
     /// held agrees with the store on all three.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn what_another_instance_commits_to_a_new_agent_while_its_report_runs_is_held() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -13493,7 +13493,7 @@ mod tests {
     /// A new Agent's record is held from its creation on but not carried until its report holds
     /// it: a presence batch run meanwhile writes nothing of it, and the Agent is not connected
     /// here until the report ends.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_new_agents_record_is_held_from_its_creation_but_not_carried_before_its_report_ends() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -13530,7 +13530,7 @@ mod tests {
 
     /// A new Agent's report that the host register refuses leaves no record, neither stored nor
     /// held: the record its creation made goes from both.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_new_agents_report_the_register_refuses_leaves_no_record_held_or_stored() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -13583,7 +13583,7 @@ mod tests {
     /// A new Agent forgotten through another instance between its creation here and the end of
     /// the report that created it is created anew by a next round of that report, so what is held
     /// is stored.
-    /// Verifies: ADR-0025, ADR-0030
+    /// Verifies: ADR-0045, ADR-0030
     #[test]
     fn a_new_agent_forgotten_while_its_report_runs_is_created_anew() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -13625,7 +13625,7 @@ mod tests {
     /// A restart requested while a delivery of the one queued before clears it is not lost: the
     /// request waits for the delivery, which holds the Agent's own lock across its clear, and is
     /// queued after it, so the Agent is sent it next.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_restart_requested_while_a_delivery_clears_one_stays_queued() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -13688,7 +13688,7 @@ mod tests {
     /// delivers, but before it took the clear into memory, is not lost: the take-up of its
     /// announcement waits for the delivery, which holds the Agent's own lock, and then holds the
     /// request, which is sent next.
-    /// Verifies: ADR-0030, ADR-0025
+    /// Verifies: ADR-0030, ADR-0045
     #[test]
     fn a_restart_requested_between_a_deliverys_clear_and_its_end_is_sent_next() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -13750,7 +13750,7 @@ mod tests {
     /// delivers the one queued before is not lost, however the two meet: where the request came
     /// before the delivery's clear, the restart sent is both; where it came after, it stays queued
     /// and is sent next, once the carrying instance takes the announcement up.
-    /// Verifies: ADR-0030, ADR-0025
+    /// Verifies: ADR-0030, ADR-0045
     #[test]
     fn a_restart_requested_through_one_instance_while_another_delivers_one_stays_until_sent() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -13830,7 +13830,7 @@ mod tests {
     /// A label set while a report reads the Agent's record from the store, before it holds it, is
     /// not undone by what the read found: the label waits for the report, which holds the Agent's
     /// own lock, and is then taken into the record held.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_label_set_while_a_report_reads_the_record_is_not_undone() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -13878,7 +13878,7 @@ mod tests {
     /// A report whose Agent leaves memory while it reads and writes the store — forgotten through
     /// another instance — starts again from what the store holds then, and the Agent is held
     /// under a record created anew.
-    /// Verifies: ADR-0025, ADR-0030
+    /// Verifies: ADR-0045, ADR-0030
     #[test]
     fn a_report_whose_agent_leaves_memory_meanwhile_starts_again() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -13921,7 +13921,7 @@ mod tests {
 
     /// A report whose Agent leaves memory in each of its rounds is answered `Unavailable`, so the
     /// Agent retries, rather than starting again without end.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_report_whose_agent_leaves_memory_in_every_round_is_answered_unavailable() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -13976,7 +13976,7 @@ mod tests {
     /// A re-key an Agent asked for that a read again finds made before the report holds the Agent
     /// under its new identity keeps the Agent: the move is pending until then, so the read again
     /// reads it back and moves what is held, and the session goes on, its labels with it.
-    /// Verifies: ADR-0025, ADR-0030
+    /// Verifies: ADR-0045, ADR-0030
     #[test]
     fn a_rekey_a_read_again_finds_before_the_report_holds_it_keeps_the_agent() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {

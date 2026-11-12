@@ -1,4 +1,4 @@
-//! What one instance holds of the Agents it carries on a shared store (ADR-0025 clause 8): the
+//! What one instance holds of the Agents it carries on a shared store (ADR-0045 clause 8): the
 //! take and the release of an Agent, the presence it writes, the re-keys whose
 //! answer was lost, the restarts kept for retry, the take-up of what other instances announced, and
 //! the per-Agent locks. Behind the same `AppState` entry points as before.
@@ -51,7 +51,7 @@ pub(super) enum Took {
 
 /// Which connection carries an Agent a WebSocket report arrives for, as the duplicate detection
 /// sees it
-/// (ADR-0025
+/// (ADR-0045
 /// clause 8).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Carried {
@@ -283,7 +283,7 @@ impl PresenceWritten {
 
 impl AppState {
     /// Takes up what another instance wrote to the records of Agents this one holds
-    /// (ADR-0025
+    /// (ADR-0045
     /// clauses 8 and 9): the record of each Agent of `uids` this instance holds, or of every one
     /// it holds where `uids` is `None`, is read again from the store. Its assignment, its labels and
     /// its queued restart are taken into what is held, its group is placed again for its labels,
@@ -455,7 +455,7 @@ impl AppState {
     /// Re-keys the stored record of `old` to `new`. Where the store answers an error, the move may
     /// have committed all the same, so it is read back before the Agent is answered: moved, it
     /// stands. A read back that fails leaves the pair for the Agent's next report to read back
-    /// (ADR-0025
+    /// (ADR-0045
     /// clause 10).
     pub(super) fn rekey_reading_back(
         &self,
@@ -589,7 +589,7 @@ impl AppState {
     /// labels go with it (ADR-0030 clause 21), the old identity leaves its group, and what was
     /// written of its presence moves with the row. A put-back of its restart kept for retry moves
     /// too, so the retry queues the restart on the row's new identity
-    /// (ADR-0025
+    /// (ADR-0045
     /// clause 8).
     pub(super) fn rekey_held(
         &self,
@@ -627,7 +627,7 @@ impl AppState {
     /// wherever the send is seen to fail. That holds on a lease that lapsed meanwhile too, since
     /// setting it again only restores what the Operator asked for. A put-back the store does not
     /// take is kept and tried again by [`retry_restarts`](Self::retry_restarts)
-    /// (ADR-0025
+    /// (ADR-0045
     /// clause 8).
     pub fn unsent(&self, message: &ServerToAgent) {
         let restart = opamp::proto::CommandType::Restart as i32;
@@ -646,7 +646,7 @@ impl AppState {
     /// instance, with a warning naming the Agent. One whose row moved through a re-key of this
     /// instance's own not read back yet waits for the read back. The composition root calls this every second, so
     /// the intervals grow to a minute; a process that ends first loses the restarts still kept
-    /// (ADR-0025
+    /// (ADR-0045
     /// clause 8).
     pub fn retry_restarts(&self) -> usize {
         for uid in self.due_restarts() {
@@ -673,7 +673,7 @@ impl AppState {
     /// restart; one whose record the store does not hold, forgotten or re-keyed through another
     /// instance, is logged and dropped, and one whose record a re-key of this instance's own whose
     /// answer was lost may have moved stays kept, for the read back to move it
-    /// (ADR-0025
+    /// (ADR-0045
     /// clause 8).
     pub(super) fn put_back(&self, uid: &InstanceUid, retry: bool) {
         let _agent = self.agent_lock(uid);
@@ -735,7 +735,7 @@ impl AppState {
     /// Takes up what another instance announced of the restarts of `uids`, every Agent where a
     /// notification was missed: a request there is this restart now, so a put-back still kept is
     /// dropped. After a missed notification only one whose record shows a restart queued is
-    /// (ADR-0025
+    /// (ADR-0045
     /// clause 8).
     ///
     /// A request announced of an Agent held here is read under the Agent's own lock and held: a
@@ -809,7 +809,7 @@ impl AppState {
 
     /// Drops the put-back of `uid`'s restart kept for retry, if one is: what a request, a delivery
     /// and a forget of the Agent do
-    /// (ADR-0025
+    /// (ADR-0045
     /// clause 8).
     pub(super) fn drop_kept_restart(&self, uid: &InstanceUid) {
         self.unput_restarts
@@ -922,7 +922,7 @@ impl AppState {
     /// are written again. An Agent whose take's answer was lost and that disconnected since has its
     /// holder and count of takes read first, and its disconnect is written under that count where
     /// the row names `holder` and the Agent was not taken here again since it was looked at
-    /// (ADR-0025
+    /// (ADR-0045
     /// clause 8). Read under the fleet lock and written after it is released, so no report waits
     /// for the batch; its answers are kept only of the Agents nothing was kept of anew meanwhile. A
     /// batch that fails is written again with the next one. Answers how many it wrote.
@@ -1018,7 +1018,7 @@ impl AppState {
     /// holder, so that no other instance forgets it as not connected while the next batch is due
     /// (ADR-0030 clause 11), and so that an instance that
     /// carried it before stops carrying it
-    /// (ADR-0025
+    /// (ADR-0045
     /// clause 8): one write per connect, never per heartbeat. A take that makes the Agent's holder
     /// change more than ten times within a minute is logged as a likely duplicate. Without a lease
     /// nothing is written. One that fails is logged, and the next batch writes it, where no other
@@ -1086,7 +1086,7 @@ impl AppState {
 
     /// Stops carrying each Agent of `uids`, every one this instance carries where `None`, whose
     /// stored presence no longer names this instance as its holder: another instance took it
-    /// (ADR-0025
+    /// (ADR-0045
     /// clause 8). It is held as on a closed connection, and its disconnect is not written, since
     /// the row is the other instance's. An Agent the row still names is kept, so of two instances
     /// that take one Agent at once only the one the row does not name stops carrying it. The

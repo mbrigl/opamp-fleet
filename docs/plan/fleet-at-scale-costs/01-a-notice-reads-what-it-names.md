@@ -32,7 +32,7 @@ only if the load test of several-server-instances ticket 14 misses its target fo
 
 ## Read first
 
-- ADR-0025 clauses 9, 10 and 12
+- ADR-0045 clauses 9, 10 and 12
 - `fleet.rs` `take_up_agents`; `configs.rs`, `deployments.rs`, `packages.rs` `reload`;
   `instance.rs` `follow`; `revocation.rs` the reload read
 - Seam: the coordination tests in `tests/instances.rs`; the load test of ticket 14 measures it

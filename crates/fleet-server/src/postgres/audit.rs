@@ -415,7 +415,7 @@ impl Ended {
 
 /// Closes the chain of the lease `chain` taken over, for the instance whose own chain is
 /// `closed_by`
-/// (ADR-0025
+/// (ADR-0045
 /// clause 18): `audit.chain_closed` with the `reason` `ended` names after its last entry, and that
 /// entry's hash and the time in its record
 /// (ADR-0029
@@ -1191,7 +1191,7 @@ mod tests {
     /// its lapsed lease, at a take or at a renewal, closes it with `audit.chain_closed`, `reason`
     /// `lease_lapsed` and `closed_by` its own chain, and from then on the store refuses the dead
     /// chain an entry. Two instances that try at once take it over once.
-    /// Verifies: ADR-0029, ADR-0025
+    /// Verifies: ADR-0029, ADR-0045
     #[test]
     fn the_instance_that_takes_over_a_lapsed_lease_closes_its_chain() {
         let Some(test) = TestDatabase::named() else {

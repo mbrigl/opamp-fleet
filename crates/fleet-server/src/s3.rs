@@ -1052,7 +1052,7 @@ pub(crate) mod tests {
     /// more. Two instances that clean up at once delete such an object once: the second waits for
     /// the first's hold on the blob store's lock and then finds nothing
     /// (ADR-0023 clauses 14 and 16).
-    /// Verifies: ADR-0023, ADR-0025
+    /// Verifies: ADR-0023, ADR-0045
     #[test]
     fn the_next_sweep_on_any_instance_deletes_a_released_leases_staging_object_once() {
         use crate::packages::{PackageId, PackageStore, Platform};

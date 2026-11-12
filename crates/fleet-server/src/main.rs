@@ -615,7 +615,7 @@ fn main() {
 async fn serve() {
     // The log goes to stderr, so that stdout carries only what a command prints as its result.
     // On PostgreSQL each line names the instance id of the lease the instance holds (clause 1 of
-    // ADR-0025).
+    // ADR-0045).
     let logged = fleet_server::instance::LoggedId::default();
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
@@ -633,7 +633,7 @@ async fn serve() {
     opamp::tls::install_ring_provider();
 
     // The clock a lease and a sweep measure on counts a suspend of the host
-    // (ADR-0025
+    // (ADR-0045
     // clause 3), handed to the package store and the lease.
     let elapsed = since_boot().unwrap_or_else(fleet_server::clock::Elapsed::monotonic);
 
@@ -661,7 +661,7 @@ async fn serve() {
     };
     // On PostgreSQL the instance id is made as soon as the store is known, so that every line
     // from here on names it, and the first lease is taken under it (clause 1 of
-    // ADR-0025).
+    // ADR-0045).
     let instance_id = if config.database.postgres().is_some() {
         match fleet_server::postgres::lease::new_instance_id() {
             Ok(id) => {
@@ -895,7 +895,7 @@ async fn serve() {
     }
     // With PostgreSQL, a lease before anything is decided and before either listener opens
     // (clauses 1 to 3 of
-    // ADR-0025):
+    // ADR-0045):
     // the audit chain is the lease's.
     let lease = match &records {
         fleet_server::Records::Postgres(database) => {
@@ -1172,7 +1172,7 @@ async fn serve() {
     let operators = fleet_server::operator_app(state.clone(), operator_auth);
 
     // The revocations, and every other change, of the other instances followed (clauses 9 to 11
-    // of ADR-0025),
+    // of ADR-0045),
     // and the presence of the Agents this instance carries written in batches under its lease
     // (ADR-0030 clause 4).
     let presence = match (&lease, &records) {
@@ -1191,7 +1191,7 @@ async fn serve() {
     };
     // A restart whose command was not sent and whose put-back failed is tried again until it
     // holds, on every store
-    // (ADR-0025
+    // (ADR-0045
     // clause 8).
     fleet_server::instance::retry_restarts(state.clone());
     // The handlers are installed before either plane is bound and logged as served, so a stop
@@ -1225,7 +1225,7 @@ async fn serve() {
     }
     // A new lease that found a schema a newer Server migrated stops the instance as a failed
     // start does, naming both versions
-    // (ADR-0025
+    // (ADR-0045
     // clause 16).
     if let fleet_server::Records::Postgres(database) = &records {
         if let Some(refusal) = database.outdated() {
@@ -1236,7 +1236,7 @@ async fn serve() {
     // number, so the ordinary restart restores a fleet without gaps or false silence.
     state.flush_agents();
     // And the presence of every Agent, its sessions ended by the drain, before the lease goes
-    // (ADR-0025
+    // (ADR-0045
     // clause 3): once the periodic batches stopped, so none commits after it.
     if let Some(presence) = presence {
         presence.stop().await;
@@ -1472,7 +1472,7 @@ mod tests {
 
     /// On Linux the lease's clock is `CLOCK_BOOTTIME`: it reads, it moves on as time passes, and it
     /// counts at least as much as the monotonic clock, which a suspend would leave behind.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[cfg(target_os = "linux")]
     #[test]
     fn the_leases_clock_is_the_one_that_counts_a_suspend() {

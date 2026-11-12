@@ -362,7 +362,7 @@ impl DeploymentStore {
 
     /// Reads every Deployment again from the backend, as another instance wrote one or changed its
     /// members
-    /// (ADR-0025
+    /// (ADR-0045
     /// clause 12): what is held is dropped and what is stored taken in its place. It reads under
     /// the lock, so no write of this instance's own lands between the read and the swap.
     ///

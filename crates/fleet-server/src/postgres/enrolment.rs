@@ -3,7 +3,7 @@
 //! request in a row of its own. Each act is one transaction on the rows it names, written before
 //! it is answered; taking a request in holds the queue against every other taker while it counts,
 //! so the queue's bounds hold for every instance on the database
-//! (ADR-0025
+//! (ADR-0045
 //! clause 19).
 
 use std::sync::Arc;
@@ -884,7 +884,7 @@ mod tests {
         acts(&|| Box::new(FsEnrolmentStore::open(dir.path())));
     }
 
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn the_enrolment_acts_hold_on_postgres() {
         let Some(test) = TestDatabase::named() else {
@@ -897,7 +897,7 @@ mod tests {
     /// Two instances take a request each into a queue with one place left, behind a barrier, and
     /// exactly one is taken while the other finds the queue full; two deciding one request decide
     /// it once.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn two_takers_at_the_queues_bound_take_one_request_between_them() {
         let Some(test) = TestDatabase::named() else {
@@ -1102,7 +1102,7 @@ mod tests {
     /// decided, signing nothing: the request's row is held from before the signature until the
     /// decision is written. The other finds it still being decided instead when it waited out
     /// its `lock_timeout`, as on a database slowed by load.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn two_approvers_of_one_request_sign_it_once() {
         let Some(test) = TestDatabase::named() else {
@@ -1172,7 +1172,7 @@ mod tests {
     /// A withdrawal of a request whose bootstrap certificate the list names announces itself in the
     /// call that commits it: where that call loses its answer, the instance is handed the
     /// notification, so it reads its queue again.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_withdrawal_whose_commit_lost_its_answer_is_handed_on() {
         let Some(test) = TestDatabase::named() else {
@@ -1295,7 +1295,7 @@ mod tests {
     /// Two instances on one database approving one request: one hands it out, the other answers
     /// that it is not found, or that it is being decided when it waited out its `lock_timeout`,
     /// and the request is signed and recorded once.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn two_instances_approving_one_request_record_one_certificate() {
         use crate::enrolment::tests::{request as submitted, requester, Echo, Manual};
@@ -1372,7 +1372,7 @@ mod tests {
 
     /// A take that read the window open before another instance closed it does not land in the
     /// closed window: the window's row is held for share while the request is written.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_take_does_not_land_in_a_window_closed_meanwhile() {
         let Some(test) = TestDatabase::named() else {
@@ -1550,7 +1550,7 @@ mod tests {
     /// for longer than a wait for a lock lasts, is answered that the request is being decided, and
     /// signs nothing; the other instance's approval stands, and once it is written the request is
     /// no longer waiting.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_decision_on_a_request_another_instance_holds_long_is_answered_deciding() {
         let Some(test) = TestDatabase::named() else {
@@ -1960,7 +1960,7 @@ mod tests {
 
     /// Two instances approve one request, and the first one's commit fails: the second, which
     /// waited for the request's row, signs it once when the first rolls back, and the request ends
-    /// decided once, with one certificate in the register (ADR-0023 clause 9, ADR-0025 clause 19).
+    /// decided once, with one certificate in the register (ADR-0023 clause 9, ADR-0045 clause 19).
     /// Verifies: ADR-0023
     #[test]
     fn two_instances_approving_one_request_whose_first_commit_fails_sign_it_once_more() {

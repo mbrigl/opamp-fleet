@@ -13,7 +13,7 @@ takes is not, or not at all:
   checks that a new downstream peer is admitted afterwards
 - the takeover signal on the re-take path (`instance.rs`, a new lease after a lost one whose take
   removed lapsed leases) is reached by no test
-- the bound of the enrolment queue counted across instances, which ADR-0025's Enforcement lists,
+- the bound of the enrolment queue counted across instances, which ADR-0045's Enforcement lists,
   has no test in `tests/instances.rs` that could be found
 
 Each gets a test through the route, beside or instead of the seam.
@@ -32,7 +32,7 @@ Each gets a test through the route, beside or instead of the seam.
 
 ## Read first
 
-- ADR-0025 clauses 3, 9 and 10 and its Enforcement; ADR-0040 on the Gateways' list
+- ADR-0045 clauses 3, 9 and 10 and its Enforcement; ADR-0040 on the Gateways' list
 - Golden path: `tests/instances.rs` and its two-instance harness
 
 ## Blocked by

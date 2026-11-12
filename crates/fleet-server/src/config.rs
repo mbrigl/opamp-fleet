@@ -117,7 +117,7 @@ pub struct ServerConfig {
     pub max_new_connections_per_sec: u32,
     /// How long an orderly shutdown spreads the closing of the WebSocket sessions over, in seconds,
     /// from 0 to 300; 0 closes them all at once
-    /// (ADR-0025
+    /// (ADR-0045
     /// clause 3).
     #[serde(default = "default_drain_secs")]
     pub drain_secs: u64,
@@ -564,7 +564,7 @@ pub struct DatabaseConfig {
     /// The database, when `store = "postgres"`; refused beside `store = "fs"`.
     pub postgres: Option<PostgresConfig>,
     /// How often an instance renews its lease, in seconds; PostgreSQL only
-    /// (ADR-0025
+    /// (ADR-0045
     /// clause 3).
     pub lease_renew_secs: Option<u64>,
     /// How long after its last renewal a lease lapses, in seconds, at least three renewals;
@@ -608,7 +608,7 @@ const DEFAULT_PRESENCE_INTERVAL_SECS: u64 = 30;
 const PRESENCE_INTERVAL_SECS: std::ops::RangeInclusive<u64> = 10..=60;
 
 /// The lease every instance on PostgreSQL holds while it serves
-/// (ADR-0025
+/// (ADR-0045
 /// clause 3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LeaseTimes {
@@ -3252,7 +3252,7 @@ mod tests {
 
     /// The rate of new Agent-plane connections defaults to 200 a second and the drain to 20
     /// seconds; a rate of zero and a drain past 300 seconds fail startup naming the key.
-    /// Verifies: ADR-0012, ADR-0025
+    /// Verifies: ADR-0012, ADR-0045
     #[test]
     fn the_new_connection_rate_and_the_drain_are_bounded() {
         let load = |keys: &str| {
@@ -3377,7 +3377,7 @@ mod tests {
 
     /// An instance must be alone on its database while it keeps its blobs as files or a CA key in a
     /// file, and names the key; with the blobs in S3 and no CA key on the Server it shares it.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn an_instance_with_files_of_its_own_must_be_alone() {
         let s3 = "[blobs]\nstore = \"s3\"\n[blobs.s3]\nendpoint = \"https://s3.example\"\n\
@@ -3462,7 +3462,7 @@ mod tests {
     /// each one set fails startup naming it; with PostgreSQL they default to 10, 30 and 30 seconds,
     /// and a lease shorter than three renewals, a renewal of zero, or a presence interval outside 10
     /// to 60 seconds fails naming the key.
-    /// Verifies: ADR-0025, ADR-0030
+    /// Verifies: ADR-0045, ADR-0030
     #[test]
     fn the_lease_keys_apply_to_postgresql_alone() {
         let load = |database: &str| {

@@ -36,7 +36,7 @@ It does not block G-20.
 - `crates/fleet-server/src/postgres/agents.rs`, the presence batch and its two statements
 - `crates/fleet-server/src/postgres/mod.rs`, `run_writing` and the pool's `Cached` statements
 - `crates/fleet-server/tests/g20.rs`, `FLEET_G20_STEADY` and the load test's acts
-- ADR-0025, its clauses on presence batches
+- ADR-0045, its clauses on presence batches
 
 ## Blocked by
 

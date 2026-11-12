@@ -53,7 +53,7 @@ use fs::{FsAgentStore, FsBlobStore, FsConfigBackend, FsDeploymentBackend, FsPack
 /// Whether an instance on PostgreSQL must be alone on its database, and the key that makes it so:
 /// blobs kept as files, or a CA key in a file. A CA key named by its label on a token makes it
 /// alone no more
-/// (ADR-0025
+/// (ADR-0045
 /// clause 2, ADR-0043
 /// clause 14).
 #[must_use]
