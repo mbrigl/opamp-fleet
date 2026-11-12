@@ -521,7 +521,11 @@ impl AgentState {
                     }
                 }
             } else {
-                self.apply(remote_config);
+                // A repeat of the hash applying or applied is only reported (clause 56 of
+                // ADR-draft-supervisor-mode-and-its-kinds-and-a-repeated-offer-is-applied-once).
+                if !self.report_a_repeated_offer(&remote_config.config_hash) {
+                    self.apply(remote_config);
+                }
                 handled.send_report = true;
             }
         }
@@ -2825,6 +2829,166 @@ mod tests {
         let status = report.remote_config_status.expect("status");
         assert_eq!(status.last_remote_config_hash, b"hash-1");
         assert_eq!(status.status, RemoteConfigStatuses::Applied as i32);
+    }
+
+    /// Offers `hash` to `agent` and says whether the offer was handed over for an apply.
+    fn config_offered(agent: &mut AgentState, hash: &[u8]) -> bool {
+        let handled = agent.handle(&ServerToAgent {
+            remote_config: Some(remote_config(b"x: 1\n", hash)),
+            ..Default::default()
+        });
+        assert!(handled.send_report, "an offer is answered at once");
+        agent.take_pending_apply().is_some()
+    }
+
+    /// The remote configuration status `agent`'s next report carries.
+    fn config_status_reported(agent: &mut AgentState) -> (RemoteConfigStatuses, Vec<u8>) {
+        let status = agent
+            .next_report()
+            .remote_config_status
+            .expect("a remote configuration status");
+        (
+            RemoteConfigStatuses::try_from(status.status).expect("a known status"),
+            status.last_remote_config_hash,
+        )
+    }
+
+    /// A Server answers a heartbeat that crossed its push with the offer again: the repeat of the
+    /// hash a Supervisor's Agent is applying hands nothing to the process adapter, so the Managed
+    /// Process is started once, and the next report carries `APPLYING` again.
+    /// Verifies: ADR-draft-supervisor-mode-and-its-kinds-and-a-repeated-offer-is-applied-once
+    #[test]
+    fn a_repeated_offer_of_the_hash_applying_is_reported_not_applied() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut agent = supervised_agent(dir.path());
+        let _ = agent.next_report();
+        assert!(config_offered(&mut agent, b"hash-1"));
+        assert_eq!(
+            config_status_reported(&mut agent),
+            (RemoteConfigStatuses::Applying, b"hash-1".to_vec())
+        );
+
+        assert!(
+            !config_offered(&mut agent, b"hash-1"),
+            "the repeat is not handed to the process adapter"
+        );
+        assert_eq!(
+            config_status_reported(&mut agent),
+            (RemoteConfigStatuses::Applying, b"hash-1".to_vec()),
+            "the status it holds is reported again"
+        );
+    }
+
+    /// Once applied and reported, a repeat of the hash restarts nothing and reports `APPLIED`
+    /// again.
+    /// Verifies: ADR-draft-supervisor-mode-and-its-kinds-and-a-repeated-offer-is-applied-once
+    #[test]
+    fn a_repeated_offer_of_the_hash_applied_restarts_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut agent = supervised_agent(dir.path());
+        let _ = agent.next_report();
+        assert!(config_offered(&mut agent, b"hash-1"));
+        agent.config_applied(b"hash-1".to_vec(), Ok(()));
+        assert_eq!(
+            config_status_reported(&mut agent),
+            (RemoteConfigStatuses::Applied, b"hash-1".to_vec())
+        );
+
+        assert!(
+            !config_offered(&mut agent, b"hash-1"),
+            "nothing is restarted"
+        );
+        assert_eq!(
+            config_status_reported(&mut agent),
+            (RemoteConfigStatuses::Applied, b"hash-1".to_vec()),
+            "APPLIED is reported again"
+        );
+    }
+
+    /// The Client's own Agent takes a repeat of its Supervisor set the same way: applying or
+    /// applied, the set is handed to the Supervisor-set apply once.
+    /// Verifies: ADR-draft-supervisor-mode-and-its-kinds-and-a-repeated-offer-is-applied-once
+    #[test]
+    fn the_client_agent_applies_a_repeated_offer_of_its_set_once() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut agent = make_agent(dir.path());
+        let _ = agent.next_report();
+        assert!(config_offered(&mut agent, b"set-1"));
+        assert!(
+            !config_offered(&mut agent, b"set-1"),
+            "not again while applying"
+        );
+        assert_eq!(
+            config_status_reported(&mut agent),
+            (RemoteConfigStatuses::Applying, b"set-1".to_vec())
+        );
+
+        agent.config_applied(b"set-1".to_vec(), Ok(()));
+        let _ = agent.next_report();
+        assert!(
+            !config_offered(&mut agent, b"set-1"),
+            "not again once applied"
+        );
+        assert_eq!(
+            config_status_reported(&mut agent),
+            (RemoteConfigStatuses::Applied, b"set-1".to_vec())
+        );
+    }
+
+    /// An offer of another hash while one is applying is taken as before: handed over behind the
+    /// first, which the process adapter's queue applies in order.
+    /// Verifies: ADR-draft-supervisor-mode-and-its-kinds-and-a-repeated-offer-is-applied-once
+    #[test]
+    fn an_offer_of_another_hash_is_applied_after_the_one_applying() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut agent = supervised_agent(dir.path());
+        let _ = agent.next_report();
+        assert!(config_offered(&mut agent, b"hash-1"));
+        let _ = agent.next_report();
+
+        let handled = agent.handle(&ServerToAgent {
+            remote_config: Some(remote_config(b"x: 2\n", b"hash-2")),
+            ..Default::default()
+        });
+        assert!(handled.send_report);
+        let pending = agent
+            .take_pending_apply()
+            .expect("the second hash is handed over");
+        assert_eq!(pending.config_hash, b"hash-2");
+        assert_eq!(
+            config_status_reported(&mut agent),
+            (RemoteConfigStatuses::Applying, b"hash-2".to_vec())
+        );
+    }
+
+    /// A hash whose apply failed is applied again when offered again, so a host repaired after
+    /// the failure takes it once more; for a Supervisor's Agent and for the Client's own.
+    /// Verifies: ADR-draft-supervisor-mode-and-its-kinds-and-a-repeated-offer-is-applied-once
+    #[test]
+    fn a_repeated_offer_of_a_hash_that_failed_is_applied_again() {
+        let supervised_dir = tempfile::tempdir().expect("tempdir");
+        let own_dir = tempfile::tempdir().expect("tempdir");
+        for mut agent in [
+            supervised_agent(supervised_dir.path()),
+            make_agent(own_dir.path()),
+        ] {
+            let _ = agent.next_report();
+            assert!(config_offered(&mut agent, b"hash-1"));
+            agent.config_applied(b"hash-1".to_vec(), Err("it did not start".to_string()));
+            assert_eq!(
+                config_status_reported(&mut agent),
+                (RemoteConfigStatuses::Failed, b"hash-1".to_vec())
+            );
+
+            assert!(
+                config_offered(&mut agent, b"hash-1"),
+                "the failed hash is applied again"
+            );
+            assert_eq!(
+                config_status_reported(&mut agent),
+                (RemoteConfigStatuses::Applying, b"hash-1".to_vec())
+            );
+        }
     }
 
     #[test]

@@ -2,7 +2,7 @@
 //! the process adapter, and its outcome reported.
 
 use opamp::proto::{AgentRemoteConfig, RemoteConfigStatus, RemoteConfigStatuses};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use super::AgentState;
 
@@ -48,6 +48,26 @@ impl AgentState {
             RemoteConfigStatuses::Applying,
             reason.to_string(),
         ));
+    }
+
+    /// An offer of the hash this Agent is applying or has applied is a report, not an apply
+    /// (ADR-draft-supervisor-mode-and-its-kinds-and-a-repeated-offer-is-applied-once, clause 56):
+    /// the status it holds is owed again and nothing is stored, handed over or restarted. A Server answers a heartbeat that crossed its push with the offer again, so
+    /// one offer arriving twice is the normal case. A hash whose apply `FAILED` is not held this
+    /// way and is applied again. Returns whether `hash` was such a repeat.
+    pub(super) fn report_a_repeated_offer(&mut self, hash: &[u8]) -> bool {
+        let Some(held) = self.protocol.remote_config_status() else {
+            return false;
+        };
+        let applying_or_applied = held.status == RemoteConfigStatuses::Applying as i32
+            || held.status == RemoteConfigStatuses::Applied as i32;
+        if !applying_or_applied || held.last_remote_config_hash != hash {
+            return false;
+        }
+        debug!(hash = %hex::encode(hash), "remote configuration offered again; reporting its status");
+        let held = held.clone();
+        self.protocol.set_remote_config_status(held);
+        true
     }
 
     /// Takes an offered configuration in and reports `APPLYING`; the outcome closes the

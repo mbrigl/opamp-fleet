@@ -50,6 +50,106 @@ async fn spawn_server() -> (std::net::SocketAddr, Arc<AppState>, tempfile::TempD
     (addr, state, dir)
 }
 
+/// A loopback relay between the Client and the Server that holds back the OpAMP messages the
+/// Server sends while `held` is true, and lets everything the Client sends through. Closed across
+/// a rollout, it delays the Server's push past the heartbeats the Client sends meanwhile, which
+/// still name the old hash and which the Server answers with the offer again: the race of a loaded
+/// host, made certain. WebSocket control frames pass while it holds, so the Client's pings are
+/// answered and it keeps the connection (ADR-0015).
+async fn spawn_relay(
+    server: std::net::SocketAddr,
+) -> (std::net::SocketAddr, tokio::sync::watch::Sender<bool>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind the relay");
+    let addr = listener.local_addr().expect("the relay's address");
+    let (held, _) = tokio::sync::watch::channel(false);
+    let gate = held.clone();
+    tokio::spawn(async move {
+        while let Ok((client, _)) = listener.accept().await {
+            let Ok(upstream) = tokio::net::TcpStream::connect(server).await else {
+                continue;
+            };
+            let (mut from_client, to_client) = client.into_split();
+            let (from_server, mut to_server) = upstream.into_split();
+            tokio::spawn(async move {
+                let _ = tokio::io::copy(&mut from_client, &mut to_server).await;
+            });
+            tokio::spawn(relay_from_server(from_server, to_client, gate.subscribe()));
+        }
+    });
+    (addr, held)
+}
+
+/// The Server's half of [`spawn_relay`]: the upgrade response as it comes, then frame by frame,
+/// the data frames queued while `held` says so and sent in order once it no longer does.
+async fn relay_from_server(
+    mut from_server: tokio::net::tcp::OwnedReadHalf,
+    mut to_client: tokio::net::tcp::OwnedWriteHalf,
+    mut held: tokio::sync::watch::Receiver<bool>,
+) {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut unread: Vec<u8> = Vec::new();
+    let mut queued: Vec<u8> = Vec::new();
+    let mut upgraded = false;
+    let mut gate_open = true;
+    loop {
+        tokio::select! {
+            read = from_server.read(&mut buf) => match read {
+                Ok(0) | Err(_) => break,
+                Ok(n) => unread.extend_from_slice(&buf[..n]),
+            },
+            changed = held.changed(), if gate_open => gate_open = changed.is_ok(),
+        }
+        let holding = gate_open && *held.borrow_and_update();
+        let mut out = Vec::new();
+        if !upgraded {
+            let Some(end) = unread.windows(4).position(|w| w == b"\r\n\r\n") else {
+                continue;
+            };
+            out.extend(unread.drain(..end + 4));
+            upgraded = true;
+        }
+        if !holding {
+            out.append(&mut queued);
+        }
+        while let Some(len) = frame_len(&unread) {
+            let frame: Vec<u8> = unread.drain(..len).collect();
+            let control = (frame[0] & 0x0f) >= 0x8;
+            if holding && !control {
+                queued.extend(frame);
+            } else {
+                out.extend(frame);
+            }
+        }
+        if to_client.write_all(&out).await.is_err() {
+            break;
+        }
+    }
+    let _ = to_client.shutdown().await;
+}
+
+/// The length of the WebSocket frame `bytes` start with (RFC 6455, section 5.2), once all of it
+/// is there.
+fn frame_len(bytes: &[u8]) -> Option<usize> {
+    let second = *bytes.get(1)?;
+    let (payload, header) = match second & 0x7f {
+        126 => (
+            usize::from(u16::from_be_bytes(bytes.get(2..4)?.try_into().ok()?)),
+            4,
+        ),
+        127 => (
+            usize::try_from(u64::from_be_bytes(bytes.get(2..10)?.try_into().ok()?)).ok()?,
+            10,
+        ),
+        short => (usize::from(short), 2),
+    };
+    let mask = if second & 0x80 == 0 { 0 } else { 4 };
+    let total = header + mask + payload;
+    (bytes.len() >= total).then_some(total)
+}
+
 fn spawn_client(config_path: &Path) -> ClientUnderTest {
     ClientUnderTest(
         Command::new(env!("CARGO_BIN_EXE_supervisor"))
@@ -112,11 +212,16 @@ fn stage_owned_program(state_dir: &Path, supervisor: &str, program: &str) {
 }
 
 // Verifies: ADR-0018, ADR-0016, G-1, G-6, G-7, G-14
+// Verifies: ADR-draft-supervisor-mode-and-its-kinds-and-a-repeated-offer-is-applied-once
 #[tokio::test]
 async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
-    let (addr, state, dir) = spawn_server().await;
+    let (server_addr, state, dir) = spawn_server().await;
+    // The Client reaches the Server through a relay that can hold back the Server's push.
+    let (addr, push_held) = spawn_relay(server_addr).await;
     let state_dir: PathBuf = dir.path().join("client-state");
     let stub_marker = dir.path().join("stub-marker");
+    // Every run of the stub, one line each: how often its process was started.
+    let stub_runs = dir.path().join("stub-runs");
     let otelcol_marker = dir.path().join("otelcol-marker");
 
     let program = stub_program_name();
@@ -137,11 +242,12 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
             "type = \"command\"\n",
             "name = \"stub\"\n",
             "command = {program:?}\n",
-            "args = [\"--touch\", {stub_marker:?}]\n",
+            "args = [\"--touch\", {stub_marker:?}, \"--log-pid\", {stub_runs:?}]\n",
             "version_args = [\"--version\"]\n",
         ),
         program = program,
         stub_marker = stub_marker.to_string_lossy(),
+        stub_runs = stub_runs.to_string_lossy(),
     );
     let toml = format!(
         concat!(
@@ -221,9 +327,37 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
     // because saving alone distributes nothing (ADR-0033); the act assigns every Agent
     // the Deployment claims, fits each Configuration to its type, and the Server pushes the
     // release over the socket.
+    //
+    // The push is held back until each Supervisor's Agent has sent a heartbeat after the rollout.
+    // Those heartbeats still name the old hash, so the Server answers them with the offer again,
+    // and the same hash reaches each Agent twice: the second is a report, not a second apply
+    // (ADR-draft-supervisor-mode-and-its-kinds-and-a-repeated-offer-is-applied-once, clause 56).
     common::save(&state, "fleet", "receivers: {}\n", otelcol_type);
     common::save(&state, "client-yaml", "receivers: {}\n", "supervisor");
+    push_held.send_replace(true);
     common::release_to_every_agent(&state, &["fleet", "client-yaml"]);
+    let rolled_out: Vec<(String, u64)> = state
+        .snapshot()
+        .iter()
+        .filter(|a| ["otelcol", "stub"].contains(&a.service_instance_name.as_str()))
+        .map(|a| (a.instance_uid.clone(), a.sequence_num))
+        .collect();
+    wait_until(
+        "a heartbeat from each supervised agent after the rollout",
+        || {
+            let snapshot = state.snapshot();
+            rolled_out
+                .iter()
+                .all(|(uid, seq)| {
+                    snapshot
+                        .iter()
+                        .any(|a| &a.instance_uid == uid && a.sequence_num > *seq)
+                })
+                .then_some(())
+        },
+    )
+    .await;
+    push_held.send_replace(false);
 
     // Both Supervisors acknowledge APPLIED and are in sync; the processes restarted on the
     // files. The Client's own Agent receives the one typed for it — its configuration is its
@@ -359,6 +493,15 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
         (otelcol.in_sync && otelcol.matched_configurations == ["fleet"]).then_some(())
     })
     .await;
+    // The stub ran three times: at the start, on the fleet configuration offered twice, and on
+    // the edge one. The edge apply waits in the process adapter's queue behind any apply before
+    // it, so a second apply of the fleet configuration would have started the stub by now.
+    let runs = std::fs::read_to_string(&stub_runs).expect("the stub's runs");
+    assert_eq!(
+        runs.lines().count(),
+        3,
+        "a configuration offered twice is applied once: {runs}"
+    );
     let stub_extra = state_dir.join("supervisors/stub/config/edge-extra");
     assert_eq!(
         std::fs::read_to_string(stub_extra).expect("the stub's second entry file"),
