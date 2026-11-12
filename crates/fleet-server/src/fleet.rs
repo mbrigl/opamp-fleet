@@ -5775,19 +5775,11 @@ fn inherit(
         })
         .collect();
     clients.extend(elsewhere.iter().map(|(uid, labels)| (*uid, labels)));
-    let (client_agent, labels) = match clients.as_slice() {
-        [(one, labels)] => (Some(*one), (*labels).clone()),
-        _ => (None, BTreeMap::new()),
-    };
-    let ambiguous = clients.len() > 1;
-    for uid in members {
-        if let Some(record) = fleet.get_mut(uid) {
+    let placed = crate::listing::place_group(members.iter().copied(), &clients);
+    for (uid, (client_agent, ambiguous, inherited)) in placed {
+        if let Some(record) = fleet.get_mut(&uid) {
             record.placement.client_agent = client_agent;
-            record.placement.inherited = if client_agent == Some(*uid) {
-                BTreeMap::new()
-            } else {
-                labels.clone()
-            };
+            record.placement.inherited = inherited;
             record.placement.ambiguous = ambiguous;
         }
     }

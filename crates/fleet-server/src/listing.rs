@@ -505,28 +505,43 @@ pub fn place_on_host(
     }
     let mut placed = std::collections::HashMap::new();
     for members in groups.values() {
-        let clients: Vec<usize> = members
+        let clients: Vec<(InstanceUid, &BTreeMap<String, String>)> = members
             .iter()
-            .copied()
-            .filter(|i| crate::labels::is_client_agent(agents[*i].1))
+            .filter(|i| crate::labels::is_client_agent(agents[**i].1))
+            .map(|i| (agents[*i].0, agents[*i].2))
             .collect();
-        let client = match clients.as_slice() {
-            [one] => Some(*one),
-            _ => None,
-        };
-        for i in members {
-            let (uid, _, _) = agents[*i];
-            let inherited = match client {
-                Some(c) if c != *i => agents[c].2.clone(),
-                _ => BTreeMap::new(),
-            };
-            placed.insert(
-                uid,
-                (client.map(|c| agents[c].0), clients.len() > 1, inherited),
-            );
-        }
+        placed.extend(place_group(members.iter().map(|i| agents[*i].0), &clients));
     }
     placed
+}
+
+/// The one rule of ADR-0030 clause 19, for one group: `members` placed by the group's Client Agents
+/// `clients`, with their labels. Exactly one places every member under it, and the others inherit
+/// its labels; more place nobody and mark every member ambiguous; none places nobody. Answers each
+/// member's Client Agent, whether the group is ambiguous, and the labels it inherits. What the
+/// fleet holds in memory and what a page reads from the store are both placed by it.
+#[must_use]
+pub fn place_group(
+    members: impl IntoIterator<Item = InstanceUid>,
+    clients: &[(InstanceUid, &BTreeMap<String, String>)],
+) -> Vec<(InstanceUid, Placed)> {
+    let (client, labels) = match clients {
+        [(one, labels)] => (Some(*one), (*labels).clone()),
+        _ => (None, BTreeMap::new()),
+    };
+    let ambiguous = clients.len() > 1;
+    members
+        .into_iter()
+        .map(|uid| {
+            // Empty where no one Client Agent places the group.
+            let inherited = if client != Some(uid) {
+                labels.clone()
+            } else {
+                BTreeMap::new()
+            };
+            (uid, (client, ambiguous, inherited))
+        })
+        .collect()
 }
 
 /// The Selector of a `selector` parameter: `key=value` pairs separated by commas, `None` when a
@@ -554,6 +569,35 @@ mod tests {
             key: Key::Int(key),
             tiebreak: tiebreak.to_string(),
         }
+    }
+
+    /// The one rule for a group: one Client Agent places every member and the others inherit its
+    /// labels; several place nobody and mark every member ambiguous; none places nobody.
+    /// Verifies: ADR-0030
+    #[test]
+    fn a_group_is_placed_by_its_one_client_agent_and_by_no_other() {
+        let (client, other, member) = (
+            InstanceUid([1; 16]),
+            InstanceUid([2; 16]),
+            InstanceUid([3; 16]),
+        );
+        let labels = BTreeMap::from([("tier".to_string(), "edge".to_string())]);
+        let none = BTreeMap::new();
+        let placed: std::collections::HashMap<_, _> =
+            place_group([client, member], &[(client, &labels)])
+                .into_iter()
+                .collect();
+        assert_eq!(placed[&client], (Some(client), false, none.clone()));
+        assert_eq!(placed[&member], (Some(client), false, labels.clone()));
+        let placed: std::collections::HashMap<_, _> = place_group(
+            [client, other, member],
+            &[(client, &labels), (other, &labels)],
+        )
+        .into_iter()
+        .collect();
+        assert!(placed.values().all(|p| *p == (None, true, none.clone())));
+        let placed = place_group([member], &[]);
+        assert_eq!(placed, [(member, (None, false, none))]);
     }
 
     /// Pages follow each other without a gap or a repeat, ties broken by the tiebreak, in either
