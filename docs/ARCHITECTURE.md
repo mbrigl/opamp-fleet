@@ -85,8 +85,8 @@ Five crates in one workspace ([ADR-0008](adr/0008-five-crates-on-tokio-and-axum.
 - **`fleet-core`** — what the Server and the Client implement identically beyond the protocol: the
   version, the platform aliases, the statements a package signature and a floor cover
   ([ADR-0035](adr/0035-package-versions-high-water-mark-and-floor.md)), the
-  renewal proof and
-  the bootstrap proof a CSR carries — read from a CSR by the adapter `csr` — the host a
+  renewal proof (`renewal`) and the bootstrap proof (`bootstrap_proof`) a CSR carries — read from
+  a CSR by the adapter `csr` — the host a
   certificate that names none is taken for, when a certificate counts as ending, what a
   certificate is called, the token buckets the Server and a Gateway count a sender in (`rate`),
   what a client certificate is known by on the Server and on a Gateway alike — its host, its issuer
@@ -95,12 +95,14 @@ Five crates in one workspace ([ADR-0008](adr/0008-five-crates-on-tokio-and-axum.
   certificate gets in the adapter `x509::issue` — and the
   bootstrap certificate's PKCS#12 file, whose rule is core and whose reading and writing with
   `p12-keystore` is the adapter `pkcs12::file` (ADR-0027).
-- **`fleet-server`** — the Server: the fleet and its Hosts, its Configurations, labels, packages
-  and Deployments, the Agent plane and the Operator plane.
-- **`fleet-agent`** — the Client in all its modes, the program `supervisor`.
+- **`fleet-server`** — the Server: the fleet and its Hosts, its Configurations, labels and the
+  effective description Selectors match (`labels`), packages and Deployments, the Agent plane, and
+  the Operator plane, whose credential check is `credentials`.
+- **`fleet-agent`** — the Client in all its modes, the program `supervisor`, its command-line
+  surface in `cli`.
 - **`fleet-tools`** — the operator tool, the one program `opamp-fleetctl`: its `package` commands
-  fetch, pack, hash and sign package artifacts — or sign a Package's signing file from the UI
-  (ADR-0034) — its `pki` commands make the fleet's certificates (ADR-0042).
+  fetch (`fetch`), pack, hash and sign package artifacts — or sign a Package's signing file from
+  the UI (`signing`, ADR-0034) — its `pki` commands make the fleet's certificates (ADR-0042).
 
 Inside the Server and the Client the code is ports and adapters
 ([ADR-0009](adr/0009-ports-and-adapters.md)): a **core** that holds the domain and owns its
@@ -265,7 +267,9 @@ no module.
   of the four lists that page.
 - **Client supervision** — `supervisor::ports` is the Port a Plugin implements
   ([ADR-0018](adr/0018-supervisor-mode-and-its-kinds.md)), and `shutdown` the handle every task
-  stops on; the Plugins and the process runner are its adapters. How a `[[supervisor]]` block is
+  stops on; the Plugins and the process runner are its adapters, among them the two Supervisors
+  this project brings, the Collector's in `supervisor::collector` and the example Custom
+  Supervisor in `supervisor::command`. How a `[[supervisor]]` block is
   read — its plugin, program, Agent type and timings — is `supervisor::block`, and what a
   Server-delivered block may bring is `supervisor::delivered`; the registry of Plugins stays in
   `supervisor`, which knows the kinds and hands them to both, and which hands `delivered` the
@@ -334,8 +338,9 @@ no module.
   Client reports as its effective configuration.
 - **Client connection** — `tls` decides which CA and which identity are in force, and `transport`
   describes the upstream `Connection` from `supervisor.toml` and runs the Engine over it. The
-  settings verification in `connection`, the Gateway's upstream pool and its downstream listener,
-  and the Supervisor Endpoint use the same `opamp` building blocks
+  settings verification in `connection`, the Gateway's upstream pool (`gateway::pool`) and its
+  downstream listener, and the Supervisor Endpoint (`supervisor::endpoint`) use the same `opamp`
+  building blocks
   ([ADR-0008](adr/0008-five-crates-on-tokio-and-axum.md)). The Gateway's
   `revocations` keeps the list it fetches from its Server and refuses what that list names
   ([ADR-0016](adr/0016-client-modes-and-the-gateway.md)),
@@ -359,8 +364,9 @@ no module.
   ([ADR-0022](adr/0022-a-gateway-rate-limits-each-downstream-host-as-the-server-limits-a-host.md)).
 - **Client engine** — `engine` routes the Server's replies to the Agents over one connection
   ([ADR-0016](adr/0016-client-modes-and-the-gateway.md)). The transports, the Gateway, telemetry
-  and the service runtime are adapters around it.
-- **Client service** — `service::manager` registers, starts, stops and deregisters the Client's
+  (`telemetry`) and the service runtime are adapters around it.
+- **Client service** — `service` is what makes the Client an OS service, but for its log on disk.
+  `service::manager` registers, starts, stops and deregisters the Client's
   service and, where a process account is named, the second service `<PRODUCT_NAME>-agents` beside
   it, and writes both systemd units itself
   ([ADR-0021](adr/0021-the-accounts-the-service-runs-under.md)). `service::run_as`
