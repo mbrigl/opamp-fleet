@@ -86,8 +86,29 @@ impl Role {
             ca_file: variable("FLEET_TEST_POSTGRES_CA_FILE").map(Into::into),
             name: format!("fleet_test_{}", random_hex()),
         };
+        // The test makes a role of its own; a developer database whose user may not says so.
+        assert_eq!(
+            role.query(
+                "",
+                Some(
+                    "SELECT count(*) FROM pg_roles WHERE rolname = current_user \
+                     AND (rolsuper OR (rolcreaterole \
+                     AND has_database_privilege(current_database(), 'CREATE')))"
+                        .to_string()
+                ),
+            ),
+            Some(1),
+            "the FLEET_TEST_POSTGRES_USER {user} lacks CREATEROLE or CREATE on the database, which \
+             this test needs to make a role and a schema of its own: ALTER ROLE {user} CREATEROLE; \
+             GRANT CREATE ON DATABASE {dbname} TO {user}",
+            user = role.user,
+            dbname = role.dbname
+        );
+        // The schema is made for the role, which since PostgreSQL 16 its maker may do only as a
+        // member of it: a maker without SUPERUSER holds the role with ADMIN, so grants it itself.
         role.sql(&format!(
             "CREATE ROLE {name} LOGIN PASSWORD '{name}'; \
+             GRANT {name} TO CURRENT_USER; \
              CREATE SCHEMA {name} AUTHORIZATION {name};",
             name = role.name
         ));

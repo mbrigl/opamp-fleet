@@ -10,7 +10,8 @@
 # The store is named through the environment the tests read: FLEET_TEST_S3_ENDPOINT,
 # FLEET_TEST_S3_BUCKET, FLEET_TEST_S3_ACCESS_KEY_ID, and FLEET_TEST_S3_SECRET_ACCESS_KEY_FILE, or
 # FLEET_TEST_POSTGRES_HOST, _PORT, _DBNAME, _USER, _PASSWORD_FILE, and _CA_FILE; 'postgres' needs a
-# bucket named too, for a Server on both stores. Skipped is not passed: once a store is named, a test
+# bucket named too, for a Server on both stores, and runs the whole library, whose tests outside
+# the store's module open the database too. Skipped is not passed: once a store is named, a test
 # that reports it skipped fails the run.
 #
 # Usage:
@@ -23,7 +24,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 case "${1:-}" in
   s3) filter="s3::" skipped="skipped: no S3 store" named="${FLEET_TEST_S3_ENDPOINT:-}" ;;
-  postgres) filter="postgres::" skipped="skipped: no PostgreSQL" named="${FLEET_TEST_POSTGRES_HOST:-}" ;;
+  postgres) filter="" skipped="skipped: no PostgreSQL" named="${FLEET_TEST_POSTGRES_HOST:-}" ;;
   *) echo "usage: scripts/check-store.sh s3|postgres" >&2; exit 2 ;;
 esac
 if [[ -z "$named" ]]; then
