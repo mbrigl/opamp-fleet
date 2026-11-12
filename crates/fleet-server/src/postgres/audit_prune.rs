@@ -1352,6 +1352,12 @@ mod tests {
         assert!(err.contains("nothing was pruned"), "{err}");
         assert_eq!(lines(&test, &a.chain)[0].0, 1, "pruned without its record");
         test.mend("audit_entries");
+        // The writer kept the refused batch and tries it again. Written before the test ends, it
+        // cannot meet the drop of the schema, which locks the tables in another order.
+        assert!(
+            a.audit.drain(Duration::from_secs(10)),
+            "the kept audit.pruned entries are written once the record takes them"
+        );
     }
 
     /// Entries stored before the migration that adds `recorded_at` take the time their line
