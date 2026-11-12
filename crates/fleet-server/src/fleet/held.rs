@@ -400,8 +400,9 @@ impl AppState {
     /// Places again each group this instance holds members of whose Client Agent may be one of
     /// `uids` that it does not hold — the group's Client Agent now, or, of a Host, an Agent the
     /// host register binds to it — or every group where `uids` is `None`. Behind a Gateway a
-    /// Client Agent another instance carries that the group was not placed under yet is found
-    /// only where `uids` is `None`.
+    /// Client Agent another instance carries that the group was not placed under yet is found here
+    /// only where `uids` is `None`; the notice of its arrival places the group again
+    /// ([`place_hosts_again`](AppState::place_hosts_again)).
     pub(super) fn place_again_for(&self, take_up: TakeUp<'_>) {
         let uids = take_up.named();
         let Some(revocations) = &self.revocations else {

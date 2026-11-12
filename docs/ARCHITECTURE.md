@@ -168,7 +168,8 @@ no module.
   while a live lease is of a release older than the schema it leaves needs, so two consecutive
   versions run side by side. A change that concerns a live session is one `NOTIFY` of
   `postgres::notify`, sent in the transaction that commits it, or right after the commit for a
-  binding and a Host row that widen trust; each instance listens on a connection of its own, reads
+  binding and a Host row that widen trust and for a Client Agent first arrived over a Gateway's
+  Host; each instance listens on a connection of its own, reads
   its caches again rather than patching them, and counts a missed notification as every
   notification. `fleet` holds only the Agents whose connections the instance carries: the holder of
   an Agent is its row's instance, the newest connection takes it by one conditional update, and an
@@ -414,7 +415,9 @@ own, or the Gateway's behind one. `fleet` derives from it, per Agent, what its e
 adds to its report: the `fleet.host.*` values of the Host it arrived over directly, and the labels
 of its Client Agent — the Agent reporting `supervisor.kind.*` in the same group, which is the Host,
 or behind a Gateway the machine the Agents report. It keeps that placement per group and places a
-group again when a report, a label, a forget or a Gateway mark changes it, so every Selector match
+group again when a report, a label, a forget or a Gateway mark changes it, and on PostgreSQL when
+another instance announces a binding of its Host or a Client Agent arriving behind its Gateway, so
+every Selector match
 reads the same description without a fleet-wide pass
 ([ADR-0030](adr/0030-the-fleet-record-of-agents-and-hosts.md)).
 

@@ -16,6 +16,20 @@ once its tag exists.
 
 ## [0.8.3]
 
+### Fixed
+
+- **An Agent inherits the labels of a Client Agent that another instance binds or takes at once**
+  ([ADR-draft-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once](docs/adr/draft-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
+  clauses 8 and 9). On PostgreSQL, an instance that placed an Agent before another instance bound
+  the Client Agent of its Host, or before the Client Agent first arrived behind the same Gateway on
+  another instance, held the Agent without the Client Agent's labels in its memory until the group
+  was placed again for another reason. The notice of a binding now places that Host's group again,
+  and a new notice that a Client Agent arrived behind a Gateway, sent after its commit, places that
+  Gateway's groups again. The fleet view, the reach counts and what a rollout releases read the
+  database and were not affected. An instance of 0.8.2 or earlier beside this release reads
+  everything again at each such arrival, as for any notice it does not know.
+  **What to do:** nothing.
+
 ## [0.8.2] - 2026-11-08
 
 ### Added
@@ -179,8 +193,7 @@ once its tag exists.
   - **Two cases inherit labels in an instance's memory only once their group is placed again**:
     a Client Agent bound to its Host just before another instance first places a fellow Agent of
     that Host, and a Client Agent that arrives behind a Gateway after another instance placed a
-    fellow Agent behind it
-    ([the manual](docs/manual/server.md#labels-on-several-instances)).
+    fellow Agent behind it. Both are placed again at once since 0.8.3.
   - **Beside 0.8.0** four things differ until its last instance stops: `max_agents` may be passed
     by records the two releases create at the same moment, a creation of the same new Agent by
     both may end one of them as a deadlock, answered `Unavailable`, and an instance of 0.8.0

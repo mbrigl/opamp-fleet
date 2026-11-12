@@ -510,9 +510,21 @@ pub trait AgentStore: Send + Sync {
     /// [`create_within`](Self::create_within) (ADR-0030 clause 14). A store whose one Server is its
     /// only writer writes the record whole.
     ///
+    /// `arrived` names the Gateway's Host where the write records a Client Agent first arriving
+    /// over it. A shared store announces that, named by the Host, right after the write commits, so
+    /// every other Server places the Gateway's groups again
+    /// (ADR-0025
+    /// clauses 8 and 9). A store whose one Server is its only writer has no one to tell.
+    ///
     /// # Errors
     /// Returns an error when the record cannot be written.
-    fn write_report(&self, uid: &InstanceUid, record: &PersistedAgent) -> Result<bool, String> {
+    fn write_report(
+        &self,
+        uid: &InstanceUid,
+        record: &PersistedAgent,
+        arrived: Option<&str>,
+    ) -> Result<bool, String> {
+        let _ = arrived;
         self.put(uid, record)?;
         Ok(true)
     }
@@ -540,7 +552,7 @@ pub trait AgentStore: Send + Sync {
         take: Option<u64>,
     ) -> Result<bool, String> {
         let _ = (holder, take);
-        self.write_report(uid, record)
+        self.write_report(uid, record, None)
     }
 
     /// Creates the record of an Agent first heard of, unless the store holds `max_records` records

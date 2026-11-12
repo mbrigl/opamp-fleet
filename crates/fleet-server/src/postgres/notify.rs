@@ -13,13 +13,16 @@
 //! committed, so it is handed the call's notifications at once, and hears its own notification of
 //! each once more ([`Unsure`]).
 //!
-//! A binding a report makes, and a Host row made or whose valid until moves forward, by a report,
-//! an issuance or a prune, are announced right after their commit instead, in a transaction of
-//! their own that does not wait for its flush ([`will_follow`], [`follow_commit`]): PostgreSQL
+//! A binding a report makes, a Host row made or whose valid until moves forward, by a report, an
+//! issuance or a prune, and a Client Agent first arrived over a Gateway's Host, are announced right
+//! after their commit instead, in a transaction of their own that does not wait for its flush
+//! ([`will_follow`], [`follow_commit`]): PostgreSQL
 //! commits one transaction that sent a `NOTIFY` at a time, database-wide, across its flush, so
 //! announcing each new Agent's binding in its commit would let a connecting fleet in no faster than
-//! one flush apiece (ADR-0025 clause 9). Such a notice may be lost; every lease
-//! renewal reads the ledger again for it (clause 10).
+//! one flush apiece (ADR-0025 clause 9). Such a notice may be lost. Every lease
+//! renewal reads the ledger again for one of a binding or a Host (clause 10); a Gateway's groups
+//! another instance placed before a lost arrival are placed again at the next event that places
+//! them.
 
 use std::collections::VecDeque;
 #[cfg(test)]
@@ -88,6 +91,12 @@ pub const FORGOTTEN: &str = "forgotten";
 /// (ADR-0025
 /// clause 8).
 pub const TAKEN: &str = "taken";
+
+/// The kind a Client Agent first arrived over a Gateway's Host is announced as, by that Host: the
+/// other instances place the Gateway's groups again, so a fellow Agent they hold finds it
+/// (ADR-0025
+/// clause 8).
+pub const ARRIVED: &str = "arrived";
 
 /// How long a listener waits before it connects again after its connection ended.
 const RECONNECT: Duration = Duration::from_secs(1);

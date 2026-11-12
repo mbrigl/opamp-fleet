@@ -838,6 +838,11 @@ struct Ending {
     superseded: bool,
     identification: Option<AgentIdentification>,
     reply_flags: u64,
+    /// The Gateway's Host the Agent first arrived over as a Client Agent with this report, which
+    /// the write of its record announces
+    /// (ADR-0025
+    /// clause 9).
+    arrived: Option<String>,
 }
 
 /// Where a report's end stands once its record is taken into memory.
@@ -1278,15 +1283,26 @@ impl AppState {
     /// instance does not hold, as [`client_agents_elsewhere`](Self::client_agents_elsewhere) reads
     /// them under it: what a report's placement inherits from, so the lock waits for no read. What
     /// this instance comes to hold meanwhile is sifted out when the group is placed.
+    /// The Agents that arrived over a Gateway's Host are read once for all its groups.
     fn read_elsewhere(&self, wanted: &[Group]) -> ClientsByGroup {
+        let held = |uid: &InstanceUid| self.fleet.lock().expect("fleet lock").contains_key(uid);
         let mut read = HashMap::new();
+        let mut behind: HashMap<&str, Result<HashMap<InstanceUid, AgentRecord>, String>> =
+            HashMap::new();
         for group in wanted {
-            if !read.contains_key(group) {
-                let found = self.clients_elsewhere(group, &|uid| {
-                    self.fleet.lock().expect("fleet lock").contains_key(uid)
-                });
-                read.insert(group.clone(), found);
+            if read.contains_key(group) {
+                continue;
             }
+            let found = match group {
+                Group::Behind { gateway, machine } if self.agent_store.is_shared() => {
+                    let arrived = behind
+                        .entry(gateway.as_str())
+                        .or_insert_with(|| self.arrived_over(gateway));
+                    clients_behind(gateway, machine, arrived.as_ref(), &held)
+                }
+                _ => self.clients_elsewhere(group, &held),
+            };
+            read.insert(group.clone(), found);
         }
         read
     }
@@ -1306,6 +1322,30 @@ impl AppState {
         for group in &missed {
             self.inherit_held(&mut fleet, &groups, group, &mut elsewhere);
         }
+    }
+
+    /// Places again every group of each of `hosts` that this instance holds members of: of a Host,
+    /// the group under the Host, and of a Gateway's Host, every group behind it. What a notice that
+    /// a binding of the Host changed, or that a Client Agent first arrived over it, calls for
+    /// (ADR-0025
+    /// clause 8). Nothing on a store this Server alone writes, whose own acts place what they
+    /// change.
+    pub fn place_hosts_again(&self, hosts: &BTreeSet<String>) {
+        if hosts.is_empty() || !self.agent_store.is_shared() {
+            return;
+        }
+        let due: Vec<Group> = self
+            .groups
+            .lock()
+            .expect("groups lock")
+            .keys()
+            .filter(|group| match group {
+                Group::Host(host) => hosts.contains(host),
+                Group::Behind { gateway, .. } => hosts.contains(gateway),
+            })
+            .cloned()
+            .collect();
+        self.place_groups_again(due);
     }
 
     /// The Client Agents of a group that this instance does not hold, with their labels, as
@@ -1334,26 +1374,7 @@ impl AppState {
             return Vec::new();
         }
         if let Group::Behind { gateway, machine } = group {
-            return match self.arrived_over(gateway) {
-                Ok(found) => {
-                    let mut clients: Vec<(InstanceUid, BTreeMap<String, String>)> = found
-                        .into_iter()
-                        .filter(|(uid, record)| {
-                            crate::labels::is_client_agent(record.description.as_ref())
-                                && crate::labels::machine(record.description.as_ref()).as_ref()
-                                    == Some(machine)
-                                && !held(uid)
-                        })
-                        .map(|(uid, record)| (uid, record.labels))
-                        .collect();
-                    clients.sort_by_key(|(uid, _)| uid.0);
-                    clients
-                }
-                Err(e) => {
-                    warn!(gateway = %gateway, error = %e, "cannot read the agents behind the gateway that another instance carries");
-                    Vec::new()
-                }
-            };
+            return clients_behind(gateway, machine, self.arrived_over(gateway).as_ref(), held);
         }
         let (Group::Host(host), Some(revocations)) = (group, &self.revocations) else {
             return Vec::new();
@@ -2685,8 +2706,13 @@ impl AppState {
     /// A write that fails is logged, never fatal: a fleet that keeps running on a full disk beats
     /// one that refuses reports. Answers whether the record is still stored: on a shared store
     /// one forgotten through another instance is not, and is not written again.
-    fn persist_if_dirty(&self, uid: &InstanceUid, persisted: &PersistedAgent) -> bool {
-        match self.persist(uid, persisted) {
+    fn persist_if_dirty(
+        &self,
+        uid: &InstanceUid,
+        persisted: &PersistedAgent,
+        arrived: Option<&str>,
+    ) -> bool {
+        match self.persist(uid, persisted, arrived) {
             Ok(stored) => stored,
             Err(e) => {
                 warn!(agent = %uid, error = %e, "cannot persist the agent record");
@@ -2715,7 +2741,17 @@ impl AppState {
     /// answered, a report that changes nothing durable writes nothing again
     /// (ADR-0025
     /// clause 8).
-    fn persist(&self, uid: &InstanceUid, persisted: &PersistedAgent) -> Result<bool, String> {
+    ///
+    /// `arrived` names the Gateway's Host the Agent first arrived over as a Client Agent with this
+    /// record, which the store announces once the record is written
+    /// (ADR-0025
+    /// clause 9). Such a record differs from the one written before, so it is written.
+    fn persist(
+        &self,
+        uid: &InstanceUid,
+        persisted: &PersistedAgent,
+        arrived: Option<&str>,
+    ) -> Result<bool, String> {
         let digest = persisted.durable_digest();
         let counted = !self.agent_store.is_shared()
             || self
@@ -2726,7 +2762,7 @@ impl AppState {
         if counted && self.written.lock().expect("written lock").get(uid) == Some(&digest) {
             return Ok(true);
         }
-        if !self.agent_store.write_report(uid, persisted)? {
+        if !self.agent_store.write_report(uid, persisted, arrived)? {
             return Ok(false);
         }
         if !counted {
@@ -3309,6 +3345,12 @@ impl AppState {
             reply_flags |= ServerToAgentFlags::ReportFullState as u64;
         }
 
+        // Whether this report may make it a Client Agent behind a Gateway that it was not: what a
+        // shared store announces, so the other instances place the Gateway's groups again.
+        let arrives = self.agent_store.is_shared()
+            && (msg.agent_description.is_some() || record.host != arrived_over);
+        let behind = arrives.then(|| self.client_behind(record)).flatten();
+
         // The Host it arrived over (ADR-0030 clause 16) — none without a host register.
         let moved = record.host != arrived_over;
         record.host = arrived_over;
@@ -3370,6 +3412,14 @@ impl AppState {
             }
         }
 
+        let arrived = arrives
+            .then(|| self.client_behind(record))
+            .flatten()
+            .filter(|now| Some(now) != behind.as_ref())
+            .and_then(|now| match now {
+                Group::Behind { gateway, .. } => Some(gateway),
+                Group::Host(_) => None,
+            });
         if !known || moved || described || rekeyed.is_some() || loaded {
             self.place(&mut fleet, &uid, &mut elsewhere);
         }
@@ -3390,6 +3440,7 @@ impl AppState {
             superseded,
             identification,
             reply_flags,
+            arrived,
         };
         let pending = match request {
             None => Pending::Settled(self.settle(record, &mut ending, None)),
@@ -3631,7 +3682,7 @@ impl AppState {
                 }
             }
         };
-        if !self.persist_if_dirty(&ending.uid, &persisted) {
+        if !self.persist_if_dirty(&ending.uid, &persisted, ending.arrived.as_deref()) {
             return self.forgotten_elsewhere(&ending.uid, &ending.reported);
         }
         processed
@@ -3703,7 +3754,7 @@ impl AppState {
         };
         // The report's updates are already in the record, so they are persisted even though no
         // certificate is issued (ADR-0030).
-        if !self.persist_if_dirty(&uid, persisted) {
+        if !self.persist_if_dirty(&uid, persisted, ending.arrived.as_deref()) {
             return Err(Box::new(self.forgotten_elsewhere(&uid, &ending.reported)));
         }
         Err(Box::new(Processed {
@@ -3766,6 +3817,15 @@ impl AppState {
         if let Elsewhere::Read { missed, .. } = elsewhere {
             self.place_groups_again(missed);
         }
+    }
+
+    /// The group behind a Gateway `record` is the Client Agent of, if it is one.
+    fn client_behind(&self, record: &AgentRecord) -> Option<Group> {
+        if !crate::labels::is_client_agent(record.description.as_ref()) {
+            return None;
+        }
+        self.group_of(record.host.as_deref(), record.description.as_ref())
+            .filter(|group| matches!(group, Group::Behind { .. }))
     }
 
     /// The group an Agent arriving over `host` and described by `description` is placed in, as
@@ -4624,6 +4684,37 @@ fn unindex(groups: &mut HashMap<Group, HashSet<InstanceUid>>, group: &Group, uid
         members.remove(uid);
         if members.is_empty() {
             groups.remove(group);
+        }
+    }
+}
+
+/// The Client Agents behind `gateway` that report `machine` and that `held` says this instance does
+/// not hold, with their labels, of the Agents `arrived` read as arrived over the Gateway's Host. A
+/// read that failed is logged, and none is answered.
+fn clients_behind(
+    gateway: &str,
+    machine: &str,
+    arrived: Result<&HashMap<InstanceUid, AgentRecord>, &String>,
+    held: &dyn Fn(&InstanceUid) -> bool,
+) -> Vec<(InstanceUid, BTreeMap<String, String>)> {
+    match arrived {
+        Ok(found) => {
+            let mut clients: Vec<(InstanceUid, BTreeMap<String, String>)> = found
+                .iter()
+                .filter(|(uid, record)| {
+                    crate::labels::is_client_agent(record.description.as_ref())
+                        && crate::labels::machine(record.description.as_ref()).as_deref()
+                            == Some(machine)
+                        && !held(uid)
+                })
+                .map(|(uid, record)| (*uid, record.labels.clone()))
+                .collect();
+            clients.sort_by_key(|(uid, _)| uid.0);
+            clients
+        }
+        Err(e) => {
+            warn!(gateway = %gateway, error = %e, "cannot read the agents behind the gateway that another instance carries");
+            Vec::new()
         }
     }
 }
@@ -9205,9 +9296,14 @@ mod tests {
         fn put(&self, uid: &InstanceUid, record: &PersistedAgent) -> Result<(), String> {
             self.inner.put(uid, record)
         }
-        fn write_report(&self, uid: &InstanceUid, record: &PersistedAgent) -> Result<bool, String> {
+        fn write_report(
+            &self,
+            uid: &InstanceUid,
+            record: &PersistedAgent,
+            arrived: Option<&str>,
+        ) -> Result<bool, String> {
             probed(&self.probe, "write_report", Some(uid));
-            self.inner.write_report(uid, record)
+            self.inner.write_report(uid, record, arrived)
         }
         fn write_report_unless_held_elsewhere(
             &self,
@@ -11548,6 +11644,155 @@ mod tests {
             assert!(std::time::Instant::now() < deadline, "never: {what}");
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    /// Instance A on a database of its own, and B on another that follows the notifications on a
+    /// runtime of its own, once it has read everything; both on the schema of `test`.
+    struct FollowingB {
+        a: Arc<AppState>,
+        a_database: Arc<crate::postgres::Database>,
+        b: Arc<AppState>,
+        following: crate::instance::Following,
+        _runtime: tokio::runtime::Runtime,
+    }
+
+    impl FollowingB {
+        fn on(test: &crate::postgres::testing::TestDatabase) -> Self {
+            let a_database = test.shared();
+            let a = Arc::new(on_postgres(
+                &a_database,
+                Box::new(crate::postgres::agents::PgAgentStore::new(
+                    a_database.clone(),
+                )),
+            ));
+            a.serve_under(tokio::sync::watch::channel(Some(LEASE_A.to_string())).1);
+            let b_database = test.shared();
+            let b = Arc::new(on_postgres(
+                &b_database,
+                Box::new(crate::postgres::agents::PgAgentStore::new(
+                    b_database.clone(),
+                )),
+            ));
+            b.serve_under(tokio::sync::watch::channel(Some(LEASE_B.to_string())).1);
+            let runtime = tokio::runtime::Runtime::new().expect("runtime");
+            let following = {
+                let _entered = runtime.enter();
+                crate::instance::follow(&b_database, b.clone(), None)
+            };
+            until("B's first read once listening", || following.reads() > 0);
+            FollowingB {
+                a,
+                a_database,
+                b,
+                following,
+                _runtime: runtime,
+            }
+        }
+
+        /// Whether `agent`, as B holds it, inherits `labels` from `client`.
+        fn inherits(
+            &self,
+            agent: &InstanceUid,
+            client: &InstanceUid,
+            labels: &[(&str, &str)],
+        ) -> bool {
+            let fleet = self.b.fleet.lock().expect("fleet lock");
+            fleet.get(agent).is_some_and(|record| {
+                record.placement.client_agent == Some(*client)
+                    && record.placement.inherited
+                        == labels
+                            .iter()
+                            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                            .collect::<BTreeMap<_, _>>()
+            })
+        }
+
+        /// The Client Agent `agent` is placed under in B's memory.
+        fn client_of(&self, agent: &InstanceUid) -> Option<InstanceUid> {
+            self.b
+                .fleet
+                .lock()
+                .expect("fleet lock")
+                .get(agent)
+                .and_then(|record| record.placement.client_agent)
+        }
+    }
+
+    /// A fellow Agent B placed before the binding of its Host's Client Agent through A reached B
+    /// inherits the Client Agent's labels in B's memory once the binding's notice reaches B. The
+    /// notice is held back from B, as one still on its way is, until the test sends it.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once, ADR-0030
+    #[test]
+    fn a_fellow_agent_inherits_once_the_notice_of_its_client_agents_binding_arrives() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let pair = FollowingB::on(&test);
+        let (client, fellow) = (InstanceUid([0xb1; 16]), InstanceUid([0xb2; 16]));
+        let subject = crate::revocation::SubjectValues::default;
+        // A's notices after a commit, its binding's among them, do not reach B.
+        pair.a_database.afterwards().drop_all(true);
+        report_over(
+            &pair.a,
+            "h1",
+            subject(),
+            client,
+            &[("supervisor.kind.collector", "true")],
+        );
+        let reads = pair.following.reads();
+        label(&pair.a, &client, &[("tier", "edge")]);
+        until("B took up the labels' notice", || {
+            pair.following.reads() > reads
+        });
+        report_over(&pair.b, "h1", subject(), fellow, &[]);
+        assert_eq!(
+            pair.client_of(&fellow),
+            None,
+            "B placed the fellow Agent before it knew of the binding"
+        );
+
+        test.sql(
+            "SELECT pg_notify('opamp_fleet:' || coalesce(current_schema(), ''), \
+             '{\"kind\": \"host\", \"id\": \"h1\"}')",
+        );
+        until("the fellow Agent inherits in B's memory", || {
+            pair.inherits(&fellow, &client, &[("tier", "edge")])
+        });
+    }
+
+    /// A fellow Agent behind a Gateway that B placed inherits in B's memory the labels of its
+    /// Client Agent that arrives behind the same Gateway through A afterwards.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once, ADR-0030
+    #[test]
+    fn a_fellow_agent_behind_a_gateway_inherits_from_a_client_agent_arriving_on_another_instance() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let pair = FollowingB::on(&test);
+        let (gateway, client, fellow) = (
+            InstanceUid([0xb3; 16]),
+            InstanceUid([0xb4; 16]),
+            InstanceUid([0xb5; 16]),
+        );
+        let subject = crate::revocation::SubjectValues::default;
+        report_over(&pair.a, "g", subject(), gateway, &[]);
+        assert_eq!(pair.a.set_gateway("g", true), Ok(true));
+        let marked = pair.b.revocations().expect("register").clone();
+        until("B took up the Gateway's mark", || marked.is_gateway("g"));
+        report_over(&pair.b, "g", subject(), fellow, &[("host.name", "m1")]);
+        assert_eq!(pair.client_of(&fellow), None, "no Client Agent yet");
+
+        report_over(
+            &pair.a,
+            "g",
+            subject(),
+            client,
+            &[("supervisor.kind.collector", "true"), ("host.name", "m1")],
+        );
+        label(&pair.a, &client, &[("tier", "edge")]);
+        until("the fellow Agent inherits in B's memory", || {
+            pair.inherits(&fellow, &client, &[("tier", "edge")])
+        });
     }
 
     /// How long the one call whose answer a test loses waits for it: short of the five seconds of

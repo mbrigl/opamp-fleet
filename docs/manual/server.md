@@ -1106,22 +1106,6 @@ then on. A new label for a new key signs checkpoints the old key's PEM does not 
 `audit-verify` takes one key, so while the record holds checkpoints of both, it fails on those of
 the other key, whichever PEM it is given.
 
-### Labels on several instances
-
-The fleet view, the reach counts and what a rollout releases are read from the database, and
-there every Agent inherits the labels of its Client Agent as on one Server. In the memory of the
-instance that carries an Agent, two cases do not inherit yet:
-
-- **A Client Agent bound to its Host** on one instance just before another instance first places a
-  fellow Agent of that Host is inherited there only once that group is placed again: when the
-  Client Agent's labels change, an Agent of the group is forgotten, the Agent's report changes, or
-  the instance has missed a notification and reads again.
-- **A Client Agent that arrives behind a Gateway** on one instance after another instance placed a
-  fellow Agent behind the same Gateway is inherited there only once that group is placed again:
-  when an Agent of the group joins, leaves or changes its report on that instance, or the instance
-  has missed a notification and reads again. Once the group is placed under it, a change of the
-  Client Agent's labels on any instance reaches it.
-
 ### A new binding on several instances
 
 A host's first report on one instance binds its Agent to the Host and writes the Host, and the
@@ -2795,9 +2779,7 @@ ring whatever its Client is labelled. The Server tells a Client's Agents apart b
 arrived over. Behind a Gateway it groups them by the `host.id` they report, or by `host.name`
 where they report no `host.id`. Where such a group holds more than one Client Agent — two Clients
 on one machine behind one Gateway — no Agent of it inherits anything, and the fleet view marks them
-as ambiguous. The Agents tab shows inherited labels on each Agent, marked as such. On several
-instances, two cases do not inherit yet in an instance's memory: see
-[Labels on several instances](#labels-on-several-instances).
+as ambiguous. The Agents tab shows inherited labels on each Agent, marked as such.
 
 **What a Selector matches** is each Agent's effective description, the same for every Deployment.
 For each key it takes the first source that has it:

@@ -12,7 +12,7 @@
 //! takes a new lease under a new instance id and binds the same addresses again. On the filesystem
 //! store there is one Server, no lease, and the planes are served until the Server stops.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::future::Future;
 use std::net::{SocketAddr, TcpListener};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -30,8 +30,8 @@ use crate::clock::Elapsed;
 use crate::config::LeaseTimes;
 use crate::fleet::AppState;
 use crate::postgres::notify::{
-    Heard, Notice, ASSIGNMENT, CERTIFICATE, CONFIGURATION, DEPLOYMENT, ENROLMENT, FLOOR, FORGOTTEN,
-    HOST, LABELS, PACKAGE, RESTART, REVOCATION, TAKEN, WINDOW,
+    Heard, Notice, ARRIVED, ASSIGNMENT, CERTIFICATE, CONFIGURATION, DEPLOYMENT, ENROLMENT, FLOOR,
+    FORGOTTEN, HOST, LABELS, PACKAGE, RESTART, REVOCATION, TAKEN, WINDOW,
 };
 use crate::postgres::Database;
 
@@ -539,10 +539,12 @@ fn lock_lost(lease: &Renewing, instance_id: &str) {
 /// (ADR-0025
 /// clauses 9 and 10): for each one announced, what its kind concerns is read again. A revocation, a
 /// Host or a register entry has the ledger read again, and the sessions check themselves against it
-/// (ADR-0040 clause 32); a floor has the floors read
-/// again; an enrolment request or the window has the window and its queue read again, and the
-/// connections waiting on them answered; a Configuration, a Deployment or a Package has its store
-/// read again
+/// (ADR-0040 clause 32), and a binding of a Host that changed has the groups of that Host placed
+/// again; a Client Agent first arrived over a Gateway's Host has the Gateway's groups placed again
+/// (ADR-0025
+/// clause 8); a floor has the floors read again; an enrolment request or the window has the window
+/// and its queue read again, and the connections waiting on them answered; a Configuration, a
+/// Deployment or a Package has its store read again
 /// (clause 12); an Agent's assignment, labels, restart request or forgetting has its record read
 /// again, its connection offered what it was released or sent the restart, its group placed again,
 /// or the Agent dropped; an Agent taken by another instance has its holder read again, and is no
@@ -614,6 +616,8 @@ pub fn follow(
         if let Some(take_up) = due.agents.take_up() {
             state.take_up_agents(take_up)?;
         }
+        // Once the ledger is read again, so a group of a Host is placed under its bindings now.
+        state.place_hosts_again(&due.hosts);
         if let Some(take_up) = due.holders.take_up() {
             state.release_taken(take_up)?;
         }
@@ -819,6 +823,10 @@ struct Due {
     /// The Agents another instance requested a restart of: a put-back kept here is that restart
     /// now.
     restarts: Agents,
+    /// The Hosts whose groups are placed again: a binding of the Host changed, or a Client Agent
+    /// first arrived over it as a Gateway's. Every group is placed again with `agents` of
+    /// [`Agents::All`].
+    hosts: BTreeSet<String>,
 }
 
 impl Due {
@@ -833,6 +841,7 @@ impl Due {
         agents: Agents::All,
         holders: Agents::All,
         restarts: Agents::All,
+        hosts: BTreeSet::new(),
     };
 
     /// What `what` calls for.
@@ -841,8 +850,19 @@ impl Due {
             return Due::EVERYTHING;
         };
         match notice.kind.as_str() {
-            REVOCATION | HOST | CERTIFICATE => Due {
+            // A notice of a binding names the Host whose binding changed. One that names none, of
+            // a Host row written or forgotten, places no group again.
+            HOST => Due {
                 ledger: true,
+                hosts: Self::host(&notice.id),
+                ..Due::default()
+            },
+            REVOCATION | CERTIFICATE => Due {
+                ledger: true,
+                ..Due::default()
+            },
+            ARRIVED => Due {
+                hosts: Self::host(&notice.id),
                 ..Due::default()
             },
             FLOOR => Due {
@@ -882,7 +902,16 @@ impl Due {
         }
     }
 
-    fn and(self, other: Due) -> Due {
+    /// The Host a notice names, as a set of none where it names none.
+    fn host(id: &str) -> BTreeSet<String> {
+        std::iter::once(id)
+            .filter(|id| !id.is_empty())
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn and(mut self, other: Due) -> Due {
+        self.hosts.extend(other.hosts);
         Due {
             ledger: self.ledger || other.ledger,
             floors: self.floors || other.floors,
@@ -893,6 +922,7 @@ impl Due {
             agents: self.agents.and(other.agents),
             holders: self.holders.and(other.holders),
             restarts: self.restarts.and(other.restarts),
+            hosts: self.hosts,
         }
     }
 }
@@ -1203,7 +1233,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    use std::collections::HashSet;
+    use std::collections::{BTreeSet, HashSet};
 
     use opamp::uid::InstanceUid;
 
@@ -1640,13 +1670,9 @@ mod tests {
     /// concerns read again and nothing else
     /// (ADR-0025
     /// clauses 9 and 19).
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0025, ADR-draft-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once
     #[tokio::test]
     async fn what_is_heard_at_once_is_answered_by_one_read_of_what_it_concerns() {
-        let ledger = Due {
-            ledger: true,
-            ..Due::default()
-        };
         assert_eq!(
             reads_for(vec![
                 notified("host"),
@@ -1654,7 +1680,27 @@ mod tests {
                 notified("revocation")
             ])
             .await,
-            vec![ledger]
+            vec![Due {
+                ledger: true,
+                hosts: BTreeSet::from(["id".to_string()]),
+                ..Due::default()
+            }],
+            "a binding of a Host has the ledger read again and the Host's groups placed again"
+        );
+        assert_eq!(
+            reads_for(vec![
+                Heard::Notified(Notice::new("host", "")),
+                Heard::Notified(Notice::new("arrived", "g1")),
+                Heard::Notified(Notice::new("arrived", "g2")),
+            ])
+            .await,
+            vec![Due {
+                ledger: true,
+                hosts: BTreeSet::from(["g1".to_string(), "g2".to_string()]),
+                ..Due::default()
+            }],
+            "a Host that names none places no group, and an arrival over a Gateway's Host places \
+             the Gateway's groups again and reads no ledger"
         );
         assert_eq!(
             reads_for(vec![notified("floor")]).await,
@@ -1779,6 +1825,7 @@ mod tests {
             Some(&Due {
                 ledger: true,
                 floors: true,
+                hosts: BTreeSet::from(["id".to_string()]),
                 ..Due::default()
             }),
             "what was heard while the reads failed is read with them"

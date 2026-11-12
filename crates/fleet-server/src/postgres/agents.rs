@@ -12,7 +12,10 @@ use super::Cached as GenericClient;
 use opamp::uid::InstanceUid;
 use prost::Message;
 
-use super::notify::{notify, ASSIGNMENT, CONFIGURATION, FORGOTTEN, LABELS, RESTART, TAKEN};
+use super::notify::{
+    follow_commit, notify, will_follow, ARRIVED, ASSIGNMENT, CONFIGURATION, FORGOTTEN, LABELS,
+    RESTART, TAKEN,
+};
 use super::{client, creating_client, signed, sql, unsigned, Database};
 use crate::agent_store::{
     AgentPage, AgentStore, Creation, Holder, PageQuery, PersistedAgent, Pin, Presence, Silenced,
@@ -397,12 +400,29 @@ impl AgentStore for PgAgentStore {
         Ok(())
     }
 
-    /// The columns a report decides, of a row that is there; nothing where none is.
-    fn write_report(&self, uid: &InstanceUid, record: &PersistedAgent) -> Result<bool, String> {
+    /// The columns a report decides, of a row that is there; nothing where none is. A Client Agent
+    /// first arriving over a Gateway's Host is announced right after the commit, named by the Host
+    /// ([`follow_commit`]).
+    fn write_report(
+        &self,
+        uid: &InstanceUid,
+        record: &PersistedAgent,
+        arrived: Option<&str>,
+    ) -> Result<bool, String> {
         let (uid, record) = (*uid, record.clone());
+        let arrived = arrived.map(str::to_string);
         self.database.run(move |pool| async move {
             let client = client(&pool).await?;
-            write_reported(&client, &uid, &record, None).await
+            // Counted before the write commits, so a write whose answer is lost has its instance
+            // read again what the notice names.
+            if let Some(host) = &arrived {
+                will_follow(ARRIVED, host);
+            }
+            let written = write_reported(&client, &uid, &record, None).await?;
+            if written && arrived.is_some() {
+                follow_commit(client, &pool);
+            }
+            Ok(written)
         })
     }
 
@@ -1907,7 +1927,7 @@ mod tests {
         report.restart_pending = false;
         report.health = None;
         report.last_seen_ms += 30_000;
-        assert_eq!(a.write_report(&uid, &report), Ok(true));
+        assert_eq!(a.write_report(&uid, &report, None), Ok(true));
         let stored = a.get(&uid).expect("get").expect("stored");
         assert_eq!(stored.labels, labels, "the labels stay as B set them");
         assert!(stored.restart_pending, "the restart stays queued");
@@ -1917,7 +1937,7 @@ mod tests {
 
         // A record forgotten meanwhile is not written again.
         b.remove(&uid).expect("forget");
-        assert_eq!(a.write_report(&uid, &report), Ok(false));
+        assert_eq!(a.write_report(&uid, &report, None), Ok(false));
         assert_eq!(a.get(&uid), Ok(None), "nothing created");
     }
 
@@ -2232,7 +2252,7 @@ mod tests {
                 .expect("take");
             let mut reported = bare.clone();
             reported.sequence_num = 9;
-            store.write_report(uid, &reported).expect("write");
+            store.write_report(uid, &reported, None).expect("write");
         }
         let seen = |statement: &str| -> Vec<String> {
             let mut settings: Vec<String> = test
@@ -2811,7 +2831,9 @@ mod tests {
         let mut reported = full.clone();
         reported.health = None;
         reported.capabilities ^= 1;
-        assert!(store.write_report(&created, &reported).expect("report"));
+        assert!(store
+            .write_report(&created, &reported, None)
+            .expect("report"));
         assert_eq!(stale(), "0", "reported");
         let import = |uid: InstanceUid, record: PersistedAgent| {
             database
@@ -3426,6 +3448,55 @@ mod tests {
             .write_presence(&a, &[(one, disconnected(7_000), Some(back + 1))])
             .expect("A's disconnect");
         assert_eq!(presence(one), [[Some(format!("none false {}", back + 1))]]);
+    }
+
+    /// A report's write that records a Client Agent first arriving over a Gateway's Host announces
+    /// it, named by the Host, after the write commits: where that notice is lost, as when the
+    /// instance ends between the commit and the `NOTIFY`, another instance hears nothing, and a
+    /// write that names no arrival announces nothing.
+    /// Verifies: ADR-draft-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once
+    #[test]
+    fn a_client_agent_arriving_over_a_gateway_is_announced_after_its_commit() {
+        use super::super::notify::{Heard, Notice};
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let open = || {
+            Database::open_in(
+                &test.config(),
+                super::super::Exclusive::Shared,
+                Some(&test.schema),
+            )
+            .expect("open")
+        };
+        let (database, listener) = (open(), open());
+        let (heard, hearing) = std::sync::mpsc::channel();
+        listener.listen(move |what| {
+            let _ = heard.send(what);
+        });
+        let within = std::time::Duration::from_secs(10);
+        assert_eq!(hearing.recv_timeout(within), Ok(Heard::Listening));
+        let store = PgAgentStore::new(database.clone());
+        let uid = InstanceUid([0x5a; 16]);
+        store.put(&uid, &record()).expect("put");
+
+        database.afterwards().drop_all(true);
+        assert_eq!(store.write_report(&uid, &record(), Some("g")), Ok(true));
+        assert_eq!(store.write_report(&uid, &record(), None), Ok(true));
+        assert!(
+            hearing
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .is_err(),
+            "nothing is announced in the write's commit"
+        );
+        database.afterwards().drop_all(false);
+        assert_eq!(store.write_report(&uid, &record(), None), Ok(true));
+        assert_eq!(store.write_report(&uid, &record(), Some("g")), Ok(true));
+        assert_eq!(
+            hearing.recv_timeout(within),
+            Ok(Heard::Notified(Notice::new(ARRIVED, "g"))),
+            "the arrival is announced after its commit, and nothing before it"
+        );
     }
 
     /// A take that replaces another holder is announced, whether or not that holder's lease is
