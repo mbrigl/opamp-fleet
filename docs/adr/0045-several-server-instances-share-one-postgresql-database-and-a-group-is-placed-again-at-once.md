@@ -1,6 +1,6 @@
 # ADR-0045: Several Server instances share one PostgreSQL database, two versions run side by side, and a group is placed again when its Client Agent is bound or arrives elsewhere
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-11-12
 - **Deciders:** Markus Brigl
 - **Applies to:** the in-memory fleet and its push in `crates/fleet-server/src/fleet.rs`, the sessions and their guard in `crates/fleet-server/src/transport.rs`, the ports, the PostgreSQL adapters and the change signals of the enrolment window and its queue in `crates/fleet-server/src/enrolment.rs` and of the certificate register, the revocation list and the Hosts in `crates/fleet-server/src/revocation.rs`, the per-instance tables of `crates/fleet-server/src/agent_rate.rs` and `crates/fleet-server/src/throttle.rs`, the package floors in `crates/fleet-server/src/floors.rs` and `crates/fleet-server/src/postgres/floors.rs`, the PostgreSQL adapters of Configurations, Deployments and Packages in `crates/fleet-server/src/postgres/`, the PostgreSQL adapters and their schema, the presence batches in `crates/fleet-server/src/instance.rs`, the WebSocket driver in `crates/opamp/src/client/ws.rs`, the audit port in `crates/fleet-server/src/audit.rs` and its PostgreSQL adapter where an instance closes the chain of a lapsed lease, the `[database]` section of `server.toml` and its parsing in `crates/fleet-server/src/config.rs`, `config/server.toml`, `docs/ARCHITECTURE.md`, and the operator manual's pages on replication, load balancing and rolling updates
