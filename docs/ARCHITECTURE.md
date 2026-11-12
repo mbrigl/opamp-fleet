@@ -172,7 +172,11 @@ no module.
   its caches again rather than patching them, and counts a missed notification as every
   notification. `fleet` holds only the Agents whose connections the instance carries: the holder of
   an Agent is its row's instance, the newest connection takes it by one conditional update, and an
-  instance writes the presence of what it carries in batches.
+  instance writes the presence of what it carries in batches. What one instance holds of them —
+  the take and the release, the presence it writes, the re-keys whose answer was lost, the restarts
+  kept for retry, the take-up of what other instances announced (a `TakeUp` names Agents or, after
+  a missed notification, every Agent), and the per-Agent locks — is the core module `fleet::held`,
+  behind the same `AppState` entry points.
 - **Server listeners** — `tls` reads the `[tls]`, `[rest.tls]` and `[enrolment]` files into the
   material each plane serves with — the Agent plane requiring a client certificate in the
   handshake, the Operator plane asking for none and serving `[rest.tls]`'s certificate when the

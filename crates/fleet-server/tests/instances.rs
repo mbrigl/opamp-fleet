@@ -3704,7 +3704,8 @@ fn an_instance_displaced_by_a_take_that_commits_later_takes_the_agent_back_at_it
     b.process(report(2), Transport::WebSocket, Some(9));
     a.process(report(1), Transport::WebSocket, Some(7));
     assert_eq!(stored(), [format!("{lease_a} true")]);
-    b.release_taken(None).expect("B hears of the take");
+    b.release_taken(fleet_server::fleet::TakeUp::Everything)
+        .expect("B hears of the take");
     assert!(!carried(&b), "B stops carrying it");
     a.mark_disconnected(&[uid], 7);
     a.write_presence(lease_a).expect("A's batch");
@@ -3830,8 +3831,10 @@ fn of_two_instances_that_take_one_agent_at_once_only_the_one_the_row_names_carri
     a.process(report(1), Transport::WebSocket, Some(7));
     b.process(report(2), Transport::WebSocket, Some(9));
     let named = std::collections::HashSet::from([uid]);
-    a.release_taken(Some(&named)).expect("A hears of B's take");
-    b.release_taken(Some(&named)).expect("B hears of A's take");
+    a.release_taken(fleet_server::fleet::TakeUp::Named(&named))
+        .expect("A hears of B's take");
+    b.release_taken(fleet_server::fleet::TakeUp::Named(&named))
+        .expect("B hears of A's take");
     let carried = |state: &AppState| {
         state
             .snapshot()
@@ -3893,9 +3896,11 @@ fn an_agent_whose_holder_changes_eleven_times_in_a_minute_is_logged_once_as_a_li
                 (&b, &a, 7)
             };
             sequence_num += 1;
-            to.release_taken(Some(&named)).expect("hears of the take");
+            to.release_taken(fleet_server::fleet::TakeUp::Named(&named))
+                .expect("hears of the take");
             to.process(report(sequence_num), Transport::WebSocket, Some(conn));
-            from.release_taken(Some(&named)).expect("hears of the take");
+            from.release_taken(fleet_server::fleet::TakeUp::Named(&named))
+                .expect("hears of the take");
             assert_eq!(likely(), usize::from(change == 11), "after change {change}");
         }
     });

@@ -611,20 +611,14 @@ pub fn follow(
         // The Configurations before the assignments, so an Agent released a revision another
         // instance saved is offered it from what this one holds.
         state.reload_catalogue(due.configurations, due.deployments, due.packages)?;
-        match &due.agents {
-            Agents::Named(uids) if uids.is_empty() => {}
-            Agents::Named(uids) => state.take_up_agents(Some(uids))?,
-            Agents::All => state.take_up_agents(None)?,
+        if let Some(take_up) = due.agents.take_up() {
+            state.take_up_agents(take_up)?;
         }
-        match &due.holders {
-            Agents::Named(uids) if uids.is_empty() => {}
-            Agents::Named(uids) => state.release_taken(Some(uids))?,
-            Agents::All => state.release_taken(None)?,
+        if let Some(take_up) = due.holders.take_up() {
+            state.release_taken(take_up)?;
         }
-        match &due.restarts {
-            Agents::Named(uids) if uids.is_empty() => {}
-            Agents::Named(uids) => state.take_up_restarts(Some(uids))?,
-            Agents::All => state.take_up_restarts(None)?,
+        if let Some(take_up) = due.restarts.take_up() {
+            state.take_up_restarts(take_up)?;
         }
         // Counted once the whole read is done, so a read counted has taken up everything it was
         // due.
@@ -776,6 +770,15 @@ enum Agents {
 }
 
 impl Agents {
+    /// What a take-up acts on, `None` where no Agent is named.
+    fn take_up(&self) -> Option<crate::fleet::TakeUp<'_>> {
+        match self {
+            Agents::Named(uids) if uids.is_empty() => None,
+            Agents::Named(uids) => Some(crate::fleet::TakeUp::Named(uids)),
+            Agents::All => Some(crate::fleet::TakeUp::Everything),
+        }
+    }
+
     /// The Agent a notification names, every Agent where it names none that reads.
     fn of(id: &str) -> Agents {
         match InstanceUid::parse(id) {
