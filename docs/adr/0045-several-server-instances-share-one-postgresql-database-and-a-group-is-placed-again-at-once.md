@@ -1,4 +1,4 @@
-# ADR-draft-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once: Several Server instances share one PostgreSQL database, two versions run side by side, and a group is placed again when its Client Agent is bound or arrives elsewhere
+# ADR-0045: Several Server instances share one PostgreSQL database, two versions run side by side, and a group is placed again when its Client Agent is bound or arrives elsewhere
 
 - **Status:** 🟡 proposed
 - **Date:** 2026-11-12
