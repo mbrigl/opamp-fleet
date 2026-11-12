@@ -29,10 +29,16 @@ impl PgConfigBackend {
 }
 
 impl ConfigBackend for PgConfigBackend {
+    /// The Configurations and their revisions in one snapshot, a read-only `REPEATABLE READ`
+    /// transaction: a change another instance commits between its two statements is read whole or
+    /// not at all, never a revision of a Configuration the first statement did not see.
     fn load(&self) -> Result<Vec<Configuration>, String> {
         self.database.run(|pool| async move {
-            let client = client(&pool).await?;
-            read_all(&client).await
+            let mut client = client(&pool).await?;
+            let snapshot = super::agents::snapshot(&mut client).await?;
+            let configs = read_all(&snapshot).await?;
+            snapshot.commit().await.map_err(sql)?;
+            Ok(configs)
         })
     }
 
@@ -411,6 +417,92 @@ mod tests {
             open().0.load().expect("load"),
             [configuration("other", "x\n", &[])]
         );
+    }
+
+    /// A Configuration deleted through another instance between the two statements of `load` is
+    /// held with all of its retained revisions or not at all: the read is of the state before the
+    /// deletion.
+    /// Verifies: ADR-0025
+    #[test]
+    fn a_configuration_deleted_between_the_reads_of_load_is_held_whole_or_not_at_all() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let backend = PgConfigBackend::new(test.open());
+        test.sql(
+            "INSERT INTO configurations (name, body, role, service_name) \
+             VALUES ('gone', 'receivers: {}', '', 'otelcol'); \
+             INSERT INTO configuration_revisions (configuration, hash, body, role, service_name) \
+             VALUES ('gone', 'abcd', 'receivers: {}', '', 'otelcol')",
+        );
+        let gate = test.hold_reads(
+            "configuration_revisions",
+            "DELETE FROM configurations WHERE name = 'gone'",
+        );
+        std::thread::scope(|scope| {
+            let loading = scope.spawn(|| backend.load());
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while test.sessions(
+                "wait_event_type = 'Lock' AND query LIKE 'SELECT%configuration_revisions%'",
+            ) == 0
+            {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "load never waited for the revisions"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            gate.open();
+            let loaded = loading.join().expect("load").expect("one committed state");
+            let gone = loaded
+                .iter()
+                .find(|config| config.name == "gone")
+                .expect("held, as it was when the read began");
+            assert_eq!(
+                gone.retained.keys().collect::<Vec<_>>(),
+                ["abcd"],
+                "with its retained revision"
+            );
+        });
+    }
+
+    /// A Configuration created and released through another instance between the two statements
+    /// of `load` is read whole or not at all: the revisions are read in the snapshot the
+    /// Configurations were, so none names a Configuration the read did not see.
+    /// Verifies: ADR-0025
+    #[test]
+    fn a_configuration_committed_between_the_reads_of_load_is_read_whole_or_not_at_all() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let backend = PgConfigBackend::new(test.open());
+        let gate = test.hold_reads(
+            "configuration_revisions",
+            "INSERT INTO configurations (name, body, role, service_name) \
+             VALUES ('late', 'receivers: {}', '', 'otelcol'); \
+             INSERT INTO configuration_revisions (configuration, hash, body, role, service_name) \
+             VALUES ('late', 'abcd', 'receivers: {}', '', 'otelcol')",
+        );
+        std::thread::scope(|scope| {
+            let loading = scope.spawn(|| backend.load());
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while test.sessions(
+                "wait_event_type = 'Lock' AND query LIKE 'SELECT%configuration_revisions%'",
+            ) == 0
+            {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "load never waited for the revisions"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            gate.open();
+            let loaded = loading.join().expect("load").expect("one committed state");
+            assert!(
+                loaded.iter().all(|config| config.name != "late"),
+                "the Configuration committed after the snapshot is not read"
+            );
+        });
     }
 
     /// Verifies: ADR-0023

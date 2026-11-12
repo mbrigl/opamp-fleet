@@ -1130,7 +1130,7 @@ pub(crate) async fn read_all(
 /// A transaction that reads one committed state of the database and writes nothing: the
 /// statements of a read in it see no commit made between them, such as an Agent's row without
 /// its presence.
-async fn snapshot(
+pub(super) async fn snapshot(
     client: &mut deadpool_postgres::Object,
 ) -> Result<deadpool_postgres::Transaction<'_>, String> {
     client
