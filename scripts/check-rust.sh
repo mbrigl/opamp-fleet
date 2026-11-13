@@ -43,10 +43,7 @@ cargo build --workspace --locked
 # stack, and their tests on them skip. A store's variables are dropped by their prefix, so one
 # added later is dropped too.
 unnamed=(-u FLEET_G20_STACK)
-mapfile -t exported < <(compgen -e)
-for name in "${exported[@]}"; do
-  [[ "$name" == FLEET_TEST_POSTGRES_* || "$name" == FLEET_TEST_S3_* ]] && unnamed+=(-u "$name")
-done
+for name in "${!FLEET_TEST_POSTGRES_@}" "${!FLEET_TEST_S3_@}"; do unnamed+=(-u "$name"); done
 env "${unnamed[@]}" cargo test --workspace --locked
 # The test harness keeps a passing test's output to itself, so the tests of the keys on a token
 # run again with theirs shown, for the skip they would say aloud.

@@ -1,10 +1,10 @@
-# Two audit tests race their writer
+# Audit tests race their writer
 
-**Kind:** defect, test; latent, neither has failed yet.
+**Kind:** defect, test; latent, none has failed yet.
 
-**Observed.** Two tests of the audit record assume an order the writer does not promise:
+**Observed.** Tests of the audit record assume an order the writer does not promise:
 
-- Other `audit_log` tests that fill the channel while holding the store lock, such as
+- The `audit_log` tests that fill the channel while holding the store lock, such as
   `a_throttle_refusal_that_finds_the_channel_full_is_counted_unrecorded` in
   `crates/fleet-server/src/audit_log.rs`, assume the writer has already taken its entry, as
   `a_held_place_counts_against_the_channel_until_it_is_written_or_given_back` did before it
