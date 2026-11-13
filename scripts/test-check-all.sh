@@ -8,7 +8,10 @@
 # file, a directory, a path that does not exist, or no line at all — and the cases change one
 # path on a branch and assert which self-tests ran. The checks themselves run in every case.
 #
-# Inputs: scripts/check-all.sh scripts/lib/
+# One case runs scripts/check-rust.sh with a stub cargo, for the variables its workspace test run
+# keeps away from the tests: check-all.sh runs the tests those variables name in other steps.
+#
+# Inputs: scripts/check-all.sh scripts/check-rust.sh scripts/lib/
 #
 # Usage:
 #     scripts/test-check-all.sh
@@ -280,14 +283,17 @@ check "--verbose shows a sensor's report in full" grep -qF "RAN $sensor" <<< "$o
 # CHECK_ALL_JOBS at jobs: each stub notes a directory of its own while it runs, and how many there
 # are. With wait, a stub stays until that many run at once, or 5 s have passed: the stub that
 # makes the count notes it as it starts, whatever the load, and only a runner that runs the checks
-# one after another waits the bound out.
+# one after another waits the bound out. The store steps run alone, so their stub only counts:
+# waiting, it would wait the bound out.
 at_once() {
-  local s want="${3:-0}"
+  local s want="${3:-0}" bound
   mkdir -p "$1/running"
   for s in "${scripts[@]}"; do
+    bound=100
+    [[ "$s" == scripts/check-store.sh ]] && bound=0
     # shellcheck disable=SC2016 # the stub's variables, not this script's
-    printf 'mkdir "%s/running/$$"; ls "%s/running" | wc -l >> "%s/counts"; i=0; while [ "$(ls "%s/running" | wc -l)" -lt %s ] && [ $i -lt 100 ]; do sleep 0.05; i=$((i + 1)); done; sleep 0.1; rmdir "%s/running/$$"\n' \
-      "$1" "$1" "$1" "$1" "$want" "$1" >> "$1/$s"
+    printf 'mkdir "%s/running/$$"; ls "%s/running" | wc -l >> "%s/counts"; i=0; while [ "$(ls "%s/running" | wc -l)" -lt %s ] && [ $i -lt %s ]; do sleep 0.05; i=$((i + 1)); done; sleep 0.1; rmdir "%s/running/$$"\n' \
+      "$1" "$1" "$1" "$1" "$want" "$bound" "$1" >> "$1/$s"
   done
   : > "$1/counts"
   CHECK_ALL_JOBS="$2" bash "$1/scripts/check-all.sh" > /dev/null 2>&1
@@ -298,6 +304,69 @@ d="$(repo capped)"
 check "CHECK_ALL_JOBS=2 runs no more than two checks at once" test "$(at_once "$d" 2)" -le 2
 d="$(repo uncapped)"
 check "the checks run side by side" test "$(at_once "$d" "${#scripts[@]}" 3)" -gt 2
+
+# The two store steps start only once every other check has ended, and one after the other, in
+# --changed mode with its skipped self-tests too. Every other stub holds a marker while it runs,
+# until a store step has run or 0.5 s has passed. A store stub holds a marker of its own, waits
+# until it sees another marker or 0.5 s has passed, and notes how many of either it saw. A runner
+# that starts a store step beside another check lets it see that check's marker, whatever the
+# load; only a runner that keeps them apart waits the bound out.
+stores_last() {
+  local s
+  mkdir -p "$1/busy" "$1/store"
+  for s in "${scripts[@]}"; do
+    [[ "$s" == scripts/check-store.sh ]] && continue
+    # shellcheck disable=SC2016 # the stub's variables, not this script's
+    printf 'mkdir "%s/busy/$$"; i=0; while [ ! -e "%s/stored" ] && [ $i -lt 10 ]; do sleep 0.05; i=$((i + 1)); done; rmdir "%s/busy/$$"\n' \
+      "$1" "$1" "$1" >> "$1/$s"
+  done
+  # shellcheck disable=SC2016 # the stub's variables, not this script's
+  printf 'mkdir "%s/store/$1"; i=0; while [ "$(ls "%s/busy" | wc -l)" -eq 0 ] && [ "$(ls "%s/store" | wc -l)" -lt 2 ] && [ $i -lt 10 ]; do sleep 0.05; i=$((i + 1)); done; echo "$1 $(ls "%s/busy" | wc -l) $(($(ls "%s/store" | wc -l) - 1))" >> "%s/seen"; touch "%s/stored"; rmdir "%s/store/$1"\n' \
+    "$1" "$1" "$1" "$1" "$1" "$1" "$1" "$1" >> "$1/scripts/check-store.sh"
+  # The stubs committed and main moved to them, so --changed skips the self-tests it would skip.
+  g "$1" commit -q -am stubs
+  git -C "${1:?}" branch -f main feature
+}
+check "the runner lists the two store steps" \
+  test "$(printf '%s\n' "${scripts[@]}" | grep -cxF scripts/check-store.sh)" -eq 2
+for mode in "" --changed; do
+  d="$(repo "stores-last$mode")"
+  stores_last "$d"
+  CHECK_ALL_JOBS="${#scripts[@]}" bash "$d/scripts/check-all.sh" $mode > "$work/out" 2>&1; rc=$?
+  # One line a store step: the store, the other checks running, the other store steps running.
+  got="$rc $(tr '\n' ' ' < "$d/seen" 2>/dev/null)"
+  check "the store steps start once every other check has ended, one after the other${mode:+, with $mode}" \
+    test "$got" = "0 s3 0 0 postgres 0 0 "
+  [[ "$got" == "0 s3 0 0 postgres 0 0 " ]] || echo "    exit and seen: $got" >&2
+  if [[ -n "$mode" ]]; then
+    check "with --changed a self-test was skipped there" grep -qF "skipped — neither it" "$work/out"
+  fi
+done
+
+# The workspace's test run in check-rust.sh sees no variable that names a store or the G-20 stack:
+# the store steps and check-g20.sh run the tests those name. A store's variables are kept away by
+# their prefix, so one added later is kept away too; any other variable passes.
+rust="$work/rust"
+mkdir -p "$rust/scripts/lib" "$rust/bin"
+cp "$ROOT/scripts/check-rust.sh" "$rust/scripts/check-rust.sh"
+cp "$ROOT/scripts/lib/softhsm.sh" "$rust/scripts/lib/softhsm.sh"
+cat > "$rust/bin/cargo" <<'STUB'
+#!/bin/sh
+[ "$*" = "test --workspace --locked" ] || exit 0
+env | grep -E '^FLEET_(TEST_POSTGRES_|TEST_S3_|G20_STACK=)' | sed 's/^/LEAKED /'
+[ -n "${FLEET_TEST_OTHER+set}" ] && echo "OTHER KEPT"
+exit 0
+STUB
+chmod +x "$rust/bin/cargo"
+out="$(env -i PATH="$rust/bin:$PATH" HOME="$work" FLEET_TEST_PKCS11_MODULE=stub \
+  FLEET_TEST_POSTGRES_HOST=db FLEET_TEST_POSTGRES_ADDED_LATER=x \
+  FLEET_TEST_S3_ENDPOINT=http://s3:9000 FLEET_TEST_S3_ADDED_LATER=x \
+  FLEET_G20_STACK=1 FLEET_TEST_OTHER=1 bash "$rust/scripts/check-rust.sh" 2>&1)"; rc=$?
+check "check-rust.sh passes with a stub cargo" test "$rc" -eq 0
+check "the workspace's test run sees no store's variable and not FLEET_G20_STACK" \
+  test "${out/LEAKED/}" = "$out"
+check "the workspace's test run keeps every other variable" grep -qxF "OTHER KEPT" <<< "$out"
+[[ "$out" == *LEAKED* ]] && grep -F LEAKED <<< "$out" | sed 's/^/    /' >&2
 
 d="$(repo jobs-zero)"
 CHECK_ALL_JOBS=0 expect_exit "CHECK_ALL_JOBS=0 exits 2" 2 "$d"

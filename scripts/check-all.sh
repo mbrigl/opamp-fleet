@@ -142,8 +142,9 @@ needs_run() {
 # files are printed in the order of the list below once all have finished, so the output reads as
 # a run one after another would. A check therefore depends on no other and writes nowhere another
 # reads: the self-tests build their fixtures in a directory of their own, and a run line added
-# for a project's build keeps to the same. A runner stopped by a signal stops the checks it
-# started and waits for them; what a check started in turn may outlive it.
+# for a project's build keeps to the same. The two store steps are the exception: they run last,
+# each alone (see alone() below). A runner stopped by a signal stops the checks it started and
+# waits for them; what a check started in turn may outlive it.
 max_jobs="${CHECK_ALL_JOBS:-$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)}"
 if [[ ! "$max_jobs" =~ ^[1-9][0-9]*$ ]]; then
   echo "check-all: CHECK_ALL_JOBS is '$max_jobs', not a number of checks from 1 up" >&2
@@ -188,6 +189,13 @@ run() {
     echo $? > "$out/$i.rc"
   } &
   running=$((running + 1))
+}
+
+# alone — wait until every check started so far has ended, so the next one starts by itself. A
+# check skipped in changed mode started nothing, so it is not waited for.
+alone() {
+  wait
+  running=0
 }
 
 run "Documentation self-test" scripts/test-check-docs.sh
@@ -236,7 +244,7 @@ run "Build hardening self-test" scripts/test-check-build-hardening.sh
 run "Build hardening" scripts/check-build-hardening.sh
 run "Fuzz target self-test" scripts/test-check-fuzz-targets.sh
 run "Fuzz targets" scripts/check-fuzz-targets.sh
-# The store checks themselves run with the gates of the other workflows, below.
+# The store checks themselves run last, below.
 run "Store check self-test" scripts/test-check-store.sh
 run "Fixture isolation" scripts/test-fixture-isolation.sh
 # The repository settings sensor reads GitHub and runs on a human's instruction (ADR-0002); its
@@ -259,8 +267,6 @@ run "Build, test and lint" scripts/check-rust.sh
 # throwaway machine, the G-20 stack — and fails instead in a CI run, where a skip would read as a
 # pass.
 run "Client on its platform" scripts/check-client-platform.sh
-run "S3 store" scripts/check-store.sh s3
-run "PostgreSQL store" scripts/check-store.sh postgres
 run "Release build of the Client" scripts/check-release-build.sh fleet-agent
 run "Release build of the Server" scripts/check-release-build.sh fleet-server
 run "Supply chain" scripts/check-deny.sh
@@ -268,6 +274,13 @@ run "Fuzzing" scripts/check-fuzz.sh
 run "Interop with opamp-go" scripts/check-interop.sh
 run "Service smoke test" scripts/check-service-smoke.sh
 run "G-20 failover and load" scripts/check-g20.sh
+# The store checks run last, each alone. A test schema fsyncs every new relation file, and beside
+# the builds' writes each sync takes seconds, so opening a schema outlasts the tests' timeout. With
+# a bucket named, both run the Server's tests against the same stores.
+alone
+run "S3 store" scripts/check-store.sh s3
+alone
+run "PostgreSQL store" scripts/check-store.sh postgres
 # The release publishes; it is no gate, and check-build-hardening.sh holds its steps.
 # Not a gate: .github/workflows/release.yml
 
