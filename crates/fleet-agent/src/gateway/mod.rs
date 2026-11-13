@@ -145,11 +145,20 @@ fn not_an_enrolment(report: &AgentToServer, presented: &[u8]) -> Option<&'static
     if *report != only {
         return Some("an enrolling peer sends a certificate signing request and nothing else");
     }
-    // Read as the Server reads it: one PEM block, nothing around it (ADR-0016).
-    let Ok(Some(encoded)) = fleet_core::csr::der(&csr.csr).and_then(|der| {
-        fleet_core::csr::requested_uri(&der, fleet_core::bootstrap_proof::URI_PREFIX)
-    }) else {
-        return Some("an enrolling peer's certificate signing request carries no bootstrap proof");
+    // Read as the Server reads it: one PEM block, nothing around it, and no renewal proof beside
+    // the bootstrap proof (ADR-0016 clause 21).
+    let encoded = match fleet_core::csr::der(&csr.csr)
+        .and_then(|der| fleet_core::csr::proof(&der, fleet_core::csr::Proof::Bootstrap))
+    {
+        Ok(Some(encoded)) => encoded,
+        Err(why) if why == fleet_core::csr::BOTH_PROOFS => {
+            return Some("an enrolling peer's certificate signing request carries both proofs");
+        }
+        _ => {
+            return Some(
+                "an enrolling peer's certificate signing request carries no bootstrap proof",
+            );
+        }
     };
     let content = {
         use base64::Engine as _;
@@ -1556,11 +1565,18 @@ mod tests {
 
     /// A CSR for a fresh key whose SANs ask for `uri`.
     fn csr_with_uri(uri: &str) -> Vec<u8> {
+        csr_with_uris(&[uri])
+    }
+
+    /// A CSR for a fresh key whose SANs ask for each of `uris`.
+    fn csr_with_uris(uris: &[&str]) -> Vec<u8> {
         let key = rcgen::KeyPair::generate().expect("key");
         let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).expect("params");
-        params
-            .subject_alt_names
-            .push(rcgen::SanType::URI(uri.try_into().expect("uri")));
+        for uri in uris {
+            params
+                .subject_alt_names
+                .push(rcgen::SanType::URI((*uri).try_into().expect("uri")));
+        }
         params
             .serialize_request(&key)
             .expect("csr")
@@ -1572,13 +1588,18 @@ mod tests {
     /// A CSR for a fresh key with a bootstrap proof embedding `certificate` (DER). Its signature
     /// is no signature at all: the Gateway does not check it.
     fn proof_of(certificate: &[u8]) -> Vec<u8> {
+        csr_with_uri(&bootstrap_uri(certificate))
+    }
+
+    /// The SAN URI of a bootstrap proof embedding `certificate` (DER), its signature none at all.
+    fn bootstrap_uri(certificate: &[u8]) -> String {
         use base64::Engine as _;
-        csr_with_uri(&format!(
+        format!(
             "{}{}",
             fleet_core::bootstrap_proof::URI_PREFIX,
             base64::engine::general_purpose::URL_SAFE_NO_PAD
                 .encode(fleet_core::bootstrap_proof::encode(certificate, b"sig"))
-        ))
+        )
     }
 
     /// A request with a bootstrap proof is an enrolment only as exactly one PEM block, the rule
@@ -1722,6 +1743,17 @@ mod tests {
             assert!(why.contains("enrolling peer"), "{why}");
             assert!(!forwarding.registry.routes(&uid));
         }
+        // A bootstrap proof of the very certificate presented does not pass with a renewal proof
+        // beside it (ADR-0016 clause 21).
+        let renewal = format!("{}AAAA", fleet_core::renewal::URI_PREFIX);
+        let both = csr_with_uris(&[&bootstrap_uri(&presented), &renewal]);
+        let why = refused(
+            forwarding
+                .forward_enrolment(&peer, enrolment(uid, both))
+                .await,
+        );
+        assert!(why.contains("both proofs"), "{why}");
+        assert!(!forwarding.registry.routes(&uid));
 
         let mut exchange =
             Box::pin(forwarding.forward_enrolment(&peer, enrolment(uid, proof.clone())));

@@ -10,6 +10,7 @@
 //! CA is a renewal and is signed at once; a CSR on an enrolment connection waits until an operator
 //! approves it ([`crate::enrolment`], ADR-0040).
 
+use fleet_core::csr::Proof;
 use fleet_core::x509::issue::{self, Role, CLOCK_SKEW};
 use rcgen::{CertificateSigningRequestParams, Issuer, KeyPair, SanType};
 use x509_parser::prelude::{FromDer, X509Certificate};
@@ -240,25 +241,11 @@ impl ClientCa {
         use sha2::{Digest, Sha256};
         // The proof and the key it covers come from the one request this CSR is (ADR-0016
         // clause 18), and so does the key `sign` certifies.
-        let (csr_der, request) = read(csr_pem)?;
-        let Some(encoded) = request
-            .params
-            .subject_alt_names
-            .iter()
-            .find_map(|san| match san {
-                SanType::URI(uri) => uri.as_str().strip_prefix(fleet_core::renewal::URI_PREFIX),
-                _ => None,
-            })
-        else {
+        let (csr_der, _) = read(csr_pem)?;
+        // Neither proof stands beside the other (ADR-0016 clause 21).
+        let Some(encoded) = fleet_core::csr::proof(&csr_der, Proof::Renewal)? else {
             return Ok(None);
         };
-        // Neither proof stands beside the other (ADR-0016 clause 21).
-        if request.params.subject_alt_names.iter().any(|san| {
-            matches!(san, SanType::URI(uri)
-                if uri.as_str().starts_with(fleet_core::bootstrap_proof::URI_PREFIX))
-        }) {
-            return Err(BOTH_PROOFS.to_string());
-        }
         let refused = |why: &str| format!("the renewal proof does not hold: {why}");
         let content = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(encoded)
@@ -307,14 +294,9 @@ pub fn bootstrap_proof(csr_pem: &str) -> Result<Option<Vec<u8>>, String> {
     use base64::Engine as _;
     use sha2::{Digest, Sha256};
     let csr_der = fleet_core::csr::der(csr_pem.as_bytes())?;
-    let Some(encoded) =
-        fleet_core::csr::requested_uri(&csr_der, fleet_core::bootstrap_proof::URI_PREFIX)?
-    else {
+    let Some(encoded) = fleet_core::csr::proof(&csr_der, Proof::Bootstrap)? else {
         return Ok(None);
     };
-    if fleet_core::csr::requested_uri(&csr_der, fleet_core::renewal::URI_PREFIX)?.is_some() {
-        return Err(BOTH_PROOFS.to_string());
-    }
     let refused = |why: &str| format!("the bootstrap proof does not hold: {why}");
     let content = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(encoded)
@@ -337,14 +319,12 @@ pub fn bootstrap_proof(csr_pem: &str) -> Result<Option<Vec<u8>>, String> {
 /// `Ok(None)` for a request without a proof.
 ///
 /// # Errors
-/// Returns the `BadRequest` text for a request that is not one PEM block, or a proof that does not
-/// parse.
+/// Returns the `BadRequest` text for a request that is not one PEM block, a proof that does not
+/// parse, or a request that carries a renewal proof beside it.
 pub fn bootstrap_proof_certificate(csr_pem: &str) -> Result<Option<Vec<u8>>, String> {
     use base64::Engine as _;
     let csr_der = fleet_core::csr::der(csr_pem.as_bytes())?;
-    let Some(encoded) =
-        fleet_core::csr::requested_uri(&csr_der, fleet_core::bootstrap_proof::URI_PREFIX)?
-    else {
+    let Some(encoded) = fleet_core::csr::proof(&csr_der, Proof::Bootstrap)? else {
         return Ok(None);
     };
     let unparsed = || "the bootstrap proof does not hold: it does not parse".to_string();
@@ -363,10 +343,6 @@ pub fn cert_id(der: &[u8]) -> Option<CertId> {
     let (issuer, serial) = fleet_core::x509::read::id(&certificate);
     Some(CertId { issuer, serial })
 }
-
-/// What a CSR carrying both proofs is answered (ADR-0016 clause 21).
-pub const BOTH_PROOFS: &str =
-    "the certificate signing request carries both a renewal proof and a bootstrap proof";
 
 /// What a certificate (DER) says about itself: issuer and serial, subject, the SHA-256 of its
 /// public key, and when it expires — for the register, and for a peer's certificate at admission.
@@ -1562,6 +1538,11 @@ mod tests {
     /// A CSR made with the key of a certificate this CA issued
     /// proves which certificate it renews.
     fn renewing(old_cert_pem: &str, old_key: &KeyPair) -> String {
+        renewing_beside(old_cert_pem, old_key, &[])
+    }
+
+    /// [`renewing`], its SANs asking for `uris` after the proof.
+    fn renewing_beside(old_cert_pem: &str, old_key: &KeyPair, uris: &[String]) -> String {
         use base64::Engine as _;
         use rcgen::{PublicKeyData as _, SigningKey as _};
         use sha2::{Digest, Sha256};
@@ -1579,14 +1560,56 @@ mod tests {
                 .encode(fleet_core::renewal::encode(&old_der, &signature))
         );
         let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).expect("params");
-        params
-            .subject_alt_names
-            .push(SanType::URI(proof.try_into().expect("uri")));
+        for uri in std::iter::once(&proof).chain(uris) {
+            params
+                .subject_alt_names
+                .push(SanType::URI(uri.clone().try_into().expect("uri")));
+        }
         params
             .serialize_request(&new_key)
             .expect("csr")
             .pem()
             .expect("pem")
+    }
+
+    /// A request that carries a bootstrap proof beside a renewal proof is refused by every reader
+    /// of a proof, the renewal's, the enrolment's and the Gateway route's, though the renewal
+    /// proof alone holds (ADR-0016 clause 21).
+    /// Verifies: ADR-0016
+    #[test]
+    fn a_request_with_both_proofs_is_refused_by_every_reader() {
+        use base64::Engine as _;
+        let ca = client_ca(30);
+        let old_key = KeyPair::generate().expect("old key");
+        let old = ca
+            .sign(
+                &rcgen::CertificateParams::new(Vec::<String>::new())
+                    .expect("params")
+                    .serialize_request(&old_key)
+                    .expect("csr")
+                    .pem()
+                    .expect("pem"),
+                "host-7",
+                &SubjectValues::default(),
+                UseCase::MemberCsr,
+            )
+            .expect("sign");
+        assert!(ca
+            .renewal_proof(&renewing(&old.pem, &old_key))
+            .expect("the renewal proof alone holds")
+            .is_some());
+        let bootstrap = format!(
+            "{}{}",
+            fleet_core::bootstrap_proof::URI_PREFIX,
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+                fleet_core::bootstrap_proof::encode(&cert_der(&old.pem), b"sig")
+            )
+        );
+        let both = renewing_beside(&old.pem, &old_key, &[bootstrap]);
+        let refused = Err(fleet_core::csr::BOTH_PROOFS.to_string());
+        assert_eq!(ca.renewal_proof(&both).map(|_| ()), refused);
+        assert_eq!(bootstrap_proof(&both).map(|_| ()), refused);
+        assert_eq!(bootstrap_proof_certificate(&both).map(|_| ()), refused);
     }
 
     /// A renewal proof names the certificate it renews and its host; a proof signed with another
