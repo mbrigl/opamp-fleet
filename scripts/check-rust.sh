@@ -36,7 +36,14 @@ log="$(mktemp)"
 trap 'rm -rf "$log" ${SOFTHSM_DIR:+"$SOFTHSM_DIR"}' EXIT
 
 cargo build --workspace --locked
-cargo test --workspace --locked
+# The tests on PostgreSQL run in scripts/check-store.sh postgres alone, which runs the whole
+# library and the integration tests that open the database, and the G-20 tests in
+# scripts/check-g20.sh. scripts/check-all.sh runs both beside this, and two test processes on one
+# database together open twice the schemas each caps itself at, and time out. So the workspace's
+# tests run without the variables that name the database, and their tests on it skip.
+env -u FLEET_TEST_POSTGRES_HOST -u FLEET_TEST_POSTGRES_PORT -u FLEET_TEST_POSTGRES_DBNAME \
+  -u FLEET_TEST_POSTGRES_USER -u FLEET_TEST_POSTGRES_PASSWORD_FILE -u FLEET_TEST_POSTGRES_CA_FILE \
+  -u FLEET_G20_STACK cargo test --workspace --locked
 # The test harness keeps a passing test's output to itself, so the tests of the keys on a token
 # run again with theirs shown, for the skip they would say aloud.
 if [[ -n "${FLEET_TEST_PKCS11_MODULE:-}" ]]; then
