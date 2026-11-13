@@ -1068,6 +1068,22 @@ pub(crate) async fn client(pool: &Pool) -> Result<Object, String> {
         .map_err(|e| format!("cannot reach the database: {e}"))
 }
 
+/// A transaction on `client` that reads one committed state of the database and writes nothing, a
+/// read-only `REPEATABLE READ` one: the statements of a read in it see no commit made between them,
+/// such as an Agent's row without its presence, or a Package's entry without the Package. Every
+/// read of several statements that must agree is read in one (ADR-0045 clause 10).
+pub(crate) async fn snapshot(
+    client: &mut Object,
+) -> Result<deadpool_postgres::Transaction<'_>, String> {
+    client
+        .build_transaction()
+        .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
+        .read_only(true)
+        .start()
+        .await
+        .map_err(sql)
+}
+
 /// [`client`] for a creation of an Agent's record, which waits for a pooled connection up to the
 /// bound of its whole call, [`CALL_TIMEOUT`], rather than [`WAIT_TIMEOUT`]: a new Agent is not
 /// answered `Unavailable` while the calls of a connecting fleet hold every connection for a few
@@ -2806,5 +2822,48 @@ mod tests {
             gate.open();
             parked.join().expect("the other schema's session");
         });
+    }
+
+    /// One function builds the read-only snapshot, [`snapshot`]: no adapter of `postgres` builds
+    /// a `REPEATABLE READ` or read-only transaction of its own, so every read of several statements
+    /// that reads one committed state reads it alike (ADR-0045 clause 10).
+    /// Verifies: ADR-0045
+    #[test]
+    fn one_function_builds_the_read_only_snapshot() {
+        // Split, so that this test does not find itself.
+        let builders = [
+            concat!(".read_only", "(true)"),
+            concat!("IsolationLevel", "::RepeatableRead"),
+            concat!("REPEATABLE", " READ"),
+        ];
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/postgres");
+        let mut found = Vec::new();
+        for entry in std::fs::read_dir(&dir).expect("src/postgres") {
+            let path = entry.expect("entry").path();
+            let name = path
+                .file_name()
+                .expect("name")
+                .to_string_lossy()
+                .into_owned();
+            let code = std::fs::read_to_string(&path).expect("read");
+            for builder in builders {
+                for (line, text) in code.lines().enumerate() {
+                    // A doc comment may name the isolation; only code builds it.
+                    if text.contains(builder) && !text.trim_start().starts_with("//") {
+                        found.push(format!("{name}:{}: {builder}", line + 1));
+                    }
+                }
+            }
+        }
+        found.sort();
+        assert_eq!(
+            found.len(),
+            2,
+            "the snapshot is built once, in mod.rs: {found:#?}"
+        );
+        assert!(
+            found.iter().all(|site| site.starts_with("mod.rs:")),
+            "{found:#?}"
+        );
     }
 }

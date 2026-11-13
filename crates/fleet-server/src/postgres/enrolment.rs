@@ -15,7 +15,7 @@ use tokio_postgres::error::Severity;
 use deadpool_postgres::Object;
 
 use super::notify::{notify, ENROLMENT, WINDOW};
-use super::{client, signed, sql, unsigned, Database};
+use super::{client, signed, snapshot, sql, unsigned, Database};
 use crate::enrolment::{
     Approval, Decided, Decision, DecisionError, EnrolmentStore, Persisted, PersistedRequest,
     Registrar, Signing, Took,
@@ -142,10 +142,15 @@ impl PgEnrolmentStore {
 }
 
 impl EnrolmentStore for PgEnrolmentStore {
+    /// The window, the rejected keys and the queue in one snapshot: what another instance commits
+    /// between the statements is read whole or not at all.
     fn load(&self) -> Result<Option<Persisted>, String> {
         self.database.run(|pool| async move {
-            let client = client(&pool).await?;
-            read(&client).await
+            let mut client = client(&pool).await?;
+            let transaction = snapshot(&mut client).await?;
+            let persisted = read(&transaction).await?;
+            transaction.commit().await.map_err(sql)?;
+            Ok(persisted)
         })
     }
 
@@ -1093,6 +1098,40 @@ mod tests {
         };
         let database = test.open();
         approvals(&|| Box::new(PgEnrolmentStore::new(database.clone())));
+    }
+
+    /// A window opened with a rejected key through another instance between the statements of
+    /// `load` is read whole or not at all: the rejected keys are read in the snapshot the window
+    /// was, so the load is never the key without its window.
+    /// Verifies: ADR-0045
+    #[test]
+    fn an_enrolment_committed_between_the_reads_of_load_is_read_whole_or_not_at_all() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let store = PgEnrolmentStore::new(test.open());
+        let gate = test.hold_reads(
+            "enrolment_rejected",
+            "INSERT INTO enrolment_window (singleton, until_ms) VALUES (true, 1000); \
+             INSERT INTO enrolment_rejected (key, rejected_ms) VALUES ('late', 1)",
+        );
+        std::thread::scope(|scope| {
+            let loading = scope.spawn(|| store.load());
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while test
+                .sessions("wait_event_type = 'Lock' AND query LIKE 'SELECT%enrolment_rejected%'")
+                == 0
+            {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "load never waited for the rejected keys"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            gate.open();
+            let loaded = loading.join().expect("load").expect("one committed state");
+            assert_eq!(loaded, None, "nothing committed after the snapshot is read");
+        });
     }
 
     /// Holds the approver that signs until the other one has met the request: it waits for the

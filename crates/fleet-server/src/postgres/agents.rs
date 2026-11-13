@@ -16,7 +16,7 @@ use super::notify::{
     follow_commit, notify, will_follow, ARRIVED, ASSIGNMENT, CONFIGURATION, FORGOTTEN, LABELS,
     RESTART, TAKEN,
 };
-use super::{client, creating_client, signed, sql, unsigned, Database};
+use super::{client, creating_client, signed, snapshot, sql, unsigned, Database};
 use crate::agent_store::{
     AgentPage, AgentStore, Creation, Holder, PageQuery, PersistedAgent, Pin, Presence, Silenced,
     StoredAgent, Taken,
@@ -1145,21 +1145,6 @@ pub(crate) async fn read_all(
     client: &impl GenericClient,
 ) -> Result<HashMap<InstanceUid, PersistedAgent>, String> {
     read(client, None).await
-}
-
-/// A transaction that reads one committed state of the database and writes nothing: the
-/// statements of a read in it see no commit made between them, such as an Agent's row without
-/// its presence.
-pub(super) async fn snapshot(
-    client: &mut deadpool_postgres::Object,
-) -> Result<deadpool_postgres::Transaction<'_>, String> {
-    client
-        .build_transaction()
-        .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
-        .read_only(true)
-        .start()
-        .await
-        .map_err(sql)
 }
 
 /// The records of the keys `only` names, or of every Agent where it names none, in one statement.

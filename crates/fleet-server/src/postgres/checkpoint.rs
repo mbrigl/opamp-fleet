@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use tokio_postgres::NoTls;
 
-use super::{client, sql, Database, Tls};
+use super::{client, snapshot, sql, Database, Tls};
 use crate::audit_log::line_hash;
 use crate::checkpoint::{CheckpointSource, Head, Prepared, Tip};
 
@@ -106,13 +106,7 @@ impl CheckpointSource for Checkpoints {
         }
         let (tip, chains) = self.database.run(|pool| async move {
             let mut client = client(&pool).await?;
-            let transaction = client
-                .build_transaction()
-                .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
-                .read_only(true)
-                .start()
-                .await
-                .map_err(sql)?;
+            let transaction = snapshot(&mut client).await?;
             let newest = transaction
                 .query_one("SELECT seq, hash FROM audit_checkpoint_head", &[])
                 .await

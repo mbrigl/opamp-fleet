@@ -11,7 +11,7 @@ use super::Cached as GenericClient;
 
 use super::notify::{notify, PACKAGE};
 use super::{blob_lock_refused, BLOB_LOCK};
-use super::{client, signed, sql, unsigned, Database};
+use super::{client, signed, snapshot, sql, unsigned, Database};
 use crate::packages::{
     assigned, no_set, pinned, removed_while_uploaded, Entry, Package, PackageBackend, PackageError,
     PackageId, Platform, Signed, Stored, ED25519_SIGNATURE_LEN,
@@ -31,10 +31,16 @@ impl PgPackageBackend {
 }
 
 impl PackageBackend for PgPackageBackend {
+    /// The Packages and their entries in one snapshot: a Package another instance commits with its
+    /// entries between the two statements is read whole or not at all, never an entry of a Package
+    /// the first statement did not see.
     fn load(&self) -> Result<Vec<Package>, String> {
         self.database.run(|pool| async move {
-            let client = client(&pool).await?;
-            read_all(&client).await
+            let mut client = client(&pool).await?;
+            let transaction = snapshot(&mut client).await?;
+            let packages = read_all(&transaction).await?;
+            transaction.commit().await.map_err(sql)?;
+            Ok(packages)
         })
     }
 
@@ -688,6 +694,46 @@ mod tests {
         };
         let database = test.open();
         contract(&|| Box::new(PgPackageBackend::new(database.clone())));
+    }
+
+    /// A Package created with its entry through another instance between the two statements of
+    /// `load` is read whole or not at all: the entries are read in the snapshot the Packages were,
+    /// so none names a Package the read did not see, and the load does not fail.
+    /// Verifies: ADR-0045
+    #[test]
+    fn a_package_committed_between_the_reads_of_load_is_read_whole_or_not_at_all() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let backend = PgPackageBackend::new(test.open());
+        let gate = test.hold_reads(
+            "package_entries",
+            &format!(
+                "INSERT INTO packages (agent_type, version) VALUES ('otelcol', '9.9.9'); \
+                 INSERT INTO package_entries (agent_type, version, os, arch, sha256, size) \
+                 VALUES ('otelcol', '9.9.9', 'linux', 'amd64', '{}', 1)",
+                "ab".repeat(32)
+            ),
+        );
+        std::thread::scope(|scope| {
+            let loading = scope.spawn(|| backend.load());
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while test.sessions("wait_event_type = 'Lock' AND query LIKE 'SELECT%package_entries%'")
+                == 0
+            {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "load never waited for the entries"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            gate.open();
+            let loaded = loading.join().expect("load").expect("one committed state");
+            assert!(
+                loaded.iter().all(|package| package.id.version != "9.9.9"),
+                "the Package committed after the snapshot is not read"
+            );
+        });
     }
 
     /// An entry write that fails leaves the Package as it was, on either store: one transaction

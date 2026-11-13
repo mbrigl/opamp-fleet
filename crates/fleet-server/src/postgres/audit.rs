@@ -560,13 +560,7 @@ pub fn verify_checked(
 ) -> Result<Verified, String> {
     let snapshot = database.run_within(super::IMPORT_TIMEOUT, |pool| async move {
         let mut client = client(&pool).await?;
-        let transaction = client
-            .build_transaction()
-            .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
-            .read_only(true)
-            .start()
-            .await
-            .map_err(sql)?;
+        let transaction = super::snapshot(&mut client).await?;
         // What every retained `audit.pruned` names, by the chain it stands in: where each chain may
         // begin, and the predecessor it carries on once the first chain's opening is pruned.
         let mut links: Vec<(String, super::audit_prune::Link)> = Vec::new();

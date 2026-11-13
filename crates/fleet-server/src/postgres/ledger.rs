@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use super::Cached as GenericClient;
 
 use super::notify::{follow_commit, notify, will_follow, CERTIFICATE, HOST};
-use super::{client, signed, sql, unsigned, Database};
+use super::{client, signed, snapshot, sql, unsigned, Database};
 use crate::revocation::{
     register_full, Added, Bound, CertId, Facts, Host, HostAct, Issued, Ledger, LedgerStore,
     RegisterBounds, Registered, Revocation, CHAIN_FULL,
@@ -77,13 +77,7 @@ impl LedgerStore for PgLedgerStore {
         // One snapshot, so the version read names exactly the list read with it.
         let ledger = self.database.run(|pool| async move {
             let mut client = client(&pool).await?;
-            let transaction = client
-                .build_transaction()
-                .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
-                .read_only(true)
-                .start()
-                .await
-                .map_err(sql)?;
+            let transaction = snapshot(&mut client).await?;
             let ledger = read_all(&transaction).await?;
             transaction.commit().await.map_err(sql)?;
             Ok(ledger)

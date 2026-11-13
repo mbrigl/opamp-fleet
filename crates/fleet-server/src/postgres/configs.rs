@@ -10,7 +10,7 @@ use std::sync::Arc;
 use super::Cached as GenericClient;
 
 use super::notify::{notify, CONFIGURATION};
-use super::{client, sql, Database};
+use super::{client, snapshot, sql, Database};
 use crate::configs::{
     check_type, validate_name, ConfigBackend, Configuration, Pinned, Removal, Revision,
 };
@@ -35,9 +35,9 @@ impl ConfigBackend for PgConfigBackend {
     fn load(&self) -> Result<Vec<Configuration>, String> {
         self.database.run(|pool| async move {
             let mut client = client(&pool).await?;
-            let snapshot = super::agents::snapshot(&mut client).await?;
-            let configs = read_all(&snapshot).await?;
-            snapshot.commit().await.map_err(sql)?;
+            let transaction = snapshot(&mut client).await?;
+            let configs = read_all(&transaction).await?;
+            transaction.commit().await.map_err(sql)?;
             Ok(configs)
         })
     }

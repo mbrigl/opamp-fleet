@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use super::Cached as GenericClient;
 
-use super::{client, sql, Database};
+use super::{client, snapshot, sql, Database};
 use crate::configs::validate_name;
 use crate::deployments::{
     check_selector, no_configuration, no_package, not_held, Change, Deployment, DeploymentBackend,
@@ -31,10 +31,16 @@ impl PgDeploymentBackend {
 }
 
 impl DeploymentBackend for PgDeploymentBackend {
+    /// The Deployments and their members in one snapshot: a Deployment another instance commits
+    /// with its members between the statements is read whole or not at all, never a member of a
+    /// Deployment the first statement did not see.
     fn load(&self) -> Result<Vec<Deployment>, String> {
         self.database.run(|pool| async move {
-            let client = client(&pool).await?;
-            read(&client, None).await
+            let mut client = client(&pool).await?;
+            let transaction = snapshot(&mut client).await?;
+            let deployments = read(&transaction, None).await?;
+            transaction.commit().await.map_err(sql)?;
+            Ok(deployments)
         })
     }
 
@@ -643,6 +649,46 @@ mod tests {
         let database = test.open();
         store_members(&test);
         contract(&|| Box::new(PgDeploymentBackend::new(database.clone())));
+    }
+
+    /// A Deployment created with its member through another instance between the statements of
+    /// `load` is read whole or not at all: the members are read in the snapshot the Deployments
+    /// were, so none names a Deployment the read did not see, and the load does not fail.
+    /// Verifies: ADR-0045
+    #[test]
+    fn a_deployment_committed_between_the_reads_of_load_is_read_whole_or_not_at_all() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let backend = PgDeploymentBackend::new(test.open());
+        store_members(&test);
+        let gate = test.hold_reads(
+            "deployment_packages",
+            "INSERT INTO deployments (name, selector, packages, configurations) \
+             VALUES ('late', '{\"channel\": \"late\"}', '[]', '{}'); \
+             INSERT INTO deployment_packages (deployment, agent_type, version) \
+             VALUES ('late', 'otelcol', '1.2.3')",
+        );
+        std::thread::scope(|scope| {
+            let loading = scope.spawn(|| backend.load());
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while test
+                .sessions("wait_event_type = 'Lock' AND query LIKE 'SELECT%deployment_packages%'")
+                == 0
+            {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "load never waited for the members"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            gate.open();
+            let loaded = loading.join().expect("load").expect("one committed state");
+            assert!(
+                loaded.iter().all(|deployment| deployment.name != "late"),
+                "the Deployment committed after the snapshot is not read"
+            );
+        });
     }
 
     /// A save or a change that fails leaves the Deployment as it was, on either store. `refuse`
