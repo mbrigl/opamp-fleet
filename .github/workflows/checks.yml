@@ -335,6 +335,8 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+      - name: Self-test the store check
+        run: bash scripts/test-check-store.sh
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       # The token the tests of several instances on one PKCS#11 token run against.
       - name: Install SoftHSM2
