@@ -63,6 +63,20 @@ fn held_elsewhere(error: &tokio_postgres::Error) -> bool {
     error.code() == Some(&tokio_postgres::error::SqlState::LOCK_NOT_AVAILABLE)
 }
 
+/// Rolls `transaction` back and waits for the database's answer before the call answers `answer`.
+/// A decision dropped instead only sends its rollback, and keeps the request's row until the
+/// database has read it: a rejection made right after, which takes the row without a wait, would
+/// find it held and be answered [`Decided::Deciding`]. A rejection's early returns end the same
+/// way, so that no call answers with its transaction still open. A rollback that fails leaves a
+/// connection the database rolls back as it ends; the answer stands.
+async fn rolled_back<T>(
+    transaction: deadpool_postgres::Transaction<'_>,
+    answer: T,
+) -> Result<T, String> {
+    let _ = transaction.rollback().await;
+    Ok(answer)
+}
+
 /// How the transaction that decides an approved request ended.
 enum Ended {
     /// Committed, leaving the revocation list's version where the register entry written with
@@ -242,15 +256,17 @@ impl EnrolmentStore for PgEnrolmentStore {
                 .await
             {
                 Ok(row) => row,
-                Err(e) if held_elsewhere(&e) => return Ok(Decided::Deciding),
+                Err(e) if held_elsewhere(&e) => {
+                    return rolled_back(transaction, Decided::Deciding).await
+                }
                 Err(e) => return Err(sql(e)),
             };
             let Some(row) = row else {
-                return Ok(Decided::NotWaiting);
+                return rolled_back(transaction, Decided::NotWaiting).await;
             };
             let mut request: Value = row.get(0);
             if request.get("decision").is_some_and(|d| !d.is_null()) {
-                return Ok(Decided::NotWaiting);
+                return rolled_back(transaction, Decided::NotWaiting).await;
             }
             request["decision"] = decision;
             transaction
@@ -283,7 +299,9 @@ impl EnrolmentStore for PgEnrolmentStore {
                 .await
             {
                 Ok(()) => {}
-                Err(e) if held_elsewhere(&e) => return Ok(Decided::Deciding),
+                Err(e) if held_elsewhere(&e) => {
+                    return rolled_back(transaction, Decided::Deciding).await
+                }
                 Err(e) => return Err(sql(e)),
             }
             let row = match transaction
@@ -294,12 +312,14 @@ impl EnrolmentStore for PgEnrolmentStore {
                 .await
             {
                 Ok(row) => row,
-                Err(e) if held_elsewhere(&e) => return Ok(Decided::Deciding),
+                Err(e) if held_elsewhere(&e) => {
+                    return rolled_back(transaction, Decided::Deciding).await
+                }
                 Err(e) => return Err(sql(e)),
             };
             let decided = match row.map(|row| row.get::<_, Value>(0)) {
                 Some(request) if request.get("decision").is_some_and(|d| !d.is_null()) => {
-                    return Ok(Decided::NotWaiting);
+                    return rolled_back(transaction, Decided::NotWaiting).await;
                 }
                 Some(mut request) => {
                     request["decision"] = rejected;
