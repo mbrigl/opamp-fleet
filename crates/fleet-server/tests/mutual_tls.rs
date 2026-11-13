@@ -6040,6 +6040,67 @@ async fn a_member_does_not_enrol_and_a_gateway_needs_a_proof() {
     );
 }
 
+/// A Gateway's own CSR with a bootstrap proof of the very certificate it presents and a renewal
+/// proof beside it is no enrolment: it stays on the Gateway's own route, is answered `BadRequest`
+/// naming both proofs, and is recorded as a refused issuance, not as a refused enrolment
+/// (ADR-0016 clauses 21 and 25).
+/// Verifies: ADR-0016
+#[tokio::test]
+async fn a_gateways_own_request_with_both_proofs_stays_on_its_route() {
+    let pki = Pki::new();
+    let bootstrap = Pki::named("opamp-fleet-test-bootstrap-ca");
+    let lines = Lines::default();
+    let audit: Arc<dyn fleet_server::audit::Audit> = Arc::new(
+        fleet_server::audit_log::AuditLog::start(
+            Box::new(lines.clone()),
+            fleet_server::audit_log::Limits::default(),
+            Manual::now(),
+        )
+        .expect("audit"),
+    );
+    let (served, gateway, gateway_cert) =
+        gateway_presenting(&pki, &bootstrap, Some(audit), None).await;
+    // The signatures are of a key of no certificate: the request is refused for carrying both
+    // proofs before either is verified.
+    let key = KeyPair::generate().expect("key").serialize_pem();
+    let both = bootstrap_csr(&gateway_cert, &key, Some((&gateway_cert, &key)));
+    let reply = decode(
+        post(
+            &gateway,
+            &served.endpoint,
+            with_csr(&InstanceUid::default(), both),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(
+        answered(&reply),
+        Answered::BadRequest(fleet_core::csr::BOTH_PROOFS.to_string())
+    );
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let all: Vec<serde_json::Value> = lines
+            .0
+            .lock()
+            .expect("lines")
+            .iter()
+            .map(|line| serde_json::from_str(line).expect("json"))
+            .collect();
+        let issuance = named(&all, "issuance.refused");
+        let enrolment = named(&all, "enrolment.refused");
+        if !issuance.is_empty() || !enrolment.is_empty() {
+            assert!(enrolment.is_empty(), "taken for an enrolment: {all:#?}");
+            assert_eq!(issuance[0]["reason"], fleet_core::csr::BOTH_PROOFS);
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the refusal was never recorded: {all:#?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
 /// What a relayed enrolment request was answered: throttled by the rate limit, told the queue is
 /// full or its window closed, refused, or taken. Both of the first two are `Unavailable`; only the
 /// message tells them apart.

@@ -1309,7 +1309,9 @@ impl Fleet {
     /// Whether a message is an enrolment request through a Gateway (ADR-0016 clause 25): a CSR
     /// carrying a bootstrap proof over the certificate of a host marked as a Gateway, unless the
     /// proof names that certificate itself — then it is the Gateway's own CSR, which `renews`
-    /// decides; it names that certificate only when it embeds it byte for byte. Its certificate is
+    /// decides; it names that certificate only when it embeds it byte for byte. A CSR with a
+    /// renewal proof beside the bootstrap proof is no enrolment either: it stays on the route it
+    /// came by, whose reader of a proof refuses it (ADR-0016 clause 21). Its certificate is
     /// checked as cheaply as the throttle allows before it keys a bucket (ADR-0016 clause 26): it parses, and
     /// it is one a bootstrap CA of `[enrolment]` issued as the handshake checks one — its issuer,
     /// that CA's signature over it, `CA:FALSE`, its validity, and the `clientAuth` extended key
@@ -1333,9 +1335,13 @@ impl Fleet {
             .as_ref()?
             .certificate_request
             .as_ref()?;
-        // A request that is not one PEM block is refused where any CSR is.
+        // A request that is not one PEM block, or that carries both proofs, is refused where any
+        // CSR is.
         let pem = std::str::from_utf8(&csr.csr).ok()?;
-        fleet_core::csr::der(pem.as_bytes()).ok()?;
+        let csr_der = fleet_core::csr::der(pem.as_bytes()).ok()?;
+        fleet_core::csr::proof(&csr_der, fleet_core::csr::Proof::Bootstrap)
+            .ok()
+            .flatten()?;
         let der = match crate::ca::bootstrap_proof_certificate(pem) {
             Ok(None) => return None,
             Ok(Some(der)) => der,
