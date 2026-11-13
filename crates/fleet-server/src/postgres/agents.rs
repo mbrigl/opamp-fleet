@@ -3756,4 +3756,267 @@ mod tests {
             "opening meets no record"
         );
     }
+
+    /// Two creations of new Agents on two instances at once, with one place left under the
+    /// ceiling, are both in flight when the first commits: each waits for the row the count is
+    /// kept in, the database lets one through, and the other counts the record the first created
+    /// and is refused.
+    /// Verifies: ADR-0045, ADR-0023
+    #[test]
+    fn two_creations_at_once_with_one_place_left_create_one_record() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let (a_database, b_database) = (test.shared(), test.shared());
+        let a = PgAgentStore::new(a_database);
+        a.create_within(&InstanceUid([1; 16]), &record(), 2)
+            .expect("the first record");
+        let b = PgAgentStore::new(b_database);
+        // The wait for the count's row outlasts a loaded host's delays in opening the hold; the
+        // session's `statement_timeout` still bounds it.
+        test.sql(
+            "CREATE FUNCTION fleet_test_lock_untimed() RETURNS trigger LANGUAGE plpgsql AS $$ \
+             BEGIN PERFORM set_config('lock_timeout', '0', true); RETURN NULL; END $$; \
+             CREATE TRIGGER fleet_test_lock_untimed BEFORE INSERT ON agents \
+             FOR EACH STATEMENT EXECUTE FUNCTION fleet_test_lock_untimed();",
+        );
+        // Both creations are under way before either may count.
+        let hold = test.hold("SELECT agents FROM agent_count FOR UPDATE;");
+        let (a, b) = (Arc::new(a), Arc::new(b));
+        let create = |store: &Arc<PgAgentStore>, byte: u8| {
+            let store = store.clone();
+            std::thread::spawn(move || store.create_within(&InstanceUid([byte; 16]), &record(), 2))
+        };
+        let (on_a, on_b) = (create(&a, 2), create(&b, 3));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while test.sessions("wait_event_type = 'Lock' AND query LIKE 'INSERT INTO agents%'") < 2 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "both creations wait for the count's row"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        hold.open();
+        let mut answers = [
+            on_a.join().expect("A's thread").expect("A's creation"),
+            on_b.join().expect("B's thread").expect("B's creation"),
+        ]
+        .map(|creation| match creation {
+            Creation::Created => "created",
+            Creation::Full => "full",
+            Creation::Found(_) => "found",
+        });
+        answers.sort_unstable();
+        assert_eq!(answers, ["created", "full"], "one is refused");
+        assert_eq!(
+            test.rows("SELECT count(*), (SELECT agents FROM agent_count) FROM agents"),
+            [[Some("2".to_string()), Some("2".to_string())]],
+            "the ceiling holds, and the count is the rows'"
+        );
+    }
+
+    /// A release and a presence batch over the same Agents at once lock the rows in one order,
+    /// whichever comes first: the second waits for the first's commit rather than deadlocking, and
+    /// both writes stay, each in the columns it names. The first is held at a gate the test opens
+    /// once the second waits for a row.
+    /// Verifies: ADR-0045, ADR-0030
+    #[test]
+    fn a_release_and_a_presence_batch_over_the_same_agents_at_once_both_commit() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let (releasing, writing) = (test.shared(), test.shared());
+        let (low, high) = (InstanceUid([1; 16]), InstanceUid([2; 16]));
+        // A rollout releases through a stored Deployment.
+        test.store_deployments(&["first", "second"]);
+        let mut bare = record();
+        bare.assignment = None;
+        let store = PgAgentStore::new(releasing.clone());
+        store.put(&low, &bare).expect("put");
+        store.put(&high, &bare).expect("put");
+        test.sql(
+            "CREATE TABLE fleet_test_gate (open boolean NOT NULL); \
+             INSERT INTO fleet_test_gate VALUES (false); \
+             CREATE FUNCTION fleet_test_wait() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN \
+             WHILE NOT (SELECT open FROM fleet_test_gate) LOOP PERFORM pg_sleep(0.01); \
+             END LOOP; RETURN NEW; END $$; \
+             CREATE TRIGGER fleet_test_wait AFTER UPDATE ON agents \
+             FOR EACH ROW EXECUTE FUNCTION fleet_test_wait(); \
+             CREATE FUNCTION fleet_test_lock_untimed() RETURNS trigger LANGUAGE plpgsql AS $$ \
+             BEGIN PERFORM set_config('lock_timeout', '0', true); RETURN NULL; END $$; \
+             CREATE TRIGGER fleet_test_lock_untimed BEFORE UPDATE ON agents \
+             FOR EACH STATEMENT EXECUTE FUNCTION fleet_test_lock_untimed();",
+        );
+        let at_gate = || test.sessions("wait_event = 'PgSleep'");
+        let waiting = |query: &str| {
+            test.sessions(&format!(
+                "wait_event_type = 'Lock' AND query LIKE '{query}%'"
+            ))
+        };
+        let until = |what: &str, done: &dyn Fn() -> bool| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            while !done() {
+                assert!(std::time::Instant::now() < deadline, "{what}");
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+        let release = |deployment: &str, order: [InstanceUid; 2]| {
+            let mut released = bare.clone();
+            released.assignment = Some(Assignment {
+                deployment: deployment.to_string(),
+                package: None,
+                configurations: BTreeMap::new(),
+            });
+            let database = releasing.clone();
+            std::thread::spawn(move || {
+                PgAgentStore::new(database).release(&[], &order.map(|uid| (uid, released.clone())))
+            })
+        };
+        let batch = |holder: &'static str, order: [InstanceUid; 2]| {
+            let database = writing.clone();
+            std::thread::spawn(move || {
+                PgAgentStore::new(database).write_presence(
+                    holder,
+                    &order.map(|uid| {
+                        (
+                            uid,
+                            Presence {
+                                connected: true,
+                                last_seen_ms: 9_000,
+                            },
+                            None,
+                        )
+                    }),
+                )
+            })
+        };
+        let stored = || {
+            test.rows(
+                "SELECT deployment, holder::text, connected::text FROM agents \
+                 ORDER BY instance_uid COLLATE \"C\"",
+            )
+        };
+        let (first_holder, second_holder) = (
+            "00000000-0000-4000-8000-000000000001",
+            "00000000-0000-4000-8000-000000000002",
+        );
+
+        // The release first: it holds the first row at the gate, and the batch waits for it.
+        let released = release("first", [high, low]);
+        until("the release reaches the gate", &|| at_gate() == 1);
+        let written = batch(first_holder, [low, high]);
+        until("the batch waits for a row", &|| {
+            waiting("SELECT 1 FROM agents") == 1
+        });
+        test.sql("UPDATE fleet_test_gate SET open = true");
+        assert_eq!(
+            released.join().expect("the release's thread"),
+            Ok(vec![high, low]),
+            "the release commits"
+        );
+        assert_eq!(
+            written
+                .join()
+                .expect("the batch's thread")
+                .expect("the batch commits")
+                .len(),
+            2
+        );
+        let both = |deployment: &str, holder: &str| {
+            vec![
+                vec![
+                    Some(deployment.to_string()),
+                    Some(holder.to_string()),
+                    Some("true".to_string()),
+                ];
+                2
+            ]
+        };
+        assert_eq!(stored(), both("first", first_holder), "both writes stay");
+
+        // The batch first: it holds both rows at the gate, and the release waits for them.
+        test.sql("UPDATE fleet_test_gate SET open = false");
+        let written = batch(second_holder, [high, low]);
+        until("the batch reaches the gate", &|| at_gate() == 1);
+        let released = release("second", [low, high]);
+        until("the release waits for a row", &|| {
+            waiting("UPDATE agents") == 1
+        });
+        test.sql("UPDATE fleet_test_gate SET open = true");
+        assert_eq!(
+            written
+                .join()
+                .expect("the batch's thread")
+                .expect("the batch commits")
+                .len(),
+            2
+        );
+        assert_eq!(
+            released.join().expect("the release's thread"),
+            Ok(vec![low, high]),
+            "the release commits"
+        );
+        assert_eq!(stored(), both("second", second_holder), "both writes stay");
+    }
+
+    /// Two threads read the Agents while this instance's release commits between their reading
+    /// the rows and their taking them up: neither takes the count of what pins the Deployment
+    /// below the release's, the one that answers first included, whose end must not drop what
+    /// the other is still decided by.
+    /// Verifies: ADR-0033, ADR-0023
+    #[test]
+    fn two_reads_on_their_own_threads_under_a_commit_keep_what_it_pins() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        test.store_deployments(&["stable"]);
+        let store = Arc::new(PgAgentStore::open(database).expect("open"));
+        let uid = InstanceUid([13; 16]);
+        let mut bare = record();
+        bare.assignment = None;
+        store.put(&uid, &bare).expect("put");
+        // Each read, on its own thread, stops between its rows and taking them up until it is
+        // let go.
+        let read = |store: &Arc<PgAgentStore>| {
+            let (arrived, arrives) = std::sync::mpsc::channel::<()>();
+            let (go, goes) = std::sync::mpsc::channel::<()>();
+            *store.after_read.lock().expect("hook") = Some(Box::new(move || {
+                arrived.send(()).expect("arrived");
+                goes.recv().expect("go");
+            }));
+            let reading = store.clone();
+            let thread = std::thread::spawn(move || reading.query(None).map(|_| ()));
+            arrives.recv().expect("the read has read the rows");
+            (go, thread)
+        };
+        let (go_one, one) = read(&store);
+        let (go_two, two) = read(&store);
+        let released = PersistedAgent {
+            assignment: Some(Assignment {
+                deployment: "stable".to_string(),
+                package: None,
+                configurations: BTreeMap::new(),
+            }),
+            ..bare
+        };
+        assert_eq!(store.release(&[], &[(uid, released)]), Ok(vec![uid]));
+        assert_eq!(store.pinning(Pin::Deployment("stable")), 1, "the release");
+        go_one.send(()).expect("let the first go");
+        one.join().expect("the first's thread").expect("the first");
+        assert_eq!(
+            store.pinning(Pin::Deployment("stable")),
+            1,
+            "after the first answered"
+        );
+        go_two.send(()).expect("let the second go");
+        two.join()
+            .expect("the second's thread")
+            .expect("the second");
+        assert_eq!(
+            store.pinning(Pin::Deployment("stable")),
+            1,
+            "after the second answered"
+        );
+    }
 }
