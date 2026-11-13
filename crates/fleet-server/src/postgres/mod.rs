@@ -1071,7 +1071,7 @@ pub(crate) async fn client(pool: &Pool) -> Result<Object, String> {
 /// A transaction on `client` that reads one committed state of the database and writes nothing, a
 /// read-only `REPEATABLE READ` one: the statements of a read in it see no commit made between them,
 /// such as an Agent's row without its presence, or a Package's entry without the Package. Every
-/// read of several statements that must agree is read in one (ADR-0045 clause 10).
+/// read of several statements that must agree is read in one.
 pub(crate) async fn snapshot(
     client: &mut Object,
 ) -> Result<deadpool_postgres::Transaction<'_>, String> {
@@ -2826,7 +2826,7 @@ mod tests {
 
     /// One function builds the read-only snapshot, [`snapshot`]: no adapter of `postgres` builds
     /// a `REPEATABLE READ` or read-only transaction of its own, so every read of several statements
-    /// that reads one committed state reads it alike (ADR-0045 clause 10).
+    /// that reads one committed state reads it alike.
     /// Verifies: ADR-0045
     #[test]
     fn one_function_builds_the_read_only_snapshot() {

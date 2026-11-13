@@ -661,7 +661,6 @@ mod tests {
             return;
         };
         let backend = PgDeploymentBackend::new(test.open());
-        store_members(&test);
         let gate = test.hold_reads(
             "deployment_packages",
             "INSERT INTO deployments (name, selector, packages, configurations) \

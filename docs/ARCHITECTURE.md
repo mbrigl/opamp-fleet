@@ -144,9 +144,9 @@ no module.
   `[database] store = "postgres"` every port but the blob port has its PostgreSQL adapter in
   `postgres` instead (`postgres::agents`, with the query of a page in `postgres::agent_page`,
   `configs`, `deployments`, `packages`, `ledger`, `bootstrap`, `enrolment`, `floors`, `audit`),
-  each write one transaction; every read of several statements — the load of the Configurations,
-  the Packages, the Deployments, the enrolment queue and the ledger, a page, the Agents' `query`,
-  a checkpoint and `server audit-verify` — reads one read-only snapshot, which
+  each write one transaction; every read of several statements that must agree — the load of the
+  Configurations, the Packages, the Deployments, the enrolment queue and the ledger, a page, the
+  Agents' `query`, a checkpoint and `server audit-verify` — reads one read-only snapshot, which
   `postgres::snapshot` alone builds. `postgres` holds the
   connection they share — TLS 1.3 on *ring*, a pool on a `bridge` runtime of its own, each call
   bounded in time by `Database::run` and `run_within`, the exclusive lock of an instance that must
