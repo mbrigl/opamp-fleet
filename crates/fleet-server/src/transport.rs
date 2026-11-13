@@ -240,7 +240,7 @@ fn expired(not_after_ms: u64) -> bool {
 }
 
 /// The check of [`checked`] a presented certificate failed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 enum Failed {
     Unreadable,
     Expired,
@@ -248,7 +248,7 @@ enum Failed {
 }
 
 /// What `/v1/opamp` and the package download alike hold a presented certificate (DER) to, beyond
-/// the handshake (ADR-0040 clauses 6, 31 and 33): its facts read, it has not ended, and it is not
+/// the handshake (ADR-0040 clauses 6, 18, 31 and 33): its facts read, it has not ended, and it is not
 /// revoked. Its facts, read once, or `None` where no certificate was presented.
 fn checked(
     certificate: Option<&[u8]>,
