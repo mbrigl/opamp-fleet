@@ -910,11 +910,12 @@ fn serving(config: &Path) -> ServerUnderTest {
     );
     let (lines, logged) = mpsc::channel();
     let stderr = server.0.stderr.take().expect("stderr");
+    // Read to the end, past the start this waits for: once its reader is gone, every later write
+    // of the Server's log fails, its audit record's among them, and an act it cannot record is
+    // refused.
     std::thread::spawn(move || {
         for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-            if lines.send(line).is_err() {
-                break;
-            }
+            let _ = lines.send(line);
         }
     });
     let mut seen = Vec::new();
