@@ -1331,6 +1331,70 @@ fn revocations_setup(pki: &Pki) -> Setup<'static> {
     }
 }
 
+/// A certificate of the client CA whose facts do not read — a serial of 21 octets, past RFC 5280's
+/// 20 — passes the handshake and is refused behind it alike on `/v1/opamp` and on the download,
+/// with no revocation list armed, while one with a serial of 20 octets reaches both
+/// (ADR-0040 clauses 6 and 18).
+/// Verifies: ADR-0040
+#[tokio::test]
+async fn a_certificate_whose_facts_do_not_read_is_refused_on_both_routes() {
+    let pki = Pki::new();
+    let served = serve(
+        &pki,
+        Setup {
+            client_ca: Some(client_ca_of(&pki)),
+            ..Setup::default()
+        },
+    )
+    .await;
+    let download = served.endpoint.replace(
+        "/v1/opamp",
+        "/api/v1/packages/otelcol/1.0.0/file?os=linux&arch=amd64",
+    );
+    let with_serial = |octets: usize| {
+        let key = KeyPair::generate().expect("key");
+        let mut params = CertificateParams::new(vec!["edge-01".to_string()]).expect("params");
+        params.serial_number = Some(rcgen::SerialNumber::from_slice(&vec![0x5a; octets]));
+        let cert = params.signed_by(&key, &pki.issuer()).expect("signed");
+        client(&served.ca_pem, Some((&cert.pem(), &key.serialize_pem())))
+    };
+
+    let readable = with_serial(20);
+    assert!(
+        post(&readable, &served.endpoint, report(&InstanceUid::default()))
+            .await
+            .status()
+            .is_success()
+    );
+    assert_eq!(
+        readable.get(&download).send().await.expect("send").status(),
+        reqwest::StatusCode::NOT_FOUND,
+        "a readable certificate reaches the download handler"
+    );
+
+    let unreadable = with_serial(21);
+    assert_eq!(
+        post(
+            &unreadable,
+            &served.endpoint,
+            report(&InstanceUid::default())
+        )
+        .await
+        .status(),
+        reqwest::StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        unreadable
+            .get(&download)
+            .send()
+            .await
+            .expect("send")
+            .status(),
+        reqwest::StatusCode::UNAUTHORIZED,
+        "the download admitted what /v1/opamp refuses"
+    );
+}
+
 /// A revoked certificate is refused on plain HTTP, on the WebSocket upgrade and on the download,
 /// without a challenge and without saying it was revoked; revoking it through the REST API lists
 /// it, and lifting it admits the certificate again (ADR-0040 clauses 27, 30 and 31).

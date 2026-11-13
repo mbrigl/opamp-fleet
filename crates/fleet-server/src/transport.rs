@@ -239,6 +239,40 @@ fn expired(not_after_ms: u64) -> bool {
     not_after_ms <= now_ms()
 }
 
+/// The check of [`checked`] a presented certificate failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Failed {
+    Unreadable,
+    Expired,
+    Revoked { serial: String },
+}
+
+/// What `/v1/opamp` and the package download alike hold a presented certificate (DER) to, beyond
+/// the handshake (ADR-0040 clauses 6, 31 and 33): its facts read, it has not ended, and it is not
+/// revoked. Its facts, read once, or `None` where no certificate was presented.
+fn checked(
+    certificate: Option<&[u8]>,
+    revocations: Option<&Revocations>,
+) -> Result<Option<crate::revocation::Facts>, Failed> {
+    let Some(certificate) = certificate else {
+        return Ok(None);
+    };
+    // The handshake verified it, so it parses; one whose facts do not read, such as a serial past
+    // 20 octets, is not admitted.
+    let facts = crate::ca::facts(certificate).map_err(|_| Failed::Unreadable)?;
+    // The handshake checked the certificate's validity once per connection; a kept-alive one
+    // outlives it, so each request is checked again.
+    if expired(facts.not_after_ms) {
+        return Err(Failed::Expired);
+    }
+    if revocations.is_some_and(|revocations| revocations.is_certificate_revoked(&facts.id)) {
+        return Err(Failed::Revoked {
+            serial: facts.id.serial,
+        });
+    }
+    Ok(Some(facts))
+}
+
 /// `401` without a challenge: the Agent plane admits by certificate, which no header can supply
 /// (ADR-0040 clause 1).
 fn unauthorized(text: &'static str) -> Response {
@@ -319,21 +353,16 @@ async fn admit_download(
         .extensions()
         .get::<PeerCertificate>()
         .and_then(|peer| peer.0.as_ref());
-    let facts = certificate.and_then(|cert| crate::ca::facts(cert.as_ref()).ok());
-    let member = match certificate {
-        Some(cert) => {
-            guard.issuers.classify(cert.as_ref()) == Peer::Member
-                && !facts
-                    .as_ref()
-                    .is_some_and(|facts| expired(facts.not_after_ms))
-                && !guard.revocations.as_ref().is_some_and(|revocations| {
-                    facts
-                        .as_ref()
-                        .is_none_or(|facts| revocations.is_certificate_revoked(&facts.id))
-                })
-        }
-        None => !guard.require_client_certificate,
+    let checked = checked(
+        certificate.map(|cert| cert.as_ref()),
+        guard.revocations.as_deref(),
+    );
+    let member = match (certificate, &checked) {
+        (Some(cert), Ok(_)) => guard.issuers.classify(cert.as_ref()) == Peer::Member,
+        (Some(_), Err(_)) => false,
+        (None, _) => !guard.require_client_certificate,
     };
+    let facts = checked.ok().flatten();
     if !member {
         if let (Some(throttle), Some(peer)) = (&guard.throttle, peer) {
             throttle.failed(peer);
@@ -629,60 +658,31 @@ async fn admit(
                 .into_response(),
         );
     }
-    let presented = match certificate
-        .as_ref()
-        .map(|cert| crate::ca::facts(cert.as_ref()))
-    {
-        None => None,
-        Some(Ok(facts)) => Some(facts),
-        // The handshake verified it, so it parses; one that does not is not admitted.
-        Some(Err(_)) => {
-            return refuse(
-                "certificate",
-                unauthorized("the OpAMP endpoint requires a certificate of the fleet"),
-            )
+    let not_of_the_fleet =
+        || unauthorized("the OpAMP endpoint requires a certificate of the fleet");
+    let presented = match checked(
+        certificate.as_ref().map(|cert| cert.as_ref()),
+        admission.revocations.as_deref(),
+    ) {
+        Ok(presented) => presented,
+        Err(Failed::Unreadable) => return refuse("certificate", not_of_the_fleet()),
+        Err(Failed::Expired) => {
+            debug!("refused: an expired certificate");
+            return refuse("expired", not_of_the_fleet());
         }
-    };
-    // The handshake checked the certificate's validity once per connection; a kept-alive one
-    // outlives it, so each request is checked again (ADR-0040 clauses 6 and 33).
-    if presented
-        .as_ref()
-        .is_some_and(|facts| expired(facts.not_after_ms))
-    {
-        debug!("refused: an expired certificate");
-        return refuse(
-            "expired",
-            unauthorized("the OpAMP endpoint requires a certificate of the fleet"),
-        );
-    }
-    if let Some(revocations) = &admission.revocations {
-        let proofs = Proofs {
-            der: None,
-            certificate: presented
-                .as_ref()
-                .map(|facts| (facts.id.clone(), facts.not_after_ms)),
-            host: None,
-            subject_values: crate::revocation::SubjectValues::default(),
-        };
         // That the certificate was revoked is not said (ADR-0040 clause 31).
-        if proofs.revoked(revocations) {
+        Err(Failed::Revoked { serial }) => {
             debug!("refused: a revoked certificate");
             if let Some(audit) = &admission.audit {
                 audit.refusal(
                     Entry::new("admission.revoked_proof", "refused")
                         .peer(peer)
-                        .with(
-                            "serial",
-                            presented.as_ref().map(|facts| facts.id.serial.clone()),
-                        ),
+                        .with("serial", Some(serial)),
                 );
             }
-            return refuse(
-                "revoked",
-                unauthorized("the OpAMP endpoint requires a certificate of the fleet"),
-            );
+            return refuse("revoked", not_of_the_fleet());
         }
-    }
+    };
     let classified = certificate
         .as_ref()
         .map(|cert| admission.issuers.classify(cert.as_ref()))
