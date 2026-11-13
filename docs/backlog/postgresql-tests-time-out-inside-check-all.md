@@ -26,7 +26,9 @@ Seen beside it, not failing yet:
 
 **Idea.** Find what the store step shares with the steps beside it: run it in check-all with the
 other steps stubbed, then with each one back, and log the database's connections and locks at a
-timeout. Keep the S3 variables away from the workspace run as the PostgreSQL ones are.
+timeout. Keep the S3 variables away from the workspace run as the PostgreSQL ones are, by their
+prefix rather than by a list of names, so a variable added later is kept away too, with a case of
+`scripts/test-check-all.sh` that says so (the design revision of 2026-11-12).
 
 **From.** The fix of tests-fail-on-a-host-loaded-beyond-a-second-build on `feat/stabilize` and its
 review (2026-11-12).

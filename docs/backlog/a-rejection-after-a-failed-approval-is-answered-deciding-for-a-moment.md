@@ -15,5 +15,7 @@ although nothing decides it. A retry succeeds. Not seen; found by reading.
 through `rolled_back`: a `ROLLBACK` sent and its answer awaited, the connection closed only where
 that fails.
 
+Ticket revision-2026-11-12/07 removes `decide`; the ending to copy is then `reject`'s.
+
 **From.** Review of the fix to the enrolment test that answered `Deciding` (feat/stabilize,
 2026-11-12).
