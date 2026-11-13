@@ -11,6 +11,5 @@ runs in under a second. `main` has no check that runs them that way.
 
 **What the old branch had.** Revision ticket 16 of `feat/revision-2026-10-31`, open, not worked: a
 check script that compiles and runs the source-reading tests this way, listed in check-all and in
-`checks.yml` as check 9 of `scripts/check-docs.sh` requires, and run by the hook of
-`a-rebase-reports-the-fast-checks.md`. The tests stay where they are, so `cargo test` keeps
-running them.
+`checks.yml` as check 9 of `scripts/check-docs.sh` requires. The tests stay where they are, so
+`cargo test` keeps running them.

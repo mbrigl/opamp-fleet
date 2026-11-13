@@ -13,4 +13,4 @@ modules.
 split the module into the wire protocol, the Client's end and the peer checks, move the service's
 server beside the other parts of the second service, and have the composition root hand in what
 the channel takes from `service`, with the overview's Client supervision paragraph. It was blocked
-by ticket 15, the flaky channel test, which `chore/revision-carry` carries.
+by ticket 15, the flaky channel test, fixed in 484b98a21; nothing blocks it now.
