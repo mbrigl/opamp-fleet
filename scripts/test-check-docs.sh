@@ -868,9 +868,8 @@ expect pass "docs/plan/ named while there is no open work" "$d"
 # --- cases: a section of a README or CONTRIBUTING.md named in prose (check 17) ----------
 
 # named <file> <heading> — a reference to a heading by name, its arrow assembled for the same
-# reason as sect; quoted <heading> <file> — the form that quotes the heading first.
+# reason as sect.
 named() { printf '%s \342\206\222 "%s"' "$1" "$2"; }
-quoted() { printf '"%s" in %s' "$1" "$2"; }
 
 d="$(repo named-missing)"
 echo "# Runs the docs ($(named README.md Nowhere))." >> "$d/.github/workflows/checks.yml"
@@ -880,7 +879,7 @@ expect fail "a named section no heading of the README carries" "$d" \
 d="$(repo named-present)"
 {
   echo "# Runs the docs ($(named README Template), $(named CONTRIBUTING.md 'Repository settings'))."
-  echo "# Listed as $(quoted 'Project Layout' CONTRIBUTING.md) says."
+  echo "# Listed as $(named CONTRIBUTING.md 'Project Layout') says."
 } >> "$d/.github/workflows/checks.yml"
 expect pass "a named section of the README and of CONTRIBUTING.md that exists" "$d"
 
@@ -894,10 +893,9 @@ printf '# Runs the docs (README.md \342\206\222\n# "Nowhere").\n' >> "$d/.github
 expect fail "a named section wrapped after its arrow is joined" "$d" \
   '.github/workflows/checks.yml:5: "Nowhere" names no heading of README.md'
 
-d="$(repo named-quoted-missing)"
-echo "# Enabled as the $(quoted 'Git hooks' CONTRIBUTING.md) says." >> "$d/.github/workflows/checks.yml"
-expect fail "a quoted section no heading of CONTRIBUTING.md carries" "$d" \
-  '.github/workflows/checks.yml:5: "Git hooks" names no heading of CONTRIBUTING.md'
+d="$(repo named-quoted-word)"
+echo '# The release sets "unreleased" in README.md to the tag.' >> "$d/.github/workflows/checks.yml"
+expect pass "a quoted word before 'in README.md' is not read as a heading" "$d"
 
 d="$(repo named-beside)"
 mkdir -p "$d/sub"

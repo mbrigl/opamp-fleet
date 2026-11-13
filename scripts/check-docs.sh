@@ -117,13 +117,14 @@
 #      still under rework, and so does a run outside CI, where nothing names the branch; the
 #      workflow says in PULL_REQUEST_DRAFT whether a pull request is a draft.
 #  17. Named-section integrity: in every text file, a section of README.md or CONTRIBUTING.md
-#      named in prose names a heading of that document. Two forms are read: the file name, an
-#      arrow, and the heading in double quotes, as in 'README.md → "Usage"' or 'README → "Usage"';
-#      and the heading in double quotes before 'in' or 'of' and the file name. The document is
-#      the one beside the file, else the one in the root; a file name after '../' is a path. A
-#      reference wrapped over two lines is joined, the comment marker of the second line dropped.
-#      A heading in angle brackets is a placeholder and names nothing. A heading in a fenced code
-#      block is not a heading. Not read: an unquoted or emphasized heading, and a section named
+#      named in prose names a heading of that document. The form read is the file name, an
+#      arrow, and the heading in double quotes, as in 'README.md → "Usage"' or 'README → "Usage"'.
+#      The document is the one beside the file, else the one in the root; a file name after
+#      '../' is a path. A reference wrapped over two lines is joined, the comment marker of the
+#      second line dropped. A heading in angle brackets is a placeholder and names nothing. A
+#      heading in a fenced code block is not a heading. Not read: an unquoted or emphasized
+#      heading; a quoted word before 'in README.md', which is as often a value as a heading; a
+#      file name after a path other than '../', such as 'docs/README.md'; and a section named
 #      by what it says instead of by its heading, such as 'the manual checklist in README.md'.
 #      Superseded and rejected ADRs are not read.
 #
@@ -1355,21 +1356,15 @@ check_named_sections() {
     BEGIN {
       doc = "(\\.\\./)*(README|CONTRIBUTING)(\\.md)?`?"
       arrow = "(^|[^A-Za-z0-9_./-])`?" doc "[[:space:]]*→[[:space:]]*\"[^\"]*\""
-      quoted = "\"[^\"]*\"[[:space:]]+(in|of)[[:space:]]+`?" doc
     }
-    function refs(re, line, joined, file, n,   rest, off, m, d, h, up) {
+    function refs(line, joined, file, n,   rest, off, m, d, h, up) {
       rest = joined; off = 0
-      while (match(rest, re)) {
+      while (match(rest, arrow)) {
         if (off + RSTART > length(line)) return
         m = substr(rest, RSTART, RLENGTH)
         off += RSTART + RLENGTH - 1; rest = substr(rest, RSTART + RLENGTH)
-        if (re == arrow) {
-          d = m; sub(/[[:space:]]*→.*$/, "", d)
-          h = m; sub(/^[^"]*"/, "", h); sub(/"$/, "", h)
-        } else {
-          d = m
-          h = m; sub(/^"/, "", h); sub(/".*$/, "", h)
-        }
+        d = m; sub(/[[:space:]]*→.*$/, "", d)
+        h = m; sub(/^[^"]*"/, "", h); sub(/"$/, "", h)
         gsub(/`/, "", d)
         match(d, /(\.\.\/)*(README|CONTRIBUTING)(\.md)?$/); d = substr(d, RSTART)
         up = d; sub(/(README|CONTRIBUTING)(\.md)?$/, "", up)
@@ -1381,8 +1376,7 @@ check_named_sections() {
       sub(/[[:space:]]+$/, "", line)
       sub(/^[[:space:]]*(\/\/[\/!]?|#+|--|\*+|>+)?[[:space:]]*/, "", following)
       joined = line " " following
-      refs(arrow, line, joined, file, n)
-      refs(quoted, line, joined, file, n)
+      refs(line, joined, file, n)
     }
     FNR == 1 && NR > 1 { scan(prev, "") }
     { if (FNR > 1) scan(prev, $0); prev = $0; file = FILENAME; n = FNR }
