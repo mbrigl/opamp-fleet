@@ -1,4 +1,4 @@
-# ADR-draft-supervisor-mode-and-its-kinds-and-a-repeated-offer-is-applied-once: Supervisor Mode and its kinds, and a repeated offer of a configuration is applied once
+# ADR-0046: Supervisor Mode and its kinds, and a repeated offer of a configuration is applied once
 
 - **Status:** 🟡 proposed
 - **Date:** 2026-11-12
