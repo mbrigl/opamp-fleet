@@ -290,6 +290,8 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+      - name: Self-test the store check
+        run: bash scripts/test-check-store.sh
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Create the bucket
         # The Server creates none (ADR-0023 clause 16). curl signs the request itself; the service

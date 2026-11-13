@@ -236,6 +236,8 @@ run "Build hardening self-test" scripts/test-check-build-hardening.sh
 run "Build hardening" scripts/check-build-hardening.sh
 run "Fuzz target self-test" scripts/test-check-fuzz-targets.sh
 run "Fuzz targets" scripts/check-fuzz-targets.sh
+# The store checks themselves run with the gates of the other workflows, below.
+run "Store check self-test" scripts/test-check-store.sh
 run "Fixture isolation" scripts/test-fixture-isolation.sh
 # The repository settings sensor reads GitHub and runs on a human's instruction (ADR-0002); its
 # self-test runs here.

@@ -36,6 +36,58 @@ if [[ -z "$named" ]]; then
   echo "Skipped: no $1 store is named in the environment."
   exit 0
 fi
+
+# Before the tests, the check probes each named store at its own protocol. A TCP connect is not
+# enough: the Dev Container's forwards (.devcontainer/forward-otlp.sh) accept a connection while
+# the host's stack is down and close it at once, and the tests then fail as a code error would.
+# PostgreSQL answers an SSLRequest with one byte, 'S' or 'N'. An S3 endpoint answers an HTTP
+# request with a status line. Bash's /dev/tcp makes the probe, so it needs neither psql nor curl;
+# it cannot speak TLS, so an https endpoint is not probed. 'postgres' probes its bucket's endpoint
+# too.
+#
+# answers <host> <port> <request> <count> <answer pattern> — whether the store at <host>:<port>
+# answers the request with <count> bytes that match the pattern, within 10 seconds.
+answers() {
+  local answer
+  # shellcheck disable=SC2016 # the inner shell expands its own arguments
+  answer="$(timeout 10 bash -c '
+    exec 3<>"/dev/tcp/$1/$2" || exit 1
+    printf "$3" >&3
+    IFS= read -r -N "$4" -t 5 -u 3 answer
+    printf "%s" "$answer"' _ "$1" "$2" "$3" "$4" 2>/dev/null)"
+  # shellcheck disable=SC2053 # the pattern is the argument
+  [[ "$answer" == $5 ]]
+}
+# probe <host> <port> <request> <count> <answer pattern> — fail when the store does not answer.
+probe() {
+  answers "$@" && return 0
+  echo "ERROR: the store at $1:$2 does not answer: nothing listens there, or a listener closes the" >&2
+  echo "connection at once, as a forward to a store that is down does. Start the store first." >&2
+  exit 1
+}
+# probe_s3 <endpoint> — probe an http:// endpoint; the port defaults to 80.
+probe_s3() {
+  local authority host port
+  [[ "$1" == http://* ]] || return 0
+  authority="${1#http://}"
+  authority="${authority%%/*}"
+  host="${authority%:*}"
+  port="${authority##*:}"
+  if [[ "$host" == "$authority" || "$port" == *]* ]]; then
+    host="$authority" port=80
+  fi
+  host="${host#[}"
+  host="${host%]}"
+  probe "$host" "$port" "HEAD / HTTP/1.0\r\nHost: $authority\r\n\r\n" 5 'HTTP/'
+}
+if [[ "$1" == "postgres" ]]; then
+  probe "$FLEET_TEST_POSTGRES_HOST" "${FLEET_TEST_POSTGRES_PORT:-5432}" \
+    '\000\000\000\010\004\322\026\057' 1 '[SN]'
+fi
+if [[ -n "${FLEET_TEST_S3_ENDPOINT:-}" ]]; then
+  probe_s3 "$FLEET_TEST_S3_ENDPOINT"
+fi
+
 command -v cargo >/dev/null || { echo "cargo is required (rust-toolchain.toml names the toolchain)" >&2; exit 1; }
 
 # The tests of several instances on one token run against SoftHSM2, as scripts/check-rust.sh
