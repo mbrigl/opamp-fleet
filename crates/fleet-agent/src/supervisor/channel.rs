@@ -4685,7 +4685,10 @@ mod tests {
         unread
     }
 
-    /// Whether a live process with `arg` among its arguments sleeps in a write to a full pipe.
+    /// Whether a live `yes` with `arg` among its arguments sleeps, which it does only in a write
+    /// to a full pipe, since writing is all it does. Its state is read from `/proc/<pid>/stat`,
+    /// the same on every kernel; `wchan` names a function of the kernel, and on CI's runners
+    /// never named `pipe_write`.
     #[cfg(target_os = "linux")]
     fn writing_blocked(arg: &str) -> bool {
         let Ok(entries) = std::fs::read_dir("/proc") else {
@@ -4696,8 +4699,11 @@ mod tests {
                 cmdline
                     .split(|b| *b == 0)
                     .any(|word| word == arg.as_bytes())
-            }) && std::fs::read_to_string(entry.path().join("wchan"))
-                .is_ok_and(|wchan| wchan.contains("pipe_write"))
+            }) && std::fs::read_to_string(entry.path().join("stat")).is_ok_and(|stat| {
+                // The state follows the command name, which closes with the last ')'.
+                stat.rsplit_once(')')
+                    .is_some_and(|(_, rest)| rest.trim_start().starts_with('S'))
+            })
         })
     }
 
