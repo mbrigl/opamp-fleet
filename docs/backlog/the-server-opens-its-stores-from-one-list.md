@@ -2,8 +2,8 @@
 
 **Kind:** idea, structure.
 
-**Observed.** `crates/fleet-server/src/main.rs` opens each store inline (on `main`, near lines 601,
-701, 712, 742 and 828 to 843), and `server migrate`'s check opens stores again from a list of its
+**Observed.** `crates/fleet-server/src/main.rs` opens each store inline, from `Enrolment::open_on`
+to `AppState::on`, and `server migrate`'s check opens stores again from a list of its
 own (`open_every_store` in `crates/fleet-server/src/migrate.rs`). The two lists are kept alike by
 nothing, and they differ in what they are given: the startup passes the bootstrap CA's signer, the
 authorities of the revocation list and `[blobs]`, and opens the enrolment and the bootstrap record
