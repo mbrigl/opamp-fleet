@@ -214,19 +214,22 @@ const ALLOWED: &[(&str, &str, &str, &str)] = &[
 ];
 
 /// The calls of the functions `ALLOWED` names, in a privileged module: file, the function the call
-/// is made in, the function called, and why the path it hands on is one no link the account placed
-/// can carry.
-const CALLED_FROM: &[(&str, &str, &str, &str)] = &[
+/// is made in, the function called, how many calls it makes of it, and why the path each hands on
+/// is one no link the account placed can carry. The count makes each call site an entry: a
+/// second call in a listed function is a finding too.
+const CALLED_FROM: &[(&str, &str, &str, usize, &str)] = &[
     (
         "src/main.rs",
         "service_command",
         "install",
+        1,
         "`service install` itself, with the administrator's flags",
     ),
     (
         "src/main.rs",
         "install",
         "install",
+        1,
         "`manager::install`, another function of the name: the registration, where only root \
          writes",
     ),
@@ -234,60 +237,70 @@ const CALLED_FROM: &[(&str, &str, &str, &str)] = &[
         "src/main.rs",
         "install",
         "create_state_dir",
+        2,
         "the state directory the install decided, and the roots it is held beneath",
     ),
     (
         "src/main.rs",
         "install",
         "restrict",
+        1,
         "the data root and the directories the administrator named, which the install planned",
     ),
     (
         "src/main.rs",
         "install",
         "stage_current_exe",
+        1,
         "the layout root the administrator named or the default, which only root's directory holds",
     ),
     (
         "src/config_init.rs",
         "the_program",
         "in_dir",
+        1,
         "the directory of the running program, which the administrator started",
     ),
     (
         "src/config_init.rs",
         "in_named_dir",
         "in_dir",
+        1,
         "the directory `--fleet-files` names, the administrator's",
     ),
     (
         "src/config_init.rs",
         "copy_ca_beside",
         "held_dir",
+        1,
         "the directory of the configuration this run writes, the data root or one `--config` named",
     ),
     (
         "src/config_file.rs",
         "held_file",
         "held_dir",
+        1,
         "the directory of the configuration, the data root or one `--config` named",
     ),
     (
         "src/service/layout.rs",
         "heal_current",
         "set_current",
+        1,
         "a version directory `current` is pointed at, in the layout root `set_current` holds",
     ),
     (
         "src/service/layout.rs",
         "stage_current_exe",
         "set_current",
+        1,
         "the version directory just staged, in the layout root `set_current` holds",
     ),
     (
         "src/service/manager.rs",
         "register",
         "install",
+        1,
         "the service manager's own `install`, another function of the name: the registration, \
          where only root writes",
     ),
@@ -295,48 +308,56 @@ const CALLED_FROM: &[(&str, &str, &str, &str)] = &[
         "src/service/manager.rs",
         "registration",
         "read_registration",
+        2,
         "the service's unit or plist, where only root writes",
     ),
     (
         "src/service/manager.rs",
         "agents_registration",
         "read_registration",
+        2,
         "the second service's unit or plist, where only root writes",
     ),
     (
         "src/service/manager.rs",
         "registered_state_dir",
         "read_state_dir",
+        2,
         "the service's unit or plist, where only root writes",
     ),
     (
         "src/service/manager.rs",
         "start_for_change",
         "load_removed_job",
+        1,
         "the service's own label, its plist in `/Library/LaunchDaemons`",
     ),
     (
         "src/service/manager.rs",
         "start",
         "load_removed_job",
+        1,
         "the service's own label, its plist in `/Library/LaunchDaemons`",
     ),
     (
         "src/service/runtime.rs",
         "unreadable_config",
         "recovery_state_dir",
+        1,
         "the run-time Client's own start, which ADR-0021 clause 11 does not cover",
     ),
     (
         "src/service/runtime.rs",
         "load_effective_config",
         "load",
+        1,
         "the run-time Client's own configuration, which ADR-0021 clause 11 does not cover",
     ),
     (
         "src/tls.rs",
         "read",
         "read_bounded",
+        1,
         "the run-time Client's `[tls]` files; a privileged step reads them through \
          `nofollow::read_privileged`",
     ),
@@ -486,22 +507,20 @@ fn privileged_modules_change_the_account_s_directories_through_held_directories_
     let mut violations = Vec::new();
     let mut used = BTreeSet::new();
     for (relative, text) in privileged_sources() {
-        {
-            for (function, call, line) in calls(&text) {
-                let allowed = ALLOWED
-                    .iter()
-                    .position(|(f, func, c, _)| *f == relative && *func == function && *c == call);
-                match allowed {
-                    Some(entry) => {
-                        used.insert(entry);
-                    }
-                    None => violations.push(format!(
-                        "{relative}:{line}: `{call}` in `{function}` names a path in a privileged \
+        for (function, call, line) in calls(&text) {
+            let allowed = ALLOWED
+                .iter()
+                .position(|(f, func, c, _)| *f == relative && *func == function && *c == call);
+            match allowed {
+                Some(entry) => {
+                    used.insert(entry);
+                }
+                None => violations.push(format!(
+                    "{relative}:{line}: `{call}` in `{function}` names a path in a privileged \
                          module; reach the directory through `nofollow::HeldDir`, \
                          `storage::handle` or `win32::files`, or list it in ALLOWED with why no \
                          link can carry it"
-                    )),
-                }
+                )),
             }
         }
     }
@@ -563,30 +582,45 @@ fn each_call_of_an_allowed_function_is_named_with_its_reason() {
         .map(|(_, function, _, _)| *function)
         .collect();
     let allowed: Vec<&str> = allowed.into_iter().collect();
-    let mut unnamed = Vec::new();
-    let mut used = BTreeSet::new();
+    let mut sites: std::collections::BTreeMap<(String, String, &str), Vec<usize>> =
+        std::collections::BTreeMap::new();
     for (relative, text) in privileged_sources() {
         for (caller, callee, line) in calls_of(&text, &allowed) {
-            match CALLED_FROM
+            sites
+                .entry((relative.clone(), caller, callee))
+                .or_default()
+                .push(line);
+        }
+    }
+    let mut unnamed = Vec::new();
+    let mut used = BTreeSet::new();
+    for ((relative, caller, callee), lines) in &sites {
+        let entry = CALLED_FROM
+            .iter()
+            .position(|(f, c, d, _, _)| f == relative && c == caller && d == callee);
+        let listed = entry.map_or(0, |entry| CALLED_FROM[entry].3);
+        if let Some(entry) = entry {
+            used.insert(entry);
+        }
+        if lines.len() != listed {
+            let at: Vec<String> = lines
                 .iter()
-                .position(|(f, c, d, _)| *f == relative && *c == caller && *d == callee)
-            {
-                Some(entry) => {
-                    used.insert(entry);
-                }
-                None => unnamed.push(format!(
-                    "{relative}:{line}: `{caller}` calls `{callee}`, which ALLOWED lets name a \
-                     path; list the call in CALLED_FROM with why no link the account placed can \
-                     carry the path it hands on, or read through `nofollow`"
-                )),
-            }
+                .map(|line| format!("{relative}:{line}"))
+                .collect();
+            unnamed.push(format!(
+                "{}: `{caller}` calls `{callee}` {} times, and CALLED_FROM names {listed}; \
+                 ALLOWED lets `{callee}` name a path, so list each call with why no link \
+                 the account placed can carry the path it hands on, or read through `nofollow`",
+                at.join(", "),
+                lines.len()
+            ));
         }
     }
     let stale: Vec<String> = CALLED_FROM
         .iter()
         .enumerate()
         .filter(|(index, _)| !used.contains(index))
-        .map(|(_, (file, caller, callee, _))| format!("{file}: `{caller}` calls `{callee}`"))
+        .map(|(_, (file, caller, callee, _, _))| format!("{file}: `{caller}` calls `{callee}`"))
         .collect();
     assert!(
         unnamed.is_empty(),
