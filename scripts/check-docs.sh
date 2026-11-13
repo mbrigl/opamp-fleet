@@ -116,6 +116,16 @@
 #      else the branch a push runs on. A draft pull request passes, since it tests a feat/ branch
 #      still under rework, and so does a run outside CI, where nothing names the branch; the
 #      workflow says in PULL_REQUEST_DRAFT whether a pull request is a draft.
+#  17. Named-section integrity: in every text file, a section of README.md or CONTRIBUTING.md
+#      named in prose names a heading of that document. Two forms are read: the file name, an
+#      arrow, and the heading in double quotes, as in 'README.md → "Usage"' or 'README → "Usage"';
+#      and the heading in double quotes before 'in' or 'of' and the file name. The document is
+#      the one beside the file, else the one in the root; a file name after '../' is a path. A
+#      reference wrapped over two lines is joined, the comment marker of the second line dropped.
+#      A heading in angle brackets is a placeholder and names nothing. A heading in a fenced code
+#      block is not a heading. Not read: an unquoted or emphasized heading, and a section named
+#      by what it says instead of by its heading, such as 'the manual checklist in README.md'.
+#      Superseded and rejected ADRs are not read.
 #
 # Checks 5 and 6 read every text file of the repository, not a list of documentation extensions:
 # docs/adr/README.md states that code may reference an ADR number, so a verifier restricted to
@@ -1293,6 +1303,93 @@ check_template_release() {
     || add_error "README.md: the Template release line names neither a 'vX.Y.Z' tag nor 'unreleased' — a release moves it to the tag it cuts (ADR-0005)"
 }
 
+# heading_texts <file> — print the text of every ATX heading outside a fenced code block.
+heading_texts() {
+  awk '
+    /^[[:space:]]*(```|~~~)/ { fence = !fence; next }
+    !fence && match($0, /^#+[[:space:]]+/) {
+      hashes = $0; sub(/[^#].*$/, "", hashes)
+      if (length(hashes) > 6) next
+      text = substr($0, RLENGTH + 1)
+      sub(/[[:space:]]+#*[[:space:]]*$/, "", text)
+      print text
+    }
+  ' "$1"
+}
+
+# Check 17 (see the header). One awk pass over every text file that mentions either document
+# prints each reference as file, line, the '../' before the name, the name, and the heading. A
+# line is read joined to the next, whose comment marker is dropped, and a match counts on the line
+# it starts on: a reference wrapped over two lines is read once, and whole. HEADING_TEXTS holds
+# the headings of each document, newline-framed, read once.
+declare -A HEADING_TEXTS=()
+check_named_sections() {
+  local files=() f
+  for f in "${TEXT_FILES[@]}"; do is_inactive_adr "$f" || files+=("$f"); done
+  ((${#files[@]})) || return 0
+  mapfile -t files < <(grep -lE 'README|CONTRIBUTING' -- "${files[@]}" 2>/dev/null)
+  ((${#files[@]})) || return 0
+  local file lineno up name heading rel doc
+  while IFS=$'\x1f' read -r file lineno up name heading; do
+    # '<Heading>' is the placeholder a sentence about these references writes, as 'NNNN' is
+    # for an ADR number (check 3).
+    [[ "$heading" == '<'*'>' ]] && continue
+    rel="${file#"$ROOT"/}"
+    f="${file%/*}"
+    if [[ -n "$up" ]]; then
+      doc="$f/$up$name.md"
+      [[ -f "$doc" ]] && doc="$(cd "${doc%/*}" && pwd)/$name.md"
+    elif [[ -f "$f/$name.md" ]]; then
+      doc="$f/$name.md"
+    else
+      doc="$ROOT/$name.md"
+    fi
+    if [[ ! -f "$doc" ]]; then
+      add_error "$rel:$lineno: \"$heading\" names a section of $up$name.md, which does not exist"
+      continue
+    fi
+    [[ -v HEADING_TEXTS["$doc"] ]] || HEADING_TEXTS["$doc"]=$'\n'"$(heading_texts "$doc")"$'\n'
+    [[ "${HEADING_TEXTS["$doc"]}" == *$'\n'"$heading"$'\n'* ]] \
+      || add_error "$rel:$lineno: \"$heading\" names no heading of ${doc#"$ROOT"/}"
+  done < <(awk '
+    BEGIN {
+      doc = "(\\.\\./)*(README|CONTRIBUTING)(\\.md)?`?"
+      arrow = "(^|[^A-Za-z0-9_./-])`?" doc "[[:space:]]*→[[:space:]]*\"[^\"]*\""
+      quoted = "\"[^\"]*\"[[:space:]]+(in|of)[[:space:]]+`?" doc
+    }
+    function refs(re, line, joined, file, n,   rest, off, m, d, h, up) {
+      rest = joined; off = 0
+      while (match(rest, re)) {
+        if (off + RSTART > length(line)) return
+        m = substr(rest, RSTART, RLENGTH)
+        off += RSTART + RLENGTH - 1; rest = substr(rest, RSTART + RLENGTH)
+        if (re == arrow) {
+          d = m; sub(/[[:space:]]*→.*$/, "", d)
+          h = m; sub(/^[^"]*"/, "", h); sub(/"$/, "", h)
+        } else {
+          d = m
+          h = m; sub(/^"/, "", h); sub(/".*$/, "", h)
+        }
+        gsub(/`/, "", d)
+        match(d, /(\.\.\/)*(README|CONTRIBUTING)(\.md)?$/); d = substr(d, RSTART)
+        up = d; sub(/(README|CONTRIBUTING)(\.md)?$/, "", up)
+        sub(/^(\.\.\/)*/, "", d); sub(/\.md$/, "", d)
+        printf "%s\037%s\037%s\037%s\037%s\n", file, n, up, d, h
+      }
+    }
+    function scan(line, following,   joined) {
+      sub(/[[:space:]]+$/, "", line)
+      sub(/^[[:space:]]*(\/\/[\/!]?|#+|--|\*+|>+)?[[:space:]]*/, "", following)
+      joined = line " " following
+      refs(arrow, line, joined, file, n)
+      refs(quoted, line, joined, file, n)
+    }
+    FNR == 1 && NR > 1 { scan(prev, "") }
+    { if (FNR > 1) scan(prev, $0); prev = $0; file = FILENAME; n = FNR }
+    END { if (NR) scan(prev, "") }
+  ' "${files[@]}")
+}
+
 collect_text_files
 read_adr_headers
 scan_markdown
@@ -1312,6 +1409,7 @@ check_inherited_adrs
 check_template_identity
 check_template_release
 check_prose_width
+check_named_sections
 
 if ((${#errors[@]} > 0)); then
   echo "Documentation checks FAILED:"

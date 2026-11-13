@@ -23,7 +23,8 @@
 //! ```
 //!
 //! What it does **not** cover: starting at boot (a runner never reboots), long-running behaviour,
-//! and hosts with SELinux or AppArmor in the way. The manual checklist in `README.md` keeps those.
+//! and hosts with SELinux or AppArmor in the way. A human checks boot and an SELinux-enforcing
+//! host by the list in README.md → "The service smoke test"; no list keeps the other two.
 
 mod common;
 mod enrolling;
