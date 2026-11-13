@@ -234,6 +234,28 @@ impl Lease {
         self.takeovers.clone()
     }
 
+    /// Runs `cleanup` each time [`takeovers`](Self::takeovers) changes, off the async threads, as a
+    /// cleanup's calls block: on the bucket, the deletion of the staging objects the removed
+    /// leases left (ADR-0023 clause 16). A cleanup that fails is logged; the next takeover, or the
+    /// next start, tries again.
+    pub fn on_each_takeover(
+        &self,
+        cleanup: impl Fn() -> Result<usize, String> + Clone + Send + 'static,
+    ) {
+        let mut takeovers = self.takeovers();
+        tokio::spawn(async move {
+            while takeovers.changed().await.is_ok() {
+                let cleanup = cleanup.clone();
+                let ran = tokio::task::spawn_blocking(cleanup)
+                    .await
+                    .unwrap_or_else(|e| Err(e.to_string()));
+                if let Err(e) = ran {
+                    warn!(error = %e, "could not delete the staging objects of a lapsed lease");
+                }
+            }
+        });
+    }
+
     /// Stops renewing and releases the lease, at an orderly shutdown.
     pub async fn release(mut self) {
         if let Some(stop) = self.stop.take() {

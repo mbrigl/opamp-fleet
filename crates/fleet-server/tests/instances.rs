@@ -392,6 +392,9 @@ struct Instance {
     audit: Option<Arc<token::Recorded>>,
     /// The database the instance listens through, where it is not [`database`](Self::database).
     listening: Option<Arc<Database>>,
+    /// How many times a takeover of the lease ran the cleanup the binary deletes the staging
+    /// objects of the removed leases with.
+    cleanups: Arc<AtomicU64>,
     _dir: tempfile::TempDir,
 }
 
@@ -404,7 +407,10 @@ impl Instance {
     /// [`start`](Self::start), taking up nothing another instance commits until
     /// [`follow`](Self::follow) is called: what it hears is held back until then.
     async fn start_deaf(pki: &Pki, schema: &Schema, config: PostgresConfig) -> Self {
-        Self::start_with(pki, schema, config, true, false, None, None, None, None).await
+        Self::start_with(
+            pki, schema, config, true, false, None, None, None, None, None,
+        )
+        .await
     }
 
     /// [`start`](Self::start), its client CA's key on the token `signing` names, opened by this
@@ -425,6 +431,7 @@ impl Instance {
             None,
             None,
             Some(signing),
+            None,
         )
         .await
     }
@@ -447,6 +454,25 @@ impl Instance {
             None,
             None,
             None,
+            None,
+        )
+        .await
+    }
+
+    /// [`start`](Self::start), its client CA the signer `gated`, so an approval through its
+    /// Operator plane signs, or waits while the gate is shut.
+    async fn start_gated(pki: &Pki, schema: &Schema, config: PostgresConfig, gated: Gated) -> Self {
+        Self::start_with(
+            pki,
+            schema,
+            config,
+            true,
+            true,
+            None,
+            None,
+            None,
+            None,
+            Some(gated),
         )
         .await
     }
@@ -482,7 +508,10 @@ impl Instance {
         config: PostgresConfig,
         renewals: bool,
     ) -> Self {
-        Self::start_with(pki, schema, config, renewals, true, None, None, None, None).await
+        Self::start_with(
+            pki, schema, config, renewals, true, None, None, None, None, None,
+        )
+        .await
     }
 
     /// [`start`](Self::start), its package blobs on the filesystem in `blobs`, which other
@@ -501,6 +530,7 @@ impl Instance {
             true,
             None,
             Some(blobs),
+            None,
             None,
             None,
         )
@@ -526,6 +556,7 @@ impl Instance {
             None,
             Some((release, migrations)),
             None,
+            None,
         )
         .await
     }
@@ -533,7 +564,8 @@ impl Instance {
     /// [`start_following`](Self::start_following), following other instances where `follows`
     /// says so, its admission throttled where `throttle` names limits, its package blobs in
     /// `blobs` where it names a directory, as the release and schema `version` names, or this
-    /// build's, and with its client CA's key on a token where `signing` names one.
+    /// build's, and with its client CA's key on a token where `signing` names one, or with the
+    /// signer `gated` as its client CA where it names one.
     #[allow(clippy::too_many_arguments)]
     async fn start_with(
         pki: &Pki,
@@ -545,6 +577,7 @@ impl Instance {
         blobs: Option<&std::path::Path>,
         version: Option<(&'static str, &'static [Migration])>,
         signing: Option<&Signing<'_>>,
+        gated: Option<Gated>,
     ) -> Self {
         opamp::tls::install_ring_provider();
         let dir = tempfile::tempdir().expect("tempdir");
@@ -623,23 +656,23 @@ impl Instance {
             fleet_server::clock::Elapsed::monotonic(),
         )
         .expect("packages");
-        let state = Arc::new(
-            fleet_server::fleet::AppState::on(&records)
-                .expect("state")
-                .with_packages(Some(
-                    fleet_server::fleet::PackageOffering::on(&records, packages)
-                        .expect("deployments"),
-                ))
-                .with_revocations(Some(revocations.clone()))
-                .with_floors(Some(floors.clone()))
-                .with_enrolment(Some(enrolment.clone()))
-                .with_client_ca(client_ca)
-                .with_audit(
-                    audit
-                        .clone()
-                        .map(|audit| audit as Arc<dyn fleet_server::audit::Audit>),
-                ),
-        );
+        let state = fleet_server::fleet::AppState::on(&records)
+            .expect("state")
+            .with_packages(Some(
+                fleet_server::fleet::PackageOffering::on(&records, packages).expect("deployments"),
+            ))
+            .with_revocations(Some(revocations.clone()))
+            .with_floors(Some(floors.clone()))
+            .with_enrolment(Some(enrolment.clone()))
+            .with_audit(
+                audit
+                    .clone()
+                    .map(|audit| audit as Arc<dyn fleet_server::audit::Audit>),
+            );
+        let state = Arc::new(match gated {
+            Some(gated) => state.with_client_ca(Some(gated)),
+            None => state.with_client_ca(client_ca),
+        });
         let (server_cert, server_key) = pki.issue("localhost");
         for (file, pem) in [
             ("server-cert.pem", &server_cert),
@@ -686,6 +719,15 @@ impl Instance {
             )
             .expect("lease")
         };
+        // As the binary wires its cleanup of the bucket's staging objects: counted here.
+        let cleanups = Arc::new(AtomicU64::new(0));
+        lease.on_each_takeover({
+            let cleanups = cleanups.clone();
+            move || {
+                cleanups.fetch_add(1, Ordering::SeqCst);
+                Ok(0)
+            }
+        });
         state.serve_under(lease.held());
         let proof = lease.proof();
         state.answer_while(move || proof.holds());
@@ -743,6 +785,7 @@ impl Instance {
             stop: Some(stop),
             audit,
             listening: None,
+            cleanups,
             _dir: dir,
         }
     }
@@ -863,6 +906,44 @@ fn cert_id(pem: &str) -> CertId {
     fleet_server::ca::facts(der[0].as_ref()).expect("facts").id
 }
 
+/// A client of an instance's Operator plane, which this harness serves without authentication.
+fn operator_client(pki: &Pki) -> reqwest::Client {
+    reqwest::Client::builder()
+        .use_rustls_tls()
+        .tls_certs_only([reqwest::Certificate::from_pem(pki.ca_pem.as_bytes()).expect("ca")])
+        .resolve(
+            "localhost",
+            "127.0.0.1:0".parse::<SocketAddr>().expect("address"),
+        )
+        .build()
+        .expect("client")
+}
+
+/// `path` on `instance`'s Operator plane.
+fn operator_url(instance: &Instance, path: &str) -> String {
+    format!("https://localhost:{}{path}", instance.operator.port())
+}
+
+/// Revokes the certificate `pem` of the client CA through `instance`'s Operator plane, as an
+/// operator does, and waits for its `201`.
+async fn revoke_through(instance: &Instance, pki: &Pki, pem: &str) {
+    let response = operator_client(pki)
+        .post(operator_url(instance, "/api/v1/revocations"))
+        .json(&serde_json::json!({
+            "certificate": { "authority": "client", "serial": cert_id(pem).serial }
+        }))
+        .send()
+        .await
+        .expect("send the revocation");
+    let status = response.status();
+    assert_eq!(
+        status,
+        reqwest::StatusCode::CREATED,
+        "the revocation: {}",
+        response.text().await.unwrap_or_default()
+    );
+}
+
 /// Waits up to `within` for `condition`.
 async fn eventually(within: Duration, condition: impl Fn() -> bool) -> bool {
     let deadline = tokio::time::Instant::now() + within;
@@ -876,9 +957,10 @@ async fn eventually(within: Duration, condition: impl Fn() -> bool) -> bool {
 }
 
 /// Two instances on one database both hold a live lease and both answer the probe on the Agent
-/// plane; a revocation committed on A ends the session of that certificate on B, by its
-/// notification or at the latest by the next renewal, and no other session. The wait is bounded at
-/// three renewal intervals, as for a notification missed, leaving a loaded host its delays.
+/// plane; a revocation made through A's Operator plane ends the session of that certificate on B,
+/// by its notification or at the latest by the next renewal, and no other session. The wait is
+/// bounded at three renewal intervals, as for a notification missed, leaving a loaded host its
+/// delays.
 /// Verifies: ADR-0045, ADR-0040
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_revocation_on_one_instance_ends_the_session_on_the_other() {
@@ -902,12 +984,7 @@ async fn a_revocation_on_one_instance_ends_the_session_on_the_other() {
     exchange(&mut revoked).await;
     exchange(&mut kept).await;
 
-    let serial = cert_id(&revoked_cert).serial;
-    let on_a = a.revocations.clone();
-    tokio::task::spawn_blocking(move || on_a.revoke_certificate("client", &serial))
-        .await
-        .expect("revoke")
-        .expect("revoke on A");
+    revoke_through(&a, &pki, &revoked_cert).await;
     assert_eq!(
         closed_within(&mut revoked, TIMES.renew * 3).await,
         Some((1008, "revoked".to_string())),
@@ -1009,6 +1086,71 @@ async fn an_instance_without_a_lease_closes_its_listeners_until_it_holds_a_new_o
     assert!(
         eventually(Duration::from_secs(5), || instance.both_planes().0).await,
         "the listeners were not opened again"
+    );
+}
+
+/// An instance that lost its lease takes a new one, and that take removes its lapsed lease: the
+/// take has the cleanup of the staging objects run, as the binary wires it to the lease, though no
+/// renewal took over a lease.
+/// Verifies: ADR-0045, ADR-0023
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_new_lease_whose_take_removes_a_lapsed_one_runs_the_staging_cleanup() {
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let network = Cuttable::to(database_address(&schema));
+    let instance = Instance::start(&pki, &schema, schema.config_on(network.port)).await;
+    let first = instance.instance_id().expect("a lease");
+
+    network.cut();
+    assert!(
+        eventually(TIMES.lapse + Duration::from_secs(5), || instance
+            .instance_id()
+            .is_none())
+        .await,
+        "the lease was not given up"
+    );
+    // Restored once the database reads the old lease as lapsed too, so the new lease's take
+    // removes it.
+    let lapsed = format!(
+        "SELECT count(*) FROM leases WHERE instance_id = '{first}' AND expires_at <= now()"
+    );
+    assert!(
+        eventually(TIMES.lapse + Duration::from_secs(5), || schema
+            .query(&lapsed)
+            == ["1"])
+        .await,
+        "the database never read the old lease as lapsed"
+    );
+    assert_eq!(
+        instance.cleanups.load(Ordering::SeqCst),
+        0,
+        "a cleanup ran before any takeover"
+    );
+
+    network.restore();
+    assert!(
+        eventually(Duration::from_secs(20), || instance
+            .instance_id()
+            .is_some_and(|id| id != first))
+        .await,
+        "no new lease was taken"
+    );
+    assert_eq!(
+        schema.query(&format!(
+            "SELECT count(*) FROM leases WHERE instance_id = '{first}'"
+        )),
+        ["0"],
+        "the new lease's take removed the lapsed one"
+    );
+    assert!(
+        eventually(Duration::from_secs(5), || instance
+            .cleanups
+            .load(Ordering::SeqCst)
+            >= 1)
+        .await,
+        "the take that removed a lapsed lease ran no cleanup"
     );
 }
 
@@ -1854,6 +1996,82 @@ impl fleet_server::fleet::CertificateSigner for Issuing {
     }
 }
 
+/// A signer of the test's CA that holds each signature while its gate is shut: an approval that
+/// decides its request for as long as the test keeps the gate so.
+#[derive(Clone)]
+struct Gated {
+    issuing: Arc<Issuing>,
+    /// Whether a signature waits at the gate, and whether the gate is open.
+    gate: Arc<(std::sync::Mutex<(bool, bool)>, std::sync::Condvar)>,
+}
+
+impl Gated {
+    fn new(pki: &Pki, open: bool) -> Self {
+        Gated {
+            issuing: Arc::new(Issuing {
+                ca_pem: pki.ca_pem.clone(),
+                ca_key_pem: pki.ca_key_pem.clone(),
+            }),
+            gate: Arc::new((
+                std::sync::Mutex::new((false, open)),
+                std::sync::Condvar::new(),
+            )),
+        }
+    }
+
+    /// Whether a signature waits at the gate.
+    fn waiting(&self) -> bool {
+        self.gate.0.lock().expect("gate").0
+    }
+
+    /// Opens the gate: the signature waiting there, and every one after it, goes ahead.
+    fn open(&self) {
+        let (gate, turned) = &*self.gate;
+        gate.lock().expect("gate").1 = true;
+        turned.notify_all();
+    }
+}
+
+impl fleet_server::fleet::CertificateSigner for Gated {
+    fn sign(
+        &self,
+        csr_pem: &str,
+        host: &str,
+        subject: &fleet_server::revocation::SubjectValues,
+        use_case: fleet_server::pkcs11::UseCase,
+    ) -> Result<fleet_server::revocation::Signed, String> {
+        let (gate, turned) = &*self.gate;
+        let mut held = gate.lock().expect("gate");
+        held.0 = true;
+        while !held.1 {
+            held = turned.wait(held).expect("gate");
+        }
+        drop(held);
+        fleet_server::fleet::CertificateSigner::sign(
+            &*self.issuing,
+            csr_pem,
+            host,
+            subject,
+            use_case,
+        )
+    }
+
+    fn renewal_proof(
+        &self,
+        csr_pem: &str,
+    ) -> Result<Option<fleet_server::revocation::Facts>, String> {
+        fleet_server::fleet::CertificateSigner::renewal_proof(&*self.issuing, csr_pem)
+    }
+
+    fn bootstrap_proof_id(&self, csr_pem: &str) -> Result<Option<CertId>, String> {
+        fleet_server::fleet::CertificateSigner::bootstrap_proof_id(&*self.issuing, csr_pem)
+    }
+
+    fn check_claims(&self, csr_pem: &str, sender: &[u8]) -> Result<(), String> {
+        fleet_server::fleet::CertificateSigner::check_claims(&*self.issuing, csr_pem, sender)
+    }
+}
+
 /// The request a host whose key has the fingerprint `key` sends, and who it is.
 fn enrolment_request(
     key: &str,
@@ -2197,6 +2415,188 @@ async fn an_enrolment_approved_on_one_instance_is_handed_out_by_the_other() {
         let mut member = websocket(instance, &pki, &issued, &host_key.serialize_pem()).await;
         exchange(&mut member).await;
     }
+}
+
+/// Of two instances deciding one enrolment request, B, asked second through its Operator plane,
+/// is answered `409` while A's approval holds the request, to an approval and to a rejection
+/// alike, and `404` once A has decided it, as the manual says.
+/// Verifies: ADR-0045, ADR-0027, ADR-0023
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_decision_asked_through_one_instance_while_another_decides_is_answered_409() {
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let held = Gated::new(&pki, false);
+    let a = Instance::start_gated(
+        &pki,
+        &schema,
+        schema.config_on(schema.config.port),
+        held.clone(),
+    )
+    .await;
+    let b = Instance::start_gated(
+        &pki,
+        &schema,
+        schema.config_on(schema.config.port),
+        Gated::new(&pki, true),
+    )
+    .await;
+    a.enrolment.open(600).expect("A opens the window");
+    let id = "ab".repeat(32);
+    let (request, requester) = enrolment_request(&id);
+    let on_a = a.enrolment.clone();
+    assert_eq!(
+        tokio::task::spawn_blocking(move || on_a.submit(request, requester))
+            .await
+            .expect("submit"),
+        fleet_server::enrolment::Submitted::Waiting
+    );
+    assert!(
+        eventually(Duration::from_secs(10), || b
+            .enrolment
+            .pending()
+            .iter()
+            .any(|pending| pending.id == id))
+        .await,
+        "B never listed the request A took in"
+    );
+
+    let operator = operator_client(&pki);
+    let decide = |instance: &Instance, decision: &str| {
+        let request = operator.post(operator_url(
+            instance,
+            &format!("/api/v1/enrolments/{id}/{decision}"),
+        ));
+        async move {
+            let response = request.send().await.expect("send the decision");
+            let status = response.status().as_u16();
+            (status, response.text().await.expect("the body"))
+        }
+    };
+    let approving = tokio::spawn(decide(&a, "approve"));
+    assert!(
+        eventually(Duration::from_secs(10), || held.waiting()).await,
+        "A's approval never reached its signature"
+    );
+    for decision in ["reject", "approve"] {
+        let (status, body) = decide(&b, decision).await;
+        assert_eq!(status, 409, "{decision} through B: {body}");
+        assert!(
+            body.contains("another Server instance is deciding"),
+            "{decision} through B: {body}"
+        );
+    }
+    held.open();
+    let (status, body) = approving.await.expect("A's approval");
+    assert_eq!(status, 204, "the approval through A: {body}");
+    for decision in ["approve", "reject"] {
+        let (status, body) = decide(&b, decision).await;
+        assert_eq!(status, 404, "{decision} through B once decided: {body}");
+    }
+}
+
+/// A host of a fresh bootstrap certificate of `bootstrap` asks `instance` for its certificate over
+/// a WebSocket: the error its answer carries, if any.
+async fn enrol(instance: &Instance, pki: &Pki, bootstrap: &Pki) -> Option<String> {
+    use futures_util::SinkExt;
+    use tokio_tungstenite::tungstenite::Message as Ws;
+    let (bootstrap_cert, bootstrap_key) = issue_bootstrap(bootstrap);
+    let mut socket = websocket(instance, pki, &bootstrap_cert, &bootstrap_key).await;
+    let (csr, _) = fresh_csr();
+    let report = csr_report(&InstanceUid::default(), csr);
+    let framed = opamp::frame::encode_within(&report, usize::MAX).expect("frame");
+    socket.send(Ws::Binary(framed.into())).await.expect("send");
+    next_message(&mut socket, Duration::from_secs(20))
+        .await
+        .expect("an answer in time")
+        .error_response
+        .map(|error| error.error_message)
+}
+
+/// The enrolment queue's bound counts the requests of every instance: once A and B have queued
+/// requests at once up to one short of it, a host's request through B's Agent plane takes the last
+/// place, and the next host's, through A's, is answered that the queue is full.
+/// Verifies: ADR-0045, ADR-0027
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_bound_of_the_enrolment_queue_counts_the_requests_of_every_instance() {
+    use fleet_server::enrolment::{Submitted, MAX_PENDING};
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let Some(test) = token::TestToken::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let dir = tempfile::tempdir().expect("dir");
+    let opened = test.open();
+    let (client_ca_pem, _) = test.ca(
+        &opened,
+        Signing::CLIENT_CA,
+        "OpAMP Fleet Client CA",
+        dir.path(),
+    );
+    let signing = Signing {
+        token: &test,
+        client_ca_pem,
+        bootstrap: Pki::named("OpAMP Fleet Bootstrap CA"),
+    };
+    let a = Instance::start_signing(
+        &pki,
+        &schema,
+        schema.config_on(schema.config.port),
+        &signing,
+    )
+    .await;
+    let b = Instance::start_signing(
+        &pki,
+        &schema,
+        schema.config_on(schema.config.port),
+        &signing,
+    )
+    .await;
+    a.enrolment.open(600).expect("A opens the window");
+    assert!(
+        eventually(Duration::from_secs(10), || b.enrolment.is_open()).await,
+        "B never took up the window A opened"
+    );
+    // Each request of a bootstrap certificate of its own, so no certificate's share is reached.
+    let queue = |instance: &Instance, name: &'static str, count: usize| {
+        let enrolment = instance.enrolment.clone();
+        tokio::task::spawn_blocking(move || {
+            for n in 0..count {
+                let key = format!("{name}-{n}");
+                let (request, mut requester) = enrolment_request(&key);
+                requester.bootstrap = CertId::new(b"bootstrap CA", &format!("{name}{n:04x}"));
+                assert_eq!(
+                    enrolment.submit(request, requester),
+                    Submitted::Waiting,
+                    "{key}"
+                );
+            }
+        })
+    };
+    let half = MAX_PENDING / 2;
+    let (on_a, on_b) = tokio::join!(queue(&a, "a", half), queue(&b, "b", half - 1));
+    on_a.expect("A queues");
+    on_b.expect("B queues");
+    assert_eq!(
+        schema.query("SELECT count(*) FROM enrolment_requests"),
+        [(MAX_PENDING - 1).to_string()]
+    );
+
+    assert_eq!(
+        enrol(&b, &pki, &signing.bootstrap).await,
+        None,
+        "B's host takes the last place"
+    );
+    let refused = enrol(&a, &pki, &signing.bootstrap).await;
+    assert!(
+        refused
+            .as_deref()
+            .is_some_and(|message| message.contains("the enrolment queue is full")),
+        "A counts B's requests: {refused:?}"
+    );
 }
 
 /// During an enrolment wave on A, A reads nothing again for its own notifications, and B takes up
@@ -4218,6 +4618,16 @@ async fn gateway(
     balancer: &Balancer,
     dir: &std::path::Path,
 ) -> (SocketAddr, tokio::sync::watch::Sender<bool>) {
+    gateway_timed(pki, balancer, dir, fleet_agent::gateway::Timings::default()).await
+}
+
+/// [`gateway`], its time bounds `timings`.
+async fn gateway_timed(
+    pki: &Pki,
+    balancer: &Balancer,
+    dir: &std::path::Path,
+    timings: fleet_agent::gateway::Timings,
+) -> (SocketAddr, tokio::sync::watch::Sender<bool>) {
     let path = |file: &str| dir.join(file).display().to_string();
     let (listener_cert, listener_key) = pki.issue("127.0.0.1");
     std::fs::write(dir.join("listener.pem"), listener_cert).expect("write");
@@ -4252,7 +4662,7 @@ async fn gateway(
     .expect("gateway config");
     let (stop, shutdown) = fleet_agent::shutdown::shutdown_channel();
     tokio::spawn(async move {
-        fleet_agent::gateway::run_on(Arc::new(config), listener, shutdown)
+        fleet_agent::gateway::run_on_timed(Arc::new(config), listener, shutdown, timings)
             .await
             .expect("gateway");
     });
@@ -4431,6 +4841,140 @@ async fn a_gateway_keeps_its_agents_on_one_instance_and_moves_those_of_a_stopped
     let mut late = behind(downstream, &pki, &cert, &key).await;
     let mut late_sequence = 0;
     reported(&mut late, InstanceUid([0xaf; 16]), &mut late_sequence).await;
+}
+
+/// The status and the `otelcol` floor the Gateway at `downstream` answers a peer presenting
+/// `cert`, asked again until they are `wanted` or 15 seconds have passed.
+async fn floors_behind(
+    downstream: SocketAddr,
+    pki: &Pki,
+    cert: &str,
+    key: &str,
+    wanted: (u16, Option<&str>),
+) -> (u16, Option<String>) {
+    let client = agent_client(pki, cert, key);
+    let url = format!("https://127.0.0.1:{}/v1/package-floors", downstream.port());
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let response = client.get(&url).send().await.expect("ask the Gateway");
+        let status = response.status().as_u16();
+        let body = response.bytes().await.expect("the body");
+        let version = serde_json::from_slice::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|floors| floors["otelcol"]["version"].as_str().map(str::to_string));
+        if (status, version.as_deref()) == wanted || tokio::time::Instant::now() >= deadline {
+            return (status, version);
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// A Gateway whose pool reached A alone serves on once A stops: its next fetches reach B, and it
+/// holds the revocation list and the floors B holds, a revocation and a floor committed through B
+/// while A was stopped included. The revoked downstream session is ended, a request with its
+/// certificate is refused, and the floors handed down are B's.
+/// Verifies: ADR-0045, ADR-0040, ADR-0035, ADR-0016
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_gateway_whose_instance_stopped_serves_the_list_and_the_floors_the_other_holds() {
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let mut a = Instance::start(&pki, &schema, schema.config_on(schema.config.port)).await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    mark_gateway(&a, &pki, dir.path());
+    let b = Instance::start(&pki, &schema, schema.config_on(schema.config.port)).await;
+    let on_a = a.floors.clone();
+    tokio::task::spawn_blocking(move || on_a.put("otelcol", "2.0.0", vec![7; 64]))
+        .await
+        .expect("put")
+        .expect("A sets a floor");
+    let a_id = a.instance_id().expect("a lease");
+
+    let balancer = Balancer::to(vec![a.agent, b.agent]).await;
+    balancer.send_to(0);
+    let (downstream, _stop) = gateway_timed(
+        &pki,
+        &balancer,
+        dir.path(),
+        fleet_agent::gateway::Timings {
+            revocation_refresh: Duration::from_secs(1),
+            floors_refresh: Duration::from_secs(1),
+            ..fleet_agent::gateway::Timings::default()
+        },
+    )
+    .await;
+    let (revoked_cert, revoked_key) = pki.issue("edge-revoked");
+    let (kept_cert, kept_key) = pki.issue("edge-kept");
+    let mut revoked = behind(downstream, &pki, &revoked_cert, &revoked_key).await;
+    let mut kept = behind(downstream, &pki, &kept_cert, &kept_key).await;
+    let (revoked_uid, kept_uid) = (InstanceUid([0xb1; 16]), InstanceUid([0xb2; 16]));
+    let (mut revoked_sequence, mut kept_sequence) = (0, 0);
+    reported(&mut revoked, revoked_uid, &mut revoked_sequence).await;
+    reported(&mut kept, kept_uid, &mut kept_sequence).await;
+    assert_eq!(
+        schema.query(&format!(
+            "SELECT holder::text FROM agents WHERE instance_uid = '{kept_uid}'"
+        )),
+        std::slice::from_ref(&a_id),
+        "the Gateway's pool reached A"
+    );
+    assert_eq!(
+        floors_behind(
+            downstream,
+            &pki,
+            &kept_cert,
+            &kept_key,
+            (200, Some("2.0.0"))
+        )
+        .await,
+        (200, Some("2.0.0".to_string())),
+        "the Gateway hands down A's floor"
+    );
+
+    // A stops; while the Gateway reaches no instance, B revokes and sets a higher floor.
+    balancer.send_to(1);
+    let _ = a.stop.take().expect("running").send(());
+    assert!(
+        eventually(Duration::from_secs(15), || schema.query(&format!(
+            "SELECT count(*) FROM leases WHERE instance_id = '{a_id}'"
+        )) == ["0"])
+        .await,
+        "A released its lease"
+    );
+    revoke_through(&b, &pki, &revoked_cert).await;
+    let on_b = b.floors.clone();
+    tokio::task::spawn_blocking(move || on_b.put("otelcol", "3.0.0", vec![7; 64]))
+        .await
+        .expect("put")
+        .expect("B sets a floor");
+
+    assert_eq!(
+        closed_within(&mut revoked, Duration::from_secs(15)).await,
+        Some((1008, "revoked".to_string())),
+        "the Gateway ends the session B's list names"
+    );
+    assert_eq!(
+        floors_behind(downstream, &pki, &revoked_cert, &revoked_key, (401, None))
+            .await
+            .0,
+        401,
+        "the Gateway refuses the certificate B revoked"
+    );
+    assert_eq!(
+        floors_behind(
+            downstream,
+            &pki,
+            &kept_cert,
+            &kept_key,
+            (200, Some("3.0.0"))
+        )
+        .await,
+        (200, Some("3.0.0".to_string())),
+        "the Gateway hands down B's floor"
+    );
+    let reply = reported(&mut kept, kept_uid, &mut kept_sequence).await;
+    assert!(reply.error_response.is_none(), "{:?}", reply.error_response);
 }
 
 /// A Configuration whose revision was pinned through one instance is not deleted through another

@@ -942,7 +942,7 @@ async fn serve() {
     // (ADR-0023 clause 16).
     if let (Some(staging), Some(lease)) = (staging, &lease) {
         staging.stage_under(lease.held());
-        clean_staging_on_takeover(staging, lease.takeovers());
+        lease.on_each_takeover(move || staging.run());
     }
     // The audit record (ADR-0028), opened before anything is decided: one chain in files, or on
     // PostgreSQL the chain of each lease
@@ -1297,25 +1297,6 @@ async fn serve() {
     if served.is_err() {
         std::process::exit(1);
     }
-}
-
-/// Runs `staging` again each time `takeovers` changes, off the async threads, as its calls to the
-/// bucket block. A cleanup that fails is logged; the next takeover, or the next start, tries again.
-fn clean_staging_on_takeover(
-    staging: fleet_server::s3::StagingCleanup,
-    mut takeovers: tokio::sync::watch::Receiver<u64>,
-) {
-    tokio::spawn(async move {
-        while takeovers.changed().await.is_ok() {
-            let staging = staging.clone();
-            let ran = tokio::task::spawn_blocking(move || staging.run())
-                .await
-                .unwrap_or_else(|e| Err(e.to_string()));
-            if let Err(e) = ran {
-                warn!(error = %e, "could not delete the staging objects of a lapsed lease");
-            }
-        }
-    });
 }
 
 /// `CLOCK_BOOTTIME`, which counts the time the host was suspended, as the clock a lease and a sweep
