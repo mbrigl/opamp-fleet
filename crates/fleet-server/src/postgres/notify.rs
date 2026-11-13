@@ -1,5 +1,5 @@
 //! The notifications the instances on one database share
-//! (ADR-0025
+//! (ADR-0045
 //! clause 9): one channel per schema, a `NOTIFY` that names a kind of change, the identifier it
 //! concerns and the instance that sent it, and nothing else, sent in the transaction that commits
 //! the change, and a connection of each instance's own that listens. A channel is the database's,
@@ -13,13 +13,16 @@
 //! committed, so it is handed the call's notifications at once, and hears its own notification of
 //! each once more ([`Unsure`]).
 //!
-//! A binding a report makes, and a Host row made or whose valid until moves forward, by a report,
-//! an issuance or a prune, are announced right after their commit instead, in a transaction of
-//! their own that does not wait for its flush ([`will_follow`], [`follow_commit`]): PostgreSQL
+//! A binding a report makes, a Host row made or whose valid until moves forward, by a report, an
+//! issuance or a prune, and a Client Agent first arrived over a Gateway's Host, are announced right
+//! after their commit instead, in a transaction of their own that does not wait for its flush
+//! ([`will_follow`], [`follow_commit`]): PostgreSQL
 //! commits one transaction that sent a `NOTIFY` at a time, database-wide, across its flush, so
 //! announcing each new Agent's binding in its commit would let a connecting fleet in no faster than
-//! one flush apiece (ADR-0025 clause 9). Such a notice may be lost; every lease
-//! renewal reads the ledger again for it (clause 10).
+//! one flush apiece (ADR-0045 clause 9). Such a notice may be lost. Every lease
+//! renewal reads the ledger again for one of a binding or a Host (clause 10); a Gateway's groups
+//! another instance placed before a lost arrival are placed again at the next event that places
+//! them.
 
 use std::collections::VecDeque;
 #[cfg(test)]
@@ -85,9 +88,15 @@ pub const FORGOTTEN: &str = "forgotten";
 
 /// The kind an Agent taken from another instance with a live lease is announced as, by its
 /// `instance_uid`: the instance it was taken from reads its holder again and stops carrying it
-/// (ADR-0025
+/// (ADR-0045
 /// clause 8).
 pub const TAKEN: &str = "taken";
+
+/// The kind a Client Agent first arrived over a Gateway's Host is announced as, by that Host: the
+/// other instances place the Gateway's groups again, so a fellow Agent they hold finds it
+/// (ADR-0045
+/// clause 8).
+pub const ARRIVED: &str = "arrived";
 
 /// How long a listener waits before it connects again after its connection ended.
 const RECONNECT: Duration = Duration::from_secs(1);
@@ -340,7 +349,7 @@ pub(crate) fn will_follow(kind: &str, id: &str) {
 /// Announces what [`will_follow`] counted in this call to every other instance, now that the call
 /// committed it: on `client`, the connection that committed it, in a transaction of its own that
 /// does not wait for its WAL flush, so it holds PostgreSQL's turn for announcing commits only for a
-/// moment (ADR-0025 clause 9). It is sent apart from the call, which answers
+/// moment (ADR-0045 clause 9). It is sent apart from the call, which answers
 /// at once: a sending that fails is logged and tried again on another connection of `pool`, and
 /// after the last try the other instances take the change up at their next lease renewal.
 pub(crate) fn follow_commit(client: deadpool_postgres::Object, pool: &deadpool_postgres::Pool) {
@@ -599,7 +608,7 @@ mod tests {
     /// committed, with the identifier it names, and not when it is rolled back, nor by the instance
     /// that announced it, nor when it is announced in another schema of the same database; each
     /// listener hears that it listens first.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_committed_change_is_heard_by_every_other_instance() {
         let Some(test) = TestDatabase::named() else {
@@ -652,7 +661,7 @@ mod tests {
 
     /// A payload names its sender; one this instance sent is not handed on, and one that does not
     /// read is a notice of a kind nobody knows.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_notice_from_this_instance_is_passed_over_and_an_unreadable_one_is_unknown() {
         let sent = r#"{"kind":"floor","id":"otelcol","from":"a"}"#;
@@ -674,7 +683,7 @@ mod tests {
     /// once: a commit that landed before the call failed and one that lands after it are both read.
     /// The same notification of an earlier call of its own, or of another instance's call that
     /// bears the same mark, is not taken for it.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn the_notifications_of_a_call_whose_answer_was_lost_are_handed_on_and_heard_once_more() {
         let unsure = Unsure::default();
@@ -722,7 +731,7 @@ mod tests {
     /// The notices that were to follow the commit of a call whose answer was lost are handed on at
     /// once, each once, and not awaited: this instance's own notice of the same kind and
     /// identifier, should one come, is passed over (clause 10).
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn the_notices_to_follow_a_commit_whose_answer_was_lost_are_read_again_and_not_awaited() {
         let unsure = Unsure::default();
@@ -747,7 +756,7 @@ mod tests {
 
     /// A call that fails after it committed a change whose notice was to follow the commit has its
     /// instance read what the notice names at once, as on hearing it (clause 10).
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_call_that_fails_after_its_commit_has_the_notice_to_follow_it_read_at_once() {
         let Some(test) = TestDatabase::named() else {
@@ -789,7 +798,7 @@ mod tests {
 
     /// A notification that names the call that sent it is read by a Server of 0.8.0 as one without:
     /// its payload, as 0.8.0 declares it, reads past a field it does not know (clause 16).
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_notification_that_names_its_call_is_read_by_the_release_before() {
         /// The payload as version/0.8.0 declares it in `postgres/notify.rs`.

@@ -340,6 +340,16 @@ fn a_recorded_decision_reaches_the_export_receiver_as_the_stored_line() {
     }
 }
 
+/// The lines of the audit record under the data directory in `dir`.
+fn record_of(dir: &Path) -> Vec<String> {
+    std::fs::read_dir(dir.join("data").join("audit"))
+        .expect("audit")
+        .flatten()
+        .filter_map(|file| std::fs::read_to_string(file.path()).ok())
+        .flat_map(|text| text.lines().map(str::to_string).collect::<Vec<_>>())
+        .collect()
+}
+
 /// With `[audit.export]` naming a receiver that takes connections and never answers, the Server
 /// still answers every act, its export drops what its queue cannot hold, and the count of what it
 /// dropped reaches the record as `audit.export_dropped` at shutdown.
@@ -363,6 +373,25 @@ fn a_silent_receiver_blocks_no_decision_and_the_dropped_count_reaches_the_record
         "the acts waited on the export"
     );
 
+    // The shutdown counts what was dropped before it writes the record out: an entry the writer
+    // had not yet written then reaches the export after the count, and is logged, not counted in
+    // the record, when it is dropped. So the test stops the server once the record holds all 3000.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let written = record_of(dir.path())
+            .iter()
+            .filter(|line| line.contains("\"event\":\"operator.act\""))
+            .count();
+        if written >= 3000 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the record holds {written} of the 3000 entries"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
     // SAFETY: kill(2) on the pid of a child this test started and has not yet reaped.
     let sent = unsafe { libc::kill(server.0.id() as libc::pid_t, libc::SIGTERM) };
     assert_eq!(sent, 0, "send SIGTERM");
@@ -372,12 +401,7 @@ fn a_silent_receiver_blocks_no_decision_and_the_dropped_count_reaches_the_record
         assert!(Instant::now() < deadline, "the server did not exit");
         std::thread::sleep(Duration::from_millis(50));
     }
-    let record: Vec<String> = std::fs::read_dir(dir.path().join("data").join("audit"))
-        .expect("audit")
-        .flatten()
-        .filter_map(|file| std::fs::read_to_string(file.path()).ok())
-        .flat_map(|text| text.lines().map(str::to_string).collect::<Vec<_>>())
-        .collect();
+    let record = record_of(dir.path());
     let dropped: u64 = record
         .iter()
         .filter(|line| line.contains("\"event\":\"audit.export_dropped\""))

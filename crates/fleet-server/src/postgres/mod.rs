@@ -1,7 +1,7 @@
 //! The Server's records in one PostgreSQL database (ADR-0023): the connection every PostgreSQL
 //! adapter shares, the exclusive lock of an instance that must be alone on it, the leases every
 //! instance holds, the notifications they share, and the schema the Server applies itself
-//! (ADR-0025).
+//! (ADR-0045).
 //!
 //! The connection is TLS 1.3 on the *ring*-only client of `opamp::tls`, the database's
 //! certificate verified against the public roots or the root `ca_file` names and its host name
@@ -97,7 +97,7 @@ const APPLICATION_NAME: &str = "opamp-fleet-server";
 /// Whether an instance must be the only one on its database, and why.
 ///
 /// An instance whose blobs or CA keys are files must be alone
-/// (ADR-0025
+/// (ADR-0045
 /// clause 2): what it keeps on its own disk no other instance can reach.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Exclusive {
@@ -161,7 +161,7 @@ pub struct Database {
     release: &'static str,
     /// Set once a lease taken after a lost one found a schema that needs a newer Server: the
     /// refusal, naming both versions, and the instance stops
-    /// (ADR-0025
+    /// (ADR-0045
     /// clause 16).
     outdated: std::sync::Mutex<Option<String>>,
     /// The `[audit] key_label` this instance names, which its lease records and every other live
@@ -465,7 +465,7 @@ impl Database {
 
     /// Applies `migrations` in one transaction (ADR-0023 clause 22), once the schema and the
     /// releases of the live leases are checked under the migrations' lock
-    /// (ADR-0025
+    /// (ADR-0045
     /// clause 16).
     ///
     /// # Errors
@@ -623,7 +623,7 @@ impl Database {
             return Err(lost_lock(&self.name));
         }
         // What the call announced is counted as it is sent: where its answer is lost, it may have
-        // committed, and the instance reads again what it names (ADR-0025
+        // committed, and the instance reads again what it names (ADR-0045
         // clause 10).
         let call = notify::Call::new(self.afterwards.clone());
         let answer = self.bridge.run(notify::sending(
@@ -746,6 +746,7 @@ impl Database {
             Ok(LockHold {
                 holding,
                 client: Arc::new(client),
+                runtime: tokio::runtime::Handle::current(),
                 #[cfg(test)]
                 settings,
             })
@@ -775,15 +776,31 @@ pub(crate) struct LockHold {
     /// The session that holds the lock: what a sweep marks the blobs it deletes on, so that a mark
     /// is written only while the lock holds (ADR-0023 clause 14).
     pub(crate) client: Arc<tokio_postgres::Client>,
+    /// The runtime the session runs on, which the hold's drop lets go of the lock on.
+    runtime: tokio::runtime::Handle,
     /// The session's `statement_timeout` and `lock_timeout` once it had the lock.
     #[cfg(test)]
     settings: (String, String),
 }
 
 impl Drop for LockHold {
+    /// Lets go of the lock on its session at once, so the next holder does not wait for the
+    /// session to end, which a clone of its client can put off. The session's end that follows
+    /// loses nothing.
     fn drop(&mut self) {
-        // Let go on purpose: the session's end that follows loses nothing.
         self.holding.store(false, Ordering::SeqCst);
+        let client = self.client.clone();
+        self.runtime.spawn(async move {
+            if let Err(e) = client
+                .execute(&format!("SELECT pg_advisory_unlock({BLOB_LOCK})"), &[])
+                .await
+            {
+                tracing::warn!(
+                    error = %sql(e),
+                    "{BLOB_LOCK_NAME} was not let go; it goes when its session ends"
+                );
+            }
+        });
     }
 }
 
@@ -861,9 +878,10 @@ pub(crate) const EXCLUSIVE_LOCK: &str =
 /// Why an instance that shares the database neither migrates nor starts while another Server
 /// holds it alone (ADR-0023 clause 22).
 const HELD_ALONE_BEFORE_MIGRATING: &str = "another Server holds the database alone — a Server of \
-     0.7.1 or earlier, or an instance that keeps its blobs as files ([blobs] store = \"fs\") or a \
-     CA key in a file ([client_ca] key_file, [enrolment] bootstrap_ca_key_file); stop it before \
-     this instance starts, which changed nothing in the database";
+     0.7.1 or earlier, an instance that keeps its blobs as files ([blobs] store = \"fs\") or a CA \
+     key in a file ([client_ca] key_file, [enrolment] bootstrap_ca_key_file), or a `server \
+     migrate-to-postgres` or `server blobs-to-s3` still running; stop the instance, or let the \
+     command finish, before this one starts, which changed nothing in the database";
 
 /// The lock of the blob store (ADR-0023 clause 14), by the key
 /// its schema gives it: a sweep or a staging cleanup holds it alone, an upload shared in the
@@ -1274,18 +1292,42 @@ pub(crate) mod testing {
         took: bool,
     }
 
+    /// How long a test waits for a place before it fails: far past the longest a test of this
+    /// crate holds one, so only a wait that cannot end reaches it.
+    const SLOT_WAIT: std::time::Duration = std::time::Duration::from_secs(300);
+
     impl Slot {
         /// Waits until fewer than [`SCHEMAS_AT_ONCE`] test threads work in a schema, and takes a
-        /// place, unless this thread holds one.
+        /// place, unless this thread holds one. A thread a test spawned, which the harness does
+        /// not name, is refused at once: it would wait for a place beside the one its test holds,
+        /// for ever once every place is taken.
         fn take() -> Slot {
             let took = HELD.get() == 0;
             if took {
+                assert!(
+                    std::thread::current().name().is_some(),
+                    "a test schema is opened on a thread the test spawned: it takes one of the \
+                     SCHEMAS_AT_ONCE ({SCHEMAS_AT_ONCE}) places beside any its test holds and \
+                     can wait for it for ever — open it on the test's own thread"
+                );
                 let (taken, freed) = &SLOTS;
-                let mut taken = freed
-                    .wait_while(taken.lock().expect("slots"), |taken| {
-                        *taken >= SCHEMAS_AT_ONCE
-                    })
-                    .expect("slots");
+                let (mut taken, waited) = freed
+                    .wait_timeout_while(
+                        taken
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner),
+                        SLOT_WAIT,
+                        |taken| *taken >= SCHEMAS_AT_ONCE,
+                    )
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if waited.timed_out() {
+                    // Released first, so the failure poisons no lock the next test takes.
+                    drop(taken);
+                    panic!(
+                    "no place among the SCHEMAS_AT_ONCE ({SCHEMAS_AT_ONCE}) test schemas came free \
+                     within {SLOT_WAIT:?}"
+                    );
+                }
                 *taken += 1;
             }
             HELD.set(HELD.get() + 1);
@@ -1989,6 +2031,48 @@ mod tests {
         }
     }
 
+    /// A test schema opened on a thread the test spawned fails at once, naming the cap on test
+    /// schemas, rather than wait for a place beside the one its test holds, which never comes
+    /// once every place is taken.
+    #[test]
+    fn a_schema_opened_on_a_thread_the_test_spawned_fails_naming_the_cap() {
+        let Some(_held) = TestDatabase::named() else {
+            return;
+        };
+        let started = std::time::Instant::now();
+        let refused = std::thread::spawn(|| TestDatabase::named().map(|test| test.schema.clone()))
+            .join()
+            .expect_err("refused");
+        let message = refused
+            .downcast_ref::<String>()
+            .cloned()
+            .unwrap_or_default();
+        assert!(message.contains("SCHEMAS_AT_ONCE"), "{message}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    /// A hold on the blob store's lock lets go of it as it is dropped, so the next holder has it at
+    /// once, though its session lives on in a clone of its client.
+    /// Verifies: ADR-0023
+    #[test]
+    fn a_blob_hold_dropped_frees_the_lock_before_its_session_ends() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let hold = database.hold_blobs().expect("the lock");
+        let session = hold
+            .held::<LockHold>()
+            .expect("a hold on PostgreSQL")
+            .client
+            .clone();
+        drop(hold);
+        let next =
+            (0..50).find_map(|_| database.hold_blobs_within(Duration::from_millis(100)).ok());
+        assert!(next.is_some(), "the lock stayed with the session");
+        drop(session);
+    }
+
     /// A database that stops answering while the Server runs fails the one call that needs it
     /// within that call's bound, and the call after it as fast; the Server is held no longer
     /// (ADR-0023 clause 24). The database is reached through a proxy that is frozen mid-run.
@@ -2205,7 +2289,7 @@ mod tests {
     /// A second instance that must be alone, against a database one already holds alone, fails
     /// startup naming the database and the key that makes it alone; once the first is gone, the
     /// lock is free again.
-    /// Verifies: ADR-0023, ADR-0025
+    /// Verifies: ADR-0023, ADR-0045
     #[test]
     fn a_second_instance_that_must_be_alone_fails_startup_naming_it() {
         let Some(test) = TestDatabase::named() else {
@@ -2317,6 +2401,44 @@ mod tests {
         );
     }
 
+    /// Migration 5 refuses a Deployment whose `packages` it cannot split into one row per Agent
+    /// type, naming the Deployment and why, and leaves the schema where it was.
+    /// Verifies: ADR-0023
+    #[test]
+    fn migration_5_names_a_deployment_it_cannot_split() {
+        for (packages, why) in [
+            (
+                r#"[{"agent_type":"otelcol","version":"1.0.0"},{"agent_type":"otelcol","version":"2.0.0"}]"#,
+                "two or more packages of the agent type otelcol",
+            ),
+            (
+                r#"[{"agent_type":"otelcol"}]"#,
+                "without an agent_type or a version",
+            ),
+        ] {
+            let Some(test) = TestDatabase::named() else {
+                return;
+            };
+            let database = Database::connect(&test.config(), Some(&test.schema)).expect("connect");
+            database
+                .apply_schema(&schema::MIGRATIONS[..4])
+                .expect("migrations 1 to 4");
+            test.sql(&format!(
+                "INSERT INTO deployments (name, selector, packages, configurations) \
+                 VALUES ('canary', '{{}}', '{packages}', '{{}}')"
+            ));
+            let err = database
+                .apply_schema(&schema::MIGRATIONS[..5])
+                .expect_err("refused");
+            assert!(err.contains("the Deployment canary holds"), "{err}");
+            assert!(err.contains(why), "{err}");
+            assert_eq!(
+                test.rows("SELECT max(version)::text FROM fleet_schema"),
+                [[Some("4".to_string())]]
+            );
+        }
+    }
+
     /// A Server of 0.7.1 takes the schema of migrations 1 and 2, which it knows, and refuses the
     /// schema once any migration of 0.8.0 is applied, naming 0.8.0 and changing nothing: it holds
     /// no lease, so it must not serve beside the instances of 0.8.0
@@ -2385,7 +2507,8 @@ mod tests {
             .map(|_| ())
             .expect_err("held alone");
         assert!(err.contains("holds the database alone"), "{err}");
-        assert!(err.contains("stop it before"), "{err}");
+        assert!(err.contains("server blobs-to-s3"), "{err}");
+        assert!(err.contains("before this one starts"), "{err}");
         assert!(
             err.contains(&format!("database {}", test.config.dbname)),
             "{err}"
@@ -2435,9 +2558,9 @@ mod tests {
     /// A lease of 0.8.0 counts as 0.8.0 by the column's default; a lapsed lease, and the live one
     /// of an instance that had to be alone and whose lock is free, count as none; with no such
     /// lease the instance applies every migration it lacks
-    /// (ADR-0025
+    /// (ADR-0045
     /// clause 16).
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn an_instance_refuses_its_start_while_a_live_lease_is_older_than_the_schema_it_leaves() {
         let Some(test) = TestDatabase::named() else {
@@ -2519,7 +2642,7 @@ mod tests {
 
     /// An instance whose migrations name the oldest Server a live lease's release is, or older,
     /// serves beside it: a newer patch release of 0.8 beside a lease of 0.8.0.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_patch_release_serves_beside_a_lease_of_the_release_its_migrations_name() {
         let Some(test) = TestDatabase::named() else {
@@ -2549,19 +2672,19 @@ mod tests {
     /// Of a lease taken while a Server two releases on migrates, the later sees the earlier: the
     /// lease waits for the migrations' lock, then finds the schema that needs a newer Server and
     /// is refused, naming both versions, taking nothing and keeping the refusal
-    /// (ADR-0025
+    /// (ADR-0045
     /// clause 16). The other order, the lease first, is
     /// `an_instance_refuses_its_start_while_a_live_lease_is_older_than_the_schema_it_leaves`.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_lease_taken_while_a_newer_server_migrates_sees_its_schema_and_is_refused() {
         let Some(test) = TestDatabase::named() else {
             return;
         };
-        const KEY: i64 = 4_711_000_161;
+        const KEY: i64 = 0x23_0002;
         let ahead = two_releases_on(
-            "SELECT pg_advisory_lock_shared(4711000161); \
-             SELECT pg_advisory_unlock_shared(4711000161); \
+            "SELECT pg_advisory_lock_shared(2293762); \
+             SELECT pg_advisory_unlock_shared(2293762); \
              CREATE TABLE fleet_test_ahead (n integer);",
         );
         let older = Database::open_as(
@@ -2657,7 +2780,7 @@ mod tests {
             return;
         };
         let other = TestDatabase::named().expect("a second schema");
-        let key = 4_711_000_151;
+        let key = 0x23_0001;
         other.sql("CREATE TABLE fleet_test_held (n integer)");
         let gate = test.gate(key);
         std::thread::scope(|scope| {

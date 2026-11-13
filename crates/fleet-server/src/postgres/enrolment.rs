@@ -3,7 +3,7 @@
 //! request in a row of its own. Each act is one transaction on the rows it names, written before
 //! it is answered; taking a request in holds the queue against every other taker while it counts,
 //! so the queue's bounds hold for every instance on the database
-//! (ADR-0025
+//! (ADR-0045
 //! clause 19).
 
 use std::sync::Arc;
@@ -61,6 +61,20 @@ enum Found {
 /// is not known yet.
 fn held_elsewhere(error: &tokio_postgres::Error) -> bool {
     error.code() == Some(&tokio_postgres::error::SqlState::LOCK_NOT_AVAILABLE)
+}
+
+/// Rolls `transaction` back and waits for the database's answer before the call answers `answer`.
+/// A decision dropped instead only sends its rollback, and keeps the request's row until the
+/// database has read it: a rejection made right after, which takes the row without a wait, would
+/// find it held and be answered [`Decided::Deciding`]. A rejection's early returns end the same
+/// way, so that no call answers with its transaction still open. A rollback that fails leaves a
+/// connection the database rolls back as it ends; the answer stands.
+async fn rolled_back<T>(
+    transaction: deadpool_postgres::Transaction<'_>,
+    answer: T,
+) -> Result<T, String> {
+    let _ = transaction.rollback().await;
+    Ok(answer)
 }
 
 /// How the transaction that decides an approved request ended.
@@ -242,15 +256,17 @@ impl EnrolmentStore for PgEnrolmentStore {
                 .await
             {
                 Ok(row) => row,
-                Err(e) if held_elsewhere(&e) => return Ok(Decided::Deciding),
+                Err(e) if held_elsewhere(&e) => {
+                    return rolled_back(transaction, Decided::Deciding).await
+                }
                 Err(e) => return Err(sql(e)),
             };
             let Some(row) = row else {
-                return Ok(Decided::NotWaiting);
+                return rolled_back(transaction, Decided::NotWaiting).await;
             };
             let mut request: Value = row.get(0);
             if request.get("decision").is_some_and(|d| !d.is_null()) {
-                return Ok(Decided::NotWaiting);
+                return rolled_back(transaction, Decided::NotWaiting).await;
             }
             request["decision"] = decision;
             transaction
@@ -283,7 +299,9 @@ impl EnrolmentStore for PgEnrolmentStore {
                 .await
             {
                 Ok(()) => {}
-                Err(e) if held_elsewhere(&e) => return Ok(Decided::Deciding),
+                Err(e) if held_elsewhere(&e) => {
+                    return rolled_back(transaction, Decided::Deciding).await
+                }
                 Err(e) => return Err(sql(e)),
             }
             let row = match transaction
@@ -294,12 +312,14 @@ impl EnrolmentStore for PgEnrolmentStore {
                 .await
             {
                 Ok(row) => row,
-                Err(e) if held_elsewhere(&e) => return Ok(Decided::Deciding),
+                Err(e) if held_elsewhere(&e) => {
+                    return rolled_back(transaction, Decided::Deciding).await
+                }
                 Err(e) => return Err(sql(e)),
             };
             let decided = match row.map(|row| row.get::<_, Value>(0)) {
                 Some(request) if request.get("decision").is_some_and(|d| !d.is_null()) => {
-                    return Ok(Decided::NotWaiting);
+                    return rolled_back(transaction, Decided::NotWaiting).await;
                 }
                 Some(mut request) => {
                     request["decision"] = rejected;
@@ -884,7 +904,7 @@ mod tests {
         acts(&|| Box::new(FsEnrolmentStore::open(dir.path())));
     }
 
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn the_enrolment_acts_hold_on_postgres() {
         let Some(test) = TestDatabase::named() else {
@@ -897,7 +917,7 @@ mod tests {
     /// Two instances take a request each into a queue with one place left, behind a barrier, and
     /// exactly one is taken while the other finds the queue full; two deciding one request decide
     /// it once.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn two_takers_at_the_queues_bound_take_one_request_between_them() {
         let Some(test) = TestDatabase::named() else {
@@ -1075,11 +1095,34 @@ mod tests {
         approvals(&|| Box::new(PgEnrolmentStore::new(database.clone())));
     }
 
+    /// Holds the approver that signs until the other one has met the request: it waits for the
+    /// request's row, or it has answered. Where both sign, a defect, neither waits for the other.
+    fn other_approver_met(
+        test: &TestDatabase,
+        signing: &std::sync::atomic::AtomicUsize,
+        finished: &std::sync::atomic::AtomicUsize,
+    ) {
+        use std::sync::atomic::Ordering::SeqCst;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while signing.load(SeqCst) < 2
+            && finished.load(SeqCst) == 0
+            && test.sessions(
+                "wait_event_type = 'Lock' AND query LIKE 'SELECT request FROM enrolment_requests%'",
+            ) == 0
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the other approver never met the request"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
     /// Of two instances approving one request, one signs and records it and the other finds it
     /// decided, signing nothing: the request's row is held from before the signature until the
     /// decision is written. The other finds it still being decided instead when it waited out
     /// its `lock_timeout`, as on a database slowed by load.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn two_approvers_of_one_request_sign_it_once() {
         let Some(test) = TestDatabase::named() else {
@@ -1097,26 +1140,30 @@ mod tests {
                 .take(&request(&id, "1"), 1_000, 100, 100)
                 .expect("take");
             let signed = std::sync::atomic::AtomicUsize::new(0);
+            let finished = std::sync::atomic::AtomicUsize::new(0);
             let barrier = std::sync::Barrier::new(2);
             let answers: Vec<Approval> = std::thread::scope(|scope| {
                 let racers: Vec<_> = stores
                     .iter()
                     .map(|store| {
-                        let (barrier, id, signed) = (&barrier, id.clone(), &signed);
+                        let (barrier, id, signed, finished, test) =
+                            (&barrier, id.clone(), &signed, &finished, &test);
                         scope.spawn(move || {
                             barrier.wait();
-                            store
+                            let answer = store
                                 .approve(
                                     &id,
                                     &bootstrap("1"),
                                     &mut || {
                                         signed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                                        std::thread::sleep(std::time::Duration::from_millis(20));
+                                        other_approver_met(test, signed, finished);
                                         Ok((Decision::Approved(format!("pem {id}")), None))
                                     },
                                     &crate::enrolment::tests::kept(),
                                 )
-                                .expect("approve")
+                                .expect("approve");
+                            finished.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            answer
                         })
                     })
                     .collect();
@@ -1145,7 +1192,7 @@ mod tests {
     /// A withdrawal of a request whose bootstrap certificate the list names announces itself in the
     /// call that commits it: where that call loses its answer, the instance is handed the
     /// notification, so it reads its queue again.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_withdrawal_whose_commit_lost_its_answer_is_handed_on() {
         let Some(test) = TestDatabase::named() else {
@@ -1268,7 +1315,7 @@ mod tests {
     /// Two instances on one database approving one request: one hands it out, the other answers
     /// that it is not found, or that it is being decided when it waited out its `lock_timeout`,
     /// and the request is signed and recorded once.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn two_instances_approving_one_request_record_one_certificate() {
         use crate::enrolment::tests::{request as submitted, requester, Echo, Manual};
@@ -1294,9 +1341,10 @@ mod tests {
             assert_eq!(a.submit(submitted(&key), requester()), Submitted::Waiting);
             assert_eq!(b.submit(submitted(&key), requester()), Submitted::Waiting);
             let recorded = std::sync::atomic::AtomicUsize::new(0);
+            let finished = std::sync::atomic::AtomicUsize::new(0);
             let record = |_: &crate::revocation::Signed, _: &[u8], _: &CertId| {
                 recorded.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                std::thread::sleep(std::time::Duration::from_millis(20));
+                other_approver_met(&test, &recorded, &finished);
                 Ok(())
             };
             let barrier = std::sync::Barrier::new(2);
@@ -1304,16 +1352,19 @@ mod tests {
                 let racers: Vec<_> = [&a, &b]
                     .into_iter()
                     .map(|enrolment| {
-                        let (barrier, key, record) = (&barrier, key.clone(), &record);
+                        let (barrier, key, record, finished) =
+                            (&barrier, key.clone(), &record, &finished);
                         scope.spawn(move || {
                             barrier.wait();
-                            enrolment.approve(
+                            let answer = enrolment.approve(
                                 &key,
                                 &Echo,
                                 "host",
                                 &crate::enrolment::tests::Recording::new(record),
                                 &|_| false,
-                            )
+                            );
+                            finished.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            answer
                         })
                     })
                     .collect();
@@ -1341,7 +1392,7 @@ mod tests {
 
     /// A take that read the window open before another instance closed it does not land in the
     /// closed window: the window's row is held for share while the request is written.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_take_does_not_land_in_a_window_closed_meanwhile() {
         let Some(test) = TestDatabase::named() else {
@@ -1367,7 +1418,18 @@ mod tests {
             .expect("closing");
         let taken = std::thread::scope(|scope| {
             let taker = scope.spawn(|| store.take(&request("late", "1"), 1_000, 8, 8));
-            std::thread::sleep(std::time::Duration::from_millis(300));
+            // The taker waits for the window's row, which the close holds.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while test.sessions(
+                "wait_event_type = 'Lock' AND query LIKE 'SELECT until_ms FROM enrolment_window%'",
+            ) == 0
+            {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the take never waited for the window's row"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
             database
                 .run(move |_| async move {
                     closing
@@ -1508,7 +1570,7 @@ mod tests {
     /// for longer than a wait for a lock lasts, is answered that the request is being decided, and
     /// signs nothing; the other instance's approval stands, and once it is written the request is
     /// no longer waiting.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_decision_on_a_request_another_instance_holds_long_is_answered_deciding() {
         let Some(test) = TestDatabase::named() else {
@@ -1918,7 +1980,7 @@ mod tests {
 
     /// Two instances approve one request, and the first one's commit fails: the second, which
     /// waited for the request's row, signs it once when the first rolls back, and the request ends
-    /// decided once, with one certificate in the register (ADR-0023 clause 9, ADR-0025 clause 19).
+    /// decided once, with one certificate in the register (ADR-0023 clause 9, ADR-0045 clause 19).
     /// Verifies: ADR-0023
     #[test]
     fn two_instances_approving_one_request_whose_first_commit_fails_sign_it_once_more() {

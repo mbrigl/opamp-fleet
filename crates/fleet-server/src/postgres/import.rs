@@ -435,32 +435,52 @@ fn upload(
         .collect();
     let uploaded =
         crate::s3::copy_from_filesystem(blobs, referenced.iter().map(String::as_str), store)?;
-    let held: std::collections::HashSet<String> = store
-        .list()?
-        .into_iter()
-        .map(|(sha256, _)| sha256)
-        .collect();
-    for package in packages {
-        for (platform, entry) in &package.entries {
-            let sha256 = hex::encode(&entry.content_hash);
-            if !held.contains(&sha256) {
-                return Err(format!(
-                    "package {} for {}: its artifact {sha256} is neither in {} nor in bucket {} — \
-                     restore it from a backup, or delete the entry, and copy again",
-                    package.id,
-                    platform.tag(),
-                    blobs.display(),
-                    bucket.bucket
-                ));
-            }
-        }
-    }
+    let held: std::collections::HashMap<String, u64> = store.list()?.into_iter().collect();
+    check_held(packages, &held, blobs, &bucket.bucket)?;
     Ok(format!(
         "{} blobs in bucket {}, {uploaded} of them uploaded from {}",
         referenced.len(),
         bucket.bucket,
         blobs.display()
     ))
+}
+
+/// Whether the bucket, by what it `held` (each object's name and size), holds every artifact of
+/// `packages` whole: an object of another length under an artifact's name is refused as one
+/// missing is, naming the artifact, since the next start would refuse it.
+fn check_held(
+    packages: &[Package],
+    held: &std::collections::HashMap<String, u64>,
+    blobs: &Path,
+    bucket: &str,
+) -> Result<(), String> {
+    for package in packages {
+        for (platform, entry) in &package.entries {
+            let sha256 = hex::encode(&entry.content_hash);
+            match held.get(&sha256) {
+                None => {
+                    return Err(format!(
+                        "package {} for {}: its artifact {sha256} is neither in {} nor in bucket \
+                         {bucket} — restore it from a backup, or delete the entry, and copy again",
+                        package.id,
+                        platform.tag(),
+                        blobs.display(),
+                    ))
+                }
+                Some(&size) if size != entry.size => {
+                    return Err(format!(
+                        "package {} for {}: bucket {bucket} holds {size} bytes under its artifact \
+                         {sha256}, which is {} bytes — delete that object and copy again",
+                        package.id,
+                        platform.tag(),
+                        entry.size,
+                    ))
+                }
+                Some(_) => {}
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The entries of `dir` by name, read and nothing else. A name that is not UTF-8 is refused, as
@@ -503,6 +523,48 @@ mod tests {
     use crate::audit::{Audit as _, Entry};
     use crate::postgres::testing::TestDatabase;
     use crate::revocation::{CertId, Facts, Host, Issued, Revocation, Revoked, SubjectValues};
+
+    /// The final check of `blobs-to-s3` refuses an object of another length under an artifact's
+    /// name, naming the artifact and both sizes, as it refuses one missing; the right length
+    /// passes.
+    /// Verifies: ADR-0023
+    #[test]
+    fn an_object_of_the_wrong_size_under_an_artifact_fails_the_check_naming_it() {
+        let platform = crate::packages::Platform::new("linux", "amd64").expect("platform");
+        let sha256 = "ab".repeat(32);
+        let packages = [Package {
+            id: crate::packages::PackageId::new("otelcol", "1.2.3").expect("id"),
+            entries: BTreeMap::from([(
+                platform.clone(),
+                crate::packages::Entry {
+                    platform,
+                    content_hash: hex::decode(&sha256).expect("hex"),
+                    size: 12,
+                    signature: None,
+                },
+            )]),
+        }];
+        let check = |held: &[(&str, u64)]| {
+            let held = held
+                .iter()
+                .map(|(name, size)| ((*name).to_string(), *size))
+                .collect();
+            check_held(&packages, &held, Path::new("/data/blobs"), "fleet")
+        };
+        assert_eq!(check(&[(&sha256, 12)]), Ok(()));
+        let short = check(&[(&sha256, 11)]).expect_err("the wrong size");
+        assert!(short.contains("otelcol@1.2.3"), "{short}");
+        assert!(short.contains(&sha256), "{short}");
+        assert!(
+            short.contains("11 bytes") && short.contains("12 bytes"),
+            "{short}"
+        );
+        let missing = check(&[]).expect_err("missing");
+        assert!(
+            missing.contains("neither in /data/blobs nor in bucket fleet"),
+            "{missing}"
+        );
+    }
 
     /// Every path under `root` with its mode and, for a file, its bytes: what "unchanged" is
     /// checked against — a directory created or removed, a mode changed, a file removed or

@@ -70,7 +70,7 @@ fn ensure_safe_package_name(name: &str) -> Result<(), String> {
 /// The artifact is a program — tens or hundreds of megabytes — so it is streamed to `staging_dir`
 /// and hashed as it arrives, never assembled in memory or read back: the signature covers the
 /// Agent type, the version and that hash, not the bytes themselves. `staging_dir` is the
-/// receiving Agent's own (ADR-0018), so the install that follows is a rename inside one
+/// receiving Agent's own (ADR-0046), so the install that follows is a rename inside one
 /// filesystem.
 /// Verifies: ADR-0034
 pub async fn download_and_verify(
@@ -192,14 +192,11 @@ const MAX_REDIRECTS: usize = 5;
 /// (`send_download`) — and per-operation timeouts rather than one for the whole transfer, since a
 /// large artifact over a modest link legitimately takes minutes.
 pub(crate) fn download_client(tls: opamp::client::ClientTls) -> Result<reqwest::Client, String> {
-    let builder = reqwest::Client::builder()
-        .use_rustls_tls()
-        .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(std::time::Duration::from_secs(30))
-        .read_timeout(std::time::Duration::from_secs(60));
-    tls.apply(builder)?
-        .build()
-        .map_err(|e| format!("cannot build the download client: {e}"))
+    tls.https_client(opamp::client::Timeouts::PerOperation {
+        connect: std::time::Duration::from_secs(30),
+        read: std::time::Duration::from_secs(60),
+    })
+    .map_err(|e| format!("the download client: {e}"))
 }
 
 /// Where a download may go (ADR-0034 clause 51): this Client's own Server origin — the scheme, host

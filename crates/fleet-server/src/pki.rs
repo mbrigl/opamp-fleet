@@ -48,11 +48,8 @@ impl Ending {
 /// Returns the message to print when the file cannot be read or holds no certificate.
 pub fn read_ending(file: &Path) -> Result<Ending, String> {
     let pem = std::fs::read(file).map_err(|e| format!("cannot read {}: {e}", file.display()))?;
-    let der = opamp::tls::certificates(&pem)
-        .map_err(|e| format!("cannot read {}: {e}", file.display()))?
-        .into_iter()
-        .next()
-        .ok_or_else(|| format!("{} holds no certificate", file.display()))?;
+    let der = opamp::tls::first_certificate(&pem)
+        .map_err(|e| format!("cannot read {}: {e}", file.display()))?;
     let (_, cert) = X509Certificate::from_der(der.as_ref())
         .map_err(|e| format!("cannot read {}: {e}", file.display()))?;
     Ok(Ending {

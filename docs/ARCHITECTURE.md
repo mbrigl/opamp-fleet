@@ -9,7 +9,7 @@
 > **Kept current by:** Markus Brigl. A document everyone may edit and nobody owns is
 > the one that goes stale.
 >
-> **Last design revision:** 2026-11-06, due after 20 changes. The revision that took the count
+> **Last design revision:** 2026-11-12, due after 20 changes. The revision that took the count
 > moves the date; the number is this project's to set; a sensor counts the changes outside
 > `docs/` since the commit that set the date and says when the next is due
 > ([ADR-0006](adr/0006-feature-layer.md)).
@@ -71,10 +71,13 @@ Five crates in one workspace ([ADR-0008](adr/0008-five-crates-on-tokio-and-axum.
   ([ADR-0008](adr/0008-five-crates-on-tokio-and-axum.md)). Always the
   generated types, framing and the endpoint's body rules. Behind `client`, an Agent's protocol state
   machine, the two transports, and `client::connection`, which builds a connection, its TLS and its
-  HTTP client from a `Connection` the application fills in. The WebSocket driver ends a
-  connection on which nothing arrived for one heartbeat interval (`client::ws::Silence`), and
-  draws its reconnects and its waits after an `Unavailable` from `client::backoff`
-  ([ADR-0015](adr/0015-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended.md)).
+  HTTP client from a `Connection` the application fills in, and every other HTTPS client of the
+  Client through `ClientTls::https_client`: TLS 1.3, no redirect followed, bounded by its
+  `Timeouts`. The WebSocket driver ends a connection on which nothing arrived for one heartbeat
+  interval (`client::ws::Silence`)
+  ([ADR-0015](adr/0015-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended.md)),
+  and both drivers draw their reconnects and their waits after a refusal or an `Unavailable` from
+  `client::backoff`. `uid` is the `InstanceUid` and `attributes` the attribute keys both sides use.
   Behind `server`, the endpoint around a `Handler`, which answers a WebSocket's pings while it
   handles a message, `server::listen`, the listener with its TLS and its bounds on connection
   setup, and `server::pace`, the floor every body and WebSocket message it serves is held to. The
@@ -85,22 +88,28 @@ Five crates in one workspace ([ADR-0008](adr/0008-five-crates-on-tokio-and-axum.
 - **`fleet-core`** — what the Server and the Client implement identically beyond the protocol: the
   version, the platform aliases, the statements a package signature and a floor cover
   ([ADR-0035](adr/0035-package-versions-high-water-mark-and-floor.md)), the
-  renewal proof and
-  the bootstrap proof a CSR carries — read from a CSR by the adapter `csr` — the host a
+  renewal proof (`renewal`) and the bootstrap proof (`bootstrap_proof`) a CSR carries — read from
+  a CSR by the adapter `csr` — the host a
   certificate that names none is taken for, when a certificate counts as ending, what a
   certificate is called, the token buckets the Server and a Gateway count a sender in (`rate`),
   what a client certificate is known by on the Server and on a Gateway alike — its host, its issuer
   and serial, and the 20-octet bound on its serial — whose rule is the core `x509`, read with
   `x509-parser` by the adapter `x509::read`, with the random serial and the clock skew every issued
-  certificate gets in the adapter `x509::issue` — and the
+  certificate gets, the shape of a leaf by its role and the loading of a CA from its certificate
+  and key file, by the Server's two CAs and the operator tool alike, in the adapter `x509::issue`;
+  the first certificate of a CA file is read by `opamp::tls::first_certificate` — and the
   bootstrap certificate's PKCS#12 file, whose rule is core and whose reading and writing with
   `p12-keystore` is the adapter `pkcs12::file` (ADR-0027).
-- **`fleet-server`** — the Server: the fleet and its Hosts, its Configurations, labels, packages
-  and Deployments, the Agent plane and the Operator plane.
-- **`fleet-agent`** — the Client in all its modes, the program `supervisor`.
+- **`fleet-server`** — the Server: the fleet and its Hosts, its Configurations, labels and the
+  effective description Selectors match (`labels`), packages and Deployments, the Agent plane, and
+  the Operator plane, whose credential check is `credentials`.
+- **`fleet-agent`** — the Client in all its modes, the program `supervisor`, its command-line
+  surface in `cli`.
 - **`fleet-tools`** — the operator tool, the one program `opamp-fleetctl`: its `package` commands
-  fetch, pack, hash and sign package artifacts — or sign a Package's signing file from the UI
-  (ADR-0034) — its `pki` commands make the fleet's certificates (ADR-0042).
+  fetch (`fetch`), pack, hash and sign package artifacts — or sign a Package's signing file from
+  the UI (`signing`, ADR-0034) — its `pki` commands make the fleet's certificates and, through
+  `token`, the CA keys and the audit key on a PKCS#11 token, and `pki p12-extract` takes a pair out
+  of a PKCS#12 file (ADR-0042).
 
 Inside the Server and the Client the code is ports and adapters
 ([ADR-0009](adr/0009-ports-and-adapters.md)): a **core** that holds the domain and owns its
@@ -135,22 +144,26 @@ no module.
   `[database] store = "postgres"` every port but the blob port has its PostgreSQL adapter in
   `postgres` instead (`postgres::agents`, with the query of a page in `postgres::agent_page`,
   `configs`, `deployments`, `packages`, `ledger`, `bootstrap`, `enrolment`, `floors`, `audit`),
-  each call one transaction; `postgres` holds the
-  connection
-  they share — TLS 1.3 on *ring*, a pool on a `bridge` runtime of its own, the exclusive lock of
-  an instance that must be alone on the database, the leases of `postgres::lease` and the
+  each write one transaction; a load of several statements reads one read-only snapshot for the
+  Configurations, the ledger, a page and the Agents' `query`, and reads the tables one after
+  another for the Packages, the Deployments and the enrolment queue. `postgres` holds the
+  connection they share — TLS 1.3 on *ring*, a pool on a `bridge` runtime of its own, each call
+  bounded in time by `Database::run` and `run_within`, the exclusive lock of an instance that must
+  be alone on the database, the blob lock a sweep, the staging cleanup and `server blobs-to-s3` hold
+  alone and an upload holds shared (`hold_blobs`), the leases of `postgres::lease` and the
   notifications of `postgres::notify` — and applies the schema embedded in `postgres::schema` as
-  numbered migrations; `postgres::import` is `server migrate-to-postgres`, which copies a
-  `data_dir` into the database offline
+  numbered migrations; `postgres::import` is `server migrate-to-postgres`, which copies a `data_dir`
+  into the database offline, and `server blobs-to-s3`, which copies the blob files into the bucket
   ([ADR-0023](adr/0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)).
-  The core's constructors take the ports — `AppState::with_stores`, `PackageStore::with_backend`,
-  `PackageOffering::with_deployments`, `BootstrapCertificates::open`, `Enrolment::open_on` — and
-  `lib.rs` chooses the adapters by `[database]` in `Records`, which `AppState::on`,
-  `PackageStore::open_on`, `PackageOffering::on` and `BootstrapCertificates::on` take, and wires
-  the filesystem adapters in `AppState::new`, `PackageStore::open`,
+  `config::read_secret_file` is the one reader of the password, PIN and secret files the PostgreSQL,
+  S3 and PKCS#11 adapters name. The core's constructors take the ports — `AppState::with_stores`,
+  `PackageStore::with_backend`, `PackageOffering::with_deployments`, `BootstrapCertificates::open`,
+  `Enrolment::open_on` — and `lib.rs` chooses the adapters by `[database]` in `Records`, which
+  `AppState::on`, `PackageStore::open_on`, `PackageOffering::on` and `BootstrapCertificates::on`
+  take, and wires the filesystem adapters in `AppState::new`, `PackageStore::open`,
   `PackageOffering::new` and `BootstrapCertificates::on_disk`. `migrate` is the one module that
-  reads the layout of an older Server, for `server migrate`, and nothing in the running Server
-  calls it.
+  reads the layout of an older Server, for `server migrate`, and nothing in the running Server calls
+  it.
 - **The golden path** — a Server store: the port `FloorStore` in the core module `floors`, its
   filesystem adapter in `fs::floors`, its PostgreSQL adapter in `postgres::floors`, and the one
   `contract` test there that runs on both stores. A new store copies its shape and its test
@@ -158,7 +171,7 @@ no module.
   [ADR-0023](adr/0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)).
 - **Server instances** — on PostgreSQL every Server is an instance, and several share one
   database and one bucket
-  ([ADR-0025](adr/0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)).
+  ([ADR-0045](adr/0045-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)).
   `instance` takes a lease, a row of `postgres::lease`, before either listener opens, renews it,
   proves it before every answer, and closes both planes while it cannot. Each lease it takes checks
   the schema under the migrations' lock and records the instance's release and its `[audit]
@@ -166,11 +179,22 @@ no module.
   while a live lease is of a release older than the schema it leaves needs, so two consecutive
   versions run side by side. A change that concerns a live session is one `NOTIFY` of
   `postgres::notify`, sent in the transaction that commits it, or right after the commit for a
-  binding and a Host row that widen trust; each instance listens on a connection of its own, reads
+  binding and a Host row that widen trust and for a Client Agent first arrived over a Gateway's
+  Host; each instance listens on a connection of its own, reads
   its caches again rather than patching them, and counts a missed notification as every
-  notification. `fleet` holds only the Agents whose connections the instance carries: the holder of
-  an Agent is its row's instance, the newest connection takes it by one conditional update, and an
-  instance writes the presence of what it carries in batches.
+  notification. `instance::follow` maps each kind of notice to what it reads again (`Due`), answers
+  what it heard meanwhile with one read, tries a failed read again with back-off, and at every
+  renewal reads the ledger again where the revocation list's version moved; a call whose answer was
+  lost has its notifications heard once more (`postgres::notify::Unsure`). `instance` also runs the
+  presence batches, the retry of the restarts kept for it and the retry of the unmarks. `fleet`
+  holds only the Agents whose connections the instance carries: the holder of an Agent is its
+  row's instance, the newest connection takes it in one transaction on its row, which raises the
+  row's count of takes and announces the take where it replaced another holder, and an instance
+  writes the presence of what it carries in batches. What one instance holds of them — the take and
+  the release, the presence it writes, the re-keys whose answer was lost, the restarts kept for
+  retry, the take-up of what other instances announced (a `TakeUp` names Agents or, after a missed
+  notification, every Agent), and the per-Agent locks — is the core module `fleet::held`, behind the
+  same `AppState` entry points.
 - **Server listeners** — `tls` reads the `[tls]`, `[rest.tls]` and `[enrolment]` files into the
   material each plane serves with — the Agent plane requiring a client certificate in the
   handshake, the Operator plane asking for none and serving `[rest.tls]`'s certificate when the
@@ -178,15 +202,17 @@ no module.
   ([ADR-0012](adr/0012-tls-1-3-two-planes-and-bounded-input.md)) — and tells a member's certificate
   from a bootstrap one by its
   issuer. `listen` serves both planes on one handle with one drain and a connection cap each
-  ([ADR-0012](adr/0012-tls-1-3-two-planes-and-bounded-input.md)).
+  ([ADR-0012](adr/0012-tls-1-3-two-planes-and-bounded-input.md)). `pki` is `server pki status`
+  and the running Server's warnings before a certificate it depends on ends (ADR-0042).
 - **Server admission** — `transport::Admission` requires the client certificate on every request
   to `/v1/opamp` and reads no `Authorization` header, admits a bootstrap certificate only while the
   enrolment window is open, and guards the package download with the same certificate. Behind
   the same admission it serves a Gateway its revocation list on `/v1/gateway/revocations` and
   every member the floors on `/v1/package-floors`
   ([ADR-0035](adr/0035-package-versions-high-water-mark-and-floor.md)). Two core
-  modules hold the state behind it: `enrolment`, the operator-opened window and the queue of
-  requests an operator approves through `api`, and `throttle`, the per-address back-off after
+  modules hold the state behind it: `enrolment`, the operator-opened window, the queue of requests
+  an operator approves or rejects through `api`, and the rejected keys, refused beyond the window,
+  and `throttle`, the per-address back-off after
   repeated failures, which both planes use
   ([ADR-0040](adr/0040-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)).
   `revocation` holds the register of issued certificates, the revocation list and the Hosts —
@@ -214,11 +240,11 @@ no module.
   writer keeps a batch whose write failed and tries it again first
   ([ADR-0029](adr/0029-the-audit-record-is-one-hash-chain-per-lease-and-names-the-lease-each-decision-was-taken-under.md),
   [ADR-0028](adr/0028-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again.md)).
-  `postgres::audit_prune` bounds it by `[audit] retain_days`: a task `main` starts prunes at
-  startup and once a day, the instance's own chain always and the closed chains while it holds the
-  prune's advisory lock, recording each `audit.pruned` through the instance's writer and waiting
-  for it before it deletes, in rounds of a bounded number of entries, every chain of one round in
-  one transaction
+  `postgres::audit_prune` bounds it by `[audit] retain_days`: the task `main` starts with its
+  `prune_daily` prunes at startup and once a day, the instance's own chain always and the closed
+  chains while it holds the prune's advisory lock, recording each `audit.pruned` through the
+  instance's writer and waiting for it before it deletes, in rounds of a bounded number of entries,
+  every chain of one round in one transaction
   ([ADR-0023](adr/0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
   clause 12).
   With `[audit.export]`, `audit_export` sends every line a store has accepted, the writer's and
@@ -245,18 +271,18 @@ no module.
   through `rcgen`'s `SigningKey` from a pool of four sessions, one `cryptoki` context per module in
   the process, and holds a place in the audit record before it signs
   (ADR-0043);
-  `opamp-fleetctl`'s `token` makes the keys on it. It also owns
+  `opamp-fleetctl`'s `token` makes the keys on it. `fleet` also owns
   `Clock`, which `clock::SystemClock` implements. It owns `Elapsed` too, the time that has passed
   as a lease and a sweep measure it: `PackageStore::with_backend` takes it, and `instance`'s
   `Lease::take_as`. `clock::Elapsed::monotonic` is the adapter on `std::time::Instant`, and
   `main.rs` hands both of them `CLOCK_BOOTTIME`, which counts a suspend of the host, on Linux
-  ([ADR-0025](adr/0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+  ([ADR-0045](adr/0045-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
   clause 3). The `[connection_offer]` and `[telemetry_offer]` sections become the fleet's offers in
   `config`.
 - **Server configuration** — `config` builds one TOML document from the defaults, `server.toml`
   when one is read, and the `FLEET_SERVER__…` variables over it, and deserializes it once, so the
-  environment is checked as strictly as the file; `main.rs` reads the process environment and
-  hands the variables in
+  environment is checked as strictly as the file; `config::server_variables` reads the
+  `FLEET_SERVER__…` variables of the process, and `main.rs` hands them in
   ([ADR-0024](adr/0024-the-servers-configuration.md)).
 - **REST views** — what the REST API reads and returns is shaped in `api`, which derives its
   OpenAPI schema ([ADR-0032](adr/0032-configurations-and-the-rest-api.md)); the core's types —
@@ -264,8 +290,11 @@ no module.
   reads `limit` and `cursor`, encodes the opaque cursor, and writes `X-Total-Count` and the `Link`
   of the four lists that page.
 - **Client supervision** — `supervisor::ports` is the Port a Plugin implements
-  ([ADR-0018](adr/0018-supervisor-mode-and-its-kinds.md)), and `shutdown` the handle every task
-  stops on; the Plugins and the process runner are its adapters. How a `[[supervisor]]` block is
+  ([ADR-0046](adr/0046-supervisor-mode-and-its-kinds-and-a-repeated-offer-is-applied-once.md)),
+  and `shutdown` the handle every task stops on; the Plugins and the process runner are its
+  adapters, among them the two Supervisors
+  this project brings, the Collector's in `supervisor::collector` and the example Custom
+  Supervisor in `supervisor::command`. How a `[[supervisor]]` block is
   read — its plugin, program, Agent type and timings — is `supervisor::block`, and what a
   Server-delivered block may bring is `supervisor::delivered`; the registry of Plugins stays in
   `supervisor`, which knows the kinds and hands them to both, and which hands `delivered` the
@@ -291,7 +320,7 @@ no module.
   link is followed. On Windows that is `win32::files`, which sets a DACL on one handle at a time
   and walks a tree itself, never into a link, with the ACE inheritance rules in `win32::acl`; the
   install's hand-over and its take-over of the data root walk the same way.
-  `supervisor::agent`, an Agent's decisions, names three more ports there: `AgentStorage`, which
+  `supervisor::agent`, an Agent's decisions, names four more ports there: `AgentStorage`, which
   `storage::Storage` implements on the state directory, `HighWaterMarks`, which
   `storage::HighWaterFile` implements on `state_dir` and every Supervisor of the Client shares
   ([ADR-0035](adr/0035-package-versions-high-water-mark-and-floor.md)),
@@ -334,8 +363,9 @@ no module.
   Client reports as its effective configuration.
 - **Client connection** — `tls` decides which CA and which identity are in force, and `transport`
   describes the upstream `Connection` from `supervisor.toml` and runs the Engine over it. The
-  settings verification in `connection`, the Gateway's upstream pool and its downstream listener,
-  and the Supervisor Endpoint use the same `opamp` building blocks
+  settings verification in `connection`, the Gateway's upstream pool (`gateway::pool`) and its
+  downstream listener, and the Supervisor Endpoint (`supervisor::endpoint`) use the same `opamp`
+  building blocks
   ([ADR-0008](adr/0008-five-crates-on-tokio-and-axum.md)). The Gateway's
   `revocations` keeps the list it fetches from its Server and refuses what that list names
   ([ADR-0016](adr/0016-client-modes-and-the-gateway.md)),
@@ -359,10 +389,11 @@ no module.
   ([ADR-0022](adr/0022-a-gateway-rate-limits-each-downstream-host-as-the-server-limits-a-host.md)).
 - **Client engine** — `engine` routes the Server's replies to the Agents over one connection
   ([ADR-0016](adr/0016-client-modes-and-the-gateway.md)). The transports, the Gateway, telemetry
-  and the service runtime are adapters around it.
-- **Client service** — `service::manager` registers, starts, stops and deregisters the Client's
+  (`telemetry`) and the service runtime are adapters around it.
+- **Client service** — `service` is what makes the Client an OS service, but for its log on disk.
+  `service::manager` registers, starts, stops and deregisters the Client's
   service and, where a process account is named, the second service `<PRODUCT_NAME>-agents` beside
-  it, and writes both systemd units itself
+  it, and writes both systemd units, or both launchd plists, itself
   ([ADR-0021](adr/0021-the-accounts-the-service-runs-under.md)). `service::run_as`
   decides and checks the Client's account and the process account, and hands the roots over,
   leaving what the process account owns. On Windows `service::windows_config` sets the SCM's
@@ -397,14 +428,17 @@ the Supervisor's `config/` directory and restarts its process; the Agent reports
 Configuration typed for the Client
 itself carries `[[supervisor]]` blocks, which `reconfigure` checks and writes into
 `supervisor.toml` before it starts or stops anything
-([ADR-0018](adr/0018-supervisor-mode-and-its-kinds.md)).
+([ADR-0046](adr/0046-supervisor-mode-and-its-kinds-and-a-repeated-offer-is-applied-once.md)).
 
 **An Agent is placed under its Host.** Each Agent record names the Host it last arrived over — its
 own, or the Gateway's behind one. `fleet` derives from it, per Agent, what its effective description
 adds to its report: the `fleet.host.*` values of the Host it arrived over directly, and the labels
 of its Client Agent — the Agent reporting `supervisor.kind.*` in the same group, which is the Host,
 or behind a Gateway the machine the Agents report. It keeps that placement per group and places a
-group again when a report, a label, a forget or a Gateway mark changes it, so every Selector match
+group again when a report, a label, a forget or a Gateway mark changes it, and on PostgreSQL when
+another instance announces a binding of its Host, a Client Agent arriving behind its Gateway, or
+the labels or the forgetting of a Client Agent that instance carries, and every group after a
+missed notification, so every Selector match
 reads the same description without a fleet-wide pass
 ([ADR-0030](adr/0030-the-fleet-record-of-agents-and-hosts.md)).
 
@@ -435,14 +469,17 @@ seal both into the PKCS#12 file it keeps, the key's only way out
 A fresh host presents a bootstrap certificate while an operator has
 the enrolment window open — to the Server, or to a Gateway that relays its request — and proves it
 in its CSR ([ADR-0016](adr/0016-client-modes-and-the-gateway.md));
-the request is filed under the certificate it proves and waits until an operator approves it, and
-the certificate it
+the request is filed under the fingerprint of the key it asks a certificate for and waits until
+an operator approves or rejects it — a rejected key stays refused beyond the window, and may be
+rejected before its request arrives — and the certificate it
 gets names a new host and carries the subject values `tls` read from the bootstrap certificate
 and `ca` checked again, never the CSR's; every renewal carries the predecessor's
 ([ADR-0027](adr/0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)).
-The questionnaire of `service install --interactive` and `service config`
-does this before the service is registered: `service::enrol` runs the Client's own Agent over the
-ordinary `transport` with the bootstrap pair until the issued certificate is in the state directory
+`service install` — asked through its questionnaire, or unasked with the bootstrap identity found
+beside the program or in `--fleet-files` — and `service config` do this before the service is
+registered: `service::enrol` runs the Client's own Agent over the ordinary `transport` with the
+bootstrap pair, or the identity a `bootstrap.p12` opened to, until the issued certificate is in
+the state directory
 ([ADR-0027](adr/0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)).
 From then on the Client renews at two thirds of the certificate's life,
 proving with the old key which certificate it renews. A revocation closes the sessions it
@@ -454,7 +491,7 @@ WebSockets after one heartbeat interval of silence. Each Agent reconnects after 
 Agent's record at its first report and takes it as its holder. Once the lost instance's lease has
 lapsed, the instance that removes it closes its audit chain. The others serve from what the lost
 instance committed to the database
-([ADR-0025](adr/0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)).
+([ADR-0045](adr/0045-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)).
 
 **A Supervisor starts its program.** Without a process account the runner starts the Managed
 Process, its version probe and a package's preflight as the Client. Where `service install

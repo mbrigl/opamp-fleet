@@ -1,5 +1,5 @@
 //! A Server instance on PostgreSQL
-//! (ADR-0025
+//! (ADR-0045
 //! clauses 1 to 3, 9 and 10): the lease it holds while it serves, the planes it opens only while it
 //! holds one, and the changes of other instances it takes up.
 //!
@@ -12,7 +12,7 @@
 //! takes a new lease under a new instance id and binds the same addresses again. On the filesystem
 //! store there is one Server, no lease, and the planes are served until the Server stops.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::future::Future;
 use std::net::{SocketAddr, TcpListener};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -30,8 +30,8 @@ use crate::clock::Elapsed;
 use crate::config::LeaseTimes;
 use crate::fleet::AppState;
 use crate::postgres::notify::{
-    Heard, Notice, ASSIGNMENT, CERTIFICATE, CONFIGURATION, DEPLOYMENT, ENROLMENT, FLOOR, FORGOTTEN,
-    HOST, LABELS, PACKAGE, RESTART, REVOCATION, TAKEN, WINDOW,
+    Heard, Notice, ARRIVED, ASSIGNMENT, CERTIFICATE, CONFIGURATION, DEPLOYMENT, ENROLMENT, FLOOR,
+    FORGOTTEN, HOST, LABELS, PACKAGE, RESTART, REVOCATION, TAKEN, WINDOW,
 };
 use crate::postgres::Database;
 
@@ -49,7 +49,7 @@ pub type Held = watch::Receiver<Option<String>>;
 
 /// Whether the lease is still held by the clock it is measured on, read at the moment of asking:
 /// what each request on either plane and each message of an Agent checks before it is answered
-/// (ADR-0025
+/// (ADR-0045
 /// clause 3). The lease thread reads the clock only every [`CHECKED_EVERY`], and after a suspend
 /// this answers at once.
 #[derive(Clone)]
@@ -219,7 +219,7 @@ impl Lease {
     }
 
     /// The revocation list's version as each renewal reads it
-    /// (ADR-0025
+    /// (ADR-0045
     /// clause 10), for [`follow`] to compare with the one the instance holds.
     #[must_use]
     pub fn list_versions(&self) -> watch::Receiver<Option<u64>> {
@@ -232,6 +232,28 @@ impl Lease {
     #[must_use]
     pub fn takeovers(&self) -> watch::Receiver<u64> {
         self.takeovers.clone()
+    }
+
+    /// Runs `cleanup` each time [`takeovers`](Self::takeovers) changes, off the async threads, as a
+    /// cleanup's calls block: on the bucket, the deletion of the staging objects the removed
+    /// leases left (ADR-0023 clause 16). A cleanup that fails is logged; the next takeover, or the
+    /// next start, tries again.
+    pub fn on_each_takeover(
+        &self,
+        cleanup: impl Fn() -> Result<usize, String> + Clone + Send + 'static,
+    ) {
+        let mut takeovers = self.takeovers();
+        tokio::spawn(async move {
+            while takeovers.changed().await.is_ok() {
+                let cleanup = cleanup.clone();
+                let ran = tokio::task::spawn_blocking(cleanup)
+                    .await
+                    .unwrap_or_else(|e| Err(e.to_string()));
+                if let Err(e) = ran {
+                    warn!(error = %e, "could not delete the staging objects of a lapsed lease");
+                }
+            }
+        });
     }
 
     /// Stops renewing and releases the lease, at an orderly shutdown.
@@ -361,7 +383,7 @@ async fn sleep_until(clock: &Elapsed, at: Duration) {
 /// id, and renews that. Ends, and with it what `held` sends, once the exclusive lock of an
 /// instance that must be alone is lost, or once a new lease finds a schema that needs a newer
 /// Server: such an instance takes it again only when it is started again
-/// (ADR-0025
+/// (ADR-0045
 /// clause 2).
 async fn renew(lease: &Renewing, taken: Taken) {
     let Renewing {
@@ -471,7 +493,7 @@ async fn renew(lease: &Renewing, taken: Taken) {
                 }
                 // A schema migrated by a newer Server while this one held no lease, or a live
                 // lease that names another audit key: it stops, as at a failed start
-                // (ADR-0025
+                // (ADR-0045
                 // clause 16, and clause 14 of
                 // ADR-0043).
                 Err(e) if database.outdated().is_some() => {
@@ -492,7 +514,7 @@ async fn renew(lease: &Renewing, taken: Taken) {
 }
 
 /// Takes over the leases that lapsed, after a renewal sent at `sent`
-/// (ADR-0025
+/// (ADR-0045
 /// clause 18), closing their audit chains; bounded by half a renewal interval, so a database that
 /// does not answer delays the next renewal by no more than that, well inside the lease. Answers
 /// whether it took over any.
@@ -536,13 +558,15 @@ fn lock_lost(lease: &Renewing, instance_id: &str) {
 }
 
 /// Takes up the changes other instances commit
-/// (ADR-0025
+/// (ADR-0045
 /// clauses 9 and 10): for each one announced, what its kind concerns is read again. A revocation, a
 /// Host or a register entry has the ledger read again, and the sessions check themselves against it
-/// (ADR-0040 clause 32); a floor has the floors read
-/// again; an enrolment request or the window has the window and its queue read again, and the
-/// connections waiting on them answered; a Configuration, a Deployment or a Package has its store
-/// read again
+/// (ADR-0040 clause 32), and a binding of a Host that changed has the groups of that Host placed
+/// again; a Client Agent first arrived over a Gateway's Host has the Gateway's groups placed again
+/// (ADR-0045
+/// clause 8); a floor has the floors read again; an enrolment request or the window has the window
+/// and its queue read again, and the connections waiting on them answered; a Configuration, a
+/// Deployment or a Package has its store read again
 /// (clause 12); an Agent's assignment, labels, restart request or forgetting has its record read
 /// again, its connection offered what it was released or sent the restart, its group placed again,
 /// or the Agent dropped; an Agent taken by another instance has its holder read again, and is no
@@ -554,7 +578,7 @@ fn lock_lost(lease: &Renewing, instance_id: &str) {
 /// notification that was missed without the connection ending, and a notice that was to follow a
 /// commit but was never sent, as when its instance ended between the two, are caught within one
 /// renewal
-/// (ADR-0025
+/// (ADR-0045
 /// clauses 9 and 10). The revocation list's version the renewal read is compared with the one
 /// held, and a version that moved is logged.
 pub fn follow(
@@ -611,20 +635,16 @@ pub fn follow(
         // The Configurations before the assignments, so an Agent released a revision another
         // instance saved is offered it from what this one holds.
         state.reload_catalogue(due.configurations, due.deployments, due.packages)?;
-        match &due.agents {
-            Agents::Named(uids) if uids.is_empty() => {}
-            Agents::Named(uids) => state.take_up_agents(Some(uids))?,
-            Agents::All => state.take_up_agents(None)?,
+        if let Some(take_up) = due.agents.take_up() {
+            state.take_up_agents(take_up)?;
         }
-        match &due.holders {
-            Agents::Named(uids) if uids.is_empty() => {}
-            Agents::Named(uids) => state.release_taken(Some(uids))?,
-            Agents::All => state.release_taken(None)?,
+        // Once the ledger is read again, so a group of a Host is placed under its bindings now.
+        state.place_hosts_again(&due.hosts);
+        if let Some(take_up) = due.holders.take_up() {
+            state.release_taken(take_up)?;
         }
-        match &due.restarts {
-            Agents::Named(uids) if uids.is_empty() => {}
-            Agents::Named(uids) => state.take_up_restarts(Some(uids))?,
-            Agents::All => state.take_up_restarts(None)?,
+        if let Some(take_up) = due.restarts.take_up() {
+            state.take_up_restarts(take_up)?;
         }
         // Counted once the whole read is done, so a read counted has taken up everything it was
         // due.
@@ -643,7 +663,7 @@ pub fn follow(
 /// (ADR-0030 clause 4). A batch that fails is logged, and what
 /// it held is written with the next one. A batch written later than its interval after it was
 /// due is logged as a warning naming how late it was
-/// (ADR-0025
+/// (ADR-0045
 /// clause 5). The batches run until they are stopped.
 pub fn write_presence(state: Arc<AppState>, held: Held, interval: Duration) -> PresenceBatches {
     let (stop, mut stopped) = tokio::sync::oneshot::channel();
@@ -776,6 +796,15 @@ enum Agents {
 }
 
 impl Agents {
+    /// What a take-up acts on, `None` where no Agent is named.
+    fn take_up(&self) -> Option<crate::fleet::TakeUp<'_>> {
+        match self {
+            Agents::Named(uids) if uids.is_empty() => None,
+            Agents::Named(uids) => Some(crate::fleet::TakeUp::Named(uids)),
+            Agents::All => Some(crate::fleet::TakeUp::Everything),
+        }
+    }
+
     /// The Agent a notification names, every Agent where it names none that reads.
     fn of(id: &str) -> Agents {
         match InstanceUid::parse(id) {
@@ -816,6 +845,10 @@ struct Due {
     /// The Agents another instance requested a restart of: a put-back kept here is that restart
     /// now.
     restarts: Agents,
+    /// The Hosts whose groups are placed again: a binding of the Host changed, or a Client Agent
+    /// first arrived over it as a Gateway's. Every group is placed again with `agents` of
+    /// [`Agents::All`].
+    hosts: BTreeSet<String>,
 }
 
 impl Due {
@@ -830,6 +863,7 @@ impl Due {
         agents: Agents::All,
         holders: Agents::All,
         restarts: Agents::All,
+        hosts: BTreeSet::new(),
     };
 
     /// What `what` calls for.
@@ -838,8 +872,19 @@ impl Due {
             return Due::EVERYTHING;
         };
         match notice.kind.as_str() {
-            REVOCATION | HOST | CERTIFICATE => Due {
+            // A notice of a binding names the Host whose binding changed. One that names none, of
+            // a Host row written or forgotten, places no group again.
+            HOST => Due {
                 ledger: true,
+                hosts: Self::host(&notice.id),
+                ..Due::default()
+            },
+            REVOCATION | CERTIFICATE => Due {
+                ledger: true,
+                ..Due::default()
+            },
+            ARRIVED => Due {
+                hosts: Self::host(&notice.id),
                 ..Due::default()
             },
             FLOOR => Due {
@@ -879,7 +924,16 @@ impl Due {
         }
     }
 
-    fn and(self, other: Due) -> Due {
+    /// The Host a notice names, as a set of none where it names none.
+    fn host(id: &str) -> BTreeSet<String> {
+        std::iter::once(id)
+            .filter(|id| !id.is_empty())
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn and(mut self, other: Due) -> Due {
+        self.hosts.extend(other.hosts);
         Due {
             ledger: self.ledger || other.ledger,
             floors: self.floors || other.floors,
@@ -890,6 +944,7 @@ impl Due {
             agents: self.agents.and(other.agents),
             holders: self.holders.and(other.holders),
             restarts: self.restarts.and(other.restarts),
+            hosts: self.hosts,
         }
     }
 }
@@ -1106,7 +1161,7 @@ async fn bind_again(
 }
 
 /// The instance id the log names
-/// (ADR-0025
+/// (ADR-0045
 /// clause 1): the one the instance makes at startup, once its store is known to be PostgreSQL and
 /// before it takes its first lease under it; then the one of each new lease. Between a lost lease
 /// and the next it names the lost one, so every line names an instance. A line logged before the
@@ -1200,7 +1255,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    use std::collections::HashSet;
+    use std::collections::{BTreeSet, HashSet};
 
     use opamp::uid::InstanceUid;
 
@@ -1209,7 +1264,7 @@ mod tests {
 
     /// A request is served while the lease is held by its clock, and answered `503` once the clock
     /// has jumped past its lapse, as after a suspend, though nothing else has noticed yet.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[tokio::test]
     async fn a_request_is_answered_503_once_the_leases_clock_has_passed_its_lapse() {
         use std::sync::atomic::{AtomicU64, Ordering};
@@ -1419,7 +1474,7 @@ mod tests {
 
     /// A presence batch written later than its interval after it was due is logged as a warning
     /// naming how late it was.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[tokio::test]
     async fn a_presence_batch_written_late_is_logged_with_how_late() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1455,7 +1510,7 @@ mod tests {
     }
 
     /// A presence batch written within its interval logs no lateness.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[tokio::test]
     async fn a_presence_batch_written_in_time_logs_no_lateness() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1524,9 +1579,9 @@ mod tests {
     /// Each line names the instance id of the lease the instance holds, and none while it holds
     /// none; a line that names an instance id of its own names it once, as the lease's take and
     /// takeover do
-    /// (ADR-0025
+    /// (ADR-0045
     /// clause 1).
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn each_line_names_the_instance_id_of_the_lease_held() {
         let id = LoggedId::default();
@@ -1554,7 +1609,7 @@ mod tests {
 
     /// The log follows the lease: the id it holds and each new one, and the last one while the
     /// lease is lost or can be held no more, so every line names an instance.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[tokio::test]
     async fn the_logged_id_follows_the_lease() {
         let (held, watched) = tokio::sync::watch::channel(Some("a1".to_string()));
@@ -1635,15 +1690,11 @@ mod tests {
 
     /// What is heard before a read starts is answered by one read, and each kind has what it
     /// concerns read again and nothing else
-    /// (ADR-0025
+    /// (ADR-0045
     /// clauses 9 and 19).
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045, ADR-0045
     #[tokio::test]
     async fn what_is_heard_at_once_is_answered_by_one_read_of_what_it_concerns() {
-        let ledger = Due {
-            ledger: true,
-            ..Due::default()
-        };
         assert_eq!(
             reads_for(vec![
                 notified("host"),
@@ -1651,7 +1702,27 @@ mod tests {
                 notified("revocation")
             ])
             .await,
-            vec![ledger]
+            vec![Due {
+                ledger: true,
+                hosts: BTreeSet::from(["id".to_string()]),
+                ..Due::default()
+            }],
+            "a binding of a Host has the ledger read again and the Host's groups placed again"
+        );
+        assert_eq!(
+            reads_for(vec![
+                Heard::Notified(Notice::new("host", "")),
+                Heard::Notified(Notice::new("arrived", "g1")),
+                Heard::Notified(Notice::new("arrived", "g2")),
+            ])
+            .await,
+            vec![Due {
+                ledger: true,
+                hosts: BTreeSet::from(["g1".to_string(), "g2".to_string()]),
+                ..Due::default()
+            }],
+            "a Host that names none places no group, and an arrival over a Gateway's Host places \
+             the Gateway's groups again and reads no ledger"
         );
         assert_eq!(
             reads_for(vec![notified("floor")]).await,
@@ -1735,9 +1806,9 @@ mod tests {
 
     /// A listening connection made again, and a notification of a kind the instance does not
     /// know, have everything read again
-    /// (ADR-0025
+    /// (ADR-0045
     /// clause 10).
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[tokio::test]
     async fn a_missed_or_unknown_notification_has_everything_read_again() {
         assert_eq!(
@@ -1753,7 +1824,7 @@ mod tests {
 
     /// A read that fails is tried again, each wait longer, until one holds, together with what was
     /// heard meanwhile.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[tokio::test]
     async fn a_read_that_fails_is_tried_again_until_one_holds() {
         let (heard, hearing) = tokio::sync::mpsc::unbounded_channel();
@@ -1776,6 +1847,7 @@ mod tests {
             Some(&Due {
                 ledger: true,
                 floors: true,
+                hosts: BTreeSet::from(["id".to_string()]),
                 ..Due::default()
             }),
             "what was heard while the reads failed is read with them"

@@ -117,7 +117,7 @@ pub struct ServerConfig {
     pub max_new_connections_per_sec: u32,
     /// How long an orderly shutdown spreads the closing of the WebSocket sessions over, in seconds,
     /// from 0 to 300; 0 closes them all at once
-    /// (ADR-0025
+    /// (ADR-0045
     /// clause 3).
     #[serde(default = "default_drain_secs")]
     pub drain_secs: u64,
@@ -564,7 +564,7 @@ pub struct DatabaseConfig {
     /// The database, when `store = "postgres"`; refused beside `store = "fs"`.
     pub postgres: Option<PostgresConfig>,
     /// How often an instance renews its lease, in seconds; PostgreSQL only
-    /// (ADR-0025
+    /// (ADR-0045
     /// clause 3).
     pub lease_renew_secs: Option<u64>,
     /// How long after its last renewal a lease lapses, in seconds, at least three renewals;
@@ -608,7 +608,7 @@ const DEFAULT_PRESENCE_INTERVAL_SECS: u64 = 30;
 const PRESENCE_INTERVAL_SECS: std::ops::RangeInclusive<u64> = 10..=60;
 
 /// The lease every instance on PostgreSQL holds while it serves
-/// (ADR-0025
+/// (ADR-0045
 /// clause 3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LeaseTimes {
@@ -1562,6 +1562,18 @@ impl ServerConfig {
         }
         if self.max_package_size_bytes == 0 {
             return Err("max_package_size_bytes must be greater than zero".to_string());
+        }
+        if self.blobs.s3().is_some()
+            && u64::try_from(self.max_package_size_bytes).unwrap_or(u64::MAX)
+                > crate::s3::LARGEST_COPY
+        {
+            return Err(format!(
+                "max_package_size_bytes is {} with [blobs] store = \"s3\", past the {} bytes \
+                 (5 GiB) one copy in the bucket moves, which an upload is placed with — lower it \
+                 to at most that",
+                self.max_package_size_bytes,
+                crate::s3::LARGEST_COPY
+            ));
         }
         if self.max_total_package_bytes == 0 {
             return Err(
@@ -3083,6 +3095,30 @@ mod tests {
         );
     }
 
+    /// With S3 an artifact past what one copy in the bucket moves (5 GiB) could never be placed:
+    /// `max_package_size_bytes` past it fails startup naming the key; at it, it starts.
+    /// Verifies: ADR-0023
+    #[test]
+    fn max_package_size_bytes_past_one_copy_in_the_bucket_is_refused() {
+        let load = |max: u64| {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("server.toml");
+            std::fs::write(
+                &path,
+                format!(
+                    "max_package_size_bytes = {max}\n{TLS}[blobs]\nstore = \"s3\"\n[blobs.s3]\n\
+                     bucket = \"fleet\"\nregion = \"eu-1\"\nendpoint = \"https://s3.example\"\n"
+                ),
+            )
+            .expect("write");
+            ServerConfig::load(&path)
+        };
+        // 5 GiB, as S3 bounds one copy.
+        assert!(load(5_368_709_120).is_ok());
+        let refused = load(5_368_709_121).map(|_| ()).expect_err("past one copy");
+        assert!(refused.contains("max_package_size_bytes"), "{refused}");
+        assert!(refused.contains("5 GiB"), "{refused}");
+    }
     /// `[blobs]`: the filesystem by default; `"s3"` with its bucket; any other store, a bucket
     /// beside the filesystem, a plaintext endpoint off the loopback, and half a key pair each fail
     /// startup naming the key — with no store to reach (ADR-0023 clauses 14, 17 and 18).
@@ -3216,7 +3252,7 @@ mod tests {
 
     /// The rate of new Agent-plane connections defaults to 200 a second and the drain to 20
     /// seconds; a rate of zero and a drain past 300 seconds fail startup naming the key.
-    /// Verifies: ADR-0012, ADR-0025
+    /// Verifies: ADR-0012, ADR-0045
     #[test]
     fn the_new_connection_rate_and_the_drain_are_bounded() {
         let load = |keys: &str| {
@@ -3341,7 +3377,7 @@ mod tests {
 
     /// An instance must be alone on its database while it keeps its blobs as files or a CA key in a
     /// file, and names the key; with the blobs in S3 and no CA key on the Server it shares it.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn an_instance_with_files_of_its_own_must_be_alone() {
         let s3 = "[blobs]\nstore = \"s3\"\n[blobs.s3]\nendpoint = \"https://s3.example\"\n\
@@ -3426,7 +3462,7 @@ mod tests {
     /// each one set fails startup naming it; with PostgreSQL they default to 10, 30 and 30 seconds,
     /// and a lease shorter than three renewals, a renewal of zero, or a presence interval outside 10
     /// to 60 seconds fails naming the key.
-    /// Verifies: ADR-0025, ADR-0030
+    /// Verifies: ADR-0045, ADR-0030
     #[test]
     fn the_lease_keys_apply_to_postgresql_alone() {
         let load = |database: &str| {

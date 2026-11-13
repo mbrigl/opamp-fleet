@@ -415,7 +415,7 @@ impl Ended {
 
 /// Closes the chain of the lease `chain` taken over, for the instance whose own chain is
 /// `closed_by`
-/// (ADR-0025
+/// (ADR-0045
 /// clause 18): `audit.chain_closed` with the `reason` `ended` names after its last entry, and that
 /// entry's hash and the time in its record
 /// (ADR-0029
@@ -1187,11 +1187,83 @@ mod tests {
         );
     }
 
+    /// `server audit-verify` reads the record in one snapshot: a close committed after its first
+    /// read and before it reads the chains' records is not seen, so the chain is reported open with
+    /// the entries it had, and the record holds. The chains' records are read through a view that
+    /// holds a read-only transaction, the verification's, at a gate, and lets every other read and
+    /// write through; the close commits meanwhile.
+    /// Verifies: ADR-0029, ADR-0045
+    #[test]
+    fn a_close_committed_during_audit_verify_is_not_seen_by_it() {
+        const KEY: i64 = 0x29_0005;
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let a = writing(&test, "host-a");
+        a.audit.record(admitted(1)).expect("record");
+        assert!(a.audit.drain(Duration::from_secs(10)), "written");
+        test.sql(&format!(
+            "CREATE FUNCTION fleet_test_gate() RETURNS boolean LANGUAGE plpgsql AS $$ BEGIN \
+                 IF current_setting('transaction_read_only') = 'on' THEN \
+                     PERFORM set_config('lock_timeout', '0', true); \
+                     PERFORM pg_advisory_lock_shared({KEY}); \
+                     PERFORM pg_advisory_unlock_shared({KEY}); \
+                 END IF; RETURN true; END $$; \
+             ALTER TABLE audit_chains RENAME TO fleet_test_audit_chains; \
+             CREATE VIEW audit_chains AS SELECT * FROM fleet_test_audit_chains \
+                 WHERE fleet_test_gate();"
+        ));
+        let gate = test.gate(KEY);
+        let (config, schema) = (test.config(), test.schema.clone());
+        let verifying = std::thread::spawn(move || verify_in(&config, Some(&schema), None));
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        while !test.waits_for(KEY) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the verification reaches the chains' records"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            a.audit.close(Duration::from_secs(10)),
+            "the chain was not closed"
+        );
+        assert!(
+            lines(&test, &a.chain)
+                .last()
+                .is_some_and(|line| line.contains("audit.chain_closed")),
+            "the close committed while the verification waits"
+        );
+        gate.open();
+        let verified = verifying
+            .join()
+            .expect("the verification's thread")
+            .expect("verify");
+        assert!(!verified.failed, "{:?}", verified.lines);
+        assert!(
+            verified
+                .lines
+                .iter()
+                .any(|line| line.contains(&a.chain) && line.contains("2 entries, open")),
+            "the chain as it was in the snapshot: {:?}",
+            verified.lines
+        );
+        let after = verify(&a.database, None).expect("verify again");
+        assert!(
+            after
+                .lines
+                .iter()
+                .any(|line| line.contains(&a.chain) && line.contains("3 entries, closed")),
+            "the close, read afterwards: {:?}",
+            after.lines
+        );
+    }
+
     /// An instance killed without a shutdown leaves its chain open; the instance that takes over
     /// its lapsed lease, at a take or at a renewal, closes it with `audit.chain_closed`, `reason`
     /// `lease_lapsed` and `closed_by` its own chain, and from then on the store refuses the dead
     /// chain an entry. Two instances that try at once take it over once.
-    /// Verifies: ADR-0029, ADR-0025
+    /// Verifies: ADR-0029, ADR-0045
     #[test]
     fn the_instance_that_takes_over_a_lapsed_lease_closes_its_chain() {
         let Some(test) = TestDatabase::named() else {

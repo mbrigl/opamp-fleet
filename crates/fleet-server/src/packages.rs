@@ -409,7 +409,7 @@ pub trait PackageBackend: Send + Sync {
     fn load(&self) -> Result<Vec<Package>, String>;
 
     /// Creates a Package without entries; one that is stored already is left as it is.
-    fn create(&self, id: &PackageId) -> Result<(), String>;
+    fn create(&self, id: &PackageId) -> Result<(), PackageError>;
 
     /// Creates or replaces the entry of one platform, in one step, once `stored` has found the
     /// blob it names stored: an upload's entry, never one naming a blob a sweep deleted. A
@@ -418,7 +418,7 @@ pub trait PackageBackend: Send + Sync {
     /// (ADR-0023 clause 14). A Package the store does not hold
     /// is an error, and so is a blob `stored` does not find, or one a sweep marked
     /// ([`mark`](Self::mark)): removed while it was uploaded.
-    fn put_entry(&self, id: &PackageId, entry: &Entry, stored: Stored) -> Result<(), String>;
+    fn put_entry(&self, id: &PackageId, entry: &Entry, stored: Stored) -> Result<(), PackageError>;
 
     /// Writes or, with `None`, clears the signature of the entry for `platform` — only while the
     /// stored entry still names the bytes `content_hash`, since a signature covers that hash
@@ -430,15 +430,15 @@ pub trait PackageBackend: Send + Sync {
         platform: &Platform,
         content_hash: &[u8],
         signature: Option<&[u8]>,
-    ) -> Result<Signed, String>;
+    ) -> Result<Signed, PackageError>;
 
     /// Removes the entry of one platform; removing what is absent is not an error.
-    fn remove_entry(&self, id: &PackageId, platform: &Platform) -> Result<(), String>;
+    fn remove_entry(&self, id: &PackageId, platform: &Platform) -> Result<(), PackageError>;
 
     /// Deletes one Package's metadata, its entries with it; its blobs are the store's to collect.
     /// A database adapter takes the Package out of every Deployment that holds it in the same
     /// transaction; on the filesystem the fleet takes it out of the Deployments after.
-    fn remove(&self, id: &PackageId) -> Result<(), String>;
+    fn remove(&self, id: &PackageId) -> Result<(), PackageError>;
 
     /// Holds the blob store's lock alone (ADR-0023 clause 14)
     /// until the hold is dropped: what a sweep holds. A backend that other Servers write too
@@ -719,7 +719,7 @@ impl PackageStore {
 
     /// Reads every Package again from the backend, as another instance created, deleted or
     /// changed one
-    /// (ADR-0025
+    /// (ADR-0045
     /// clause 12): what is held is dropped and what is stored taken in its place. It reads under
     /// the lock, so no write of this instance's own lands between the read and the swap. The blobs
     /// are not read: they are the blob store's, which every instance shares.
@@ -741,7 +741,7 @@ impl PackageStore {
     /// Creates a Package. **Saving never distributes** (ADR-0033), and there is nothing to update:
     /// a Package is its identity and its entries, so creating one that exists is the same request
     /// arriving twice.
-    pub fn create(&self, id: &PackageId) -> Result<(), String> {
+    pub fn create(&self, id: &PackageId) -> Result<(), PackageError> {
         let _writes = self.writes.lock().expect("writes lock");
         let mut sets = self.sets.write().expect("sets lock");
         if sets.contains_key(id) {
@@ -764,11 +764,11 @@ impl PackageStore {
     ///
     /// # Errors
     /// Returns an error when no Package of that identity exists.
-    pub fn writable(&self, id: &PackageId) -> Result<(), String> {
+    pub fn writable(&self, id: &PackageId) -> Result<(), PackageError> {
         if self.sets.read().expect("sets lock").contains_key(id) {
             Ok(())
         } else {
-            Err(format!("no package set {id}"))
+            Err(no_set(id))
         }
     }
 
@@ -781,7 +781,7 @@ impl PackageStore {
         id: &PackageId,
         platform: &Platform,
         bytes: &mut dyn std::io::Read,
-    ) -> Result<(), String> {
+    ) -> Result<(), PackageError> {
         self.writable(id)?;
         let (sha256, size) = self.blobs.put(bytes)?;
         // Whether the blob stays although no entry names it: when the store could not be asked
@@ -789,7 +789,10 @@ impl PackageStore {
         let mut keep = false;
         let result = self.begin_upload(&sha256).and_then(|()| {
             let recorded = if size == 0 {
-                Err("the package artifact is empty; refusing to distribute it".to_string())
+                Err(PackageError::refused(
+                    Refusal::Invalid,
+                    "the package artifact is empty; refusing to distribute it",
+                ))
             } else {
                 // The backend asks whether the blob is stored as it writes the entry: on a store
                 // other Servers write too, in the entry's transaction under the blob store's lock,
@@ -854,7 +857,7 @@ impl PackageStore {
         id: &PackageId,
         platform: &Platform,
         artifact: Vec<u8>,
-    ) -> Result<(), String> {
+    ) -> Result<(), PackageError> {
         self.put_entry_from(id, platform, &mut artifact.as_slice())
     }
 
@@ -869,24 +872,26 @@ impl PackageStore {
         id: &PackageId,
         platform: &Platform,
         signature: Vec<u8>,
-    ) -> Result<SignatureState, String> {
+    ) -> Result<SignatureState, PackageError> {
         if signature.is_empty() {
-            return Err(
-                "the signature is empty — it says nothing; delete the one held instead".to_string(),
-            );
+            return Err(PackageError::refused(
+                Refusal::Invalid,
+                "the signature is empty — it says nothing; delete the one held instead",
+            ));
         }
         if signature.len() != ED25519_SIGNATURE_LEN {
-            return Err(format!(
+            return Err(PackageError::refused(
+                Refusal::Invalid,
+                format!(
                 "the signature must be the 64 bytes of an Ed25519 signature (128 hex characters, \
                  as `opamp-fleetctl package sign` prints it), not {} bytes",
-                signature.len()
+                    signature.len()
+                ),
             ));
         }
         let _writes = self.writes.lock().expect("writes lock");
         let mut sets = self.sets.write().expect("sets lock");
-        let set = sets
-            .get_mut(id)
-            .ok_or_else(|| format!("no package set {id}"))?;
+        let set = sets.get_mut(id).ok_or_else(|| no_set(id))?;
         let entry = set
             .entries
             .get_mut(platform)
@@ -907,12 +912,14 @@ impl PackageStore {
     ///
     /// # Errors
     /// `no package set …` or `no entry …` when the entry does not exist (a `404`).
-    pub fn remove_signature(&self, id: &PackageId, platform: &Platform) -> Result<bool, String> {
+    pub fn remove_signature(
+        &self,
+        id: &PackageId,
+        platform: &Platform,
+    ) -> Result<bool, PackageError> {
         let _writes = self.writes.lock().expect("writes lock");
         let mut sets = self.sets.write().expect("sets lock");
-        let set = sets
-            .get_mut(id)
-            .ok_or_else(|| format!("no package set {id}"))?;
+        let set = sets.get_mut(id).ok_or_else(|| no_set(id))?;
         let entry = set
             .entries
             .get_mut(platform)
@@ -940,20 +947,18 @@ impl PackageStore {
         id: &PackageId,
         entry: Entry,
         stored: Stored,
-    ) -> Result<Recorded, String> {
+    ) -> Result<Recorded, PackageError> {
         // Under the lock of the writes, as every write of a Package is: the store must hold what
         // memory holds, in the order it changed. Not under `sets`: the backend asks the blob
         // store, which may take as long as the store answers. A PostgreSQL call is bounded
         // (ADR-0023 clause 24).
         let _writes = self.writes.lock().expect("writes lock");
         if !self.sets.read().expect("sets lock").contains_key(id) {
-            return Err(format!("no package set {id}"));
+            return Err(no_set(id));
         }
         self.backend.put_entry(id, &entry, stored)?;
         let mut sets = self.sets.write().expect("sets lock");
-        let set = sets
-            .get_mut(id)
-            .ok_or_else(|| format!("no package set {id}"))?;
+        let set = sets.get_mut(id).ok_or_else(|| no_set(id))?;
         let previous = set.entries.insert(entry.platform.clone(), entry);
         Ok(match previous {
             None => Recorded::Added,
@@ -968,7 +973,7 @@ impl PackageStore {
     /// last entry taken away leaves an **empty Package**, kept: a Package being reassembled is a
     /// normal state, and deleting the Package is its own act. Its blob goes with the last entry
     /// that names it (ADR-0023 clause 13).
-    pub fn delete_entry(&self, id: &PackageId, platform: &Platform) -> Result<bool, String> {
+    pub fn delete_entry(&self, id: &PackageId, platform: &Platform) -> Result<bool, PackageError> {
         let writes = self.writes.lock().expect("writes lock");
         let mut sets = self.sets.write().expect("sets lock");
         let Some(set) = sets.get_mut(id) else {
@@ -992,7 +997,7 @@ impl PackageStore {
     /// `Ok(false)` when none of that identity exists. The fleet removes every assignment that
     /// referenced it, which withdraws the offer; Agents that installed it keep running it
     /// (ADR-0034).
-    pub fn delete_set(&self, id: &PackageId) -> Result<bool, String> {
+    pub fn delete_set(&self, id: &PackageId) -> Result<bool, PackageError> {
         Ok(match self.remove_set(id)? {
             Some(sweep) => {
                 self.sweep_after(sweep);
@@ -1010,7 +1015,7 @@ impl PackageStore {
     ///
     /// # Errors
     /// Returns an error when the Package cannot be deleted.
-    pub fn remove_set(&self, id: &PackageId) -> Result<Option<Sweep>, String> {
+    pub fn remove_set(&self, id: &PackageId) -> Result<Option<Sweep>, PackageError> {
         let _writes = self.writes.lock().expect("writes lock");
         let mut sets = self.sets.write().expect("sets lock");
         if !sets.contains_key(id) {
@@ -1035,10 +1040,10 @@ impl PackageStore {
     /// Marks an upload as holding `sha256`: no deletion of it starts until
     /// [`end_upload`](Self::end_upload). Refused when one has started already — the bytes the
     /// upload stored may be what it deletes.
-    fn begin_upload(&self, sha256: &str) -> Result<(), String> {
+    fn begin_upload(&self, sha256: &str) -> Result<(), PackageError> {
         let mut life = self.life.lock().expect("blob life lock");
         if life.deleting.contains(sha256) {
-            return Err(REMOVED_WHILE_UPLOADED.to_string());
+            return Err(removed_while_uploaded());
         }
         *life.uploading.entry(sha256.to_string()).or_default() += 1;
         Ok(())
@@ -1308,7 +1313,7 @@ impl PackageStore {
         installed: &InstalledVersions,
     ) -> Result<(), String> {
         let sets = self.sets.read().expect("sets lock");
-        let set = sets.get(id).ok_or_else(|| format!("no package set {id}"))?;
+        let set = sets.get(id).ok_or_else(|| no_set(id).message)?;
         // Nobody's candidate, whatever the Agent reports (ADR-0035 clause 5).
         if !set.id.is_semver() {
             return Err(format!(
@@ -1408,6 +1413,12 @@ fn fits(description: Option<&AgentDescription>, id: &PackageId, platform: &Platf
 pub(crate) const REMOVED_WHILE_UPLOADED: &str =
     "the artifact was removed while it was uploaded; upload it again";
 
+/// The refusal of an upload whose blob a sweep deleted, or marked, meanwhile.
+#[must_use]
+pub fn removed_while_uploaded() -> PackageError {
+    PackageError::refused(Refusal::Invalid, REMOVED_WHILE_UPLOADED)
+}
+
 /// What a sweep does when a blob cannot be deleted.
 #[derive(Clone, Copy)]
 enum Deletion {
@@ -1443,26 +1454,99 @@ fn referenced(sets: &BTreeMap<PackageId, Package>, sha256: &str) -> bool {
 /// The refusal every write to the entries of an assigned Package answers with (ADR-0033 clause
 /// 13), whether the Server found the assignment in what it holds or in what is stored.
 #[must_use]
-pub fn assigned(id: &PackageId) -> String {
-    format!(
-        "set {id} is assigned to an Agent and its entries are immutable — create the next version \
-         as a new set and roll that out"
+pub fn assigned(id: &PackageId) -> PackageError {
+    PackageError::refused(
+        Refusal::Conflict,
+        format!(
+            "set {id} is assigned to an Agent and its entries are immutable — create the next \
+             version as a new set and roll that out"
+        ),
     )
+}
+
+/// What kind of refusal a [`PackageError`] is: what the REST API answers it by, whatever the store
+/// or the path that carried it wrote around its text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refusal {
+    /// The Package or the entry does not exist.
+    NotFound,
+    /// The request conflicts with what is stored: an assigned or pinned Package, an entry another
+    /// instance changed.
+    Conflict,
+    /// The request itself is wrong: an empty artifact or signature, a blob deleted while it was
+    /// uploaded.
+    Invalid,
+}
+
+/// An error of the Package store: a refusal of the request, of its [`Refusal`] kind, or a failure
+/// of the store, which is the Server's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageError {
+    /// The kind of refusal; `None` for a failure.
+    pub refusal: Option<Refusal>,
+    /// What the operator is told.
+    pub message: String,
+}
+
+impl PackageError {
+    /// A refusal of `refusal`'s kind.
+    #[must_use]
+    pub fn refused(refusal: Refusal, message: impl Into<String>) -> Self {
+        PackageError {
+            refusal: Some(refusal),
+            message: message.into(),
+        }
+    }
+}
+
+/// A failure of the store: whatever is not a refusal.
+impl From<String> for PackageError {
+    fn from(message: String) -> Self {
+        PackageError {
+            refusal: None,
+            message,
+        }
+    }
+}
+
+/// Its message, where a caller answers in text.
+impl From<PackageError> for String {
+    fn from(error: PackageError) -> Self {
+        error.message
+    }
+}
+
+impl std::fmt::Display for PackageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+/// The refusal for a Package that does not exist.
+#[must_use]
+pub fn no_set(id: &PackageId) -> PackageError {
+    PackageError::refused(Refusal::NotFound, format!("no package set {id}"))
 }
 
 /// The refusal of the deletion of a Package that the assignments of `pinning` Agents pin
 /// (ADR-0033 clause 12).
 #[must_use]
-pub fn pinned(id: &PackageId, pinning: usize) -> String {
-    format!(
-        "package {id} is pinned by the assignment of {pinning} Agent(s) — roll them out through a \
-         Deployment without it, or forget them, before deleting it"
+pub fn pinned(id: &PackageId, pinning: usize) -> PackageError {
+    PackageError::refused(
+        Refusal::Conflict,
+        format!(
+            "package {id} is pinned by the assignment of {pinning} Agent(s) — roll them out \
+             through a Deployment without it, or forget them, before deleting it"
+        ),
     )
 }
 
 /// The refusal for an entry a Package does not hold.
-fn no_entry(id: &PackageId, platform: &Platform) -> String {
-    format!("no entry {}-{} in set {id}", platform.os, platform.arch)
+fn no_entry(id: &PackageId, platform: &Platform) -> PackageError {
+    PackageError::refused(
+        Refusal::NotFound,
+        format!("no entry {}-{} in set {id}", platform.os, platform.arch),
+    )
 }
 
 /// Holds the entry for `platform` as the store answered it, after a signature write found that
@@ -1475,7 +1559,7 @@ fn take_up(
     id: &PackageId,
     platform: &Platform,
     stored: Option<Entry>,
-) -> String {
+) -> PackageError {
     match stored {
         Some(entry) => set.entries.insert(platform.clone(), entry),
         None => set.entries.remove(platform),
@@ -1485,11 +1569,14 @@ fn take_up(
 
 /// The refusal of a signature write whose entry the store no longer holds with the bytes this
 /// Server read: another instance replaced or removed it.
-fn changed_entry(id: &PackageId, platform: &Platform) -> String {
-    format!(
-        "the entry {}-{} in set {id} has changed since this Server read it — read the Package \
-         again and sign what it holds",
-        platform.os, platform.arch
+fn changed_entry(id: &PackageId, platform: &Platform) -> PackageError {
+    PackageError::refused(
+        Refusal::Conflict,
+        format!(
+            "the entry {}-{} in set {id} has changed since this Server read it — read the \
+             Package again and sign what it holds",
+            platform.os, platform.arch
+        ),
     )
 }
 
@@ -1910,7 +1997,7 @@ mod tests {
     /// entry as stored, so the Package read again through it shows the new bytes, and a signature
     /// written again through it is stored. Two stores on one data directory stand in for two
     /// instances.
-    /// Verifies: ADR-0025, ADR-0034
+    /// Verifies: ADR-0045, ADR-0034
     #[test]
     fn a_signature_on_bytes_another_instance_replaced_is_refused_and_signed_anew() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1931,7 +2018,8 @@ mod tests {
         let refused = b
             .put_signature(&set, &linux(), vec![5u8; 64])
             .expect_err("B's signature covers bytes the store no longer holds");
-        assert!(refused.contains("has changed since"), "{refused}");
+        assert!(refused.message.contains("has changed since"), "{refused}");
+        assert_eq!(refused.refusal, Some(Refusal::Conflict), "a 409");
         let read_again = b.summary(&set).expect("summary");
         assert_eq!(
             read_again.entries[0].content_hash, replaced,
@@ -1943,7 +2031,7 @@ mod tests {
         );
         let refused = b
             .remove_signature(&set, &linux())
-            .map_err(|e| e.contains("has changed since"));
+            .map_err(|e| e.message.contains("has changed since"));
         assert_eq!(refused, Ok(false), "there is no signature to take away");
 
         assert_eq!(
@@ -1965,23 +2053,34 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
         let set = stored_set(&store, "otelcol", "1.0.0", b"bytes");
-        assert!(store
-            .put_signature(&set, &windows(), vec![1u8; 64])
-            .expect_err("no windows entry")
-            .starts_with("no entry"));
-        assert!(store
-            .remove_signature(&set, &windows())
-            .expect_err("no windows entry")
-            .starts_with("no entry"));
-        assert!(store
-            .put_signature(&id("otelcol", "9.9.9"), &linux(), vec![1u8; 64])
-            .expect_err("no such package")
-            .starts_with("no package set"));
+        let not_found = |refused: PackageError, begins: &str| {
+            assert!(refused.message.starts_with(begins), "{refused}");
+            assert_eq!(refused.refusal, Some(Refusal::NotFound), "a 404: {refused}");
+        };
+        not_found(
+            store
+                .put_signature(&set, &windows(), vec![1u8; 64])
+                .expect_err("no windows entry"),
+            "no entry",
+        );
+        not_found(
+            store
+                .remove_signature(&set, &windows())
+                .expect_err("no windows entry"),
+            "no entry",
+        );
+        not_found(
+            store
+                .put_signature(&id("otelcol", "9.9.9"), &linux(), vec![1u8; 64])
+                .expect_err("no such package"),
+            "no package set",
+        );
         for refused in [Vec::new(), vec![1u8; 63], vec![1u8; 65]] {
-            assert!(store
+            let refused = store
                 .put_signature(&set, &linux(), refused)
-                .expect_err("refused")
-                .starts_with("the signature"));
+                .expect_err("refused");
+            assert!(refused.message.starts_with("the signature"), "{refused}");
+            assert_eq!(refused.refusal, Some(Refusal::Invalid), "a 400: {refused}");
         }
         assert_eq!(
             store.summary(&set).expect("summary").entries[0].signature,
@@ -3075,10 +3174,15 @@ mod tests {
         fn load(&self) -> Result<Vec<Package>, String> {
             self.inner.load()
         }
-        fn create(&self, id: &PackageId) -> Result<(), String> {
+        fn create(&self, id: &PackageId) -> Result<(), PackageError> {
             self.inner.create(id)
         }
-        fn put_entry(&self, id: &PackageId, entry: &Entry, stored: Stored) -> Result<(), String> {
+        fn put_entry(
+            &self,
+            id: &PackageId,
+            entry: &Entry,
+            stored: Stored,
+        ) -> Result<(), PackageError> {
             self.inner.put_entry(id, entry, stored)
         }
         fn sign(
@@ -3087,13 +3191,13 @@ mod tests {
             platform: &Platform,
             content_hash: &[u8],
             signature: Option<&[u8]>,
-        ) -> Result<Signed, String> {
+        ) -> Result<Signed, PackageError> {
             self.inner.sign(id, platform, content_hash, signature)
         }
-        fn remove_entry(&self, id: &PackageId, platform: &Platform) -> Result<(), String> {
+        fn remove_entry(&self, id: &PackageId, platform: &Platform) -> Result<(), PackageError> {
             self.inner.remove_entry(id, platform)
         }
-        fn remove(&self, id: &PackageId) -> Result<(), String> {
+        fn remove(&self, id: &PackageId) -> Result<(), PackageError> {
             self.inner.remove(id)
         }
         fn hold_blobs(&self) -> Result<BlobHold, String> {
@@ -3456,7 +3560,10 @@ mod tests {
             .store
             .put_entry(&two, &linux(), b"artifact".to_vec())
             .expect_err("its blob is being deleted");
-        assert!(err.contains("removed while it was uploaded"), "{err}");
+        assert!(
+            err.message.contains("removed while it was uploaded"),
+            "{err}"
+        );
         gated.leave.wait();
         assert!(deleting.join().expect("join").expect("deleted"));
         assert!(gated.store.artifact(&two, &linux()).is_none());
@@ -3486,8 +3593,11 @@ mod tests {
             .store
             .put_entry(&one, &linux(), b"artifact".to_vec())
             .expect_err("the store does not answer");
-        assert!(err.contains("the store does not answer"), "{err}");
-        assert!(!err.contains("removed while it was uploaded"), "{err}");
+        assert!(err.message.contains("the store does not answer"), "{err}");
+        assert!(
+            !err.message.contains("removed while it was uploaded"),
+            "{err}"
+        );
         assert!(gated.store.artifact(&one, &linux()).is_none());
         assert_eq!(
             std::fs::read_dir(&gated.blobs).expect("blobs").count(),

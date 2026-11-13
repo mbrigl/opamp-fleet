@@ -1,7 +1,7 @@
 //! Deployments in PostgreSQL (ADR-0023 clause 6): the PostgreSQL adapter behind
 //! [`DeploymentBackend`](crate::deployments::DeploymentBackend) — one row per Deployment and one
 //! per member, each call one transaction on the rows it names
-//! (ADR-0025
+//! (ADR-0045
 //! clause 19).
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -189,7 +189,7 @@ impl DeploymentBackend for PgDeploymentBackend {
 /// Takes `member` out of every Deployment that holds it inside the transaction that deletes it,
 /// which holds the member's row `FOR UPDATE`: an add that holds that row `FOR KEY SHARE` has
 /// committed before this reads the member rows, and every later one finds the member gone
-/// (ADR-0025
+/// (ADR-0045
 /// clause 19). The Deployments' rows are not held, so this takes no lock in the order of an add,
 /// which holds the Deployment's row before the member's.
 pub(super) async fn drop_member_rows(
@@ -634,7 +634,7 @@ mod tests {
         contract(&|| Box::new(FsDeploymentBackend::open(dir.path()).expect("open")));
     }
 
-    /// Verifies: ADR-0023, ADR-0025
+    /// Verifies: ADR-0023, ADR-0045
     #[test]
     fn the_deployment_port_contract_holds_on_postgres() {
         let Some(test) = TestDatabase::named() else {
@@ -760,7 +760,7 @@ mod tests {
 
     /// Migration 5 moves the members out of the Deployments' columns into rows of their own, and
     /// the Deployments load as the release before left them.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn the_members_move_out_of_the_deployments_columns() {
         use crate::postgres::schema::{MIGRATIONS, SCHEMA_TABLE};
@@ -798,7 +798,7 @@ mod tests {
     /// write, so the second runs exactly then; the gate opens once the second waits for the
     /// Deployment's row, or has reached the gate itself, which only an amendment that took no hold
     /// does.
-    /// Verifies: ADR-0025, ADR-0034
+    /// Verifies: ADR-0045, ADR-0034
     #[test]
     fn two_packages_of_one_type_added_at_once_add_one() {
         let Some(test) = TestDatabase::named() else {
@@ -818,9 +818,11 @@ mod tests {
              CREATE TRIGGER fleet_test_wait BEFORE INSERT ON deployment_packages \
              FOR EACH ROW EXECUTE FUNCTION fleet_test_wait();",
         );
-        let sessions = |condition: &str| test.sessions(condition);
-        let at_gate =
-            || sessions("wait_event = 'PgSleep' AND query LIKE 'INSERT INTO deployment_packages%'");
+        let at_gate = || {
+            test.sessions(
+                "wait_event = 'PgSleep' AND query LIKE 'INSERT INTO deployment_packages%'",
+            )
+        };
         let until = |what: &str, done: &dyn Fn() -> bool| {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
             while !done() {
@@ -841,7 +843,7 @@ mod tests {
         let second = add("2.0.0");
         until("the second waits for the row, or reaches the gate", &|| {
             at_gate() == 2
-                || sessions(
+                || test.sessions(
                     "wait_event_type = 'Lock' AND query LIKE \
                      'SELECT 1 FROM deployments WHERE name = $1 FOR UPDATE'",
                 ) == 1
@@ -870,7 +872,7 @@ mod tests {
     /// The deletion of a Configuration or a Package takes it out of every Deployment that holds it
     /// in the transaction that deletes it: nothing the fleet does after, which a crash would cut
     /// off, is needed for no Deployment to name it.
-    /// Verifies: ADR-0025, ADR-0033
+    /// Verifies: ADR-0045, ADR-0033
     #[test]
     fn a_deleted_member_leaves_every_deployment_in_the_transaction_that_deletes_it() {
         use crate::configs::{ConfigBackend as _, Removal};
@@ -926,7 +928,7 @@ mod tests {
     /// A deletion of a Deployment through B while a rollout through A that releases through it
     /// has not yet committed waits for the rollout, and then refuses it from the assignment the
     /// rollout stored: the rollout holds the Deployment's row until it commits.
-    /// Verifies: ADR-0025, ADR-0033
+    /// Verifies: ADR-0045, ADR-0033
     #[test]
     fn a_deletion_waits_for_a_rollout_through_the_deployment_and_is_refused() {
         use crate::agent_store::{tests::record, AgentStore as _};

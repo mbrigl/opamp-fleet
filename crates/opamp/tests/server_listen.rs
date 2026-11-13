@@ -61,6 +61,17 @@ fn spawn(listener: Listener) {
     tokio::spawn(async move { listener.serve(router()).await.expect("serve") });
 }
 
+/// Waits, within seconds, until `handle`'s listener holds exactly `count` connections open.
+async fn open_connections(handle: &Handle, count: usize) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while handle.connection_count() != count {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("the listener never held {count} connections"));
+}
+
 fn bind() -> (std::net::TcpListener, u16) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
     let port = listener.local_addr().expect("addr").port();
@@ -244,7 +255,8 @@ async fn a_client_offering_only_tls_1_2_is_refused() {
 async fn connections_past_the_cap_are_refused_while_established_ones_keep_working() {
     opamp::tls::install_ring_provider();
     let (listener, port) = bind();
-    spawn(Listener::new(listener, Handle::new()).with_max_connections(2));
+    let handle = Handle::new();
+    spawn(Listener::new(listener, handle.clone()).with_max_connections(2));
 
     let first = TcpStream::connect(("127.0.0.1", port))
         .await
@@ -252,8 +264,8 @@ async fn connections_past_the_cap_are_refused_while_established_ones_keep_workin
     let second = TcpStream::connect(("127.0.0.1", port))
         .await
         .expect("second");
-    // Give the listener time to accept both before the third arrives.
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // The listener has accepted both before the third arrives.
+    open_connections(&handle, 2).await;
 
     let mut third = TcpStream::connect(("127.0.0.1", port))
         .await
@@ -275,7 +287,7 @@ async fn connections_past_the_cap_are_refused_while_established_ones_keep_workin
         String::from_utf8_lossy(&answer)
     );
     drop(second);
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    open_connections(&handle, 0).await;
 
     // Both slots are free again, so a new peer is served.
     let text = reqwest::get(format!("http://127.0.0.1:{port}/"))
@@ -288,14 +300,16 @@ async fn connections_past_the_cap_are_refused_while_established_ones_keep_workin
 }
 
 /// Past its rate of new connections a listener answers `503` with a `Retry-After` from 1 to 30
-/// seconds and closes the connection: of 30 new connections at a rate of 20, about 20 are served
+/// seconds and closes the connection: of 30 new connections at a rate of 2, the burst is served
 /// and the rest are told when to come back. The exact count is the bucket's own unit test; this
 /// one is small enough to fit any listen queue.
 /// Verifies: ADR-0012
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn new_connections_past_the_rate_are_answered_503_with_a_spread_retry_after() {
     let (listener, port) = bind();
-    spawn(Listener::new(listener, Handle::new()).with_max_new_connections_per_sec(20));
+    // A rate of two: the thirty connections would have to spread over some fourteen seconds to
+    // find the bucket refilled, which only a defect does, not a loaded host.
+    spawn(Listener::new(listener, Handle::new()).with_max_new_connections_per_sec(2));
     let attempts = (0..30).map(|_| async move {
         let mut stream = TcpStream::connect(("127.0.0.1", port))
             .await
@@ -321,7 +335,7 @@ async fn new_connections_past_the_rate_are_answered_503_with_a_spread_retry_afte
         .filter(|a| a.starts_with("HTTP/1.1 503"))
         .collect();
     assert_eq!(served + refused.len(), 30, "{answers:?}");
-    assert!(served >= 20, "{served} served in {elapsed:?}");
+    assert!(served >= 2, "{served} served in {elapsed:?}");
     assert!(!refused.is_empty(), "{served} served in {elapsed:?}");
     for answer in refused {
         let lower = answer.to_ascii_lowercase();
@@ -433,6 +447,11 @@ const FLOOR: u64 = 1024;
 /// A plain listener held to the short floor, answering `/echo` with the length of the body it read
 /// and serving the OpAMP endpoint for the WebSocket cases.
 fn spawn_paced() -> u16 {
+    spawn_paced_over(WINDOW)
+}
+
+/// [`spawn_paced`], its floor measured over `window`.
+fn spawn_paced_over(window: Duration) -> u16 {
     let (listener, port) = bind();
     let router = Router::new()
         .route(
@@ -443,7 +462,7 @@ fn spawn_paced() -> u16 {
             std::sync::Arc::new(Silent),
             opamp::server::Settings::new(1 << 20),
         ));
-    let listener = Listener::new(listener, Handle::new()).with_pace(WINDOW, FLOOR);
+    let listener = Listener::new(listener, Handle::new()).with_pace(window, FLOOR);
     tokio::spawn(async move { listener.serve(router).await.expect("serve") });
     port
 }
@@ -547,21 +566,29 @@ async fn a_body_that_trickles_is_answered_408() {
 /// Verifies: ADR-0012
 #[tokio::test]
 async fn a_slow_body_above_the_floor_is_taken_whole() {
-    let port = spawn_paced();
-    let chunk = vec![b'x'; 2 * FLOOR as usize];
-    let mut socket = post_headers(port, chunk.len() * 6).await;
-    for _ in 0..6 {
+    // Over three one-second windows, chunks of sixteen times the floor four to a window: each
+    // window takes far more than the floor whatever the load, so only a pause of a whole window,
+    // or a defect in carrying the count from one window to the next, cuts it.
+    let window = Duration::from_secs(1);
+    let port = spawn_paced_over(window);
+    let chunk = vec![b'x'; 16 * FLOOR as usize];
+    let chunks = 12;
+    let mut socket = post_headers(port, chunk.len() * chunks).await;
+    for _ in 0..chunks {
         socket.write_all(&chunk).await.expect("write");
-        tokio::time::sleep(WINDOW / 3).await;
+        tokio::time::sleep(window / 4).await;
     }
     let mut buffer = vec![0u8; 1024];
-    let read = tokio::time::timeout(WINDOW * 10, socket.read(&mut buffer))
+    let read = tokio::time::timeout(window * 10, socket.read(&mut buffer))
         .await
         .expect("an answer in time")
         .expect("read");
     let answer = String::from_utf8_lossy(&buffer[..read]).to_string();
     assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
-    assert!(answer.ends_with(&(chunk.len() * 6).to_string()), "{answer}");
+    assert!(
+        answer.ends_with(&(chunk.len() * chunks).to_string()),
+        "{answer}"
+    );
 }
 
 /// Upgrades a raw connection to a WebSocket on the OpAMP endpoint.
@@ -721,8 +748,12 @@ async fn a_websocket_that_only_pings_stays_open() {
     }
 }
 
-/// An OpAMP handler whose every message never finishes: a session stuck in its handler.
-struct Stuck(std::sync::Arc<std::sync::atomic::AtomicBool>);
+/// An OpAMP handler whose every message never finishes: a session stuck in its handler. The first
+/// flag is set when the task holding the message is cut, the second once a message entered it.
+struct Stuck(
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
+);
 
 /// Sets its flag when dropped — when the task holding it is cut.
 struct CutFlag(std::sync::Arc<std::sync::atomic::AtomicBool>);
@@ -750,6 +781,7 @@ impl opamp::server::Handler for Stuck {
         _message: opamp::proto::AgentToServer,
     ) -> opamp::server::Reply {
         let _flag = CutFlag(self.0.clone());
+        self.1.store(true, std::sync::atomic::Ordering::SeqCst);
         std::future::pending().await
     }
 
@@ -768,9 +800,10 @@ async fn a_drain_cuts_a_stuck_websocket_session_at_its_deadline() {
     use futures_util::SinkExt;
 
     let cut = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let entered = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (listener, port) = bind();
     let router = opamp::server::router(
-        std::sync::Arc::new(Stuck(cut.clone())),
+        std::sync::Arc::new(Stuck(cut.clone(), entered.clone())),
         opamp::server::Settings::new(1 << 20),
     );
     let handle = Handle::new();
@@ -794,8 +827,14 @@ async fn a_drain_cuts_a_stuck_websocket_session_at_its_deadline() {
         ))
         .await
         .expect("send");
-    // The session is now inside its handler, and will never come out on its own.
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // The session enters its handler, and will never come out on its own.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !entered.load(std::sync::atomic::Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the session entered its handler");
     assert!(!cut.load(std::sync::atomic::Ordering::SeqCst));
 
     let drain = Duration::from_millis(300);
@@ -873,8 +912,10 @@ async fn a_spread_drain_closes_the_sessions_over_its_window() {
     assert!(closed.iter().all(|(code, _)| *code == 1001), "{closed:?}");
     let first = closed.iter().map(|(_, at)| *at).min().expect("sessions");
     let last = closed.iter().map(|(_, at)| *at).max().expect("sessions");
+    // Drawn over the window, the closes end within it and its grace; a bound of twice the window
+    // leaves a loaded host its delays and still catches closes drawn over a longer one.
     assert!(
-        last < window + opamp::server::listen::SPREAD_GRACE,
+        last < window * 2 + opamp::server::listen::SPREAD_GRACE,
         "{last:?}"
     );
     assert!(

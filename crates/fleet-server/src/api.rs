@@ -29,7 +29,7 @@ use crate::credentials::Credentials;
 use crate::deployments::{Deployment, DeploymentError, DeploymentStore};
 use crate::fleet::{self, AppState, DeleteError, ForgetError, RestartError, RolloutError};
 use crate::labels::LabelError;
-use crate::packages::{PackageId, PackageSummary, Platform, SignatureState};
+use crate::packages::{PackageError, PackageId, PackageSummary, Platform, SignatureState};
 
 mod paging;
 
@@ -1027,7 +1027,8 @@ async fn reported_attributes(State(state): State<Arc<AppState>>) -> Response {
         (status = 400, description = "Malformed Instance UID", body = ErrorBody),
         (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
         (status = 404, description = "No such Agent", body = ErrorBody),
-        (status = 409, description = "The Agent does not declare AcceptsRestartCommand", body = ErrorBody)
+        (status = 409, description = "The Agent does not declare AcceptsRestartCommand", body = ErrorBody),
+        (status = 503, description = "The audit record cannot be written; nothing was changed — retry after Retry-After", content_type = "text/plain", body = String, headers(("Retry-After" = u64, description = "Seconds to wait before asking again")))
     )
 )]
 async fn restart_agent(
@@ -1081,7 +1082,8 @@ struct LabelsBody {
         (status = 400, description = "Malformed Instance UID, an unusable label, or a key starting `fleet.`", body = ErrorBody),
         (status = 404, description = "No such Agent", body = ErrorBody),
         (status = 409, description = "A label restates an attribute the Agent reports", body = ErrorBody),
-        (status = 500, description = "The labels could not be written, or they were written and the Agent's view cannot be read from the store; the answer says which", body = ErrorBody)
+        (status = 500, description = "The labels could not be written, or they were written and the Agent's view cannot be read from the store; the answer says which", body = ErrorBody),
+        (status = 503, description = "The audit record cannot be written; nothing was changed — retry after Retry-After", content_type = "text/plain", body = String, headers(("Retry-After" = u64, description = "Seconds to wait before asking again")))
     )
 )]
 async fn set_agent_labels(
@@ -1141,7 +1143,8 @@ struct AgentRolloutSpec {
         (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
         (status = 404, description = "No such Agent", body = ErrorBody),
         (status = 409, description = "The Agent is in no Deployment, in a conflict, or in another one than named; or the Deployment holds nothing, or a Package with an unsigned entry", body = ErrorBody),
-        (status = 500, description = "Nothing was released, as the Agent or the fleet could not be read or the release could not be written; or the release was written and the Agent's view cannot be read, which the answer says", body = ErrorBody)
+        (status = 500, description = "Nothing was released, as the Agent or the fleet could not be read or the release could not be written; or the release was written and the Agent's view cannot be read, which the answer says", body = ErrorBody),
+        (status = 503, description = "The audit record cannot be written; nothing was changed — retry after Retry-After", content_type = "text/plain", body = String, headers(("Retry-After" = u64, description = "Seconds to wait before asking again")))
     )
 )]
 async fn rollout_to_agent(
@@ -1186,7 +1189,8 @@ async fn rollout_to_agent(
         (status = 204, description = "The Agent is forgotten"),
         (status = 400, description = "Malformed Instance UID", body = ErrorBody),
         (status = 404, description = "No such Agent", body = ErrorBody),
-        (status = 409, description = "The Agent is still reporting", body = ErrorBody)
+        (status = 409, description = "The Agent is still reporting", body = ErrorBody),
+        (status = 503, description = "The audit record cannot be written; nothing was changed — retry after Retry-After", content_type = "text/plain", body = String, headers(("Retry-After" = u64, description = "Seconds to wait before asking again")))
     )
 )]
 async fn forget_agent(
@@ -1335,7 +1339,8 @@ async fn get_configuration(
     responses(
         (status = 200, description = "The stored Configuration — distributed to nobody until a Deployment holding it is rolled out", body = ConfigurationView),
         (status = 400, description = "Invalid name, an empty body, no service_name, or a selector", body = ErrorBody),
-        (status = 500, description = "The Configuration could not be persisted", body = ErrorBody)
+        (status = 500, description = "The Configuration could not be persisted", body = ErrorBody),
+        (status = 503, description = "The audit record cannot be written; nothing was changed — retry after Retry-After", content_type = "text/plain", body = String, headers(("Retry-After" = u64, description = "Seconds to wait before asking again")))
     )
 )]
 async fn put_configuration(
@@ -1409,7 +1414,8 @@ fn rollout_error(e: RolloutError) -> Response {
         (status = 204, description = "Deleted, and taken out of every Deployment that held it"),
         (status = 404, description = "No Configuration of that name", body = ErrorBody),
         (status = 409, description = "An Agent's assignment pins it", body = ErrorBody),
-        (status = 500, description = "The Configuration could not be deleted", body = ErrorBody)
+        (status = 500, description = "The Configuration could not be deleted", body = ErrorBody),
+        (status = 503, description = "The audit record cannot be written; nothing was changed — retry after Retry-After", content_type = "text/plain", body = String, headers(("Retry-After" = u64, description = "Seconds to wait before asking again")))
     )
 )]
 async fn delete_configuration(
@@ -1581,21 +1587,14 @@ fn set_response(state: &AppState, id: &PackageId) -> Response {
 
 /// Maps a store refusal onto the status the REST contract names: immutability and emptiness are
 /// conflicts with the Package's current state (`409`), absence is `404`, bad input `400`.
-fn package_error(e: String) -> Response {
-    if e.contains("not configured") || e.starts_with("no package set") || e.starts_with("no entry")
-    {
-        error(StatusCode::NOT_FOUND, e)
-    } else if e.contains("immutable")
-        || e.contains("holds no entries")
-        || e.contains("is pinned")
-        || e.contains("has changed since")
-    {
-        error(StatusCode::CONFLICT, e)
-    } else if e.starts_with("invalid") || e.starts_with("the ") || e.contains("empty") {
-        error(StatusCode::BAD_REQUEST, e)
-    } else {
-        error(StatusCode::INTERNAL_SERVER_ERROR, e)
-    }
+fn package_error(e: PackageError) -> Response {
+    let status = match e.refusal {
+        Some(crate::packages::Refusal::NotFound) => StatusCode::NOT_FOUND,
+        Some(crate::packages::Refusal::Conflict) => StatusCode::CONFLICT,
+        Some(crate::packages::Refusal::Invalid) => StatusCode::BAD_REQUEST,
+        None => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    error(status, e.message)
 }
 
 /// All stored Packages, in identity order — Agent type, then version — and never the artifact
@@ -1677,7 +1676,8 @@ async fn get_package_set(
         (status = 200, description = "The stored Set", body = PackageSetView),
         (status = 400, description = "Invalid identity, or a version that is not SemVer", body = ErrorBody),
         (status = 404, description = "Package delivery is not configured", body = ErrorBody),
-        (status = 500, description = "The Set could not be persisted", body = ErrorBody)
+        (status = 500, description = "The Set could not be persisted", body = ErrorBody),
+        (status = 503, description = "The audit record cannot be written; nothing was changed — retry after Retry-After", content_type = "text/plain", body = String, headers(("Retry-After" = u64, description = "Seconds to wait before asking again")))
     )
 )]
 async fn put_package_set(
@@ -1710,7 +1710,8 @@ async fn put_package_set(
         (status = 400, description = "Invalid identity", body = ErrorBody),
         (status = 404, description = "No such Set, or package delivery is not configured", body = ErrorBody),
         (status = 409, description = "An Agent's assignment pins the Package", body = ErrorBody),
-        (status = 500, description = "The Set could not be deleted", body = ErrorBody)
+        (status = 500, description = "The Set could not be deleted", body = ErrorBody),
+        (status = 503, description = "The audit record cannot be written; nothing was changed — retry after Retry-After", content_type = "text/plain", body = String, headers(("Retry-After" = u64, description = "Seconds to wait before asking again")))
     )
 )]
 async fn delete_package_set(
@@ -1729,7 +1730,7 @@ async fn delete_package_set(
         move || state.delete_package_set(&id)
     })
     .await
-    .unwrap_or_else(|e| Err(format!("the deletion ended: {e}")));
+    .unwrap_or_else(|e| Err(PackageError::from(format!("the deletion ended: {e}"))));
     match deleted {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => error(StatusCode::NOT_FOUND, format!("no package set {id}")),
@@ -1760,7 +1761,8 @@ async fn delete_package_set(
         (status = 409, description = "The Set is assigned to an Agent and its entries are immutable", body = ErrorBody),
         (status = 413, description = "The artifact exceeds max_package_size_bytes", body = ErrorBody),
         (status = 500, description = "The entry could not be persisted", body = ErrorBody),
-        (status = 507, description = "Storing it would exceed max_total_package_bytes", body = ErrorBody)
+        (status = 507, description = "Storing it would exceed max_total_package_bytes", body = ErrorBody),
+        (status = 503, description = "The audit record cannot be written; nothing was changed — retry after Retry-After", content_type = "text/plain", body = String, headers(("Retry-After" = u64, description = "Seconds to wait before asking again")))
     )
 )]
 async fn put_package_entry(
@@ -1827,9 +1829,11 @@ async fn put_package_entry(
         }
     };
     drop(chunks);
-    let committed = store
-        .await
-        .unwrap_or_else(|e| Err(format!("the upload could not be stored: {e}")));
+    let committed = store.await.unwrap_or_else(|e| {
+        Err(PackageError::from(format!(
+            "the upload could not be stored: {e}"
+        )))
+    });
     // Stored now, or gone: either way the store counts it from here, and the upload no longer.
     drop(reservation);
     match committed {
@@ -1859,7 +1863,8 @@ async fn put_package_entry(
         (status = 400, description = "Invalid identity or platform", body = ErrorBody),
         (status = 404, description = "No such Set or entry, or package delivery is not configured", body = ErrorBody),
         (status = 409, description = "The Set is assigned to an Agent and its entries are immutable", body = ErrorBody),
-        (status = 500, description = "The entry could not be deleted", body = ErrorBody)
+        (status = 500, description = "The entry could not be deleted", body = ErrorBody),
+        (status = 503, description = "The audit record cannot be written; nothing was changed — retry after Retry-After", content_type = "text/plain", body = String, headers(("Retry-After" = u64, description = "Seconds to wait before asking again")))
     )
 )]
 async fn delete_package_entry(
@@ -1878,7 +1883,7 @@ async fn delete_package_entry(
         move || state.delete_package_entry(&id, &platform)
     })
     .await
-    .unwrap_or_else(|e| Err(format!("the deletion ended: {e}")));
+    .unwrap_or_else(|e| Err(PackageError::from(format!("the deletion ended: {e}"))));
     match deleted {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => error(
@@ -1913,7 +1918,8 @@ async fn delete_package_entry(
         (status = 400, description = "Invalid identity or platform, or a signature that is empty, not hex, or not 64 bytes", body = ErrorBody),
         (status = 404, description = "No such Set or entry, or package delivery is not configured", body = ErrorBody),
         (status = 409, description = "The Set is assigned to an Agent and its entries are immutable", body = ErrorBody),
-        (status = 500, description = "The signature could not be persisted", body = ErrorBody)
+        (status = 500, description = "The signature could not be persisted", body = ErrorBody),
+        (status = 503, description = "The audit record cannot be written; nothing was changed — retry after Retry-After", content_type = "text/plain", body = String, headers(("Retry-After" = u64, description = "Seconds to wait before asking again")))
     )
 )]
 async fn put_entry_signature(
@@ -1960,7 +1966,8 @@ async fn put_entry_signature(
         (status = 400, description = "Invalid identity or platform", body = ErrorBody),
         (status = 404, description = "No such Set, entry or signature, or package delivery is not configured", body = ErrorBody),
         (status = 409, description = "The Set is assigned to an Agent and its entries are immutable", body = ErrorBody),
-        (status = 500, description = "The change could not be persisted", body = ErrorBody)
+        (status = 500, description = "The change could not be persisted", body = ErrorBody),
+        (status = 503, description = "The audit record cannot be written; nothing was changed — retry after Retry-After", content_type = "text/plain", body = String, headers(("Retry-After" = u64, description = "Seconds to wait before asking again")))
     )
 )]
 async fn delete_entry_signature(
@@ -2067,7 +2074,8 @@ async fn list_package_floors(State(state): State<Arc<AppState>>) -> Response {
         (status = 400, description = "An Agent type that is no token, a version that is not SemVer, or a signature that is not hex or not 64 bytes", body = ErrorBody),
         (status = 404, description = "Package floors are not configured", body = ErrorBody),
         (status = 409, description = "The version orders below the floor stored for the type", body = ErrorBody),
-        (status = 500, description = "The floor could not be persisted", body = ErrorBody)
+        (status = 500, description = "The floor could not be persisted", body = ErrorBody),
+        (status = 503, description = "The audit record cannot be written; nothing was changed — retry after Retry-After", content_type = "text/plain", body = String, headers(("Retry-After" = u64, description = "Seconds to wait before asking again")))
     )
 )]
 async fn put_package_floor(
@@ -2148,7 +2156,8 @@ async fn put_package_floor(
         (status = 204, description = "Removed"),
         (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
         (status = 404, description = "No floor for the type, or package floors are not configured", body = ErrorBody),
-        (status = 500, description = "The removal could not be persisted; the floor is kept", body = ErrorBody)
+        (status = 500, description = "The removal could not be persisted; the floor is kept", body = ErrorBody),
+        (status = 503, description = "The audit record cannot be written; nothing was changed — retry after Retry-After", content_type = "text/plain", body = String, headers(("Retry-After" = u64, description = "Seconds to wait before asking again")))
     )
 )]
 async fn delete_package_floor(
@@ -2575,7 +2584,8 @@ async fn get_deployment(State(state): State<Arc<AppState>>, Path(name): Path<Str
         (status = 200, description = "The stored Deployment — distributed to nobody until rolled out", body = DeploymentView),
         (status = 400, description = "Invalid name, or a Selector that names no pair", body = ErrorBody),
         (status = 404, description = "Package delivery is not configured", body = ErrorBody),
-        (status = 500, description = "The change could not be written, or it was written and whom the Deployment reaches cannot be read from the store; the answer says which", body = ErrorBody)
+        (status = 500, description = "The change could not be written, or it was written and whom the Deployment reaches cannot be read from the store; the answer says which", body = ErrorBody),
+        (status = 503, description = "The audit record cannot be written; nothing was changed — retry after Retry-After", content_type = "text/plain", body = String, headers(("Retry-After" = u64, description = "Seconds to wait before asking again")))
     )
 )]
 async fn put_deployment(
@@ -2604,7 +2614,8 @@ async fn put_deployment(
     responses(
         (status = 204, description = "Deleted"),
         (status = 404, description = "No such Deployment, or package delivery is not configured", body = ErrorBody),
-        (status = 409, description = "An Agent's assignment still names this Deployment")
+        (status = 409, description = "An Agent's assignment still names this Deployment"),
+        (status = 503, description = "The audit record cannot be written; nothing was changed — retry after Retry-After", content_type = "text/plain", body = String, headers(("Retry-After" = u64, description = "Seconds to wait before asking again")))
     )
 )]
 async fn delete_deployment(
@@ -2632,7 +2643,8 @@ async fn delete_deployment(
     responses(
         (status = 200, description = "The re-aimed Deployment", body = DeploymentView),
         (status = 400, description = "A Selector that names no pair", body = ErrorBody),
-        (status = 404, description = "No such Deployment, or package delivery is not configured", body = ErrorBody)
+        (status = 404, description = "No such Deployment, or package delivery is not configured", body = ErrorBody),
+        (status = 503, description = "The audit record cannot be written; nothing was changed — retry after Retry-After", content_type = "text/plain", body = String, headers(("Retry-After" = u64, description = "Seconds to wait before asking again")))
     )
 )]
 async fn put_deployment_selector(
@@ -2671,7 +2683,8 @@ async fn put_deployment_selector(
         (status = 400, description = "Invalid Agent type or version", body = ErrorBody),
         (status = 404, description = "No such Deployment or Package, or package delivery is not configured", body = ErrorBody),
         (status = 409, description = "The Deployment already holds a Package for this Agent type", body = ErrorBody),
-        (status = 500, description = "The change could not be written, or it was written and whom the Deployment reaches cannot be read from the store; the answer says which", body = ErrorBody)
+        (status = 500, description = "The change could not be written, or it was written and whom the Deployment reaches cannot be read from the store; the answer says which", body = ErrorBody),
+        (status = 503, description = "The audit record cannot be written; nothing was changed — retry after Retry-After", content_type = "text/plain", body = String, headers(("Retry-After" = u64, description = "Seconds to wait before asking again")))
     )
 )]
 async fn put_deployment_package(
@@ -2715,7 +2728,8 @@ async fn put_deployment_package(
         (status = 200, description = "The Deployment, without the Package", body = DeploymentView),
         (status = 400, description = "Invalid Agent type or version", body = ErrorBody),
         (status = 404, description = "No such Deployment or Package in it, or package delivery is not configured", body = ErrorBody),
-        (status = 500, description = "The change could not be written, or it was written and whom the Deployment reaches cannot be read from the store; the answer says which", body = ErrorBody)
+        (status = 500, description = "The change could not be written, or it was written and whom the Deployment reaches cannot be read from the store; the answer says which", body = ErrorBody),
+        (status = 503, description = "The audit record cannot be written; nothing was changed — retry after Retry-After", content_type = "text/plain", body = String, headers(("Retry-After" = u64, description = "Seconds to wait before asking again")))
     )
 )]
 async fn delete_deployment_package(
@@ -2747,7 +2761,8 @@ async fn delete_deployment_package(
     responses(
         (status = 200, description = "The Deployment, with the Configuration", body = DeploymentView),
         (status = 404, description = "No such Deployment or Configuration, or package delivery is not configured", body = ErrorBody),
-        (status = 500, description = "The change could not be written, or it was written and whom the Deployment reaches cannot be read from the store; the answer says which", body = ErrorBody)
+        (status = 500, description = "The change could not be written, or it was written and whom the Deployment reaches cannot be read from the store; the answer says which", body = ErrorBody),
+        (status = 503, description = "The audit record cannot be written; nothing was changed — retry after Retry-After", content_type = "text/plain", body = String, headers(("Retry-After" = u64, description = "Seconds to wait before asking again")))
     )
 )]
 async fn put_deployment_configuration(
@@ -2774,7 +2789,8 @@ async fn put_deployment_configuration(
     responses(
         (status = 200, description = "The Deployment, without the Configuration", body = DeploymentView),
         (status = 404, description = "No such Deployment, or it does not hold the Configuration, or package delivery is not configured", body = ErrorBody),
-        (status = 500, description = "The change could not be written, or it was written and whom the Deployment reaches cannot be read from the store; the answer says which", body = ErrorBody)
+        (status = 500, description = "The change could not be written, or it was written and whom the Deployment reaches cannot be read from the store; the answer says which", body = ErrorBody),
+        (status = 503, description = "The audit record cannot be written; nothing was changed — retry after Retry-After", content_type = "text/plain", body = String, headers(("Retry-After" = u64, description = "Seconds to wait before asking again")))
     )
 )]
 async fn delete_deployment_configuration(
@@ -2814,7 +2830,8 @@ struct ReplaceQuery {
         (status = 200, description = "Rolled out; how many Agents were assigned", body = RolloutOutcome),
         (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
         (status = 404, description = "No such Deployment, or package delivery is not configured", body = ErrorBody),
-        (status = 409, description = "The Deployment holds no Package and no Configuration, or a Package with an unsigned entry", body = ErrorBody)
+        (status = 409, description = "The Deployment holds no Package and no Configuration, or a Package with an unsigned entry", body = ErrorBody),
+        (status = 503, description = "The audit record cannot be written; nothing was changed — retry after Retry-After", content_type = "text/plain", body = String, headers(("Retry-After" = u64, description = "Seconds to wait before asking again")))
     )
 )]
 async fn rollout_deployment(
@@ -3023,7 +3040,7 @@ async fn list_bootstrap_certificates(State(state): State<Arc<AppState>>) -> Resp
         (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
         (status = 404, description = "Enrolment is not configured", body = ErrorBody),
         (status = 409, description = "No bootstrap_ca_key_file is configured, the bootstrap CA has ended, or the record is full", body = ErrorBody),
-        (status = 503, description = "The audit record cannot be written; nothing was handed out", body = ErrorBody)
+        (status = 503, description = "The audit record cannot be written; nothing was handed out — retry after Retry-After", content_type = "text/plain", body = String, headers(("Retry-After" = u64, description = "Seconds to wait before asking again")))
     )
 )]
 async fn issue_bootstrap_certificate(
@@ -3126,7 +3143,7 @@ async fn issue_bootstrap_certificate(
     responses(
         (status = 200, description = "The PKCS#12 file, `bootstrap.p12`", content_type = "application/x-pkcs12", body = Vec<u8>),
         (status = 404, description = "No such certificate, no file kept for it, revoked or ended — or enrolment is not configured", body = ErrorBody),
-        (status = 503, description = "The audit record cannot be written; nothing was handed out", body = ErrorBody)
+        (status = 503, description = "The audit record cannot be written; nothing was handed out — retry after Retry-After", content_type = "text/plain", body = String, headers(("Retry-After" = u64, description = "Seconds to wait before asking again")))
     )
 )]
 async fn download_bootstrap_p12(
@@ -3196,7 +3213,7 @@ async fn download_bootstrap_p12(
         (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
         (status = 404, description = "No such certificate on record, or enrolment is not configured", body = ErrorBody),
         (status = 409, description = "The certificate is not revoked — revoke it first", body = ErrorBody),
-        (status = 503, description = "The audit record cannot be written; nothing was deleted", body = ErrorBody)
+        (status = 503, description = "The audit record cannot be written; nothing was deleted — retry after Retry-After", content_type = "text/plain", body = String, headers(("Retry-After" = u64, description = "Seconds to wait before asking again")))
     )
 )]
 async fn delete_bootstrap_certificate(
@@ -3288,7 +3305,8 @@ async fn get_enrolment_window(State(state): State<Arc<AppState>>) -> Response {
         (status = 200, description = "The window, open until its new end", body = EnrolmentWindow),
         (status = 400, description = "open_for_secs is out of range", body = ErrorBody),
         (status = 404, description = "Enrolment is not configured", body = ErrorBody),
-        (status = 500, description = "The window could not be persisted; it is as it was", body = ErrorBody)
+        (status = 500, description = "The window could not be persisted; it is as it was", body = ErrorBody),
+        (status = 503, description = "The audit record cannot be written; nothing was changed — retry after Retry-After", content_type = "text/plain", body = String, headers(("Retry-After" = u64, description = "Seconds to wait before asking again")))
     )
 )]
 async fn open_enrolment_window(
@@ -3324,7 +3342,8 @@ async fn open_enrolment_window(
     responses(
         (status = 204, description = "Closed"),
         (status = 404, description = "Enrolment is not configured", body = ErrorBody),
-        (status = 500, description = "Closed, but not persisted: a restart may find the window open until its end", body = ErrorBody)
+        (status = 500, description = "Closed, but not persisted: a restart may find the window open until its end", body = ErrorBody),
+        (status = 503, description = "The audit record cannot be written; nothing was changed — retry after Retry-After", content_type = "text/plain", body = String, headers(("Retry-After" = u64, description = "Seconds to wait before asking again")))
     )
 )]
 async fn close_enrolment_window(State(state): State<Arc<AppState>>) -> Response {
@@ -3410,7 +3429,8 @@ fn through_gateway(state: &AppState, id: &str) -> Option<String> {
         (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
         (status = 404, description = "No such pending request, or enrolment is not configured", body = ErrorBody),
         (status = 409, description = "The CA could not sign the request, its bootstrap certificate is revoked, that certificate's subject breaks the rules of ADR-0027 clause 1 — the message names the attribute —, or another Server instance is deciding the request at this moment; nothing is signed", body = ErrorBody),
-        (status = 500, description = "The approval could not be persisted; the request still waits", body = ErrorBody)
+        (status = 500, description = "The approval could not be persisted; the request still waits", body = ErrorBody),
+        (status = 503, description = "The audit record cannot be written; nothing was changed — retry after Retry-After", content_type = "text/plain", body = String, headers(("Retry-After" = u64, description = "Seconds to wait before asking again")))
     )
 )]
 async fn approve_enrolment(
@@ -3470,7 +3490,8 @@ fn deciding(id: &str) -> Response {
         (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
         (status = 404, description = "The queue holds the request decided already, or enrolment is not configured", body = ErrorBody),
         (status = 409, description = "Another Server instance is deciding the request at this moment; nothing is decided", body = ErrorBody),
-        (status = 500, description = "The rejection could not be persisted; the request still waits", body = ErrorBody)
+        (status = 500, description = "The rejection could not be persisted; the request still waits", body = ErrorBody),
+        (status = 503, description = "The audit record cannot be written; nothing was changed — retry after Retry-After", content_type = "text/plain", body = String, headers(("Retry-After" = u64, description = "Seconds to wait before asking again")))
     )
 )]
 async fn reject_enrolment(
@@ -3908,7 +3929,8 @@ async fn list_hosts(State(state): State<Arc<AppState>>, RawQuery(raw): RawQuery)
     responses(
         (status = 204, description = "Set"),
         (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
-        (status = 404, description = "No such host, or revocation is not configured", body = ErrorBody)
+        (status = 404, description = "No such host, or revocation is not configured", body = ErrorBody),
+        (status = 503, description = "The audit record cannot be written; nothing was changed — retry after Retry-After", content_type = "text/plain", body = String, headers(("Retry-After" = u64, description = "Seconds to wait before asking again")))
     )
 )]
 async fn set_gateway(
@@ -4044,7 +4066,8 @@ async fn list_revocations(State(state): State<Arc<AppState>>, RawQuery(raw): Raw
         (status = 400, description = "No certificate named, a field this route does not know, an authority this Server does not have, a serial that is not hex, or a credential named, which the Agent plane does not have", body = ErrorBody),
         (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
         (status = 404, description = "Revocation is not configured", body = ErrorBody),
-        (status = 507, description = "The list is full", body = ErrorBody)
+        (status = 507, description = "The list is full", body = ErrorBody),
+        (status = 503, description = "The audit record cannot be written; nothing was changed — retry after Retry-After", content_type = "text/plain", body = String, headers(("Retry-After" = u64, description = "Seconds to wait before asking again")))
     )
 )]
 async fn revoke(
@@ -4148,7 +4171,8 @@ async fn revoke(
     responses(
         (status = 204, description = "Lifted"),
         (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
-        (status = 404, description = "No such revocation, or revocation is not configured", body = ErrorBody)
+        (status = 404, description = "No such revocation, or revocation is not configured", body = ErrorBody),
+        (status = 503, description = "The audit record cannot be written; nothing was changed — retry after Retry-After", content_type = "text/plain", body = String, headers(("Retry-After" = u64, description = "Seconds to wait before asking again")))
     )
 )]
 async fn lift_revocation(
@@ -4506,34 +4530,39 @@ mod tests {
         );
     }
 
-    /// A store refusal of the Package routes is answered with the status the REST contract names
-    /// for it — among them the signature write onto an entry another instance replaced, a
-    /// conflict with the entry's stored state, whose message also begins as a `400`'s does.
+    /// A store refusal of the Package routes is answered with the status its kind names, whatever
+    /// its text: a refusal whose message a database prefixed keeps its status, and a failure whose
+    /// message begins as a refusal's does is a `500`.
     /// Verifies: ADR-0034
     #[test]
     fn a_package_refusal_is_answered_with_its_status() {
+        use crate::packages::Refusal;
         for (refusal, status) in [
-            ("no package set otelcol@1.0.0", StatusCode::NOT_FOUND),
             (
-                "no entry linux-amd64 in set otelcol@1.0.0",
+                PackageError::refused(
+                    Refusal::NotFound,
+                    "database fleet on db:5432: no package set otelcol@1.0.0",
+                ),
                 StatusCode::NOT_FOUND,
             ),
             (
-                "set otelcol@1.0.0 is assigned to an Agent and its entries are immutable",
+                PackageError::refused(Refusal::Conflict, "set otelcol@1.0.0 is assigned"),
                 StatusCode::CONFLICT,
             ),
             (
-                "the entry linux-amd64 in set otelcol@1.0.0 has changed since this Server read \
-                 it — read the Package again and sign what it holds",
-                StatusCode::CONFLICT,
+                PackageError::refused(
+                    Refusal::Invalid,
+                    "database fleet on db:5432: the artifact was removed while it was uploaded",
+                ),
+                StatusCode::BAD_REQUEST,
             ),
-            ("the signature is empty", StatusCode::BAD_REQUEST),
+            (
+                PackageError::from("the deletion ended: panicked".to_string()),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
         ] {
-            assert_eq!(
-                package_error(refusal.to_string()).status(),
-                status,
-                "{refusal}"
-            );
+            let text = refusal.message.clone();
+            assert_eq!(package_error(refusal).status(), status, "{text}");
         }
     }
 }

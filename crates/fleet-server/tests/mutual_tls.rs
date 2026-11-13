@@ -2976,6 +2976,22 @@ async fn an_operator_act_names_the_operator() {
     assert!(!serde_json::to_string(&all).expect("json").contains("guess"));
 }
 
+/// Waits, within seconds, until `audit` refuses what it is asked to record. The probe is a record
+/// of its own, so its failed write may be what makes the audit refuse: what follows decides that a
+/// refusing audit stops what needs a record, not which write failed first.
+async fn audit_refuses(audit: &Arc<dyn fleet_server::audit::Audit>) {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while audit
+            .record(fleet_server::audit::Entry::new("test.probe", "probe"))
+            .is_ok()
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the audit's failed write made it refuse");
+}
+
 /// A record that cannot be written stops admission: no Agent is admitted without its entry.
 /// Verifies: ADR-0028
 #[tokio::test]
@@ -3007,16 +3023,16 @@ async fn an_audit_that_cannot_write_refuses_admission() {
     let served = serve(
         &pki,
         Setup {
-            audit: Some(audit),
+            audit: Some(audit.clone()),
             ..revocations_setup(&pki)
         },
     )
     .await;
     let (cert, key) = pki.issue("edge-01");
     let http = client(&served.ca_pem, Some((&cert, &key)));
-    // The first admission is queued; its write fails, and from then on nothing is admitted.
+    // The audit fails at its first write, and from then on nothing is admitted.
     let _ = post(&http, &served.endpoint, report(&InstanceUid::default())).await;
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    audit_refuses(&audit).await;
     let other = client(
         &served.ca_pem,
         Some(pki.issue("edge-02"))
@@ -3065,7 +3081,7 @@ async fn an_audit_that_cannot_write_issues_no_certificate() {
     let served = serve(
         &pki,
         Setup {
-            audit: Some(audit),
+            audit: Some(audit.clone()),
             ..revocations_setup(&pki)
         },
     )
@@ -3077,7 +3093,7 @@ async fn an_audit_that_cannot_write_issues_no_certificate() {
     let uid = InstanceUid::default();
     exchange(&mut socket, &uid).await;
 
-    // The record fails at its next write — another peer's admission — and stays failed.
+    // The record fails at its next write, and stays failed.
     failing.store(true, Ordering::SeqCst);
     let (other_cert, other_key) = pki.issue("edge-02");
     let _ = post(
@@ -3086,7 +3102,7 @@ async fn an_audit_that_cannot_write_issues_no_certificate() {
         report(&InstanceUid::default()),
     )
     .await;
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    audit_refuses(&audit).await;
 
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::Message as Ws;
@@ -6569,6 +6585,7 @@ impl fleet_server::agent_store::AgentStore for HeldWrite {
         &self,
         uid: &InstanceUid,
         record: &fleet_server::agent_store::PersistedAgent,
+        arrived: Option<&str>,
     ) -> Result<bool, String> {
         if *uid == self.held {
             let _ = self.entered.lock().expect("hook lock").send(());
@@ -6578,7 +6595,7 @@ impl fleet_server::agent_store::AgentStore for HeldWrite {
                 .expect("hook lock")
                 .recv_timeout(std::time::Duration::from_secs(30));
         }
-        self.inner.write_report(uid, record)
+        self.inner.write_report(uid, record, arrived)
     }
     fn set_labels(
         &self,
@@ -6624,7 +6641,7 @@ impl fleet_server::agent_store::AgentStore for HeldWrite {
 /// completes and its report is answered: the report runs off the runtime's workers, so the one
 /// worker of the Server's runtime here stays free, and the fleet lock is not held across the
 /// call.
-/// Verifies: ADR-0025
+/// Verifies: ADR-0045
 #[test]
 fn a_handshake_completes_and_a_report_is_answered_while_another_reports_store_call_waits() {
     let pki = Pki::new();
@@ -6698,7 +6715,7 @@ fn a_handshake_completes_and_a_report_is_answered_while_another_reports_store_ca
 /// An Agent whose report waits for its store call is answered a WebSocket ping on the same
 /// connection meanwhile, so a stall of the Server's handling ends no live connection for silence;
 /// its reply follows once the call is let go.
-/// Verifies: ADR-0025
+/// Verifies: ADR-0045
 #[test]
 fn a_ping_is_answered_on_a_connection_whose_report_waits_for_its_store_call() {
     let pki = Pki::new();

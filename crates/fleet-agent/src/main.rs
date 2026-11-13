@@ -671,7 +671,7 @@ fn install(
 
         // The handover (ADR-0021 clause 1), on every registration that runs under an account — a
         // kept one and root included: both roots belong to it — config and state because the
-        // service reads and rewrites them (ADR-0018), the executable layout because the
+        // service reads and rewrites them (ADR-0046), the executable layout because the
         // self-update that stages into it *is* the service (ADR-0019). The state directory is
         // created first: the daemon must not need rights on its parent to begin. Where a process
         // account is registered, what it keeps there stays its own (ADR-0021 clause 1): every

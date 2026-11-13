@@ -469,7 +469,10 @@ async fn gateway_revocations(State(state): State<Arc<AppState>>, request: Reques
 /// as it would when a Server of 0.8.0 beside this one registered a renewal, which moves no version
 /// (ADR-0023 clause 10). Either way it changes with the list and survives a restart.
 #[must_use]
-pub fn gateway_list(certificates: &[serde_json::Value], version: Option<u64>) -> (String, String) {
+pub(crate) fn gateway_list(
+    certificates: &[serde_json::Value],
+    version: Option<u64>,
+) -> (String, String) {
     use sha2::Digest as _;
     let body = serde_json::json!({ "certificates": certificates }).to_string();
     let hash = hex::encode(sha2::Sha256::digest(body.as_bytes()));
@@ -482,7 +485,7 @@ pub fn gateway_list(certificates: &[serde_json::Value], version: Option<u64>) ->
 
 /// The Gateways' list of `revocations`, as [`gateway_list`] answers it.
 #[must_use]
-pub fn gateway_list_of(revocations: &Revocations) -> (String, String) {
+pub(crate) fn gateway_list_of(revocations: &Revocations) -> (String, String) {
     let (revoked, version) = revocations.revoked_certificates_at("client");
     let certificates: Vec<serde_json::Value> = revoked
         .into_iter()
@@ -1042,7 +1045,7 @@ impl Handler for Fleet {
     async fn on_message(&self, carrier: &mut Carrier, report: AgentToServer) -> Reply {
         // Nothing is answered on a lease this instance cannot prove, after a suspend before its
         // listeners are closed included
-        // (ADR-0025
+        // (ADR-0045
         // clause 3).
         if !self.0.holds_its_lease() {
             return Reply::Refuse(StatusCode::SERVICE_UNAVAILABLE, NO_LEASE.to_string());
@@ -1114,7 +1117,7 @@ impl Handler for Fleet {
     fn on_outbound(&self, carrier: &mut Carrier, push: Push) -> Vec<ServerToAgent> {
         // Nothing is pushed on a lease this instance cannot prove: a queued restart stays queued,
         // and an offer or an approval waits for an instance that holds one
-        // (ADR-0025
+        // (ADR-0045
         // clause 3).
         if !self.0.holds_its_lease() {
             return Vec::new();
@@ -1190,7 +1193,7 @@ impl Handler for Fleet {
     }
 
     /// A restart command its connection did not take stays queued
-    /// (ADR-0025
+    /// (ADR-0045
     /// clause 8).
     fn on_unsent(&self, message: &ServerToAgent) {
         self.0.unsent(message);
@@ -1517,7 +1520,7 @@ mod tests {
     use super::*;
 
     /// A restart command the endpoint reports unsent is queued again, so it is sent once more.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_restart_command_reported_unsent_is_queued_again() {
         let dir = tempfile::tempdir().expect("tempdir");

@@ -90,7 +90,7 @@ pub struct ConfigEntry {
 #[derive(Clone)]
 pub struct DesiredConfig {
     /// The entries, sorted by name — deterministic like the entry order the Managed Process sees
-    /// (the Collector receives them as one `--config` per entry, ADR-0018).
+    /// (the Collector receives them as one `--config` per entry, ADR-0046).
     pub entries: Vec<ConfigEntry>,
     /// SHA-256 over the length-prefixed `(name, body, role)` triples in name order.
     pub hash: Vec<u8>,
@@ -254,7 +254,7 @@ impl ConfigStore {
 
     /// Reads every Configuration again from the backend, as another instance saved, pinned,
     /// collected or deleted one
-    /// (ADR-0025
+    /// (ADR-0045
     /// clause 12): what is held is dropped and what is stored taken in its place. It reads under
     /// the lock, so no write of this instance's own lands between the read and the swap.
     ///

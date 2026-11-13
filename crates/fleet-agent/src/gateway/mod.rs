@@ -1725,14 +1725,25 @@ mod tests {
 
         let mut exchange =
             Box::pin(forwarding.forward_enrolment(&peer, enrolment(uid, proof.clone())));
+        // The exchange is under way once it is the route and holds its place upstream.
+        let upstream = async {
+            while !(forwarding.registry.routes(&uid)
+                && forwarding.pool.assignments().0.contains(&uid))
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        };
+        tokio::select! {
+            _ = &mut exchange => panic!("the silent upstream answered"),
+            reached = tokio::time::timeout(std::time::Duration::from_secs(10), upstream) => {
+                reached.expect("its exchange is its route, with a place upstream");
+            }
+        }
+        // Time for an exchange that binds to do so before the check that it does not.
         tokio::select! {
             _ = &mut exchange => panic!("the silent upstream answered"),
             () = tokio::time::sleep(std::time::Duration::from_millis(200)) => {}
         }
-        assert!(
-            forwarding.registry.routes(&uid),
-            "its exchange is its route"
-        );
         assert!(
             !forwarding.registry.cache().is_bound(&uid),
             "it binds nothing"
@@ -2115,14 +2126,22 @@ mod tests {
             let uid = InstanceUid::default();
             let request = enrolment(uid, proof_of(&presented));
             let mut relayed = Box::pin(forwarding.on_message(&mut enrolling, request));
+            let upstream = async {
+                while !forwarding.pool.assignments().0.contains(&uid) {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            };
+            tokio::select! {
+                _ = &mut relayed => panic!("{how}: the enrolment was answered at the Gateway"),
+                went = tokio::time::timeout(std::time::Duration::from_secs(10), upstream) => {
+                    went.unwrap_or_else(|_| panic!("{how}: the enrolment went upstream"));
+                }
+            }
+            // Time for a relay that writes the store to do so before the check that it does not.
             tokio::select! {
                 _ = &mut relayed => panic!("{how}: the enrolment was answered at the Gateway"),
                 () = tokio::time::sleep(std::time::Duration::from_millis(200)) => {}
             }
-            assert!(
-                forwarding.pool.assignments().0.contains(&uid),
-                "{how}: the enrolment went upstream"
-            );
             drop(relayed);
 
             let after = std::fs::symlink_metadata(&store).expect("metadata");

@@ -10,11 +10,8 @@
 //! CA is a renewal and is signed at once; a CSR on an enrolment connection waits until an operator
 //! approves it ([`crate::enrolment`], ADR-0040).
 
-use fleet_core::x509::issue::{random_serial, CLOCK_SKEW};
-use rcgen::{
-    CertificateSigningRequestParams, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
-    KeyUsagePurpose, SanType,
-};
+use fleet_core::x509::issue::{self, Role, CLOCK_SKEW};
+use rcgen::{CertificateSigningRequestParams, Issuer, KeyPair, SanType};
 use x509_parser::prelude::{FromDer, X509Certificate};
 use zeroize::Zeroizing;
 
@@ -97,20 +94,13 @@ impl ClientCa {
         config: &ClientCaConfig,
         token: Option<&std::sync::Arc<crate::pkcs11::Token>>,
     ) -> Result<Self, String> {
-        let cert_pem = std::fs::read_to_string(&config.cert_file)
-            .map_err(|e| format!("cannot read {}: {e}", config.cert_file.display()))?;
+        let ca_der = first_certificate(&config.cert_file)?;
         let key = CaKey::load(
             ("[client_ca] key_file", config.key_file.as_deref()),
             ("[client_ca] key_label", config.key_label.as_deref()),
             token,
         )?;
-        let issuer = Issuer::from_ca_cert_pem(&cert_pem, key)
-            .map_err(|e| format!("cannot use {} as a CA: {e}", config.cert_file.display()))?;
-        let ca_der = opamp::tls::certificates(cert_pem.as_bytes())
-            .map_err(|e| format!("cannot read {}: {e}", config.cert_file.display()))?
-            .first()
-            .map(|der| der.as_ref().to_vec())
-            .ok_or_else(|| format!("{} holds no certificate", config.cert_file.display()))?;
+        let issuer = issue::authority(&config.cert_file, &ca_der, key)?;
         let leaf_name = leaf_name(&config.cert_file, &ca_der)?;
         Ok(ClientCa {
             issuer,
@@ -174,10 +164,10 @@ impl ClientCa {
         request.params.distinguished_name = distinguished_name(
             &crate::bootstrap::carried_attributes(subject, &self.leaf_name),
         )?;
-        // Never trust the request for the certificate's powers: force a client-auth leaf.
-        request.params.is_ca = IsCa::ExplicitNoCa;
-        request.params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
-        request.params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+        // Never trust the request for the certificate's powers: force a client-auth leaf, with a
+        // serial of its own, so two certificates from one key are two revocable things (ADR-0040
+        // clause 26). rcgen would derive the serial from the key.
+        issue::leaf(&mut request.params, Role::Client)?;
         // None of the request's names — one could name another host. The one name this Server
         // puts in is the host the certificate is issued to (ADR-0027 clause 11), which a renewal
         // carries on.
@@ -187,9 +177,6 @@ impl ClientCa {
                 .try_into()
                 .map_err(|e| format!("cannot name the host {host:?}: {e}"))?,
         ));
-        // A serial of its own for every certificate, so two certificates from one key are two
-        // revocable things (ADR-0040 clause 26). rcgen would derive it from the key.
-        request.params.serial_number = Some(random_serial()?);
         // A token key signs only with a place for its entry held in the record
         // (ADR-0043
         // clause 6).
@@ -800,8 +787,7 @@ impl BootstrapCa {
             (None, Some(label)) => format!("[enrolment] bootstrap_ca_key_label {label:?}"),
             (None, None) => return Ok(None),
         };
-        let cert_pem = std::fs::read_to_string(&enrolment.bootstrap_ca_file)
-            .map_err(|e| format!("cannot read {}: {e}", enrolment.bootstrap_ca_file.display()))?;
+        let der = first_certificate(&enrolment.bootstrap_ca_file)?;
         let key = CaKey::load(
             (
                 "[enrolment] bootstrap_ca_key_file",
@@ -813,7 +799,6 @@ impl BootstrapCa {
             ),
             token,
         )?;
-        let der = first_certificate(&enrolment.bootstrap_ca_file, &cert_pem)?;
         let (_, cert) = X509Certificate::from_der(&der)
             .map_err(|e| format!("cannot read {}: {e}", enrolment.bootstrap_ca_file.display()))?;
         if cert.public_key().raw != key.subject_public_key_info().as_slice() {
@@ -842,12 +827,7 @@ impl BootstrapCa {
         let not_after_ms = u64::try_from(cert.validity().not_after.timestamp())
             .unwrap_or(0)
             .saturating_mul(1000);
-        let issuer = Issuer::from_ca_cert_pem(&cert_pem, key).map_err(|e| {
-            format!(
-                "cannot use {} as a CA: {e}",
-                enrolment.bootstrap_ca_file.display()
-            )
-        })?;
+        let issuer = issue::authority(&enrolment.bootstrap_ca_file, &der, key)?;
         Ok(Some(BootstrapCa {
             issuer,
             leaf_name,
@@ -882,10 +862,7 @@ impl crate::bootstrap::BootstrapSigner for BootstrapCa {
         let mut params = rcgen::CertificateParams::default();
         params.distinguished_name = distinguished_name(subject)?;
         // A client-authentication leaf and nothing more (ADR-0027 clause 3).
-        params.is_ca = IsCa::ExplicitNoCa;
-        params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
-        params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
-        params.serial_number = Some(random_serial()?);
+        issue::leaf(&mut params, Role::Client)?;
         params.not_before = at_ms(now_ms)? - CLOCK_SKEW;
         params.not_after = at_ms(not_after_ms)?;
         let permit = self.issuer.key().reserve()?;
@@ -941,16 +918,7 @@ impl CaKey {
         token: Option<&std::sync::Arc<crate::pkcs11::Token>>,
     ) -> Result<Self, String> {
         match (file, label) {
-            (Some(file), _) => {
-                // Wiped when it is dropped; what `rcgen` and `ring` keep of it is theirs
-                // (ADR-0014).
-                let pem = std::fs::read_to_string(file)
-                    .map(Zeroizing::new)
-                    .map_err(|e| format!("cannot read {}: {e}", file.display()))?;
-                KeyPair::from_pem(&pem)
-                    .map(|key| CaKey::File(Box::new(key)))
-                    .map_err(|e| format!("cannot read {}: {e}", file.display()))
-            }
+            (Some(file), _) => issue::read_key(file).map(|key| CaKey::File(Box::new(key))),
             (None, Some(label)) => token
                 .ok_or_else(|| {
                     format!("{label_key} {label:?} names a key on a token, and [pkcs11] is not set")
@@ -1049,13 +1017,12 @@ fn leaf_name(path: &std::path::Path, ca_der: &[u8]) -> Result<String, String> {
     Ok(name)
 }
 
-/// The first certificate of a PEM file, DER.
-fn first_certificate(path: &std::path::Path, pem: &str) -> Result<Vec<u8>, String> {
-    opamp::tls::certificates(pem.as_bytes())
-        .map_err(|e| format!("cannot read {}: {e}", path.display()))?
-        .first()
+/// The first certificate of the CA file at `path`, DER, by the reader the operator tool uses.
+fn first_certificate(path: &std::path::Path) -> Result<Vec<u8>, String> {
+    let pem = std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    opamp::tls::first_certificate(&pem)
         .map(|der| der.as_ref().to_vec())
-        .ok_or_else(|| format!("{} holds no certificate", path.display()))
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))
 }
 
 /// Milliseconds since the epoch, in the time type rcgen speaks.
@@ -1067,6 +1034,7 @@ fn at_ms(ms: u64) -> Result<time::OffsetDateTime, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rcgen::{ExtendedKeyUsagePurpose, KeyUsagePurpose};
 
     /// A CA and a Client, end to end: the Client's key never leaves it, and what comes back is a
     /// certificate the CA signed over the public half it was sent.

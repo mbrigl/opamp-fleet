@@ -151,22 +151,25 @@ if [[ ! "$max_jobs" =~ ^[1-9][0-9]*$ ]]; then
 fi
 out="$(mktemp -d)"
 labels=() kinds=() running=0
-# stop — on every exit, a signal's included: stop every job the runner still has, the one started
-# an instant before included, wait for them, and remove their files.
+# stop — on every exit, a signal's included: tell every job the runner still has to stop its
+# check, the one started an instant before included, wait for them, and remove their files.
 # shellcheck disable=SC2317 # run by the trap
 stop() {
   local running_jobs
   running_jobs="$(jobs -p)"
   # shellcheck disable=SC2086 # one process id per word
-  [[ -n "$running_jobs" ]] && kill $running_jobs 2>/dev/null
+  [[ -n "$running_jobs" ]] && kill -USR1 $running_jobs 2>/dev/null
   wait
   rm -rf "$out"
 }
 trap stop EXIT
 
-# run <label> <script> [args...] — start one check, its output and exit code kept under $out. The
-# subshell passes a TERM on to the check and waits for it, so stop() returns once each has ended;
-# its trap stands before the check starts, so a TERM never finds the check without it.
+# run <label> <script> [args...] — start one check, its output and exit code kept under $out. On
+# a USR1 the subshell sends the check a TERM and waits for it, so stop() returns once each has
+# ended; its trap stands before the check starts, so a USR1 never finds the check without it.
+# The subshell's jobs name the check, as $! is not yet read when the USR1 comes right after the
+# fork. The subshell traps USR1 and not TERM: a check forked and not yet running its script still
+# has the subshell's traps, and would lose a TERM it trapped.
 run() {
   local label="$1" script="$2" i="${#labels[@]}"
   shift 2
@@ -179,11 +182,9 @@ run() {
   fi
   while ((running >= max_jobs)); do wait -n; running=$((running - 1)); done
   {
-    check=""
-    trap '[[ -n "$check" ]] && kill "$check" 2>/dev/null && wait "$check"; exit 143' TERM
+    trap 'kill $(jobs -p) 2>/dev/null; wait; exit 143' USR1
     bash "$ROOT/$script" "$@" > "$out/$i" 2>&1 &
-    check=$!
-    wait "$check"
+    wait "$!"
     echo $? > "$out/$i.rc"
   } &
   running=$((running + 1))

@@ -10,8 +10,10 @@
 # The store is named through the environment the tests read: FLEET_TEST_S3_ENDPOINT,
 # FLEET_TEST_S3_BUCKET, FLEET_TEST_S3_ACCESS_KEY_ID, and FLEET_TEST_S3_SECRET_ACCESS_KEY_FILE, or
 # FLEET_TEST_POSTGRES_HOST, _PORT, _DBNAME, _USER, _PASSWORD_FILE, and _CA_FILE; 'postgres' needs a
-# bucket named too, for a Server on both stores. Skipped is not passed: once a store is named, a test
-# that reports it skipped fails the run.
+# bucket named too, for a Server on both stores, and runs the whole library, whose tests outside
+# the store's module open the database too. FLEET_TEST_SERVER_IMAGE names the Server's image for
+# the test that runs it read-only on both stores; it skips without one, except in a CI run. Skipped
+# is not passed: once a store is named, a test that reports it skipped fails the run.
 #
 # Usage:
 #     scripts/check-store.sh s3|postgres
@@ -23,7 +25,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 case "${1:-}" in
   s3) filter="s3::" skipped="skipped: no S3 store" named="${FLEET_TEST_S3_ENDPOINT:-}" ;;
-  postgres) filter="postgres::" skipped="skipped: no PostgreSQL" named="${FLEET_TEST_POSTGRES_HOST:-}" ;;
+  postgres) filter="" skipped="skipped: no PostgreSQL" named="${FLEET_TEST_POSTGRES_HOST:-}" ;;
   *) echo "usage: scripts/check-store.sh s3|postgres" >&2; exit 2 ;;
 esac
 if [[ -z "$named" ]]; then
@@ -55,6 +57,11 @@ if [[ "$1" == "postgres" ]]; then
   cargo test -p fleet-server --locked --test stateless_instance -- --nocapture 2>&1 | tee -a "$log"
   if grep -q "skipped: no S3 store" "$log"; then
     echo "the test of a Server on PostgreSQL and S3 was skipped: name a bucket too" >&2
+    exit 1
+  fi
+  # The image run read-only needs an image built and a container runtime, which a CI run has.
+  if [[ "${CI:-}" == "true" ]] && grep -q "skipped: no Server image" "$log"; then
+    echo "the test of the Server's image was skipped in a CI run: name FLEET_TEST_SERVER_IMAGE" >&2
     exit 1
   fi
 fi

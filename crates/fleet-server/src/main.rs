@@ -338,9 +338,9 @@ fn migrate_to_postgres(mut args: impl Iterator<Item = String>) -> ! {
         (Some(bucket), None) => (
             fleet_server::postgres::import::Blobs::Bucket(bucket),
             format!(
-                "copied into the database {} and the bucket {} — remove data_dir from \
-                 server.toml if it names one, keep [database] store = \"postgres\" and [blobs] \
-                 store = \"s3\", and start the Server; {} stays as the backup",
+                "copied into the database {} and the bucket {} — keep [database] store = \
+                 \"postgres\" and [blobs] store = \"s3\", and start the Server; {} stays as the \
+                 backup",
                 database.dbname,
                 bucket.bucket,
                 from.display()
@@ -615,7 +615,7 @@ fn main() {
 async fn serve() {
     // The log goes to stderr, so that stdout carries only what a command prints as its result.
     // On PostgreSQL each line names the instance id of the lease the instance holds (clause 1 of
-    // ADR-0025).
+    // ADR-0045).
     let logged = fleet_server::instance::LoggedId::default();
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
@@ -633,7 +633,7 @@ async fn serve() {
     opamp::tls::install_ring_provider();
 
     // The clock a lease and a sweep measure on counts a suspend of the host
-    // (ADR-0025
+    // (ADR-0045
     // clause 3), handed to the package store and the lease.
     let elapsed = since_boot().unwrap_or_else(fleet_server::clock::Elapsed::monotonic);
 
@@ -661,7 +661,7 @@ async fn serve() {
     };
     // On PostgreSQL the instance id is made as soon as the store is known, so that every line
     // from here on names it, and the first lease is taken under it (clause 1 of
-    // ADR-0025).
+    // ADR-0045).
     let instance_id = if config.database.postgres().is_some() {
         match fleet_server::postgres::lease::new_instance_id() {
             Ok(id) => {
@@ -895,7 +895,7 @@ async fn serve() {
     }
     // With PostgreSQL, a lease before anything is decided and before either listener opens
     // (clauses 1 to 3 of
-    // ADR-0025):
+    // ADR-0045):
     // the audit chain is the lease's.
     let lease = match &records {
         fleet_server::Records::Postgres(database) => {
@@ -942,7 +942,7 @@ async fn serve() {
     // (ADR-0023 clause 16).
     if let (Some(staging), Some(lease)) = (staging, &lease) {
         staging.stage_under(lease.held());
-        clean_staging_on_takeover(staging, lease.takeovers());
+        lease.on_each_takeover(move || staging.run());
     }
     // The audit record (ADR-0028), opened before anything is decided: one chain in files, or on
     // PostgreSQL the chain of each lease
@@ -1026,33 +1026,12 @@ async fn serve() {
     // after (ADR-0023 clause 12).
     if let (fleet_server::Records::Postgres(database), Some(lease)) = (&records, &lease) {
         let (database, audit, held) = (database.clone(), audit_log.clone(), lease.held());
-        let retain_days = config.audit.retain_days();
-        tokio::spawn(async move {
-            let mut daily = tokio::time::interval(std::time::Duration::from_secs(24 * 60 * 60));
-            loop {
-                daily.tick().await;
-                let (database, audit) = (database.clone(), audit.clone());
-                let own = held.borrow().clone();
-                let pruned = tokio::task::spawn_blocking(move || {
-                    fleet_server::postgres::audit_prune::prune(&database, audit, own, retain_days)
-                })
-                .await;
-                match pruned {
-                    Ok(Ok(rounds)) => tracing::info!(
-                        rounds = rounds.len(),
-                        chains = rounds.iter().map(|round| round.chains.len()).sum::<usize>(),
-                        carried = rounds
-                            .iter()
-                            .map(|round| round.carried.len())
-                            .sum::<usize>(),
-                        closed_chains = rounds.iter().any(|round| round.closed_chains),
-                        "pruned the audit record to {retain_days} days"
-                    ),
-                    Ok(Err(e)) => tracing::warn!(error = %e, "cannot prune the audit record"),
-                    Err(e) => tracing::warn!(error = %e, "the audit record's prune stopped"),
-                }
-            }
-        });
+        fleet_server::postgres::audit_prune::prune_daily(
+            database,
+            audit,
+            held,
+            config.audit.retain_days(),
+        );
     }
     if let Some(enrolment) = &enrolment {
         enrolment.set_audit(audit.clone());
@@ -1172,7 +1151,7 @@ async fn serve() {
     let operators = fleet_server::operator_app(state.clone(), operator_auth);
 
     // The revocations, and every other change, of the other instances followed (clauses 9 to 11
-    // of ADR-0025),
+    // of ADR-0045),
     // and the presence of the Agents this instance carries written in batches under its lease
     // (ADR-0030 clause 4).
     let presence = match (&lease, &records) {
@@ -1191,7 +1170,7 @@ async fn serve() {
     };
     // A restart whose command was not sent and whose put-back failed is tried again until it
     // holds, on every store
-    // (ADR-0025
+    // (ADR-0045
     // clause 8).
     fleet_server::instance::retry_restarts(state.clone());
     // The handlers are installed before either plane is bound and logged as served, so a stop
@@ -1225,7 +1204,7 @@ async fn serve() {
     }
     // A new lease that found a schema a newer Server migrated stops the instance as a failed
     // start does, naming both versions
-    // (ADR-0025
+    // (ADR-0045
     // clause 16).
     if let fleet_server::Records::Postgres(database) = &records {
         if let Some(refusal) = database.outdated() {
@@ -1236,7 +1215,7 @@ async fn serve() {
     // number, so the ordinary restart restores a fleet without gaps or false silence.
     state.flush_agents();
     // And the presence of every Agent, its sessions ended by the drain, before the lease goes
-    // (ADR-0025
+    // (ADR-0045
     // clause 3): once the periodic batches stopped, so none commits after it.
     if let Some(presence) = presence {
         presence.stop().await;
@@ -1297,25 +1276,6 @@ async fn serve() {
     if served.is_err() {
         std::process::exit(1);
     }
-}
-
-/// Runs `staging` again each time `takeovers` changes, off the async threads, as its calls to the
-/// bucket block. A cleanup that fails is logged; the next takeover, or the next start, tries again.
-fn clean_staging_on_takeover(
-    staging: fleet_server::s3::StagingCleanup,
-    mut takeovers: tokio::sync::watch::Receiver<u64>,
-) {
-    tokio::spawn(async move {
-        while takeovers.changed().await.is_ok() {
-            let staging = staging.clone();
-            let ran = tokio::task::spawn_blocking(move || staging.run())
-                .await
-                .unwrap_or_else(|e| Err(e.to_string()));
-            if let Err(e) = ran {
-                warn!(error = %e, "could not delete the staging objects of a lapsed lease");
-            }
-        }
-    });
 }
 
 /// `CLOCK_BOOTTIME`, which counts the time the host was suspended, as the clock a lease and a sweep
@@ -1472,7 +1432,7 @@ mod tests {
 
     /// On Linux the lease's clock is `CLOCK_BOOTTIME`: it reads, it moves on as time passes, and it
     /// counts at least as much as the monotonic clock, which a suspend would leave behind.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[cfg(target_os = "linux")]
     #[test]
     fn the_leases_clock_is_the_one_that_counts_a_suspend() {
