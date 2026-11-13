@@ -612,7 +612,7 @@ async fn managed_processes_stop_cleanly_on_the_self_update_restart() {
 
     // A supervised Managed Process that stays up and records its pid — rewritten with a fresh one
     // every time it is (re)started. Placed in the Supervisor's own `program/` directory and named
-    // by a bare file name, the only shape a block may carry (ADR-0018): a Managed Process is always
+    // by a bare file name, the only shape a block may carry (ADR-0046): a Managed Process is always
     // one this Client installed.
     let stub = {
         let program_dir = state_dir.join("supervisors/managed/program");

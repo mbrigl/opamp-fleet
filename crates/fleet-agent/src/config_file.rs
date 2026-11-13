@@ -52,7 +52,7 @@ impl ClientConfig {
         config.source = Some(redact_secrets(&text));
         config.path = Some(path.to_path_buf());
         // **Every directory this Client derives is made absolute here**, and this is the one place
-        // it can be done once. A Managed Process starts in its own directory (ADR-0018), so a path
+        // it can be done once. A Managed Process starts in its own directory (ADR-0046), so a path
         // the Client hands it — its program, a `--config` a plugin builds, a `${config_dir}` it
         // substitutes — is resolved by that process against a directory the Client has left.
         // `state_dir` defaults to the relative `client-state`, so leaving these relative would make
@@ -362,7 +362,7 @@ pub(crate) fn read_held(path: &Path) -> Result<zeroize::Zeroizing<Vec<u8>>, Stri
 /// either, and a link at either name is replaced and never written through (ADR-0021 clause 11).
 /// The directory is synced after the rename, so an apply reported applied survives a power loss.
 /// The mode is the caller's: owner-only for an install or a `service config` (ADR-0020 clause
-/// 25), the operator's own for an apply (ADR-0018 clause 30).
+/// 25), the operator's own for an apply (ADR-0046 clause 30).
 pub(crate) fn replace(
     path: &Path,
     contents: &[u8],
@@ -383,7 +383,7 @@ mod tests {
     /// persists what it receives — so a credential value must never survive the redaction, while
     /// the operator's comments and layout must (they are half of what the file says). A leftover
     /// `[auth]` section is masked whole, whatever its keys are called.
-    /// Verifies: ADR-0018, ADR-0040
+    /// Verifies: ADR-0046, ADR-0040
     #[test]
     fn redaction_masks_credential_values_and_keeps_everything_else() {
         let text = "# the fleet endpoint\nendpoint = \"wss://fleet:4320/v1/opamp\"\n\n\
@@ -419,7 +419,7 @@ mod tests {
     /// A secret is masked whatever TOML spelling carries it: a multi-line string, basic or
     /// literal, must not leave its continuation lines behind, and a dotted key, a quoted key, an
     /// inline table or an array of tables hides it no better. What is not secret stays as written.
-    /// Verifies: ADR-0018, ADR-0034
+    /// Verifies: ADR-0046, ADR-0034
     #[test]
     fn redaction_masks_every_spelling_of_a_secret_value() {
         let spellings = [
@@ -465,7 +465,7 @@ mod tests {
     }
 
     /// Text that does not parse cannot be taken apart, so it is reported as a placeholder.
-    /// Verifies: ADR-0018, ADR-0034
+    /// Verifies: ADR-0046, ADR-0034
     #[test]
     fn redaction_replaces_text_that_does_not_parse_whole() {
         let redacted = redact_secrets("archive_key = \"\"\"\nleak\nnot = closed\n");

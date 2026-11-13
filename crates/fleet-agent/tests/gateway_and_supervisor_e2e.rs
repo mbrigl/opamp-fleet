@@ -164,7 +164,7 @@ fn view<'a>(agents: &'a [AgentView], name: &str) -> Option<&'a AgentView> {
 
 /// One host supervising its own process *and* gatewaying for another Client: three Agents reach the
 /// Server, each its own, over the connections this one Client holds.
-/// Places the stub where a Managed Process must live (ADR-0018): inside the Supervisor's own
+/// Places the stub where a Managed Process must live (ADR-0046): inside the Supervisor's own
 /// `program/` directory, under a bare name the configuration can spell. Copied rather than
 /// symlinked so the file is one this Client owns in fact as well as by rule — which is what an
 /// installed package would leave behind.

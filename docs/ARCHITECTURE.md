@@ -290,8 +290,9 @@ no module.
   reads `limit` and `cursor`, encodes the opaque cursor, and writes `X-Total-Count` and the `Link`
   of the four lists that page.
 - **Client supervision** — `supervisor::ports` is the Port a Plugin implements
-  ([ADR-0018](adr/0018-supervisor-mode-and-its-kinds.md)), and `shutdown` the handle every task
-  stops on; the Plugins and the process runner are its adapters, among them the two Supervisors
+  ([ADR-0046](adr/0046-supervisor-mode-and-its-kinds-and-a-repeated-offer-is-applied-once.md)),
+  and `shutdown` the handle every task stops on; the Plugins and the process runner are its
+  adapters, among them the two Supervisors
   this project brings, the Collector's in `supervisor::collector` and the example Custom
   Supervisor in `supervisor::command`. How a `[[supervisor]]` block is
   read — its plugin, program, Agent type and timings — is `supervisor::block`, and what a
@@ -427,7 +428,7 @@ the Supervisor's `config/` directory and restarts its process; the Agent reports
 Configuration typed for the Client
 itself carries `[[supervisor]]` blocks, which `reconfigure` checks and writes into
 `supervisor.toml` before it starts or stops anything
-([ADR-0018](adr/0018-supervisor-mode-and-its-kinds.md)).
+([ADR-0046](adr/0046-supervisor-mode-and-its-kinds-and-a-repeated-offer-is-applied-once.md)).
 
 **An Agent is placed under its Host.** Each Agent record names the Host it last arrived over — its
 own, or the Gateway's behind one. `fleet` derives from it, per Agent, what its effective description

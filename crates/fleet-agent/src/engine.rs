@@ -1,4 +1,4 @@
-//! The Engine: n Agents over one upstream connection (ADR-0016, ADR-0018).
+//! The Engine: n Agents over one upstream connection (ADR-0016, ADR-0046).
 //!
 //! This is the Server-facing seam of the hexagonal core. The transports consume it — build
 //! reports, hand it every decoded `ServerToAgent`, ask for the goodbyes — and it routes each
@@ -50,13 +50,13 @@ pub struct EngineAgent {
     pub state: AgentState,
     /// The command side of its Managed-Process Port.
     pub commands: Option<mpsc::Sender<ProcessCommand>>,
-    /// Fires this Supervisor's own shutdown (ADR-0018): its adapter and its Supervisor Endpoint
+    /// Fires this Supervisor's own shutdown (ADR-0046): its adapter and its Supervisor Endpoint
     /// listen on the receiving side, so one Supervisor can be stopped — port released, process
     /// down — while the rest of the Client runs on.
     pub stop: Option<watch::Sender<bool>>,
     /// The `[[supervisor]]` block name behind this Agent — what package staging and the
     /// Supervisor-set diff are keyed by, since an Engine index stops naming a block position the
-    /// moment the set changes at runtime (ADR-0018).
+    /// moment the set changes at runtime (ADR-0046).
     pub block_name: Option<String>,
 }
 
@@ -70,7 +70,7 @@ struct SupervisedAgent {
     block_name: Option<String>,
     /// A handled reply asked for an immediate report (config outcome, demanded full state).
     owes_report: bool,
-    /// Retired by a Supervisor-set change (ADR-0018): its goodbye is sent, its adapter is gone,
+    /// Retired by a Supervisor-set change (ADR-0046): its goodbye is sent, its adapter is gone,
     /// and it is skipped everywhere. The slot stays — the event channel and package routing are
     /// keyed by index, and a shifted index would misdeliver to a live neighbour.
     retired: bool,
@@ -99,10 +99,10 @@ pub struct Engine {
     agents: Vec<SupervisedAgent>,
     /// The shared event channel every adapter reports into, tagged with the Agent's index.
     events: mpsc::Receiver<(usize, ProcessEvent)>,
-    /// The sending side of that channel, kept to start Supervisors at runtime (ADR-0018) — a
+    /// The sending side of that channel, kept to start Supervisors at runtime (ADR-0046) — a
     /// fresh adapter needs a tagged sender into the same channel.
     event_tx: mpsc::Sender<(usize, ProcessEvent)>,
-    /// The self-Agent's received configuration awaiting the Supervisor-set apply (ADR-0018),
+    /// The self-Agent's received configuration awaiting the Supervisor-set apply (ADR-0046),
     /// taken by the transport exactly once.
     pending_self_config: Option<AgentRemoteConfig>,
     /// A connection-settings offer awaiting the transport's verification (ADR-0013). The offer
@@ -157,7 +157,7 @@ impl Engine {
 
     /// An Engine over Supervisor-backed Agents: each with the handles of its Port, all sharing
     /// one event channel (senders tagged by the Agent's index here). `event_tx` is the sending
-    /// side of `events`, kept for Supervisors started at runtime (ADR-0018).
+    /// side of `events`, kept for Supervisors started at runtime (ADR-0046).
     #[must_use]
     pub fn with_processes(
         agents: Vec<EngineAgent>,
@@ -548,7 +548,7 @@ impl Engine {
             return Handled::default();
         };
         // n is the number of local Supervisors — small; a linear scan beats a map to maintain.
-        // A retired Agent (ADR-0018) said goodbye; a straggling reply for it is dropped like one
+        // A retired Agent (ADR-0046) said goodbye; a straggling reply for it is dropped like one
         // for an Agent that never existed.
         let Some(index) = self
             .agents
@@ -580,7 +580,7 @@ impl Engine {
         // ConfigApplied event closes the APPLYING → APPLIED/FAILED lifecycle. The self-Agent's
         // goes to the Engine's pending slot instead (assigned after `agent`'s borrow ends): its
         // configuration is the Supervisor set, which the transport applies through
-        // [`crate::reconfigure`] (ADR-0018).
+        // [`crate::reconfigure`] (ADR-0046).
         let mut self_config = None;
         if let Some(config) = agent.state.take_pending_apply() {
             if index == SELF_AGENT_INDEX && !agent.state.is_managed() {
@@ -637,12 +637,12 @@ impl Engine {
     }
 
     /// The self-Agent's received configuration, taken exactly once for the Supervisor-set apply
-    /// (ADR-0018).
+    /// (ADR-0046).
     pub fn take_self_config(&mut self) -> Option<AgentRemoteConfig> {
         self.pending_self_config.take()
     }
 
-    /// Closes the self-Agent's `APPLYING` → `APPLIED`/`FAILED` lifecycle (ADR-0018): the verdict
+    /// Closes the self-Agent's `APPLYING` → `APPLIED`/`FAILED` lifecycle (ADR-0046): the verdict
     /// of the Supervisor-set apply, where a Managed Process's `ConfigApplied` event would stand.
     pub fn self_config_applied(&mut self, hash: Vec<u8>, result: Result<(), String>) {
         let Some(agent) = self.agents.get_mut(SELF_AGENT_INDEX) else {
@@ -653,7 +653,7 @@ impl Engine {
     }
 
     /// Refreshes what the self-Agent reports as its effective configuration — the (redacted)
-    /// text of `supervisor.toml`, which an applied Supervisor set just rewrote (ADR-0018).
+    /// text of `supervisor.toml`, which an applied Supervisor set just rewrote (ADR-0046).
     pub fn set_self_effective_config(&mut self, source: String) {
         let Some(agent) = self.agents.get_mut(SELF_AGENT_INDEX) else {
             return;
@@ -676,7 +676,7 @@ impl Engine {
     }
 
     /// The `[[supervisor]]` block name behind the Agent at `index` — `None` for the self-Agent.
-    /// What package staging is keyed by (ADR-0018): an Engine index stops naming a block
+    /// What package staging is keyed by (ADR-0046): an Engine index stops naming a block
     /// position once the Agent set has changed at runtime.
     pub fn block_name(&self, index: usize) -> Option<&str> {
         self.agents.get(index)?.block_name.as_deref()
@@ -690,13 +690,13 @@ impl Engine {
     }
 
     /// The sending side of the shared event channel, for starting a Supervisor at runtime
-    /// (ADR-0018) — its Endpoint and adapter each get a tagged sender into it.
+    /// (ADR-0046) — its Endpoint and adapter each get a tagged sender into it.
     #[must_use]
     pub fn events_handle(&self) -> mpsc::Sender<(usize, ProcessEvent)> {
         self.event_tx.clone()
     }
 
-    /// Adds a freshly started Supervisor's Agent (ADR-0018). It introduces itself with a full
+    /// Adds a freshly started Supervisor's Agent (ADR-0046). It introduces itself with a full
     /// snapshot on the next flush — a fresh state's first report is a full one.
     pub fn add_supervisor(&mut self, agent: EngineAgent) {
         let mut agent = SupervisedAgent::live(agent);
@@ -708,14 +708,14 @@ impl Engine {
         self.refresh_sampling();
     }
 
-    /// Retires the Agents whose `[[supervisor]]` blocks left the set (ADR-0018): each one's
+    /// Retires the Agents whose `[[supervisor]]` blocks left the set (ADR-0046): each one's
     /// adapter stops the Managed Process within the stop budget, its Endpoint releases the port,
     /// the adapter's exit is awaited, and the goodbyes to send are returned. The slots stay (see
     /// [`SupervisedAgent::retired`]); unnamed Agents run on untouched.
     ///
-    /// A name in `uninstalling` is leaving the set *for good* (ADR-0018): its adapter is told to
+    /// A name in `uninstalling` is leaving the set *for good* (ADR-0046): its adapter is told to
     /// uninstall — stop, undo what installing it did, answer — before the caller purges its
-    /// directory (ADR-0018). A name only in `names` merely changed: it is stopped, restarts
+    /// directory (ADR-0046). A name only in `names` merely changed: it is stopped, restarts
     /// under its name, and keeps what it installed. The adapter's own stop budget bounds either
     /// path; an uninstall that cannot be delivered falls back to the plain stop.
     pub async fn retire_supervisors(
@@ -796,7 +796,7 @@ impl Engine {
             return;
         };
         // A retired Agent's adapter may still flush its last events (its process going down);
-        // they are nobody's news — the goodbye already went out (ADR-0018).
+        // they are nobody's news — the goodbye already went out (ADR-0046).
         if agent.retired {
             return;
         }
@@ -821,7 +821,7 @@ impl Engine {
             ProcessEvent::PackageApplied { hash, result } => {
                 agent.state.package_applied(hash, result);
             }
-            // The adapter's last word before retirement (ADR-0018). The goodbye carries no
+            // The adapter's last word before retirement (ADR-0046). The goodbye carries no
             // status, so the outcome is the operator's to read here — an `Err` names what the
             // kind could not undo, which nothing else will ever mention again.
             ProcessEvent::Uninstalled { result } => {
@@ -848,7 +848,7 @@ impl Engine {
         let mut stopping = Vec::new();
         for agent in &mut self.agents {
             // The Supervisor's own shutdown fires alongside the command, so its Endpoint task
-            // winds down with its adapter rather than with this process (ADR-0018).
+            // winds down with its adapter rather than with this process (ADR-0046).
             if let Some(stop) = agent.stop.take() {
                 let _ = stop.send(true);
             }
@@ -1006,7 +1006,7 @@ mod tests {
         assert!(goodbyes.iter().all(|g| g.agent_disconnect.is_some()));
     }
 
-    /// ADR-0018 at the Engine seam: a name in `uninstalling` is told to uninstall — its adapter
+    /// ADR-0046 at the Engine seam: a name in `uninstalling` is told to uninstall — its adapter
     /// answers and exits on the command itself — while a name that merely changed is only
     /// stopped, so it keeps what it installed for its restart. Both end retired with a goodbye.
     #[tokio::test]

@@ -152,14 +152,14 @@ impl Storage {
     }
 
     /// Where [`store_remote_config`](Self::store_remote_config) writes the plain entry files —
-    /// what a Managed Process is pointed at (ADR-0018).
+    /// what a Managed Process is pointed at (ADR-0046).
     #[must_use]
     pub fn config_dir(&self) -> PathBuf {
         self.dir.join(CONFIG_DIR)
     }
 
     /// Takes a stored remote configuration out of force for a Supervisor whose remote
-    /// configuration is switched off (ADR-0018 clause 49): each entry file, and `.supplementary`,
+    /// configuration is switched off (ADR-0046 clause 49): each entry file, and `.supplementary`,
     /// whose bytes are still the ones the stored map would write is deleted, every other file in
     /// `config/` stays, and `remote-config.pb` goes. A `.pb` that does not decode is deleted and
     /// `config/` is left alone. `None` when nothing was stored.
@@ -198,7 +198,7 @@ impl Storage {
 
 impl Storage {
     /// Takes the Client's own stored Supervisor set out of the way on a host that keeps its set
-    /// (ADR-0018 clause 41): `remote-config.pb` goes **first**, so nothing that fails after it can
+    /// (ADR-0046 clause 41): `remote-config.pb` goes **first**, so nothing that fails after it can
     /// leave a hash to report, and then each entry copy in `config/` whose bytes are still the
     /// stored ones goes as far as it can. Nothing runs on the copies, so one that cannot be read
     /// or deleted is named in the result, not an error. A `.pb` that does not decode is deleted
@@ -240,7 +240,7 @@ impl Storage {
     }
 }
 
-/// What [`Storage::drop_stored_set`] found and did (ADR-0018 clause 41).
+/// What [`Storage::drop_stored_set`] found and did (ADR-0046 clause 41).
 #[derive(Debug, PartialEq, Eq)]
 pub enum DroppedStoredSet {
     /// `remote-config.pb` is gone, and so is every entry copy still as stored; `kept` names the
@@ -255,7 +255,7 @@ pub enum DroppedStoredSet {
     Undecodable,
 }
 
-/// What [`Storage::drop_remote_config`] found and did (ADR-0018 clause 49).
+/// What [`Storage::drop_remote_config`] found and did (ADR-0046 clause 49).
 #[derive(Debug, PartialEq, Eq)]
 pub enum DroppedRemoteConfig {
     /// The stored configuration and the files it wrote are gone; `kept` names the files
@@ -352,7 +352,7 @@ impl AgentStorage for Storage {
             write_shared(&config_dir.join(file_name), &body, self.config_group())?;
         }
         // Last: a store cut short leaves the previous `.pb`, never a new one beside the previous
-        // offer's files, which `drop_remote_config` would keep as the operator's (ADR-0018
+        // offer's files, which `drop_remote_config` would keep as the operator's (ADR-0046
         // clause 31).
         write_private(&self.dir.join(CONFIG_PB_FILE), &config.encode_to_vec())
     }
@@ -2170,7 +2170,7 @@ mod tests {
     /// Every entry is written through a temporary name and a rename, and that name is never one an
     /// entry is stored under: an entry named like another's temporary file stays on disk in
     /// whichever order the map yields the two.
-    /// Verifies: ADR-0018, ADR-0021
+    /// Verifies: ADR-0046, ADR-0021
     #[test]
     fn no_entry_is_lost_to_another_entrys_temporary_name() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2189,7 +2189,7 @@ mod tests {
 
     /// An entry replaced by a rename is a new file: it belongs to the account the Client runs as,
     /// and it is owner-only like the one it replaces, whatever mode that one was left at.
-    /// Verifies: ADR-0018, ADR-0021
+    /// Verifies: ADR-0046, ADR-0021
     #[cfg(unix)]
     #[test]
     fn a_replaced_entry_is_the_runtimes_own_and_owner_only() {
@@ -2351,8 +2351,8 @@ mod tests {
     /// A configuration means the same on every host, so an entry name Windows cannot hold as a
     /// file — a device name, with or without an extension, or a name ending in a dot — is refused
     /// on every host, and the previous offer's files stay as they were. The refusal is what the
-    /// Agent reports `FAILED` with (ADR-0018 clause 7).
-    /// Verifies: ADR-0018
+    /// Agent reports `FAILED` with (ADR-0046 clause 7).
+    /// Verifies: ADR-0046
     #[test]
     fn an_entry_name_windows_cannot_hold_is_refused_on_every_host() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2381,7 +2381,7 @@ mod tests {
     /// Two entries that would land in one file — equal once mapped, or equal to a case-insensitive
     /// file system — are refused rather than one silently overwriting the other in an order the map
     /// decides.
-    /// Verifies: ADR-0018
+    /// Verifies: ADR-0046
     #[test]
     fn entries_that_would_share_a_file_are_refused() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2419,10 +2419,10 @@ mod tests {
 
     /// A store cut short leaves the previous `remote-config.pb`, never a new one beside the
     /// previous offer's files: the drop then still reads the previous map and deletes what it
-    /// wrote instead of keeping it as the operator's (ADR-0018 clause 49). The store is stopped
+    /// wrote instead of keeping it as the operator's (ADR-0046 clause 49). The store is stopped
     /// by a directory standing where the next offer's entry file goes — `create_private_dir`
     /// resets the mode of `config/`, so a failed removal cannot be staged from here.
-    /// Verifies: ADR-0018
+    /// Verifies: ADR-0046
     #[test]
     fn a_store_cut_short_leaves_no_previous_entry_file_beside_a_new_pb() {
         let dir = tempfile::tempdir().expect("tempdir");

@@ -154,7 +154,7 @@ async fn a_signed_package_is_downloaded_verified_swapped_and_reported_installed(
 
     // The managed binary starts as a copy of the stub, in the Supervisor's own `program/`
     // directory — which is what a bare `command` names, and what consents to the update
-    // (ADR-0018). The package swap replaces it there.
+    // (ADR-0046). The package swap replaces it there.
     let state_dir = dir.path().join("client-state");
     let program_dir = state_dir.join("supervisors/myagent/program");
     std::fs::create_dir_all(&program_dir).expect("create the program dir");
@@ -236,7 +236,7 @@ async fn a_signed_package_is_downloaded_verified_swapped_and_reported_installed(
         .exists());
 }
 
-/// ADR-0018 clause 54's preflight, reached through the `command` kind's own configuration: `version_args`
+/// ADR-0046 clause 54's preflight, reached through the `command` kind's own configuration: `version_args`
 /// is the arguments an operator has declared safe to invoke the program with, so they are also
 /// what proves a *staged* program runs before the running one is stopped.
 ///

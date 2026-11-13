@@ -70,7 +70,7 @@ fn ensure_safe_package_name(name: &str) -> Result<(), String> {
 /// The artifact is a program — tens or hundreds of megabytes — so it is streamed to `staging_dir`
 /// and hashed as it arrives, never assembled in memory or read back: the signature covers the
 /// Agent type, the version and that hash, not the bytes themselves. `staging_dir` is the
-/// receiving Agent's own (ADR-0018), so the install that follows is a rename inside one
+/// receiving Agent's own (ADR-0046), so the install that follows is a rename inside one
 /// filesystem.
 /// Verifies: ADR-0034
 pub async fn download_and_verify(

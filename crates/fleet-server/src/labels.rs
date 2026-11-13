@@ -25,7 +25,7 @@ use opamp::proto::AgentDescription;
 /// The key prefix only the Server fills (ADR-0030 clause 20).
 pub const RESERVED_PREFIX: &str = "fleet.";
 
-/// The attribute prefix only a Client's own Agent reports (ADR-0018 clause 18), which recognises
+/// The attribute prefix only a Client's own Agent reports (ADR-0046 clause 18), which recognises
 /// it as the Client Agent (ADR-0030 clause 19).
 pub const CLIENT_KIND_PREFIX: &str = "supervisor.kind.";
 
@@ -192,7 +192,7 @@ pub fn ignored(description: Option<&AgentDescription>) -> Vec<String> {
         .collect()
 }
 
-/// Whether this is a Client's own Agent: it alone reports `supervisor.kind.*` (ADR-0018
+/// Whether this is a Client's own Agent: it alone reports `supervisor.kind.*` (ADR-0046
 /// clause 18, ADR-0030 clause 19).
 pub fn is_client_agent(description: Option<&AgentDescription>) -> bool {
     description.is_some_and(|description| {

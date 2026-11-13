@@ -3,7 +3,7 @@
 //!
 //! Transport-agnostic on purpose (ADR-0012): the WebSocket and plain-HTTP loops feed the same
 //! state machine, so transport is carriage, never semantics. The [`Engine`](crate::engine)
-//! carries n of these over one connection (ADR-0016, ADR-0018) — a Supervisor-backed Agent and
+//! carries n of these over one connection (ADR-0016, ADR-0046) — a Supervisor-backed Agent and
 //! the self-Agent fallback are the same state machine.
 
 mod connection_settings;
@@ -50,7 +50,7 @@ pub const AGENT_CAPABILITIES: u64 = AgentCapabilities::ReportsStatus as u64
     | AgentCapabilities::ReportsOwnLogs as u64;
 
 /// What a Supervisor's Agent declares when the operator switched its remote configuration off
-/// (ADR-0018 clause 47): the base set without either remote-configuration bit.
+/// (ADR-0046 clause 47): the base set without either remote-configuration bit.
 pub const AGENT_CAPABILITIES_WITHOUT_REMOTE_CONFIG: u64 = AGENT_CAPABILITIES
     & !(AgentCapabilities::AcceptsRemoteConfig as u64
         | AgentCapabilities::ReportsRemoteConfig as u64);
@@ -97,21 +97,21 @@ pub struct AgentState {
     storage: Box<dyn AgentStorage>,
     /// A received configuration awaiting dispatch to the process adapter.
     pending_apply: Option<AgentRemoteConfig>,
-    /// The self-Agent's configuration in flight (ADR-0018): stored only once the apply succeeded,
+    /// The self-Agent's configuration in flight (ADR-0046): stored only once the apply succeeded,
     /// so a Client restarted mid-apply reports nothing as applied and is re-offered — a status of
     /// `APPLIED` on restart must mean the file was actually rewritten.
     applying: Option<AgentRemoteConfig>,
     /// A Server-commanded restart awaiting dispatch to the process adapter.
     pending_restart: bool,
     /// The SHA-256 of each remote configuration hash ignored since start, when the operator
-    /// switched remote configuration off for this Agent (ADR-0018); `None` when it takes
+    /// switched remote configuration off for this Agent (ADR-0046); `None` when it takes
     /// them. A digest and not the hash itself, and at most [`IGNORED_CONFIGS_CAP`] of them,
     /// because the hash is whatever the Server sends.
     ignored_configs: Option<std::collections::HashSet<[u8; 32]>>,
 }
 
 /// How many ignored remote configuration hashes a Supervisor with remote configuration switched
-/// off remembers before it starts over (ADR-0018 clause 48).
+/// off remembers before it starts over (ADR-0046 clause 48).
 const IGNORED_CONFIGS_CAP: usize = 1024;
 
 /// A Server-sent hash as a log field: hex, cut after its first 32 bytes, since its length is the
@@ -144,7 +144,7 @@ struct Local {
     /// A Managed Process stands behind this Agent: a received configuration is acknowledged
     /// `APPLYING` and handed to the process adapter; `APPLIED`/`FAILED` follow its outcome.
     managed: bool,
-    /// The Managed Process's health — derived or self-reported (ADR-0018). Absent for the
+    /// The Managed Process's health — derived or self-reported (ADR-0046). Absent for the
     /// self-Agent, whose health is being alive.
     process_health: Option<ComponentHealth>,
     /// The Managed Process's self-reported description, folded into ours (goal 16).
@@ -230,7 +230,7 @@ impl AgentState {
         Self::restore(instance_name, storage, host, true)
     }
 
-    /// The Client's own Agent on a host that keeps its Supervisor set from the Server (ADR-0018):
+    /// The Client's own Agent on a host that keeps its Supervisor set from the Server (ADR-0046):
     /// it declares neither `AcceptsRemoteConfig` nor `ReportsRemoteConfig`, restores no stored
     /// set, and ignores a set that arrives anyway. Every other capability is the one
     /// [`new`](Self::new) declares.
@@ -243,7 +243,7 @@ impl AgentState {
     }
 
     /// [`new`](Self::new), with `remote_config` saying whether this Agent takes remote
-    /// configuration at all (ADR-0018): without it the Agent declares neither remote-configuration
+    /// configuration at all (ADR-0046): without it the Agent declares neither remote-configuration
     /// capability, restores no stored configuration, and ignores every offer.
     fn restore(
         instance_name: String,
@@ -306,7 +306,7 @@ impl AgentState {
         })
     }
 
-    /// An Agent with a Managed Process behind it (a Supervisor-backed Agent, ADR-0018). Only
+    /// An Agent with a Managed Process behind it (a Supervisor-backed Agent, ADR-0046). Only
     /// such an Agent accepts a restart command — the self-Agent has no process to restart.
     ///
     /// The type is a parameter rather than a builder default because there is no sensible default
@@ -323,7 +323,7 @@ impl AgentState {
     }
 
     /// A Supervisor-backed Agent whose remote configuration the operator switched off
-    /// (ADR-0018): it declares neither `AcceptsRemoteConfig` nor `ReportsRemoteConfig`, restores
+    /// (ADR-0046): it declares neither `AcceptsRemoteConfig` nor `ReportsRemoteConfig`, restores
     /// no stored configuration, and ignores an offer that arrives anyway. Built without the bits
     /// rather than stripped of them afterwards, because a declared capability only ever grows.
     pub fn supervised_without_remote_config(
@@ -494,7 +494,7 @@ impl AgentState {
 
         if let Some(remote_config) = received.remote_config {
             if let Some(ignored) = &mut self.ignored_configs {
-                // Not declared, so not acted on and not reported (ADR-0018 clauses 3 and 48); said once per hash, so a Server resending its offer on every exchange
+                // Not declared, so not acted on and not reported (ADR-0046 clauses 3 and 48); said once per hash, so a Server resending its offer on every exchange
                 // does not flood the log.
                 use sha2::Digest as _;
                 let seen: [u8; 32] = sha2::Sha256::digest(&remote_config.config_hash).into();
@@ -512,7 +512,7 @@ impl AgentState {
                              off for this supervisor in [supervisors] remote_config_disabled"
                         );
                     } else {
-                        // The Client's own Agent, offered a Supervisor set (ADR-0018 clause 40).
+                        // The Client's own Agent, offered a Supervisor set (ADR-0046 clause 40).
                         warn!(
                             hash = %logged_hash(&remote_config.config_hash),
                             "ignoring a supervisor set: this Client keeps its supervisor set \
@@ -2771,7 +2771,7 @@ mod tests {
     }
 
     /// The self-Agent's offer is acknowledged `APPLYING` and left pending for the Engine's
-    /// Supervisor-set apply (ADR-0018); the verdict closes the lifecycle, and only then does the
+    /// Supervisor-set apply (ADR-0046); the verdict closes the lifecycle, and only then does the
     /// configuration echo as effective.
     /// Verifies: ADR-0013
     #[test]
@@ -2801,7 +2801,7 @@ mod tests {
     }
 
     /// A restart reports `APPLIED` only for a configuration whose apply actually finished
-    /// (ADR-0018): the offer is persisted on the verdict, never on receipt, so a Client
+    /// (ADR-0046): the offer is persisted on the verdict, never on receipt, so a Client
     /// restarted mid-apply reports nothing and the Server offers again.
     #[test]
     fn the_applied_config_survives_a_restart() {
@@ -3067,8 +3067,8 @@ mod tests {
     }
 
     /// A listed Supervisor's Agent is built without either remote-configuration bit, and keeps
-    /// every other capability a Supervisor declares (ADR-0018 clause 47).
-    /// Verifies: ADR-0018
+    /// every other capability a Supervisor declares (ADR-0046 clause 47).
+    /// Verifies: ADR-0046
     #[test]
     fn a_supervisor_with_remote_config_disabled_declares_neither_remote_config_capability() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3092,8 +3092,8 @@ mod tests {
     }
 
     /// An offer that arrives anyway is ignored: nothing stored, no entry file, nothing pending for
-    /// the process adapter, and no status reported (ADR-0018 clause 48).
-    /// Verifies: ADR-0018
+    /// the process adapter, and no status reported (ADR-0046 clause 48).
+    /// Verifies: ADR-0046
     #[test]
     fn a_remote_config_offered_anyway_is_neither_stored_nor_applied_nor_reported() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3122,8 +3122,8 @@ mod tests {
         assert!(agent.next_report().remote_config_status.is_none());
     }
 
-    /// The warning about an ignored offer is said once per hash seen since start (ADR-0018 clause 30), so a Server resending the same offer does not flood the log.
-    /// Verifies: ADR-0018
+    /// The warning about an ignored offer is said once per hash seen since start (ADR-0046 clause 30), so a Server resending the same offer does not flood the log.
+    /// Verifies: ADR-0046
     #[test]
     fn an_ignored_remote_config_is_logged_once_per_hash() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3148,8 +3148,8 @@ mod tests {
 
     /// What an ignored offer leaves behind is bounded whatever the Server sends: at most
     /// `IGNORED_CONFIGS_CAP` remembered digests however many distinct hashes arrive, and a long
-    /// hash cut short in the log (ADR-0018 clause 48).
-    /// Verifies: ADR-0018
+    /// hash cut short in the log (ADR-0046 clause 48).
+    /// Verifies: ADR-0046
     #[test]
     fn what_ignored_remote_configs_leave_behind_is_bounded() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3186,8 +3186,8 @@ mod tests {
 
     /// The Client's own Agent on a host that keeps its set is built without either
     /// remote-configuration bit and keeps everything else it declares, self-update included
-    /// (ADR-0018 clause 39).
-    /// Verifies: ADR-0018
+    /// (ADR-0046 clause 39).
+    /// Verifies: ADR-0046
     #[test]
     fn the_own_agent_of_a_host_that_keeps_its_set_declares_neither_remote_config_capability() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3215,8 +3215,8 @@ mod tests {
     }
 
     /// A set offered anyway is not stored, not handed to the Supervisor-set apply, and not
-    /// answered (ADR-0018 clause 40).
-    /// Verifies: ADR-0018
+    /// answered (ADR-0046 clause 40).
+    /// Verifies: ADR-0046
     #[test]
     fn a_set_offered_anyway_to_a_host_that_keeps_it_is_neither_stored_nor_applied_nor_reported() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3248,8 +3248,8 @@ mod tests {
     }
 
     /// The warning about an ignored set is said once per hash and names the key that keeps the
-    /// set on the host (ADR-0018 clause 40).
-    /// Verifies: ADR-0018
+    /// set on the host (ADR-0046 clause 40).
+    /// Verifies: ADR-0046
     #[test]
     fn a_set_ignored_by_a_host_that_keeps_it_is_logged_once_per_hash() {
         let dir = tempfile::tempdir().expect("tempdir");

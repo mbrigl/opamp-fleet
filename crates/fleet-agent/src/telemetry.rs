@@ -7,7 +7,7 @@
 //!
 //! What "own" means here is what this Client can honestly observe: its own process, and the
 //! Managed Processes it spawned and holds the pids of. It does **not** reach into a Collector's
-//! internal telemetry the way upstream's supervisor does — ADR-0018 forbids this Client from
+//! internal telemetry the way upstream's supervisor does — ADR-0046 forbids this Client from
 //! touching a Managed Process's configuration, and the specification's non-goal forbids inventing
 //! an abstraction over it.
 //!

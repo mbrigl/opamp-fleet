@@ -26,7 +26,7 @@ protox = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "1"
-# Format-preserving TOML editing (ADR-0018): rewriting `client.toml`'s `[[supervisor]]` blocks
+# Format-preserving TOML editing (ADR-0046): rewriting `client.toml`'s `[[supervisor]]` blocks
 # must not destroy the operator's comments and layout in the rest of the file.
 toml_edit = "0.25"
 futures-util = "0.3"
@@ -79,7 +79,7 @@ zeroize = "1.9.1"
 base64 = "0.23"
 # Constant-time credential comparison on the Server (ADR-0040).
 constant_time_eq = "0.6"
-# kill(2) for the graceful SIGTERM stop of Managed Processes (ADR-0018). Unix-only.
+# kill(2) for the graceful SIGTERM stop of Managed Processes (ADR-0046). Unix-only.
 libc = "0.2"
 # The Client's WebSocket transport; rustls enables `wss://` (ADR-0012).
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }

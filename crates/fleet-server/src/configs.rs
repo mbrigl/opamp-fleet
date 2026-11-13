@@ -90,7 +90,7 @@ pub struct ConfigEntry {
 #[derive(Clone)]
 pub struct DesiredConfig {
     /// The entries, sorted by name — deterministic like the entry order the Managed Process sees
-    /// (the Collector receives them as one `--config` per entry, ADR-0018).
+    /// (the Collector receives them as one `--config` per entry, ADR-0046).
     pub entries: Vec<ConfigEntry>,
     /// SHA-256 over the length-prefixed `(name, body, role)` triples in name order.
     pub hash: Vec<u8>,

@@ -1,4 +1,4 @@
-//! The supervision `Runner` (ADR-0018) across everything it does *to a host*: spawn and watchdog,
+//! The supervision `Runner` (ADR-0046) across everything it does *to a host*: spawn and watchdog,
 //! the health-gated apply, the binary swap and its rollback (ADR-0034), and the tree install
 //! (ADR-0034).
 //!
@@ -382,7 +382,7 @@ async fn the_directories_an_agent_writes_into_are_made_before_it_runs(via: Via) 
 both!(the_directories_an_agent_writes_into_are_made_before_it_runs);
 
 /// A program named by a **relative** path starts, though the process begins in its own directory
-/// (ADR-0018).
+/// (ADR-0046).
 ///
 /// `Command` does `chdir` *before* `exec` on Unix, so a relative program is resolved against the
 /// directory it was just moved into: `<dir>/<dir>/<program>`, which is nothing. The Client's own
@@ -885,7 +885,7 @@ fn the_second_service_does_not_listen_while_it_is_traced() {
     assert!(!socket.exists(), "it listened while it was traced");
 }
 
-// ── Reload and uninstall (ADR-0018) ──────────────────────────────────────────
+// ── Reload and uninstall (ADR-0046) ──────────────────────────────────────────
 
 /// The pid the spawn reported — how these tests tell a kept process from a fresh one.
 #[cfg(unix)]
@@ -990,7 +990,7 @@ async fn the_managed_process_is_handed_the_endpoint_token(via: Via) {
 }
 both!(the_managed_process_is_handed_the_endpoint_token);
 
-/// A kind that declared a reload applies a configuration in place (ADR-0018): the process is
+/// A kind that declared a reload applies a configuration in place (ADR-0046): the process is
 /// signalled, survives the grace, and the apply is acknowledged without a restart — the process
 /// that was running is still the one running.
 #[cfg(unix)]
@@ -1041,10 +1041,10 @@ both!(
     a_declared_reload_applies_without_a_restart
 );
 
-/// `reload-or-restart` (ADR-0018): a process that dies on its reload signal — the stub without
+/// `reload-or-restart` (ADR-0046): a process that dies on its reload signal — the stub without
 /// `--ignore-hup` keeps SIGHUP's default disposition, termination — is restarted on the new
 /// files, and the apply is acknowledged from that restart rather than failed.
-// Verifies: ADR-0018
+// Verifies: ADR-0046
 #[cfg(unix)]
 async fn a_process_that_dies_on_the_reload_signal_is_restarted_instead(via: Via) {
     let mut harness = runner_full(
@@ -1075,9 +1075,9 @@ both!(
     a_process_that_dies_on_the_reload_signal_is_restarted_instead
 );
 
-/// The generic uninstall (ADR-0018): the graceful stop plus the answer, which is the adapter's
+/// The generic uninstall (ADR-0046): the graceful stop plus the answer, which is the adapter's
 /// last event — the adapter exits on the command itself, no shutdown ever fired. The answer
-/// coming last is what lets the core purge the directory only after the kind is done (ADR-0018).
+/// coming last is what lets the core purge the directory only after the kind is done (ADR-0046).
 async fn an_uninstall_stops_the_process_answers_and_exits(via: Via) {
     let mut harness = start(via, || Some(spec(&stub_agent())));
     let health = next_health(&mut harness.events).await;
@@ -1290,7 +1290,7 @@ fn binary_harness(via: Via, binary: &Path, apply_grace: Duration) -> Harness {
     )
 }
 
-/// ADR-0018 clause 54: a package is *proved to run* before it replaces what runs. The check fails here, so
+/// ADR-0046 clause 54: a package is *proved to run* before it replaces what runs. The check fails here, so
 /// nothing is swapped and — the point of the whole exercise — the running process is never stopped
 /// for an artifact that could never have worked. Before this, the sequence was stop, swap, fail to
 /// start, roll back, restart: an outage bought for nothing.
@@ -2635,10 +2635,10 @@ mod an_apply_while_the_second_service_is_away {
     }
 
     /// A restart command while a configuration and a package wait for the second service respawns
-    /// on the current files and does no more (ADR-0018 clause 8): its start, though it reaches the
+    /// on the current files and does no more (ADR-0046 clause 8): its start, though it reaches the
     /// service, acknowledges nothing and swaps nothing in. The retry it makes due at once does
     /// both, with a start of its own that is gated.
-    /// Verifies: ADR-0018, ADR-0021
+    /// Verifies: ADR-0046, ADR-0021
     #[tokio::test]
     async fn a_restart_while_something_waits_only_respawns_and_the_retry_decides() {
         let (mut away, service) = running(&stub_agent(), Duration::from_millis(500)).await;
@@ -2965,7 +2965,7 @@ mod an_apply_while_the_second_service_is_away {
 
     /// A package that waited for the second service without its preflight is refused by the
     /// preflight that runs once the service is back, before anything is stopped: it is reported
-    /// failed, and what ran stays in place (ADR-0021 clause 18, ADR-0018 clause 54).
+    /// failed, and what ran stays in place (ADR-0021 clause 18, ADR-0046 clause 54).
     /// Verifies: ADR-0021
     #[tokio::test]
     async fn a_package_whose_preflight_found_the_service_away_is_refused_once_it_is_back() {
