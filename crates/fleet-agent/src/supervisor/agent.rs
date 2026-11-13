@@ -2961,6 +2961,56 @@ mod tests {
         );
     }
 
+    /// The verdict on a hash handed over before the one applying leaves the status as it is: the
+    /// Agent still reports `APPLYING` the newer hash, so the Server's offer of it again is a
+    /// repeat and is not handed over a second time. The newer hash's own verdict closes it; for a
+    /// Supervisor's Agent and for the Client's own, which stores it then.
+    /// Verifies: ADR-0046
+    #[test]
+    fn a_verdict_on_an_older_hash_leaves_the_status_of_the_one_applying() {
+        let supervised_dir = tempfile::tempdir().expect("tempdir");
+        let own_dir = tempfile::tempdir().expect("tempdir");
+        for mut agent in [
+            supervised_agent(supervised_dir.path()),
+            make_agent(own_dir.path()),
+        ] {
+            let _ = agent.next_report();
+            assert!(config_offered(&mut agent, b"hash-1"));
+            assert!(config_offered(&mut agent, b"hash-2"));
+            let _ = agent.next_report();
+
+            agent.config_applied(b"hash-1".to_vec(), Ok(()));
+            assert_eq!(
+                agent.next_report().remote_config_status,
+                None,
+                "the older hash's verdict does not replace the status of the one applying"
+            );
+            assert!(
+                !config_offered(&mut agent, b"hash-2"),
+                "the offer of the hash applying again is a repeat"
+            );
+            assert_eq!(
+                config_status_reported(&mut agent),
+                (RemoteConfigStatuses::Applying, b"hash-2".to_vec())
+            );
+
+            agent.config_applied(b"hash-2".to_vec(), Ok(()));
+            assert_eq!(
+                config_status_reported(&mut agent),
+                (RemoteConfigStatuses::Applied, b"hash-2".to_vec())
+            );
+        }
+        let restarted = make_agent(own_dir.path()).next_report();
+        assert_eq!(
+            restarted
+                .remote_config_status
+                .expect("a status")
+                .last_remote_config_hash,
+            b"hash-2",
+            "the Client's own Agent stored the hash its verdict applied"
+        );
+    }
+
     /// A hash whose apply failed is applied again when offered again, so a host repaired after
     /// the failure takes it once more; for a Supervisor's Agent and for the Client's own.
     /// Verifies: ADR-0046
