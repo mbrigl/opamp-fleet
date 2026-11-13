@@ -897,6 +897,20 @@ d="$(repo named-quoted-word)"
 echo '# The release sets "unreleased" in README.md to the tag.' >> "$d/.github/workflows/checks.yml"
 expect pass "a quoted word before 'in README.md' is not read as a heading" "$d"
 
+d="$(repo named-comment-wrap)"
+mkdir -p "$d/src"
+printf '//! Built as README.md \342\206\222\n//! "Nowhere" says.\n' > "$d/src/lib.rs"
+layout "$d" "src/"
+expect fail "a reference wrapped under a '//!' comment is joined" "$d" \
+  'src/lib.rs:1: "Nowhere" names no heading of README.md'
+
+d="$(repo named-fenced)"
+# shellcheck disable=SC2016  # the backticks are a Markdown fence, not a command substitution
+printf '\n```\n## Fenced\n```\n' >> "$d/README.md"
+echo "# Runs the docs ($(named README.md Fenced))." >> "$d/.github/workflows/checks.yml"
+expect fail "a heading inside a fenced code block is no heading" "$d" \
+  '.github/workflows/checks.yml:5: "Fenced" names no heading of README.md'
+
 d="$(repo named-beside)"
 mkdir -p "$d/sub"
 printf '# Sub\n\n## Local\n' > "$d/sub/README.md"
@@ -911,6 +925,18 @@ echo "See $(named README Template)." > "$d/sub/notes.md"
 layout "$d" "sub/"
 expect fail "the README beside the file is chosen before the root one" "$d" \
   'sub/notes.md:1: "Template" names no heading of sub/README.md'
+
+d="$(repo named-up)"
+mkdir -p "$d/sub"
+printf '# Sub\n\n## Local\n' > "$d/sub/README.md"
+echo "See $(named ../README.md Template)." > "$d/sub/notes.md"
+layout "$d" "sub/"
+expect pass "a file name after '../' is a path, past the README beside the file" "$d"
+
+d="$(repo named-up-missing)"
+echo "# Runs the docs ($(named ../README.md Template))." >> "$d/.github/workflows/checks.yml"
+expect fail "a path to a document that does not exist" "$d" \
+  '.github/workflows/checks.yml:5: "Template" names a section of ../README.md, which does not exist'
 
 d="$(repo named-root)"
 mkdir -p "$d/sub"
