@@ -651,6 +651,80 @@ mod tests {
         contract(&|| Box::new(PgDeploymentBackend::new(database.clone())));
     }
 
+    /// A stored Deployment is loaded by the rules it was written by (ADR-0023 clause 6). A
+    /// Package reference with a field no write puts there is refused. A second Package of one
+    /// Agent type is refused in the words the write refuses it with, rather than loaded with the
+    /// last one kept. Each refusal names the file.
+    /// Verifies: ADR-0023
+    #[test]
+    fn a_stored_deployment_is_held_to_the_write_rules_on_the_filesystem() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = FsDeploymentBackend::open(dir.path()).expect("open");
+        store
+            .put(&deployment("stable", Some("1.2.3"), &[]))
+            .expect("put");
+        let write = store
+            .amend(
+                "stable",
+                &Change::PutPackage {
+                    id: id("1.3.0"),
+                    replace: false,
+                },
+            )
+            .expect_err("the write refuses a second Package of the type")
+            .to_string();
+        let file = dir.path().join("deployments/stable.json");
+        let written = std::fs::read(&file).expect("read");
+        let plant = |change: &dyn Fn(&mut serde_json::Value)| {
+            let mut meta: serde_json::Value = serde_json::from_slice(&written).expect("json");
+            change(&mut meta["packages"]);
+            std::fs::write(&file, meta.to_string()).expect("write");
+            store.load().map(|_| ()).expect_err("refused")
+        };
+
+        let unknown = plant(&|packages| packages[0]["extra"] = 1.into());
+        assert!(unknown.contains("stable.json"), "{unknown}");
+        assert!(unknown.contains("unknown field `extra`"), "{unknown}");
+        let second = plant(&|packages| {
+            packages
+                .as_array_mut()
+                .expect("packages")
+                .push(serde_json::json!({"agent_type": "otelcol", "version": "1.3.0"}));
+        });
+        assert!(second.contains("stable.json"), "{second}");
+        assert!(second.ends_with(&write), "{second}");
+    }
+
+    /// The database cannot hold what the filesystem test plants: a Package of a Deployment is a
+    /// row of two columns keyed by its Agent type, so a second of one type is refused by the
+    /// database itself, and no field beside the two has a place.
+    /// Verifies: ADR-0023
+    #[test]
+    fn a_second_package_of_one_agent_type_cannot_be_stored_on_postgres() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        store_members(&test);
+        put(
+            &PgDeploymentBackend::new(database.clone()),
+            &deployment("stable", Some("1.2.3"), &[]),
+        );
+        let planted = database.run(|pool| async move {
+            client(&pool)
+                .await?
+                .execute(
+                    "INSERT INTO deployment_packages (deployment, agent_type, version) \
+                     VALUES ('stable', 'otelcol', '1.3.0')",
+                    &[],
+                )
+                .await
+                .map_err(sql)
+        });
+        let err = planted.expect_err("refused by the database");
+        assert!(err.contains("(23505)"), "a unique violation: {err}");
+    }
+
     /// A Deployment created with its member through another instance between the statements of
     /// `load` is read whole or not at all: the members are read in the snapshot the Deployments
     /// were, so none names a Deployment the read did not see, and the load does not fail.

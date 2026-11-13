@@ -177,6 +177,34 @@ pub struct Assignment {
     pub configurations: BTreeMap<String, String>,
 }
 
+impl Assignment {
+    /// Whether a stored assignment keeps the rules its write met, which both stores ask on load
+    /// (ADR-0023 clause 4): the Deployment's and each Configuration's name keep the name grammar
+    /// of [`validate_name`](crate::configs::validate_name), and each pinned revision is named by
+    /// a content hash, the form [`revision_hash`](crate::configs::revision_hash) gives. Whether
+    /// the revision is still retained is not asked. Each store names the record before the
+    /// message.
+    ///
+    /// # Errors
+    /// Returns the rule the assignment breaks.
+    pub fn check(&self) -> Result<(), String> {
+        let deployment = &self.deployment;
+        crate::configs::validate_name(deployment)
+            .map_err(|e| format!("the assignment's deployment {deployment:?}: {e}"))?;
+        for (name, revision) in &self.configurations {
+            crate::configs::validate_name(name)
+                .map_err(|e| format!("the assignment's configuration {name:?}: {e}"))?;
+            if !crate::blobs::is_hash(revision) {
+                return Err(format!(
+                    "the assignment's configuration {name:?}: revision {revision:?} is no content \
+                     hash, 64 lowercase hexadecimal digits"
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// The configuration map of an Agent nothing was rolled out to.
 static NO_CONFIGURATIONS: BTreeMap<String, String> = BTreeMap::new();
 

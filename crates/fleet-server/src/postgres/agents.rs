@@ -1216,7 +1216,8 @@ fn configurations_of(
         .map_err(|e| format!("the assignment's Configurations: {e}"))
 }
 
-/// The assignment the assignment's columns of one row and its Configurations make.
+/// The assignment the assignment's columns of one row and its Configurations make, held to the
+/// rules its write met ([`Assignment::check`]).
 fn assignment_of(
     deployment: Option<String>,
     agent_type: Option<String>,
@@ -1232,11 +1233,15 @@ fn assignment_of(
         _ => return Err("half a package in the assignment".to_string()),
     };
     match deployment {
-        Some(deployment) => Ok(Some(Assignment {
-            deployment,
-            package,
-            configurations,
-        })),
+        Some(deployment) => {
+            let assignment = Assignment {
+                deployment,
+                package,
+                configurations,
+            };
+            assignment.check()?;
+            Ok(Some(assignment))
+        }
         None if package.is_none() && configurations.is_empty() => Ok(None),
         None => Err("an assignment without its Deployment".to_string()),
     }
@@ -1726,7 +1731,7 @@ mod tests {
         assert_eq!(reopened.pinning(Pin::Deployment("stable")), 2);
         assert_eq!(
             reopened.referenced_revisions("base"),
-            BTreeSet::from(["0123abcd".to_string(), revision_hash(&pinned)])
+            BTreeSet::from(["0123abcd".repeat(8), revision_hash(&pinned)])
         );
 
         // The acts that decide the labels and a queued restart write them, and one Agent is read
@@ -1852,7 +1857,7 @@ mod tests {
         re_released.assignment = Some(Assignment {
             deployment: "canary".to_string(),
             package: None,
-            configurations: BTreeMap::from([("other".to_string(), "4567cdef".to_string())]),
+            configurations: BTreeMap::from([("other".to_string(), "4567cdef".repeat(8))]),
         });
         a.release(&[], &[(uid, re_released)])
             .expect("re-released through A");
@@ -2034,7 +2039,7 @@ mod tests {
         let assignment = Assignment {
             deployment: "canary".to_string(),
             package: None,
-            configurations: BTreeMap::from([("edge".to_string(), "4567cdef".to_string())]),
+            configurations: BTreeMap::from([("edge".to_string(), "4567cdef".repeat(8))]),
         };
         let stale = PersistedAgent {
             sequence_num: 1,
@@ -2100,6 +2105,99 @@ mod tests {
                 all.into_iter()
                     .map(|(uid, stored)| (uid, stored.record))
                     .collect()
+            },
+        );
+    }
+
+    /// A stored assignment is loaded by the rules its write met, on either store. `plant` stores
+    /// the assignment of `uid` as each case names it — its Deployment, its one Configuration and
+    /// that one's revision — and every read in `reads` is refused in the words of
+    /// [`Assignment::check`], naming the record. Whether a revision is still retained is not
+    /// asked, so the well-formed hash `put` pins is retained by no Configuration.
+    fn assignments_are_held_to_the_write_rules(
+        store: &dyn AgentStore,
+        plant: &dyn Fn(&InstanceUid, &str, &str, &str),
+        reads: &dyn Fn() -> Vec<Result<(), String>>,
+    ) {
+        let hash = "0".repeat(64);
+        let cases = [
+            ("Stable", "base", hash.as_str()),
+            ("stable", "Base", hash.as_str()),
+            ("stable", "base", "0123abcd"),
+        ];
+        for (deployment, configuration, revision) in cases {
+            let uid = InstanceUid::default();
+            let mut held = record();
+            held.assignment = Some(Assignment {
+                deployment: "stable".to_string(),
+                package: None,
+                configurations: BTreeMap::from([("base".to_string(), hash.clone())]),
+            });
+            store.put(&uid, &held).expect("put");
+            assert!(reads().iter().all(Result::is_ok), "a well-formed one loads");
+            plant(&uid, deployment, configuration, revision);
+            let core = Assignment {
+                deployment: deployment.to_string(),
+                package: None,
+                configurations: BTreeMap::from([(configuration.to_string(), revision.to_string())]),
+            }
+            .check()
+            .expect_err("the core refuses it");
+            for read in reads() {
+                let err = read.expect_err("refused");
+                assert!(err.ends_with(&core), "{err}");
+                assert!(err.contains(&uid.to_string()), "the record is named: {err}");
+            }
+            store.remove(&uid).expect("remove");
+        }
+    }
+
+    /// Verifies: ADR-0023, ADR-0033
+    #[test]
+    fn stored_assignments_are_held_to_the_write_rules_on_the_filesystem() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let open = || FsAgentStore::open(dir.path()).expect("open");
+        assignments_are_held_to_the_write_rules(
+            &open(),
+            &|uid, deployment, configuration, revision| {
+                let file = dir.path().join(format!("agents/{uid}.json"));
+                let mut envelope: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&file).expect("read")).expect("json");
+                envelope["assignment"] = serde_json::json!({
+                    "deployment": deployment,
+                    "configurations": {configuration: revision},
+                });
+                std::fs::write(&file, envelope.to_string()).expect("write");
+            },
+            &|| vec![open().load().map(|_| ())],
+        );
+    }
+
+    /// Opening the adapter reads the assignments alone, and the load reads every record: both
+    /// are refused.
+    /// Verifies: ADR-0023, ADR-0033
+    #[test]
+    fn stored_assignments_are_held_to_the_write_rules_on_postgres() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        assignments_are_held_to_the_write_rules(
+            &PgAgentStore::new(database.clone()),
+            &|uid, deployment, configuration, revision| {
+                test.sql(&format!(
+                    "UPDATE agents SET deployment = '{deployment}' \
+                     WHERE instance_uid = '{uid}'; \
+                     UPDATE agent_assignment_configurations SET \
+                     configuration = '{configuration}', revision = '{revision}' \
+                     WHERE instance_uid = '{uid}'"
+                ));
+            },
+            &|| {
+                vec![
+                    PgAgentStore::open(database.clone()).map(|_| ()),
+                    PgAgentStore::new(database.clone()).load().map(|_| ()),
+                ]
             },
         );
     }
@@ -2604,7 +2702,7 @@ mod tests {
         assert_eq!(opened.pinning(Pin::Deployment("stable")), 1);
         assert_eq!(
             opened.referenced_revisions("base"),
-            BTreeSet::from(["0123abcd".to_string()])
+            BTreeSet::from(["0123abcd".repeat(8)])
         );
     }
 
@@ -2656,7 +2754,10 @@ mod tests {
         let store = Arc::new(PgAgentStore::new(database.clone()));
         let uid = InstanceUid([7; 16]);
         store.put(&uid, &record()).expect("put");
-        let mut states = [pair("stable", "0123abcd"), pair("canary", "4567cdef")];
+        let mut states = [
+            pair("stable", &"0123abcd".repeat(8)),
+            pair("canary", &"4567cdef".repeat(8)),
+        ];
         // Each race rolls the Agent over to the other state.
         let mut race =
             |label: &str,
@@ -2777,12 +2878,13 @@ mod tests {
         while !test.waits_for(key) {
             assert!(std::time::Instant::now() < deadline, "never waits");
         }
-        test.sql(
+        test.sql(&format!(
             "UPDATE agents SET deployment = 'canary'; \
-             UPDATE held_configurations SET revision = '4567cdef'",
-        );
+             UPDATE held_configurations SET revision = '{}'",
+            "4567cdef".repeat(8)
+        ));
         gate.open();
-        assert_eq!(answer(), Some(pair("stable", "0123abcd")));
+        assert_eq!(answer(), Some(pair("stable", &"0123abcd".repeat(8))));
     }
 
     /// A record created, a report written and a record imported each carry their derived columns
