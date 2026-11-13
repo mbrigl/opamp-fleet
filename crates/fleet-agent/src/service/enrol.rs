@@ -232,15 +232,24 @@ fn take_answered(config: &mut ClientConfig, answered: &Answered) {
 ///
 /// `service install` and `service config` run as root or an Administrator, and these paths come
 /// from answers whose defaults `supervisor.toml` gives, a file the service's account can rewrite
-/// (ADR-0021 clause 11). So each is read as [`read_privileged`] says, and a file that is no
-/// certificate or no key is named.
+/// (ADR-0021 clause 11). So each is read as [`crate::nofollow::read_privileged`] reads an
+/// administrator's path, and a file that is no certificate or no key is named.
 fn read_once(
     config: &mut ClientConfig,
     bootstrap: &Bootstrap,
     roots: &[&Path],
 ) -> Result<(), String> {
     let state_dir = config.state_dir.clone();
-    let read = |path: &Path| read_privileged(path, roots, Some(&state_dir));
+    let read = |path: &Path| {
+        crate::nofollow::read_privileged(
+            path,
+            roots,
+            Some(&state_dir),
+            crate::nofollow::Named::ByAdministrator,
+            crate::tls::MAX_PEM_BYTES,
+        )
+        .map_err(|e| e.to_string())
+    };
     if let (None, Some(ca)) = (&config.ca_pem, config.ca_file()) {
         config.ca_pem = Some(crate::tls::certificates_in(ca, read(ca)?.to_vec())?);
     }
@@ -253,165 +262,6 @@ fn read_once(
         Bootstrap::Pkcs12 { identity, .. } => identity.clone(),
     });
     Ok(())
-}
-
-/// The most links a privileged read follows on an administrator's path, as Linux's `ELOOP` bound.
-const MAX_LINKS: usize = 40;
-
-/// The file at `path`, read by a privileged step: a regular file of at most
-/// [`crate::tls::MAX_PEM_BYTES`], opened without blocking, so a device or a FIFO is never read.
-///
-/// The roots — the data root and the layout root — and the state directory belong to the
-/// service's account. The path is resolved one component at a time, `..` and every link on the
-/// way included, and each directory it passes is judged:
-///
-/// - **A root or the state directory** that the walk reaches must hold the file directly: the
-///   name after it is opened in that directory, held, and a link at the name is refused. A root
-///   is held as [`HeldDir::open_root`](crate::nofollow::HeldDir::open_root) holds it (ADR-0021
-///   clause 13), the state directory without following a link at its own name (clauses 11
-///   and 12). The state directory directly in a root is reached by that name too, and counts as
-///   the account's where it is missing.
-/// - **A path that goes on beneath one of them** is refused: a directory there could be a link
-///   the account put in place.
-/// - **Anywhere else** the path is the administrator's, and a link on it is followed, at most
-///   [`MAX_LINKS`]. The file is opened by its name in the directory the walk ends in, held.
-pub(crate) fn read_privileged(
-    path: &Path,
-    roots: &[&Path],
-    state_dir: Option<&Path>,
-) -> Result<zeroize::Zeroizing<Vec<u8>>, String> {
-    let named = |why: String| format!("cannot read {}: {why}", path.display());
-    // The roots as resolved; the state directory by its resolved parent and its own name, not
-    // followed, so it counts as the account's even where it is missing or a link.
-    let state = state_dir
-        .and_then(|dir| dir.parent().zip(dir.file_name()))
-        .and_then(|(parent, name)| Some(std::fs::canonicalize(parent).ok()?.join(name)));
-    let owned: Vec<(PathBuf, &Path, bool)> = roots
-        .iter()
-        .filter_map(|root| Some((std::fs::canonicalize(root).ok()?, *root, true)))
-        .chain(
-            state
-                .clone()
-                .zip(state_dir)
-                .map(|(form, dir)| (form, dir, false)),
-        )
-        .collect();
-    let absolute = std::path::absolute(path).map_err(|e| named(e.to_string()))?;
-    let mut pending: std::collections::VecDeque<Part> =
-        absolute.components().map(Part::of).collect();
-    let mut at = PathBuf::new();
-    let mut links = 0;
-    while let Some(next) = pending.pop_front() {
-        match next {
-            Part::Up => {
-                at.pop();
-            }
-            Part::Here => {}
-            Part::Name(name) => {
-                let here = at.join(&name);
-                let meta = std::fs::symlink_metadata(&here).map_err(|e| named(e.to_string()))?;
-                if meta.file_type().is_symlink() {
-                    links += 1;
-                    if links > MAX_LINKS {
-                        return Err(named(format!("more than {MAX_LINKS} links on the way")));
-                    }
-                    let target = std::fs::read_link(&here).map_err(|e| named(e.to_string()))?;
-                    if target.is_absolute() {
-                        at = PathBuf::new();
-                    }
-                    for part in target.components().rev() {
-                        pending.push_front(Part::of(part));
-                    }
-                    continue;
-                }
-                at = here;
-            }
-            // The root, and on Windows the drive.
-            Part::Root(root) => at.push(root),
-        }
-        if pending.is_empty() {
-            break;
-        }
-        // A directory the walk reached: one of the account's holds the file directly, or not at all.
-        let real = std::fs::canonicalize(&at).map_err(|e| named(e.to_string()))?;
-        if let Some((_, dir, root)) = owned.iter().find(|(form, _, _)| *form == real) {
-            // The state directory directly in a root holds its own files, reached by its name.
-            if let (2, Some(Part::Name(sub)), Some(Part::Name(name))) =
-                (pending.len(), pending.front(), pending.back())
-            {
-                if let (Some(dir), true) = (state_dir, state.as_ref() == Some(&real.join(sub))) {
-                    return read_in(crate::nofollow::HeldDir::open(dir), name, &named);
-                }
-            }
-            let (1, Some(Part::Name(name))) = (pending.len(), pending.front()) else {
-                return Err(named(format!(
-                    "it lies beneath {}, which the service's account owns, but not directly in it",
-                    dir.display()
-                )));
-            };
-            let held = if *root {
-                crate::nofollow::HeldDir::open_root(dir)
-            } else {
-                crate::nofollow::HeldDir::open(dir)
-            };
-            return read_in(held, name, &named);
-        }
-    }
-    let (dir, name) = split(&at).map_err(named)?;
-    let held = if dir.parent().is_some() {
-        crate::nofollow::HeldDir::open(dir)
-    } else {
-        crate::nofollow::HeldDir::open_root(dir)
-    };
-    read_in(held, std::ffi::OsStr::new(name), &named)
-}
-
-/// One component of a path being resolved, owned, so a link's target can be put in its place.
-enum Part {
-    Root(std::ffi::OsString),
-    Here,
-    Up,
-    Name(std::ffi::OsString),
-}
-
-impl Part {
-    fn of(component: std::path::Component<'_>) -> Self {
-        use std::path::Component;
-        match component {
-            Component::Prefix(_) | Component::RootDir => Part::Root(component.as_os_str().into()),
-            Component::CurDir => Part::Here,
-            Component::ParentDir => Part::Up,
-            Component::Normal(name) => Part::Name(name.into()),
-        }
-    }
-}
-
-/// The regular file `name` in `held`, read within the bound, a link at the name refused.
-fn read_in(
-    held: std::io::Result<crate::nofollow::HeldDir>,
-    name: &std::ffi::OsStr,
-    named: &impl Fn(String) -> String,
-) -> Result<zeroize::Zeroizing<Vec<u8>>, String> {
-    let name = name
-        .to_str()
-        .ok_or_else(|| named("its name is not UTF-8".to_string()))?;
-    let file = held
-        .and_then(|held| held.open_file(name))
-        .map_err(|e| named(e.to_string()))?;
-    crate::tls::read_opened(file).map_err(named)
-}
-
-/// `path` as its directory and its file name, which must be UTF-8.
-fn split(path: &Path) -> Result<(&Path, &str), String> {
-    let dir = path
-        .parent()
-        .ok_or_else(|| "it names no file".to_string())?;
-    let name = path
-        .file_name()
-        .ok_or_else(|| "it names no file".to_string())?
-        .to_str()
-        .ok_or_else(|| "its name is not UTF-8".to_string())?;
-    Ok((dir, name))
 }
 
 #[cfg(test)]

@@ -155,6 +155,7 @@ impl Beside {
         &self,
         config: &ClientConfig,
         password: Option<&str>,
+        roots: &[&Path],
     ) -> Result<Option<Bootstrap>, String> {
         let p12 = match &self.bootstrap {
             Some(BootstrapFiles::Pkcs12(file)) => Some(file),
@@ -183,7 +184,9 @@ impl Beside {
                         file.display()
                     ));
                 };
-                let identity = crate::tls::pkcs12_identity(file, password)
+                // Beside the program or in `--fleet-files`: the administrator's path.
+                let bytes = read_pkcs12(file, None, (roots, &config.state_dir))?;
+                let identity = crate::tls::pkcs12_identity(file, &bytes, password)
                     .map_err(|e| format!("{}: {e} (--bootstrap-password-file)", file.display()))?;
                 Ok(Some(Bootstrap::Pkcs12 {
                     file: file.clone(),
@@ -335,7 +338,7 @@ pub fn run(
         );
     }
     beside.report();
-    let (answers, bootstrap) = ask(current, enrolled, beside, password)?;
+    let (answers, bootstrap) = ask(current, enrolled, beside, password, account)?;
     let (answers, answered) = copy_ca_beside(answers, path, account.0, Some(account.1))?;
     let copies = copies(&answered);
     if existing {
@@ -435,7 +438,14 @@ fn read_certificates(
     roots: &[&Path],
     state_dir: Option<&Path>,
 ) -> Result<Vec<u8>, String> {
-    let bytes = crate::service::enrol::read_privileged(path, roots, state_dir)?;
+    let bytes = crate::nofollow::read_privileged(
+        path,
+        roots,
+        state_dir,
+        crate::nofollow::Named::ByAdministrator,
+        crate::tls::MAX_PEM_BYTES,
+    )
+    .map_err(|e| e.to_string())?;
     let certificates = opamp::tls::certificates(&bytes).map_err(|_| {
         format!(
             "{} is not a CA file: it holds no PEM certificate",
@@ -621,6 +631,7 @@ pub fn ask(
     enrolled: bool,
     beside: &Beside,
     password: Option<&str>,
+    account: (&[&Path], &Path),
 ) -> Result<(Answers, Option<Bootstrap>), String> {
     let defaults = Defaults::of(current, beside);
 
@@ -663,10 +674,13 @@ pub fn ask(
         println!("enrolled: this Client holds a certificate the Server issued");
         None
     } else {
+        // The file's own `cert_file`, which the service's account may have written.
+        let offered = current.tls.as_ref().and_then(|t| t.cert_file.as_deref());
         Some(ask_bootstrap(
-            defaults.cert_file,
-            defaults.key_file,
+            (defaults.cert_file, defaults.key_file),
+            offered,
             password,
+            account,
         )?)
     };
 
@@ -705,11 +719,13 @@ pub fn ask(
 
 /// The bootstrap identity: its certificate first, then the key of a PEM certificate, or the
 /// password of a PKCS#12 file — asked with input hidden, and again until the file opens. A file
-/// that is no bootstrap identity sends the question back to its path.
+/// that is no bootstrap identity, or cannot be read, sends the question back to its path.
+/// `offered` is the path the configuration names, which [`read_pkcs12`] holds to its own rule.
 fn ask_bootstrap(
-    cert_default: Option<String>,
-    key_default: Option<String>,
+    (cert_default, key_default): (Option<String>, Option<String>),
+    offered: Option<&Path>,
     password: Option<&str>,
+    account: (&[&Path], &Path),
 ) -> Result<Bootstrap, String> {
     use fleet_core::pkcs12::file::OpenError;
     let mut cert_default = cert_default;
@@ -725,8 +741,17 @@ fn ask_bootstrap(
             )?;
             return Ok(Bootstrap::Pair { cert, key });
         }
+        let bytes = match read_pkcs12(&cert, offered, account) {
+            Ok(bytes) => bytes,
+            Err(why) if password.is_some() => return Err(why),
+            Err(why) => {
+                println!("{why}");
+                cert_default = None;
+                continue;
+            }
+        };
         if let Some(password) = password {
-            let identity = crate::tls::pkcs12_identity(&cert, password)
+            let identity = crate::tls::pkcs12_identity(&cert, &bytes, password)
                 .map_err(|e| format!("{}: {e} (--bootstrap-password-file)", cert.display()))?;
             return Ok(Bootstrap::Pkcs12 {
                 file: cert,
@@ -742,7 +767,7 @@ fn ask_bootstrap(
                     .interact()
                     .map_err(prompt_failed)?,
             );
-            match crate::tls::pkcs12_identity(&cert, &typed) {
+            match crate::tls::pkcs12_identity(&cert, &bytes, &typed) {
                 Ok(identity) => {
                     return Ok(Bootstrap::Pkcs12 {
                         file: cert,
@@ -762,6 +787,36 @@ fn ask_bootstrap(
     }
 }
 
+/// The bootstrap PKCS#12 file at `path`, read by a privileged step as
+/// [`crate::nofollow::read_privileged`] reads it, at most [`fleet_core::pkcs12::MAX_FILE_BYTES`]
+/// of it, with `account` — the roots and the state directory — as the service's account's
+/// (ADR-0021 clause 11). `offered` is the path the configuration names: where `path` is that
+/// one, the questionnaire offered it from a file the account may write, and a link at its name is
+/// refused wherever it lies. Any other path the administrator gave.
+///
+/// # Errors
+/// Returns an error naming the file when it is refused or cannot be read.
+fn read_pkcs12(
+    path: &Path,
+    offered: Option<&Path>,
+    (roots, state_dir): (&[&Path], &Path),
+) -> Result<zeroize::Zeroizing<Vec<u8>>, String> {
+    use crate::nofollow::Named;
+    let named_by = if offered == Some(path) {
+        Named::ByAccountFile
+    } else {
+        Named::ByAdministrator
+    };
+    crate::nofollow::read_privileged(
+        path,
+        roots,
+        Some(state_dir),
+        named_by,
+        fleet_core::pkcs12::MAX_FILE_BYTES,
+    )
+    .map_err(|e| e.to_string())
+}
+
 /// Whether an answered path is read as PKCS#12: by its extension, `.p12` or `.pfx` in any case
 /// (ADR-0027 clause 16).
 #[must_use]
@@ -772,20 +827,28 @@ pub fn is_pkcs12_path(path: &Path) -> bool {
 }
 
 /// The password a password file holds: its first line, without its `\n` or `\r\n` (ADR-0027
-/// clause 18). The file is read once, at most 4 KiB of it, and left as it is. `flag` is the option
-/// that named it, `--bootstrap-password-file` here, for the error. The file's bytes and the
-/// password are held in buffers wiped when they are dropped (ADR-0014).
+/// clause 18). The file is read once and left as it is: the administrator's path, read as
+/// [`crate::nofollow::read_privileged`] reads one with `roots` as the service's account's, and a
+/// file of more than 4 KiB is refused (ADR-0021 clause 11). `flag` is the option that named it,
+/// `--bootstrap-password-file` here, for the error. The file's bytes and the password are held in
+/// buffers wiped when they are dropped (ADR-0014).
 ///
 /// # Errors
 /// Returns an error naming the flag when the file cannot be read or its first line is empty.
-pub fn read_password_file(path: &Path, flag: &str) -> Result<zeroize::Zeroizing<String>, String> {
-    use std::io::Read as _;
-    const LIMIT: usize = 4096;
-    // Sized for all it may read, so it is never grown and left behind.
-    let mut bytes = zeroize::Zeroizing::new(Vec::with_capacity(LIMIT));
-    std::fs::File::open(path)
-        .and_then(|file| file.take(LIMIT as u64).read_to_end(&mut bytes))
-        .map_err(|e| format!("{flag} {}: {e}", path.display()))?;
+pub fn read_password_file(
+    path: &Path,
+    flag: &str,
+    roots: &[&Path],
+) -> Result<zeroize::Zeroizing<String>, String> {
+    const LIMIT: u64 = 4096;
+    let bytes = crate::nofollow::read_privileged(
+        path,
+        roots,
+        None,
+        crate::nofollow::Named::ByAdministrator,
+        LIMIT,
+    )
+    .map_err(|e| format!("{flag}: {e}"))?;
     let text = std::str::from_utf8(&bytes)
         .map_err(|_| format!("{flag} {}: not UTF-8 text", path.display()))?;
     let line = text.split('\n').next().unwrap_or_default();
@@ -1597,7 +1660,7 @@ mod tests {
             ..ClientConfig::default()
         };
         assert_eq!(
-            beside.unasked_enrolment(&config, None),
+            beside.unasked_enrolment(&config, None, &[]),
             Ok(Some(Bootstrap::Pair {
                 cert: program.path().join(BOOTSTRAP_CERT_FILE),
                 key: program.path().join(BOOTSTRAP_KEY_FILE),
@@ -1608,18 +1671,18 @@ mod tests {
             endpoint: "ws://127.0.0.1:4320/v1/opamp".to_string(),
             ..config.clone()
         };
-        assert_eq!(beside.unasked_enrolment(&loopback, None), Ok(None));
+        assert_eq!(beside.unasked_enrolment(&loopback, None, &[]), Ok(None));
 
         for name in [crate::tls::ISSUED_CERT_FILE, crate::tls::ISSUED_KEY_FILE] {
             std::fs::write(state.path().join(name), "issued").expect("write");
         }
         assert_eq!(
-            beside.unasked_enrolment(&config, None),
+            beside.unasked_enrolment(&config, None, &[]),
             Ok(None),
             "enrolled already"
         );
         assert_eq!(
-            Beside::default().unasked_enrolment(&ClientConfig::default(), None),
+            Beside::default().unasked_enrolment(&ClientConfig::default(), None, &[]),
             Ok(None)
         );
     }
@@ -1637,6 +1700,67 @@ mod tests {
             .expect("sealed");
         std::fs::write(dir.join(BOOTSTRAP_P12_FILE), file).expect("write");
         cert.pem()
+    }
+
+    /// The bootstrap PKCS#12 file the questionnaire offers from `[tls] cert_file`, which the
+    /// service's account may write, is refused where a link stands at its name, wherever it lies,
+    /// and not read; the same path the administrator gave is read through the link, as the CA
+    /// file is. A link in the account's directories is refused either way.
+    /// Verifies: ADR-0021
+    #[cfg(unix)]
+    #[test]
+    fn a_link_at_the_offered_bootstrap_p12_is_refused_and_not_read() {
+        let account = tempfile::tempdir().expect("account");
+        let state = account.path().join("state");
+        let elsewhere = tempfile::tempdir().expect("elsewhere");
+        let admin = tempfile::tempdir().expect("admin");
+        p12_in(elsewhere.path());
+        let target = elsewhere.path().join(BOOTSTRAP_P12_FILE);
+        let link = admin.path().join("offered.p12");
+        std::os::unix::fs::symlink(&target, &link).expect("link");
+        let roots = [account.path()];
+        let account_dirs = (&roots[..], state.as_path());
+
+        let refused = read_pkcs12(&link, Some(&link), account_dirs).expect_err("a link");
+        assert!(refused.contains("offered.p12"), "{refused}");
+        assert!(refused.contains("is a link"), "{refused}");
+
+        let typed = read_pkcs12(&link, None, account_dirs).expect("the administrator's link");
+        assert_eq!(*typed, std::fs::read(&target).expect("read"));
+        let other = admin.path().join("other.p12");
+        read_pkcs12(&link, Some(&other), account_dirs).expect("not the offered path");
+
+        let planted = account.path().join("planted.p12");
+        std::os::unix::fs::symlink(&target, &planted).expect("link");
+        for offered in [None, Some(planted.as_path())] {
+            let refused = read_pkcs12(&planted, offered, account_dirs).expect_err("a link");
+            assert!(refused.contains("is a link"), "{refused}");
+        }
+    }
+
+    /// A bootstrap PKCS#12 file over its bound and a password file over 4 KiB are refused,
+    /// naming the file and the bound, before they are read.
+    /// Verifies: ADR-0014, ADR-0021
+    #[test]
+    fn a_bootstrap_p12_or_a_password_file_over_its_bound_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = dir.path().join("state");
+        let large = dir.path().join("large.p12");
+        std::fs::File::create(&large)
+            .expect("create")
+            .set_len(fleet_core::pkcs12::MAX_FILE_BYTES + 1)
+            .expect("size");
+        let refused = read_pkcs12(&large, None, (&[], &state)).expect_err("over the bound");
+        assert!(refused.contains("large.p12"), "{refused}");
+        let bound = fleet_core::pkcs12::MAX_FILE_BYTES.to_string();
+        assert!(refused.contains(&bound), "{refused}");
+
+        let password = dir.path().join("password");
+        std::fs::write(&password, "a".repeat(4097)).expect("write");
+        let refused = read_password_file(&password, "--bootstrap-password-file", &[])
+            .expect_err("over the bound");
+        assert!(refused.contains("--bootstrap-password-file"), "{refused}");
+        assert!(refused.contains("4096"), "{refused}");
     }
 
     /// A `bootstrap.p12` is found as a bootstrap identity; lying beside a file of the pair,
@@ -1714,14 +1838,14 @@ mod tests {
             ..ClientConfig::default()
         };
         let without = beside
-            .unasked_enrolment(&config, None)
+            .unasked_enrolment(&config, None, &[])
             .expect_err("no password");
         assert!(without.contains("--bootstrap-password-file"), "{without}");
         let wrong = beside
-            .unasked_enrolment(&config, Some("not the password"))
+            .unasked_enrolment(&config, Some("not the password"), &[])
             .expect_err("wrong password");
         assert!(wrong.contains("--bootstrap-password-file"), "{wrong}");
-        match beside.unasked_enrolment(&config, Some(P12_PASSWORD)) {
+        match beside.unasked_enrolment(&config, Some(P12_PASSWORD), &[]) {
             Ok(Some(Bootstrap::Pkcs12 { file, identity })) => {
                 assert_eq!(file, program.path().join(BOOTSTRAP_P12_FILE));
                 assert_eq!(
@@ -1736,7 +1860,7 @@ mod tests {
         let pair_only = tempfile::tempdir().expect("tempdir");
         fleet_files(pair_only.path());
         let refused = Beside::in_dir(pair_only.path())
-            .unasked_enrolment(&config, Some(P12_PASSWORD))
+            .unasked_enrolment(&config, Some(P12_PASSWORD), &[])
             .expect_err("no file to open");
         assert!(refused.contains("--bootstrap-password-file"), "{refused}");
 
@@ -1744,7 +1868,7 @@ mod tests {
             std::fs::write(state.path().join(name), "issued").expect("write");
         }
         assert_eq!(
-            beside.unasked_enrolment(&config, None),
+            beside.unasked_enrolment(&config, None, &[]),
             Ok(None),
             "an enrolled Client takes no bootstrap identity, and needs no password"
         );
@@ -1764,7 +1888,7 @@ mod tests {
         ] {
             std::fs::write(&file, content).expect("write");
             assert_eq!(
-                read_password_file(&file, "--bootstrap-password-file")
+                read_password_file(&file, "--bootstrap-password-file", &[])
                     .expect("read")
                     .as_str(),
                 expected
@@ -1772,10 +1896,12 @@ mod tests {
         }
         std::fs::write(&file, "\nsecret").expect("write");
         assert!(
-            read_password_file(&file, "--bootstrap-password-file").is_err(),
+            read_password_file(&file, "--bootstrap-password-file", &[]).is_err(),
             "an empty first line"
         );
-        assert!(read_password_file(&dir.path().join("none"), "--bootstrap-password-file").is_err());
+        assert!(
+            read_password_file(&dir.path().join("none"), "--bootstrap-password-file", &[]).is_err()
+        );
 
         for (path, p12) in [
             ("bootstrap.p12", true),

@@ -795,7 +795,7 @@ fn p12_password(
     file: &Path,
 ) -> Result<Zeroizing<String>, String> {
     if let Some(path) = password_file {
-        return fleet_agent::config_init::read_password_file(path, "--password-file");
+        return fleet_agent::config_init::read_password_file(path, "--password-file", &[]);
     }
     if !terminal {
         return Err(
@@ -820,12 +820,23 @@ fn p12_password(
 /// # Errors
 /// Returns the message to print when the file does not open, either file exists, or writing fails.
 pub fn p12_extract(file: &Path, password: &str, out: &Path) -> Result<Vec<String>, String> {
-    let identity = fleet_agent::tls::pkcs12_identity(file, password).map_err(|e| match e {
-        fleet_core::pkcs12::file::OpenError::WrongPassword => {
-            format!("{}: the password does not open it", file.display())
-        }
-        fleet_core::pkcs12::file::OpenError::Invalid(why) => why,
-    })?;
+    // Read as the install reads an administrator's path, here with no directory of a service's
+    // account to refuse a link in.
+    let bytes = fleet_agent::nofollow::read_privileged(
+        file,
+        &[],
+        None,
+        fleet_agent::nofollow::Named::ByAdministrator,
+        fleet_core::pkcs12::MAX_FILE_BYTES,
+    )
+    .map_err(|e| e.to_string())?;
+    let identity =
+        fleet_agent::tls::pkcs12_identity(file, &bytes, password).map_err(|e| match e {
+            fleet_core::pkcs12::file::OpenError::WrongPassword => {
+                format!("{}: the password does not open it", file.display())
+            }
+            fleet_core::pkcs12::file::OpenError::Invalid(why) => why,
+        })?;
     write_all(&[Target {
         dir: out.to_path_buf(),
         files: vec![

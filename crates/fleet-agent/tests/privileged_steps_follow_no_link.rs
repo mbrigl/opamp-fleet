@@ -104,12 +104,6 @@ const ALLOWED: &[(&str, &str, &str, &str)] = &[
          not one of the account's",
     ),
     (
-        "src/config_init.rs",
-        "read_password_file",
-        "File::open(",
-        "the password file an administrator's flag names, read once and at most 4 KiB of it",
-    ),
-    (
         "src/service/layout.rs",
         "stage_current_exe",
         "fs::read(",
@@ -143,20 +137,12 @@ const ALLOWED: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "src/tls.rs",
-        "pkcs12_identity",
-        "File::open(",
-        "the `bootstrap.p12` the operator put beside the program or in `--fleet-files`, not in one \
-         of the account's directories when `service install` runs from a payload or a download; a \
-         regular file only, read at its size",
-    ),
-    (
-        "src/tls.rs",
         "read_bounded",
         "OpenOptions::new(",
         "opens a file to read it, never to change it, and without blocking, used only when it is \
          a regular file of at most 1 MiB: the run-time Client's reads of the files `[tls]` names, \
          in its own account's directories; a privileged step reads them, and an answered CA, \
-         through `service::enrol::read_privileged`",
+         through `nofollow::read_privileged`",
     ),
     (
         "src/main.rs",
@@ -227,6 +213,138 @@ const ALLOWED: &[(&str, &str, &str, &str)] = &[
     ),
 ];
 
+/// The calls of the functions `ALLOWED` names, in a privileged module: file, the function the call
+/// is made in, the function called, and why the path it hands on is one no link the account placed
+/// can carry.
+const CALLED_FROM: &[(&str, &str, &str, &str)] = &[
+    (
+        "src/main.rs",
+        "service_command",
+        "install",
+        "`service install` itself, with the administrator's flags",
+    ),
+    (
+        "src/main.rs",
+        "install",
+        "install",
+        "`manager::install`, another function of the name: the registration, where only root \
+         writes",
+    ),
+    (
+        "src/main.rs",
+        "install",
+        "create_state_dir",
+        "the state directory the install decided, and the roots it is held beneath",
+    ),
+    (
+        "src/main.rs",
+        "install",
+        "restrict",
+        "the data root and the directories the administrator named, which the install planned",
+    ),
+    (
+        "src/main.rs",
+        "install",
+        "stage_current_exe",
+        "the layout root the administrator named or the default, which only root's directory holds",
+    ),
+    (
+        "src/config_init.rs",
+        "the_program",
+        "in_dir",
+        "the directory of the running program, which the administrator started",
+    ),
+    (
+        "src/config_init.rs",
+        "in_named_dir",
+        "in_dir",
+        "the directory `--fleet-files` names, the administrator's",
+    ),
+    (
+        "src/config_init.rs",
+        "copy_ca_beside",
+        "held_dir",
+        "the directory of the configuration this run writes, the data root or one `--config` named",
+    ),
+    (
+        "src/config_file.rs",
+        "held_file",
+        "held_dir",
+        "the directory of the configuration, the data root or one `--config` named",
+    ),
+    (
+        "src/service/layout.rs",
+        "heal_current",
+        "set_current",
+        "a version directory `current` is pointed at, in the layout root `set_current` holds",
+    ),
+    (
+        "src/service/layout.rs",
+        "stage_current_exe",
+        "set_current",
+        "the version directory just staged, in the layout root `set_current` holds",
+    ),
+    (
+        "src/service/manager.rs",
+        "register",
+        "install",
+        "the service manager's own `install`, another function of the name: the registration, \
+         where only root writes",
+    ),
+    (
+        "src/service/manager.rs",
+        "registration",
+        "read_registration",
+        "the service's unit or plist, where only root writes",
+    ),
+    (
+        "src/service/manager.rs",
+        "agents_registration",
+        "read_registration",
+        "the second service's unit or plist, where only root writes",
+    ),
+    (
+        "src/service/manager.rs",
+        "registered_state_dir",
+        "read_state_dir",
+        "the service's unit or plist, where only root writes",
+    ),
+    (
+        "src/service/manager.rs",
+        "start_for_change",
+        "load_removed_job",
+        "the service's own label, its plist in `/Library/LaunchDaemons`",
+    ),
+    (
+        "src/service/manager.rs",
+        "start",
+        "load_removed_job",
+        "the service's own label, its plist in `/Library/LaunchDaemons`",
+    ),
+    (
+        "src/service/runtime.rs",
+        "unreadable_config",
+        "recovery_state_dir",
+        "the run-time Client's own start, which ADR-0021 clause 11 does not cover",
+    ),
+    (
+        "src/service/runtime.rs",
+        "load_effective_config",
+        "load",
+        "the run-time Client's own configuration, which ADR-0021 clause 11 does not cover",
+    ),
+    (
+        "src/tls.rs",
+        "read",
+        "read_bounded",
+        "the run-time Client's `[tls]` files; a privileged step reads them through \
+         `nofollow::read_privileged`",
+    ),
+];
+
+/// How a call of a function `ALLOWED` names is spelled, where its bare name is a common one.
+const SPELLED: &[(&str, &str)] = &[("load", "ClientConfig::load(")];
+
 /// Every `.rs` file of `path`, a file or a directory.
 fn sources(path: &Path) -> Vec<PathBuf> {
     if path.is_file() {
@@ -272,8 +390,9 @@ fn contains_call(code: &str, banned: &str) -> bool {
     })
 }
 
-/// The banned calls in `text`, outside comments and the test module, by function and call.
-fn calls(text: &str) -> Vec<(String, &'static str, usize)> {
+/// The lines of code in `text`, outside comments and the test module, each with the function it
+/// lies in and its number.
+fn code_lines(text: &str) -> Vec<(String, usize, &str)> {
     let lines: Vec<&str> = text.lines().collect();
     let mut found = Vec::new();
     let mut function = String::from("(module)");
@@ -293,28 +412,53 @@ fn calls(text: &str) -> Vec<(String, &'static str, usize)> {
         if let Some(name) = declared_fn(code) {
             function = name.to_string();
         }
+        found.push((function.clone(), index + 1, code));
+    }
+    found
+}
+
+/// The banned calls in `text`, outside comments and the test module, by function and call.
+fn calls(text: &str) -> Vec<(String, &'static str, usize)> {
+    let mut found = Vec::new();
+    for (function, line, code) in code_lines(text) {
         for banned in BANNED {
             if contains_call(code, banned) {
-                found.push((function.clone(), *banned, index + 1));
+                found.push((function.clone(), *banned, line));
             }
             // `use std::fs::{remove_file, …}` would let the call go by its bare name.
             let bare = banned.trim_start_matches("fs::").trim_end_matches('(');
             if (code.starts_with("use std::fs") || code.starts_with("use tokio::fs"))
                 && code.contains(bare)
             {
-                found.push((function.clone(), *banned, index + 1));
+                found.push((function.clone(), *banned, line));
             }
         }
     }
     found
 }
 
-/// Verifies: ADR-0021
-#[test]
-fn privileged_modules_change_the_account_s_directories_through_held_directories_only() {
+/// The calls in `text` of a function `callees` names, outside comments and the test module, by
+/// the function they are made in, the function called, and the line; a declaration is no call.
+fn calls_of<'a>(text: &str, callees: &[&'a str]) -> Vec<(String, &'a str, usize)> {
+    let mut found = Vec::new();
+    for (function, line, code) in code_lines(text) {
+        for callee in callees {
+            let spelled = SPELLED
+                .iter()
+                .find(|(function, _)| function == callee)
+                .map_or_else(|| format!("{callee}("), |(_, call)| (*call).to_string());
+            if declared_fn(code) != Some(callee) && contains_call(code, &spelled) {
+                found.push((function.clone(), *callee, line));
+            }
+        }
+    }
+    found
+}
+
+/// Every source file of the privileged modules, by its path relative to the crate, and its text.
+fn privileged_sources() -> Vec<(String, String)> {
     let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let mut violations = Vec::new();
-    let mut used = BTreeSet::new();
+    let mut found = Vec::new();
     for (module, _why) in PRIVILEGED {
         let root = crate_dir.join(module);
         assert!(
@@ -327,7 +471,22 @@ fn privileged_modules_change_the_account_s_directories_through_held_directories_
                 .expect("beneath the crate")
                 .to_string_lossy()
                 .replace('\\', "/");
-            let text = std::fs::read_to_string(&file).expect("read a source file");
+            found.push((
+                relative,
+                std::fs::read_to_string(&file).expect("read a source file"),
+            ));
+        }
+    }
+    found
+}
+
+/// Verifies: ADR-0021
+#[test]
+fn privileged_modules_change_the_account_s_directories_through_held_directories_only() {
+    let mut violations = Vec::new();
+    let mut used = BTreeSet::new();
+    for (relative, text) in privileged_sources() {
+        {
             for (function, call, line) in calls(&text) {
                 let allowed = ALLOWED
                     .iter()
@@ -388,6 +547,74 @@ fn the_scanner_finds_path_based_calls_by_function() {
             ("a".to_string(), "fs::write("),
             ("a".to_string(), "fs::read("),
             ("b".to_string(), "fs::remove_dir_all("),
+        ]
+    );
+}
+
+/// A function `ALLOWED` names is allowed its path-based call for the paths it is handed, so each
+/// call of it in a privileged module is named here too, by the file and the function it is made
+/// in, with why the path it hands on is one no link the account placed can carry. A new caller
+/// is a finding until it is listed, and an entry that no longer matches fails, as in `ALLOWED`.
+/// Verifies: ADR-0021
+#[test]
+fn each_call_of_an_allowed_function_is_named_with_its_reason() {
+    let allowed: BTreeSet<&str> = ALLOWED
+        .iter()
+        .map(|(_, function, _, _)| *function)
+        .collect();
+    let allowed: Vec<&str> = allowed.into_iter().collect();
+    let mut unnamed = Vec::new();
+    let mut used = BTreeSet::new();
+    for (relative, text) in privileged_sources() {
+        for (caller, callee, line) in calls_of(&text, &allowed) {
+            match CALLED_FROM
+                .iter()
+                .position(|(f, c, d, _)| *f == relative && *c == caller && *d == callee)
+            {
+                Some(entry) => {
+                    used.insert(entry);
+                }
+                None => unnamed.push(format!(
+                    "{relative}:{line}: `{caller}` calls `{callee}`, which ALLOWED lets name a \
+                     path; list the call in CALLED_FROM with why no link the account placed can \
+                     carry the path it hands on, or read through `nofollow`"
+                )),
+            }
+        }
+    }
+    let stale: Vec<String> = CALLED_FROM
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !used.contains(index))
+        .map(|(_, (file, caller, callee, _))| format!("{file}: `{caller}` calls `{callee}`"))
+        .collect();
+    assert!(
+        unnamed.is_empty(),
+        "calls of allowed functions without a reason:\n{}",
+        unnamed.join("\n")
+    );
+    assert!(
+        stale.is_empty(),
+        "CALLED_FROM names calls the code no longer makes:\n{}",
+        stale.join("\n")
+    );
+}
+
+/// The call scanner: a call by any path is found, a declaration and a longer name are not.
+#[test]
+fn the_call_scanner_finds_calls_and_passes_over_declarations() {
+    let src = r#"
+        fn in_dir(p: &Path) {}
+        fn a() { let _ = Self::in_dir(p); begin_dir(p); }
+        fn b() { crate::config_init::in_dir(p); }
+        #[cfg(test)]
+        mod tests { fn c() { in_dir(p); } }
+    "#;
+    assert_eq!(
+        calls_of(src, &["in_dir"]),
+        [
+            ("a".to_string(), "in_dir", 3),
+            ("b".to_string(), "in_dir", 4)
         ]
     );
 }

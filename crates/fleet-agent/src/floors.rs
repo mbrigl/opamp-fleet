@@ -100,7 +100,7 @@ impl FloorFile {
     #[must_use]
     pub fn open(state_dir: &Path, key: Option<Vec<u8>>) -> Self {
         let path = state_dir.join(FILE);
-        let kept = match crate::nofollow::read(&path) {
+        let kept = match crate::nofollow::read(&path, crate::nofollow::MAX_READ_BYTES) {
             Ok(bytes) => parse_kept(&bytes),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Floors::new()),
             Err(e) => Err(e.to_string()),

@@ -293,7 +293,7 @@ impl AgentStorage for Storage {
     /// The persisted identity, or a fresh UUID v7 persisted on first start.
     fn load_or_create_uid(&self) -> io::Result<InstanceUid> {
         let path = self.dir.join(UID_FILE);
-        if let Ok(bytes) = crate::nofollow::read(&path) {
+        if let Ok(bytes) = crate::nofollow::read(&path, crate::nofollow::MAX_READ_BYTES) {
             if let Some(uid) = InstanceUid::parse(&String::from_utf8_lossy(&bytes)) {
                 return Ok(uid);
             }
@@ -359,7 +359,11 @@ impl AgentStorage for Storage {
 
     /// The installed package (ADR-0034), if one survived a previous run.
     fn load_package(&self) -> Option<InstalledPackage> {
-        let bytes = crate::nofollow::read(&self.dir.join(PACKAGE_FILE)).ok()?;
+        let bytes = crate::nofollow::read(
+            &self.dir.join(PACKAGE_FILE),
+            crate::nofollow::MAX_READ_BYTES,
+        )
+        .ok()?;
         match serde_json::from_slice(&bytes) {
             Ok(package) => Some(package),
             Err(e) => {

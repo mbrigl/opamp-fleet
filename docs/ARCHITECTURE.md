@@ -337,18 +337,27 @@ no module.
   root through the adapter `nofollow`: a directory held open without following a link at its name,
   read from and written to by name, each file written whole and renamed into place, because a
   privileged install works in directories the service's account owns
-  ([ADR-0021](adr/0021-the-accounts-the-service-runs-under.md)). The test
+  ([ADR-0021](adr/0021-the-accounts-the-service-runs-under.md)). `nofollow` reads every file one
+  way: a regular file within a bound the caller names, into a buffer sized before it reads and
+  wiped when dropped ([ADR-0014](adr/0014-secrets-in-memory-are-wiped-on-drop.md)). A path a
+  privileged step did not choose itself is resolved by `nofollow::read_privileged`, described
+  below. The test
   `privileged_steps_follow_no_link` holds `main.rs`, `config_init`, `config_file`, `service/`,
   `csr`, `connection` and `tls` to that, with the path-based calls that change or read a file left
-  to them listed and justified; a by-path `metadata` or `exists` check is not among them.
+  to them listed and justified, and each call of such a function listed by where it is made and
+  why; a by-path `metadata` or `exists` check is not among them.
   `supervisor.toml` is read by a privileged step through `ClientConfig::load_held` and rewritten,
   by an install and by a Server-driven apply alike, through `config_file::replace`, in the held
   directory, which on Windows refuses a configuration directory that is a reparse point for the
   apply too; the run-time Client reads it by path with `load`. The privileged enrolment
   (`service::enrol`) reads the CA file and the bootstrap pair once, before it connects, into
   `ClientConfig::ca_pem` and `bootstrap_identity`: a regular file of at most 1 MiB, opened by its
-  name in a held directory. The path is resolved one component at a time, and a root or the state
-  directory it passes must hold the file directly. A run that answered the questionnaire or
+  name in a held directory. `nofollow::read_privileged` resolves the path one component at a time,
+  and a root or the state directory it passes must hold the file directly; elsewhere a link on the
+  administrator's path is followed. The questionnaire's bootstrap PKCS#12 file and
+  `--bootstrap-password-file` are read the same way, except that a PKCS#12 path the questionnaire
+  offers from `[tls] cert_file`, which the service's account may write, is refused where a link
+  stands at its name, wherever it lies. A run that answered the questionnaire or
   `--endpoint` hands the enrolment the endpoint and the CA certificates it copied
   (`config_init::Answered`), which stand in for what the file says by then; the answered CA file
   itself is read as the enrolment reads one, and only its certificates are kept. `--endpoint` over a

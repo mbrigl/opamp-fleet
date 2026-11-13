@@ -192,7 +192,7 @@ async fn a_bootstrap_p12_enrols_and_its_key_is_never_written() {
     let config = fleet_agent::config::ClientConfig::load(&config_path).expect("load");
     let beside = fleet_agent::config_init::Beside::in_named_dir(&p12_dir).expect("dir");
     let bootstrap = beside
-        .unasked_enrolment(&config, Some(PASSWORD))
+        .unasked_enrolment(&config, Some(PASSWORD), &[])
         .expect("opens")
         .expect("taken");
 

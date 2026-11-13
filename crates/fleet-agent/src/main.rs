@@ -440,7 +440,13 @@ fn install(
     let password = args
         .bootstrap_password_file
         .as_deref()
-        .map(|path| config_init::read_password_file(path, "--bootstrap-password-file"))
+        .map(|path| {
+            config_init::read_password_file(
+                path,
+                "--bootstrap-password-file",
+                &[&data_root, &layout_root],
+            )
+        })
         .transpose()?;
     // Not asked, the bootstrap identity found enrols a Client that holds no issued certificate,
     // over TLS (ADR-0027 clause 18) — decided, and a `bootstrap.p12` opened, before anything is
@@ -455,7 +461,11 @@ fn install(
             about_to_run.endpoint.clone_from(endpoint);
         }
         about_to_run.state_dir = about_to_run.service_state_dir(&roots)?;
-        beside.unasked_enrolment(&about_to_run, password.as_deref().map(String::as_str))?
+        beside.unasked_enrolment(
+            &about_to_run,
+            password.as_deref().map(String::as_str),
+            &[&data_root, &layout_root],
+        )?
     };
     // Held from the first write to the last, so the account cannot swap the data root for a link
     // while this privileged run writes into it (ADR-0021).

@@ -345,12 +345,11 @@ pub(crate) fn held_file(path: &Path) -> Result<(HeldDir, &str), String> {
 }
 
 /// The bytes of the configuration at `path`, read through its held directory and never through a
-/// link at its name, in a buffer wiped when it is dropped: the file may hold `[packages]
-/// archive_key` (ADR-0014).
+/// link at its name, at most [`crate::nofollow::MAX_READ_BYTES`] of it, in a buffer sized before
+/// it reads and wiped when it is dropped: the file may hold `[packages] archive_key` (ADR-0014).
 pub(crate) fn read_held(path: &Path) -> Result<zeroize::Zeroizing<Vec<u8>>, String> {
     let (dir, name) = held_file(path)?;
-    dir.read(name)
-        .map(zeroize::Zeroizing::new)
+    dir.read(name, crate::nofollow::MAX_READ_BYTES)
         .map_err(|e| format!("cannot read {}: {e}", path.display()))
 }
 
@@ -676,5 +675,25 @@ mod tests {
             .expect("load")
             .service_state_dir(&unregistered)
             .expect_err("the default, planted as a link");
+    }
+
+    /// A privileged step reads `supervisor.toml` within a bound: a file over it is refused,
+    /// naming the file and the bound, before it is read into a buffer that would grow.
+    /// Verifies: ADR-0014, ADR-0021
+    #[test]
+    fn a_privileged_load_refuses_a_configuration_over_the_bound() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("supervisor.toml");
+        let mut text = String::from("endpoint = 'ws://127.0.0.1:4320/v1/opamp'\n");
+        let bound = crate::nofollow::MAX_READ_BYTES;
+        text.push_str(&"#".repeat(usize::try_from(bound).expect("bound")));
+        std::fs::write(&path, text).expect("write");
+
+        let err = ClientConfig::load_held(&path).expect_err("over the bound");
+        assert!(err.contains("supervisor.toml"), "{err}");
+        assert!(err.contains(&bound.to_string()), "{err}");
+
+        std::fs::write(&path, "endpoint = 'ws://127.0.0.1:4320/v1/opamp'\n").expect("write");
+        ClientConfig::load_held(&path).expect("within the bound");
     }
 }
