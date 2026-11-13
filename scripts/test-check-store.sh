@@ -128,4 +128,7 @@ expect pass "a PostgreSQL and an S3 endpoint that answer" postgres "" \
   "127.0.0.1:5432 $PG_REQUEST"$'\n'"127.0.0.1:9000 $(s3_request 9000)" \
   "${PG[@]}" FLEET_TEST_S3_ENDPOINT=http://127.0.0.1:9000
 
+fresh
+expect pass "an https endpoint is not probed" s3 "" "" FLEET_TEST_S3_ENDPOINT=https://s3.example.invalid
+
 summary "Store check self-test"

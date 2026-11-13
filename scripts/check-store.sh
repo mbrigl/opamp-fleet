@@ -42,8 +42,8 @@ fi
 # the host's stack is down and close it at once, and the tests then fail as a code error would.
 # PostgreSQL answers an SSLRequest with one byte, 'S' or 'N'. An S3 endpoint answers an HTTP
 # request with a status line. Bash's /dev/tcp makes the probe, so it needs neither psql nor curl;
-# it cannot speak TLS, so an https endpoint is not probed. 'postgres' probes its bucket's endpoint
-# too.
+# it cannot speak TLS, so it probes an S3 endpoint only of the form http://<host>:<port>, which CI
+# and the Dev Container name. 'postgres' probes its bucket's endpoint too.
 #
 # answers <host> <port> <request> <count> <answer pattern> — whether the store at <host>:<port>
 # answers the request with <count> bytes that match the pattern, within 10 seconds.
@@ -65,20 +65,15 @@ probe() {
   echo "connection at once, as a forward to a store that is down does. Start the store first." >&2
   exit 1
 }
-# probe_s3 <endpoint> — probe an http:// endpoint; the port defaults to 80.
+# probe_s3 <endpoint> — probe an endpoint of the form http://<host>:<port>; any other form is not
+# probed, and the check says so.
 probe_s3() {
-  local authority host port
-  [[ "$1" == http://* ]] || return 0
-  authority="${1#http://}"
-  authority="${authority%%/*}"
-  host="${authority%:*}"
-  port="${authority##*:}"
-  if [[ "$host" == "$authority" || "$port" == *]* ]]; then
-    host="$authority" port=80
+  if [[ ! "$1" =~ ^http://([^/:]+):([0-9]+)(/.*)?$ ]]; then
+    echo "Note: the S3 endpoint $1 is not of the form http://<host>:<port>, so it is not probed."
+    return 0
   fi
-  host="${host#[}"
-  host="${host%]}"
-  probe "$host" "$port" "HEAD / HTTP/1.0\r\nHost: $authority\r\n\r\n" 5 'HTTP/'
+  probe "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" \
+    "HEAD / HTTP/1.0\r\nHost: ${BASH_REMATCH[1]}:${BASH_REMATCH[2]}\r\n\r\n" 5 'HTTP/'
 }
 if [[ "$1" == "postgres" ]]; then
   probe "$FLEET_TEST_POSTGRES_HOST" "${FLEET_TEST_POSTGRES_PORT:-5432}" \
