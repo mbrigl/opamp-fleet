@@ -100,7 +100,7 @@ impl HeldDir {
         sys::dir(self, name, mode)
     }
 
-    /// The bytes of the regular file `name`, refusing a link, read as [`read_opened`] reads.
+    /// The bytes of the regular file `name`, refusing a link, read as `read_opened` reads.
     ///
     /// # Errors
     /// Returns an error when the file cannot be read, is no regular file, or holds more than
@@ -205,7 +205,7 @@ impl std::os::fd::AsRawFd for HeldDir {
 }
 
 /// Reads the regular file at `path`, refusing a link at it or at its directory's name, as
-/// [`read_opened`] reads.
+/// `read_opened` reads.
 ///
 /// # Errors
 /// Returns an error when the file cannot be read, a link stands at either name, or it holds more
@@ -223,12 +223,12 @@ pub fn read(path: &Path, limit: u64) -> io::Result<Zeroizing<Vec<u8>>> {
 /// # Errors
 /// Returns an error when the file is no regular file, holds more than `limit` bytes, or cannot be
 /// read. It leaves naming the file to the caller.
-pub fn read_opened(file: std::fs::File, limit: u64) -> io::Result<Zeroizing<Vec<u8>>> {
+pub(crate) fn read_opened(file: std::fs::File, limit: u64) -> io::Result<Zeroizing<Vec<u8>>> {
     use std::io::Read as _;
     let over = || {
         io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("larger than {limit} bytes (it may hold at most {limit})"),
+            format!("larger than the {limit} bytes it may hold at most"),
         )
     };
     let meta = file.metadata()?;
@@ -266,7 +266,7 @@ pub enum Named {
 const MAX_LINKS: usize = 40;
 
 /// The file at `path`, read by a privileged step: a regular file of at most `limit` bytes, opened
-/// without blocking, so a device or a FIFO is never read, and read as [`read_opened`] reads.
+/// without blocking, so a device or a FIFO is never read, and read as `read_opened` reads.
 ///
 /// The roots — the data root and the layout root — and the state directory belong to the
 /// service's account. The path is resolved one component at a time, `..` and every link on the
