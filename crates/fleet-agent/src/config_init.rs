@@ -185,7 +185,7 @@ impl Beside {
                     ));
                 };
                 // Beside the program or in `--fleet-files`: the administrator's path.
-                let bytes = read_pkcs12(file, None, (roots, &config.state_dir))?;
+                let bytes = read_pkcs12(file, &Offered::default(), (roots, &config.state_dir))?;
                 let identity = crate::tls::pkcs12_identity(file, &bytes, password)
                     .map_err(|e| format!("{}: {e} (--bootstrap-password-file)", file.display()))?;
                 Ok(Some(Bootstrap::Pkcs12 {
@@ -277,6 +277,9 @@ pub struct Written {
     /// refuses a kept file that names another
     /// (ADR-0044).
     pub named_over_kept: Option<String>,
+    /// The paths this run's questions offered from the file, which the enrolment reads through no
+    /// link at their name where an answer kept one.
+    pub offered: Offered,
 }
 
 /// The endpoint and the trust a run answered, held in memory: a privileged enrolment connects
@@ -289,6 +292,39 @@ pub struct Answered {
     /// The CA copy beside the configuration and the certificates written into it; `None` where
     /// no CA was answered, which leaves the built-in roots.
     pub ca: Option<(PathBuf, Vec<u8>)>,
+}
+
+/// The paths the questionnaire offers from `supervisor.toml`, a file the service's account may
+/// write: `[tls] ca_file`, `cert_file` and `key_file`. An answer that keeps one is read through
+/// no link at its name, wherever it lies; any other answer is the administrator's (ADR-0021
+/// clause 11).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Offered(Vec<PathBuf>);
+
+impl Offered {
+    /// What the configuration `current` offers.
+    #[must_use]
+    pub fn of(current: &ClientConfig) -> Self {
+        Self(
+            current
+                .tls
+                .iter()
+                .flat_map(|tls| [&tls.ca_file, &tls.cert_file, &tls.key_file])
+                .flatten()
+                .cloned()
+                .collect(),
+        )
+    }
+
+    /// Whose word `path` is: the file's where it is a path offered, the administrator's else.
+    #[must_use]
+    pub fn naming(&self, path: &Path) -> crate::nofollow::Named {
+        if self.0.iter().any(|offered| offered == path) {
+            crate::nofollow::Named::ByAccountFile
+        } else {
+            crate::nofollow::Named::ByAdministrator
+        }
+    }
 }
 
 /// Ask, write, and report — the whole of `--interactive` and `service config` (ADR-0020).
@@ -339,7 +375,8 @@ pub fn run(
     }
     beside.report();
     let (answers, bootstrap) = ask(current, enrolled, beside, password, account)?;
-    let (answers, answered) = copy_ca_beside(answers, path, account.0, Some(account.1))?;
+    let offered = Offered::of(current);
+    let (answers, answered) = copy_ca_beside(answers, path, account.0, Some(account.1), &offered)?;
     let copies = copies(&answered);
     if existing {
         // The file may hold `[packages] archive_key`: the text read and the text written are wiped
@@ -358,6 +395,7 @@ pub fn run(
         bootstrap,
         answered: Some(answered),
         named_over_kept: None,
+        offered,
     })
 }
 
@@ -386,7 +424,8 @@ fn copies(answered: &Answered) -> Vec<PathBuf> {
 /// and the copy it names lies in the account's directory. This runs as root or an Administrator
 /// and the copy is handed to the account, so the copy holds the file's certificates and nothing
 /// else, wherever a link at the name leads: a key or a password file yields no certificate and is
-/// refused before anything is written, and a FIFO or a device is refused without being read.
+/// refused before anything is written, and a FIFO or a device is refused without being read. An
+/// answer that keeps the path `offered` names is read through no link at its name at all.
 ///
 /// # Errors
 /// Returns an error naming the file that could not be read or written, or that holds no
@@ -396,6 +435,7 @@ pub fn copy_ca_beside(
     config: &Path,
     roots: &[&Path],
     state_dir: Option<&Path>,
+    offered: &Offered,
 ) -> Result<(Answers, Answered), String> {
     let Some(ca) = &answers.ca_file else {
         let endpoint = answers.endpoint.clone();
@@ -408,7 +448,7 @@ pub fn copy_ca_beside(
         .ok_or_else(|| format!("{} names no directory", config.display()))?;
     let held = crate::config_file::held_dir(&dir)?;
     let to = dir.join(SERVER_CA_FILE);
-    let bytes = read_certificates(ca, roots, state_dir)?;
+    let bytes = read_certificates(ca, roots, state_dir, offered.naming(ca))?;
     held.write(SERVER_CA_FILE, &bytes, 0o600)
         .map_err(|e| format!("cannot write {}: {e}", to.display()))?;
     let answered = Answered {
@@ -437,12 +477,13 @@ fn read_certificates(
     path: &Path,
     roots: &[&Path],
     state_dir: Option<&Path>,
+    named_by: crate::nofollow::Named,
 ) -> Result<Vec<u8>, String> {
     let bytes = crate::nofollow::read_privileged(
         path,
         roots,
         state_dir,
-        crate::nofollow::Named::ByAdministrator,
+        named_by,
         crate::tls::MAX_PEM_BYTES,
     )
     .map_err(|e| e.to_string())?;
@@ -592,7 +633,7 @@ pub fn run_with_endpoint(
         println!("took the package verification key {key} from beside the program");
     }
     // The CA beside the program is the administrator's, in none of the account's directories.
-    let (answers, answered) = copy_ca_beside(answers, path, &[], None)?;
+    let (answers, answered) = copy_ca_beside(answers, path, &[], None, &Offered::default())?;
     let copies = copies(&answered);
     write_new(path, &render(&answers))?;
     println!("wrote {} for {}", path.display(), answers.endpoint);
@@ -601,6 +642,7 @@ pub fn run_with_endpoint(
         bootstrap: None,
         answered: Some(answered),
         named_over_kept: None,
+        offered: Offered::default(),
     })
 }
 
@@ -674,11 +716,9 @@ pub fn ask(
         println!("enrolled: this Client holds a certificate the Server issued");
         None
     } else {
-        // The file's own `cert_file`, which the service's account may have written.
-        let offered = current.tls.as_ref().and_then(|t| t.cert_file.as_deref());
         Some(ask_bootstrap(
             (defaults.cert_file, defaults.key_file),
-            offered,
+            &defaults.offered,
             password,
             account,
         )?)
@@ -720,10 +760,10 @@ pub fn ask(
 /// The bootstrap identity: its certificate first, then the key of a PEM certificate, or the
 /// password of a PKCS#12 file — asked with input hidden, and again until the file opens. A file
 /// that is no bootstrap identity, or cannot be read, sends the question back to its path.
-/// `offered` is the path the configuration names, which [`read_pkcs12`] holds to its own rule.
+/// `offered` is what the configuration offers, which [`read_pkcs12`] holds to its own rule.
 fn ask_bootstrap(
     (cert_default, key_default): (Option<String>, Option<String>),
-    offered: Option<&Path>,
+    offered: &Offered,
     password: Option<&str>,
     account: (&[&Path], &Path),
 ) -> Result<Bootstrap, String> {
@@ -790,28 +830,22 @@ fn ask_bootstrap(
 /// The bootstrap PKCS#12 file at `path`, read by a privileged step as
 /// [`crate::nofollow::read_privileged`] reads it, at most [`fleet_core::pkcs12::MAX_FILE_BYTES`]
 /// of it, with `account` — the roots and the state directory — as the service's account's
-/// (ADR-0021 clause 11). `offered` is the path the configuration names: where `path` is that
-/// one, the questionnaire offered it from a file the account may write, and a link at its name is
-/// refused wherever it lies. Any other path the administrator gave.
+/// (ADR-0021 clause 11). Where `path` is one `offered` names, the questionnaire offered it from a
+/// file the account may write, and a link at its name is refused wherever it lies. Any other path
+/// the administrator gave.
 ///
 /// # Errors
 /// Returns an error naming the file when it is refused or cannot be read.
 fn read_pkcs12(
     path: &Path,
-    offered: Option<&Path>,
+    offered: &Offered,
     (roots, state_dir): (&[&Path], &Path),
 ) -> Result<zeroize::Zeroizing<Vec<u8>>, String> {
-    use crate::nofollow::Named;
-    let named_by = if offered == Some(path) {
-        Named::ByAccountFile
-    } else {
-        Named::ByAdministrator
-    };
     crate::nofollow::read_privileged(
         path,
         roots,
         Some(state_dir),
-        named_by,
+        offered.naming(path),
         fleet_core::pkcs12::MAX_FILE_BYTES,
     )
     .map_err(|e| e.to_string())
@@ -892,6 +926,8 @@ struct Defaults {
     cert_file: Option<String>,
     key_file: Option<String>,
     verification_key: Option<String>,
+    /// Which of the paths above the file offers, which the account may have written.
+    offered: Offered,
 }
 
 impl Defaults {
@@ -915,6 +951,7 @@ impl Defaults {
                 .as_ref()
                 .and_then(|p| p.verification_key.clone())
                 .or_else(|| beside.verification_key.clone()),
+            offered: Offered::of(current),
         }
     }
 }
@@ -1587,8 +1624,14 @@ mod tests {
     #[test]
     fn answers_without_a_ca_hand_on_their_endpoint_and_no_ca() {
         let to = tempfile::tempdir().expect("tempdir");
-        let (_, answered) = copy_ca_beside(answers(), &to.path().join(FILE_NAME), &[], None)
-            .expect("nothing to copy");
+        let (_, answered) = copy_ca_beside(
+            answers(),
+            &to.path().join(FILE_NAME),
+            &[],
+            None,
+            &Offered::default(),
+        )
+        .expect("nothing to copy");
         assert_eq!(answered.endpoint, answers().endpoint);
         assert_eq!(answered.ca, None);
         assert!(!to.path().join(SERVER_CA_FILE).exists());
@@ -1721,19 +1764,21 @@ mod tests {
         let roots = [account.path()];
         let account_dirs = (&roots[..], state.as_path());
 
-        let refused = read_pkcs12(&link, Some(&link), account_dirs).expect_err("a link");
+        let offered = Offered(vec![link.clone()]);
+        let refused = read_pkcs12(&link, &offered, account_dirs).expect_err("a link");
         assert!(refused.contains("offered.p12"), "{refused}");
         assert!(refused.contains("is a link"), "{refused}");
 
-        let typed = read_pkcs12(&link, None, account_dirs).expect("the administrator's link");
+        let typed = read_pkcs12(&link, &Offered::default(), account_dirs)
+            .expect("the administrator's link");
         assert_eq!(*typed, std::fs::read(&target).expect("read"));
-        let other = admin.path().join("other.p12");
-        read_pkcs12(&link, Some(&other), account_dirs).expect("not the offered path");
+        let other = Offered(vec![admin.path().join("other.p12")]);
+        read_pkcs12(&link, &other, account_dirs).expect("not the offered path");
 
         let planted = account.path().join("planted.p12");
         std::os::unix::fs::symlink(&target, &planted).expect("link");
-        for offered in [None, Some(planted.as_path())] {
-            let refused = read_pkcs12(&planted, offered, account_dirs).expect_err("a link");
+        for offered in [Offered::default(), Offered(vec![planted.clone()])] {
+            let refused = read_pkcs12(&planted, &offered, account_dirs).expect_err("a link");
             assert!(refused.contains("is a link"), "{refused}");
         }
     }
@@ -1750,7 +1795,8 @@ mod tests {
             .expect("create")
             .set_len(fleet_core::pkcs12::MAX_FILE_BYTES + 1)
             .expect("size");
-        let refused = read_pkcs12(&large, None, (&[], &state)).expect_err("over the bound");
+        let refused =
+            read_pkcs12(&large, &Offered::default(), (&[], &state)).expect_err("over the bound");
         assert!(refused.contains("large.p12"), "{refused}");
         let bound = fleet_core::pkcs12::MAX_FILE_BYTES.to_string();
         assert!(refused.contains(&bound), "{refused}");
@@ -1931,6 +1977,7 @@ mod tests {
             &path,
             &[],
             None,
+            &Offered::default(),
         )
         .expect("copy");
 
@@ -1985,6 +2032,7 @@ mod tests {
             &path,
             &[],
             None,
+            &Offered::default(),
         )
         .expect("copy onto itself");
         assert_eq!(certificates_in(&copy), before);
@@ -1999,10 +2047,43 @@ mod tests {
             &path,
             &[],
             None,
+            &Offered::default(),
         )
         .expect("copy");
         assert_eq!(certificates_in(&copy), certificates_in(&elsewhere));
         assert_ne!(certificates_in(&copy), before);
+    }
+
+    /// The CA file the questionnaire offers from `[tls] ca_file`, which the service's account may
+    /// write, is refused where a link stands at its name, outside the account's directories too,
+    /// and nothing is written; the same link the administrator typed is followed and copied.
+    /// Verifies: ADR-0021
+    #[cfg(unix)]
+    #[test]
+    fn a_link_at_the_offered_ca_file_is_refused_and_not_read() {
+        let config_dir = tempfile::tempdir().expect("config");
+        let admin = tempfile::tempdir().expect("admin");
+        let path = config_dir.path().join(FILE_NAME);
+        let copy = config_dir.path().join(SERVER_CA_FILE);
+        let target = admin.path().join("real-ca.pem");
+        std::fs::write(&target, ca_pem()).expect("ca");
+        let link = admin.path().join("ca.pem");
+        std::os::unix::fs::symlink(&target, &link).expect("link");
+        let answered = || Answers {
+            ca_file: Some(link.clone()),
+            ..answers()
+        };
+        let file: ClientConfig =
+            toml::from_str(&format!("[tls]\nca_file = \"{}\"\n", link.display())).expect("config");
+
+        let refused = copy_ca_beside(answered(), &path, &[], None, &Offered::of(&file))
+            .expect_err("a link at the offered CA");
+        assert!(refused.contains("is a link"), "{refused}");
+        assert!(!copy.exists(), "nothing is written");
+
+        copy_ca_beside(answered(), &path, &[], None, &Offered::default())
+            .expect("the administrator's link is followed");
+        assert!(copy.exists());
     }
 
     /// `service config` runs as root and hands the copy to the service's account, which may have
@@ -2025,6 +2106,7 @@ mod tests {
             &path,
             &[],
             None,
+            &Offered::default(),
         )
         .expect_err("refused");
         assert!(
@@ -2048,6 +2130,7 @@ mod tests {
             &path,
             &[],
             None,
+            &Offered::default(),
         )
         .expect("copy");
         let copied = std::fs::read_to_string(&copy).expect("read");
@@ -2078,6 +2161,7 @@ mod tests {
             &data.path().join(FILE_NAME),
             &[data.path()],
             None,
+            &Offered::default(),
         )
         .expect_err("a link at the copy");
         assert!(refused.contains("is a link"), "{refused}");
@@ -2104,7 +2188,9 @@ mod tests {
                 ..answers()
             };
             let at = path.clone();
-            std::thread::spawn(move || done.send(copy_ca_beside(answers, &at, &[], None).err()));
+            std::thread::spawn(move || {
+                done.send(copy_ca_beside(answers, &at, &[], None, &Offered::default()).err())
+            });
             let refused = wait
                 .recv_timeout(std::time::Duration::from_secs(10))
                 .unwrap_or_else(|_| panic!("{} held the copy up", named.display()))
@@ -2241,6 +2327,11 @@ mod tests {
             ),
             (None, None, None, None)
         );
+        assert_eq!(
+            fresh.offered,
+            Offered::default(),
+            "nothing is offered from no file"
+        );
 
         let held: ClientConfig = toml::from_str(
             "endpoint = \"wss://fleet.example/v1/opamp\"\n\
@@ -2262,6 +2353,11 @@ mod tests {
                 cert_file: Some("/d/boot.pem".to_string()),
                 key_file: Some("/d/boot-key.pem".to_string()),
                 verification_key: Some("abcd".to_string()),
+                offered: Offered(
+                    ["/d/server-ca.pem", "/d/boot.pem", "/d/boot-key.pem"]
+                        .map(PathBuf::from)
+                        .to_vec()
+                ),
             }
         );
     }

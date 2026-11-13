@@ -355,9 +355,10 @@ no module.
   name in a held directory. `nofollow::read_privileged` resolves the path one component at a time,
   and a root or the state directory it passes must hold the file directly; elsewhere a link on the
   administrator's path is followed. The questionnaire's bootstrap PKCS#12 file and
-  `--bootstrap-password-file` are read the same way, except that a PKCS#12 path the questionnaire
-  offers from `[tls] cert_file`, which the service's account may write, is refused where a link
-  stands at its name, wherever it lies. A run that answered the questionnaire or
+  `--bootstrap-password-file` are read the same way. A path the questionnaire offers from
+  `supervisor.toml` (`[tls] ca_file`, `cert_file`, `key_file`, which the service's account may
+  write) and the answer keeps is refused where a link stands at its name, wherever it lies
+  (`config_init::Offered`). A run that answered the questionnaire or
   `--endpoint` hands the enrolment the endpoint and the CA certificates it copied
   (`config_init::Answered`), which stand in for what the file says by then; the answered CA file
   itself is read as the enrolment reads one, and only its certificates are kept. `--endpoint` over a

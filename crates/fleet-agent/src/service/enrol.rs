@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;
 
 use crate::config::ClientConfig;
-use crate::config_init::{Answered, Bootstrap, Written};
+use crate::config_init::{Answered, Bootstrap, Offered, Written};
 use crate::engine::{Engine, EngineAgent};
 use crate::service::runtime;
 use crate::shutdown::{shutdown_channel, Shutdown};
@@ -91,7 +91,7 @@ pub async fn enrol(
     bootstrap: Bootstrap,
     shutdown: Shutdown,
 ) -> Result<(), String> {
-    read_once(&mut config, &bootstrap, &[])?;
+    read_once(&mut config, &bootstrap, &[], &Offered::default())?;
     connect(config, shutdown).await
 }
 
@@ -185,7 +185,7 @@ fn prepare(
         take_answered(&mut config, answered);
     }
     holds_to_named(&config, written)?;
-    read_once(&mut config, bootstrap, roots)?;
+    read_once(&mut config, bootstrap, roots, &written.offered)?;
     Ok(config)
 }
 
@@ -232,12 +232,14 @@ fn take_answered(config: &mut ClientConfig, answered: &Answered) {
 ///
 /// `service install` and `service config` run as root or an Administrator, and these paths come
 /// from answers whose defaults `supervisor.toml` gives, a file the service's account can rewrite
-/// (ADR-0021 clause 11). So each is read as [`crate::nofollow::read_privileged`] reads an
-/// administrator's path, and a file that is no certificate or no key is named.
+/// (ADR-0021 clause 11). So each is read as [`crate::nofollow::read_privileged`] reads it: a path
+/// the questionnaire offered from the file and the answer kept, through no link at its name; any
+/// other as an administrator's path. A file that is no certificate or no key is named.
 fn read_once(
     config: &mut ClientConfig,
     bootstrap: &Bootstrap,
     roots: &[&Path],
+    offered: &Offered,
 ) -> Result<(), String> {
     let state_dir = config.state_dir.clone();
     let read = |path: &Path| {
@@ -245,7 +247,7 @@ fn read_once(
             path,
             roots,
             Some(&state_dir),
-            crate::nofollow::Named::ByAdministrator,
+            offered.naming(path),
             crate::tls::MAX_PEM_BYTES,
         )
         .map_err(|e| e.to_string())
@@ -487,7 +489,13 @@ mod tests {
         std::os::unix::fs::symlink(&bundle, &link).expect("symlink");
         let mut followed = config(account.path(), &link);
 
-        read_once(&mut followed, &bootstrap(admin.path()), &[account.path()]).expect("read");
+        read_once(
+            &mut followed,
+            &bootstrap(admin.path()),
+            &[account.path()],
+            &Offered::default(),
+        )
+        .expect("read");
         assert_eq!(followed.ca_pem.as_deref(), Some(ca.as_bytes()));
 
         // Where the link leads, the rules of the account's directories hold.
@@ -503,6 +511,64 @@ mod tests {
             account.path().to_path_buf(),
         );
         assert!(refused.contains("is a link"), "{refused}");
+    }
+
+    /// The bootstrap pair the questionnaire offers from `[tls] cert_file` and `key_file`, which
+    /// the service's account may write, is refused where a link stands at either name, outside
+    /// the account's directories too; the same links the administrator typed are followed.
+    /// Verifies: ADR-0021
+    #[cfg(unix)]
+    #[test]
+    fn a_link_at_an_offered_bootstrap_pair_file_is_refused_and_not_read() {
+        let account = tempfile::tempdir().expect("account");
+        let admin = tempfile::tempdir().expect("admin");
+        let elsewhere = tempfile::tempdir().expect("elsewhere");
+        let (ca, _) = pair();
+        let ca_path = admin.path().join("ca.pem");
+        std::fs::write(&ca_path, ca).expect("ca");
+        let Bootstrap::Pair { cert, key } = bootstrap(elsewhere.path()) else {
+            unreachable!()
+        };
+        let (cert_link, key_link) = (admin.path().join("boot.pem"), admin.path().join("key.pem"));
+        std::os::unix::fs::symlink(&cert, &cert_link).expect("link");
+        std::os::unix::fs::symlink(&key, &key_link).expect("link");
+        let linked = Bootstrap::Pair {
+            cert: cert_link.clone(),
+            key: key_link.clone(),
+        };
+        let prepared = |offered: Offered, bootstrap: &Bootstrap| {
+            let written = Written {
+                offered,
+                ..Written::default()
+            };
+            prepare(
+                &config(account.path(), &ca_path),
+                bootstrap,
+                &written,
+                &[account.path()],
+            )
+        };
+
+        for (offered_cert, offered_key) in [(true, false), (false, true)] {
+            let mut file = config(account.path(), &ca_path);
+            file.tls = Some(crate::config::TlsConfig {
+                ca_file: None,
+                cert_file: offered_cert.then(|| cert_link.clone()),
+                key_file: offered_key.then(|| key_link.clone()),
+            });
+            let refused = prepared(Offered::of(&file), &linked).expect_err("a link");
+            assert!(refused.contains("is a link"), "{refused}");
+            let named = if offered_cert { "boot.pem" } else { "key.pem" };
+            assert!(refused.contains(named), "{refused}");
+        }
+
+        let typed = prepared(Offered::default(), &linked).expect("the administrator's links");
+        let identity = typed.bootstrap_identity.expect("read");
+        assert_eq!(
+            identity.cert_pem,
+            std::fs::read(&cert).expect("cert"),
+            "read through the link"
+        );
     }
 
     /// A state directory the account swapped for a link is not read through: a file named in it
@@ -544,7 +610,13 @@ mod tests {
         let mut config = config(account.path(), &state.join("ca.pem"));
         config.state_dir.clone_from(&state);
 
-        read_once(&mut config, &bootstrap(admin.path()), &[account.path()]).expect("read");
+        read_once(
+            &mut config,
+            &bootstrap(admin.path()),
+            &[account.path()],
+            &Offered::default(),
+        )
+        .expect("read");
         assert_eq!(config.ca_pem.as_deref(), Some(ca.as_bytes()));
     }
 
@@ -584,7 +656,7 @@ mod tests {
         let pair = bootstrap(admin.path());
         let mut config = config(account.path(), &copy);
 
-        read_once(&mut config, &pair, &[account.path()]).expect("read");
+        read_once(&mut config, &pair, &[account.path()], &Offered::default()).expect("read");
         assert_eq!(config.ca_pem.as_deref(), Some(ca.as_bytes()));
         assert!(config.bootstrap_identity.is_some());
 

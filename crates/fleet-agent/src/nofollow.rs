@@ -870,3 +870,35 @@ mod sys {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A link at the file's own name is refused for a path the account's file offered, and
+    /// followed for the administrator's; a file over the bound is refused, naming the bound.
+    /// Verifies: ADR-0021
+    #[cfg(unix)]
+    #[test]
+    fn a_privileged_read_holds_a_link_at_the_name_to_whose_word_the_path_is() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("target");
+        std::fs::write(&target, "bytes").expect("write");
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&target, &link).expect("link");
+
+        let refused = read_privileged(&link, &[], None, Named::ByAccountFile, 16)
+            .expect_err("a link at the name");
+        assert!(refused.to_string().contains("is a link"), "{refused}");
+        let followed = read_privileged(&link, &[], None, Named::ByAdministrator, 16).expect("read");
+        assert_eq!(&**followed, b"bytes");
+
+        let over = read_privileged(&target, &[], None, Named::ByAdministrator, 4)
+            .expect_err("over the bound");
+        let over = over.to_string();
+        assert!(
+            over.contains("larger than") && over.contains("4 bytes"),
+            "{over}"
+        );
+    }
+}
