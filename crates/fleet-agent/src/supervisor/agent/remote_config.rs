@@ -16,9 +16,9 @@ impl AgentState {
     /// Engine's Supervisor-set apply for the self-Agent (ADR-0046): closes the `APPLYING` →
     /// `APPLIED`/`FAILED` lifecycle (goal 4, end to end).
     ///
-    /// A verdict on a hash other than the one the status holds is on an offer handed over before
-    /// the one applying: it leaves the status as it is, so an offer of the hash applying again
-    /// stays a repeat (ADR-0046, clause 56).
+    /// A verdict on a hash other than the one the status holds is on an offer the status has
+    /// moved past, to one applying or one that failed before its hand-over: it leaves the status
+    /// as it is, so the Server's offer of the held hash again stays a repeat (ADR-0046, clause 56).
     pub fn config_applied(&mut self, hash: Vec<u8>, result: Result<(), String>) {
         let held = self.protocol.remote_config_status();
         if held.is_some_and(|held| held.last_remote_config_hash != hash) {

@@ -2963,8 +2963,9 @@ mod tests {
 
     /// The verdict on a hash handed over before the one applying leaves the status as it is: the
     /// Agent still reports `APPLYING` the newer hash, so the Server's offer of it again is a
-    /// repeat and is not handed over a second time. The newer hash's own verdict closes it; for a
-    /// Supervisor's Agent and for the Client's own, which stores it then.
+    /// repeat and is not handed over a second time. The newer hash's own verdict closes it. A
+    /// Supervisor's Agent meets this sequence; the Client's own Agent cannot, since its apply holds
+    /// the Engine until the verdict, and runs it to keep the newer offer it stores then.
     /// Verifies: ADR-0046
     #[test]
     fn a_verdict_on_an_older_hash_leaves_the_status_of_the_one_applying() {
