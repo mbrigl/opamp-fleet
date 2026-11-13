@@ -78,7 +78,7 @@ once its tag exists.
   without a host is not re-keyed by its own reconnect.
   **What to do:** nothing.
 - **A configuration offered twice restarts its Managed Process once**
-  ([ADR-draft-supervisor-mode-and-its-kinds-and-a-repeated-offer-is-applied-once](docs/adr/draft-supervisor-mode-and-its-kinds-and-a-repeated-offer-is-applied-once.md)
+  ([ADR-0046](docs/adr/0046-supervisor-mode-and-its-kinds-and-a-repeated-offer-is-applied-once.md)
   clause 56). A heartbeat that left the Client before the Server's push of a rollout arrived still
   named the old hash, the Server answered it with the offer again, and the Client applied both:
   the Managed Process restarted once more after reporting `APPLIED`, and the Client's own Agent

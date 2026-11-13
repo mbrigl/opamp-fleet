@@ -522,7 +522,7 @@ impl AgentState {
                 }
             } else {
                 // A repeat of the hash applying or applied is only reported (clause 56 of
-                // ADR-draft-supervisor-mode-and-its-kinds-and-a-repeated-offer-is-applied-once).
+                // ADR-0046).
                 if !self.report_a_repeated_offer(&remote_config.config_hash) {
                     self.apply(remote_config);
                 }
@@ -2856,7 +2856,7 @@ mod tests {
     /// A Server answers a heartbeat that crossed its push with the offer again: the repeat of the
     /// hash a Supervisor's Agent is applying hands nothing to the process adapter, so the Managed
     /// Process is started once, and the next report carries `APPLYING` again.
-    /// Verifies: ADR-draft-supervisor-mode-and-its-kinds-and-a-repeated-offer-is-applied-once
+    /// Verifies: ADR-0046
     #[test]
     fn a_repeated_offer_of_the_hash_applying_is_reported_not_applied() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2881,7 +2881,7 @@ mod tests {
 
     /// Once applied and reported, a repeat of the hash restarts nothing and reports `APPLIED`
     /// again.
-    /// Verifies: ADR-draft-supervisor-mode-and-its-kinds-and-a-repeated-offer-is-applied-once
+    /// Verifies: ADR-0046
     #[test]
     fn a_repeated_offer_of_the_hash_applied_restarts_nothing() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2907,7 +2907,7 @@ mod tests {
 
     /// The Client's own Agent takes a repeat of its Supervisor set the same way: applying or
     /// applied, the set is handed to the Supervisor-set apply once.
-    /// Verifies: ADR-draft-supervisor-mode-and-its-kinds-and-a-repeated-offer-is-applied-once
+    /// Verifies: ADR-0046
     #[test]
     fn the_client_agent_applies_a_repeated_offer_of_its_set_once() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2937,7 +2937,7 @@ mod tests {
 
     /// An offer of another hash while one is applying is taken as before: handed over behind the
     /// first, which the process adapter's queue applies in order.
-    /// Verifies: ADR-draft-supervisor-mode-and-its-kinds-and-a-repeated-offer-is-applied-once
+    /// Verifies: ADR-0046
     #[test]
     fn an_offer_of_another_hash_is_applied_after_the_one_applying() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2963,7 +2963,7 @@ mod tests {
 
     /// A hash whose apply failed is applied again when offered again, so a host repaired after
     /// the failure takes it once more; for a Supervisor's Agent and for the Client's own.
-    /// Verifies: ADR-draft-supervisor-mode-and-its-kinds-and-a-repeated-offer-is-applied-once
+    /// Verifies: ADR-0046
     #[test]
     fn a_repeated_offer_of_a_hash_that_failed_is_applied_again() {
         let supervised_dir = tempfile::tempdir().expect("tempdir");

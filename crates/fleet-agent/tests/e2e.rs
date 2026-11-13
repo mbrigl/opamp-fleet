@@ -212,7 +212,7 @@ fn stage_owned_program(state_dir: &Path, supervisor: &str, program: &str) {
 }
 
 // Verifies: ADR-0018, ADR-0016, G-1, G-6, G-7, G-14
-// Verifies: ADR-draft-supervisor-mode-and-its-kinds-and-a-repeated-offer-is-applied-once
+// Verifies: ADR-0046
 #[tokio::test]
 async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
     let (server_addr, state, dir) = spawn_server().await;
@@ -331,7 +331,7 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
     // The push is held back until each Supervisor's Agent has sent a heartbeat after the rollout.
     // Those heartbeats still name the old hash, so the Server answers them with the offer again,
     // and the same hash reaches each Agent twice: the second is a report, not a second apply
-    // (ADR-draft-supervisor-mode-and-its-kinds-and-a-repeated-offer-is-applied-once, clause 56).
+    // (ADR-0046, clause 56).
     common::save(&state, "fleet", "receivers: {}\n", otelcol_type);
     common::save(&state, "client-yaml", "receivers: {}\n", "supervisor");
     push_held.send_replace(true);

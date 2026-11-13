@@ -8,7 +8,7 @@ process adapter behind H1 and reports `APPLYING` H2. H1's verdict then arrives, 
 (`crates/fleet-agent/src/supervisor/agent/remote_config.rs`). The Agent reports H1 as its last
 configuration while H2 waits in the queue. The Server, seeing H1 where it wants H2, answers the next
 message with the offer of H2 again. The status the Agent holds is now `APPLIED` H1, so clause 56
-of ADR-draft-supervisor-mode-and-its-kinds-and-a-repeated-offer-is-applied-once does not take the
+of ADR-0046 does not take the
 offer of H2 as a repeat: H2 is handed over a second time and the Managed Process restarts once
 more. It takes two rollouts within one apply grace.
 
