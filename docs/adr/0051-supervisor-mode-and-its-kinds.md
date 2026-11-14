@@ -1,4 +1,4 @@
-# ADR-draft-supervisor-mode-and-its-kinds: Supervisor Mode and its kinds, and a repeated offer of a configuration is applied once
+# ADR-0051: Supervisor Mode and its kinds, and a repeated offer of a configuration is applied once
 
 - **Status:** 🟡 proposed
 - **Date:** 2026-11-14
@@ -204,7 +204,7 @@ working directory the kind names for the start, the preflight's inside the stage
 probe the environment the kind names for the start, and resolves `${staged}` in the preflight's
 arguments, environment and working directory. Clause 18 there leaves an operator's attribute under a
 kind's key as written; `[attributes]` refuses every `supervisor.*` key
-([ADR-draft-what-an-agent-reports-about-itself](draft-what-an-agent-reports-about-itself.md) clause
+([ADR-0054](0054-what-an-agent-reports-about-itself.md) clause
 10), so clause 18 here says that an operator cannot state one.
 
 ## Decision
@@ -388,7 +388,7 @@ configuration whose hash an Agent is applying or has applied as a report, not a 
     Supervisor set at Clients that can run it. One key per kind, because a Selector is equality
     over string values and the question is about one member of the set. An operator cannot state
     one: `[attributes]` refuses every `supervisor.*` key at startup
-    ([ADR-draft-what-an-agent-reports-about-itself](draft-what-an-agent-reports-about-itself.md)
+    ([ADR-0054](0054-what-an-agent-reports-about-itself.md)
     clause 10). `AvailableComponents` is
     not used for this: the message is *Development* in the pinned Baseline
     ([ADR-0011](0011-the-protocol-is-pinned-and-checked-against-opamp-go.md)) and Selectors do not

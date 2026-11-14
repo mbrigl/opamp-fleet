@@ -1,4 +1,4 @@
-# ADR-draft-the-fleet-record-of-agents-and-hosts: The fleet record of Agents and Hosts
+# ADR-0052: The fleet record of Agents and Hosts
 
 - **Status:** 🟡 proposed
 - **Date:** 2026-11-14
@@ -322,7 +322,7 @@ report, its own labels and its Client Agent's labels, in that order of precedenc
     - A label whose key starts with `supervisor.` is refused (`400`), naming the key, the same way.
       That space is a Supervisor's own statement: the kinds its Client carries and the version of
       the Package it installed
-      ([ADR-draft-what-an-agent-reports-about-itself](draft-what-an-agent-reports-about-itself.md)
+      ([ADR-0054](0054-what-an-agent-reports-about-itself.md)
       clauses 5 and 10). A label there would let a Selector match an Agent as if it stated one.
     - A label the record already holds in either space is ignored: it enters no effective
       description (clause 18), so no Selector and no package match reads it, no Agent inherits it

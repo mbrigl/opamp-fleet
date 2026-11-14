@@ -1,4 +1,4 @@
-# ADR-draft-what-an-agent-reports-about-itself: What an Agent reports about itself
+# ADR-0054: What an Agent reports about itself
 
 - **Status:** 🟡 proposed
 - **Date:** 2026-11-14
@@ -148,7 +148,7 @@ This ADR restates [ADR-0017](0017-what-an-agent-reports-about-itself.md) in full
 it once accepted; until then ADR-0017 stays in force, and ADR-0017's status line follows with the
 acceptance. It changes two things. Clause 5 adds `supervisor.package.version`, the version of the
 Package a Supervisor installed, which a Package is matched against
-([ADR-draft-deployments-and-rollouts](draft-deployments-and-rollouts.md) clause 25). Clause 10
+([ADR-0049](0049-deployments-and-rollouts.md) clause 25). Clause 10
 refuses every `[attributes]` key in the `supervisor.` namespace, however TOML spells it, since that
 namespace is the Supervisor's own statement and an operator who could state one could make every
 Agent of the host a Client Agent or choose the version a Package is held against.
@@ -199,7 +199,7 @@ to the destinations the Server offers, in TLS 1.3 and in cleartext only to a loo
    `os.version`, `os.build_id`, `os.description`, `host.name`, `host.id`, `host.cpu.model.name`,
    `host.ip`, and `host.mac`. A Supervisor-backed Agent also reports `supervisor.package.version`,
    the version of the Package its Supervisor installed, when and from what record
-   [ADR-draft-deployments-and-rollouts](draft-deployments-and-rollouts.md) clause 25 states.
+   [ADR-0049](0049-deployments-and-rollouts.md) clause 25 states.
    What the platform cannot answer is left out: a placeholder would be something false a Selector
    could match. Nothing is taken from the connection.
 
@@ -270,7 +270,7 @@ to the destinations the Server offers, in TLS 1.3 and in cleartext only to a loo
     `supervisor.`, whether TOML spells it quoted, dotted, or as a sub-table under
     `[attributes.supervisor]`, fails at startup with a message naming the key. That namespace is
     the Supervisor's own statement: `supervisor.kind.*`
-    ([ADR-draft-supervisor-mode-and-its-kinds](draft-supervisor-mode-and-its-kinds.md) clause 18)
+    ([ADR-0051](0051-supervisor-mode-and-its-kinds.md) clause 18)
     and `supervisor.package.version` (clause 5). An operator who could state one could make every
     Agent of the host a Client Agent or choose the version a Package is held against.
 

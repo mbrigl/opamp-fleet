@@ -1,4 +1,4 @@
-# ADR-draft-client-modes-and-the-gateway: Client modes, the Supervisor Endpoint and the Gateway
+# ADR-0048: Client modes, the Supervisor Endpoint and the Gateway
 
 - **Status:** 🟡 proposed
 - **Date:** 2026-10-27

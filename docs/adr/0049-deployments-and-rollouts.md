@@ -1,4 +1,4 @@
-# ADR-draft-deployments-and-rollouts: A Deployment is the one thing aimed and rolled out, and a rollout pins what it releases
+# ADR-0049: A Deployment is the one thing aimed and rolled out, and a rollout pins what it releases
 
 - **Status:** 🟡 proposed
 - **Date:** 2026-10-29
@@ -60,7 +60,7 @@ This ADR restates [ADR-0033](0033-deployments-and-rollouts.md) and will supersed
 until then ADR-0033 stays in force, and ADR-0033's status line follows with the acceptance. ADR-0033
 holds a Package against the `service.version` a Managed Process reports. A repacked Package carries
 a version its program does not report
-([ADR-draft-the-operator-program-opamp-fleetctl](draft-the-operator-program-opamp-fleetctl.md)
+([ADR-0053](0053-the-operator-program-opamp-fleetctl.md)
 clause 28): the second repack of an upstream 2.14.3 is Package `2.14.4-0.r.2`, and the program it
 installs still reports `2.14.3`. Held against that number, a host that installed the repack stays a
 candidate for it: the reach count counts it, the fleet view proposes it, and the bulk act chooses it
@@ -304,7 +304,7 @@ Configuration, Package or Deployment that an assignment pins.
 
 25. **A Supervisor reports the version of the Package it installed.**
     - A Supervisor-backed Agent reports the non-identifying attribute `supervisor.package.version`
-      ([ADR-draft-what-an-agent-reports-about-itself](draft-what-an-agent-reports-about-itself.md)
+      ([ADR-0054](0054-what-an-agent-reports-about-itself.md)
       clause 5): the version of the Package whose program its Supervisor installed and starts,
       from the record of the last install that survived its apply grace
       ([ADR-0034](0034-packages-signatures-and-delivery.md)), restored when the Client starts.
@@ -314,15 +314,15 @@ Configuration, Package or Deployment that an assignment pins.
     - The Supervisor alone states it. The fold of a Managed Process's description drops every
       `supervisor.*` key ([ADR-0017](0017-what-an-agent-reports-about-itself.md) clause 8),
       `[attributes]` refuses one at startup
-      ([ADR-draft-what-an-agent-reports-about-itself](draft-what-an-agent-reports-about-itself.md)
+      ([ADR-0054](0054-what-an-agent-reports-about-itself.md)
       clause 10), and the Server refuses a label in that namespace and ignores one already stored
-      ([ADR-draft-the-fleet-record-of-agents-and-hosts](draft-the-fleet-record-of-agents-and-hosts.md)
+      ([ADR-0052](0052-the-fleet-record-of-agents-and-hosts.md)
       clause 20), so neither a program nor the host's operator nor the Server's can state it.
     - The Client Agent reports none: its `service.version` is its baked version, which is what
       it runs, and its claim stays the record of clauses 15 and 18.
     - It is the Package's version, not the program's. A repacked Package carries a version its
       program does not report
-      ([ADR-draft-the-operator-program-opamp-fleetctl](draft-the-operator-program-opamp-fleetctl.md)
+      ([ADR-0053](0053-the-operator-program-opamp-fleetctl.md)
       clause 28), and a Package carrying a program that numbers itself its own way (`1.19`)
       carries one written as SemVer
       ([ADR-0035](0035-package-versions-high-water-mark-and-floor.md) clause 6). Held against

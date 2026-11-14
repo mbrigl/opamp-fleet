@@ -1,4 +1,4 @@
-# ADR-draft-the-operator-program-opamp-fleetctl: The operator program `opamp-fleetctl`
+# ADR-0053: The operator program `opamp-fleetctl`
 
 - **Status:** 🟡 proposed
 - **Date:** 2026-11-14
@@ -403,7 +403,7 @@ upstream that signs with OpenPGP.
       at that path and not through a linked directory, whose target is byte for byte that one is
       kept. It is packed with mode `0o777`, read from the tree and never followed, so nothing of
       the operator's host is read through it, and the Client creates exactly those links
-      ([ADR-draft-packages-signatures-and-delivery](draft-packages-signatures-and-delivery.md)
+      ([ADR-0050](0050-packages-signatures-and-delivery.md)
       clause 57). A link at a named path with another target, and every link the kind does not
       name, leads out as before. The shared rule is `fleet_core::tree::is_kept`.
     - **A link that names nothing inside the tree is dropped.**
@@ -428,7 +428,7 @@ upstream that signs with OpenPGP.
       below any pre-release upstream names for the next patch.
     - **The program keeps the version it is.** Its program keeps reporting the upstream version,
       so the Server holds the Package against the version of the Package the host's Supervisor
-      installed ([ADR-draft-deployments-and-rollouts](draft-deployments-and-rollouts.md) clauses
+      installed ([ADR-0049](0049-deployments-and-rollouts.md) clauses
       14 and 25): a host on an earlier repack is offered the later one, a host on the later one is
       offered it no more, and upstream's next release still replaces it. Build metadata
       (`2.14.3+r2`) is not the form: two versions that differ only in it compare equal
@@ -760,7 +760,7 @@ which `gpgv` cannot know of.
 
 ## Enforcement
 
-Tests that carry `Verifies: ADR-draft-the-operator-program-opamp-fleetctl`:
+Tests that carry `Verifies: ADR-0053`:
 
 - `pki init` writes exactly the files of clause 7 into the two directories: the bootstrap CA's key
   into `--server-dir`, no server-CA key and no package signing key into it,

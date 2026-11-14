@@ -1,4 +1,4 @@
-# ADR-draft-packages-signatures-and-delivery: Packages, signatures, and delivery
+# ADR-0050: Packages, signatures, and delivery
 
 - **Status:** 🟡 proposed
 - **Date:** 2026-10-28
@@ -738,7 +738,7 @@ swapped in by rename, health-gated and rolled back only to a real predecessor.
       with another target, a relative one, and one outside the program's directory. So does any
       member at or beneath a kept link, so nothing is written through it. A zip or 7z tree keeps
       no link at all, since the repacks that need one are `.tar.gz`
-      ([ADR-draft-the-operator-program-opamp-fleetctl](draft-the-operator-program-opamp-fleetctl.md)
+      ([ADR-0053](0053-the-operator-program-opamp-fleetctl.md)
       clause 27). The program is never a kept link. Both ends hold a link against the kind's list
       by one rule, `fleet_core::tree::is_kept`.
 
