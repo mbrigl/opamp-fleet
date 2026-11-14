@@ -41,12 +41,13 @@ pub fn written(state_dir: &Path) -> Vec<PathBuf> {
     files
 }
 
-/// Enrol on a runtime of its own, until the issued certificate is stored or Ctrl-C ends the wait.
+/// Enrol on a runtime of its own, until the issued certificate is stored or Ctrl-C ends the wait;
+/// a run with no bootstrap identity to enrol with, an enrolled Client's, enrols nothing.
 ///
 /// `config` is the configuration the service will run with, its `state_dir` the service's.
-/// `written` is what this run asked and wrote: an endpoint and trust it answered replace the
-/// file's, and an endpoint named over a kept file holds the file to it
-/// (ADR-0044).
+/// `written` is what this run asked and wrote: the bootstrap identity it enrols with, an endpoint
+/// and trust it answered, which replace the file's, and an endpoint named over a kept file, which
+/// holds the file to it (ADR-0044).
 /// `roots` are the data root and the layout root. The CA file and the bootstrap pair are read
 /// once, before anything connects; one in a root or the state directory, which the service's
 /// account owns, is read through that directory, never through a link at its name.
@@ -54,13 +55,10 @@ pub fn written(state_dir: &Path) -> Vec<PathBuf> {
 /// # Errors
 /// Returns an error when the CA file or the bootstrap pair cannot be read, when the state
 /// directory cannot be prepared, or when the wait is interrupted before a certificate arrived.
-pub fn run(
-    config: &ClientConfig,
-    bootstrap: &Bootstrap,
-    written: &Written,
-    roots: &[&Path],
-) -> Result<(), String> {
-    let config = prepare(config, bootstrap, written, roots)?;
+pub fn run(config: &ClientConfig, written: &Written, roots: &[&Path]) -> Result<(), String> {
+    let Some(config) = prepare(config, written, roots)? else {
+        return Ok(());
+    };
     runtime::daemon_runtime()?.block_on(async move {
         let (stop, shutdown) = shutdown_channel();
         tokio::spawn(async move {
@@ -173,20 +171,23 @@ async fn connect(mut config: ClientConfig, mut shutdown: Shutdown) -> Result<(),
 /// `config` as the enrolment connects with it: what the run answered in place of what the file
 /// says (ADR-0044),
 /// and the CA file and the bootstrap pair read once, before anything connects, never again by a
-/// path the account gave (ADR-0021 clause 11).
+/// path the account gave (ADR-0021 clause 11). `None` where `written` holds no bootstrap identity,
+/// and so nothing to enrol with.
 fn prepare(
     config: &ClientConfig,
-    bootstrap: &Bootstrap,
     written: &Written,
     roots: &[&Path],
-) -> Result<ClientConfig, String> {
+) -> Result<Option<ClientConfig>, String> {
+    let Some(bootstrap) = &written.bootstrap else {
+        return Ok(None);
+    };
     let mut config = config.clone();
     if let Some(answered) = &written.answered {
         take_answered(&mut config, answered);
     }
     holds_to_named(&config, written)?;
     read_once(&mut config, bootstrap, roots, &written.offered)?;
-    Ok(config)
+    Ok(Some(config))
 }
 
 /// Refuses the enrolment where `--endpoint` named, over a file the install kept, another endpoint
@@ -307,13 +308,29 @@ mod tests {
         }
     }
 
+    /// `written`, enrolling with `bootstrap`.
+    fn enrolling(bootstrap: Bootstrap, written: Written) -> Written {
+        Written {
+            bootstrap: Some(bootstrap),
+            ..written
+        }
+    }
+
+    /// [`prepare`] for a run that enrols, as every caller here is.
+    fn prepare_enrolling(
+        config: &ClientConfig,
+        written: &Written,
+        roots: &[&Path],
+    ) -> Result<ClientConfig, String> {
+        prepare(config, written, roots).map(|config| config.expect("a run that enrols"))
+    }
+
     /// `run`'s error, which must come before anything connects: a run still going after ten
     /// seconds read something it should have refused.
     fn refusal(config: ClientConfig, bootstrap: Bootstrap, account: PathBuf) -> String {
         let (done, wait) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            done.send(run(&config, &bootstrap, &Written::default(), &[&account]).err())
-        });
+        let written = enrolling(bootstrap, Written::default());
+        std::thread::spawn(move || done.send(run(&config, &written, &[&account]).err()));
         wait.recv_timeout(std::time::Duration::from_secs(10))
             .expect("the enrolment read what it should have refused")
             .expect("refused")
@@ -537,13 +554,15 @@ mod tests {
             key: key_link.clone(),
         };
         let prepared = |offered: Offered, bootstrap: &Bootstrap| {
-            let written = Written {
-                offered,
-                ..Written::default()
-            };
-            prepare(
+            let written = enrolling(
+                bootstrap.clone(),
+                Written {
+                    offered,
+                    ..Written::default()
+                },
+            );
+            prepare_enrolling(
                 &config(account.path(), &ca_path),
-                bootstrap,
                 &written,
                 &[account.path()],
             )
@@ -689,13 +708,15 @@ mod tests {
         let mut rewritten = config(account.path(), Path::new("/dev/zero"));
         rewritten.endpoint = "wss://theirs.example.net/v1/opamp".to_string();
 
-        let prepared = prepare(
+        let prepared = prepare_enrolling(
             &rewritten,
-            &bootstrap(admin.path()),
-            &Written {
-                answered: Some(answered.clone()),
-                ..Written::default()
-            },
+            &enrolling(
+                bootstrap(admin.path()),
+                Written {
+                    answered: Some(answered.clone()),
+                    ..Written::default()
+                },
+            ),
             &[account.path()],
         )
         .expect("prepared from the answers");
@@ -709,13 +730,15 @@ mod tests {
             ca: None,
             ..answered.clone()
         };
-        let prepared = prepare(
+        let prepared = prepare_enrolling(
             &rewritten,
-            &bootstrap(admin.path()),
-            &Written {
-                answered: Some(without),
-                ..Written::default()
-            },
+            &enrolling(
+                bootstrap(admin.path()),
+                Written {
+                    answered: Some(without),
+                    ..Written::default()
+                },
+            ),
             &[account.path()],
         )
         .expect("prepared from the answers");
@@ -724,6 +747,22 @@ mod tests {
             crate::tls::client_tls(&prepared).expect("built").ca_pem,
             None
         );
+    }
+
+    /// A run with no bootstrap identity, an enrolled Client's, enrols nothing and reads nothing:
+    /// the identity it would enrol with is the one `Written` holds, taken from nowhere else.
+    /// Verifies: ADR-0027
+    #[test]
+    fn a_run_with_no_bootstrap_identity_enrols_nothing() {
+        let account = tempfile::tempdir().expect("account");
+        // A CA that would be refused, were it read.
+        let file = config(account.path(), Path::new("/dev/zero"));
+        let written = Written::default();
+
+        assert!(prepare(&file, &written, &[account.path()])
+            .expect("nothing read")
+            .is_none());
+        run(&file, &written, &[account.path()]).expect("nothing to enrol");
     }
 
     /// A run that answered nothing takes the endpoint and the CA from the file: the residual the
@@ -739,10 +778,9 @@ mod tests {
         let mut file = config(account.path(), &copy);
         file.endpoint = "wss://in-the-file.example.com/v1/opamp".to_string();
 
-        let prepared = prepare(
+        let prepared = prepare_enrolling(
             &file,
-            &bootstrap(admin.path()),
-            &Written::default(),
+            &enrolling(bootstrap(admin.path()), Written::default()),
             &[account.path()],
         )
         .expect("prepared from the file");
@@ -763,13 +801,16 @@ mod tests {
         let mut kept = config(account.path(), &copy);
         kept.endpoint = "wss://theirs.example.net/v1/opamp".to_string();
         let named = "wss://fleet.example.com/v1/opamp";
-        let written = Written {
-            named_over_kept: Some(named.to_string()),
-            ..Written::default()
-        };
+        let written = enrolling(
+            bootstrap(admin.path()),
+            Written {
+                named_over_kept: Some(named.to_string()),
+                ..Written::default()
+            },
+        );
 
-        let refused = prepare(&kept, &bootstrap(admin.path()), &written, &[account.path()])
-            .expect_err("another endpoint");
+        let refused =
+            prepare_enrolling(&kept, &written, &[account.path()]).expect_err("another endpoint");
         assert!(refused.contains(named), "{refused}");
         assert!(
             refused.contains("wss://theirs.example.net/v1/opamp"),
@@ -777,8 +818,8 @@ mod tests {
         );
 
         kept.endpoint = named.to_string();
-        let prepared = prepare(&kept, &bootstrap(admin.path()), &written, &[account.path()])
-            .expect("the same endpoint");
+        let prepared =
+            prepare_enrolling(&kept, &written, &[account.path()]).expect("the same endpoint");
         assert_eq!(prepared.endpoint, named);
         assert_eq!(prepared.ca_pem.as_deref(), Some(ca.as_bytes()));
     }

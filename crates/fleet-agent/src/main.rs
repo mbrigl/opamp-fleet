@@ -577,7 +577,7 @@ fn install(
                 &state_dir,
                 &supervisors_root,
                 &config_path,
-                &written.copies,
+                written.ca_copy().map(Path::to_path_buf).as_slice(),
             ),
         );
         halt_recorded(
@@ -633,9 +633,7 @@ fn install(
         }
         // Before anything is staged or registered (ADR-0020 clause 26): an enrolment that is stopped
         // leaves the answered file and nothing else.
-        if let Some(bootstrap) = &written.bootstrap {
-            enrol::run(&config, bootstrap, &written, &[&data_root, &layout_root])?;
-        }
+        enrol::run(&config, &written, &[&data_root, &layout_root])?;
         // And held to what the Client needs at startup. A packaged install registers the service
         // even so — it has an endpoint and no client identity to write — but never starts it, and
         // the service refuses to run until the file names one (ADR-0020, ADR-0021). Said loudly
@@ -704,16 +702,7 @@ fn install(
                 )?,
             );
             // The copy beside a configuration named outside the data root is not under it.
-            skipped.extend(
-                run_as.hand_over(
-                    &written
-                        .copies
-                        .iter()
-                        .map(PathBuf::as_path)
-                        .collect::<Vec<_>>(),
-                    kept,
-                )?,
-            );
+            skipped.extend(run_as.hand_over(written.ca_copy().as_slice(), kept)?);
             for skipped in skipped {
                 println!("warning: {}", skipped.warning(run_as.account()));
             }
@@ -879,13 +868,11 @@ fn configure(
     let mut config = ClientConfig::load_held(&config_path)?;
     let state_dir = config.service_state_dir(&roots)?;
     config.state_dir.clone_from(&state_dir);
-    if let Some(bootstrap) = &written.bootstrap {
-        enrol::run(&config, bootstrap, &written, &[&data_root, &roots.layout])?;
-    }
+    enrol::run(&config, &written, &[&data_root, &roots.layout])?;
     // What this run created belongs to whoever owns the configuration — the service's account when
     // it runs as one (ADR-0021 clause 1) — not to the administrator who ran it.
     let mut created = enrol::written(&state_dir);
-    created.extend(written.copies.iter().cloned());
+    created.extend(written.ca_copy().map(Path::to_path_buf));
     let skipped = run_as::match_owner(
         &config_path,
         &data_root,

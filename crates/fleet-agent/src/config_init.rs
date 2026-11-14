@@ -262,13 +262,11 @@ impl Bootstrap {
     }
 }
 
-/// What the questionnaire left behind: the files it wrote beside the configuration, which an
-/// install hands over to the service account with the file, and the bootstrap identity to enrol
-/// with.
+/// What the questionnaire left behind: what it answered, among it the file it wrote beside the
+/// configuration ([`Written::ca_copy`]), which an install hands over to the service account with
+/// the file, and the bootstrap identity to enrol with.
 #[derive(Debug, Default)]
 pub struct Written {
-    /// The copy of the answered Server CA, when one was answered.
-    pub copies: Vec<PathBuf>,
     /// The identity to enrol with; `None` on an enrolled Client, which was not asked.
     pub bootstrap: Option<Bootstrap>,
     /// What this run answered and wrote; `None` where it kept the file as it was.
@@ -280,6 +278,16 @@ pub struct Written {
     /// The paths this run's questions offered from the file, which the enrolment reads through no
     /// link at their name where an answer kept one.
     pub offered: Offered,
+}
+
+impl Written {
+    /// The copy of the answered Server CA beside the configuration, the one file the run wrote
+    /// there besides it; `None` where no CA was answered or nothing was.
+    #[must_use]
+    pub fn ca_copy(&self) -> Option<&Path> {
+        let (copy, _) = self.answered.as_ref()?.ca.as_ref()?;
+        Some(copy)
+    }
 }
 
 /// The endpoint and the trust a run answered, held in memory: a privileged enrolment connects
@@ -377,7 +385,7 @@ pub fn run(
     let (answers, bootstrap) = ask(current, enrolled, beside, password, account)?;
     let offered = Offered::of(current);
     let (answers, answered) = copy_ca_beside(answers, path, account.0, Some(account.1), &offered)?;
-    let copies = copies(&answered);
+    report_copy(&answered);
     if existing {
         // The file may hold `[packages] archive_key`: the text read and the text written are wiped
         // when they are dropped; what `toml_edit` keeps while it edits is its own (ADR-0014).
@@ -391,7 +399,6 @@ pub fn run(
     }
     println!("wrote {}", path.display());
     Ok(Written {
-        copies,
         bootstrap,
         answered: Some(answered),
         named_over_kept: None,
@@ -399,14 +406,11 @@ pub fn run(
     })
 }
 
-/// The copy `answered` names, as a list of the files written beside the configuration, each
-/// reported.
-fn copies(answered: &Answered) -> Vec<PathBuf> {
-    let copies: Vec<PathBuf> = answered.ca.iter().map(|(copy, _)| copy.clone()).collect();
-    for copy in &copies {
+/// Reports the copy `answered` names, the file written beside the configuration.
+fn report_copy(answered: &Answered) {
+    if let Some((copy, _)) = &answered.ca {
         println!("copied {}", copy.display());
     }
-    copies
 }
 
 /// Copy the answered CA into the directory of the configuration at `config`, under
@@ -634,11 +638,10 @@ pub fn run_with_endpoint(
     }
     // The CA beside the program is the administrator's, in none of the account's directories.
     let (answers, answered) = copy_ca_beside(answers, path, &[], None, &Offered::default())?;
-    let copies = copies(&answered);
+    report_copy(&answered);
     write_new(path, &render(&answers))?;
     println!("wrote {} for {}", path.display(), answers.endpoint);
     Ok(Written {
-        copies,
         bootstrap: None,
         answered: Some(answered),
         named_over_kept: None,
@@ -1649,11 +1652,10 @@ mod tests {
         let data = tempfile::tempdir().expect("tempdir");
         let path = data.path().join(FILE_NAME);
 
-        let copies = run_with_endpoint(&path, "wss://fleet.example.com/v1/opamp", true, &beside)
-            .expect("write")
-            .copies;
+        let written = run_with_endpoint(&path, "wss://fleet.example.com/v1/opamp", true, &beside)
+            .expect("write");
         let copy = data.path().join(SERVER_CA_FILE);
-        assert_eq!(copies, vec![copy.clone()]);
+        assert_eq!(written.ca_copy(), Some(copy.as_path()));
         let loaded = ClientConfig::load(&path).expect("loads");
         assert_eq!(
             loaded.tls.expect("tls").ca_file.as_deref(),
@@ -1672,17 +1674,16 @@ mod tests {
         assert!(
             run_with_endpoint(&path, "wss://other.example.com/v1/opamp", true, &beside)
                 .expect("kept")
-                .copies
-                .is_empty()
+                .ca_copy()
+                .is_none()
         );
         assert_eq!(std::fs::read(&path).expect("read"), before);
 
         let loopback = tempfile::tempdir().expect("tempdir");
         let path = loopback.path().join(FILE_NAME);
-        let copies = run_with_endpoint(&path, "ws://127.0.0.1:4320/v1/opamp", true, &beside)
-            .expect("write")
-            .copies;
-        assert!(copies.is_empty());
+        let written =
+            run_with_endpoint(&path, "ws://127.0.0.1:4320/v1/opamp", true, &beside).expect("write");
+        assert_eq!(written.ca_copy(), None);
         let loaded = ClientConfig::load(&path).expect("loads");
         assert!(loaded.tls.and_then(|t| t.ca_file).is_none());
         assert!(loaded.packages.and_then(|p| p.verification_key).is_none());
@@ -1848,15 +1849,17 @@ mod tests {
         std::fs::write(dir.path().join(SERVER_CA_FILE), ca_pem()).expect("write");
         let named = Beside::in_named_dir(dir.path()).expect("a directory");
         let data = tempfile::tempdir().expect("tempdir");
-        let copies = run_with_endpoint(
+        let written = run_with_endpoint(
             &data.path().join(FILE_NAME),
             "wss://fleet.example.com/v1/opamp",
             true,
             &named,
         )
-        .expect("write")
-        .copies;
-        assert_eq!(copies, vec![data.path().join(SERVER_CA_FILE)]);
+        .expect("write");
+        assert_eq!(
+            written.ca_copy(),
+            Some(data.path().join(SERVER_CA_FILE).as_path())
+        );
 
         let missing = dir.path().join("no such directory");
         let refused = Beside::in_named_dir(&missing).expect_err("refused");
