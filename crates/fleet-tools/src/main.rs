@@ -9,6 +9,7 @@
 #![forbid(unsafe_code)]
 
 mod fetch;
+mod gpgv;
 mod package;
 mod pki;
 mod signing;
