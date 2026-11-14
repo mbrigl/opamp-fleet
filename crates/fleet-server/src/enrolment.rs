@@ -380,26 +380,6 @@ pub trait EnrolmentStore: Send + Sync {
         Ok(Took::Added)
     }
 
-    /// Decides the waiting request `id`, and answers whether it was decided now: a request the
-    /// store does not hold, or holds decided already, is left as it is, and so is one another
-    /// instance holds while it decides it.
-    ///
-    /// # Errors
-    /// Returns an error when the store cannot be read or written; nothing is then decided.
-    fn decide(&self, id: &str, decision: &Decision) -> Result<Decided, String> {
-        let mut persisted = self.load()?.unwrap_or_default();
-        let Some(request) = persisted
-            .requests
-            .iter_mut()
-            .find(|r| r.id == id && r.decision.is_none())
-        else {
-            return Ok(Decided::NotWaiting);
-        };
-        request.decision = Some(decision.clone());
-        self.save(&persisted)?;
-        Ok(Decided::Written)
-    }
-
     /// Rejects the key `id` at `rejected_ms`, kept beyond the window, and decides its request
     /// while it waits: [`Decided::Written`]. A request the store holds decided is left as it is,
     /// its key not rejected: [`Decided::NotWaiting`]. A key the queue does not hold is rejected
@@ -2165,9 +2145,9 @@ pub(crate) mod tests {
         fn approve(
             &self,
             id: &str,
-            _: &CertId,
+            bootstrap: &CertId,
             sign: &mut dyn FnMut() -> Result<Signing, DecisionError>,
-            _: &dyn Registrar,
+            registrar: &dyn Registrar,
         ) -> Result<Approval, String> {
             let (decision, _) = match sign() {
                 Ok(signing) => signing,
@@ -2175,13 +2155,29 @@ pub(crate) mod tests {
             };
             match self.1 {
                 Commit::Landed => {
-                    assert_eq!(self.0.decide(id, &decision), Ok(Decided::Written));
+                    assert_eq!(
+                        self.0.approve(
+                            id,
+                            bootstrap,
+                            &mut || Ok((decision.clone(), None)),
+                            registrar
+                        ),
+                        Ok(Approval::Approved(decision))
+                    );
                     Err("the commit's answer was lost".to_string())
                 }
                 Commit::Lost | Commit::Unreadable => Err("the commit failed".to_string()),
                 Commit::Foreign => {
                     let theirs = Decision::Approved("another instance's certificate".to_string());
-                    assert_eq!(self.0.decide(id, &theirs), Ok(Decided::Written));
+                    assert_eq!(
+                        self.0.approve(
+                            id,
+                            bootstrap,
+                            &mut || Ok((theirs.clone(), None)),
+                            registrar
+                        ),
+                        Ok(Approval::Approved(theirs))
+                    );
                     Err("the commit's answer was lost".to_string())
                 }
                 Commit::NotCommitted => {

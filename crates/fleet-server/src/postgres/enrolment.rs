@@ -64,10 +64,10 @@ fn held_elsewhere(error: &tokio_postgres::Error) -> bool {
 }
 
 /// Rolls `transaction` back and waits for the database's answer before the call answers `answer`.
-/// A decision dropped instead only sends its rollback, and keeps the request's row until the
+/// A transaction dropped instead only sends its rollback, and keeps the request's row until the
 /// database has read it: a rejection made right after, which takes the row without a wait, would
-/// find it held and be answered [`Decided::Deciding`]. A rejection's early returns end the same
-/// way, so that no call answers with its transaction still open. A rollback that fails leaves a
+/// find it held and be answered [`Decided::Deciding`]. A rejection's early returns end this way,
+/// so that none answers with its transaction still open. A rollback that fails leaves a
 /// connection the database rolls back as it ends; the answer stands.
 async fn rolled_back<T>(
     transaction: deadpool_postgres::Transaction<'_>,
@@ -241,49 +241,6 @@ impl EnrolmentStore for PgEnrolmentStore {
             notify(&transaction, ENROLMENT, &id).await?;
             transaction.commit().await.map_err(sql)?;
             Ok(Took::Added)
-        })
-    }
-
-    /// The request's row is held while it is read and written, so two instances deciding one
-    /// request decide it once. A wait for the row that outlasts the session's `lock_timeout`, as
-    /// behind an approval that signs, is answered [`Decided::Deciding`].
-    fn decide(&self, id: &str, decision: &Decision) -> Result<Decided, String> {
-        let id = id.to_string();
-        let decision = serde_json::to_value(decision).expect("a decision serializes");
-        self.database.run(move |pool| async move {
-            let mut client = client(&pool).await?;
-            let transaction = client.transaction().await.map_err(sql)?;
-            let row = match transaction
-                .query_opt(
-                    "SELECT request FROM enrolment_requests WHERE id = $1 FOR UPDATE",
-                    &[&id],
-                )
-                .await
-            {
-                Ok(row) => row,
-                Err(e) if held_elsewhere(&e) => {
-                    return rolled_back(transaction, Decided::Deciding).await
-                }
-                Err(e) => return Err(sql(e)),
-            };
-            let Some(row) = row else {
-                return rolled_back(transaction, Decided::NotWaiting).await;
-            };
-            let mut request: Value = row.get(0);
-            if request.get("decision").is_some_and(|d| !d.is_null()) {
-                return rolled_back(transaction, Decided::NotWaiting).await;
-            }
-            request["decision"] = decision;
-            transaction
-                .execute(
-                    "UPDATE enrolment_requests SET request = $2 WHERE id = $1",
-                    &[&id, &request],
-                )
-                .await
-                .map_err(sql)?;
-            notify(&transaction, ENROLMENT, &id).await?;
-            transaction.commit().await.map_err(sql)?;
-            Ok(Decided::Written)
         })
     }
 
@@ -853,15 +810,20 @@ mod tests {
         );
 
         let approved = Decision::Approved("-----BEGIN CERTIFICATE-----".to_string());
-        assert_eq!(store.decide("a", &approved), Ok(Decided::Written));
+        let mut sign = || Ok((approved.clone(), None));
+        let kept = crate::enrolment::tests::kept();
         assert_eq!(
-            store.decide("a", &Decision::Rejected),
-            Ok(Decided::NotWaiting),
+            store.approve("a", &bootstrap("1"), &mut sign, &kept),
+            Ok(Approval::Approved(approved.clone()))
+        );
+        assert_eq!(
+            store.approve("a", &bootstrap("1"), &mut sign, &kept),
+            Ok(Approval::NotWaiting),
             "decided once"
         );
         assert_eq!(
-            store.decide("none", &Decision::Rejected),
-            Ok(Decided::NotWaiting)
+            store.approve("none", &bootstrap("1"), &mut sign, &kept),
+            Ok(Approval::NotWaiting)
         );
         let mut decided = request("a", "1");
         decided.decision = Some(approved);
@@ -920,8 +882,8 @@ mod tests {
     }
 
     /// Two instances take a request each into a queue with one place left, behind a barrier, and
-    /// exactly one is taken while the other finds the queue full; two deciding one request decide
-    /// it once.
+    /// exactly one is taken while the other finds the queue full; two rejecting one request reject
+    /// it once, and the other finds it decided.
     /// Verifies: ADR-0045
     #[test]
     fn two_takers_at_the_queues_bound_take_one_request_between_them() {
@@ -968,15 +930,14 @@ mod tests {
         for request in &held {
             let barrier = std::sync::Barrier::new(2);
             let id = request.id.clone();
-            let decided: Vec<bool> = std::thread::scope(|scope| {
+            let mut decided: Vec<Decided> = std::thread::scope(|scope| {
                 let racers: Vec<_> = stores
                     .iter()
                     .map(|store| {
                         let (barrier, id) = (&barrier, id.clone());
                         scope.spawn(move || {
                             barrier.wait();
-                            store.decide(&id, &Decision::Rejected).expect("decide")
-                                == Decided::Written
+                            store.reject(&id, 1).expect("reject")
                         })
                     })
                     .collect();
@@ -985,11 +946,8 @@ mod tests {
                     .map(|r| r.join().expect("racer"))
                     .collect()
             });
-            assert_eq!(
-                decided.iter().filter(|d| **d).count(),
-                1,
-                "{id}: {decided:?}"
-            );
+            decided.sort_by_key(|d| *d != Decided::Written);
+            assert_eq!(decided, [Decided::Written, Decided::NotWaiting], "{id}");
         }
     }
 
@@ -1624,7 +1582,7 @@ mod tests {
         a.take(&request("p", "1"), 1_000, 100, 100).expect("take");
         let (signing, signs) = std::sync::mpsc::channel::<()>();
         let (answered, answers) = std::sync::mpsc::channel();
-        let (b_approved, b_decided, b_rejected, b_listed) = std::thread::scope(|scope| {
+        let (b_approved, b_rejected, b_listed) = std::thread::scope(|scope| {
             // A signs until B has answered, however long B waits.
             let first = scope.spawn(move || {
                 a.approve(
@@ -1646,7 +1604,6 @@ mod tests {
                     &mut || Ok((Decision::Approved("pem b".to_string()), None)),
                     &crate::enrolment::tests::kept(),
                 ),
-                b.decide("p", &Decision::Rejected),
                 b.reject("p", 1),
                 // A key the queue does not hold is rejected beside the approval, without a wait.
                 b.reject("q", 1),
@@ -1659,7 +1616,6 @@ mod tests {
             answer
         });
         assert_eq!(b_approved, Ok(Approval::Deciding));
-        assert_eq!(b_decided, Ok(Decided::Deciding));
         assert_eq!(b_rejected, Ok(Decided::Deciding));
         assert_eq!(b_listed, Ok(Decided::Listed));
         assert_eq!(
@@ -1671,7 +1627,6 @@ mod tests {
             ),
             Ok(Approval::NotWaiting)
         );
-        assert_eq!(b.decide("p", &Decision::Rejected), Ok(Decided::NotWaiting));
         assert_eq!(
             b.reject("p", 1),
             Ok(Decided::NotWaiting),
@@ -1766,7 +1721,15 @@ mod tests {
         assert_eq!(store.take(&request("a", "1"), now, 3, 3), Ok(Took::Added));
         assert_eq!(store.take(&request("b", "1"), now, 3, 3), Ok(Took::Added));
         let approved = Decision::Approved("-----BEGIN CERTIFICATE-----".to_string());
-        assert_eq!(store.decide("b", &approved), Ok(Decided::Written));
+        assert_eq!(
+            store.approve(
+                "b",
+                &bootstrap("1"),
+                &mut || Ok((approved.clone(), None)),
+                &crate::enrolment::tests::kept()
+            ),
+            Ok(Approval::Approved(approved.clone()))
+        );
         assert_eq!(store.reject("a", 7), Ok(Decided::Written));
         assert_eq!(
             store.reject("a", 8),
