@@ -1791,7 +1791,7 @@ mod tests {
 
     /// `opamp-fleetctl pki status` and `server pki status` over the same certificate print the
     /// same line, read and worded by the one function in `fleet-core`.
-    /// Verifies: ADR-draft-the-operator-program-opamp-fleetctl
+    /// Verifies: ADR-0047
     #[test]
     fn both_status_commands_print_one_line_for_one_certificate() {
         let root = tempfile::tempdir().expect("tempdir");
