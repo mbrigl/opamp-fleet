@@ -27,6 +27,29 @@ pub struct Taken {
     pub taken_over: Vec<String>,
 }
 
+/// What a lease records of its instance beyond its holder and its release, and where the lines
+/// its transaction writes into a chain go: handed to each take, so no lease is taken without them.
+#[derive(Clone, Default)]
+pub struct Terms {
+    /// The `[audit] key_label` this instance names, which its lease records and every other live
+    /// lease must name too
+    /// (ADR-0043
+    /// clause 14).
+    pub audit_key_label: Option<String>,
+    /// The `seq` and the hash of the last entry of the file record under `data_dir/audit/` this
+    /// Server kept before its record moved into the database
+    /// ([`archive_in`](super::audit::archive_in)): the take that opens the first chain the database
+    /// holds records it, unless an archive is recorded already, and the chain names it as its
+    /// predecessor
+    /// (ADR-0029 clause 6).
+    pub archive: Option<(u64, String)>,
+    /// Where the lines a lease's transaction writes into a chain are exported to, where
+    /// `[audit.export]` names a receiver
+    /// (ADR-0043
+    /// clause 9).
+    pub export: Option<crate::audit_export::Sink>,
+}
+
 /// A lease this instance renewed.
 #[derive(Clone, Copy, Debug)]
 pub struct Renewal {
@@ -60,7 +83,7 @@ pub fn new_instance_id() -> Result<String, String> {
 }
 
 impl Database {
-    /// Takes a lease under a new instance id, lapsing `lapse` after now, for `host`.
+    /// Takes a lease under a new instance id, lapsing `lapse` after now, for `host`, on `terms`.
     ///
     /// An instance that must be alone fails when another live lease exists, naming the key that
     /// makes it alone and the number of live leases; it holds the exclusive lock already, so a
@@ -76,8 +99,8 @@ impl Database {
     ///
     /// # Errors
     /// Returns an error naming the database when it cannot be reached, and the refusals above.
-    pub fn take_lease(&self, host: &str, lapse: Duration) -> Result<Taken, String> {
-        self.take_lease_within(new_instance_id()?, host, lapse, super::CALL_TIMEOUT)
+    pub fn take_lease(&self, host: &str, lapse: Duration, terms: &Terms) -> Result<Taken, String> {
+        self.take_lease_within(new_instance_id()?, host, lapse, super::CALL_TIMEOUT, terms)
     }
 
     /// [`take_lease`](Self::take_lease) under `instance_id`, one [`new_instance_id`] made, waiting
@@ -91,13 +114,14 @@ impl Database {
         host: &str,
         lapse: Duration,
         bound: Duration,
+        terms: &Terms,
     ) -> Result<Taken, String> {
         let exclusive = self.exclusive().clone();
-        let files = self.archive_offered();
+        let files = terms.archive.clone();
         let host = host.to_string();
         let release = self.release();
-        let audit_key = self.audit_key_label();
-        let export = self.audit_export.get().cloned();
+        let audit_key = terms.audit_key_label.clone();
+        let export = terms.export.clone();
         let taking = self.run_within(bound, move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
@@ -295,7 +319,8 @@ impl Database {
     }
 
     /// Takes over every lease other than `instance_id`'s that has lapsed, waiting at most `bound`
-    /// for the answer: what an instance does after each renewal
+    /// for the answer, the lines it writes exported as `terms` say: what an instance does after
+    /// each renewal
     /// (ADR-0045
     /// clause 18). Each lease is removed in one transaction with the closing of its audit chain,
     /// `closed_by` the chain of `instance_id`; the removal locks the lease, so one instance alone
@@ -307,9 +332,10 @@ impl Database {
         &self,
         instance_id: &str,
         bound: Duration,
+        terms: &Terms,
     ) -> Result<Vec<String>, String> {
         let id = instance_id.to_string();
-        let export = self.audit_export.get().cloned();
+        let export = terms.export.clone();
         self.run_within(bound, move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
@@ -389,14 +415,18 @@ impl Database {
 mod tests {
     use super::super::testing::TestDatabase;
     use super::*;
+    use crate::postgres::Opening;
 
     const LAPSE: Duration = Duration::from_secs(30);
 
     fn alone(test: &TestDatabase, because: &str) -> Result<std::sync::Arc<Database>, String> {
-        Database::open_in(
+        Database::open(
             &test.config(),
-            Exclusive::Alone(because.to_string()),
-            Some(&test.schema),
+            Opening {
+                exclusive: Exclusive::Alone(because.to_string()),
+                schema: Some(&test.schema),
+                ..Opening::default()
+            },
         )
     }
 
@@ -419,25 +449,26 @@ mod tests {
         let Some(test) = TestDatabase::named() else {
             return;
         };
-        let labelled = |label: Option<&str>| {
-            let database = test.shared();
-            database.set_audit_key_label(label.map(str::to_string));
-            database
+        let labelled = |label: Option<&str>| Terms {
+            audit_key_label: label.map(str::to_string),
+            ..Terms::default()
         };
         // Two without one both start.
-        let (a, b) = (labelled(None), labelled(None));
-        let first = a.take_lease("host-a", LAPSE).expect("a");
-        let second = b.take_lease("host-b", LAPSE).expect("b");
-        let err = labelled(Some("audit"))
-            .take_lease("host-c", LAPSE)
+        let (a, b) = (test.shared(), test.shared());
+        let first = a.take_lease("host-a", LAPSE, &labelled(None)).expect("a");
+        let second = b.take_lease("host-b", LAPSE, &labelled(None)).expect("b");
+        let err = test
+            .shared()
+            .take_lease("host-c", LAPSE, &labelled(Some("audit")))
             .expect_err("a label against none");
         assert!(err.contains("[audit] key_label"), "{err}");
         assert!(err.contains("\"audit\" here and none"), "{err}");
         a.release_lease(&first.instance_id).expect("release");
         b.release_lease(&second.instance_id).expect("release");
 
-        let a = labelled(Some("audit"));
-        let first = a.take_lease("host-a", LAPSE).expect("a with a label");
+        let first = a
+            .take_lease("host-a", LAPSE, &labelled(Some("audit")))
+            .expect("a with a label");
         assert_eq!(
             test.rows(&format!(
                 "SELECT audit_key_label FROM leases WHERE instance_id = '{}'",
@@ -446,18 +477,19 @@ mod tests {
             vec![vec![Some("audit".to_string())]],
             "the lease records the label"
         );
-        let differing = labelled(Some("other"));
+        let differing = test.shared();
         let err = differing
-            .take_lease("host-b", LAPSE)
+            .take_lease("host-b", LAPSE, &labelled(Some("other")))
             .expect_err("a differing label");
         assert!(err.contains("\"other\" here and \"audit\""), "{err}");
         assert_eq!(differing.outdated(), Some(err), "the refusal is kept");
-        let err = labelled(None)
-            .take_lease("host-b", LAPSE)
+        let err = test
+            .shared()
+            .take_lease("host-b", LAPSE, &labelled(None))
             .expect_err("none against a label");
         assert!(err.contains("none here and \"audit\""), "{err}");
-        labelled(Some("audit"))
-            .take_lease("host-b", LAPSE)
+        test.shared()
+            .take_lease("host-b", LAPSE, &labelled(Some("audit")))
             .expect("the same label");
     }
 
@@ -470,8 +502,12 @@ mod tests {
             return;
         };
         let (a, b) = (test.shared(), test.shared());
-        let first = a.take_lease("host-a", LAPSE).expect("a's lease");
-        let second = b.take_lease("host-b", LAPSE).expect("b's lease");
+        let first = a
+            .take_lease("host-a", LAPSE, &Terms::default())
+            .expect("a's lease");
+        let second = b
+            .take_lease("host-b", LAPSE, &Terms::default())
+            .expect("b's lease");
         assert_ne!(first.instance_id, second.instance_id);
         assert!(a
             .renew_lease(&first.instance_id, LAPSE, LAPSE)
@@ -505,9 +541,15 @@ mod tests {
             return;
         };
         let database = test.shared();
-        let lapsed = database.take_lease("host-a", LAPSE).expect("a");
-        let live = database.take_lease("host-b", LAPSE).expect("b");
-        let released = database.take_lease("host-c", LAPSE).expect("c");
+        let lapsed = database
+            .take_lease("host-a", LAPSE, &Terms::default())
+            .expect("a");
+        let live = database
+            .take_lease("host-b", LAPSE, &Terms::default())
+            .expect("b");
+        let released = database
+            .take_lease("host-c", LAPSE, &Terms::default())
+            .expect("c");
         test.sql(&format!(
             "UPDATE leases SET expires_at = now() WHERE instance_id = '{}'",
             lapsed.instance_id
@@ -531,22 +573,34 @@ mod tests {
             return;
         };
         let other = test.shared();
-        let lease = other.take_lease("host-a", LAPSE).expect("lease");
+        let lease = other
+            .take_lease("host-a", LAPSE, &Terms::default())
+            .expect("lease");
         let lonely = alone(&test, "[blobs] store = \"fs\"").expect("the lock is free");
         let err = lonely
-            .take_lease("host-b", LAPSE)
+            .take_lease("host-b", LAPSE, &Terms::default())
             .expect_err("another lease is live");
         assert!(err.contains("[blobs] store = \"fs\""), "{err}");
         assert!(err.contains("1 other instance holds a live lease"), "{err}");
         other.release_lease(&lease.instance_id).expect("release");
-        let held = lonely.take_lease("host-b", LAPSE).expect("alone now");
+        let held = lonely
+            .take_lease("host-b", LAPSE, &Terms::default())
+            .expect("alone now");
 
-        let err = Database::open_in(&test.config(), Exclusive::Shared, Some(&test.schema))
-            .map(|_| ())
-            .expect_err("held alone");
+        let err = Database::open(
+            &test.config(),
+            Opening {
+                schema: Some(&test.schema),
+                ..Opening::default()
+            },
+        )
+        .map(|_| ())
+        .expect_err("held alone");
         assert!(err.contains("holds the database alone"), "{err}");
         assert!(err.contains("server blobs-to-s3"), "{err}");
-        let err = other.take_lease("host-c", LAPSE).expect_err("held alone");
+        let err = other
+            .take_lease("host-c", LAPSE, &Terms::default())
+            .expect_err("held alone");
         assert!(err.contains("holds the database alone"), "{err}");
         assert!(err.contains("server blobs-to-s3"), "{err}");
         let err = alone(&test, "[client_ca] key_file")
@@ -558,7 +612,7 @@ mod tests {
         drop(lonely);
         let taken = test
             .shared()
-            .take_lease("host-c", LAPSE)
+            .take_lease("host-c", LAPSE, &Terms::default())
             .expect("the lock went with its session");
         assert_eq!(taken.taken_over, [held.instance_id]);
     }
@@ -573,11 +627,13 @@ mod tests {
             return;
         };
         let lonely = alone(&test, "[blobs] store = \"fs\"").expect("the lock is free");
-        let held = lonely.take_lease("host-a", LAPSE).expect("alone");
+        let held = lonely
+            .take_lease("host-a", LAPSE, &Terms::default())
+            .expect("alone");
         drop(lonely);
         let taker = test.shared();
         let taken = taker
-            .take_lease("host-b", LAPSE)
+            .take_lease("host-b", LAPSE, &Terms::default())
             .expect("the lock went with its session");
         assert_eq!(taken.taken_over, std::slice::from_ref(&held.instance_id));
         let closing = test.rows(&format!(
@@ -591,7 +647,7 @@ mod tests {
                 && closing.contains(&format!("\"closed_by\":\"{}\"", taken.instance_id)),
             "{closing}"
         );
-        let verified = super::super::audit::verify(&taker, None).expect("verify");
+        let verified = super::super::audit::verify(&taker, None, None).expect("verify");
         assert!(!verified.failed, "{:?}", verified.lines);
     }
 
@@ -604,13 +660,19 @@ mod tests {
             return;
         };
         let (a, b, c) = (test.shared(), test.shared(), test.shared());
-        let lapsed = a.take_lease("host-a", LAPSE).expect("a's lease");
-        let live = b.take_lease("host-b", LAPSE).expect("b's lease");
+        let lapsed = a
+            .take_lease("host-a", LAPSE, &Terms::default())
+            .expect("a's lease");
+        let live = b
+            .take_lease("host-b", LAPSE, &Terms::default())
+            .expect("b's lease");
         test.sql(&format!(
             "UPDATE leases SET expires_at = now() WHERE instance_id = '{}'",
             lapsed.instance_id
         ));
-        let taken = c.take_lease("host-c", LAPSE).expect("c's lease");
+        let taken = c
+            .take_lease("host-c", LAPSE, &Terms::default())
+            .expect("c's lease");
         assert_eq!(taken.taken_over, [lapsed.instance_id]);
         assert!(!taken.taken_over.contains(&live.instance_id));
     }
@@ -668,7 +730,9 @@ mod tests {
             ));
         };
         let (a, b) = (test.shared(), test.shared());
-        let gone = a.take_lease("host-a", LAPSE).expect("a's lease");
+        let gone = a
+            .take_lease("host-a", LAPSE, &Terms::default())
+            .expect("a's lease");
         lapse(&gone.instance_id);
         let (taken, lines) = logged(|| {
             crate::instance::take_in_time(
@@ -678,6 +742,7 @@ mod tests {
                 "host-b",
                 new_instance_id().expect("id"),
                 None,
+                &Terms::default(),
             )
             .expect("b's lease")
         });
@@ -704,6 +769,7 @@ mod tests {
                 "host-b",
                 new_instance_id().expect("id"),
                 Some(&taken.instance_id),
+                &Terms::default(),
             )
             .expect("b's new lease")
         });

@@ -3718,7 +3718,7 @@ mod tests {
             data_dir: Some(root.join("fleet-data")),
             ..ServerConfig::default()
         };
-        let err = crate::Records::open(&config)
+        let err = crate::Records::open(&config, None)
             .err()
             .expect("the directory cannot be written");
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).expect("chmod");

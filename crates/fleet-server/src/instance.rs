@@ -30,6 +30,7 @@ use crate::changed::Changed;
 use crate::clock::Elapsed;
 use crate::config::LeaseTimes;
 use crate::fleet::AppState;
+use crate::postgres::lease::Terms;
 use crate::postgres::notify::{Heard, Notice};
 use crate::postgres::Database;
 
@@ -131,15 +132,28 @@ pub struct Lease {
 }
 
 impl Lease {
-    /// Takes a lease on `database` for `host` and renews it every `times.renew` in the background,
-    /// measured on [`Elapsed::monotonic`].
+    /// Takes a lease on `database` for `host` on `terms` and renews it every `times.renew` in the
+    /// background, measured on [`Elapsed::monotonic`]; each new lease after a lost one is taken on
+    /// the same terms.
     ///
     /// # Errors
     /// Returns an error when the first lease cannot be taken in time: the database does not
     /// answer, or this instance may not share the database with the instances on it.
-    pub fn take(database: Arc<Database>, times: LeaseTimes, host: &str) -> Result<Self, String> {
+    pub fn take(
+        database: Arc<Database>,
+        times: LeaseTimes,
+        host: &str,
+        terms: Terms,
+    ) -> Result<Self, String> {
         let instance_id = crate::postgres::lease::new_instance_id()?;
-        Self::take_as(database, times, host, instance_id, Elapsed::monotonic())
+        Self::take_as(
+            database,
+            times,
+            host,
+            instance_id,
+            Elapsed::monotonic(),
+            terms,
+        )
     }
 
     /// [`take`](Self::take) under `instance_id`, the one the instance made at startup and its log
@@ -153,8 +167,9 @@ impl Lease {
         host: &str,
         instance_id: String,
         clock: Elapsed,
+        terms: Terms,
     ) -> Result<Self, String> {
-        let taken = take_in_time(&database, &clock, times, host, instance_id, None)?;
+        let taken = take_in_time(&database, &clock, times, host, instance_id, None, &terms)?;
         info!(instance_id = %taken.instance_id, "took a lease");
         let proof = Proof::until(clock.clone(), taken.sent.saturating_add(times.lapse));
         let proving = proof.clone();
@@ -177,6 +192,7 @@ impl Lease {
                             clock,
                             times,
                             host,
+                            terms,
                             held,
                             proof: proving,
                             versions,
@@ -279,7 +295,8 @@ impl Lease {
 /// A lease taken under `instance_id` within its own lapse: one the database answered for later
 /// than that is lapsed already, as far as this instance can tell, and is not served on. `own` is
 /// the lease this instance lost, if it lost one: a take that removes it logs it as this instance's
-/// own lapsed lease, and every other lease it removes as one of an instance that is gone.
+/// own lapsed lease, and every other lease it removes as one of an instance that is gone. The
+/// lease records `terms`.
 pub(crate) fn take_in_time(
     database: &Database,
     clock: &Elapsed,
@@ -287,9 +304,10 @@ pub(crate) fn take_in_time(
     host: &str,
     instance_id: String,
     own: Option<&str>,
+    terms: &Terms,
 ) -> Result<Taken, String> {
     let sent = clock.now();
-    let taken = database.take_lease_within(instance_id, host, times.lapse, times.lapse)?;
+    let taken = database.take_lease_within(instance_id, host, times.lapse, times.lapse, terms)?;
     for removed in &taken.taken_over {
         if own == Some(removed.as_str()) {
             info!(
@@ -332,6 +350,8 @@ struct Renewing {
     clock: Elapsed,
     times: LeaseTimes,
     host: String,
+    /// What each lease records, and where the lines its takes write go.
+    terms: Terms,
     held: watch::Sender<Option<String>>,
     proof: Proof,
     versions: watch::Sender<Option<u64>>,
@@ -389,6 +409,7 @@ async fn renew(lease: &Renewing, taken: Taken) {
         clock,
         times,
         host,
+        terms,
         held,
         proof,
         versions,
@@ -461,15 +482,16 @@ async fn renew(lease: &Renewing, taken: Taken) {
             if database.lock_lost() {
                 return lock_lost(lease, &instance_id);
             }
-            let (db, host, lost, clock) = (
+            let (db, host, lost, clock, terms) = (
                 database.clone(),
                 host.clone(),
                 instance_id.clone(),
                 clock.clone(),
+                terms.clone(),
             );
             match tokio::task::spawn_blocking(move || {
                 let fresh = crate::postgres::lease::new_instance_id()?;
-                take_in_time(&db, &clock, times, &host, fresh, Some(&lost))
+                take_in_time(&db, &clock, times, &host, fresh, Some(&lost), &terms)
             })
             .await
             .unwrap_or_else(|e| Err(e.to_string()))
@@ -519,8 +541,12 @@ async fn renew(lease: &Renewing, taken: Taken) {
 async fn take_over_lapsed(lease: &Renewing, instance_id: &str, sent: Duration) -> Waited<bool> {
     let deadline = sent.saturating_add(lease.times.lapse);
     let bound = lease.times.renew / 2;
-    let (db, id) = (lease.database.clone(), instance_id.to_string());
-    let taking = tokio::task::spawn_blocking(move || db.take_over_lapsed(&id, bound));
+    let (db, id, terms) = (
+        lease.database.clone(),
+        instance_id.to_string(),
+        lease.terms.clone(),
+    );
+    let taking = tokio::task::spawn_blocking(move || db.take_over_lapsed(&id, bound, &terms));
     match until_deadline(lease, deadline, taking).await {
         Waited::Done(Ok(Ok(taken_over))) => {
             for lapsed in &taken_over {

@@ -16,10 +16,9 @@ use std::sync::Arc;
 
 use super::Cached as GenericClient;
 
-use super::{client, sql, Database, Exclusive, CALL_TIMEOUT};
+use super::{client, sql, Database};
 use crate::audit::Entry;
 use crate::audit_log::{line_hash, render, AuditStore, Chain, ChainWalk, Tail, GENESIS};
-use crate::config::PostgresConfig;
 
 /// The entries read in one round trip while a chain is walked.
 const PAGE: i64 = 5000;
@@ -332,9 +331,10 @@ fn now_ms() -> u64 {
 /// archive's last entry as its predecessor, where a move from files recorded one.
 ///
 /// `files` is the end of the file record a Server on PostgreSQL kept under `data_dir/audit/`
-/// before its record moved into the database ([`Database::offer_archive`]): with no chain and no
-/// archive recorded yet, it is recorded as the archive here, as `server migrate-to-postgres`
-/// records one, and named as the predecessor.
+/// before its record moved into the database
+/// ([`Terms::archive`](super::lease::Terms::archive)): with no chain and no archive recorded yet,
+/// it is recorded as the archive here, as `server migrate-to-postgres` records one, and named as
+/// the predecessor.
 pub(crate) async fn open_chain(
     transaction: &impl GenericClient,
     chain: &str,
@@ -486,47 +486,6 @@ pub struct Verified {
     pub newest_checkpoint: Option<String>,
 }
 
-/// Walks every chain of the record on the database `config` names, with the Server's own
-/// credentials and without changing anything
-/// (ADR-0029 clauses 5 and 6),
-/// and, with `archive`, checks that the file record there ends on the entry the first chain names
-/// as its predecessor.
-///
-/// # Errors
-/// Returns an error when the database cannot be reached or read.
-pub fn verify_on(config: &PostgresConfig, archive: Option<&Path>) -> Result<Verified, String> {
-    verify_in(config, None, archive)
-}
-
-/// [`verify_on`] in the schema `schema`: what the tests work in.
-///
-/// # Errors
-/// As [`verify_on`].
-#[doc(hidden)]
-pub fn verify_in(
-    config: &PostgresConfig,
-    schema: Option<&str>,
-    archive: Option<&Path>,
-) -> Result<Verified, String> {
-    let database = Database::connect_as(config, schema, CALL_TIMEOUT, Exclusive::Shared)?;
-    verify(&database, archive)
-}
-
-/// [`verify_on`], and every chain checked against the checkpoints with `check`
-/// (ADR-0041 clause 4).
-///
-/// # Errors
-/// As [`verify_on`].
-pub fn verify_checked_on(
-    config: &PostgresConfig,
-    schema: Option<&str>,
-    archive: Option<&Path>,
-    check: Option<crate::checkpoint::Check>,
-) -> Result<Verified, String> {
-    let database = Database::connect_as(config, schema, CALL_TIMEOUT, Exclusive::Shared)?;
-    verify_checked(&database, archive, check)
-}
-
 /// What one snapshot of the record holds, walked: each chain with its host and what its walk
 /// found, the archive the database records, and the chain that names a predecessor.
 struct Snapshot {
@@ -539,21 +498,17 @@ struct Snapshot {
     checked: Option<crate::checkpoint::Report>,
 }
 
-/// Walks every chain on `database`; see [`verify_on`]. The chain records and every entry are read
-/// in one read-only snapshot, so a chain an instance closes meanwhile is seen either open or
-/// closed, never half of each.
+/// Walks every chain of the record on `database` without changing anything
+/// (ADR-0029 clauses 5 and 6); with `archive`, checks that the file record there ends on the entry
+/// the first chain names as its predecessor; and with `check`, checks every chain against the
+/// checkpoints (ADR-0041 clause 4). The chain records and every entry are read in one read-only
+/// snapshot, so a chain an instance closes meanwhile is seen either open or closed, never half of
+/// each. `server audit-verify` opens the database with the Server's own credentials, touching
+/// nothing ([`Opening::migrations`](super::Opening::migrations)).
 ///
 /// # Errors
-/// As [`verify_on`].
-pub fn verify(database: &Database, archive: Option<&Path>) -> Result<Verified, String> {
-    verify_checked(database, archive, None)
-}
-
-/// [`verify`], and with `check` every chain checked against the checkpoints in the same snapshot.
-///
-/// # Errors
-/// As [`verify_on`].
-pub fn verify_checked(
+/// Returns an error when the database cannot be read.
+pub fn verify(
     database: &Database,
     archive: Option<&Path>,
     mut check: Option<crate::checkpoint::Check>,
@@ -868,14 +823,14 @@ async fn walk(
     }
 }
 
-/// Offers the file record in `dir`, a Server's `data_dir/audit/` from before its record moved into
-/// the database, as the archive the first chain names
-/// (ADR-0029 clause 6), while
-/// the database holds no chain; once it holds one, the offer would be moot, and `dir` is not read.
+/// The end of the file record in `dir`, a Server's `data_dir/audit/` from before its record moved
+/// into the database, as the archive the first chain names
+/// ([`Terms::archive`](super::lease::Terms::archive), ADR-0029 clause 6), while the database holds
+/// no chain; once it holds one, the archive would be moot, and `dir` is not read.
 ///
 /// # Errors
 /// As [`archive_end`], and when the database cannot be asked whether it holds a chain.
-pub fn offer_archive_in(database: &Database, dir: &Path) -> Result<(), String> {
+pub fn archive_in(database: &Database, dir: &Path) -> Result<Option<(u64, String)>, String> {
     let first = database.run(|pool| async move {
         let client = client(&pool).await?;
         let row = client
@@ -885,9 +840,10 @@ pub fn offer_archive_in(database: &Database, dir: &Path) -> Result<(), String> {
         Ok(row.get::<_, bool>(0))
     })?;
     if first {
-        database.offer_archive(archive_end(dir)?);
+        archive_end(dir)
+    } else {
+        Ok(None)
     }
-    Ok(())
 }
 
 /// The `seq` and the hash of the last entry of the file record in `dir`, once its whole chain
@@ -960,6 +916,8 @@ pub fn archive_checked(dir: &Path) -> Result<Option<Archive>, String> {
 
 #[cfg(test)]
 mod tests {
+    use crate::postgres::lease::Terms;
+    use crate::postgres::Opening;
     use std::time::Duration;
 
     use tokio::sync::watch;
@@ -972,7 +930,14 @@ mod tests {
     const LAPSE: Duration = Duration::from_secs(30);
 
     fn shared(test: &TestDatabase) -> Arc<Database> {
-        Database::open_in(&test.config(), Exclusive::Shared, Some(&test.schema)).expect("shared")
+        Database::open(
+            &test.config(),
+            Opening {
+                schema: Some(&test.schema),
+                ..Opening::default()
+            },
+        )
+        .expect("shared")
     }
 
     /// An instance as the Server composes its record: a lease, and the writer on its chain.
@@ -995,7 +960,10 @@ mod tests {
         proof: Option<crate::instance::Proof>,
     ) -> Writing {
         let database = shared(test);
-        let chain = database.take_lease(host, LAPSE).expect("lease").instance_id;
+        let chain = database
+            .take_lease(host, LAPSE, &Terms::default())
+            .expect("lease")
+            .instance_id;
         let (held, watched) = watch::channel(Some(chain.clone()));
         let audit = AuditLog::start_under(
             Box::new(PgAuditStore::new(database.clone(), watched.clone())),
@@ -1058,7 +1026,7 @@ mod tests {
                 );
             }
         }
-        let verified = verify(&a.database, None).expect("verify");
+        let verified = verify(&a.database, None, None).expect("verify");
         assert!(!verified.failed, "{:?}", verified.lines);
         for writer in [&a, &b] {
             assert!(
@@ -1169,7 +1137,7 @@ mod tests {
             )),
             vec![vec![Some(line_hash(last))]]
         );
-        let verified = verify(&a.database, None).expect("verify");
+        let verified = verify(&a.database, None, None).expect("verify");
         assert!(!verified.failed, "{:?}", verified.lines);
         assert!(
             verified
@@ -1209,7 +1177,21 @@ mod tests {
         ));
         let gate = test.gate(KEY);
         let (config, schema) = (test.config(), test.schema.clone());
-        let verifying = std::thread::spawn(move || verify_in(&config, Some(&schema), None));
+        let verifying = std::thread::spawn(move || {
+            verify(
+                &crate::postgres::Database::open(
+                    &config,
+                    Opening {
+                        schema: Some(&schema),
+                        migrations: None,
+                        ..Opening::default()
+                    },
+                )
+                .expect("open"),
+                None,
+                None,
+            )
+        });
         let deadline = std::time::Instant::now() + Duration::from_secs(60);
         while !test.waits_for(KEY) {
             assert!(
@@ -1242,7 +1224,7 @@ mod tests {
             "the chain as it was in the snapshot: {:?}",
             verified.lines
         );
-        let after = verify(&a.database, None).expect("verify again");
+        let after = verify(&a.database, None, None).expect("verify again");
         assert!(
             after
                 .lines
@@ -1294,8 +1276,11 @@ mod tests {
         lapse(&test, &gone_chain);
         let (bd, cd) = (b.database.clone(), c.database.clone());
         let (b_chain, c_chain) = (b.chain.clone(), c.chain.clone());
-        let racing = std::thread::spawn(move || bd.take_over_lapsed(&b_chain, LAPSE));
-        let other = cd.take_over_lapsed(&c_chain, LAPSE).expect("c");
+        let racing =
+            std::thread::spawn(move || bd.take_over_lapsed(&b_chain, LAPSE, &Terms::default()));
+        let other = cd
+            .take_over_lapsed(&c_chain, LAPSE, &Terms::default())
+            .expect("c");
         let one = racing.join().expect("b").expect("b");
         let mut taken: Vec<String> = one.iter().chain(other.iter()).cloned().collect();
         taken.sort();
@@ -1327,7 +1312,7 @@ mod tests {
             .expect_err("a closed chain takes no entry");
         assert!(err.contains("is closed"), "{err}");
 
-        let verified = verify(&b.database, None).expect("verify");
+        let verified = verify(&b.database, None, None).expect("verify");
         assert!(!verified.failed, "{:?}", verified.lines);
     }
 
@@ -1357,7 +1342,7 @@ mod tests {
         // The instance takes its next lease, which closes the old chain.
         let new = a
             .database
-            .take_lease("host-a", LAPSE)
+            .take_lease("host-a", LAPSE, &Terms::default())
             .expect("new lease")
             .instance_id;
         a.held.send_replace(Some(new.clone()));
@@ -1389,7 +1374,7 @@ mod tests {
             "{last}"
         );
 
-        let verified = verify(&a.database, None).expect("verify");
+        let verified = verify(&a.database, None, None).expect("verify");
         assert!(!verified.failed, "{:?}", verified.lines);
     }
 
@@ -1405,9 +1390,12 @@ mod tests {
         };
         let (sink, taken) = crate::audit_export::test_sink();
         let database = shared(&test);
-        database.export_audit_to(sink.clone());
+        let terms = Terms {
+            export: Some(sink.clone()),
+            ..Terms::default()
+        };
         let old = database
-            .take_lease("host-a", LAPSE)
+            .take_lease("host-a", LAPSE, &terms)
             .expect("lease")
             .instance_id;
         let (held, watched) = watch::channel(Some(old.clone()));
@@ -1432,7 +1420,7 @@ mod tests {
         );
 
         let new = database
-            .take_lease("host-a", LAPSE)
+            .take_lease("host-a", LAPSE, &terms)
             .expect("new lease")
             .instance_id;
         held.send_replace(Some(new.clone()));
@@ -1482,7 +1470,7 @@ mod tests {
         );
         let new = a
             .database
-            .take_lease("host-a", LAPSE)
+            .take_lease("host-a", LAPSE, &Terms::default())
             .expect("new lease")
             .instance_id;
         a.held.send_replace(Some(new.clone()));
@@ -1514,7 +1502,7 @@ mod tests {
             closing.contains("audit.chain_closed") && !closing.contains("taken_under"),
             "{closing}"
         );
-        let verified = verify(&a.database, None).expect("verify");
+        let verified = verify(&a.database, None, None).expect("verify");
         assert!(!verified.failed, "{:?}", verified.lines);
     }
 
@@ -1549,7 +1537,7 @@ mod tests {
                 .is_some_and(|line| line.contains("audit.chain_closed")),
             "{chain:#?}"
         );
-        let verified = verify(&a.database, None).expect("verify");
+        let verified = verify(&a.database, None, None).expect("verify");
         assert!(!verified.failed, "{:?}", verified.lines);
     }
 
@@ -1572,7 +1560,7 @@ mod tests {
             "DELETE FROM audit_entries WHERE chain = '{}' AND seq = 3",
             a.chain
         ));
-        let verified = verify(&a.database, None).expect("verify");
+        let verified = verify(&a.database, None, None).expect("verify");
         assert!(verified.failed, "{:?}", verified.lines);
         assert!(
             verified.lines.iter().any(|line| line
@@ -1623,8 +1611,16 @@ mod tests {
         assert_eq!(end.0, 3);
 
         let database = shared(&test);
-        database.offer_archive(Some(end.clone()));
-        let first = database.take_lease("host-a", LAPSE).expect("lease");
+        let first = database
+            .take_lease(
+                "host-a",
+                LAPSE,
+                &Terms {
+                    archive: Some(end.clone()),
+                    ..Terms::default()
+                },
+            )
+            .expect("lease");
         assert_eq!(
             test.rows("SELECT seq::text, hash FROM audit_archive"),
             vec![vec![Some("3".to_string()), Some(end.1.clone())]]
@@ -1632,13 +1628,21 @@ mod tests {
         let opened = lines(&test, &first.instance_id).remove(0);
         assert!(opened.contains("\"predecessor_seq\":3"), "{opened}");
         assert!(opened.contains(&end.1), "{opened}");
-        let verified = verify(&database, Some(&archive)).expect("verify");
+        let verified = verify(&database, Some(&archive), None).expect("verify");
         assert!(!verified.failed, "{:?}", verified.lines);
 
         // Offered again by a later start, over files that went on: nothing more is recorded.
         file_record(dir.path(), 1);
-        database.offer_archive(archive_end(&archive).expect("tail"));
-        let later = database.take_lease("host-a", LAPSE).expect("lease");
+        let later = database
+            .take_lease(
+                "host-a",
+                LAPSE,
+                &Terms {
+                    archive: archive_end(&archive).expect("tail"),
+                    ..Terms::default()
+                },
+            )
+            .expect("lease");
         assert!(!lines(&test, &later.instance_id)[0].contains("predecessor"));
         assert_eq!(
             test.rows("SELECT seq::text FROM audit_archive"),
@@ -1662,8 +1666,16 @@ mod tests {
             return;
         };
         let database = shared(&test);
-        database.offer_archive(archive_end(&dir.path().join("empty")).expect("empty"));
-        let first = database.take_lease("host-a", LAPSE).expect("lease");
+        let first = database
+            .take_lease(
+                "host-a",
+                LAPSE,
+                &Terms {
+                    archive: archive_end(&dir.path().join("empty")).expect("empty"),
+                    ..Terms::default()
+                },
+            )
+            .expect("lease");
         assert!(test.rows("SELECT seq FROM audit_archive").is_empty());
         assert!(!lines(&test, &first.instance_id)[0].contains("predecessor"));
     }
@@ -1720,7 +1732,7 @@ mod tests {
     ) {
         let database = shared(test);
         let chain = database
-            .take_lease("host-a", LAPSE)
+            .take_lease("host-a", LAPSE, &Terms::default())
             .expect("lease")
             .instance_id;
         let (held, watched) = watch::channel(Some(chain.clone()));
@@ -1831,7 +1843,7 @@ mod tests {
         for lands in [true, false] {
             let database = shared(&test);
             let chain = database
-                .take_lease("host-a", LAPSE)
+                .take_lease("host-a", LAPSE, &Terms::default())
                 .expect("lease")
                 .instance_id;
             let (_held, watched) = watch::channel(Some(chain.clone()));
@@ -1865,7 +1877,7 @@ mod tests {
             );
             assert_eq!(count(&entries, "\"n\":1"), 1, "{entries:#?}");
         }
-        let verified = verify(&shared(&test), None).expect("verify");
+        let verified = verify(&shared(&test), None, None).expect("verify");
         assert!(!verified.failed, "{:?}", verified.lines);
     }
 
@@ -1909,7 +1921,7 @@ mod tests {
         let chain = lines(&test, &b.chain);
         assert_eq!(count(&chain, "\"n\":1"), 1, "{chain:#?}");
         assert_eq!(count(&chain, "\"n\":2"), 1, "{chain:#?}");
-        let verified = verify(&b.database, None).expect("verify");
+        let verified = verify(&b.database, None, None).expect("verify");
         assert!(!verified.failed, "{:?}", verified.lines);
     }
 
@@ -1930,7 +1942,7 @@ mod tests {
         lapse(&test, &a.chain);
         let next = a
             .database
-            .take_lease("host-a", LAPSE)
+            .take_lease("host-a", LAPSE, &Terms::default())
             .expect("new lease")
             .instance_id;
         a.held.send_replace(Some(next.clone()));
@@ -1945,7 +1957,7 @@ mod tests {
         assert_eq!(count(&old, "\"n\":1"), 1, "{old:#?}");
         assert_eq!(count(&new, "\"n\":1"), 0, "written twice: {new:#?}");
         assert_eq!(count(&new, "\"n\":2"), 1, "{new:#?}");
-        let verified = verify(&a.database, None).expect("verify");
+        let verified = verify(&a.database, None, None).expect("verify");
         assert!(!verified.failed, "{:?}", verified.lines);
     }
 
@@ -2083,10 +2095,18 @@ mod tests {
             return;
         };
         let database = shared(&test);
-        database.offer_archive(Some(end.clone()));
-        let first = database.take_lease("host-a", LAPSE).expect("lease");
+        let first = database
+            .take_lease(
+                "host-a",
+                LAPSE,
+                &Terms {
+                    archive: Some(end.clone()),
+                    ..Terms::default()
+                },
+            )
+            .expect("lease");
         assert!(lines(&test, &first.instance_id)[0].contains(&end.1));
-        let verified = verify(&database, Some(&archive)).expect("verify");
+        let verified = verify(&database, Some(&archive), None).expect("verify");
         assert!(!verified.failed, "{:?}", verified.lines);
     }
 
@@ -2140,10 +2160,18 @@ mod tests {
             return;
         };
         let database = shared(&test);
-        database.offer_archive(Some(end.clone()));
-        let first = database.take_lease("host-a", LAPSE).expect("lease");
+        let first = database
+            .take_lease(
+                "host-a",
+                LAPSE,
+                &Terms {
+                    archive: Some(end.clone()),
+                    ..Terms::default()
+                },
+            )
+            .expect("lease");
         assert!(lines(&test, &first.instance_id)[0].contains(&end.1));
-        let verified = verify(&database, Some(&archive)).expect("verify");
+        let verified = verify(&database, Some(&archive), None).expect("verify");
         assert!(verified.failed, "{:?}", verified.lines);
         assert!(
             verified
@@ -2190,9 +2218,17 @@ mod tests {
             return;
         };
         let database = shared(&test);
-        database.offer_archive(Some(archive_end.end));
-        database.take_lease("host-a", LAPSE).expect("lease");
-        let verified = verify(&database, Some(&archive)).expect("verify");
+        database
+            .take_lease(
+                "host-a",
+                LAPSE,
+                &Terms {
+                    archive: Some(archive_end.end),
+                    ..Terms::default()
+                },
+            )
+            .expect("lease");
+        let verified = verify(&database, Some(&archive), None).expect("verify");
         assert!(!verified.failed, "{:?}", verified.lines);
         assert!(
             verified
@@ -2215,7 +2251,7 @@ mod tests {
         };
         let database = shared(&test);
         let chain = database
-            .take_lease("host-a", LAPSE)
+            .take_lease("host-a", LAPSE, &Terms::default())
             .expect("lease")
             .instance_id;
         let (_held, watched) = watch::channel(Some(chain.clone()));
@@ -2251,18 +2287,22 @@ mod tests {
         let whole = std::fs::read_to_string(&file).expect("read");
         std::fs::write(&file, format!("{whole}{{\"seq\":4,\"pr")).expect("tear");
         let database = shared(&test);
-        let err = offer_archive_in(&database, &archive).expect_err("no chain yet: it is read");
+        let err = archive_in(&database, &archive).expect_err("no chain yet: it is read");
         assert!(err.contains("torn"), "{err}");
 
         std::fs::write(&file, &whole).expect("mend");
-        offer_archive_in(&database, &archive).expect("offer");
-        assert!(database.archive_offered().is_some());
-        database.take_lease("host-a", LAPSE).expect("lease");
+        let terms = Terms {
+            archive: archive_in(&database, &archive).expect("offer"),
+            ..Terms::default()
+        };
+        assert!(terms.archive.is_some());
+        database.take_lease("host-a", LAPSE, &terms).expect("lease");
 
         std::fs::write(&file, format!("{whole}{{\"seq\":4,\"pr")).expect("tear");
-        database.offer_archive(None);
-        offer_archive_in(&database, &archive).expect("a chain exists: it is not read");
-        assert_eq!(database.archive_offered(), None);
+        assert_eq!(
+            archive_in(&database, &archive).expect("a chain exists: it is not read"),
+            None
+        );
     }
 
     /// A chain that names a predecessor while the database records no archive fails
@@ -2277,11 +2317,14 @@ mod tests {
         file_record(dir.path(), 3);
         let archive = dir.path().join(crate::fs::AUDIT);
         let database = shared(&test);
-        offer_archive_in(&database, &archive).expect("offer");
-        database.take_lease("host-a", LAPSE).expect("lease");
+        let terms = Terms {
+            archive: archive_in(&database, &archive).expect("offer"),
+            ..Terms::default()
+        };
+        database.take_lease("host-a", LAPSE, &terms).expect("lease");
         test.sql("DELETE FROM audit_archive");
         for checked in [None, Some(archive.as_path())] {
-            let verified = verify(&database, checked).expect("verify");
+            let verified = verify(&database, checked, None).expect("verify");
             assert!(verified.failed, "{:?}", verified.lines);
             assert!(
                 verified
@@ -2303,9 +2346,11 @@ mod tests {
             return;
         };
         let database = shared(&test);
-        database.take_lease("host-a", LAPSE).expect("lease");
+        database
+            .take_lease("host-a", LAPSE, &Terms::default())
+            .expect("lease");
         test.sql("INSERT INTO audit_archive (seq, hash) VALUES (3, 'abc')");
-        let verified = verify(&database, None).expect("verify");
+        let verified = verify(&database, None, None).expect("verify");
         assert!(verified.failed, "{:?}", verified.lines);
         assert!(
             verified

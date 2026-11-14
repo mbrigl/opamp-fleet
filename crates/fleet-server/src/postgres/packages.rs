@@ -512,7 +512,9 @@ pub(crate) async fn write(client: &impl GenericClient, package: &Package) -> Res
 mod tests {
     use super::*;
     use crate::fs::FsPackageBackend;
+    use crate::postgres::lease::Terms;
     use crate::postgres::testing::TestDatabase;
+    use crate::postgres::Opening;
 
     /// The blob of every entry found stored: the port's tests write entries whose bytes are not
     /// the point.
@@ -1010,16 +1012,18 @@ mod tests {
     /// An instance's database on the test's schema, shared with the others, holding a live lease
     /// under which its sweeps mark: what each instance of these tests is.
     fn shared(test: &TestDatabase) -> Arc<Database> {
-        let database = Database::open_in(
+        let database = Database::open(
             &test.config(),
-            crate::postgres::Exclusive::Shared,
-            Some(&test.schema),
+            Opening {
+                schema: Some(&test.schema),
+                ..Opening::default()
+            },
         )
         .expect("open");
         let id = crate::postgres::lease::new_instance_id().expect("an instance id");
         let lapse = std::time::Duration::from_secs(600);
         database
-            .take_lease_within(id, "a host", lapse, lapse)
+            .take_lease_within(id, "a host", lapse, lapse, &Terms::default())
             .expect("a lease");
         database
     }
@@ -1377,13 +1381,17 @@ mod tests {
         let Some(test) = TestDatabase::named() else {
             return;
         };
-        let a = Database::open_in(
+        let a = Database::open(
             &test.config(),
-            crate::postgres::Exclusive::Shared,
-            Some(&test.schema),
+            Opening {
+                schema: Some(&test.schema),
+                instance_id: Some(
+                    crate::postgres::lease::new_instance_id().expect("an instance id"),
+                ),
+                ..Opening::default()
+            },
         )
         .expect("open");
-        a.sweep_under(&crate::postgres::lease::new_instance_id().expect("an instance id"));
         a_mark_outlives_its_lost_session(&test, &a);
     }
 

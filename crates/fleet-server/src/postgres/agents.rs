@@ -1672,7 +1672,9 @@ mod tests {
     use crate::agent_store::Presence;
     use crate::configs::{revision_hash, Configuration, Revision};
     use crate::fs::{FsAgentStore, FsConfigBackend};
+    use crate::postgres::lease::Terms;
     use crate::postgres::testing::TestDatabase;
+    use crate::postgres::Opening;
 
     /// The two stores a rollout writes into, opened on one backing store.
     type Open<'a> = &'a dyn Fn() -> (Box<dyn AgentStore>, Box<dyn crate::configs::ConfigBackend>);
@@ -2291,10 +2293,13 @@ mod tests {
             return;
         };
         let decoy = format!("fleet_test_decoy_{}", hex::encode(InstanceUid::default().0));
-        let database = crate::postgres::Database::open_in(
+        let database = crate::postgres::Database::open(
             &test.config(),
-            crate::postgres::Exclusive::Alone("the test".to_string()),
-            Some(&format!("\"$user\",{decoy},{}", test.schema)),
+            Opening {
+                exclusive: crate::postgres::Exclusive::Alone("the test".to_string()),
+                schema: Some(&format!("\"$user\",{decoy},{}", test.schema)),
+                ..Opening::default()
+            },
         )
         .expect("open under a path naming $user first");
         let store = PgAgentStore::open(database.clone()).expect("open");
@@ -2386,10 +2391,13 @@ mod tests {
         for (size, creating) in [(2, 1), (6, 3), (40, 20)] {
             let mut config = test.config();
             config.pool_size = size;
-            let database = Database::open_in(
+            let database = Database::open(
                 &config,
-                super::super::Exclusive::Alone("the test".to_string()),
-                Some(&test.schema),
+                Opening {
+                    exclusive: super::super::Exclusive::Alone("the test".to_string()),
+                    schema: Some(&test.schema),
+                    ..Opening::default()
+                },
             )
             .expect("open");
             assert_eq!(database.pool_size(), size, "the pool");
@@ -2412,10 +2420,13 @@ mod tests {
         };
         let mut config = test.config();
         config.pool_size = 2;
-        let database = Database::open_in(
+        let database = Database::open(
             &config,
-            super::super::Exclusive::Alone("the test".to_string()),
-            Some(&test.schema),
+            Opening {
+                exclusive: super::super::Exclusive::Alone("the test".to_string()),
+                schema: Some(&test.schema),
+                ..Opening::default()
+            },
         )
         .expect("open");
         let store = Arc::new(PgAgentStore::open(database.clone()).expect("open"));
@@ -2689,7 +2700,7 @@ mod tests {
         };
         let database = test.open();
         let a = database
-            .take_lease("a", std::time::Duration::from_secs(60))
+            .take_lease("a", std::time::Duration::from_secs(60), &Terms::default())
             .expect("lease")
             .instance_id;
         let store = PgAgentStore::new(database.clone());
@@ -2975,7 +2986,11 @@ mod tests {
         };
         let database = test.open();
         let a = database
-            .take_lease("host-a", std::time::Duration::from_secs(60))
+            .take_lease(
+                "host-a",
+                std::time::Duration::from_secs(60),
+                &Terms::default(),
+            )
             .expect("lease")
             .instance_id;
         let store = PgAgentStore::new(database.clone());
@@ -3232,7 +3247,7 @@ mod tests {
         };
         let database = test.open();
         let a = database
-            .take_lease("a", std::time::Duration::from_secs(60))
+            .take_lease("a", std::time::Duration::from_secs(60), &Terms::default())
             .expect("lease")
             .instance_id;
         let store = PgAgentStore::new(database.clone());
@@ -3351,8 +3366,14 @@ mod tests {
         };
         let database = test.open();
         let lapse = std::time::Duration::from_secs(60);
-        let a = database.take_lease("a", lapse).expect("lease").instance_id;
-        let b = database.take_lease("b", lapse).expect("lease").instance_id;
+        let a = database
+            .take_lease("a", lapse, &Terms::default())
+            .expect("lease")
+            .instance_id;
+        let b = database
+            .take_lease("b", lapse, &Terms::default())
+            .expect("lease")
+            .instance_id;
         let store = PgAgentStore::new(database.clone());
         let (one, two) = (InstanceUid([1; 16]), InstanceUid([2; 16]));
         for uid in [one, two] {
@@ -3485,8 +3506,14 @@ mod tests {
         };
         let database = test.open();
         let lapse = std::time::Duration::from_secs(60);
-        let a = database.take_lease("a", lapse).expect("lease").instance_id;
-        let b = database.take_lease("b", lapse).expect("lease").instance_id;
+        let a = database
+            .take_lease("a", lapse, &Terms::default())
+            .expect("lease")
+            .instance_id;
+        let b = database
+            .take_lease("b", lapse, &Terms::default())
+            .expect("lease")
+            .instance_id;
         let store = PgAgentStore::new(database.clone());
         let (one, two) = (InstanceUid([1; 16]), InstanceUid([2; 16]));
         for uid in [one, two] {
@@ -3570,10 +3597,12 @@ mod tests {
             return;
         };
         let open = || {
-            Database::open_in(
+            Database::open(
                 &test.config(),
-                super::super::Exclusive::Shared,
-                Some(&test.schema),
+                Opening {
+                    schema: Some(&test.schema),
+                    ..Opening::default()
+                },
             )
             .expect("open")
         };
@@ -3648,10 +3677,12 @@ mod tests {
             return;
         };
         let open = || {
-            Database::open_in(
+            Database::open(
                 &test.config(),
-                super::super::Exclusive::Shared,
-                Some(&test.schema),
+                Opening {
+                    schema: Some(&test.schema),
+                    ..Opening::default()
+                },
             )
             .expect("open")
         };

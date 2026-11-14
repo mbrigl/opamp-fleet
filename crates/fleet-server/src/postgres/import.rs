@@ -19,7 +19,7 @@ use std::path::Path;
 
 use opamp::uid::InstanceUid;
 
-use super::{client, schema, sql, Database, IMPORT_TIMEOUT};
+use super::{client, schema, sql, Database, Exclusive, Opening, IMPORT_TIMEOUT};
 use crate::agent_store::{AgentStore as _, PersistedAgent};
 use crate::blobs::BlobStore as _;
 use crate::bootstrap::{BootstrapStore as _, Entry as BootstrapEntry};
@@ -230,8 +230,19 @@ pub(crate) fn run_in(
 }
 
 /// The database `config` names, checked to hold none of the Server's tables.
-fn checked(config: &PostgresConfig, schema: Option<&str>) -> Result<Database, String> {
-    let database = Database::connect(config, schema)?;
+fn checked(
+    config: &PostgresConfig,
+    schema: Option<&str>,
+) -> Result<std::sync::Arc<Database>, String> {
+    let database = Database::open(
+        config,
+        Opening {
+            exclusive: Exclusive::Alone("server migrate-to-postgres".to_string()),
+            schema,
+            migrations: None,
+            ..Opening::default()
+        },
+    )?;
     let tables = database.server_tables()?;
     if !tables.is_empty() {
         return Err(format!(
@@ -381,12 +392,15 @@ pub(crate) fn blobs_to_s3_in(
             data_dir.display()
         ));
     }
-    let database = std::sync::Arc::new(Database::connect_as(
+    let database = Database::open(
         config,
-        schema,
-        super::CALL_TIMEOUT,
-        super::Exclusive::Alone("server blobs-to-s3".to_string()),
-    )?);
+        Opening {
+            exclusive: Exclusive::Alone("server blobs-to-s3".to_string()),
+            schema,
+            migrations: None,
+            ..Opening::default()
+        },
+    )?;
     if database.server_tables()?.is_empty() {
         return Err(format!(
             "the {} holds none of the Server's tables — name the database the Server runs on",
@@ -515,6 +529,8 @@ fn copy_file(from: &Path, to: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    use crate::postgres::lease::Terms;
+    use crate::postgres::Opening;
     use std::collections::{BTreeMap, BTreeSet};
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -1009,11 +1025,19 @@ mod tests {
         assert!(err.contains("otelcol@1.2.3"), "{err}");
         assert!(err.contains(&artifact), "{err}");
         assert!(
-            crate::postgres::Database::connect(&second.config(), Some(&second.schema))
-                .expect("connect")
-                .server_tables()
-                .expect("tables")
-                .is_empty(),
+            crate::postgres::Database::open(
+                &second.config(),
+                Opening {
+                    exclusive: Exclusive::Alone("server migrate-to-postgres".to_string()),
+                    schema: Some(&second.schema),
+                    migrations: None,
+                    ..Opening::default()
+                }
+            )
+            .expect("connect")
+            .server_tables()
+            .expect("tables")
+            .is_empty(),
             "the database holds none of the Server's tables"
         );
         clear(&store);
@@ -1287,8 +1311,16 @@ mod tests {
             err.contains("nothing was written into the database"),
             "{err}"
         );
-        let database = crate::postgres::Database::connect(&test.config(), Some(&test.schema))
-            .expect("connect");
+        let database = crate::postgres::Database::open(
+            &test.config(),
+            Opening {
+                exclusive: Exclusive::Alone("server migrate-to-postgres".to_string()),
+                schema: Some(&test.schema),
+                migrations: None,
+                ..Opening::default()
+            },
+        )
+        .expect("connect");
         assert!(database.server_tables().expect("tables").is_empty());
         assert!(!new.exists(), "the new data_dir is left as it was: absent");
     }
@@ -1313,10 +1345,18 @@ mod tests {
         // The first lease opens the first chain.
         let database = test.shared();
         let first = database
-            .take_lease("host-a", std::time::Duration::from_secs(30))
+            .take_lease(
+                "host-a",
+                std::time::Duration::from_secs(30),
+                &Terms::default(),
+            )
             .expect("lease");
         let second = database
-            .take_lease("host-b", std::time::Duration::from_secs(30))
+            .take_lease(
+                "host-b",
+                std::time::Duration::from_secs(30),
+                &Terms::default(),
+            )
             .expect("lease");
         let opened = test.rows(&format!(
             "SELECT line FROM audit_entries WHERE chain = '{}' AND seq = 1",
@@ -1341,9 +1381,20 @@ mod tests {
         );
 
         // Through the connection `audit-verify --config` makes.
-        let checked =
-            super::super::audit::verify_in(&test.config(), Some(&test.schema), Some(&archive))
-                .expect("verify");
+        let checked = super::super::audit::verify(
+            &crate::postgres::Database::open(
+                &test.config(),
+                Opening {
+                    schema: Some(&test.schema),
+                    migrations: None,
+                    ..Opening::default()
+                },
+            )
+            .expect("open"),
+            Some(&archive),
+            None,
+        )
+        .expect("verify");
         assert!(!checked.failed, "{:?}", checked.lines);
         assert!(
             checked
@@ -1353,7 +1404,7 @@ mod tests {
             "{:?}",
             checked.lines
         );
-        let unchecked = super::super::audit::verify(&database, None).expect("verify");
+        let unchecked = super::super::audit::verify(&database, None, None).expect("verify");
         assert!(!unchecked.failed, "{:?}", unchecked.lines);
         assert!(
             unchecked
@@ -1373,7 +1424,7 @@ mod tests {
         let mut lines: Vec<&str> = text.lines().collect();
         lines.pop();
         std::fs::write(&newest, lines.join("\n") + "\n").expect("write");
-        let removed = super::super::audit::verify(&database, Some(&archive)).expect("verify");
+        let removed = super::super::audit::verify(&database, Some(&archive), None).expect("verify");
         assert!(removed.failed, "{:?}", removed.lines);
         assert!(
             removed
@@ -1392,7 +1443,7 @@ mod tests {
             .replace("\"n\":\"2\"", "\"n\":\"9\"");
         changed.push(last);
         std::fs::write(&newest, changed.join("\n") + "\n").expect("write");
-        let altered = super::super::audit::verify(&database, Some(&archive)).expect("verify");
+        let altered = super::super::audit::verify(&database, Some(&archive), None).expect("verify");
         assert!(altered.failed, "{:?}", altered.lines);
         assert!(
             altered
@@ -1428,8 +1479,16 @@ mod tests {
             err.contains("torn") && err.contains(&file.display().to_string()),
             "{err}"
         );
-        let database = crate::postgres::Database::connect(&test.config(), Some(&test.schema))
-            .expect("connect");
+        let database = crate::postgres::Database::open(
+            &test.config(),
+            Opening {
+                exclusive: Exclusive::Alone("server migrate-to-postgres".to_string()),
+                schema: Some(&test.schema),
+                migrations: None,
+                ..Opening::default()
+            },
+        )
+        .expect("connect");
         assert!(database.server_tables().expect("tables").is_empty());
     }
 }

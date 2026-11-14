@@ -763,6 +763,7 @@ mod tests {
     use crate::enrolment::{Decided, Decision, PersistedRequest, Took};
     use crate::fs::FsEnrolmentStore;
     use crate::postgres::testing::TestDatabase;
+    use crate::postgres::Opening;
 
     fn persisted(until: Option<u64>, ids: &[&str]) -> Persisted {
         let requests: Vec<Value> = ids
@@ -1756,7 +1757,18 @@ mod tests {
         let proxy = Lingering::to((test.config.host.clone(), test.config.port));
         let mut through = test.config();
         through.port = proxy.port;
-        let database = Arc::new(Database::connect(&through, Some(&test.schema)).expect("connect"));
+        let database = Database::open(
+            &through,
+            Opening {
+                exclusive: crate::postgres::Exclusive::Alone(
+                    "server migrate-to-postgres".to_string(),
+                ),
+                schema: Some(&test.schema),
+                migrations: None,
+                ..Opening::default()
+            },
+        )
+        .expect("connect");
         let register = register_on(&database);
         let enrolment = enrolment_on(&database);
         enrolment.open(600).expect("window");

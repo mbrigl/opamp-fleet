@@ -588,7 +588,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::super::testing::TestDatabase;
-    use super::super::{client, Exclusive};
+    use super::super::{client, Opening};
     use super::*;
 
     /// A change announced in a transaction is heard by every other listening instance once it is
@@ -602,7 +602,14 @@ mod tests {
             return;
         };
         let open = || {
-            Database::open_in(&test.config(), Exclusive::Shared, Some(&test.schema)).expect("open")
+            Database::open(
+                &test.config(),
+                Opening {
+                    schema: Some(&test.schema),
+                    ..Opening::default()
+                },
+            )
+            .expect("open")
         };
         let (a, b) = (open(), open());
         let (heard, hearing) = std::sync::mpsc::channel();
@@ -614,10 +621,12 @@ mod tests {
             Ok(Heard::Listening)
         );
         let elsewhere = TestDatabase::named().expect("the same database");
-        Database::open_in(
+        Database::open(
             &elsewhere.config(),
-            Exclusive::Shared,
-            Some(&elsewhere.schema),
+            Opening {
+                schema: Some(&elsewhere.schema),
+                ..Opening::default()
+            },
         )
         .expect("another schema")
         .run(|pool| async move {
@@ -793,8 +802,14 @@ mod tests {
         let Some(test) = TestDatabase::named() else {
             return;
         };
-        let database =
-            Database::open_in(&test.config(), Exclusive::Shared, Some(&test.schema)).expect("open");
+        let database = Database::open(
+            &test.config(),
+            Opening {
+                schema: Some(&test.schema),
+                ..Opening::default()
+            },
+        )
+        .expect("open");
         let (heard, hearing) = std::sync::mpsc::channel();
         database.listen(move |what| {
             let _ = heard.send(what);

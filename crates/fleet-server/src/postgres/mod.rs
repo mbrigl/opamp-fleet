@@ -135,10 +135,6 @@ pub struct Database {
     /// What the notifications this instance sends name as their sender: random, one per open
     /// database, so two instances in one process are two origins.
     origin: String,
-    /// The end of the file record under `data_dir/audit/` this Server kept before its record moved
-    /// into the database, which the first chain names as its predecessor
-    /// ([`offer_archive`](Self::offer_archive)).
-    archive: std::sync::Mutex<Option<(u64, String)>>,
     /// What one call may take ([`CALL_TIMEOUT`]), in milliseconds; a test may shorten it for the
     /// one call whose answer it means to lose.
     bound: std::sync::atomic::AtomicU64,
@@ -160,16 +156,6 @@ pub struct Database {
     /// (ADR-0045
     /// clause 16).
     outdated: std::sync::Mutex<Option<String>>,
-    /// The `[audit] key_label` this instance names, which its lease records and every other live
-    /// lease must name too
-    /// (ADR-0043
-    /// clause 14).
-    audit_key_label: std::sync::Mutex<Option<String>>,
-    /// Where the lines a lease's transaction writes into a chain are exported to, set once where
-    /// `[audit.export]` names a receiver
-    /// (ADR-0043
-    /// clause 9).
-    audit_export: std::sync::OnceLock<crate::audit_export::Sink>,
     /// The notifications of the calls whose answer was lost, which the listener hands on
     /// ([`notify::Unsure`]).
     unsure: Arc<notify::Unsure>,
@@ -186,95 +172,80 @@ enum Tls {
     Plain,
 }
 
+/// How [`Database::open`] opens a database: by default as a Server that shares it, in the
+/// role's own schema, its schema brought up to date.
+#[derive(Clone, Debug)]
+pub struct Opening<'a> {
+    /// Whether this instance must be alone, which takes the exclusive lock.
+    pub exclusive: Exclusive,
+    /// The schema worked in rather than the role's default: what the tests work in, one schema
+    /// each, the integration tests of several instances among them.
+    pub schema: Option<&'a str>,
+    /// The release this instance is, as its lease records it: what the tests of two versions side
+    /// by side start each version as.
+    #[doc(hidden)]
+    pub release: &'static str,
+    /// The migrations applied as this release's schema, or `None` to touch nothing: what `server
+    /// migrate-to-postgres`, `server blobs-to-s3` and `server audit-verify` connect for.
+    #[doc(hidden)]
+    pub migrations: Option<&'static [schema::Migration]>,
+    /// What one call may take: what the tests of a database that stops answering shorten.
+    #[doc(hidden)]
+    pub bound: Duration,
+    /// The instance id its first lease is taken under, which its sweeps mark the blobs they delete
+    /// under until then (ADR-0023 clause 14); `None` for a Server that takes no lease, such as a
+    /// command. Each lease it takes sets it anew.
+    pub instance_id: Option<String>,
+}
+
+impl Default for Opening<'_> {
+    fn default() -> Self {
+        Opening {
+            exclusive: Exclusive::Shared,
+            schema: None,
+            release: schema::server_version(),
+            migrations: Some(schema::MIGRATIONS),
+            bound: CALL_TIMEOUT,
+            instance_id: None,
+        }
+    }
+}
+
 impl Database {
-    /// Connects to the database `config` names, takes the exclusive lock when `exclusive` says
-    /// this instance must be alone, and brings its schema up to date (ADR-0023 clauses 22 to 24).
+    /// Connects to the database `config` names as `opening` says: takes the exclusive lock when
+    /// this instance must be alone, and brings its schema up to date unless it is to touch
+    /// nothing (ADR-0023 clauses 22 to 24).
     ///
     /// # Errors
     /// Returns an error naming the key when the password or CA file cannot be read, naming the host
     /// and the database when it cannot be reached or another instance holds it alone, and naming
     /// both versions when its schema needs a newer Server.
-    pub fn open(config: &PostgresConfig, exclusive: Exclusive) -> Result<Arc<Self>, String> {
-        Self::open_in(config, exclusive, None)
-    }
-
-    /// [`open`](Self::open), in the schema `schema` rather than the role's default: what the tests
-    /// work in, one schema each, the integration tests of several instances among them.
-    ///
-    /// # Errors
-    /// As [`open`](Self::open).
-    #[doc(hidden)]
-    pub fn open_in(
-        config: &PostgresConfig,
-        exclusive: Exclusive,
-        schema: Option<&str>,
-    ) -> Result<Arc<Self>, String> {
-        Self::open_as(
-            config,
-            exclusive,
-            schema,
-            schema::server_version(),
-            schema::MIGRATIONS,
-        )
-    }
-
-    /// [`open_in`](Self::open_in), as a Server of `release` whose schema is `migrations`: what the
-    /// tests of two versions side by side start each version as.
-    ///
-    /// # Errors
-    /// As [`open`](Self::open).
-    #[doc(hidden)]
-    pub fn open_as(
-        config: &PostgresConfig,
-        exclusive: Exclusive,
-        schema: Option<&str>,
-        release: &'static str,
-        migrations: &'static [schema::Migration],
-    ) -> Result<Arc<Self>, String> {
-        let mut database = Self::connect_as(config, schema, CALL_TIMEOUT, exclusive)?;
-        database.release = release;
-        let applied = database.apply_schema(migrations)?;
-        if !applied.versions.is_empty() {
-            tracing::info!(
-                database = %database.name,
-                migrations = ?applied.versions,
-                "applied the Server's schema"
-            );
+    pub fn open(config: &PostgresConfig, opening: Opening<'_>) -> Result<Arc<Self>, String> {
+        let migrations = opening.migrations;
+        let database = Self::connect(config, opening)?;
+        if let Some(migrations) = migrations {
+            let applied = database.apply_schema(migrations)?;
+            if !applied.versions.is_empty() {
+                tracing::info!(
+                    database = %database.name,
+                    migrations = ?applied.versions,
+                    "applied the Server's schema"
+                );
+            }
         }
         Ok(Arc::new(database))
     }
 
-    /// Connects and takes the exclusive lock, and touches nothing else: what `server
-    /// migrate-to-postgres` copies under, while no Server runs.
-    ///
-    /// # Errors
-    /// As [`open`](Self::open), the schema aside.
-    pub(crate) fn connect(config: &PostgresConfig, schema: Option<&str>) -> Result<Self, String> {
-        Self::connect_within(config, schema, CALL_TIMEOUT)
-    }
-
-    /// [`connect`](Self::connect), its every call bounded by `bound` rather than
-    /// [`CALL_TIMEOUT`]: what the tests of a database that stops answering wait for.
-    pub(crate) fn connect_within(
-        config: &PostgresConfig,
-        schema: Option<&str>,
-        bound: Duration,
-    ) -> Result<Self, String> {
-        Self::connect_as(
-            config,
+    /// Connects, and takes the exclusive lock when `opening` says this instance must be alone.
+    fn connect(config: &PostgresConfig, opening: Opening<'_>) -> Result<Self, String> {
+        let Opening {
+            exclusive,
             schema,
+            release,
+            migrations: _,
             bound,
-            Exclusive::Alone("server migrate-to-postgres".to_string()),
-        )
-    }
-
-    /// Connects, and takes the exclusive lock when `exclusive` says this instance must be alone.
-    pub(crate) fn connect_as(
-        config: &PostgresConfig,
-        schema: Option<&str>,
-        bound: Duration,
-        exclusive: Exclusive,
-    ) -> Result<Self, String> {
+            instance_id,
+        } = opening;
         let name = format!(
             "database {} on {}:{}",
             config.dbname, config.host, config.port
@@ -370,20 +341,17 @@ impl Database {
             closing,
             name,
             origin,
-            archive: std::sync::Mutex::new(None),
             bound: std::sync::atomic::AtomicU64::new(
                 u64::try_from(bound.as_millis()).unwrap_or(u64::MAX),
             ),
             holds_lost: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             holds_ended: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            sweeps_under: std::sync::Mutex::new(None),
+            sweeps_under: std::sync::Mutex::new(instance_id),
             sweep_wait: std::sync::atomic::AtomicU64::new(
                 u64::try_from(SWEEP_WAIT.as_millis()).unwrap_or(u64::MAX),
             ),
-            release: schema::server_version(),
+            release,
             outdated: std::sync::Mutex::new(None),
-            audit_key_label: std::sync::Mutex::new(None),
-            audit_export: std::sync::OnceLock::new(),
             unsure: Arc::default(),
             afterwards: Arc::default(),
             bridge,
@@ -407,29 +375,6 @@ impl Database {
     #[must_use]
     pub fn outdated(&self) -> Option<String> {
         self.outdated
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-    }
-
-    /// Names the `[audit] key_label` the leases of this instance record, `None` for none.
-    pub fn set_audit_key_label(&self, label: Option<String>) {
-        *self
-            .audit_key_label
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = label;
-    }
-
-    /// Hands every line a lease's transaction writes into a chain to `sink` as well, from now on;
-    /// a second sink is ignored.
-    pub fn export_audit_to(&self, sink: crate::audit_export::Sink) {
-        let _ = self.audit_export.set(sink);
-    }
-
-    /// The `[audit] key_label` the leases of this instance record.
-    #[must_use]
-    pub fn audit_key_label(&self) -> Option<String> {
-        self.audit_key_label
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
@@ -526,20 +471,6 @@ impl Database {
                 .map_err(sql)?;
             Ok(rows.iter().map(|row| row.get(0)).collect())
         })
-    }
-
-    /// Offers `end`, the `seq` and the hash of the last entry of the audit files a Server on
-    /// PostgreSQL wrote under `data_dir/audit/` before its record moved into the database, as the
-    /// archive: the take that opens the first chain the database holds records it, unless an
-    /// archive is recorded already, and the chain names it as its predecessor
-    /// (ADR-0029 clause 6).
-    pub fn offer_archive(&self, end: Option<(u64, String)>) {
-        *self.archive.lock().expect("archive lock") = end;
-    }
-
-    /// What [`offer_archive`](Self::offer_archive) offered.
-    pub(crate) fn archive_offered(&self) -> Option<(u64, String)> {
-        self.archive.lock().expect("archive lock").clone()
     }
 
     /// What one call may take.
@@ -655,16 +586,16 @@ impl Database {
     }
 
     /// Has the sweeps of this instance mark the blobs they delete under `instance_id`: the lease it
-    /// takes next, set before its first sweep and again with each lease it takes.
-    pub fn sweep_under(&self, instance_id: &str) {
+    /// takes, set again with each lease it takes.
+    pub(crate) fn sweep_under(&self, instance_id: &str) {
         *self
             .sweeps_under
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(instance_id.to_string());
     }
 
-    /// The instance id the sweeps of this instance mark under, if any
-    /// ([`sweep_under`](Self::sweep_under)).
+    /// The instance id the sweeps of this instance mark under, if any: the one it was opened with
+    /// ([`Opening::instance_id`]) until it takes a lease, then that lease's.
     pub(crate) fn sweeps_under(&self) -> Option<String> {
         self.sweeps_under
             .lock()
@@ -1467,10 +1398,13 @@ pub(crate) mod testing {
 
         /// A Server's database in this schema, its schema applied.
         pub(crate) fn open(&self) -> Arc<Database> {
-            Database::open_in(
+            Database::open(
                 &self.config,
-                Exclusive::Alone("the test".to_string()),
-                Some(&self.schema),
+                Opening {
+                    exclusive: Exclusive::Alone("the test".to_string()),
+                    schema: Some(&self.schema),
+                    ..Opening::default()
+                },
             )
             .expect("open the test database")
         }
@@ -1616,8 +1550,14 @@ pub(crate) mod testing {
         /// schema alone ([`wait_until_none_holds_it_alone`](Self::wait_until_none_holds_it_alone)).
         pub(crate) fn shared(&self) -> Arc<Database> {
             self.wait_until_none_holds_it_alone();
-            Database::open_in(&self.config, Exclusive::Shared, Some(&self.schema))
-                .expect("open the test database shared")
+            Database::open(
+                &self.config,
+                Opening {
+                    schema: Some(&self.schema),
+                    ..Opening::default()
+                },
+            )
+            .expect("open the test database shared")
         }
 
         /// [`shared`](Self::shared), its every call bounded by `bound`: an instance whose call
@@ -1626,10 +1566,16 @@ pub(crate) mod testing {
         /// tests beside this one does not fail the migration on the short bound.
         pub(crate) fn shared_within(&self, bound: std::time::Duration) -> Arc<Database> {
             drop(self.shared());
-            Arc::new(
-                Database::connect_as(&self.config, Some(&self.schema), bound, Exclusive::Shared)
-                    .expect("open the test database shared"),
+            Database::open(
+                &self.config,
+                Opening {
+                    schema: Some(&self.schema),
+                    migrations: None,
+                    bound,
+                    ..Opening::default()
+                },
             )
+            .expect("open the test database shared")
         }
 
         /// Holds the commit of every transaction that writes a row of `table` at a gate the test
@@ -1874,6 +1820,7 @@ pub(crate) mod testing {
 mod tests {
     use super::testing::TestDatabase;
     use super::*;
+    use crate::postgres::lease::Terms;
 
     fn config(host: &str, tls: bool) -> PostgresConfig {
         PostgresConfig {
@@ -1986,9 +1933,16 @@ mod tests {
         // Others may read it, or its group may write it.
         for mode in [0o644, 0o604, 0o660] {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).expect("chmod");
-            let err = Database::connect(&named, None)
-                .map(|_| ())
-                .expect_err("readable by others");
+            let err = Database::open(
+                &named,
+                Opening {
+                    exclusive: Exclusive::Alone("server migrate-to-postgres".to_string()),
+                    migrations: None,
+                    ..Opening::default()
+                },
+            )
+            .map(|_| ())
+            .expect_err("readable by others");
             assert!(
                 err.contains("[database.postgres] password_file"),
                 "{mode:o}: {err}"
@@ -2027,9 +1981,16 @@ mod tests {
         let mut gone = config("127.0.0.1", false);
         gone.port = port;
         gone.password_file = path;
-        let err = Database::connect(&gone, None)
-            .map(|_| ())
-            .expect_err("nothing listens");
+        let err = Database::open(
+            &gone,
+            Opening {
+                exclusive: Exclusive::Alone("server migrate-to-postgres".to_string()),
+                migrations: None,
+                ..Opening::default()
+            },
+        )
+        .map(|_| ())
+        .expect_err("nothing listens");
         assert!(
             err.contains(&format!("database fleet on 127.0.0.1:{port}")),
             "{err}"
@@ -2069,9 +2030,17 @@ mod tests {
         silent.port = port;
         silent.password_file = path;
         let started = std::time::Instant::now();
-        let err = Database::connect_within(&silent, None, Duration::from_millis(500))
-            .map(|_| ())
-            .expect_err("no answer");
+        let err = Database::open(
+            &silent,
+            Opening {
+                exclusive: Exclusive::Alone("server migrate-to-postgres".to_string()),
+                migrations: None,
+                bound: Duration::from_millis(500),
+                ..Opening::default()
+            },
+        )
+        .map(|_| ())
+        .expect_err("no answer");
         assert!(started.elapsed() < Duration::from_secs(5), "{err}");
         assert!(err.contains("no answer within 500 ms"), "{err}");
         assert!(
@@ -2198,16 +2167,32 @@ mod tests {
             }
         });
         // The schema is applied directly, so the bound under test is the call's alone.
-        Database::connect(&test.config(), Some(&test.schema))
-            .expect("connect directly")
-            .apply_schema(schema::MIGRATIONS)
-            .expect("schema");
+        Database::open(
+            &test.config(),
+            Opening {
+                exclusive: Exclusive::Alone("server migrate-to-postgres".to_string()),
+                schema: Some(&test.schema),
+                migrations: None,
+                ..Opening::default()
+            },
+        )
+        .expect("connect directly")
+        .apply_schema(schema::MIGRATIONS)
+        .expect("schema");
         let mut through = test.config();
         through.port = port;
         let bound = Duration::from_secs(1);
-        let database = Arc::new(
-            Database::connect_within(&through, Some(&test.schema), bound).expect("connect"),
-        );
+        let database = Database::open(
+            &through,
+            Opening {
+                exclusive: Exclusive::Alone("server migrate-to-postgres".to_string()),
+                schema: Some(&test.schema),
+                migrations: None,
+                bound,
+                ..Opening::default()
+            },
+        )
+        .expect("connect");
         let store = configs::PgConfigBackend::new(database.clone());
         crate::configs::ConfigBackend::load(&store).expect("answers while it answers");
 
@@ -2313,9 +2298,17 @@ mod tests {
             named.port = port;
             named.password_file = password.clone();
             named.ca_file = Some(ca_file);
-            let err = Database::connect_within(&named, None, Duration::from_secs(5))
-                .map(|_| ())
-                .expect_err("nothing serves past the handshake");
+            let err = Database::open(
+                &named,
+                Opening {
+                    exclusive: Exclusive::Alone("server migrate-to-postgres".to_string()),
+                    migrations: None,
+                    bound: Duration::from_secs(5),
+                    ..Opening::default()
+                },
+            )
+            .map(|_| ())
+            .expect_err("nothing serves past the handshake");
             (err, handshaken.load(Ordering::SeqCst))
         };
 
@@ -2392,10 +2385,13 @@ mod tests {
             return;
         };
         let first = test.open();
-        let err = Database::open_in(
+        let err = Database::open(
             &test.config(),
-            Exclusive::Alone("the test".to_string()),
-            Some(&test.schema),
+            Opening {
+                exclusive: Exclusive::Alone("the test".to_string()),
+                schema: Some(&test.schema),
+                ..Opening::default()
+            },
         )
         .map(|_| ())
         .expect_err("held by the first");
@@ -2409,10 +2405,13 @@ mod tests {
         // The lock goes with its session, which the server notices when the connection closes.
         let mut reopened = None;
         for _ in 0..50 {
-            if let Ok(database) = Database::open_in(
+            if let Ok(database) = Database::open(
                 &test.config(),
-                Exclusive::Alone("the test".to_string()),
-                Some(&test.schema),
+                Opening {
+                    exclusive: Exclusive::Alone("the test".to_string()),
+                    schema: Some(&test.schema),
+                    ..Opening::default()
+                },
             ) {
                 reopened = Some(database);
                 break;
@@ -2449,7 +2448,16 @@ mod tests {
             },
         ];
         {
-            let database = Database::connect(&test.config(), Some(&test.schema)).expect("connect");
+            let database = Database::open(
+                &test.config(),
+                Opening {
+                    exclusive: Exclusive::Alone("server migrate-to-postgres".to_string()),
+                    schema: Some(&test.schema),
+                    migrations: None,
+                    ..Opening::default()
+                },
+            )
+            .expect("connect");
             assert_eq!(database.apply_schema(BEHIND).expect("first").versions, [1]);
             assert_eq!(
                 database.apply_schema(BEHIND).expect("again").versions,
@@ -2469,10 +2477,13 @@ mod tests {
 
         test.sql("INSERT INTO fleet_schema (version, oldest_server) VALUES (99, '999.0.0')");
         let before = test.rows("SELECT version, oldest_server FROM fleet_schema ORDER BY version");
-        let err = Database::open_in(
+        let err = Database::open(
             &test.config(),
-            Exclusive::Alone("the test".to_string()),
-            Some(&test.schema),
+            Opening {
+                exclusive: Exclusive::Alone("the test".to_string()),
+                schema: Some(&test.schema),
+                ..Opening::default()
+            },
         )
         .map(|_| ())
         .expect_err("a newer schema");
@@ -2515,7 +2526,16 @@ mod tests {
             let Some(test) = TestDatabase::named() else {
                 return;
             };
-            let database = Database::connect(&test.config(), Some(&test.schema)).expect("connect");
+            let database = Database::open(
+                &test.config(),
+                Opening {
+                    exclusive: Exclusive::Alone("server migrate-to-postgres".to_string()),
+                    schema: Some(&test.schema),
+                    migrations: None,
+                    ..Opening::default()
+                },
+            )
+            .expect("connect");
             database
                 .apply_schema(&schema::MIGRATIONS[..4])
                 .expect("migrations 1 to 4");
@@ -2546,7 +2566,16 @@ mod tests {
         let Some(test) = TestDatabase::named() else {
             return;
         };
-        let database = Database::connect(&test.config(), Some(&test.schema)).expect("connect");
+        let database = Database::open(
+            &test.config(),
+            Opening {
+                exclusive: Exclusive::Alone("server migrate-to-postgres".to_string()),
+                schema: Some(&test.schema),
+                migrations: None,
+                ..Opening::default()
+            },
+        )
+        .expect("connect");
         for applied in 2..=schema::MIGRATIONS.len() {
             let migrations = &schema::MIGRATIONS[..applied];
             database
@@ -2593,15 +2622,29 @@ mod tests {
             return;
         };
         // The Server of 0.7.1: the exclusive lock for its whole run, on the schema it brought.
-        let release_before =
-            Database::connect(&test.config(), Some(&test.schema)).expect("connect");
+        let release_before = Database::open(
+            &test.config(),
+            Opening {
+                exclusive: Exclusive::Alone("server migrate-to-postgres".to_string()),
+                schema: Some(&test.schema),
+                migrations: None,
+                ..Opening::default()
+            },
+        )
+        .expect("connect");
         release_before
             .apply_schema(&schema::MIGRATIONS[..2])
             .expect("its schema");
         let before = test.rows("SELECT version, oldest_server FROM fleet_schema ORDER BY version");
-        let err = Database::open_in(&test.config(), Exclusive::Shared, Some(&test.schema))
-            .map(|_| ())
-            .expect_err("held alone");
+        let err = Database::open(
+            &test.config(),
+            Opening {
+                schema: Some(&test.schema),
+                ..Opening::default()
+            },
+        )
+        .map(|_| ())
+        .expect_err("held alone");
         assert!(err.contains("holds the database alone"), "{err}");
         assert!(err.contains("server blobs-to-s3"), "{err}");
         assert!(err.contains("before this one starts"), "{err}");
@@ -2666,26 +2709,30 @@ mod tests {
         let schema_rows =
             || test.rows("SELECT version, oldest_server FROM fleet_schema ORDER BY version");
         let open_ahead = || {
-            Database::open_as(
+            Database::open(
                 &test.config(),
-                Exclusive::Shared,
-                Some(&test.schema),
-                "0.10.0",
-                ahead,
+                Opening {
+                    schema: Some(&test.schema),
+                    release: "0.10.0",
+                    migrations: Some(ahead),
+                    ..Opening::default()
+                },
             )
         };
 
         // An instance of 0.8.4 holds a lease on this release's schema.
-        let older = Database::open_as(
+        let older = Database::open(
             &test.config(),
-            Exclusive::Shared,
-            Some(&test.schema),
-            "0.8.4",
-            schema::MIGRATIONS,
+            Opening {
+                schema: Some(&test.schema),
+                release: "0.8.4",
+                migrations: Some(schema::MIGRATIONS),
+                ..Opening::default()
+            },
         )
         .expect("0.8.4 migrates");
         let held = older
-            .take_lease("host-older", Duration::from_secs(3600))
+            .take_lease("host-older", Duration::from_secs(3600), &Terms::default())
             .expect("a lease");
         let before = schema_rows();
         let err = open_ahead().map(|_| ()).expect_err("a live lease of 0.8.4");
@@ -2726,7 +2773,7 @@ mod tests {
         lease_as_0_8_0_takes_it(&test, true);
         let opened = open_ahead().expect("only leases taken over");
         let taken = opened
-            .take_lease("host-ahead", Duration::from_secs(3600))
+            .take_lease("host-ahead", Duration::from_secs(3600), &Terms::default())
             .expect("a lease");
         assert_eq!(taken.taken_over.len(), 2, "both taken over");
         assert_eq!(
@@ -2746,16 +2793,18 @@ mod tests {
         };
         drop(test.shared());
         lease_as_0_8_0_takes_it(&test, false);
-        let patch = Database::open_as(
+        let patch = Database::open(
             &test.config(),
-            Exclusive::Shared,
-            Some(&test.schema),
-            "0.8.1",
-            schema::MIGRATIONS,
+            Opening {
+                schema: Some(&test.schema),
+                release: "0.8.1",
+                migrations: Some(schema::MIGRATIONS),
+                ..Opening::default()
+            },
         )
         .expect("a patch release beside 0.8.0");
         patch
-            .take_lease("host-patch", Duration::from_secs(3600))
+            .take_lease("host-patch", Duration::from_secs(3600), &Terms::default())
             .expect("serves");
         let mut releases = test.rows("SELECT release FROM leases ORDER BY release");
         releases.dedup();
@@ -2783,12 +2832,14 @@ mod tests {
              SELECT pg_advisory_unlock_shared(2293762); \
              CREATE TABLE fleet_test_ahead (n integer);",
         );
-        let older = Database::open_as(
+        let older = Database::open(
             &test.config(),
-            Exclusive::Shared,
-            Some(&test.schema),
-            "0.8.0",
-            schema::MIGRATIONS,
+            Opening {
+                schema: Some(&test.schema),
+                release: "0.8.0",
+                migrations: Some(schema::MIGRATIONS),
+                ..Opening::default()
+            },
         )
         .expect("0.8.0 migrates");
         let waits_for_the_migrations = |waiting: usize| {
@@ -2813,12 +2864,14 @@ mod tests {
         let gate = test.gate(KEY);
         std::thread::scope(|scope| {
             let migrating = scope.spawn(|| {
-                Database::open_as(
+                Database::open(
                     &test.config(),
-                    Exclusive::Shared,
-                    Some(&test.schema),
-                    "0.10.0",
-                    ahead,
+                    Opening {
+                        schema: Some(&test.schema),
+                        release: "0.10.0",
+                        migrations: Some(ahead),
+                        ..Opening::default()
+                    },
                 )
                 .map(|_| ())
             });
@@ -2827,7 +2880,9 @@ mod tests {
                 assert!(std::time::Instant::now() < deadline, "the migration waits");
                 std::thread::sleep(Duration::from_millis(10));
             }
-            let taking = scope.spawn(|| older.take_lease("host-older", Duration::from_secs(3600)));
+            let taking = scope.spawn(|| {
+                older.take_lease("host-older", Duration::from_secs(3600), &Terms::default())
+            });
             waits_for_the_migrations(1);
             gate.open();
             migrating

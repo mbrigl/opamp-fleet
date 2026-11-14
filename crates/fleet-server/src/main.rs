@@ -122,8 +122,15 @@ fn audit_verify_database(
                 .to_string(),
         );
     };
-    let verified =
-        fleet_server::postgres::audit::verify_checked_on(database, None, archive, check)?;
+    // With the Server's own credentials, touching nothing.
+    let database = fleet_server::postgres::Database::open(
+        database,
+        fleet_server::postgres::Opening {
+            migrations: None,
+            ..fleet_server::postgres::Opening::default()
+        },
+    )?;
+    let verified = fleet_server::postgres::audit::verify(&database, archive, check)?;
     for line in &verified.lines {
         println!("{line}");
     }
@@ -678,8 +685,9 @@ async fn serve() {
     };
     // Where the records live (ADR-0023): the data directory, its layout created owner-only and
     // checked before any store opens (ADR-0023), and with PostgreSQL the database, its lock taken
-    // and its schema applied.
-    let records = match fleet_server::Records::open(&config) {
+    // and its schema applied. Its startup sweep marks what it deletes under the lease the instance
+    // takes next, which another instance's sweep leaves (ADR-0023 clause 14).
+    let records = match fleet_server::Records::open(&config, instance_id.clone()) {
         Ok(records) => records,
         Err(e) => {
             eprintln!("{e}");
@@ -829,11 +837,6 @@ async fn serve() {
             std::process::exit(1);
         }
     };
-    // Its startup sweep marks what it deletes under the lease the instance takes next, which
-    // another instance's sweep leaves (ADR-0023 clause 14).
-    if let (fleet_server::Records::Postgres(database), Some(id)) = (&records, &instance_id) {
-        database.sweep_under(id);
-    }
     // The package store before the lease, so that a bucket that fails startup leaves no lease
     // and no audit chain behind. Its startup cleanup needs no lease of this instance: it lists the
     // staging keys before it asks which leases are live
@@ -890,9 +893,6 @@ async fn serve() {
             std::process::exit(1);
         }
     };
-    if let (fleet_server::Records::Postgres(database), Some(export)) = (&records, &export) {
-        database.export_audit_to(export.sink());
-    }
     // With PostgreSQL, a lease before anything is decided and before either listener opens
     // (clauses 1 to 3 of
     // ADR-0045):
@@ -904,14 +904,25 @@ async fn serve() {
             // ADR-0029).
             // Only while the database holds no chain: a later start never reads them.
             // With S3 too there is no data directory, and no archive to offer.
-            if let Some(data_dir) = config.data_dir() {
-                let archive = data_dir.join(fleet_server::fs::AUDIT);
-                if let Err(e) = fleet_server::postgres::audit::offer_archive_in(database, &archive)
-                {
+            let archive = match config.data_dir().map(|data_dir| {
+                fleet_server::postgres::audit::archive_in(
+                    database,
+                    &data_dir.join(fleet_server::fs::AUDIT),
+                )
+            }) {
+                None => None,
+                Some(Ok(archive)) => archive,
+                Some(Err(e)) => {
                     eprintln!("{e}");
                     std::process::exit(1);
                 }
-            }
+            };
+            // What every lease of this instance records, and where the lines its takes write go.
+            let terms = fleet_server::postgres::lease::Terms {
+                audit_key_label: config.audit.key_label.clone(),
+                archive,
+                export: export.as_ref().map(|export| export.sink()),
+            };
             let made = instance_id.clone().map_or_else(
                 fleet_server::postgres::lease::new_instance_id,
                 Ok::<String, String>,
@@ -923,6 +934,7 @@ async fn serve() {
                     &host_name(),
                     id,
                     elapsed.clone(),
+                    terms,
                 )
             }) {
                 Ok(lease) => {

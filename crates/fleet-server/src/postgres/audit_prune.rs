@@ -648,6 +648,8 @@ async fn delete(client: &impl GenericClient, chains: &[Link]) -> Result<(), Stri
 
 #[cfg(test)]
 mod tests {
+    use crate::postgres::lease::Terms;
+    use crate::postgres::Opening;
     use tokio::sync::watch;
 
     use super::super::testing::TestDatabase;
@@ -668,11 +670,21 @@ mod tests {
     }
 
     fn shared(test: &TestDatabase) -> Arc<Database> {
-        Database::open_in(&test.config(), Exclusive::Shared, Some(&test.schema)).expect("shared")
+        Database::open(
+            &test.config(),
+            Opening {
+                schema: Some(&test.schema),
+                ..Opening::default()
+            },
+        )
+        .expect("shared")
     }
 
-    fn writing_on(database: Arc<Database>, host: &str) -> Writing {
-        let chain = database.take_lease(host, LAPSE).expect("lease").instance_id;
+    fn writing_on(database: Arc<Database>, host: &str, terms: &Terms) -> Writing {
+        let chain = database
+            .take_lease(host, LAPSE, terms)
+            .expect("lease")
+            .instance_id;
         let (held, watched) = watch::channel(Some(chain.clone()));
         let audit = AuditLog::start_under(
             Box::new(PgAuditStore::new(database.clone(), watched.clone())),
@@ -691,7 +703,7 @@ mod tests {
     }
 
     fn writing(test: &TestDatabase, host: &str) -> Writing {
-        writing_on(shared(test), host)
+        writing_on(shared(test), host, &Terms::default())
     }
 
     impl Writing {
@@ -755,7 +767,7 @@ mod tests {
     }
 
     fn held(database: &Database) -> crate::postgres::audit::Verified {
-        let verified = verify(database, None).expect("verify");
+        let verified = verify(database, None, None).expect("verify");
         assert!(!verified.failed, "{:?}", verified.lines);
         verified
     }
@@ -926,7 +938,7 @@ mod tests {
             "DELETE FROM audit_entries WHERE chain = '{}' AND seq = 3",
             a.chain
         ));
-        let verified = verify(&a.database, None).expect("verify");
+        let verified = verify(&a.database, None, None).expect("verify");
         assert!(verified.failed, "{:?}", verified.lines);
         assert!(
             verified
@@ -942,7 +954,7 @@ mod tests {
             "f".repeat(64),
             shut.chain
         ));
-        let verified = verify(&a.database, None).expect("verify");
+        let verified = verify(&a.database, None, None).expect("verify");
         assert!(
             verified
                 .lines
@@ -962,8 +974,11 @@ mod tests {
             return;
         };
         let database = shared(&test);
-        database.offer_archive(Some((7, "ab".repeat(32))));
-        let first = writing_on(database, "host-a");
+        let archive = Terms {
+            archive: Some((7, "ab".repeat(32))),
+            ..Terms::default()
+        };
+        let first = writing_on(database, "host-a", &archive);
         first.decide(1);
         assert!(first.audit.close(Duration::from_secs(10)), "not closed");
         let b = writing(&test, "host-b");
@@ -982,7 +997,7 @@ mod tests {
              WHERE chain = '{}' AND seq = 1",
             b.chain
         ));
-        let verified = verify(&b.database, None).expect("verify");
+        let verified = verify(&b.database, None, None).expect("verify");
         assert!(verified.failed, "{:?}", verified.lines);
         assert!(
             verified
@@ -1034,7 +1049,7 @@ mod tests {
              WHERE chain = '{}' AND seq = 1",
             a.chain
         ));
-        let verified = verify(&a.database, None).expect("verify");
+        let verified = verify(&a.database, None, None).expect("verify");
         assert!(verified.failed, "{:?}", verified.lines);
         assert!(
             verified
@@ -1065,8 +1080,11 @@ mod tests {
         };
         let database = shared(&test);
         let archive = (7, "ab".repeat(32));
-        database.offer_archive(Some(archive.clone()));
-        let first = writing_on(database, "host-a");
+        let terms = Terms {
+            archive: Some(archive.clone()),
+            ..Terms::default()
+        };
+        let first = writing_on(database, "host-a", &terms);
         first.decide(2);
         assert!(first.audit.close(Duration::from_secs(10)), "not closed");
         let second = writing(&test, "host-c");
@@ -1460,7 +1478,16 @@ mod tests {
             return;
         };
         let before = &super::super::schema::MIGRATIONS[..9];
-        let database = Database::connect(&test.config(), Some(&test.schema)).expect("connect");
+        let database = Database::open(
+            &test.config(),
+            Opening {
+                exclusive: Exclusive::Alone("server migrate-to-postgres".to_string()),
+                schema: Some(&test.schema),
+                migrations: None,
+                ..Opening::default()
+            },
+        )
+        .expect("connect");
         database.apply_schema(before).expect("the schema before");
         test.sql(
             "INSERT INTO audit_chains (id, host, opened_at) \
@@ -1499,11 +1526,17 @@ mod tests {
              AS $$ SELECT at FROM {schema}.fleet_test_now $$;",
             schema = test.schema
         ));
-        // `open_in` names its schema in the connection's options, `-c search_path=<schema>`; the
+        // `Opening::schema` is named in the connection's options, `-c search_path=<schema>`; the
         // catalog after it, and the time zone as a further option of the same string.
         let path = format!("{},pg_catalog -c TimeZone={zone}", test.schema);
-        let database = Database::open_in(&test.config(), Exclusive::Shared, Some(&path))
-            .expect("a database on the stopped clock");
+        let database = Database::open(
+            &test.config(),
+            Opening {
+                schema: Some(&path),
+                ..Opening::default()
+            },
+        )
+        .expect("a database on the stopped clock");
         let (stopped, named) = database
             .run_within(Duration::from_secs(30), |pool| async move {
                 let row = client(&pool)
@@ -1543,7 +1576,7 @@ mod tests {
                 return;
             };
             let database = stopped_at(&test, at, "Europe/Berlin");
-            let a = writing_on(database.clone(), "host-a");
+            let a = writing_on(database.clone(), "host-a", &Terms::default());
             // A closed chain: one entry older than a day of 24 hours, one exactly a day old, one
             // 23 hours old, and its closing entry, stored now.
             let chain = "00000000-0000-4000-8000-000000000032";

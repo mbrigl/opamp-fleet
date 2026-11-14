@@ -1080,7 +1080,7 @@ mod tests {
     use super::*;
     use crate::fs::FsLedgerStore;
     use crate::postgres::testing::TestDatabase;
-    use crate::postgres::Exclusive;
+    use crate::postgres::Opening;
     use crate::revocation::{Revoked, SubjectValues};
 
     fn issued(serial: &str, predecessor: Option<&str>) -> Issued {
@@ -2345,8 +2345,14 @@ mod tests {
     fn follower(
         test: &TestDatabase,
     ) -> (Arc<crate::revocation::Revocations>, tokio::runtime::Runtime) {
-        let database = Database::open_in(&test.config(), Exclusive::Shared, Some(&test.schema))
-            .expect("B's database");
+        let database = Database::open(
+            &test.config(),
+            Opening {
+                schema: Some(&test.schema),
+                ..Opening::default()
+            },
+        )
+        .expect("B's database");
         let b = Arc::new(instances_on(&database)());
         let runtime = tokio::runtime::Runtime::new().expect("runtime");
         {
@@ -2435,8 +2441,14 @@ mod tests {
             return;
         };
         // Both instances share the database, as two instances beside each other do.
-        let database = Database::open_in(&test.config(), Exclusive::Shared, Some(&test.schema))
-            .expect("A's database");
+        let database = Database::open(
+            &test.config(),
+            Opening {
+                schema: Some(&test.schema),
+                ..Opening::default()
+            },
+        )
+        .expect("A's database");
         let instance = instances_on(&database);
         let a = instance();
         let subject = SubjectValues::default();
@@ -2500,8 +2512,14 @@ mod tests {
         Arc<crate::revocation::Revocations>,
         tokio::runtime::Runtime,
     ) {
-        let database = Database::open_in(&test.config(), Exclusive::Shared, Some(&test.schema))
-            .expect("A's database");
+        let database = Database::open(
+            &test.config(),
+            Opening {
+                schema: Some(&test.schema),
+                ..Opening::default()
+            },
+        )
+        .expect("A's database");
         let a = instances_on(&database)();
         let (b, runtime) = follower(test);
         a.check_report("h0", &SubjectValues::default(), 1_000, b"\x10")
@@ -2833,8 +2851,14 @@ mod tests {
             return;
         };
         // Both instances share the database, as two instances beside each other do.
-        let database = Database::open_in(&test.config(), Exclusive::Shared, Some(&test.schema))
-            .expect("A's database");
+        let database = Database::open(
+            &test.config(),
+            Opening {
+                schema: Some(&test.schema),
+                ..Opening::default()
+            },
+        )
+        .expect("A's database");
         let instance = instances_on(&database);
         let a = instance();
         let (b, _runtime) = follower(&test);
@@ -2975,8 +2999,14 @@ mod tests {
         let Some(test) = TestDatabase::named() else {
             return;
         };
-        let database = Database::open_in(&test.config(), Exclusive::Shared, Some(&test.schema))
-            .expect("A's database");
+        let database = Database::open(
+            &test.config(),
+            Opening {
+                schema: Some(&test.schema),
+                ..Opening::default()
+            },
+        )
+        .expect("A's database");
         let instance = instances_on(&database);
         let a = instance();
         let (b, _runtime) = follower(&test);

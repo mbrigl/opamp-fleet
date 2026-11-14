@@ -18,7 +18,7 @@ use fleet_server::config::{LeaseTimes, PostgresConfig};
 use fleet_server::enrolment::Enrolment;
 use fleet_server::floors::PackageFloors;
 use fleet_server::postgres::schema::{Migration, MIGRATIONS};
-use fleet_server::postgres::{Database, Exclusive};
+use fleet_server::postgres::{Database, Opening};
 use fleet_server::revocation::{CertId, Revocations};
 use fleet_server::Records;
 use opamp::proto::{AgentCapabilities, AgentToServer};
@@ -490,7 +490,13 @@ impl Instance {
     async fn follow_through(&mut self, schema: &Schema, config: PostgresConfig) {
         let name = schema.name.clone();
         let listening = tokio::task::spawn_blocking(move || {
-            Database::open_in(&config, Exclusive::Shared, Some(&name))
+            Database::open(
+                &config,
+                Opening {
+                    schema: Some(&name),
+                    ..Opening::default()
+                },
+            )
         })
         .await
         .expect("open")
@@ -583,10 +589,22 @@ impl Instance {
         let dir = tempfile::tempdir().expect("tempdir");
         let name = schema.name.clone();
         let database = tokio::task::spawn_blocking(move || match version {
-            Some((release, migrations)) => {
-                Database::open_as(&config, Exclusive::Shared, Some(&name), release, migrations)
-            }
-            None => Database::open_in(&config, Exclusive::Shared, Some(&name)),
+            Some((release, migrations)) => Database::open(
+                &config,
+                Opening {
+                    schema: Some(&name),
+                    release,
+                    migrations: Some(migrations),
+                    ..Opening::default()
+                },
+            ),
+            None => Database::open(
+                &config,
+                Opening {
+                    schema: Some(&name),
+                    ..Opening::default()
+                },
+            ),
         })
         .await
         .expect("open")
@@ -716,6 +734,7 @@ impl Instance {
                 "test-host",
                 fleet_server::postgres::lease::new_instance_id().expect("id"),
                 clock,
+                fleet_server::postgres::lease::Terms::default(),
             )
             .expect("lease")
         };
@@ -1251,8 +1270,14 @@ async fn an_instance_whose_clock_jumps_past_its_lapse_serves_nothing_until_it_ho
 /// The store as one instance opens it, in the test's schema: what each instance writes through.
 fn records(schema: &Schema) -> Records {
     Records::Postgres(
-        Database::open_in(&schema.config, Exclusive::Shared, Some(&schema.name))
-            .expect("open the database"),
+        Database::open(
+            &schema.config,
+            Opening {
+                schema: Some(&schema.name),
+                ..Opening::default()
+            },
+        )
+        .expect("open the database"),
     )
 }
 
@@ -3312,9 +3337,20 @@ async fn a_running_instance_closes_the_chain_of_one_killed_at_its_renewal() {
     // Killed: a lease and its chain, and nothing renews or closes them.
     let (config, name) = (schema.config_on(schema.config.port), schema.name.clone());
     let dead = tokio::task::spawn_blocking(move || {
-        let database = Database::open_in(&config, Exclusive::Shared, Some(&name)).expect("open");
+        let database = Database::open(
+            &config,
+            Opening {
+                schema: Some(&name),
+                ..Opening::default()
+            },
+        )
+        .expect("open");
         database
-            .take_lease("killed-host", TIMES.lapse)
+            .take_lease(
+                "killed-host",
+                TIMES.lapse,
+                &fleet_server::postgres::lease::Terms::default(),
+            )
             .expect("lease")
             .instance_id
     })
@@ -6043,12 +6079,14 @@ async fn this_release_starts_beside_a_live_lease_of_0_8_0_and_migrates_once() {
     let config = || schema.config_on(schema.config.port);
     let (before, name) = (config(), schema.name.clone());
     tokio::task::spawn_blocking(move || {
-        Database::open_as(
+        Database::open(
             &before,
-            Exclusive::Shared,
-            Some(&name),
-            "0.8.0",
-            &MIGRATIONS[..11],
+            Opening {
+                schema: Some(&name),
+                release: "0.8.0",
+                migrations: Some(&MIGRATIONS[..11]),
+                ..Opening::default()
+            },
         )
         .map(|_| ())
     })
@@ -6179,7 +6217,15 @@ async fn an_instance_whose_lease_lapsed_while_a_newer_server_migrated_stops_at_i
     let (port, frozen) = freezable_proxy(target);
     let (config, name) = (schema.config_on(port), schema.name.clone());
     let older = tokio::task::spawn_blocking(move || {
-        Database::open_as(&config, Exclusive::Shared, Some(&name), "0.8.0", MIGRATIONS)
+        Database::open(
+            &config,
+            Opening {
+                schema: Some(&name),
+                release: "0.8.0",
+                migrations: Some(MIGRATIONS),
+                ..Opening::default()
+            },
+        )
     })
     .await
     .expect("open")
@@ -6187,7 +6233,7 @@ async fn an_instance_whose_lease_lapsed_while_a_newer_server_migrated_stops_at_i
     let lease = {
         let older = older.clone();
         tokio::task::spawn_blocking(move || {
-            fleet_server::instance::Lease::take(older, TIMES, "host-older")
+            fleet_server::instance::Lease::take(older, TIMES, "host-older", Default::default())
         })
         .await
         .expect("take")
@@ -6207,12 +6253,14 @@ async fn an_instance_whose_lease_lapsed_while_a_newer_server_migrated_stops_at_i
     schema.sql("UPDATE leases SET expires_at = now() - interval '1 second'");
     let (config, name) = (schema.config_on(schema.config.port), schema.name.clone());
     tokio::task::spawn_blocking(move || {
-        Database::open_as(
+        Database::open(
             &config,
-            Exclusive::Shared,
-            Some(&name),
-            "0.10.0",
-            two_releases_on(),
+            Opening {
+                schema: Some(&name),
+                release: "0.10.0",
+                migrations: Some(two_releases_on()),
+                ..Opening::default()
+            },
         )
         .map(|_| ())
     })
@@ -6256,7 +6304,13 @@ async fn signing_record(
 ) {
     let (config, name) = (schema.config_on(schema.config.port), schema.name.clone());
     let database = tokio::task::spawn_blocking(move || {
-        Database::open_in(&config, Exclusive::Shared, Some(&name))
+        Database::open(
+            &config,
+            Opening {
+                schema: Some(&name),
+                ..Opening::default()
+            },
+        )
     })
     .await
     .expect("open")
@@ -6264,7 +6318,7 @@ async fn signing_record(
     let lease = {
         let database = database.clone();
         tokio::task::spawn_blocking(move || {
-            fleet_server::instance::Lease::take(database, TIMES, "test-host")
+            fleet_server::instance::Lease::take(database, TIMES, "test-host", Default::default())
         })
         .await
         .expect("take")
@@ -6417,9 +6471,16 @@ async fn one_instance_signs_at_a_time_naming_every_chain_and_another_takes_over(
     let spki = fleet_server::checkpoint::CheckpointSigner::public_key_der(&key);
     let (config, name) = (schema.config_on(schema.config.port), schema.name.clone());
     let verified = tokio::task::spawn_blocking(move || {
-        fleet_server::postgres::audit::verify_checked_on(
-            &config,
-            Some(&name),
+        fleet_server::postgres::audit::verify(
+            &Database::open(
+                &config,
+                Opening {
+                    schema: Some(&name),
+                    migrations: None,
+                    ..Opening::default()
+                },
+            )
+            .expect("open"),
             None,
             Some(fleet_server::checkpoint::Check::new(
                 fleet_server::checkpoint::AuditKey::from_der(&spki).expect("key"),
@@ -6440,9 +6501,16 @@ async fn one_instance_signs_at_a_time_naming_every_chain_and_another_takes_over(
     let spki = fleet_server::checkpoint::CheckpointSigner::public_key_der(&key);
     let (config, name) = (schema.config_on(schema.config.port), schema.name.clone());
     let verified = tokio::task::spawn_blocking(move || {
-        fleet_server::postgres::audit::verify_checked_on(
-            &config,
-            Some(&name),
+        fleet_server::postgres::audit::verify(
+            &Database::open(
+                &config,
+                Opening {
+                    schema: Some(&name),
+                    migrations: None,
+                    ..Opening::default()
+                },
+            )
+            .expect("open"),
             None,
             Some(fleet_server::checkpoint::Check::new(
                 fleet_server::checkpoint::AuditKey::from_der(&spki).expect("key"),
@@ -6619,9 +6687,16 @@ async fn a_prune_names_the_last_checkpoint_it_removes_and_the_record_verifies_af
     let spki = fleet_server::checkpoint::CheckpointSigner::public_key_der(&key);
     let (config, name) = (schema.config_on(schema.config.port), schema.name.clone());
     let verified = tokio::task::spawn_blocking(move || {
-        fleet_server::postgres::audit::verify_checked_on(
-            &config,
-            Some(&name),
+        fleet_server::postgres::audit::verify(
+            &Database::open(
+                &config,
+                Opening {
+                    schema: Some(&name),
+                    migrations: None,
+                    ..Opening::default()
+                },
+            )
+            .expect("open"),
             None,
             Some(fleet_server::checkpoint::Check::new(
                 fleet_server::checkpoint::AuditKey::from_der(&spki).expect("key"),
@@ -6689,9 +6764,16 @@ async fn verified_against(
     let spki = fleet_server::checkpoint::CheckpointSigner::public_key_der(key);
     let (config, name) = (schema.config_on(schema.config.port), schema.name.clone());
     tokio::task::spawn_blocking(move || {
-        fleet_server::postgres::audit::verify_checked_on(
-            &config,
-            Some(&name),
+        fleet_server::postgres::audit::verify(
+            &Database::open(
+                &config,
+                Opening {
+                    schema: Some(&name),
+                    migrations: None,
+                    ..Opening::default()
+                },
+            )
+            .expect("open"),
             None,
             Some(fleet_server::checkpoint::Check::new(
                 fleet_server::checkpoint::AuditKey::from_der(&spki).expect("key"),

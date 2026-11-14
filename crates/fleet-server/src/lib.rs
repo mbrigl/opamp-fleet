@@ -96,12 +96,16 @@ pub enum Records {
 
 impl Records {
     /// Opens the store `[database]` chooses: the data directory, its layout created owner-only
-    /// and checked, and with PostgreSQL the database, its lock taken and its schema applied.
+    /// and checked, and with PostgreSQL the database, its lock taken and its schema applied, its
+    /// sweeps marking under `instance_id`, the id its first lease is taken under.
     ///
     /// # Errors
     /// Returns an error naming the path or the key when the data directory or the database cannot
     /// be opened.
-    pub fn open(config: &config::ServerConfig) -> Result<Self, String> {
+    pub fn open(
+        config: &config::ServerConfig,
+        instance_id: Option<String>,
+    ) -> Result<Self, String> {
         match (config.database.postgres(), config.data_dir()) {
             (None, Some(data_dir)) => {
                 fs::open_data_dir(data_dir, config.blobs.s3().is_none()).map_err(named)?;
@@ -114,8 +118,14 @@ impl Records {
                 if let Some(data_dir) = data_dir {
                     fs::open_data_dir_beside_database(data_dir).map_err(named)?;
                 }
-                let opened = postgres::Database::open(database, exclusive(config))?;
-                opened.set_audit_key_label(config.audit.key_label.clone());
+                let opened = postgres::Database::open(
+                    database,
+                    postgres::Opening {
+                        exclusive: exclusive(config),
+                        instance_id,
+                        ..postgres::Opening::default()
+                    },
+                )?;
                 Ok(Records::Postgres(opened))
             }
         }
