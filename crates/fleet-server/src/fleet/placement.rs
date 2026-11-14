@@ -76,9 +76,10 @@ pub type Placed = (Option<InstanceUid>, bool, BTreeMap<String, String>);
 
 /// Where the Agents that arrived over one Host place each other (ADR-0030 clause 19): on a direct
 /// connection they are one group, behind a Gateway one group per machine they report. A group with
-/// exactly one Client Agent places the others under it, and they inherit its labels; one with more
-/// places nobody and marks every member ambiguous. Answers, per Agent of a group, its Client Agent,
-/// whether it is ambiguous, and the labels it inherits.
+/// exactly one Client Agent places the others under it, and they inherit its labels but those in a
+/// reserved space (clause 20); one with more places nobody and marks every member ambiguous.
+/// Answers, per Agent of a group, its Client Agent, whether it is ambiguous, and the labels it
+/// inherits.
 #[must_use]
 pub fn place_on_host(
     gateway: bool,
@@ -115,16 +116,17 @@ pub fn place_on_host(
 
 /// The one rule of ADR-0030 clause 19, for one group: `members` placed by the group's Client Agents
 /// `clients`, with their labels. Exactly one places every member under it, and the others inherit
-/// its labels; more place nobody and mark every member ambiguous; none places nobody. Answers each
-/// member's Client Agent, whether the group is ambiguous, and the labels it inherits. What the
-/// fleet holds in memory and what a page reads from the store are both placed by it.
+/// its labels but those in a reserved space (clause 20); more place nobody and mark every member
+/// ambiguous; none places nobody. Answers each member's Client Agent, whether the group is
+/// ambiguous, and the labels it inherits. What the fleet holds in memory and what a page reads
+/// from the store are both placed by it.
 #[must_use]
 pub fn place_group(
     members: impl IntoIterator<Item = InstanceUid>,
     clients: &[(InstanceUid, &BTreeMap<String, String>)],
 ) -> Vec<(InstanceUid, Placed)> {
     let (client, labels) = match clients {
-        [(one, labels)] => (Some(*one), (*labels).clone()),
+        [(one, labels)] => (Some(*one), crate::labels::inheritable(labels)),
         _ => (None, BTreeMap::new()),
     };
     let ambiguous = clients.len() > 1;
@@ -686,10 +688,10 @@ fn clients_of_host<'a>(
     clients
 }
 
-/// Places the members of one group under their Client Agent (ADR-0030 clause 19): with exactly
-/// one, the others inherit its labels; with more than one, nobody inherits and every member is
-/// marked ambiguous; with none, nobody inherits. `elsewhere` are the group's Client Agents that
-/// `fleet` does not hold, with their labels.
+/// Places the members of one group under their Client Agent (ADR-0030 clause 19): with exactly one,
+/// the others inherit its labels but those in a reserved space (clause 20); with more than one,
+/// nobody inherits and every member is marked ambiguous; with none, nobody inherits. `elsewhere`
+/// are the group's Client Agents that `fleet` does not hold, with their labels.
 fn inherit(
     fleet: &mut HashMap<InstanceUid, AgentRecord>,
     groups: &HashMap<Group, HashSet<InstanceUid>>,

@@ -142,6 +142,19 @@ impl Local {
                 non_identifying_attributes.push(string_array_attr(key, &values));
             }
         }
+        // The version of the Package this Supervisor installed, from the record of its last
+        // install (ADR-draft-deployments-and-rollouts clause 25). It is the Package's version, not
+        // the program's: a repack is a Package its program does not report, and the Server holds
+        // the next Package against this one. The Client Agent reports none, since its
+        // `service.version` is what it runs.
+        if self.managed {
+            if let Some(installed) = &self.installed_package {
+                non_identifying_attributes.push(string_attr(
+                    attributes::SUPERVISOR_PACKAGE_VERSION,
+                    &installed.version,
+                ));
+            }
+        }
         let mut description = AgentDescription {
             identifying_attributes,
             non_identifying_attributes,

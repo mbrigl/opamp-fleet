@@ -181,6 +181,10 @@ impl AgentState {
                 info!(version = %version, "package installed");
                 local.installed_package = Some(installed);
                 local.package_error.clear();
+                // The description states the installed Package's version
+                // (ADR-draft-deployments-and-rollouts clause 25), and only a full report carries
+                // the description.
+                self.protocol.force_full();
             }
             Err(error) => {
                 error!(error = %error, "package installation failed");

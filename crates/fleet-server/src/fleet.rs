@@ -4563,6 +4563,12 @@ pub struct AgentView {
     /// reporting a key that was labelled earlier. Shown rather than dropped in silence.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub shadowed_labels: Vec<String>,
+    /// Labels stored with a key in `fleet.` or `supervisor.`, which no label may speak in
+    /// (ADR-draft-the-fleet-record-of-agents-and-hosts clause 20): ignored by every Selector and by
+    /// package matching, and inherited by no Agent. Listed rather than dropped in silence; the next
+    /// label set put without them removes them.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub ignored_labels: Vec<String>,
     /// The labels of this Agent's Client Agent, which hold for it below its own (ADR-0030
     /// clause 19); empty for the Client Agent itself, for an Agent whose Client the Server cannot
     /// tell, and for an ambiguous one.
@@ -4867,6 +4873,7 @@ impl AgentView {
             last_seen_ms: record.last_seen_ms,
             stale,
             shadowed_labels: crate::labels::shadowed(record.description.as_ref(), &record.labels),
+            ignored_labels: crate::labels::ignored_labels(&record.labels),
             labels: record.labels.clone(),
             inherited_labels: record.placement.inherited.clone(),
             client_agent: record
@@ -8479,6 +8486,56 @@ mod tests {
             view(&state, &supervisor).inherited_labels.is_empty(),
             "a forgotten Client Agent's labels are inherited no more"
         );
+    }
+
+    /// A label in the Supervisor's space that the record already holds — stored before the Server
+    /// refused one — is ignored after a restart: no Selector matches it on the Agent or on its
+    /// Client's other Agents, it is not inherited, the fleet row lists it as ignored, and the next
+    /// label set put without it removes it.
+    /// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts
+    #[test]
+    fn a_stored_label_in_the_supervisors_space_matches_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let client = InstanceUid::default();
+        let supervisor = InstanceUid::default();
+        {
+            let state = hosted_fleet(dir.path());
+            report_over(
+                &state,
+                "h1",
+                organization("Kunde GmbH"),
+                client,
+                &[("supervisor.kind.collector", "true")],
+            );
+            report_over(&state, "h1", organization("Kunde GmbH"), supervisor, &[]);
+        }
+        let store = crate::fs::FsAgentStore::open(&dir.path().join("configs")).expect("open");
+        let stored = BTreeMap::from([
+            ("supervisor.kind.x".to_string(), "true".to_string()),
+            ("ring".to_string(), "early".to_string()),
+        ]);
+        for uid in [client, supervisor] {
+            assert!(store.set_labels(&uid, &stored).expect("stored"));
+        }
+        let state = hosted_fleet(dir.path());
+        for uid in [client, supervisor] {
+            assert!(!selects(&state, &uid, &[("supervisor.kind.x", "true")]));
+            assert!(selects(&state, &uid, &[("ring", "early")]));
+            let fleet = state.fleet.lock().expect("fleet lock");
+            let effective = fleet[&uid].effective_description();
+            assert!(
+                !crate::labels::reported_keys(effective.as_deref()).contains(&"supervisor.kind.x"),
+                "it never reaches the effective description"
+            );
+            drop(fleet);
+            assert_eq!(view(&state, &uid).ignored_labels, ["supervisor.kind.x"]);
+        }
+        assert_eq!(
+            view(&state, &supervisor).inherited_labels,
+            BTreeMap::from([("ring".to_string(), "early".to_string())])
+        );
+        label(&state, &client, &[("ring", "early")]);
+        assert!(view(&state, &client).ignored_labels.is_empty());
     }
 
     /// Behind a Gateway an Agent carries no `fleet.host.*`; the Agents sharing a `host.id` inherit
