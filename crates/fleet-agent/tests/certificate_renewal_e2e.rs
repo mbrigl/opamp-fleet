@@ -81,8 +81,8 @@ fn issued(state_dir: &Path) -> Option<(Vec<u8>, time::OffsetDateTime, Option<Str
     ))
 }
 
-/// Each certificate is replaced before it expires, over and over, and the Client stays with the
-/// Server throughout — on a main thread no larger than Windows gives it, which the daemon once
+/// Each certificate is replaced before it expires, over and over, and the Server holds the Client
+/// as connected after the third — on a main thread no larger than Windows gives it, which the daemon once
 /// overflowed the moment it applied the offered connection settings. The connection presents no certificate here, so the host that every
 /// generation carries on is the renewal proof's doing (ADR-0016 clause 18).
 /// Verifies: ADR-0040
@@ -154,17 +154,15 @@ async fn a_client_renews_each_certificate_before_it_expires() {
         std::fs::read_to_string(&log_path).unwrap_or_default()
     );
     // The Client reconnects with each certificate it stores, so the snapshot may be read between
-    // the store and the new connection: the Client is back with the Server, not connected at
-    // the instant the third certificate is read.
-    common::wait_until(
-        "the Client back with the Server after its third certificate",
-        || {
-            state
-                .snapshot()
-                .first()
-                .is_some_and(|agent| agent.connected)
-                .then_some(())
-        },
-    )
+    // the store and the new connection: the Server holds the Agent as connected at some point
+    // after the third certificate is read, not at that instant. The old connection may still
+    // show until its close arrives, so this does not tell the reconnect apart from it.
+    common::wait_until("the Agent connected after its third certificate", || {
+        state
+            .snapshot()
+            .first()
+            .is_some_and(|agent| agent.connected)
+            .then_some(())
+    })
     .await;
 }
